@@ -36,6 +36,9 @@ from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAt
 
 EXAMPLE_PATH = "diffusers/sparsity"
 
+# Run the example scripts in this process: ~20s of startup saved per step (see conftest).
+pytestmark = pytest.mark.usefixtures("in_process_examples")
+
 # Tiny inference settings — fast but exercises all code paths
 _TINY_ARGS = [
     "--num-frames",
@@ -229,8 +232,9 @@ def test_wan22_calibrated_export(tiny_wan22_path, tmp_path):
         # threshold_scale_factor lives inside the skip_softmax group.
         tsf = group_0["threshold_scale_factor"]
         assert tsf["formula"] == "a * exp(b * target_sparsity)"
-        assert tsf["prefill"]["a"] == pytest.approx(math.exp(test_log_a))
-        assert tsf["prefill"]["b"] == pytest.approx(test_b)
+        assert tsf["coefficients"]["a"] == pytest.approx(math.exp(test_log_a))
+        assert tsf["coefficients"]["b"] == pytest.approx(test_b)
+        assert isinstance(group_0["target_sparsity"], float)  # scalar, as VisualGen expects
 
         # Calibrated mode — no raw_threshold.
         assert "raw_threshold" not in group_0

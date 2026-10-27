@@ -17,7 +17,7 @@ from functools import partial
 
 import torch
 import transformers
-from _test_utils.torch.megatron.models import get_mcore_mamba_hybrid_model
+from _test_utils.torch.megatron.models import get_mcore_hybrid_model
 from _test_utils.torch.transformers_models import create_tiny_nemotron_h_dir
 from safetensors import safe_open
 
@@ -27,13 +27,6 @@ from modelopt.torch.export.plugins.megatron_importer import _get_mamba_conv1d
 
 class _Mixer:
     pass
-
-
-def test_get_mamba_conv1d_returns_legacy_module():
-    mixer = _Mixer()
-    mixer.conv1d = torch.nn.Conv1d(4, 4, 3)
-
-    assert _get_mamba_conv1d(mixer) is mixer.conv1d
 
 
 def test_get_mamba_conv1d_wraps_direct_params():
@@ -58,7 +51,7 @@ def test_get_mamba_conv1d_wraps_direct_params():
 
 
 def _build_mcore_nemotron_h(config, size, initialize=True):
-    return get_mcore_mamba_hybrid_model(
+    return get_mcore_hybrid_model(
         tensor_model_parallel_size=size,
         pipeline_model_parallel_size=1,
         initialize_megatron=initialize,

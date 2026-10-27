@@ -36,7 +36,7 @@ pipeline:
       --export_unified_hf_path <<global_vars.output_dir>>/Nemotron-3-Nano-30B-A3B-FP8-hf
     slurm_config: &sc
       _factory_: "slurm_factory"
-      container: nvcr.io/nvidia/nemo:26.06
+      container: nvcr.io/nvidia/nemo:26.08
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       docker_user: root
       ntasks_per_node: 4

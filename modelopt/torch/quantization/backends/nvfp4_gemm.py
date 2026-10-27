@@ -192,7 +192,8 @@ class Nvfp4Linear(Function):
 
 def _nvfp4_availability_check(module, input, args, kwargs):
     """Comprehensive check for FP4 GEMM availability."""
-    # NOTE: Having the import at the top causes mpirun commands inside pytest (vlm_ptq) to fail without any error
+    # NOTE: Having the import at the top causes mpirun commands inside pytest (hf_ptq VLM
+    # tests) to fail without any error
     try:
         import tensorrt_llm  # noqa: F401
     except ImportError:

@@ -49,6 +49,8 @@ class SGLANGModel(Model):
             speculative_algorithm = "LOOKAHEAD"
         elif speculative_algorithm == "NONE":
             speculative_algorithm = None
+        elif speculative_algorithm == "DSPARK":
+            raise NotImplementedError("DSPARK is only supported by --engine VLLM.")
 
         engine_kwargs = {
             "model_path": model_dir,
@@ -141,6 +143,9 @@ class SGLANGModel(Model):
         output_dict["output_logits"] = None
         output_dict["token_times"] = timing
         return output_dict
+
+    def stop(self):
+        self.model.shutdown()
 
     def get_serving_config(self):
         """Dump the engine_kwargs dict supplied to sgl.Engine()."""

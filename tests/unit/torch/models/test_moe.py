@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Unit tests for modelopt.torch.models.moe — MoE-block detection."""
+
+import pytest
+import torch.nn as nn
+
+from modelopt.torch.models import is_moe
+
+
+class _FakeSparseMoeBlock(nn.Module):
+    """Name ends with 'sparsemoeblock' — detected by naming convention."""
+
+
+class _FakeMoeLayer(nn.Module):
+    """Name contains 'moelayer' — detected by naming convention."""
+
+
+class ArcticMoE(nn.Module):
+    """Non-standard MoE block name — detected via the model spec registry (exact
+    MRO class name, so the fake must carry the real name)."""
+
+
+class _StructuralMoeModule(nn.Module):
+    """Has router + experts attributes — detected by structural check."""
+
+    def __init__(self):
+        super().__init__()
+        self.router = nn.Linear(8, 4)
+        self.experts = nn.ModuleList([nn.Linear(8, 8) for _ in range(4)])
+
+
+class _NotMoeModule(nn.Module):
+    """Plain module — should NOT be classified as MoE."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(8, 8)
+
+
+class _PartialStructuralModule(nn.Module):
+    """Has router but no experts — should NOT be classified as MoE."""
+
+    def __init__(self):
+        super().__init__()
+        self.router = nn.Linear(8, 4)
+
+
+@pytest.mark.parametrize(
+    "module_cls",
+    [_FakeSparseMoeBlock, _FakeMoeLayer, ArcticMoE],
+)
+def test_is_moe_name_based(module_cls):
+    assert is_moe(module_cls())
+
+
+def test_is_moe_structural():
+    assert is_moe(_StructuralMoeModule())
+
+
+def test_is_moe_negative():
+    assert not is_moe(_NotMoeModule())
+
+
+def test_is_moe_partial_structural():
+    assert not is_moe(_PartialStructuralModule())

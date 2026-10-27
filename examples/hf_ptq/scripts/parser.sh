@@ -41,7 +41,7 @@ parse_options() {
     CALIB_WITH_IMAGES=false
 
   # Parse command-line options
-  ARGS=$(getopt -o "" -l "model:,quant:,recipe:,kv_cache_quant:,tp:,pp:,sparsity:,awq_block_size:,calib:,calib_batch_size:,input:,output:,batch:,tasks:,lm_eval_tasks:,lm_eval_limit:,simple_eval_tasks:,simple_eval_limit:,mmlu_limit:,trust_remote_code,use_seq_device_map,gpu_max_mem_percentage:,kv_cache_free_gpu_memory_fraction:,low_memory_mode,no-verbose,calib_dataset:,calib_seq:,auto_quantize_checkpoint:,auto_quantize_bits:,auto_quantize_method:,auto_quantize_score_size:,auto_quantize_cost_model:,auto_quantize_active_moe_expert_ratio:,moe_calib_experts_ratio:,cast_mxfp4_to_nvfp4,vlm,calib_with_images" -n "$0" -- "$@")
+  ARGS=$(getopt -o "" -l "model:,quant:,recipe:,kv_cache_quant:,tp:,pp:,sparsity:,awq_block_size:,calib:,calib_batch_size:,input:,output:,batch:,tasks:,lm_eval_tasks:,lm_eval_limit:,simple_eval_tasks:,simple_eval_limit:,mmlu_limit:,trust_remote_code,use_seq_device_map,gpu_max_mem_percentage:,kv_cache_free_gpu_memory_fraction:,low_memory_mode,no-verbose,calib_dataset:,calib_seq:,auto_quantize_checkpoint:,moe_calib_experts_ratio:,cast_mxfp4_to_nvfp4,vlm,calib_with_images" -n "$0" -- "$@")
 
   eval set -- "$ARGS"
   while true; do
@@ -74,11 +74,6 @@ parse_options() {
       --calib_dataset ) CALIB_DATASET="$2"; shift 2;;
       --calib_seq ) CALIB_SEQ="$2"; shift 2;;
       --auto_quantize_checkpoint ) AUTO_QUANTIZE_CHECKPOINT="$2"; shift 2;;
-      --auto_quantize_bits ) AUTO_QUANTIZE_BITS="$2"; shift 2;;
-      --auto_quantize_method ) AUTO_QUANTIZE_METHOD="$2"; shift 2;;
-      --auto_quantize_score_size ) AUTO_QUANTIZE_SCORE_SIZE="$2"; shift 2;;
-      --auto_quantize_cost_model ) AUTO_QUANTIZE_COST_MODEL="$2"; shift 2;;
-      --auto_quantize_active_moe_expert_ratio ) AUTO_QUANTIZE_ACTIVE_MOE_EXPERT_RATIO="$2"; shift 2;;
       --moe_calib_experts_ratio ) MOE_CALIB_EXPERTS_RATIO="$2"; shift 2;;
       --cast_mxfp4_to_nvfp4 ) CAST_MXFP4_TO_NVFP4=true; shift;;
       --vlm ) VLM=true; shift;;
@@ -182,11 +177,6 @@ parse_options() {
   echo "calib_dataset: $CALIB_DATASET"
   echo "calib_seq: $CALIB_SEQ"
   echo "auto_quantize_checkpoint: $AUTO_QUANTIZE_CHECKPOINT"
-  echo "auto_quantize_bits: $AUTO_QUANTIZE_BITS"
-  echo "auto_quantize_method: $AUTO_QUANTIZE_METHOD"
-  echo "auto_quantize_score_size: $AUTO_QUANTIZE_SCORE_SIZE"
-  echo "auto_quantize_cost_model: $AUTO_QUANTIZE_COST_MODEL"
-  echo "auto_quantize_active_moe_expert_ratio: $AUTO_QUANTIZE_ACTIVE_MOE_EXPERT_RATIO"
   echo "moe_calib_experts_ratio: $MOE_CALIB_EXPERTS_RATIO"
   echo "cast_mxfp4_to_nvfp4: $CAST_MXFP4_TO_NVFP4"
   echo "vlm: $VLM"

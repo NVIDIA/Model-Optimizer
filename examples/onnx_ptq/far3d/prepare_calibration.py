@@ -14,24 +14,26 @@
 # limitations under the License.
 
 import argparse
+import sys
 from pathlib import Path
 
-import numpy as np
-import torch
-from evaluate import Far3DPipeline
+from evaluate import get_image_input
 from mmcv import Config
 from mmdet.datasets import replace_ImageToTensor
 from mmdet3d.datasets import build_dataset
 from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 from torch.utils.data import Subset
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from examples.onnx_ptq.quantization_utils import NpzCalibrationWriter
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Prepare FAR3D calibration batches")
+    parser = argparse.ArgumentParser(description="Prepare FAR3D encoder calibration batches")
     parser.add_argument("config", help="Path to the FAR3D configuration file")
+    parser.add_argument("encoder_onnx")
     parser.add_argument("output_dir", type=Path)
-    parser.add_argument("--encoder-engine")
-    parser.add_argument("--decoder-engine")
     parser.add_argument("--num-samples", type=int, default=512)
     parser.add_argument("--sample-skip-interval", type=int, default=20)
     return parser.parse_args()
@@ -61,9 +63,8 @@ def build_validation_loader(config_path, num_samples, sample_skip_interval):
         min(len(dataset), num_samples * sample_skip_interval),
         sample_skip_interval,
     )
-    dataset = Subset(dataset, sample_indices)
     return build_dataloader(
-        dataset,
+        Subset(dataset, sample_indices),
         samples_per_gpu=samples_per_gpu,
         workers_per_gpu=cfg.data.workers_per_gpu,
         dist=False,
@@ -72,71 +73,19 @@ def build_validation_loader(config_path, num_samples, sample_skip_interval):
     )
 
 
-class DecoderCalibrationWriter:
-    def __init__(self, output_dir):
-        self.output_dir = output_dir
-        self.saved = 0
-
-    def __call__(self, inputs):
-        batch = {name: value.detach().cpu().numpy() for name, value in inputs.items()}
-        np.savez(self.output_dir / f"batch_{self.saved:04d}.npz", **batch)
-        self.saved += 1
-
-
 def main():
     args = parse_args()
-    if args.num_samples < 1:
-        raise ValueError("--num-samples must be positive")
-    if args.sample_skip_interval < 1:
-        raise ValueError("--sample-skip-interval must be positive")
-    if bool(args.encoder_engine) != bool(args.decoder_engine):
-        raise ValueError("--encoder-engine and --decoder-engine must be specified together")
+    if args.num_samples < 1 or args.sample_skip_interval < 1:
+        raise ValueError("Sample count and skip interval must be positive")
 
-    encoder_dir = args.output_dir / "encoder"
-    encoder_dir.mkdir(parents=True, exist_ok=True)
-    if any(encoder_dir.glob("*.npy")):
-        raise FileExistsError(
-            f"{encoder_dir} already contains calibration batches; use an empty directory"
-        )
+    writer = NpzCalibrationWriter(args.output_dir, args.encoder_onnx)
+    loader = build_validation_loader(args.config, args.num_samples, args.sample_skip_interval)
+    for data in loader:
+        writer.write({"img": get_image_input(data)})
 
-    decoder_writer = pipeline = None
-    if args.encoder_engine:
-        decoder_dir = args.output_dir / "decoder"
-        decoder_dir.mkdir(parents=True, exist_ok=True)
-        if any(decoder_dir.glob("*.npz")):
-            raise FileExistsError(
-                f"{decoder_dir} already contains calibration batches; use an empty directory"
-            )
-        decoder_writer = DecoderCalibrationWriter(decoder_dir)
-        pipeline = Far3DPipeline(
-            args.encoder_engine,
-            args.decoder_engine,
-            decoder_input_callback=decoder_writer,
-        )
-        stream = torch.cuda.Stream()
-
-    saved = 0
-    data_loader = build_validation_loader(args.config, args.num_samples, args.sample_skip_interval)
-    for data in data_loader:
-        images = data["img"][0].data[0].cpu().permute(0, 1, 3, 4, 2).numpy()
-        np.save(encoder_dir / f"batch_{saved:04d}.npy", images)
-        if pipeline:
-            pipeline(stream, data)
-        saved += 1
-        if saved == args.num_samples:
-            break
-
-    if saved < args.num_samples:
-        raise RuntimeError(
-            f"Only prepared {saved} of {args.num_samples} requested calibration batches"
-        )
-    if decoder_writer and decoder_writer.saved != saved:
-        raise RuntimeError(f"Prepared {saved} encoder and {decoder_writer.saved} decoder batches")
-    print(f"Saved {saved} encoder calibration batches to {encoder_dir}")
-    if decoder_writer:
-        print(
-            f"Saved {decoder_writer.saved} decoder calibration batches to {decoder_writer.output_dir}"
-        )
+    if writer.count != args.num_samples:
+        raise RuntimeError(f"Prepared {writer.count} batches; expected {args.num_samples}")
+    print(f"Saved {writer.count} calibration batches to {args.output_dir}")
 
 
 if __name__ == "__main__":

@@ -20,12 +20,16 @@ TensorRT-LLM install is needed: ``_parse_logprobs`` is pure Python over a respon
 object, which these tests stub out.
 """
 
+import importlib.machinery
+import inspect
 import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import transformers
 
 # Skip on the backend module, not just `lm_eval`: it currently guards its `tensorrt_llm`
 # import, but if that ever becomes eager this should skip rather than error.
@@ -38,6 +42,7 @@ if str(_LLM_EVAL_DIR) not in sys.path:
     sys.path.insert(0, str(_LLM_EVAL_DIR))
 
 import lm_eval_trtllm
+from lm_eval.models.trtllm_causallms import TRTLLM
 
 # TensorRT-LLM aligns prompt_logprobs to the *next* token, so entry i holds the
 # distribution that predicted tokens[i + 1]. These fixtures mirror that layout.
@@ -153,12 +158,12 @@ def test_trust_remote_code_not_injected_when_unset(monkeypatch):
 
 
 def test_trtllm_backend_accepts_trust_remote_code():
-    """The key lm-eval injects has to be a parameter the backend actually takes."""
-    import inspect
+    """The key lm-eval injects has to be a parameter the backend actually takes.
 
-    from lm_eval.models.trtllm_causallms import TRTLLM
-
-    assert "trust_remote_code" in inspect.signature(TRTLLM.__init__).parameters
+    Inspected on the upstream ``__init__``: ``TRTLLM.__init__`` is the wrapper below, which
+    takes ``**kwargs`` and forwards them, so its own signature proves nothing.
+    """
+    assert "trust_remote_code" in inspect.signature(lm_eval_trtllm._UPSTREAM_INIT).parameters
 
 
 def _fake_trtllm(monkeypatch, version):
@@ -189,6 +194,89 @@ def test_version_is_checked_before_scoring(monkeypatch):
         lm_eval_trtllm._parse_logprobs(
             tokens=TOKENS, outputs=_Outputs(_prompt_logprobs()), ctxlen=CTXLEN
         )
+
+
+class _RecordingKvCacheConfig:
+    """Stand-in for ``tensorrt_llm.llmapi.KvCacheConfig``, capturing its kwargs."""
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+@pytest.fixture
+def stub_engine(monkeypatch):
+    """Make the upstream ``__init__`` runnable without tensorrt_llm or a real tokenizer.
+
+    Everything between the tokenizer load and the ``LLM(...)`` call is upstream code, so
+    this exercises the real construction rather than a stand-in for it.
+    """
+    # The backend gates on find_spec(), which reads __spec__ off an already-imported module.
+    trtllm = types.ModuleType("tensorrt_llm")
+    trtllm.__spec__ = importlib.machinery.ModuleSpec("tensorrt_llm", loader=None)
+    monkeypatch.setitem(sys.modules, "tensorrt_llm", trtllm)
+
+    class _LLM:
+        last_kwargs: dict = {}
+
+        def __init__(self, **kwargs):
+            _LLM.last_kwargs = kwargs
+
+    monkeypatch.setattr(lm_eval_trtllm.trtllm_causallms, "LLM", _LLM, raising=False)
+    monkeypatch.setattr(
+        lm_eval_trtllm.trtllm_causallms, "KvCacheConfig", _RecordingKvCacheConfig, raising=False
+    )
+
+    class _Tokenizer:
+        pad_token_id = 0
+        eos_token_id = 0
+        eos_token = "</s>"
+
+    monkeypatch.setattr(
+        transformers, "AutoTokenizer", SimpleNamespace(from_pretrained=lambda *a, **k: _Tokenizer())
+    )
+    return _LLM
+
+
+def _build(**model_args):
+    """Instantiate the backend the way lm-eval does from a parsed `--model_args` string."""
+    # add_bos_token is pinned only to skip the tokenizer round-trip that auto-detects it.
+    return TRTLLM.create_from_arg_obj({"model": "/ckpt", "add_bos_token": False, **model_args})
+
+
+def test_kv_cache_fraction_reaches_the_engine(stub_engine):
+    """`--model_args kv_cache_free_gpu_memory_fraction=...` must reach `KvCacheConfig`.
+
+    Upstream drops `--model_args` keys it does not declare, so without the patch the KV
+    cache takes TensorRT-LLM's default 90% of free memory and large-memory GPUs OOM during
+    `prompt_logprobs` deserialization (nvbug 6701763).
+    """
+    _build(kv_cache_free_gpu_memory_fraction=0.5)
+
+    kv_cache_config = stub_engine.last_kwargs["kv_cache_config"]
+    assert kv_cache_config.kwargs == {"enable_block_reuse": False, "free_gpu_memory_fraction": 0.5}
+    # The patch is process-wide while held, so it must not outlive the constructor.
+    assert lm_eval_trtllm.trtllm_causallms.KvCacheConfig is _RecordingKvCacheConfig
+
+
+def test_kv_cache_fraction_defaults_below_the_trtllm_default(stub_engine):
+    """Unset, the engine must still get 0.8 rather than TensorRT-LLM's 0.9."""
+    _build()
+
+    kv_cache_config = stub_engine.last_kwargs["kv_cache_config"]
+    assert kv_cache_config.kwargs["free_gpu_memory_fraction"] == 0.8
+
+
+def test_init_patch_is_installed():
+    assert TRTLLM.__init__ is lm_eval_trtllm._init
+
+
+def test_upstream_still_drops_the_kv_cache_fraction():
+    """Tripwire: when upstream sizes the KV cache itself, drop the `__init__` patch."""
+    parameters = inspect.signature(lm_eval_trtllm._UPSTREAM_INIT).parameters
+    assert "kv_cache_free_gpu_memory_fraction" not in parameters
+
+    # It accepts **kwargs, then builds the LLM kwargs from a fixed set of names.
+    assert "free_gpu_memory_fraction" not in inspect.getsource(lm_eval_trtllm._UPSTREAM_INIT)
 
 
 def test_upstream_is_still_misaligned():

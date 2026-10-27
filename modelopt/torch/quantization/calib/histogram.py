@@ -218,7 +218,7 @@ def _compute_amax_entropy(calib_hist, calib_bin_edges, num_bits, unsigned, strid
         if summ != 0:
             distr = distr / summ
 
-    bins = calib_hist[:]
+    bins = calib_hist.copy()
     bins[0] = bins[1]
 
     total_data = np.sum(bins)

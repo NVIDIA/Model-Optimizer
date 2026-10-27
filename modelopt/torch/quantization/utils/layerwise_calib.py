@@ -27,6 +27,7 @@ import json
 import os
 import shutil
 from collections import deque
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -34,15 +35,23 @@ import torch
 import torch.nn as nn
 
 from modelopt.torch.utils import distributed as dist
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import (
+    get_available_gpu_memory,
+    get_process_gpus,
+    print_rank_0,
+    warn_rank_0,
+)
+from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.network import (
     bind_forward_method,
     get_module_device,
     unpatch_forward_method,
 )
 
+from .core_utils import has_accelerate_offload
+
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from modelopt.torch.opt.searcher import ForwardLoop
 
@@ -67,17 +76,18 @@ class _LayerCalibState:
 
 
 class _SkipLayer(nn.Module):
-    """Parameter-free stand-in for a fully calibrated decoder layer.
+    """Parameter-free stand-in that skips or forwards through a decoder layer.
 
     Replaces the real layer in the ModuleList so that framework hooks
     (accelerate, FSDP2, etc.) have no parameters to transfer. Holds a
     reference to the original layer for restoration during cleanup.
     """
 
-    def __init__(self, original: nn.Module):
+    def __init__(self, original: nn.Module, *, forward_original: bool = False):
         super().__init__()
         # Bypass nn.Module.__setattr__ to avoid registering original as a submodule.
         object.__setattr__(self, "_original", original)
+        self._forward_original = forward_original
         self._layerwise_calib = _LayerCalibState(mode="skip")
 
     _PROXY_BLOCKLIST = frozenset({"_hf_hook", "_old_forward"})
@@ -96,9 +106,91 @@ class _SkipLayer(nn.Module):
             return getattr(object.__getattribute__(self, "_original"), name)
 
     def forward(self, *args, **kwargs):
+        if self._forward_original:
+            return self._original(*args, **kwargs)
         return LayerActivationCollector._zeros_from_meta(
             self._original._layerwise_calib.output_meta
         )
+
+
+@contextmanager
+def _hide_modules_from_traversal(slots: Sequence[tuple[nn.Module, str, nn.Module]]):
+    """Retain forward behavior while hiding registered modules from traversal and state dicts."""
+    proxies = {id(child): _SkipLayer(child, forward_original=True) for _, _, child in slots}
+
+    try:
+        for parent, child_name, child in slots:
+            parent._modules[child_name] = proxies[id(child)]
+        yield
+    finally:
+        for parent, child_name, child in slots:
+            parent._modules[child_name] = child
+
+
+class _OutsideQuantizerCalibrator:
+    """Calibrate enabled quantizers outside the layerwise decoder subtrees."""
+
+    def __init__(
+        self,
+        model: nn.Module,
+        transformer_layers: Sequence[nn.Module],
+        forward_loop: ForwardLoop,
+        calib_func: Callable,
+        calib_kwargs: dict[str, Any],
+        qdq_from_prev: bool,
+    ):
+        self.model = model
+        self.transformer_layers = transformer_layers
+        self.forward_loop = forward_loop
+        self.calib_func = calib_func
+        self.calib_kwargs = calib_kwargs
+        self.qdq_from_prev = qdq_from_prev
+
+        # Inline import breaks nn -> qtensor -> utils -> layerwise_calib import cycle.
+        from ..nn import TensorQuantizer
+
+        layer_ids = {id(layer) for layer in transformer_layers}
+        self.transformer_layer_slots = [
+            (parent, child_name, child)
+            for parent in tuple(model.modules())
+            for child_name, child in parent._modules.items()
+            if child is not None and id(child) in layer_ids
+        ]
+
+        with _hide_modules_from_traversal(self.transformer_layer_slots):
+            self.enabled = any(
+                isinstance(module, TensorQuantizer) and module.is_enabled
+                for module in model.modules()
+            )
+
+    def calibrate(self):
+        """Calibrate outside quantizers while decoder state is hidden from caller traversal."""
+        if not self.enabled:
+            return
+
+        if has_accelerate_offload(self.model):
+            warn_rank_0(
+                "Layerwise calibration found enabled quantizers outside transformer layers. "
+                "Calibrating them may be slow because CPU- or disk-offloaded decoder weights "
+                "can be transferred for every batch."
+            )
+
+        with _hide_modules_from_traversal(self.transformer_layer_slots):
+            if self.qdq_from_prev:
+                self.calib_func(self.model, self.forward_loop, **self.calib_kwargs)
+                return
+
+            # Inline import breaks conversion -> utils -> layerwise_calib import cycle.
+            from ..conversion import set_quantizer_by_cfg_context
+
+            with ExitStack() as stack:
+                for layer in self.transformer_layers:
+                    stack.enter_context(
+                        set_quantizer_by_cfg_context(
+                            layer, [{"quantizer_name": "*", "enable": False}]
+                        )
+                    )
+                self.calib_func(self.model, self.forward_loop, **self.calib_kwargs)
 
 
 class LayerActivationCollector:
@@ -262,11 +354,28 @@ class LayerActivationCollector:
                 )
                 bind_forward_method(layer, _patched_forward, "_original_forward")
 
+            # A VLM wrapper and its language model are both patched, and the wrapper's forward calls the
+            # language model's. Only the outermost call may turn the stop into ``None``: if the inner one
+            # did, the wrapper would go on running its own code on a ``None`` output.
+            depth = [0]
+
             def _early_stop_forward(module_self, *args, **kwargs):
+                depth[0] += 1
                 try:
                     return module_self._original_forward(*args, **kwargs)
                 except _EarlyStopForwardError:
+                    if depth[0] > 1:
+                        raise
                     return None
+                except torch.cuda.OutOfMemoryError as e:
+                    # The forward loop would split the data batch and retry, but the layer in 'run'
+                    # mode replays the batch it cached at full size, one cached batch per call: a
+                    # retry cannot shrink it and would replay the next batch's inputs instead.
+                    raise RuntimeError(
+                        "Layerwise calibration ran out of GPU memory. Splitting the batch now "
+                        "cannot help, since each decoder layer replays its cached inputs at the "
+                        "size they were cached with; rerun with a smaller calibration batch size."
+                    ) from e
                 except RuntimeError as e:
                     if "meta" not in str(e).lower():
                         raise
@@ -277,13 +386,31 @@ class LayerActivationCollector:
                         "decoder blocks. Use non-layerwise calibration for this "
                         "architecture."
                     ) from e
+                finally:
+                    depth[0] -= 1
 
-            bind_forward_method(self.model, _early_stop_forward, "_original_forward")
+            for root in self._early_stop_roots():
+                bind_forward_method(root, _early_stop_forward, "_original_forward")
         except Exception:
             self._cleanup_layers()
             raise
 
         self._patched = True
+
+    def _early_stop_roots(self) -> list[nn.Module]:
+        """Modules whose forward ends the pass early.
+
+        The model, plus the language model of a VLM wrapper, which text calibration drives directly.
+        """
+        roots = [self.model]
+        lm = getattr(self.model, "language_model", None)
+        if (
+            isinstance(lm, nn.Module)
+            and self._decoder_layers
+            and any(m is self._decoder_layers[0] for m in lm.modules())
+        ):
+            roots.append(lm)
+        return roots
 
     def _cleanup_layers(self):
         """Best-effort cleanup of any patched layers and model forward."""
@@ -292,8 +419,9 @@ class LayerActivationCollector:
                 if isinstance(layer, _SkipLayer):
                     self._decoder_layers[idx] = layer._original
 
-        if hasattr(self.model, "_original_forward"):
-            unpatch_forward_method(self.model, "_original_forward")
+        for root in self._early_stop_roots():
+            if hasattr(root, "_original_forward"):
+                unpatch_forward_method(root, "_original_forward")
 
         if self._decoder_layers is not None:
             for layer in self._decoder_layers:
@@ -464,6 +592,162 @@ class LayerActivationCollector:
         return self.get_input_activations(next_layer, forward_loop)
 
 
+def _cuda_bytes_per_gpu(obj: Any, out: dict[int, int] | None = None) -> dict[int, int]:
+    """Bytes of the CUDA tensors in a nested args/kwargs structure, per GPU."""
+    out = {} if out is None else out
+    if isinstance(obj, torch.Tensor):
+        if obj.is_cuda:
+            out[obj.device.index] = out.get(obj.device.index, 0) + obj.nbytes
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            _cuda_bytes_per_gpu(value, out)
+    elif isinstance(obj, (list, tuple)):
+        for value in obj:
+            _cuda_bytes_per_gpu(value, out)
+    return out
+
+
+def _capture_layer_inputs(
+    model: nn.Module, layer: nn.Module, batch_size: int, seq_len: int, device: torch.device
+):
+    """Run *model* on a dummy batch until *layer* and return the ``(args, kwargs)`` it receives."""
+    input_ids = torch.zeros(batch_size, seq_len, dtype=torch.long, device=device)
+    # One left-pad position, like padded calibration rows, so the model builds the explicit
+    # attention mask that calibration batches get instead of a cheaper causal-only path.
+    attention_mask = torch.ones_like(input_ids)
+    attention_mask[:, 0] = 0
+    info = layer._layerwise_calib
+    info.mode = "capture"
+    try:
+        with _disable_use_cache(model):
+            model(input_ids, attention_mask=attention_mask)
+    finally:
+        info.mode = "original"
+    (inputs,) = info.collected_inputs
+    info.collected_inputs = []
+    return inputs
+
+
+def _forward_peak_per_gpu(layer: nn.Module, args: tuple, kwargs: dict) -> dict[int, int]:
+    """Peak memory one forward of *layer* adds on each GPU."""
+    base = {}
+    for gpu in get_process_gpus():
+        torch.cuda.reset_peak_memory_stats(gpu)
+        base[gpu] = torch.cuda.memory_allocated(gpu)
+    layer(*args, **kwargs)
+    return {
+        gpu: torch.cuda.max_memory_allocated(gpu) - base.get(gpu, 0) for gpu in get_process_gpus()
+    }
+
+
+def _gpu_index(device: torch.device) -> int | None:
+    """CUDA device index of *device*; ``None`` if it is not a GPU."""
+    if device.type != "cuda":
+        return None
+    return torch.cuda.current_device() if device.index is None else device.index
+
+
+def _layer_batch_fit(
+    model: nn.Module,
+    layer: nn.Module,
+    gpus: set[int],
+    seq_len: int,
+    num_samples: int,
+    memory_fraction: float,
+    device: torch.device,
+) -> int | None:
+    """Largest batch whose forward through *layer* fits; ``None`` if no GPU memory grows with it.
+
+    Layers of the same kind on other *gpus* cost what *layer* costs on its own GPU, so those GPUs'
+    memory limits the batch too.
+    """
+    # The first forward only warms up: it also allocates one-off buffers like cuBLAS's workspace.
+    for _ in range(2):
+        args, kwargs = _capture_layer_inputs(model, layer, 1, seq_len, device)
+        cached_per_sample = _cuda_bytes_per_gpu((args, kwargs))
+        one = _forward_peak_per_gpu(layer, args, kwargs)
+        del args, kwargs
+    try:
+        args, kwargs = _capture_layer_inputs(model, layer, 2, seq_len, device)
+        two = _forward_peak_per_gpu(layer, args, kwargs)
+    except RuntimeError as e:
+        # Capturing inputs reports running out of memory as a RuntimeError raised from it.
+        if not any(isinstance(x, torch.cuda.OutOfMemoryError) for x in (e, e.__cause__)):
+            raise
+        two = None
+    finally:
+        args = kwargs = None
+    if two is None:
+        # One sample fits but two do not: release what the failed forward left cached.
+        torch.cuda.empty_cache()
+        return 1
+
+    costs = {}
+    for gpu, peak in two.items():
+        per_sample = peak - one.get(gpu, 0)
+        if per_sample > 0:
+            costs[gpu] = (per_sample, one.get(gpu, 0) - per_sample, cached_per_sample.get(gpu, 0))
+    home = _gpu_index(get_module_device(layer))
+    if home in costs:
+        for gpu in gpus:
+            costs.setdefault(gpu, costs[home])
+    fits = []
+    for gpu, (per_sample, fixed, cached) in costs.items():
+        # Layerwise calibration caches every sample's inputs for this layer and the next.
+        available = get_available_gpu_memory(gpu) - 2 * num_samples * cached
+        fits.append(int((memory_fraction * available - fixed) // per_sample))
+    return min(fits, default=None)
+
+
+@torch.no_grad()
+def get_max_layerwise_batch_size(
+    model: nn.Module,
+    seq_len: int,
+    max_batch_size: int,
+    num_samples: int,
+    memory_fraction: float = 0.5,
+    device: torch.device | None = None,
+) -> int:
+    """Largest calibration batch, up to *max_batch_size*, whose decoder-layer forwards fit.
+
+    Layerwise calibration runs one decoder layer at a time, so a full-model batch probe such as
+    :func:`get_max_batch_size <modelopt.torch.utils.dataset_utils.get_max_batch_size>` both
+    overstates the memory a batch needs and risks running out of it. Instead, the first layer
+    of each kind (by module classes and parameter shapes: dense or MoE, full or linear attention,
+    and per-layer widths such as Nemotron-NAS's) runs on one and two samples of *seq_len* tokens,
+    and the growth of its peak memory on each GPU is that GPU's cost per sample; every other GPU
+    that runs a layer of that kind is charged the same. A batch fits
+    when the layer's forward stays within *memory_fraction* of the GPU's available memory, after
+    the inputs layerwise calibration caches for all *num_samples*; the rest is left for
+    quantizers and Hessians. A layer that fits one sample but not two gives a batch of one. The
+    dummy token ids go to *device*, by default the model's. All ranks return the same, smallest
+    batch.
+    """
+    batch_size = max_batch_size
+    layers = LayerActivationCollector.get_decoder_layers(model)
+    if layers and torch.cuda.is_available() and max_batch_size > 1:
+        kinds: dict[tuple, list[nn.Module]] = {}
+        for layer in layers:
+            classes = tuple(sorted({type(m).__name__ for m in layer.modules()}))
+            shapes = tuple(tuple(p.shape) for p in layer.parameters())
+            kinds.setdefault((classes, shapes), []).append(layer)
+        device = device or get_module_device(model)
+        collector = LayerActivationCollector(model)
+        collector._patch_all_layers(layers)
+        try:
+            for same_kind in kinds.values():
+                indexes = (_gpu_index(get_module_device(layer)) for layer in same_kind)
+                gpus = {gpu for gpu in indexes if gpu is not None}
+                fit = _layer_batch_fit(
+                    model, same_kind[0], gpus, seq_len, num_samples, memory_fraction, device
+                )
+                if fit is not None:
+                    batch_size = min(batch_size, fit)
+        finally:
+            collector._unpatch_all_layers()
+    return max(1, min(dist.allgather(batch_size)))
+
+
 def _move_to_device(obj: Any, device: torch.device) -> Any:
     """Recursively move tensors to *device*. Non-tensors are returned as-is."""
     if isinstance(obj, torch.Tensor):
@@ -494,6 +778,7 @@ def _write_manifest(
     num_layers: int,
     save_every: int,
     calib_mutates_weights: bool,
+    save_layer_state: bool,
 ) -> None:
     """Atomically write manifest.json. Config keys are persisted so resume can detect drift."""
     path = os.path.join(checkpoint_dir, "manifest.json")
@@ -505,6 +790,7 @@ def _write_manifest(
                 "num_layers": num_layers,
                 "save_every": save_every,
                 "calib_mutates_weights": calib_mutates_weights,
+                "save_layer_state": save_layer_state,
             },
             f,
         )
@@ -519,7 +805,7 @@ def _save_layer_files(
     checkpoint_dir: str,
     idx: int,
     weights: dict | None,
-    qstate: dict,
+    qstate: dict | None,
     quantizer_buffers: dict | None,
     output_meta: tuple,
 ) -> None:
@@ -527,7 +813,9 @@ def _save_layer_files(
 
     Exactly one of ``weights`` (full layer state_dict) or ``quantizer_buffers``
     (just the TensorQuantizer state_dict slice, used when calibration does not mutate weights)
-    is written; ``full_restore`` falls back to whichever is present.
+    is written; ``full_restore`` falls back to whichever is present. Both may be None,
+    along with ``qstate``, when per-layer export already captured the layer durably and
+    resume will skip it rather than restore it.
     ``next_inputs.pt`` and ``manifest.json`` are deferred to window boundaries
     in :meth:`_CheckpointState.save`.
     """
@@ -539,7 +827,8 @@ def _save_layer_files(
         torch.save(weights, os.path.join(d, "weights.pt"))
     elif quantizer_buffers is not None:
         torch.save(quantizer_buffers, os.path.join(d, "quantizer_buffers.pt"))
-    torch.save(qstate, os.path.join(d, "quantizer_state.pt"))
+    if qstate is not None:
+        torch.save(qstate, os.path.join(d, "quantizer_state.pt"))
     torch.save(output_meta, os.path.join(d, "output_meta.pt"))
 
 
@@ -561,6 +850,37 @@ def detect_resume_point(checkpoint_dir: str) -> tuple[int, dict] | None:
     return (last + 1, manifest)
 
 
+def _reconcile_export_with_resume(
+    exporter, checkpoint_dir: str | None, start_layer: int, num_layers: int
+) -> bool:
+    """Reconcile the shards on disk with the layer calibration will start from.
+
+    Returns True when every layer already has a shard, so only ``finalize()`` is owed.
+    """
+    manifest = _read_manifest(checkpoint_dir) if checkpoint_dir is not None else None
+    last = (manifest or {}).get("last_completed_layer")
+    total = (manifest or {}).get("num_layers")
+    if total is not None and total != num_layers:
+        raise ValueError(
+            f"Layerwise checkpoint at {checkpoint_dir} was written for {total} layers "
+            f"but this model has {num_layers}. Use a fresh checkpoint_dir."
+        )
+    # detect_resume_point returns None once the manifest is complete, which puts start_layer
+    # back at 0 and would recalibrate everything the shards already hold.
+    if last is not None and last + 1 >= num_layers:
+        exporter.assert_shards_present(num_layers)
+        return True
+
+    if start_layer > 0:
+        exporter.assert_shards_present(start_layer)
+    elif checkpoint_dir is not None:
+        # Starting at 0 with a checkpoint_dir means no usable resume record, so calibration
+        # would silently overwrite finished shards. Without one there is no resume to lose,
+        # and re-exporting is the documented behaviour.
+        exporter.assert_no_orphan_shards()
+    return False
+
+
 class _CheckpointState:
     """Manages checkpoint save and restore for layerwise calibration.
 
@@ -580,6 +900,7 @@ class _CheckpointState:
         start_layer: int = 0,
         save_every: int = 1,
         calib_mutates_weights: bool = True,
+        save_layer_state: bool = True,
     ):
         if dist.is_initialized() and dist.size() > 1:
             raise RuntimeError(
@@ -593,6 +914,9 @@ class _CheckpointState:
         self.start_layer = start_layer
         self.save_every = save_every
         self.calib_mutates_weights = calib_mutates_weights
+        # False when per-layer export runs alongside: its shards hold each layer's result,
+        # so resume skips rather than restores.
+        self.save_layer_state = save_layer_state
         # Tracks the most recent saved layer so save() can window-save the layers
         # since the last save event. Initialized to start_layer - 1 so the first
         # save event after resume covers the new work only.
@@ -605,6 +929,7 @@ class _CheckpointState:
         num_layers: int,
         save_every: int = 1,
         calib_mutates_weights: bool = True,
+        save_layer_state: bool = True,
     ) -> _CheckpointState | None:
         """Create from folder. Detects resume point. Returns None if no checkpoint_dir."""
         if not checkpoint_dir:
@@ -617,6 +942,9 @@ class _CheckpointState:
                 ("num_layers", num_layers),
                 ("save_every", save_every),
                 ("calib_mutates_weights", calib_mutates_weights),
+                # Else a resume without export_dir recalibrates everything, then fails in
+                # full_restore on files that were never written.
+                ("save_layer_state", save_layer_state),
             ):
                 ckpt_value = manifest.get(key)
                 if ckpt_value is not None and ckpt_value != new_value:
@@ -635,6 +963,7 @@ class _CheckpointState:
             start_layer=start,
             save_every=save_every,
             calib_mutates_weights=calib_mutates_weights,
+            save_layer_state=save_layer_state,
         )
 
     def setup_resume(self, layers: nn.ModuleList) -> list | None:
@@ -672,21 +1001,22 @@ class _CheckpointState:
         from modelopt.torch.quantization.conversion import restore_quantizer_state
         from modelopt.torch.quantization.utils.core_utils import (
             enable_weight_access_and_writeback,
+            module_name_maps,
             set_quantizer_state_dict,
         )
 
-        if self.start_layer == 0:
+        if self.start_layer == 0 or not self.save_layer_state:
             return
 
         dummy_config = QuantizeConfig()
-        name_to_module = dict(model.named_modules())
+        names = module_name_maps(model)
         for i in range(self.start_layer):
             layer = layers[i]
             d = _layer_dir(self.checkpoint_dir, i)
 
             # Resolve layer_device and load inside the context so params are
             # materialized — otherwise get_module_device can return meta.
-            with enable_weight_access_and_writeback(layer, model, name_to_module):
+            with enable_weight_access_and_writeback(layer, model, names):
                 layer_device = get_module_device(layer)
                 # weights_only=False is safe: files are internally generated by _save_layer
                 qstate = torch.load(
@@ -723,6 +1053,15 @@ class _CheckpointState:
 
         print_rank_0(f"Checkpoint: restored {self.start_layer} previously calibrated layers")
 
+    def _prune_stale_next_inputs(self, keep: int) -> None:
+        """Drop every layer's cached activations but the committed boundary's."""
+        for idx in range(self.num_layers):
+            if idx == keep:
+                continue
+            stale = os.path.join(_layer_dir(self.checkpoint_dir, idx), "next_inputs.pt")
+            if os.path.exists(stale):
+                os.remove(stale)
+
     def save(
         self,
         layer_idx: int,
@@ -747,14 +1086,14 @@ class _CheckpointState:
 
         _cpu = torch.device("cpu")
         layer = layers[layer_idx]
-        with enable_weight_access_and_writeback(layer, model, writeback=False):
-            qstate = _move_to_device(quantizer_state(layer), _cpu)
-            if self.calib_mutates_weights:
-                weights = _move_to_device(layer.state_dict(), _cpu)
-                quantizer_buffers = None
-            else:
-                weights = None
-                quantizer_buffers = _move_to_device(get_quantizer_state_dict(layer), _cpu)
+        qstate = weights = quantizer_buffers = None
+        if self.save_layer_state:
+            with enable_weight_access_and_writeback(layer, model, writeback=False):
+                qstate = _move_to_device(quantizer_state(layer), _cpu)
+                if self.calib_mutates_weights:
+                    weights = _move_to_device(layer.state_dict(), _cpu)
+                else:
+                    quantizer_buffers = _move_to_device(get_quantizer_state_dict(layer), _cpu)
 
         output_meta = getattr(layer._layerwise_calib, "output_meta", None)
         if output_meta is None:
@@ -787,7 +1126,13 @@ class _CheckpointState:
             self.num_layers,
             save_every=self.save_every,
             calib_mutates_weights=self.calib_mutates_weights,
+            save_layer_state=self.save_layer_state,
         )
+        # Per-layer export only: its resume dir is auto-derived, so an activation set per
+        # layer would dwarf a checkpoint the user never opted into. After the manifest, so
+        # a crash mid-write still resumes from the previous boundary.
+        if not self.save_layer_state:
+            self._prune_stale_next_inputs(keep=layer_idx)
         window_start = self._last_saved_layer + 1
         self._last_saved_layer = layer_idx
         window_size = layer_idx - window_start + 1

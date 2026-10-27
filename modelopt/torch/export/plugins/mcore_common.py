@@ -18,6 +18,7 @@
 from typing import Any
 
 from .mcore_deepseek import deepseek_causal_lm_export, deepseek_causal_lm_import
+from .mcore_glm import glm_moe_dsa_causal_lm_export
 from .mcore_gptoss import gptoss_causal_lm_export, gptoss_causal_lm_import
 from .mcore_llama import (
     eagle3_deep_llama_causal_lm_export,
@@ -33,13 +34,19 @@ from .mcore_nemotron import (
     nemotron_h_causal_lm_export,
     nemotron_h_causal_lm_import,
 )
+from .mcore_nemotron_omni import NEMOTRON_H_OMNI_VISION_PREFIXES, nemotron_h_omni_causal_lm_export
 from .mcore_qwen import (
     qwen3_causal_lm_export,
     qwen3_causal_lm_import,
     qwen25_causal_lm_export,
     qwen25_causal_lm_import,
 )
-from .mcore_qwen3vl import qwen3vl_causal_lm_export, qwen3vl_causal_lm_import
+from .mcore_qwen3vl import (
+    QWEN3VL_VISION_PREFIXES,
+    qwen3vl_causal_lm_export,
+    qwen3vl_causal_lm_import,
+)
+from .mcore_qwen35vl import QWEN3_5_VL_VISION_PREFIXES, qwen3_5_vl_causal_lm_export
 
 all_mcore_hf_export_mapping: dict[str, Any] = {
     "DeepseekV2ForCausalLM": deepseek_causal_lm_export,
@@ -48,6 +55,7 @@ all_mcore_hf_export_mapping: dict[str, Any] = {
     "Llama4ForConditionalGeneration": llama4_causal_lm_export,
     "NemotronForCausalLM": nemotron_causal_lm_export,
     "NemotronHForCausalLM": nemotron_h_causal_lm_export,
+    "NemotronH_Omni_Reasoning_V3": nemotron_h_omni_causal_lm_export,
     "LlamaForCausalLMEagle": eagle_llama_causal_lm_export,
     "LlamaForCausalLMEagle3": eagle3_llama_causal_lm_export,
     "LlamaForCausalLMEagle3Deep": eagle3_deep_llama_causal_lm_export,
@@ -56,6 +64,19 @@ all_mcore_hf_export_mapping: dict[str, Any] = {
     "Qwen2ForCausalLM": qwen25_causal_lm_export,
     "GptOssForCausalLM": gptoss_causal_lm_export,
     "Qwen3VLForConditionalGeneration": qwen3vl_causal_lm_export,
+    "Qwen3_5ForConditionalGeneration": qwen3_5_vl_causal_lm_export,
+    "Qwen3_5MoeForConditionalGeneration": qwen3_5_vl_causal_lm_export,
+    "GlmMoeDsaForCausalLM": glm_moe_dsa_causal_lm_export,
+}
+
+# VLM architectures whose Megatron export covers the language model only: the vision tower is copied
+# verbatim from the HF checkpoint under these key prefixes. Architectures absent here fall back to
+# ``LLAVA_VISION_PREFIXES`` when the model is an MCore ``LLaVAModel``, and to no copy otherwise.
+all_mcore_hf_vision_passthrough_mapping: dict[str, tuple[str, ...]] = {
+    "Qwen3VLForConditionalGeneration": QWEN3VL_VISION_PREFIXES,
+    "Qwen3_5ForConditionalGeneration": QWEN3_5_VL_VISION_PREFIXES,
+    "Qwen3_5MoeForConditionalGeneration": QWEN3_5_VL_VISION_PREFIXES,
+    "NemotronH_Omni_Reasoning_V3": NEMOTRON_H_OMNI_VISION_PREFIXES,
 }
 
 all_mcore_hf_import_mapping: dict[str, Any] = {

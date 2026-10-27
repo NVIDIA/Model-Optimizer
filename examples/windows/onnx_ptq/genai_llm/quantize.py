@@ -390,6 +390,7 @@ def main(args):
         calibration_method=args.algo,
         calibration_data_reader=None if args.use_random_calib else calib_inputs,
         calibration_eps=args.calibration_eps,
+        trt_rtx_backend=args.trt_rtx_backend,
         use_zero_point=args.use_zero_point,
         block_size=args.block_size,
         input_shapes_profile=input_shapes_profile_data,
@@ -568,6 +569,12 @@ if __name__ == "__main__":
         type=parse_calibration_eps,  # Use the custom parser
         default=["cuda", "cpu"],  # Default as a list
         help="Comma-separated list of calibration endpoints. Choose from 'cuda', 'cpu', 'dml', 'NvTensorRtRtx'.",
+    )
+    parser.add_argument(
+        "--trt_rtx_backend",
+        choices=["legacy", "abi"],
+        default="legacy",
+        help="TensorRT-RTX backend used with NvTensorRtRtx calibration: legacy or abi.",
     )
     parser.add_argument(
         "--trust_remote_code",

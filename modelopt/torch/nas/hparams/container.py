@@ -17,6 +17,8 @@
 
 from collections.abc import Callable
 
+import torch
+
 from modelopt.torch.trace import Symbol, SymDepth
 
 from ..traced_hp import TracedHp, TracedHpRegistry
@@ -46,3 +48,6 @@ class DepthHparam(TracedHp):
         self.choices = list(choices & set(self.choices))
 
         return super()._resolve_dependencies(sym, get_hp)
+
+
+torch.serialization.add_safe_globals([DepthHparam])

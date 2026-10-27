@@ -94,15 +94,8 @@ def wrap_in_parent_with_tied_keys(
       when ``decoder_canonical=True``, list-style (legacy, no canonical/alias
       distinction) when ``decoder_canonical=False``.
 
-    Used by tests for :func:`_collect_canonical_tied_patterns` and
-    :func:`_reorder_canonical_first`. The legacy list-style branch exercises
-    the "no patterns extracted" negative case.
-
-    The parent's class name contains ``DiffusionGemma`` so the model_type
-    gate inside :func:`_reorder_canonical_first` (mirrors the existing
-    whisper / nemotron-vl dispatch in ``unified_export_hf.py``) passes for
-    test parents — without this, the function early-returns before
-    reaching the patterns step.
+    Used by tests for :class:`TiedWeightMap`. The list-style branch exercises the
+    "no canonical/alias info" negative case (an empty tie map).
     """
     parent_cls = type("DiffusionGemmaTestParent", (nn.Module,), {})
     parent = parent_cls()
@@ -115,8 +108,12 @@ def wrap_in_parent_with_tied_keys(
         parent._tied_weights_keys = {
             rf"^encoder\.{re.escape(weight_attr)}$": f"decoder.{weight_attr}",
         }
+        # transformers >=5.0 resolves the declaration into concrete {alias: canonical} names on
+        # the model (``all_tied_weights_keys``); TiedWeightMap reads that attribute.
+        parent.all_tied_weights_keys = {f"encoder.{weight_attr}": f"decoder.{weight_attr}"}
     else:
-        # Legacy list-style: just a list of tied paths, no canonical info.
+        # Legacy list-style: just a list of tied paths, no canonical info -> empty resolved map.
         parent._tied_weights_keys = [f"encoder.{weight_attr}"]
+        parent.all_tied_weights_keys = {}
 
     return parent

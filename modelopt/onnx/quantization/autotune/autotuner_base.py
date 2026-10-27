@@ -28,6 +28,7 @@ import dataclasses
 import functools
 import os
 import random
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 import onnx
@@ -51,7 +52,7 @@ from modelopt.onnx.quantization.autotune.insertion_points import (
     get_autotuner_quantizable_ops,
 )
 from modelopt.onnx.quantization.autotune.region_pattern import RegionPattern
-from modelopt.onnx.quantization.graph_utils import get_tensor_consumer_node_indices
+from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
 
 _MUTATION_SPECS = [
     ("node_inputs", "node input points", lambda p: (p.node_index, p.input_index)),
@@ -528,7 +529,10 @@ class QDQAutotunerBase:
                     quantized_node_indices.add(producer_idx)
 
         nodes_to_quantize = [graph.nodes[i].name for i in quantized_node_indices]
-        op_types_to_quantize = list(get_autotuner_quantizable_ops())
+        op_types_to_quantize = get_autotuner_quantizable_ops()
+        if self.config.default_quant_type == "fp8":
+            op_types_to_quantize &= {"Conv", "Gemm", "MatMul", "Add"}
+        op_types_to_quantize = list(op_types_to_quantize)
 
         # Inputs of quantized nodes NOT covered by Q/DQ (only non-constant producer inputs)
         no_quantize_inputs: list[tuple[gs.Node, gs.Node, str]] = []
@@ -558,7 +562,11 @@ class QDQAutotunerBase:
 
     @_requires_init
     def export_onnx(
-        self, output_path: str | None = None, insert_qdq: bool = True, best: bool = False
+        self,
+        output_path: str | None = None,
+        insert_qdq: bool = True,
+        best: bool = False,
+        model_transform: Callable[[onnx.ModelProto], onnx.ModelProto] | None = None,
     ) -> bytes:
         """Export ONNX model with Q/DQ nodes inserted according to tested schemes.
 
@@ -606,6 +614,7 @@ class QDQAutotunerBase:
             self.config,
             insert_qdq=insert_qdq and bool(resolved_insertion_points),
             needs_fp8_conversion=needs_fp8_conversion,
+            model_transform=model_transform,
         )
 
         model_bytes = model.SerializeToString()
@@ -728,7 +737,7 @@ class QDQAutotunerBase:
             "patterns": [pattern_schemes.to_dict() for pattern_schemes in self.profiled_patterns],
         }
 
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             yaml.dump(state, f, default_flow_style=False, sort_keys=False)
 
         num_patterns = len(self.profiled_patterns)
@@ -766,7 +775,7 @@ class QDQAutotunerBase:
             AutotunerNotInitializedError: If initialize() hasn't been called
             FileNotFoundError: If the input_path doesn't exist
         """
-        with open(input_path) as f:
+        with open(input_path, encoding="utf-8") as f:
             state = yaml.safe_load(f)
 
         if state.get("baseline_latency_ms") is not None:

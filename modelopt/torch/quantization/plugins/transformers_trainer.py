@@ -19,7 +19,6 @@ import contextlib
 import gc
 import os
 import types
-import warnings
 from dataclasses import field
 
 import torch
@@ -53,16 +52,7 @@ class QuantizationArguments(ModelOptHFArguments):
             "help": (
                 "Path to a quantization recipe YAML file (built-in or custom). "
                 "Built-in recipes can be specified by relative path, e.g. "
-                "'general/ptq/nvfp4_default-kv_fp8'. Replaces the deprecated --quant_cfg flag."
-            ),
-        },
-    )
-    quant_cfg: str | None = field(
-        default=None,
-        metadata={
-            "help": (
-                "Deprecated: pre-quantize the model with a separate quantization step instead. "
-                "Specify the quantization format for PTQ/QAT by name (e.g. NVFP4_DEFAULT_CFG)."
+                "'general/ptq/nvfp4_default-kv_fp8'."
             ),
         },
     )
@@ -86,41 +76,18 @@ class QuantizationArguments(ModelOptHFArguments):
     )
 
 
-# Backwards-compat alias for the pre-refactor public name; remove in a future release.
-QuantizationArgumentsWithConfig = QuantizationArguments
-
-
-def resolve_quant_cfg_from_args(
-    quant_args: QuantizationArguments | None,
-    *,
-    warn_on_quant_cfg: bool = False,
-):
-    """Resolve a ModelOpt quantization config from recipe or legacy quant_cfg arguments."""
-    if quant_args is None:
+def resolve_quant_cfg_from_args(quant_args: QuantizationArguments | None):
+    """Resolve a ModelOpt quantization config from the recipe argument."""
+    recipe_path = getattr(quant_args, "recipe", None) if quant_args is not None else None
+    if not recipe_path:
         return None
 
-    recipe_path = getattr(quant_args, "recipe", None)
-    if recipe_path:
-        from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+    from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 
-        recipe = load_recipe(recipe_path)
-        if not isinstance(recipe, ModelOptPTQRecipe):
-            raise ValueError(
-                f"Expected PTQ recipe, but got {type(recipe).__name__} from {recipe_path}"
-            )
-        return recipe.quantize
-
-    quant_cfg = getattr(quant_args, "quant_cfg", None)
-    if quant_cfg is None:
-        return None
-    if warn_on_quant_cfg:
-        warnings.warn(
-            "In-trainer quantization via quant_args is deprecated and will be removed in a "
-            "future release. Pre-quantize your model with a separate quantization step instead.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-    return getattr(mtq, quant_cfg) if isinstance(quant_cfg, str) else quant_cfg
+    recipe = load_recipe(recipe_path)
+    if not isinstance(recipe, ModelOptPTQRecipe):
+        raise ValueError(f"Expected PTQ recipe, but got {type(recipe).__name__} from {recipe_path}")
+    return recipe.quantize
 
 
 def _patch_fsdp2_post_backward():
@@ -201,7 +168,7 @@ class QATTrainer(ModelOptHFTrainer):
         super().__init__(*args, **kwargs)
 
         self.quant_args = quant_args
-        self.quant_cfg = resolve_quant_cfg_from_args(quant_args, warn_on_quant_cfg=True)
+        self.quant_cfg = resolve_quant_cfg_from_args(quant_args)
 
         # Add lora adapter before quantizing the model
         if getattr(self.args, "lora_config", None) is not None and not hasattr(

@@ -18,8 +18,10 @@
 import functools
 import io
 import os
+import sys
 import time
-from collections.abc import Callable
+import traceback
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from datetime import timedelta
 from typing import Any
@@ -36,6 +38,8 @@ __all__ = [
     "backend",
     "barrier",
     "fsdp2_wrap",
+    "gather_bytes",
+    "gather_state_dicts",
     "is_available",
     "is_fsdp2_model",
     "is_initialized",
@@ -106,9 +110,9 @@ def _deserialize(tensor: torch.Tensor, size: int | None = None) -> Any:
     buffer = tensor.numpy().tobytes()
     if size is not None:
         buffer = buffer[:size]
-    # Security NOTE: weights_only=False is used here on internally-generated buffer, not on untrusted user input
-    obj = torch.load(io.BytesIO(buffer), weights_only=False)
-    return obj
+    # Explicit so TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD cannot re-enable pickle for peer payloads. Custom
+    # classes sent through broadcast/allgather must be registered with add_safe_globals.
+    return torch.load(io.BytesIO(buffer), weights_only=True)
 
 
 def _broadcast(tensor: torch.Tensor, src: int = 0, group=None) -> None:
@@ -140,6 +144,60 @@ def broadcast(obj: Any, src: int = 0, group=None) -> Any:
     if rank() != src:
         obj = _deserialize(tensor.cpu())
     return obj
+
+
+def gather_bytes(
+    data: bytes, dst: int, group=None, chunk_bytes: int = 1 << 28
+) -> list[bytearray] | None:
+    """Gathers byte strings to global rank ``dst`` only, without unpickling anything on the way.
+
+    Unlike ``torch.distributed.gather_object`` it never runs pickle, and it moves ``chunk_bytes`` per
+    rank at a time to bound device memory. Returns the per-rank bytes on ``dst`` and ``None`` elsewhere.
+    """
+    n = size(group)
+    device = torch.device("cuda" if torch.distributed.get_backend(group) == "nccl" else "cpu")
+    local = (
+        torch.frombuffer(bytearray(data), dtype=torch.uint8)
+        if data
+        else torch.empty(0, dtype=torch.uint8)
+    )
+    sizes_t = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(n)]
+    torch.distributed.all_gather(sizes_t, torch.tensor([len(data)], device=device), group=group)
+    sizes = [int(t.item()) for t in sizes_t]
+
+    is_dst = torch.distributed.get_rank() == dst
+    out = [bytearray(s) for s in sizes] if is_dst else None
+    for off in range(0, max(sizes), chunk_bytes):
+        length = min(chunk_bytes, max(sizes) - off)
+        buf = torch.zeros(length, dtype=torch.uint8, device=device)
+        piece = local[off : off + length]
+        buf[: piece.numel()] = piece.to(device)
+        bufs = [torch.empty_like(buf) for _ in range(n)] if is_dst else None
+        torch.distributed.gather(buf, bufs, dst=dst, group=group)
+        if bufs is not None and out is not None:
+            for i, b in enumerate(bufs):
+                k = min(length, max(0, sizes[i] - off))
+                out[i][off : off + k] = b[:k].cpu().numpy().tobytes()
+    return out
+
+
+def gather_state_dicts(state: dict, dst: int, group=None) -> Iterator[dict]:
+    """Gathers ``state`` from every rank of ``group`` to global rank ``dst``, loaded with ``weights_only``.
+
+    Yields one rank's dict at a time on ``dst`` (to bound host memory) and nothing elsewhere. The collective
+    runs eagerly, so every rank must call this before iterating.
+    """
+    buf = io.BytesIO()
+    torch.save(state, buf)
+    gathered = gather_bytes(buf.getvalue(), dst, group)
+    del buf
+
+    def _load() -> Iterator[dict]:
+        while gathered:
+            # Explicit weights_only so TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD cannot re-enable pickle for peers.
+            yield torch.load(io.BytesIO(gathered.pop(0)), map_location="cpu", weights_only=True)
+
+    return _load()
 
 
 def _allgather(tensors: list[torch.Tensor], tensor: torch.Tensor, group=None) -> None:
@@ -212,16 +270,104 @@ def setup(timeout: timedelta | None = None):
 
 
 def cleanup():
-    """Cleans up the distributed environment."""
+    """Cleans up the distributed environment.
+
+    The barrier is skipped when unwinding from an error, since peers may be blocked in a collective
+    this rank will never reach. ``SystemExit`` is treated as a clean exit (every rank reaches it).
+    That is not sufficient on its own -- ``destroy_process_group`` below blocks for the same reason
+    -- so error paths must call :func:`abort` before reaching this ``finally``.
+    """
     if is_initialized():
-        with suppress(Exception):
-            barrier()
+        exc = sys.exc_info()[1]
+        if exc is None or isinstance(exc, SystemExit):
+            with suppress(Exception):
+                barrier()
         torch.distributed.destroy_process_group()
+
+
+def abort(exit_code: int = 1) -> None:
+    """Print the active exception and exit this rank immediately.
+
+    Call from an ``except`` block in a distributed entrypoint. Both a barrier and
+    ``destroy_process_group`` stall when peers are blocked in a collective this rank will never
+    reach, and the traceback only prints once the enclosing ``finally`` returns -- so the run looks
+    hung rather than failed. Exiting lets the launcher (e.g. torchrun) terminate the peers.
+    ``SystemExit`` is re-raised instead, since every rank reaches an intentional exit.
+    """
+    exc = sys.exc_info()[1]
+    if isinstance(exc, SystemExit):
+        raise exc
+    traceback.print_exc()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)
 
 
 def is_fsdp2_model(model) -> bool:
     """Return True if any submodule of ``model`` has been wrapped with FSDP2 ``fully_shard``."""
     return any(isinstance(m, FSDPModule) for m in model.modules())
+
+
+def _off_dtype_params(model) -> set[torch.nn.Parameter]:
+    """Params whose dtype differs from the model's dominant (by element count) param dtype.
+
+    FSDP2 needs one dtype per shard group, but HF models routinely keep a few params in fp32 for
+    stability (e.g. MoE router gates). Pass these to ``fully_shard(ignored_params=...)``.
+
+    TODO: Drop this and shard the off-dtype params once a stable PyTorch release includes FSDP2
+    mixed-precision parameter dtype support (already on nightly).
+    """
+    numel_by_dtype: dict[torch.dtype, int] = {}
+    for param in model.parameters():
+        numel_by_dtype[param.dtype] = numel_by_dtype.get(param.dtype, 0) + param.numel()
+    if len(numel_by_dtype) <= 1:
+        return set()
+
+    # Lazy import: logging imports this module at top level (circular).
+    from modelopt.torch.utils.logging import warn_rank_0
+
+    dominant = max(numel_by_dtype, key=lambda d: numel_by_dtype[d])
+    off_dtype = {n: p for n, p in model.named_parameters() if p.dtype != dominant}
+    off_numel = sum(numel_by_dtype[d] for d in numel_by_dtype if d != dominant)
+    names = sorted(off_dtype)
+    warn_rank_0(
+        f"Model has mixed parameter dtypes {set(numel_by_dtype)}; FSDP2 needs one dtype per shard "
+        f"group, so {len(names)} non-{dominant} parameter(s) "
+        f"({100 * off_numel / sum(numel_by_dtype.values()):.2f}% of elements) will stay replicated "
+        f"rather than sharded: {names[:3]}{' ...' if len(names) > 3 else ''}"
+    )
+    return set(off_dtype.values())
+
+
+def _move_to_fsdp_device(model, params: set[torch.nn.Parameter]) -> None:
+    """Move ``params`` onto the device FSDP2 computes on for ``model``.
+
+    ``fully_shard`` only moves the params it manages, so ignored ones would be stranded on
+    whatever device the caller built the model on. Meta params are left alone for deferred init.
+
+    The device comes from a sharded param's mesh rather than its local shard: under
+    ``cpu_offload`` the shard rests on CPU while compute still happens on the accelerator.
+    """
+    # Lazy import: logging imports this module at top level (circular).
+    from modelopt.torch.utils.logging import warn_rank_0
+
+    mesh = next((p.device_mesh for p in model.parameters() if isinstance(p, DTensor)), None)
+    if mesh is None:
+        warn_rank_0(
+            f"FSDP2 sharded no parameter of {type(model).__name__}, so the compute device for "
+            f"{len(params)} unsharded off-dtype parameter(s) cannot be determined; leaving them "
+            "where they are. Move them to the compute device or the forward will fail."
+        )
+        return
+
+    device = (
+        torch.device("cpu")
+        if mesh.device_type == "cpu"
+        else torch.device(mesh.device_type, getattr(torch, mesh.device_type).current_device())
+    )
+    for param in params:
+        if not param.is_meta and param.device != device:
+            param.data = param.data.to(device)
 
 
 def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):
@@ -231,6 +377,11 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     sharded instead of replicated per rank; pass ``shard_root=False`` to leave the root replicated
     (only decoder layers sharded). Returns the detected decoder layers so callers can reuse the
     detection result.
+
+    Parameters whose dtype differs from the model's dominant one are excluded from the wrap (see
+    :func:`_off_dtype_params`), since FSDP2 rejects a shard group that mixes dtypes. They stay
+    replicated and are moved onto the shards' device, which ``fully_shard`` does not do for the
+    params it ignores.
     """
     # Lazy import: layerwise_calib imports this module at top level (circular).
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -246,6 +397,9 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
         fsdp_kwargs["mp_policy"] = mp_policy
     if cpu_offload:
         fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
+    ignored_params = _off_dtype_params(model)
+    if ignored_params:
+        fsdp_kwargs["ignored_params"] = ignored_params
 
     # Snapshot/restore config.architectures: some HF builders mutate it during fully_shard.
     config = getattr(model, "config", None)
@@ -254,6 +408,8 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
         fully_shard(layer, **fsdp_kwargs)
     if shard_root:
         fully_shard(model, **fsdp_kwargs)
+    if ignored_params:
+        _move_to_fsdp_device(model, ignored_params)
     if config is not None and architectures:
         config.architectures = architectures
 

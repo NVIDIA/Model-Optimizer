@@ -155,7 +155,11 @@ nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     # Grouped local experts (TEGroupedMLP: fused per-expert weights)
     "experts.linear_fc1": GroupedMLPSlicing("backbone.layers.{}.mixer.experts.{{}}.up_proj"),
     "experts.linear_fc2": GroupedMLPSlicing("backbone.layers.{}.mixer.experts.{{}}.down_proj"),
-    # MTP
+    # MTP predictor projections (outer MultiTokenPredictionLayer). The MTP inner
+    # attention/MoE layers are structurally identical to the backbone hybrid layers, so
+    # they reuse the base rules above via is_mtp=True (which retargets the backbone/model
+    # root to mtp, mirroring the importer) — only these predictor-specific keys are
+    # dedicated.
     "mtp.enorm": NameRemapping("mtp.layers.{}.enorm."),
     "mtp.hnorm": NameRemapping("mtp.layers.{}.hnorm."),
     "mtp.eh_proj": NameRemapping("mtp.layers.{}.eh_proj."),

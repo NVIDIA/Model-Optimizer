@@ -22,13 +22,18 @@ optimization of ONNX models using pattern-based region analysis and TensorRT per
 import fnmatch
 import shutil
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import onnx
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.autotune.autotuner import QDQAutotuner
-from modelopt.onnx.quantization.autotune.benchmark import TensorRTPyBenchmark, TrtExecBenchmark
+from modelopt.onnx.quantization.autotune.benchmark import (
+    TensorRTPyBenchmark,
+    TrtExecBenchmark,
+    default_timing_cache_file,
+)
 from modelopt.onnx.quantization.autotune.common import Config, PatternCache
 from modelopt.onnx.quantization.qdq_utils import get_quantized_tensors
 
@@ -96,7 +101,8 @@ def init_benchmark_instance(
                           These plugins will be loaded by trtexec or TensorRT Python API during engine building.
                           If None, no custom plugins are loaded.
         timing_cache_file: Path to TensorRT timing cache file for faster engine builds.
-                          If None, uses default "trtexec_timing.cache" (default: None)
+                          If None, uses "trtexec_timing.cache" in a private temporary directory
+                          (default: None)
         warmup_runs: Number of warmup inference iterations before measurement.
                     Allows GPU to reach stable performance state (default: 5)
         timing_runs: Number of timed inference iterations for latency measurement.
@@ -125,7 +131,8 @@ def init_benchmark_instance(
             logger.info("TensorRT Python API benchmark initialized")
         logger.debug(
             f"Settings: warmup={warmup_runs}, timing={timing_runs}, "
-            f"cache={timing_cache_file or 'trtexec_timing.cache'}, plugin_libraries={plugin_libraries}"
+            f"cache={timing_cache_file or default_timing_cache_file()}, "
+            f"plugin_libraries={plugin_libraries}"
         )
         return _benchmark_instance
     except Exception as e:
@@ -170,6 +177,7 @@ def region_pattern_autotuning_workflow(
     qdq_baseline_model: str | None = None,
     node_filter_list: list[str] | None = None,
     verbose: bool = False,
+    model_transform: Callable[[onnx.ModelProto], onnx.ModelProto] | None = None,
 ) -> QDQAutotuner:
     """Run automated Q/DQ (Quantization/Dequantization) optimization on an ONNX model.
 
@@ -214,6 +222,7 @@ def region_pattern_autotuning_workflow(
         node_filter_list: Optional list of wildcard patterns to filter ONNX nodes. Regions
                          without any matching nodes are skipped during autotuning (default: None)
         verbose: Enable verbose logging in Config for detailed autotuner output (default: False)
+        model_transform: Optional transform applied to every model before benchmarking.
 
     Returns:
         QDQAutotuner instance after autotuning
@@ -265,6 +274,18 @@ def region_pattern_autotuning_workflow(
     if state_path.exists():
         logger.info(f"Resuming from checkpoint: {state_path}")
         autotuner.load_state(str(state_path))
+        if model_transform is not None:
+            for pattern_schemes in autotuner.profiled_patterns:
+                for scheme in pattern_schemes.schemes:
+                    scheme.latency_ms = float("inf")
+                    scheme.error = False
+                    scheme.profile_timestamp = None
+                if autotuner.pattern_cache is not None:
+                    autotuner.pattern_cache.add_pattern_schemes(pattern_schemes)
+            autotuner.profiled_patterns.clear()
+            autotuner.baseline_latency_ms = None
+            autotuner.config = config
+            logger.info("Re-profiling checkpoint measurements for transformed models")
     else:
         logger.info("Starting new autotuning session")
 
@@ -286,7 +307,7 @@ def region_pattern_autotuning_workflow(
     if autotuner.baseline_latency_ms is None:
         logger.info("Measuring baseline (no Q/DQ)")
         baseline_path = output_dir / "baseline.onnx"
-        autotuner.export_onnx(str(baseline_path), insert_qdq=False)
+        autotuner.export_onnx(str(baseline_path), insert_qdq=False, model_transform=model_transform)
         baseline_log = logs_dir / "baseline.log"
         baseline_latency = benchmark_onnx_model(str(baseline_path), str(baseline_log))
         autotuner.submit(baseline_latency)
@@ -327,7 +348,9 @@ def region_pattern_autotuning_workflow(
                 break
 
             schemes_tested += 1
-            model_bytes = autotuner.export_onnx(None, insert_qdq=True)
+            model_bytes = autotuner.export_onnx(
+                None, insert_qdq=True, model_transform=model_transform
+            )
             test_log = logs_dir / f"region_{region.id}_scheme_{scheme_idx}.log"
             flush_timing_cache = (iteration_count % 10) == 0
             latency = benchmark_onnx_model(
@@ -351,7 +374,9 @@ def region_pattern_autotuning_workflow(
             logger.info(f"  Tested {schemes_tested} schemes")
 
         region_model_path = models_dir / f"region_{region.id}_level_{region.level}.onnx"
-        autotuner.export_onnx(str(region_model_path), insert_qdq=True, best=True)
+        autotuner.export_onnx(
+            str(region_model_path), insert_qdq=True, best=True, model_transform=model_transform
+        )
         logger.debug(f"  Saved best model: {region_model_path.name}")
 
         # Save state after each region (incremental, crash recovery)
@@ -363,7 +388,7 @@ def region_pattern_autotuning_workflow(
 
     logger.info("Exporting final optimized model")
     final_model_path = output_dir / "optimized_final.onnx"
-    autotuner.export_onnx(str(final_model_path), insert_qdq=True)
+    autotuner.export_onnx(str(final_model_path), insert_qdq=True, model_transform=model_transform)
     final_log = logs_dir / "final.log"
     final_latency = benchmark_onnx_model(str(final_model_path), str(final_log))
 

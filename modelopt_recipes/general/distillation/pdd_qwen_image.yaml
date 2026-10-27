@@ -1,0 +1,18 @@
+# Parallel Decoding Distillation defaults for the Qwen-Image example.
+#
+# Maps to modelopt.torch.fastgen.PDDConfig. This file contains algorithm and
+# model-call defaults only; data roots, training topology, checkpoint paths, and
+# cluster settings belong to the framework example and run manifest.
+
+# Canonical Qwen teacher guidance. Packed-space norm rescaling remains owned by
+# the Qwen plugin/example rather than the framework-neutral PDD config.
+guidance_scale: 4.0
+
+grid_size: 128
+grid_max_t: 0.999
+flow_shift: 5.0
+block_size_min: 4
+block_size_max: 64
+teacher_integrator: euler
+inference_blocks: [32, 32, 32, 32]
+data_free: false

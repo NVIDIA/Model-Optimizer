@@ -38,6 +38,7 @@ from .config import (
     AWQLiteCalibConfig,
     CompressConfig,
     GPTQCalibConfig,
+    ImatrixCalibConfig,
     LocalHessianCalibConfig,
     LSQConfig,
     MaxCalibConfig,
@@ -62,6 +63,7 @@ from .conversion import (
 from .model_calib import (
     awq,
     gptq,
+    imatrix_calibrate,
     layerwise_calibrate,
     local_hessian_calibrate,
     lsq,
@@ -71,6 +73,7 @@ from .model_calib import (
     smoothquant,
     svdquant,
 )
+from .utils.calib_utils import reset_calib_forward_memory
 
 __all__ = ["BaseCalibrateModeDescriptor"]
 
@@ -230,7 +233,8 @@ def wrapped_calib_func(
     layerwise_cfg = kwargs.pop("layerwise", None) or {}
     layerwise = layerwise_cfg.get("enable", False)
     checkpoint_dir = layerwise_cfg.get("checkpoint_dir")
-    qdq_from_prev = layerwise_cfg.get("get_qdq_activations_from_prev_layer", False)
+    export_dir = layerwise_cfg.get("export_dir")
+    qdq_from_prev = layerwise_cfg.get("get_qdq_activations_from_prev_layer", True)
     save_every = layerwise_cfg.get("save_every", 1)
     calib_mutates_weights = layerwise_cfg.get("calib_mutates_weights", True)
     if method is not None and "awq" in method:
@@ -247,6 +251,7 @@ def wrapped_calib_func(
                 module._moe_calib_experts_ratio = moe_calib_experts_ratio
 
     if func is not None:
+        reset_calib_forward_memory()
         if layerwise:
             # All currently implemented PTQ algorithms support layerwise calibration;
             # future algorithms that need full-model context must add a guard here.
@@ -265,6 +270,7 @@ def wrapped_calib_func(
                 forward_loop=forward_loop,
                 calib_func=func,
                 checkpoint_dir=checkpoint_dir,
+                export_dir=export_dir,
                 get_qdq_activations_from_prev_layer=qdq_from_prev,
                 save_every=save_every,
                 calib_mutates_weights=calib_mutates_weights,
@@ -554,6 +560,18 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
         return GPTQCalibConfig
 
     _calib_func = gptq
+
+
+@CalibrateModeRegistry.register_mode
+class ImatrixModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for imatrix calibration algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return ImatrixCalibConfig
+
+    _calib_func = imatrix_calibrate
 
 
 @CalibrateModeRegistry.register_mode
