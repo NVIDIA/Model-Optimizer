@@ -210,6 +210,8 @@ def test_export_writes_up_and_down_proj_per_expert():
         torch.testing.assert_close(expert.up_proj.input_scale, up_scale)
         torch.testing.assert_close(expert.down_proj.input_scale, down_scale)
     assert not hasattr(experts, "up_proj_weight_quantizers")
+    # The fused parameters are released, not kept beside the per-expert copies.
+    assert not hasattr(experts, "up_proj") and not hasattr(experts, "down_proj")
 
 
 def test_unsupported_backend_is_redirected_to_grouped_mm():
