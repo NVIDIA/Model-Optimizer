@@ -440,6 +440,91 @@ def test_ineligible_gemm_keeps_native_boundary_and_weights(tail):
     assert [list(tensor.dims) for tensor in converted.graph.initializer] == [[3, 4], [4]]
 
 
+@pytest.mark.parametrize("source", ["initializer", "constant", "runtime"])
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize("tail", [False, True])
+def test_scalar_gather_requires_registered_rank_conversion(source, axis, tail, monkeypatch):
+    """Refuse unprepared scalar Gather before the actual pipeline changes caller state."""
+    pipeline = import_module(_transform_make_dla_compatible.__module__)
+    monkeypatch.setattr(
+        pipeline,
+        "DLA_TRANSFORMS",
+        tuple((name, transform) for name, transform in pipeline.DLA_TRANSFORMS if name != "Gather"),
+    )
+    shape = [2, 3, 4, 4] if axis == 0 else [1, 3, 4, 4]
+    output_shape = shape[:axis] + shape[axis + 1 :]
+    nodes = [helper.make_node("Gather", ["x", "indices"], ["hidden" if tail else "y"], axis=axis)]
+    if tail:
+        nodes.append(helper.make_node("Identity", ["hidden"], ["y"]))
+    tensor = numpy_helper.from_array(np.int64(1), "indices")
+    inputs = [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)]
+    if source == "constant":
+        nodes.insert(0, helper.make_node("Constant", [], ["indices"], value=tensor))
+    elif source == "runtime":
+        inputs.append(helper.make_tensor_value_info("indices", TensorProto.INT64, []))
+    model = _make_model(
+        nodes,
+        inputs,
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, output_shape)],
+        [tensor] if source == "initializer" else [],
+    )
+    feeds = {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape)}
+    if source == "runtime":
+        feeds["indices"] = np.int64(1)
+    _checked_run(model, feeds)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match=r"Output rank conversion.*Gather"):
+        _transform_make_dla_compatible(model, verbose=False)
+    assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("indices_shape", [[2], ["K"]])
+def test_native_vector_gather_keeps_rank_four_output(indices_shape, monkeypatch):
+    """Keep native rank-four Gather when only its index-vector length is symbolic."""
+    pipeline = import_module(_transform_make_dla_compatible.__module__)
+    monkeypatch.setattr(
+        pipeline,
+        "DLA_TRANSFORMS",
+        tuple((name, transform) for name, transform in pipeline.DLA_TRANSFORMS if name != "Gather"),
+    )
+    shape = [1, 3, 4, 4]
+    model = _make_model(
+        [helper.make_node("Gather", ["x", "indices"], ["y"], axis=1)],
+        [
+            helper.make_tensor_value_info("x", TensorProto.FLOAT, shape),
+            helper.make_tensor_value_info("indices", TensorProto.INT64, indices_shape),
+        ],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, indices_shape[0], 4, 4])],
+    )
+    feeds = {
+        "x": np.arange(48, dtype=np.float32).reshape(shape),
+        "indices": np.array([0, 2], np.int64),
+    }
+    expected = _checked_run(model, feeds)[0]
+    converted = _transform_make_dla_compatible(model, verbose=False)
+    np.testing.assert_array_equal(_checked_run(converted, feeds)[0], expected)
+
+
+@pytest.mark.parametrize("shape", [[3], [1, 3, 4, 4]])
+@pytest.mark.parametrize("tail", [False, True])
+def test_shape_outputs_keep_native_vector_rank(shape, tail):
+    """Retain native Shape vectors, including a one-element vector through unary tails."""
+    nodes = [helper.make_node("Shape", ["x"], ["hidden" if tail else "y"])]
+    if tail:
+        nodes.append(helper.make_node("Identity", ["hidden"], ["y"]))
+    model = _make_model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+        [helper.make_tensor_value_info("y", TensorProto.INT64, [len(shape)])],
+    )
+    feeds = {"x": np.ones(shape, np.float32)}
+    expected = _checked_run(model, feeds)[0]
+    converted = _transform_make_dla_compatible(model, verbose=False)
+    actual = _checked_run(converted, feeds)[0]
+    assert actual.shape == (len(shape),)
+    np.testing.assert_array_equal(actual, expected)
+
+
 def test_early_pattern_does_not_allow_an_unmatched_native_reduction(monkeypatch):
     """Refuse a native reducer before mutation even when another reducer has a valid early lowering."""
     pipeline = import_module(_transform_make_dla_compatible.__module__)

@@ -29,8 +29,24 @@ _RANK_FLOW_OPS = _RANK_AGNOSTIC_OPS | {"Slice", "Transpose", "Reshape", "Expand"
 _REDUCTION_OPS = frozenset({"ReduceSum", "ReduceMean", "ReduceMin", "ReduceMax"})
 
 
-def _require_output_rank_conversion(node, local_functions, prepared_output_ops):
+def _require_output_rank_conversion(node, local_functions, prepared_output_ops, cache):
     """Require an explicit later stage before deferring a native rank-reducing operation."""
+    if _is_standard_node(node, local_functions, {"Gather"}) and "Gather" not in prepared_output_ops:
+        shape = cache.get_shape(node.input[1])
+        value = cache.vi_map.get(node.input[1])
+        rank = (
+            len(shape)
+            if shape is not None
+            else (
+                len(value.type.tensor_type.shape.dim)
+                if value is not None and value.type.tensor_type.HasField("shape")
+                else None
+            )
+        )
+        if rank is None or rank == 0:
+            raise ValueError(
+                "Output rank conversion is unavailable for scalar or unknown-rank Gather"
+            )
     if (
         _is_standard_node(node, local_functions, {node.op_type})
         and (
@@ -329,10 +345,10 @@ def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False, prepared_o
         producer = cache.get_producer(value.name)
         source = _output_rank_source(cache, producer, local_functions, rank_sources)
         if source is not None:
-            if _is_standard_node(source, local_functions, {"Gemm"}):
+            if _is_standard_node(source, local_functions, {"Gemm", "Shape"}):
                 continue
             if defer_rank_conversion:
-                _require_output_rank_conversion(source, local_functions, prepared_output_ops)
+                _require_output_rank_conversion(source, local_functions, prepared_output_ops, cache)
             if not _is_standard_node(
                 source, local_functions, {source.op_type}, contrib_ops=contrib_ops
             ):

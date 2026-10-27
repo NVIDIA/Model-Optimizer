@@ -56,6 +56,7 @@ from .dla_transforms.dla_reshape_patterns import (
 )
 from .utils.graph_utils import (
     DEFAULT_QDQ_REMOVE_QUANT_TYPES,
+    GraphCache,
     infer_shapes,
     parse_qdq_quantized_dtype_list,
 )
@@ -128,6 +129,7 @@ def _boundary_stage_options(name, quant_types, verbose, prepared_input_ops, prep
 def _validate_boundary_contract(model, prepared_input_ops, prepared_output_ops):
     """Refuse unsupported native layouts before adapting any public boundary."""
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    cache = GraphCache(model.graph)
     for node in model.graph.node:
         if (
             node.op_type in _REDUCTION_OPS
@@ -138,7 +140,7 @@ def _validate_boundary_contract(model, prepared_input_ops, prepared_output_ops):
             and any(attr.name == "keepdims" and attr.i == 0 for attr in node.attribute)
         ):
             raise NotImplementedError("Standalone reductions are not available in this pipeline")
-        _require_output_rank_conversion(node, local_functions, prepared_output_ops)
+        _require_output_rank_conversion(node, local_functions, prepared_output_ops, cache)
     _apply_non4d_model_inputs(model, prepared_input_ops=prepared_input_ops, validate_only=True)
 
 
