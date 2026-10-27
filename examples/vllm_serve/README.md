@@ -30,14 +30,19 @@ building for a different tested release.
 
 The image runs as the `vllm` user, which owns `/workspace`. To run it as a different user, point
 `TORCH_EXTENSIONS_DIR` at a directory that user can write, for example a mounted volume. ModelOpt
-then builds its CUDA extensions there on first use rather than under `/workspace`; without it,
-ModelOpt warns and falls back to slower eager fake quantization.
+then builds its CUDA extensions there on first use rather than under `/workspace`. Without a
+writable directory, quantizers that have an eager implementation, such as FP8, warn and fall back
+to slower fake quantization, while those that do not fail, for example NVFP4 on GPUs below compute
+capability 8.9 such as A100.
 
 ```bash
 mkdir -p ext_cache
 docker run --user $(id -u) -v "$PWD/ext_cache:/ext_cache" -e TORCH_EXTENSIONS_DIR=/ext_cache \
   <your usual docker run options> vllm-modelopt:v0.30.0
 ```
+
+`ext_cache` holds only the built extensions: keep it to skip the rebuild on later runs, or delete it
+at any time.
 
 For a direct installation from the ModelOpt repository root, install the tested vLLM
 release and the ModelOpt extras used by this example:
