@@ -255,6 +255,45 @@ def test_internal_native_reshape_refuses_before_index_or_reduction_mutation(
     assert model.SerializeToString() == before
 
 
+@pytest.mark.parametrize("operation", ["GatherElements", "ReduceSum"])
+@pytest.mark.parametrize("batch", [1, 2])
+def test_symbolic_internal_reshape_retains_native_index_and_reduction_layout(operation, batch):
+    """Keep previously supported symbolic native paths outside concrete rank adaptation."""
+    inputs = [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 1, "batch", 3])]
+    control = "indices" if operation == "GatherElements" else "axes"
+    options = {"axis": -1} if operation == "GatherElements" else {"keepdims": 1}
+    nodes = [
+        helper.make_node("Reshape", ["x", "target"], ["native"]),
+        helper.make_node(operation, ["native", control], ["y"], **options),
+    ]
+    initializers = [numpy_helper.from_array(np.array([-1, 3], np.int64), "target")]
+    if operation == "GatherElements":
+        inputs.append(helper.make_tensor_value_info("indices", TensorProto.INT64, ["batch", 3]))
+    else:
+        initializers.append(numpy_helper.from_array(np.array([-1], np.int64), "axes"))
+    output_shape = ["batch", 3 if operation == "GatherElements" else 1]
+    model = _model(
+        nodes,
+        inputs,
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, output_shape)],
+        initializers,
+    )
+    model = onnx.shape_inference.infer_shapes(model)
+    feeds = {"x": np.arange(batch * 3, dtype=np.float32).reshape(1, 1, batch, 3)}
+    if operation == "GatherElements":
+        feeds["indices"] = np.zeros((batch, 3), np.int64)
+    expected = _execute(model, feeds)
+    before = model.SerializeToString()
+    callback = (
+        _apply_gather_elements
+        if operation == "GatherElements"
+        else _apply_standalone_reduce_operations
+    )
+    converted = callback(model)
+    assert converted.SerializeToString() == before
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected[0])
+
+
 def _execute(model, feeds):
     """Run CPU graph semantics without backend fusion changing the comparison."""
     onnx.checker.check_model(model, full_check=True)

@@ -350,8 +350,10 @@ def _apply_gather_elements(model):
     standard = {id(node) for node in _operator_nodes(model, _RANK_AGNOSTIC_OPS | {"Reshape"})}
     checked = {}
     for node in graph.node:
-        if id(node) in selected_ids and _native_reshape_data(
-            cache, node.input[0], standard, checked
+        if (
+            id(node) in selected_ids
+            and cache.get_shape(node.input[0]) is not None
+            and _native_reshape_data(cache, node.input[0], standard, checked)
         ):
             raise ValueError(f"{node.name!r}: GatherElements data requires rank preparation")
     for index, node in enumerate(graph.node):
@@ -468,14 +470,14 @@ def _apply_standalone_reduce_operations(model):
     standard = {id(node) for node in _operator_nodes(model, _RANK_AGNOSTIC_OPS | {"Reshape"})}
     checked = {}
     for node in _operator_nodes(model, {"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"}):
-        if _native_reshape_data(cache, node.input[0], standard, checked):
-            raise ValueError(f"{node.name!r}: reduction data requires rank preparation")
         shape = _shape_before_boundary_promotion(cache, node.input[0])
         if not shape:
             keepdims = _attribute(node, "keepdims")
             if keepdims is not None and keepdims.i == 0:
                 raise ValueError(f"Missing static reduction input shape for {node.name!r}")
             continue  # Already rank-preserving, including generated 4D reduction branches.
+        if _native_reshape_data(cache, node.input[0], standard, checked):
+            raise ValueError(f"{node.name!r}: reduction data requires rank preparation")
         tensor = cache.get_init(node.input[1]) if len(node.input) > 1 else None
         if len(node.input) > 1 and (tensor is None or tensor.name in cache.graph_input_names):
             raise ValueError(f"Dynamic reduction axes are unsupported for {node.name!r}")
