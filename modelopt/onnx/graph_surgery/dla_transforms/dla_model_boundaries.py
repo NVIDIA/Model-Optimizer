@@ -138,11 +138,28 @@ def _require_adapter_opset(model):
 
 
 def _native_conv1d(node, cache):
-    """Recognize Conv kernels whose native spatial layout is one-dimensional."""
+    """Recognize one-dimensional Conv paths whose data stays native before normalization repair."""
     kernel = (
         cache.get_shape(node.input[1]) if node.op_type == "Conv" and len(node.input) > 1 else None
     )
-    return kernel is not None and len(kernel) == 3
+    if kernel is None or len(kernel) != 3:
+        return False
+    name, seen = node.input[0], set()
+    while name not in seen:
+        seen.add(name)
+        if name in cache.graph_input_names:
+            shape = cache.get_shape(name)
+            return shape is not None and len(shape) == 3
+        producer = cache.get_producer(name)
+        if producer is None:
+            return False
+        if producer.op_type == "InstanceNormalization":
+            shape = cache.get_shape(producer.input[0])
+            return shape is not None and len(shape) == 3
+        if producer.op_type not in _RANK_AGNOSTIC_OPS or len(producer.input) != 1:
+            return False
+        name = producer.input[0]
+    return False
 
 
 def _promoted_axis(node, rank, default):
