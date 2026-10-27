@@ -243,6 +243,17 @@ class _Protocol2Only:
         return _Protocol2Only, (self.n,)
 
 
+def _refuse_to_load():
+    raise RuntimeError("this value cannot be loaded")
+
+
+class _Unloadable:
+    """Pickles, and raises when loaded back."""
+
+    def __reduce__(self):
+        return _refuse_to_load, ()
+
+
 def _broadcast_from_job(rank, size):
     ran = []
 
@@ -280,6 +291,12 @@ def _broadcast_from_job(rank, size):
             assert "rank 0 failed to compute x: TypeError" in str(error), error
         # Serialized once, where the sending rank catches a failure, not again by the broadcast.
         assert broadcast_from("x", lambda: _Protocol2Only(7)).n == 7
+        # Loaded back there too: a value the other ranks could not load fails on the sending rank.
+        _, error = _outcome(lambda: broadcast_from("x", _Unloadable))
+        assert isinstance(error, RuntimeError), error
+        assert ("cannot be loaded" if rank == 0 else "rank 0 failed to compute x") in str(error), (
+            error
+        )
         sent, error = _outcome(lambda: broadcast_from("plan" if rank == 0 else "other", lambda: 7))
         if rank == 0:
             assert (sent, error) == (7, None)
@@ -292,8 +309,9 @@ def test_broadcast_from_gives_every_rank_the_sending_ranks_value(cpu_dist_worker
     """Over a real broadcast: any rank can send, and only it runs fn. A rank outside the run is
     refused, the sending rank's failure stops every rank and its exit exits every rank with its
     code, so that distributed_run tears every rank down alike. A value that does not serialize
-    fails as fn raising does, rather than in the broadcast; one only torch.save's pickle protocol
-    takes crosses, serialized once; and ranks out of step fail."""
+    fails as fn raising does, rather than in the broadcast, and so does one the other ranks could
+    not load back; one only torch.save's pickle protocol takes crosses, serialized once; and ranks
+    out of step fail."""
     cpu_dist_workers.run(_broadcast_from_job)
 
 
@@ -351,6 +369,11 @@ def _all_reduce_job(rank, size):
             "x", lambda: _Protocol2Only(rank), lambda values: [v.n for v in values]
         )
         assert reduced == list(range(size)), reduced
+        _, error = _outcome(lambda: all_reduce("x", _Unloadable if rank == 1 else lambda: 4, min))
+        assert isinstance(error, RuntimeError), error
+        assert ("cannot be loaded" if rank == 1 else "rank 1 failed to compute x") in str(error), (
+            error
+        )
         _, error = _outcome(
             lambda: all_reduce("smallest" if rank == 0 else "other", lambda: 4, min)
         )
@@ -362,8 +385,9 @@ def test_all_reduce_gives_every_rank_the_combined_value(cpu_dist_workers):
     """Over a real gather: every rank's value counts and every rank gets the same result. One rank's
     failure stops every rank and its exit exits every rank with its code. A rank's error outranks
     another's exit, so that no rank waits in the exit's barrier for one that aborted. A value that
-    does not serialize fails as fn raising does, rather than in the gather; one only torch.save's
-    pickle protocol takes crosses, serialized once; and ranks out of step fail."""
+    does not serialize, or that the other ranks could not load back, fails as fn raising does, rather
+    than in the gather; one only torch.save's pickle protocol takes crosses, serialized once; and
+    ranks out of step fail."""
     cpu_dist_workers.run(_all_reduce_job)
 
 
