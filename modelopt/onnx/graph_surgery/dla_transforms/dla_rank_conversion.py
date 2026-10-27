@@ -94,6 +94,7 @@ def _apply_non4d_reshape(model):
     """Prepare fixed Reshape targets for the deferred four-dimensional layout."""
     cache = GraphCache(model.graph)
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    native_sources = {}
     runtime_inputs = _runtime_input_names(model)
     reshapes = _operator_nodes(model, {"Reshape"})
     gathers = {id(node) for node in _operator_nodes(model, {"Gather"})}
@@ -115,7 +116,9 @@ def _apply_non4d_reshape(model):
         rank = len(native_input) if native_input is not None else _known_rank(cache, node.input[0])
         if rank is None:
             raise ValueError(f"{node.name!r}: Reshape input rank must be known")
-        if rank < 4 and _has_native_symbolic_data(cache, node.input[0], local_functions):
+        if rank < 4 and _has_native_symbolic_data(
+            cache, node.input[0], local_functions, native_sources
+        ):
             continue
         if tensor is None or tensor.name in runtime_inputs:
             raise ValueError(f"{node.name!r}: Reshape target must be fixed")
@@ -272,6 +275,7 @@ def _pad_shape_inputs(model, op_type, suffix):
     """Preserve native rank-four layouts and plan fixed control padding otherwise."""
     cache = GraphCache(model.graph)
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    native_sources = {}
     runtime_inputs = _runtime_input_names(model)
     plans = []
     for node in _operator_nodes(model, {op_type}):
@@ -282,7 +286,9 @@ def _pad_shape_inputs(model, op_type, suffix):
             continue
         if rank is None:
             raise ValueError(f"{node.name!r}: {op_type} input rank must be known")
-        if rank < 4 and _has_native_symbolic_data(cache, node.input[0], local_functions):
+        if rank < 4 and _has_native_symbolic_data(
+            cache, node.input[0], local_functions, native_sources
+        ):
             continue
         if tensor is None or tensor.name in runtime_inputs:
             raise ValueError(f"{node.name!r}: {op_type} target must be fixed")

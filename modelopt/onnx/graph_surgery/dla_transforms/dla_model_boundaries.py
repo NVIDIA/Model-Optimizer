@@ -114,10 +114,14 @@ def _output_rank_source(cache, node, local_functions, sources):
     return node
 
 
-def _has_native_symbolic_data(cache, name, local_functions):
+def _has_native_symbolic_data(cache, name, local_functions, sources=None):
     """Prove a low-rank symbolic data path was left native by boundary promotion."""
     seen = set()
+    sources = {} if sources is None else sources
     while name not in seen:
+        if name in sources:
+            result = sources[name]
+            break
         seen.add(name)
         info = cache.vi_map.get(name)
         rank = (
@@ -126,18 +130,24 @@ def _has_native_symbolic_data(cache, name, local_functions):
             else None
         )
         if rank is not None and rank >= 4:
-            return False
+            result = False
+            break
         if name in cache.graph_input_names:
-            return cache.get_shape(name) is None and rank is not None and rank < 4
+            result = cache.get_shape(name) is None and rank is not None and rank < 4
+            break
         node = cache.get_producer(name)
         if (
             node is None
             or not _is_standard_node(node, local_functions, _RANK_FLOW_OPS)
             or not node.input
         ):
-            return False
+            result = False
+            break
         name = node.input[0]
-    raise ValueError("Cyclic data path while planning native symbolic controls")
+    else:
+        raise ValueError("Cyclic data path while planning native symbolic controls")
+    sources.update(dict.fromkeys(seen, result))
+    return result
 
 
 def _require_adapter_opset(model):
@@ -398,6 +408,7 @@ def _apply_non4d_model_outputs(
                     native_broadcasts.update(node.output)
     rank_sources = {}
     contrib_ops = _boundary_contrib_ops(model)
+    native_sources = {}
     inputs_promotable = all(
         cache.get_shape(value.name) is not None
         for value in graph.input
@@ -435,7 +446,9 @@ def _apply_non4d_model_outputs(
             ):
                 continue
             if _is_standard_node(source, local_functions, {"Reshape", "Expand", "Tile"}):
-                if _has_native_symbolic_data(cache, source.input[0], local_functions):
+                if _has_native_symbolic_data(
+                    cache, source.input[0], local_functions, native_sources
+                ):
                     continue
                 target = cache.get_shape(source.input[1]) if source.op_type == "Reshape" else None
                 if (
