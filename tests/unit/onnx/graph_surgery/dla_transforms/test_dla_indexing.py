@@ -592,6 +592,44 @@ def test_gather_preserves_overridable_scalar_and_vector_indices(indices, produce
     np.testing.assert_array_equal(_execute(transformed, feeds)[0], expected)
 
 
+@pytest.mark.parametrize(
+    ("shape", "unsqueeze_axes"), [([2, 3], [0]), ([2, 3], [0, 1]), ([2, 3, 4], [0])]
+)
+@pytest.mark.parametrize("negative", [False, True])
+@pytest.mark.parametrize("keepdims", [0, 1])
+def test_reduction_preserves_rank_of_replaced_boundary_unsqueeze(
+    shape, unsqueeze_axes, negative, keepdims
+):
+    """Keep the original adapter rank when boundary promotion replaces its data owner."""
+    native = [1] * len(unsqueeze_axes) + shape
+    axis = len(unsqueeze_axes)
+    output = native.copy()
+    if keepdims:
+        output[axis] = 1
+    else:
+        output.pop(axis)
+    model = _model(
+        [
+            helper.make_node("Unsqueeze", ["x", "adapter_axes"], ["expanded"]),
+            helper.make_node(
+                "ReduceMean", ["expanded", "reduction_axes"], ["y"], keepdims=keepdims
+            ),
+        ],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, output)],
+        [
+            numpy_helper.from_array(np.asarray(unsqueeze_axes, np.int64), "adapter_axes"),
+            numpy_helper.from_array(
+                np.asarray([axis - len(native) if negative else axis], np.int64), "reduction_axes"
+            ),
+        ],
+    )
+    feeds = {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape)}
+    expected = _execute(model, feeds)[0]
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+
+
 def test_reduction_registers_legacy_initializer_inputs():
     """Keep IR3 controls declared while preserving reduction output values and ranks."""
     model = helper.make_model(
