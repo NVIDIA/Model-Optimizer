@@ -44,7 +44,12 @@ from contextlib import contextmanager
 import torch
 import torch.distributed as dist
 
-from modelopt.torch.utils import get_available_gpu_memory, get_process_gpus, print_rank_0
+from modelopt.torch.utils import (
+    get_available_gpu_memory,
+    get_process_gpus,
+    print_rank_0,
+    warn_rank_0,
+)
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
 # A GPU takes a new Hessian only if enough memory stays available after it for the calibration
@@ -108,13 +113,16 @@ def _hessian_offload_device(nbytes: int) -> torch.device:
     return torch.device("cpu")
 
 
-def update_hessian(input, hessian, n_samples):
+def update_hessian(input, hessian, n_samples, input_dtype=torch.float32):
     """Update hessian matrix with new input samples using incremental formula.
 
     Args:
         input: Input tensor (batch_size, ..., features)
         hessian: Current Hessian matrix to update in-place
         n_samples: Number of samples already processed
+        input_dtype: The dtype the GEMM reads ``input`` in: ``torch.float32``, or
+            ``torch.bfloat16`` for a tensor-core GEMM that accumulates in float32.
+
     Returns:
         Tuple of (updated_hessian, new_sample_count)
 
@@ -133,13 +141,14 @@ def update_hessian(input, hessian, n_samples):
     n_samples += batch_size
     alpha = 2 / n_samples
     if (
-        input_flat.is_cuda
-        and input_flat.dtype in (torch.bfloat16, torch.float16)
-        and _has_float32_out_gemm()
+        input_dtype == torch.bfloat16
+        and input_flat.is_cuda
+        and _has_float32_out_gemm(input_flat.device)
     ):
-        # BF16 and FP16 products are exact in float32, so a tensor-core GEMM writing float32 differs
-        # from a float32 GEMM only in how it rounds the sums, by ~1e-5 of the Hessian's diagonal.
-        # It is 9-16x faster on GB300 and needs no float32 copy of the inputs.
+        # BF16 products are exact in float32, so a tensor-core GEMM writing float32 differs from a
+        # float32 GEMM only in how it rounds the sums, by ~1e-5 of the Hessian's diagonal. It is
+        # 9-16x faster on GB300 and needs no float32 copy of the inputs.
+        input_flat = input_flat.to(torch.bfloat16)
         if hessian.device == input_flat.device:
             torch.addmm(
                 hessian,
@@ -154,6 +163,8 @@ def update_hessian(input, hessian, n_samples):
             gram = torch.mm(input_flat.t(), input_flat, out_dtype=torch.float32)
             hessian.mul_(scale).add_(gram.to(hessian.device), alpha=alpha)
         return hessian, n_samples
+    if input_dtype == torch.bfloat16:
+        _warn_bfloat16_hessian_unavailable(input_flat.device)
 
     input_flat = input_flat.float()
     if hessian.device == input_flat.device:
@@ -165,15 +176,23 @@ def update_hessian(input, hessian, n_samples):
 
 
 @functools.cache
-def _has_float32_out_gemm() -> bool:
-    """Whether this torch's CUDA GEMMs take BF16/FP16 inputs and write float32 (``out_dtype``)."""
+def _has_float32_out_gemm(device: torch.device) -> bool:
+    """Whether GEMMs on CUDA ``device`` take bfloat16 inputs and write float32 (``out_dtype``)."""
     try:
-        x = torch.zeros(1, 1, device="cuda", dtype=torch.bfloat16)
+        x = torch.zeros(1, 1, device=device, dtype=torch.bfloat16)
         h = torch.mm(x, x, out_dtype=torch.float32)
         torch.addmm(h, x, x, out_dtype=torch.float32, out=h)
     except (TypeError, RuntimeError):
         return False
     return True
+
+
+@functools.cache
+def _warn_bfloat16_hessian_unavailable(device: torch.device) -> None:
+    warn_rank_0(
+        f"GPTQ hessian_input_dtype='bfloat16' needs CUDA GEMMs that take out_dtype, which {device} "
+        "lacks with this torch; computing its Hessians in float32."
+    )
 
 
 def compute_hessian_inverse(hessian, weight, perc_damp):
@@ -238,6 +257,7 @@ class GPTQHelper:
         weight_quantizer=None,
         weight=None,
         log_mse=True,
+        hessian_input_dtype="float32",
     ):
         """Initialize GPTQHelper with module state and Hessian storage.
 
@@ -245,11 +265,13 @@ class GPTQHelper:
         one expert's slice of an HF fused-MoE parameter; by default the helper owns
         ``module.weight`` and ``module.weight_quantizer``. ``log_mse=False`` skips the logged
         Hessian-weighted error, which costs two weight-by-Hessian matmuls.
+        ``hessian_input_dtype`` is the dtype the Hessian GEMM reads the inputs in, by name.
         """
         self.module = module
         self.name = name
         self.fused = fused
         self.importance_weighted = importance_weighted
+        self.hessian_input_dtype = getattr(torch, hessian_input_dtype)
         self._weight_quantizer = weight_quantizer
         self.log_mse = log_mse
         weight = module.weight if weight is None else weight
@@ -295,7 +317,9 @@ class GPTQHelper:
     def accumulate(self, inputs):
         """Add a batch of this weight's inputs, after input quantization, to the Hessian."""
         inputs = inputs.to_local() if hasattr(inputs, "to_local") else inputs
-        self.hessian, self.n_samples = update_hessian(inputs, self.hessian, self.n_samples)
+        self.hessian, self.n_samples = update_hessian(
+            inputs, self.hessian, self.n_samples, self.hessian_input_dtype
+        )
 
     def cleanup(self):
         """Unpatch the module's forward method."""

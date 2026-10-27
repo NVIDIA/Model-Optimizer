@@ -2425,6 +2425,7 @@ def gptq(
     block_size: int = 128,
     fused: bool = False,
     importance_weighted: bool = False,
+    hessian_input_dtype: str = "float32",
 ):
     """GPTQ quantization.
 
@@ -2463,6 +2464,8 @@ def gptq(
         fused: If True, use fused Triton kernel for NVFP4 static quantization.
         importance_weighted: If True, formats whose codebook search takes a per-input-column
             importance weight it by the square root of the Hessian diagonal.
+        hessian_input_dtype: ``"float32"`` or ``"bfloat16"``, the dtype the Hessian GEMM reads
+            the activations in; see :class:`GPTQCalibConfig <modelopt.torch.quantization.config.GPTQCalibConfig>`.
     """
     total_start = time.time()
 
@@ -2513,6 +2516,7 @@ def gptq(
             offload_to_cpu=True,
             fused=fused,
             importance_weighted=importance_weighted,
+            hessian_input_dtype=hessian_input_dtype,
             weight_quantizer=weight_quantizer,
             weight=weight,
             log_mse=log_mse,
