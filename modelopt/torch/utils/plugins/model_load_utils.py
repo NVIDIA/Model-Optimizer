@@ -1112,7 +1112,10 @@ def resolve_distribution_plan(
     ``revision``, ``token``, ``cache_dir``, ``local_files_only`` and ``subfolder`` locate the
     checkpoint as :func:`load_pretrained` takes them, so the plan is decided for what the load reads:
     all but ``subfolder`` resolve a Hub model ID (:func:`ensure_local_checkpoint`), and the config
-    read takes all but ``revision``, for custom code its ``auto_map`` names in another Hub repo.
+    read takes all but ``revision``, for custom code its ``auto_map`` names in another Hub repo. It
+    returns no path, so a caller that loads the checkpoint resolves it first, with
+    :func:`ensure_local_checkpoint`, and passes the local directory: the plan is then decided for
+    the snapshot the load reads.
     """
     from modelopt.torch.utils import distributed as dist
 
