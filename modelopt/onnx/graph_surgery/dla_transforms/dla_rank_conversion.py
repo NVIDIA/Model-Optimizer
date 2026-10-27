@@ -322,8 +322,8 @@ def _apply_non4d_initializers(model):
     return model
 
 
-def _rank_one_path_widened(cache, name, rank_preserving):
-    """Recognize broadcasting from promoted initializers without crossing rank-setting nodes."""
+def _rank_one_path_widened(cache, name, rank_preserving, reshapes):
+    """Recognize earlier 4D initializer and Reshape promotion through rank-preserving paths."""
     pending, seen = [name], set()
     while pending:
         current = pending.pop()
@@ -336,6 +336,10 @@ def _rank_one_path_widened(cache, name, rank_preserving):
                 return True
             continue
         producer = cache.get_producer(current)
+        if producer is not None and id(producer) in reshapes:
+            if cache.get_shape(producer.input[1]) == [4]:
+                return True
+            continue
         if producer is not None and id(producer) in rank_preserving:
             pending.extend(producer.input)
     return False
@@ -348,6 +352,7 @@ def _pad_shape_inputs(model, op_type, suffix):
     native_sources = {}
     runtime_inputs = _runtime_input_names(model)
     rank_preserving = {id(node) for node in _operator_nodes(model, _RANK_AGNOSTIC_OPS)}
+    reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
     plans = []
     for node in _operator_nodes(model, {op_type}):
         tensor = cache.get_init(node.input[1])
@@ -358,7 +363,7 @@ def _pad_shape_inputs(model, op_type, suffix):
         if rank is None:
             raise ValueError(f"{node.name!r}: {op_type} input rank must be known")
         if op_type == "Tile" and rank == 1:
-            if not _rank_one_path_widened(cache, node.input[0], rank_preserving):
+            if not _rank_one_path_widened(cache, node.input[0], rank_preserving, reshapes):
                 continue
         if rank < 4 and _has_native_symbolic_data(
             cache, node.input[0], local_functions, native_sources

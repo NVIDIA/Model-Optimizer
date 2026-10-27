@@ -1417,6 +1417,53 @@ def test_rank_one_tile_tracks_widened_elementwise_initializer(operation, unary):
         np.testing.assert_array_equal(actual, reference)
 
 
+@pytest.mark.parametrize(
+    ("producer", "shape"),
+    [("Reshape", [2, 3]), ("Reshape", [1, 2, 3, 1]), ("ArgMax", [2, 3]), ("ReduceSum", [2, 3])],
+)
+@pytest.mark.parametrize("unary", [False, True])
+def test_rank_one_tile_tracks_registered_rank_restoring_reshape(producer, shape, unary):
+    """Execute vector Tile after earlier registered stages create a leading 4D view."""
+    nodes = []
+    initializers = [numpy_helper.from_array(np.array([2], np.int64), "repeats")]
+    if producer == "Reshape":
+        initializers.append(numpy_helper.from_array(np.array([-1], np.int64), "target"))
+        nodes.append(helper.make_node("Reshape", ["x", "target"], ["vector"]))
+        length = 6
+    elif producer == "ArgMax":
+        nodes.append(helper.make_node("ArgMax", ["x"], ["vector"], axis=0, keepdims=0))
+        length = 3
+    else:
+        initializers.append(numpy_helper.from_array(np.array([0], np.int64), "axes"))
+        nodes.append(helper.make_node("ReduceSum", ["x", "axes"], ["vector"], keepdims=0))
+        length = 3
+    if unary:
+        nodes.append(helper.make_node("Identity", ["vector"], ["middle"]))
+    nodes.append(helper.make_node("Tile", ["middle" if unary else "vector", "repeats"], ["y"]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "restored_tile",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+            [
+                helper.make_tensor_value_info(
+                    "y",
+                    TensorProto.INT64 if producer == "ArgMax" else TensorProto.FLOAT,
+                    [2 * length],
+                )
+            ],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(shape)}
+    expected = _execute(model, feeds)
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    for actual, reference in zip(_execute(converted, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
 @pytest.mark.parametrize("operation", ["Tile", "Expand", "Reshape"])
 def test_unknown_structural_data_rank_refuses_before_mutation(operation):
     """Refuse unresolved intermediate ranks before allocating any control view."""
