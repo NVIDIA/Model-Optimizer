@@ -1041,9 +1041,34 @@ def _expert_input_scale_job(rank, world_size, tmp_dir):
     model.model.layers[0].mlp.experts.gate_up_proj_input_quantizer.amax = torch.tensor(1.0 + rank)
     _nogather_export(_fsdp2_shard(model, mesh), tmp_dir / "export")
 
+    # A scale one rank holds and the other lacks fails on both, named, rather than leave the ranks
+    # hanging or mismatched in the reduce.
+    from torch.distributed.checkpoint import state_dict
+
+    real = state_dict.get_model_state_dict
+
+    def without_a_scale(*args, **kwargs):
+        sd = real(*args, **kwargs)
+        return {k: v for k, v in sd.items() if rank == 0 or "gate_up_proj_input_scale" not in k}
+
+    model = _load(tmp_dir / "src")
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randint(0, 64, (2, 8))))
+    try:
+        with (
+            bounded_collectives(),
+            mock.patch.object(state_dict, "get_model_state_dict", without_a_scale),
+        ):
+            _nogather_export(_fsdp2_shard(model, mesh), tmp_dir / "diverging")
+    except RuntimeError as error:
+        raised = str(error)
+    else:
+        raised = "no error"
+    assert "different expert input scales" in raised, raised
+
 
 def test_two_ranks_write_every_expert_with_the_largest_input_scale(cpu_dist_workers, tmp_path):
-    """The experts' shared input scale is reduced across the ranks that fold them, to its max."""
+    """The experts' shared input scale is reduced across the ranks that fold them, to its max, and
+    ranks that hold different scales fail alike, naming them."""
     _save(_qwen2_moe_config(), tmp_path / "src")
 
     cpu_dist_workers.run(_expert_input_scale_job, tmp_dir=tmp_path)
