@@ -143,6 +143,8 @@ def test_weight_cache_contract():
 
 def test_enrollment_by_chunk():
     chunks = [_quantized_mlp(), _quantized_mlp()]
+    with pytest.raises(ValueError, match="more than one"):
+        enable_weight_cache([chunks[0], chunks[0][0]])
     # Like Megatron virtual pipeline chunks: each chunk owns its quantizers and can be scoped alone.
     assert enable_weight_cache(chunks, select=lambda name, q: name.startswith("0.")) == 2
     with weight_cache_scope(chunks[1]) as stats:

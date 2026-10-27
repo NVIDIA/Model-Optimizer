@@ -151,7 +151,8 @@ def enable_weight_cache(
                     raise ValueError(
                         f"{name} is already enrolled under another model; disable it there first."
                     )
-                selected[quantizer] = m
+                if selected.setdefault(quantizer, m) is not m:
+                    raise ValueError(f"{name} is in more than one of the given model chunks.")
     if not selected:
         raise ValueError("No enabled weight quantizers were selected for the weight cache.")
 
