@@ -1766,16 +1766,21 @@ def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
     return router_names
 
 
-def _has_pre_quant_scale(module: nn.Module, weight_names) -> bool:
+def _has_pre_quant_scale(module: nn.Module, weight_names: list[str]) -> bool:
     """Whether the export writes a ``pre_quant_scale`` for ``module``.
 
     AWQ leaves it on every input quantizer of the module, or fuses it into a sibling and marks the
     module (loaders accept the missing tensor there). Without AWQ (max calibration, or fused
     experts that AWQ skips) there is none, even though the INT4 label is ``*_AWQ``.
     """
-    return getattr(module, "fused_with_prequant", False) or all(
-        hasattr(getattr(module, quantizer_attr_names(wn).input_quantizer, None), "_pre_quant_scale")
-        for wn in weight_names
+    return getattr(module, "fused_with_prequant", False) or (
+        bool(weight_names)
+        and all(
+            hasattr(
+                getattr(module, quantizer_attr_names(wn).input_quantizer, None), "_pre_quant_scale"
+            )
+            for wn in weight_names
+        )
     )
 
 

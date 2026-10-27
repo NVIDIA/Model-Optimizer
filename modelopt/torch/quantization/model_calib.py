@@ -1080,7 +1080,7 @@ def _fused_expert_projections(module: nn.Module):
             yield weight_name, weight, quantizers, input_quantizer
 
 
-def _warn_if_fused_experts_skipped(model: nn.Module) -> None:
+def _warn_if_fused_experts_skipped(model: nn.Module, algorithm: str) -> None:
     """Warn that a linear-layer algorithm (AWQ, SmoothQuant, SVDQuant) skips fused experts.
 
     These algorithms only process 2-D quantized linears, so quantized experts keep max
@@ -1094,7 +1094,7 @@ def _warn_if_fused_experts_skipped(model: nn.Module) -> None:
                 for stage in q if isinstance(q, SequentialQuantizer) else [q]:
                     if stage.is_enabled and stage.num_bits != (4, 3):
                         warn_rank_0(
-                            "AWQ, SmoothQuant and SVDQuant do not apply to fused MoE experts "
+                            f"{algorithm} does not apply to fused MoE experts "
                             f"(e.g. {name}); they keep max calibration."
                         )
                         return
@@ -1475,7 +1475,7 @@ def smoothquant(model: nn.Module, forward_loop: ForwardLoop | None = None, alpha
     See :class:`SmoothQuantCalibConfig <modelopt.torch.quantization.config.SmoothQuantCalibConfig>` for
     details on the remaining arguments.
     """
-    _warn_if_fused_experts_skipped(model)
+    _warn_if_fused_experts_skipped(model, "smoothquant")
 
     # distributed synchronization
     # max_calibrate performs amax sync for data parallel
@@ -1570,7 +1570,7 @@ def awq(
     See :class:`AWQFullCalibConfig <modelopt.torch.quantization.config.AWQFullCalibConfig>` for
     details on the remaining arguments.
     """
-    _warn_if_fused_experts_skipped(model)
+    _warn_if_fused_experts_skipped(model, algorithm)
     with SequentialQuantizer.convert_to_single_quantizer(model):
         if algorithm in ["awq_full", "awq_lite"]:
             awq_lite(model, forward_loop, **kwargs)

@@ -855,7 +855,7 @@ class TestExportFusedExperts:
     @pytest.mark.parametrize("fmt", ["w4a8_awq", "int4_awq"])
     def test_int4_experts_do_not_promise_a_pre_quant_scale(self, fmt):
         """AWQ-family algorithms skip fused experts, so INT4 / W4A8 experts carry no
-        pre_quant_scale; the config must not promise one, while dense layers keep theirs."""
+        pre_quant_scale; the config must not promise one."""
         from modelopt.torch.export.quant_utils import get_quant_config
 
         model = _TinyMoEModel()
@@ -1211,8 +1211,11 @@ class TestFusedExpertsCalibration:
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
-            skipped = [w for w in caught if "do not apply to fused MoE experts" in str(w.message)]
+            skipped = [w for w in caught if "does not apply to fused MoE experts" in str(w.message)]
             assert bool(skipped) == warns
+            if warns:  # the message names the algorithm that ran
+                expected = "smoothquant" if "SMOOTHQUANT" in cfg_name else "awq"
+                assert str(skipped[0].message).startswith(expected)
             # The experts still get their max-calibrated amax.
             assert model.moe.experts.gate_up_proj_weight_quantizers[0].amax is not None
         finally:
