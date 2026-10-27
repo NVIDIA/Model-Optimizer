@@ -156,7 +156,10 @@ def reseeding_worker_teardown(rank, world_size):
 
 def _on_group(collective, bound, /, *args, **kwargs):
     """``collective`` on ``bound`` unless the caller named a group of its own: modelopt's
-    ``barrier()`` passes ``group=None`` explicitly, which would override a ``partial``'s keyword."""
+    ``barrier()`` passes ``group=None`` explicitly, which would override a ``partial``'s keyword.
+
+    A job names its group as ``group=``: one passed by position, as ``dist.barrier(group)`` can, is
+    not seen here and fails as a duplicate argument."""
     group = kwargs.get("group")
     return collective(*args, **{**kwargs, "group": bound if group is None else group})
 
