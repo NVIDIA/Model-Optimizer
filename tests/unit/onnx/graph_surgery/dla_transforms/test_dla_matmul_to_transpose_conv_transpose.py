@@ -952,6 +952,10 @@ def test_unknown_intermediate_result_rank_is_preserved(defer):
 
 def test_test_fixture_inference_supplies_intermediate_metadata():
     """Exercise the fixture inference rather than silently accepting keyword failures."""
+    pytest.importorskip(
+        "onnxruntime.tools.symbolic_shape_infer",
+        reason="This fixture requires ORT symbolic shape inference",
+    )
     model = _make_model(
         [
             helper.make_node("Identity", ["X"], ["middle"]),
