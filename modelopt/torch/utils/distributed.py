@@ -41,7 +41,6 @@ from torch.utils.data import (
     IterableDataset,
     RandomSampler,
     SequentialSampler,
-    get_worker_info,
 )
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
@@ -701,12 +700,10 @@ class _StridedIterableShard(IterableDataset):
     trailing incomplete group is dropped so every rank yields exactly the same count -- preserving
     the equal-per-rank-batch invariant that keeps per-step EP collectives from hanging when one rank
     runs short. A stream shorter than ``world_size`` has no complete group, so it is refused rather
-    than leaving every rank with nothing to calibrate on. Each DataLoader worker process iterates
-    its own copy of the stream, so the workers split the groups between them rather than each
-    yielding them all: every worker still decodes the whole stream and keeps ``1/num_workers`` of
-    it, so ``num_workers > 0`` buys parallelism at ``num_workers`` times the decode cost.
+    than leaving every rank with nothing to calibrate on. It is iterated in the loader's own process
+    (:func:`shard_dataloader` refuses workers for a stream).
     ``vlm_dataset_utils._ShardedIterable`` cannot stand in: it pads every rank to a count its own loader
-    knows, while this wraps any loader's stream, which may know none, and splits across its workers.
+    knows, while this wraps any loader's stream, which may know none.
     """
 
     def __init__(self, base: IterableDataset, rank: int, world_size: int):
@@ -715,8 +712,6 @@ class _StridedIterableShard(IterableDataset):
         self.world_size = world_size
 
     def __iter__(self):
-        info = get_worker_info()
-        num_workers, worker = (info.num_workers, info.id) if info is not None else (1, 0)
         it = iter(self.base)
         for index in itertools.count():
             group = list(itertools.islice(it, self.world_size))
@@ -729,8 +724,7 @@ class _StridedIterableShard(IterableDataset):
                         f"{self.world_size} ranks: no rank would get a sample to calibrate on."
                     )
                 return  # drop incomplete trailing group -> equal counts across ranks
-            if index % num_workers == worker:
-                yield group[self.rank]
+            yield group[self.rank]
 
 
 def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoader:
@@ -746,9 +740,9 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
     :class:`_StridedIterableShard`. That stream must yield the same samples in the same order on
     every rank and in every DataLoader worker, or the shards overlap and the ranks' step counts can
     differ, which hangs the collectives: one that shuffles needs a fixed seed of its own, as torch
-    seeds each worker's RNG differently and the ranks' RNGs need not agree. Every DataLoader worker
-    must see that whole stream: a dataset that splits itself across workers by ``get_worker_info()``
-    would be split twice and lose samples, so load one with ``num_workers=0``.
+    seeds each worker's RNG differently and the ranks' RNGs need not agree. A stream loaded with
+    workers is refused: a dataset that splits itself across them by ``get_worker_info()``, as a
+    Hugging Face streaming dataset does, would be split twice and silently lose samples.
 
     Forwards all non-sampler DataLoader settings from ``loader`` (batching, workers, pinning,
     prefetch, init fn, generator, ...). With one rank there is nothing to shard: ``loader`` itself
@@ -771,6 +765,13 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
                 "just the samples to calibrate on (a torch.utils.data.Subset) instead."
             )
     if isinstance(loader.dataset, IterableDataset):
+        if loader.num_workers:
+            raise ValueError(
+                f"shard_dataloader: a streaming loader with num_workers={loader.num_workers} is "
+                "refused: a dataset that splits itself across the workers by get_worker_info() "
+                "would be split twice, by worker and by rank, and lose samples. Load it with "
+                "num_workers=0."
+            )
         return DataLoader(
             _StridedIterableShard(loader.dataset, rank, world_size),
             batch_size=loader.batch_size,
