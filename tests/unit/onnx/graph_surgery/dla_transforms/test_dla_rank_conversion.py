@@ -77,7 +77,14 @@ def test_rank_conversion_preserves_operator_values(operation):
     model.ir_version = 9
     transformed = copy.deepcopy(model)
     for apply in (_apply_non4d_model_inputs, _apply_non4d_model_outputs, transform):
-        options = {"defer_rank_conversion": True} if apply is _apply_non4d_model_outputs else {}
+        options = (
+            {
+                "defer_rank_conversion": True,
+                "prepared_output_ops": {"Non4DReshape"} if operation == "Reshape" else set(),
+            }
+            if apply is _apply_non4d_model_outputs
+            else {}
+        )
         if apply is _apply_non4d_model_inputs:
             options = {"prepared_input_ops": {operation}}
         transformed = apply(transformed, **options)
@@ -1563,7 +1570,10 @@ def test_legacy_initializer_controls_remain_fixed(operation):
         transformed = apply(
             transformed,
             **(
-                {"defer_rank_conversion": True}
+                {
+                    "defer_rank_conversion": True,
+                    "prepared_output_ops": {"Non4DReshape"} if operation == "Reshape" else set(),
+                }
                 if apply is _apply_non4d_model_outputs
                 else {"prepared_input_ops": {operation}}
                 if apply is _apply_non4d_model_inputs
