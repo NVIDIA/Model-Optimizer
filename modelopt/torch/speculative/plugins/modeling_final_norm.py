@@ -100,6 +100,13 @@ _FINAL_NORM_TYPE_BY_MODEL_TYPE: dict[str, str] = {
     "kimi_k2": "rmsnorm",  # Kimi-K2 / K2-Thinking (DeepSeek-V3 arch) report model_type "kimi_k2"
     "kimi_k25": "rmsnorm",  # Kimi-K2.5 / K2.6 / K2.7 all report model_type "kimi_k25"
     "nemotron_h": "rmsnorm",
+    # Muse Glimmer (Gemma-2-derived text stack, nested as text_config with model_type
+    # "muse_glimmer_text"). Its per-layer sandwich norms carry the (1 + weight) offset but the
+    # FINAL norm does not: on meta-models/Muse-Glimmer-30B plain ``normed * weight`` reproduces
+    # HF ``hidden_states[-1]`` at cos=0.999999 (max-abs 0.21, bf16 noise) while ``(1 + weight)``
+    # gives cos=0.9207 / max-abs 62.7. Both keys so a text-only checkpoint resolves too.
+    "muse_glimmer_text": "rmsnorm",
+    "muse_glimmer": "rmsnorm",
     # M3's final norm is always gemma-style; map it here too so a config that lost its
     # use_gemma_norm flag still gets the correct flavor instead of silently dropping the +1.
     "minimax_m3_vl_text": "gemma_rmsnorm",
