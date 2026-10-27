@@ -519,13 +519,13 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
     if getattr(hf_config, "quantization_config", None) is not None:
         # It reads the tensors as stored: quantized weights would load as if they were not.
         raise NotImplementedError(
-            f"The FSDP2 load cannot dequantize this {model_type} checkpoint; load it unsharded."
+            f"The {route} load cannot dequantize this {model_type} checkpoint; load it unsharded."
         )
     if _auto_class(hf_config, trust_remote_code=trust_remote_code) is not AutoModelForCausalLM:
         # It builds through AutoModelForCausalLM, which refuses most VLMs' configs and, for some,
         # builds the language model alone, whose other towers the export would carry unquantized.
         raise NotImplementedError(
-            f"The FSDP2 load builds a causal LM, which this {model_type} checkpoint is not. To load "
+            f"The {route} load builds a causal LM, which this {model_type} checkpoint is not. To load "
             "it whole on every rank, pass its model class as auto_class, with MODELOPT_FSDP_SIZE=1 "
             f"or distribution=DistributionPlan({dist.size()}, dense='replicate')."
         )
