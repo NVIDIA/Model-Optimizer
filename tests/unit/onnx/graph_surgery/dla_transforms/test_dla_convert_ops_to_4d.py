@@ -1311,6 +1311,55 @@ def test_fixed_dequantization_preserves_scalar_and_half_precision_outputs(shape,
     _assert_match(expected, _run_ort(converted, {}))
 
 
+@pytest.mark.parametrize("storage", ["typed", "external"])
+def test_gather_elements_fixed_index_storage_is_preserved(tmp_path, storage):
+    """Use runtime index views without decoding unloaded sidecars or replacing tensor metadata."""
+    indices = np.array([[0, 2, 1], [1, 0, 2]], np.int64)
+    tensor = (
+        _init("indices", indices)
+        if storage == "external"
+        else helper.make_tensor("indices", TensorProto.INT64, [2, 3], indices.reshape(-1).tolist())
+    )
+    tensor.doc_string = "native index owner"
+    model = _make_model(
+        [helper.make_node("GatherElements", ["x", "indices"], ["y"], axis=1)],
+        "index_storage",
+        [_vi("x", TensorProto.FLOAT, [2, 3])],
+        [_vi("y", TensorProto.FLOAT, [2, 3])],
+        [tensor],
+    )
+    native = tmp_path / "native.onnx"
+    if storage == "external":
+        onnx.save_model(
+            model,
+            str(native),
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location="indices.bin",
+            size_threshold=0,
+        )
+    else:
+        onnx.save_model(model, str(native))
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    expected = ort.InferenceSession(str(native), providers=["CPUExecutionProvider"]).run(
+        None, feeds
+    )[0]
+    unloaded = onnx.load(str(native), load_external_data=False)
+    original = unloaded.graph.initializer[0].SerializeToString()
+    converted = _apply_convert_ops_to_4d(unloaded)
+    assert (
+        next(t for t in converted.graph.initializer if t.name == "indices").SerializeToString()
+        == original
+    )
+    target = tmp_path / "converted.onnx"
+    onnx.save_model(converted, str(target))
+    onnx.checker.check_model(str(target), full_check=True)
+    actual = ort.InferenceSession(str(target), providers=["CPUExecutionProvider"]).run(None, feeds)[
+        0
+    ]
+    np.testing.assert_array_equal(actual, expected)
+
+
 def test_external_weight_promotion_preserves_sidecar_bytes_and_relative_metadata(tmp_path):
     """Promote unloaded external weights without reading or rewriting their payload sidecar."""
     weight = np.arange(6, dtype=np.float32).reshape(2, 3)

@@ -873,8 +873,7 @@ def _handle_gatherelements(node, graph, shape_map, init_names, unique_init, init
     also be unsqueezed to 4D so the ranks match → output is naturally 4D.
 
     Indices are cast to INT32 (DLA requirement).
-    For initializer indices: cast + reshape to 4D done in-place.
-    For dynamic indices: Cast node followed by Unsqueeze node(s).
+    Index Cast and Unsqueeze views preserve fixed storage and runtime defaults.
     """
     in_name = node.input[0]
     orig_shape = shape_map.get(in_name)
@@ -906,52 +905,43 @@ def _handle_gatherelements(node, graph, shape_map, init_names, unique_init, init
     # ── 3. Cast indices to INT32 and unsqueeze to 4D (must match data shape) ──
     if len(node.input) > 1 and node.input[1]:
         idx_name = node.input[1]
-        if idx_name in init_names:
-            for init in graph.initializer:
-                if init.name == idx_name:
-                    arr = numpy_helper.to_array(init).astype(np.int32)
-                    if arr.ndim < 4:
-                        new_shape = pad4d(list(arr.shape))
-                        init.CopyFrom(numpy_helper.from_array(arr.reshape(new_shape), idx_name))
-                    break
+        # Only cast to INT32 if indices are not already INT32
+        ge_need_cast = shape_map._cache.get_dtype(idx_name) != TensorProto.INT32
+
+        if ge_need_cast:
+            c_cast = cnt_ref[0]
+            cnt_ref[0] += 1
+            cast_out = unique_init.unique_name(f"{pfx}_idx_i32_{c_cast}")
+            pre.append(
+                helper.make_node(
+                    "Cast",
+                    inputs=[idx_name],
+                    outputs=[cast_out],
+                    to=TensorProto.INT32,
+                    name=unique_init.unique_name(f"{pfx}_idx_cast_{c_cast}"),
+                )
+            )
+            idx_after_cast = cast_out
         else:
-            # Only cast to INT32 if indices are not already INT32
-            ge_need_cast = shape_map._cache.get_dtype(idx_name) != TensorProto.INT32
+            idx_after_cast = idx_name
 
-            if ge_need_cast:
-                c_cast = cnt_ref[0]
-                cnt_ref[0] += 1
-                cast_out = unique_init.unique_name(f"{pfx}_idx_i32_{c_cast}")
-                pre.append(
-                    helper.make_node(
-                        "Cast",
-                        inputs=[idx_name],
-                        outputs=[cast_out],
-                        to=TensorProto.INT32,
-                        name=unique_init.unique_name(f"{pfx}_idx_cast_{c_cast}"),
-                    )
-                )
-                idx_after_cast = cast_out
-            else:
-                idx_after_cast = idx_name
-
-            # Unsqueeze indices to 4D to match data
-            if rank < 4:
-                c_usq = cnt_ref[0]
-                cnt_ref[0] += 1
-                idx_4d, idx_unsq = _make_unsqueeze_to_4d(
-                    idx_after_cast,
-                    rank,
-                    unique_init.unique_name(f"{pfx}_idx"),
-                    unique_init,
-                    graph,
-                    c_usq,
-                )
-                node.input[1] = idx_4d
-                if idx_unsq:
-                    pre.append(idx_unsq)
-            else:
-                node.input[1] = idx_after_cast
+        # Unsqueeze indices to 4D to match data
+        if rank < 4:
+            c_usq = cnt_ref[0]
+            cnt_ref[0] += 1
+            idx_4d, idx_unsq = _make_unsqueeze_to_4d(
+                idx_after_cast,
+                rank,
+                unique_init.unique_name(f"{pfx}_idx"),
+                unique_init,
+                graph,
+                c_usq,
+            )
+            node.input[1] = idx_4d
+            if idx_unsq:
+                pre.append(idx_unsq)
+        else:
+            node.input[1] = idx_after_cast
 
     # ── 4. Squeeze outputs back to original output shapes ─────────────────────
     post: list = []
