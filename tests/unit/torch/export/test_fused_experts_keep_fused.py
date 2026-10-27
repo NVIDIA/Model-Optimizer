@@ -848,37 +848,22 @@ def test_quant_linear_handlers_pack_an_fsdp2_unit_in_one_weight_window(
 
 
 class GptOssExperts(nn.Module):
-    """Named as transformers' fused BMM experts, whose handler packs each of its weights in turn."""
+    """Named as transformers' fused BMM experts, which store their weights transposed."""
 
 
-def test_bmm_experts_pack_both_weights_in_their_unit_s_held_window(gloo_world_of_one):
-    """``gate_up_proj`` and then ``down_proj`` of one module pack in the unit's held window, which
-    the module joins once: listed twice, the window would re-register its weights with FSDP2 a
-    second time, off the shards the first pass left."""
-    torch.manual_seed(0)
-    linears = nn.Sequential(nn.Linear(32, 16, bias=False), nn.Linear(16, 32, bias=False))
-    mtq.quantize(linears, mtq.NVFP4_DEFAULT_CFG, lambda m: m(torch.randn(4, 32)))
+def test_keep_fused_refuses_bmm_experts():
+    """The writer splits a keep-fused export's ``experts.<proj>`` weights as ``(num_experts, out_dim,
+    in_dim)``; BMM experts store theirs transposed, so the split would cut every expert wrong, and
+    the export refuses them before packing anything."""
     experts = GptOssExperts()
-    for proj, linear in zip(("gate_up_proj", "down_proj"), linears):
-        experts.register_parameter(proj, nn.Parameter(linear.weight.detach().clone()))
-        setattr(experts, f"{proj}_weight_quantizer", linear.weight_quantizer)
-        setattr(experts, f"{proj}_input_quantizer", linear.input_quantizer)
-    ref = copy.deepcopy(experts)
-    ExportModuleRegistry.match(ref)(PREFIX, ref, ExportContext(model=ref, dtype=torch.bfloat16))
-    layer = nn.Sequential(experts)
-    model = nn.Sequential(layer)
-    fully_shard(layer, mesh=gloo_world_of_one)
-    set_distribution_plan(model, DistributionPlan(dense="fsdp"))
-    ctx = ExportContext(model=model, dtype=torch.bfloat16, keep_fused_experts=True)
+    experts.gate_up_proj = nn.Parameter(torch.randn(NUM_EXPERTS, HIDDEN_DIM, 2 * INTERMEDIATE_DIM))
+    before = copy.deepcopy(experts.state_dict())
+    ctx = ExportContext(model=experts, dtype=torch.bfloat16, keep_fused_experts=True)
 
-    with handlers.held_fsdp2_weight_windows(ctx):
-        ExportModuleRegistry.match(experts)("0.0", experts, ctx)
+    with pytest.raises(NotImplementedError, match="stores its experts transposed"):
+        ExportModuleRegistry.match(experts)(PREFIX, experts, ctx)
 
-    sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
-    for key, want in ref.state_dict().items():
-        got = sd[f"0.0.{key}"]
-        got = got.full_tensor() if isinstance(got, DTensor) else got
-        assert torch.equal(_raw_bytes(got), _raw_bytes(want)), key
+    torch.testing.assert_close(experts.state_dict(), before, rtol=0, atol=0)
 
 
 def test_nvfp4_packs_a_sharded_weight_into_the_same_codes(gloo_world_of_one):

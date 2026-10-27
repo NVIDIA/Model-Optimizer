@@ -89,10 +89,7 @@ def _fsdp2_weight_window(
         return fsdp2_aware_weight_update(root, module, names=names)
     held = ctx.fsdp2_window
     if held is not None and held.unit is unit:
-        # A module with several quantized weights (fused BMM experts) packs each in turn: it joins
-        # the window once, or the window would re-register its weights with FSDP2 twice.
-        if not any(m is module for m in held.modules):
-            held.modules.append(module)
+        held.modules.append(module)
         return contextlib.nullcontext()
     _close_fsdp2_weight_window(ctx)
     root, names = _window_root(ctx, unit)
@@ -325,6 +322,16 @@ def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> Non
     Its weight quantizer has one amax covering all experts, so under FSDP2 each rank can pack
     just the experts it owns and produce identical bytes -- no gather or unshard needed.
     """
+    if ctx.keep_fused_experts:
+        # The keep-fused export leaves fused experts for the writer to split by their
+        # ``experts.<proj>`` key, as ``(num_experts, out_dim, in_dim)`` weights. These store theirs
+        # transposed (GPT-OSS also interleaves gate and up, and keeps biases), so the split would cut
+        # every expert wrong, quantized or not.
+        raise NotImplementedError(
+            f"{name}: the keep-fused export splits fused experts stored (num_experts, out_dim, "
+            f"in_dim), and {type(module).__name__} stores its experts transposed; export it through "
+            "the gather export instead."
+        )
     if get_quantization_format(module) == QUANTIZATION_NONE:
         return
     # TODO: consolidate uncalibrated experts handling logic
