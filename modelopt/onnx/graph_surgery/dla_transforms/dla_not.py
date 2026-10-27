@@ -40,36 +40,63 @@ from ..utils.graph_utils import (
     add_value_info,
     batch_replace_nodes,
 )
+from .dla_constants_to_initializers import _add_legacy_initializer_inputs
+from .dla_graph_cleanup import _subgraph_captures
+from .dla_indexing import _operator_nodes
+from .dla_rank_conversion import _runtime_input_names
+
+__all__ = []
+
+
+def _binary_source(cache: GraphCache, name: str, runtime: set[str]) -> bool:
+    """Prove binary values without retaining a decoded fixed tensor."""
+    if cache.get_dtype(name) == TensorProto.BOOL:
+        return True
+    tensor = cache.get_init(name) if name not in runtime else None
+    if tensor is None:
+        return False
+    array = numpy_helper.to_array(tensor)
+    return all(
+        np.all((chunk == 0) | (chunk == 1))
+        for chunk in np.nditer(
+            array, flags=["external_loop", "buffered", "zerosize_ok"], buffersize=65536, order="C"
+        )
+    )
 
 
 def _apply_not(model: onnx.ModelProto) -> onnx.ModelProto:
     """Rewrite unshared casts of binary values; preserve other Not chains."""
     graph = model.graph
     cache = GraphCache(graph)
+    if next((op.version for op in model.opset_import if op.domain in {"", "ai.onnx"}), 1) < 11:
+        return model
     node_idx = {id(n): i for i, n in enumerate(graph.node)}
+    captured = _subgraph_captures(graph)
+    casts = {id(node) for node in _operator_nodes(model, {"Cast"})}
+    runtime = _runtime_input_names(model)
+    binary = {}
     unique_init: set[str] = set()
     replacements: dict[int, tuple[list, list]] = {}
     cnt = 0
 
-    for node in cache.nodes_by_op("Not"):
+    for node in _operator_nodes(model, {"Not"}):
         producer_node = cache.get_producer(node.input[0])
-        if producer_node is None or producer_node.op_type != "Cast":
+        if producer_node is None or id(producer_node) not in casts:
             logger.debug("Not %r: input not from a Cast node — skipped.", node.name)
             continue
         if (
             len(cache.get_consumers(producer_node.output[0])) != 1
-            or producer_node.output[0] in cache.graph_output_names
+            or producer_node.output[0] in cache.graph_output_names | captured
+            or node.output[0] in captured
         ):
             continue
         source = producer_node.input[0]
-        array = cache.get_init_array(source)
-        binary_source = cache.get_dtype(source) == TensorProto.BOOL or (
-            array is not None and np.all((array == 0) | (array == 1))
-        )
-        boolean_users = {"And", "Or", "Xor", "Not"}
+        if source not in binary:
+            binary[source] = _binary_source(cache, source, runtime)
+        binary_source = binary[source]
         if not binary_source or any(
-            user.op_type in boolean_users or (user.op_type == "Where" and port == 0)
-            for user, port in cache.get_consumers(node.output[0])
+            user.op_type != "Cast" or id(user) not in casts
+            for user, _port in cache.get_consumers(node.output[0])
         ):
             continue
 
@@ -102,7 +129,7 @@ def _apply_not(model: onnx.ModelProto) -> onnx.ModelProto:
             "Clip",
             inputs=[producer_node.output[0], min_name, max_name],
             outputs=[clip_out],
-            name=f"{node.name}_clip",
+            name=cache.unique_name(f"{node.name}_clip"),
         )
         clip_shape = cache.get_shape(producer_node.output[0])
         if clip_shape is not None:
@@ -117,7 +144,7 @@ def _apply_not(model: onnx.ModelProto) -> onnx.ModelProto:
             "Sub",
             inputs=[one_name, clip_out],
             outputs=list(node.output),
-            name=f"{node.name}_sub",
+            name=cache.unique_name(f"{node.name}_sub"),
         )
 
         replacements[node_idx[id(node)]] = ([node], [clip_node, sub_node])
@@ -126,5 +153,6 @@ def _apply_not(model: onnx.ModelProto) -> onnx.ModelProto:
 
     batch_replace_nodes(graph, replacements)
 
+    _add_legacy_initializer_inputs(model)
     logger.debug("not: transformed %d Not node(s).", cnt)
     return model

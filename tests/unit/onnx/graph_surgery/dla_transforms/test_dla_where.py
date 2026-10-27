@@ -42,19 +42,17 @@ No Where nodes                              → noop, ORT parity
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 
 import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms import dla_where as _mod
 
-pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-_SAVED_MODELS_DIR = _REPO_ROOT / "scratch_space" / "where_test_models"
 _OPSET_VERSION = 17
 _MAX_IR_VERSION_FOR_ORT = 9
 
@@ -66,33 +64,38 @@ _apply = _mod._apply_where
 
 
 def _vi(name: str, elem_type: int, shape: list) -> onnx.ValueInfoProto:
+    """Declare a typed tensor shape."""
     return helper.make_tensor_value_info(name, elem_type, shape)
 
 
 def _clamp_ir(model: onnx.ModelProto) -> None:
+    """Select an IR version supported by the CPU runtime."""
     model.ir_version = min(model.ir_version, _MAX_IR_VERSION_FOR_ORT)
 
 
 def _prepare_model(model: onnx.ModelProto) -> None:
+    """Populate metadata using optional runtime symbolic inference."""
     try:
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
-
-        inferred = SymbolicShapeInference.infer_shapes(model)
-        if inferred is not None:
-            del model.graph.value_info[:]
-            model.graph.value_info.extend(inferred.graph.value_info)
-    except Exception:
-        pass
+        # Optional ONNX Runtime tooling is absent in some CPU installations.
+        from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
+    except ImportError:
+        return
+    inferred = SymbolicShapeInference.infer_shapes(model, auto_merge=True)
+    if inferred is not None:
+        del model.graph.value_info[:]
+        model.graph.value_info.extend(inferred.graph.value_info)
 
 
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
-    import onnxruntime as ort  # type: ignore[import-untyped]
-
+    """Fully check and execute all public outputs in one CPU session."""
     _clamp_ir(model)
-    sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
-    return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
+    onnx.checker.check_model(model, full_check=True)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    sess = ort.InferenceSession(
+        model.SerializeToString(), options, providers=["CPUExecutionProvider"]
+    )
+    return dict(zip([o.name for o in model.graph.output], sess.run(None, feeds)))
 
 
 _RNG = np.random.default_rng(2024)
@@ -373,3 +376,92 @@ def test_no_where_nodes_noop():
 
     assert len(tr.graph.node) == original_node_count, "noop: node count must not change"
     np.testing.assert_array_equal(ref["Y"], got["Y"])
+
+
+@pytest.mark.parametrize("overridden", ["condition", "zeros"])
+@pytest.mark.parametrize("zero_index", [0, 1])
+def test_where_respects_overridable_initializer_inputs(overridden, zero_index):
+    """Use runtime condition defaults and decline nonconstant zero branches."""
+    inputs = [_vi("data", TensorProto.FLOAT, [3]), _vi("condition", TensorProto.BOOL, [3])]
+    initializers = [
+        numpy_helper.from_array(np.asarray([False, False, False]), "condition"),
+        numpy_helper.from_array(np.zeros(3, np.float32), "zeros"),
+    ]
+    if overridden == "zeros":
+        inputs.append(_vi("zeros", TensorProto.FLOAT, [3]))
+    branches = ["zeros", "data"] if zero_index == 0 else ["data", "zeros"]
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Where", ["condition", *branches], ["y"])],
+            "runtime_where",
+            inputs,
+            [_vi("y", TensorProto.FLOAT, [3])],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    _clamp_ir(model)
+    feeds = {
+        "data": np.asarray([2, 3, 4], np.float32),
+        "condition": np.asarray([True, False, True]),
+    }
+    if overridden == "zeros":
+        feeds["zeros"] = np.asarray([9, 8, 7], np.float32)
+    expected = _run_ort(copy.deepcopy(model), feeds)
+    np.testing.assert_array_equal(_run_ort(_apply(copy.deepcopy(model)), feeds)["y"], expected["y"])
+
+
+@pytest.mark.parametrize("domain", ["custom", ""])
+def test_where_preserves_opaque_local_function(domain):
+    """Leave a local Where function and its fixed owners intact."""
+    function = helper.make_function(
+        domain,
+        "Where",
+        ["condition", "a", "b"],
+        ["c"],
+        [helper.make_node("Identity", ["b"], ["c"])],
+        [helper.make_opsetid("", 17)],
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Where", ["condition", "zeros", "data"], ["y"], domain=domain)],
+            "opaque",
+            [_vi("condition", TensorProto.BOOL, [2]), _vi("data", TensorProto.FLOAT, [2])],
+            [_vi("y", TensorProto.FLOAT, [2])],
+            [numpy_helper.from_array(np.zeros(2, np.float32), "zeros")],
+        ),
+        functions=[function],
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("custom", 1)],
+    )
+    _clamp_ir(model)
+    original = model.SerializeToString()
+    feeds = {"condition": np.asarray([False, True]), "data": np.asarray([2, 3], np.float32)}
+    expected = ReferenceEvaluator(model).run(None, feeds)[0]
+    _apply(model)
+    assert model.SerializeToString() == original
+    onnx.checker.check_model(model, full_check=True)
+    np.testing.assert_array_equal(ReferenceEvaluator(model).run(None, feeds)[0], expected)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_where_allocates_distinct_names_and_legacy_controls(legacy):
+    """Execute repeated unnamed rewrites with occupied node names and legacy declarations."""
+    inputs = [_vi("x", TensorProto.FLOAT, [2]), _vi("condition", TensorProto.BOOL, [2])]
+    initializers = [numpy_helper.from_array(np.zeros(2, np.float32), "zeros")]
+    nodes = [helper.make_node("Where", ["condition", "x", "zeros"], [out]) for out in ("a", "b")]
+    nodes.append(helper.make_node("Identity", ["x"], ["spare"], name="_mul"))
+    outputs = [_vi(out, TensorProto.FLOAT, [2]) for out in ("a", "b", "spare")]
+    feeds = {"x": np.asarray([2, 3], np.float32), "condition": np.asarray([False, True])}
+    if legacy:
+        inputs.extend(_vi(t.name, t.data_type, list(t.dims)) for t in initializers)
+    model = helper.make_model(
+        helper.make_graph(nodes, "names_and_legacy", inputs, outputs, initializers),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 3 if legacy else 9
+    expected = _run_ort(copy.deepcopy(model), feeds)
+    transformed = _apply(copy.deepcopy(model))
+    names = [node.name for node in transformed.graph.node if node.name]
+    assert len(names) == len(set(names))
+    for name, actual in _run_ort(transformed, feeds).items():
+        np.testing.assert_array_equal(actual, expected[name])

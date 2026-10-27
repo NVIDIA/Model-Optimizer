@@ -13,25 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Replace ``Where`` nodes with a float-friendly ``Mul`` when one branch is an all-zero initializer.
+"""Lower zero-branch selections to arithmetic under the existing finite-FP32 assumption.
 
-DLA does not support the ``Where`` op.  When one of the two data branches is a static all-zero
-tensor the operation simplifies to a scalar multiply:
-
-    Where(cond, 0, y)  →  Mul(y, 1 - float(cond))
-    Where(cond, x, 0)  →  Mul(x, float(cond))
-
-The boolean condition is converted to float32 by:
-
-* **Static BOOL initializer** — replaced in-place by a pre-computed float32 initializer
-  (or its inverse, for the zero-true-branch case).  The original bool initializer is removed
-  only if the ``Where`` node is its sole consumer.
-* **Dynamic BOOL tensor** — a ``Cast(to=FLOAT)`` node is inserted before the ``Mul``.
-  For the zero-true-branch case a ``Sub(1, cast_out)`` is also inserted.
-* **Non-BOOL condition** — used directly as the float mask (no cast needed).
-
-``Where`` nodes whose both data inputs are non-zero (or non-initializer) are left unchanged.
-This C++-compatible arithmetic lowering assumes finite FP32 data values.
+Fixed BOOL conditions get private FLOAT masks; runtime conditions use Cast nodes.
+Overridable zero branches remain native, and initializer owners are preserved.
 """
 
 from __future__ import annotations
@@ -47,14 +32,22 @@ from ..utils.graph_utils import (
     add_value_info,
     batch_replace_nodes,
 )
+from .dla_constants_to_initializers import _add_legacy_initializer_inputs
+from .dla_indexing import _operator_nodes
+from .dla_rank_conversion import _runtime_input_names
+
+__all__ = []
 
 
-def _zero_initializer_index(cache: GraphCache, names: list[str]) -> int | None:
+def _zero_initializer_index(
+    cache: GraphCache, names: list[str], runtime: set[str], zeros: dict[str, bool]
+) -> int | None:
     """Return the index (in ``names``) of the first all-zero initializer, or ``None``."""
     for idx, name in enumerate(names):
-        if cache.is_init(name):
-            arr = cache.get_init_array(name)
-            if arr is not None and np.count_nonzero(arr) == 0:
+        if cache.is_init(name) and name not in runtime:
+            if name not in zeros:
+                zeros[name] = np.count_nonzero(numpy_helper.to_array(cache.get_init(name))) == 0
+            if zeros[name]:
                 return idx
     return None
 
@@ -71,13 +64,15 @@ def _apply_where(model: onnx.ModelProto) -> onnx.ModelProto:
     unique_init: set[str] = set()
     replacements: dict[int, tuple[list, list]] = {}
     cnt = 0
+    runtime = _runtime_input_names(model)
+    zeros = {}
 
-    for node in cache.nodes_by_op("Where"):
+    for node in _operator_nodes(model, {"Where"}):
         condition = node.input[0]
         x_name = node.input[1]  # true branch
         y_name = node.input[2]  # false branch
 
-        zero_idx = _zero_initializer_index(cache, [x_name, y_name])
+        zero_idx = _zero_initializer_index(cache, [x_name, y_name], runtime, zeros)
         if zero_idx is None:
             continue
 
@@ -94,7 +89,7 @@ def _apply_where(model: onnx.ModelProto) -> onnx.ModelProto:
         condition_type = cache.get_dtype(condition)
         nodes_to_add: list = []
 
-        if cache.is_init(condition):
+        if cache.is_init(condition) and condition not in runtime:
             if condition_type == TensorProto.BOOL:
                 cond_raw = cache.get_init_array(condition)
                 if cond_raw is None:
@@ -102,10 +97,13 @@ def _apply_where(model: onnx.ModelProto) -> onnx.ModelProto:
                 cond_arr = cond_raw.astype(np.float32)
                 if zero_idx == 0:
                     # Where(cond, 0, y) → y * (1 - cond_float)
-                    cond_arr = 1.0 - cond_arr
+                    np.subtract(1.0, cond_arr, out=cond_arr)
                 float_name = cache.unique_name(f"{condition}_float32")
-                add_unique_initializers(
-                    graph, unique_init, [numpy_helper.from_array(cond_arr, name=float_name)]
+                graph.initializer.add(
+                    name=float_name,
+                    data_type=TensorProto.FLOAT,
+                    dims=cond_arr.shape,
+                    raw_data=cond_arr.astype("<f4", copy=False).tobytes(),
                 )
                 mul_inputs = [non_zero_name, float_name]
             else:
@@ -121,7 +119,7 @@ def _apply_where(model: onnx.ModelProto) -> onnx.ModelProto:
                     inputs=[condition],
                     outputs=[float_name],
                     to=TensorProto.FLOAT,
-                    name=f"{node.name}_cast_cond",
+                    name=cache.unique_name(f"{node.name}_cast_cond"),
                 )
                 nodes_to_add.append(cast_node)
                 cond_shape = cache.get_shape(condition)
@@ -145,7 +143,7 @@ def _apply_where(model: onnx.ModelProto) -> onnx.ModelProto:
                     "Sub",
                     inputs=[one_name, mask_name],
                     outputs=[inv_name],
-                    name=f"{node.name}_inv",
+                    name=cache.unique_name(f"{node.name}_inv"),
                 )
                 nodes_to_add.append(sub_node)
                 cond_shape = cache.get_shape(condition)
@@ -160,7 +158,7 @@ def _apply_where(model: onnx.ModelProto) -> onnx.ModelProto:
             "Mul",
             inputs=mul_inputs,
             outputs=list(node.output),
-            name=f"{node.name}_mul",
+            name=cache.unique_name(f"{node.name}_mul"),
         )
         nodes_to_add.append(mul_node)
         replacements[node_idx[id(node)]] = ([node], nodes_to_add)
@@ -169,5 +167,6 @@ def _apply_where(model: onnx.ModelProto) -> onnx.ModelProto:
 
     batch_replace_nodes(graph, replacements)
 
+    _add_legacy_initializer_inputs(model)
     logger.debug("where: transformed %d Where node(s).", cnt)
     return model

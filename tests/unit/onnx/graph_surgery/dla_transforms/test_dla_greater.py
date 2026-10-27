@@ -39,19 +39,17 @@ both inputs INT32 initializers → both cast to float32
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 
 import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms import dla_greater as _mod
 
-pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-_SAVED_MODELS_DIR = _REPO_ROOT / "scratch_space" / "greater_test_models"
 _OPSET_VERSION = 17
 _MAX_IR_VERSION_FOR_ORT = 9
 
@@ -63,36 +61,42 @@ _apply = _mod._apply_greater
 
 
 def _vi(name: str, elem_type: int, shape: list) -> onnx.ValueInfoProto:
+    """Declare a typed tensor shape."""
     return helper.make_tensor_value_info(name, elem_type, shape)
 
 
 def _clamp_ir(model: onnx.ModelProto) -> None:
+    """Select an IR version supported by the CPU runtime."""
     model.ir_version = min(model.ir_version, _MAX_IR_VERSION_FOR_ORT)
 
 
 def _prepare_model(model: onnx.ModelProto) -> None:
+    """Populate metadata using optional runtime symbolic inference."""
     try:
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
-
-        inferred = SymbolicShapeInference.infer_shapes(model)
-        if inferred is not None:
-            del model.graph.value_info[:]
-            model.graph.value_info.extend(inferred.graph.value_info)
-    except Exception:
-        pass
+        # Optional ONNX Runtime tooling is absent in some CPU installations.
+        from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
+    except ImportError:
+        return
+    inferred = SymbolicShapeInference.infer_shapes(model, auto_merge=True)
+    if inferred is not None:
+        del model.graph.value_info[:]
+        model.graph.value_info.extend(inferred.graph.value_info)
 
 
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
-    import onnxruntime as ort  # type: ignore[import-untyped]
-
+    """Fully check and execute all public outputs in one CPU session."""
     _clamp_ir(model)
-    sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
-    return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
+    onnx.checker.check_model(model, full_check=True)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    sess = ort.InferenceSession(
+        model.SerializeToString(), options, providers=["CPUExecutionProvider"]
+    )
+    return dict(zip([o.name for o in model.graph.output], sess.run(None, feeds)))
 
 
 def _init_dtype(model: onnx.ModelProto, name: str) -> int | None:
+    """Read a named initializer element type."""
     for init in model.graph.initializer:
         if init.name == name:
             return init.data_type
@@ -282,3 +286,136 @@ def test_greater_both_inputs_int32_converted():
     assert _init_dtype(tr, "A_cast") == TensorProto.FLOAT, "A must be cast to float32"
     assert _init_dtype(tr, "B_cast") == TensorProto.FLOAT, "B must be cast to float32"
     np.testing.assert_array_equal(ref["Y"], got["Y"])
+
+
+@pytest.mark.parametrize("runtime_both", [False, True])
+def test_greater_preserves_large_integer_ordering(runtime_both):
+    """Keep adjacent large integers distinguishable instead of rounding both to FLOAT."""
+    shape = [3]
+    values = np.asarray([2**24, 2**24 + 1, 2**24 + 2], np.int64)
+    threshold = np.full(shape, 2**24, np.int64)
+    inputs = [_vi("x", TensorProto.INT64, shape)]
+    initializers = []
+    feeds = {"x": values}
+    if runtime_both:
+        inputs.append(_vi("threshold", TensorProto.INT64, shape))
+        feeds["threshold"] = threshold
+    else:
+        initializers.append(numpy_helper.from_array(threshold, "threshold"))
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Greater", ["x", "threshold"], ["y"])],
+            "integer_ordering",
+            inputs,
+            [_vi("y", TensorProto.BOOL, shape)],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    _clamp_ir(model)
+    expected = _run_ort(copy.deepcopy(model), feeds)
+    transformed = _apply(copy.deepcopy(model))
+    np.testing.assert_array_equal(_run_ort(transformed, feeds)["y"], expected["y"])
+
+
+def test_greater_preserves_runtime_initializer_threshold():
+    """Do not fold an overridable comparison threshold into its default value."""
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Greater", ["x", "threshold"], ["y"])],
+            "runtime_threshold",
+            [_vi("x", TensorProto.INT32, [3]), _vi("threshold", TensorProto.INT32, [])],
+            [_vi("y", TensorProto.BOOL, [3])],
+            [numpy_helper.from_array(np.asarray(0, np.int32), "threshold")],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    _clamp_ir(model)
+    feeds = {"x": np.asarray([1, 2, 3], np.int32), "threshold": np.asarray(2, np.int32)}
+    expected = _run_ort(copy.deepcopy(model), feeds)
+    np.testing.assert_array_equal(_run_ort(_apply(copy.deepcopy(model)), feeds)["y"], expected["y"])
+
+
+@pytest.mark.parametrize("domain", ["custom", ""])
+def test_greater_preserves_opaque_local_function(domain):
+    """Leave model-local comparisons and their native operand types untouched."""
+    function = helper.make_function(
+        domain,
+        "Greater",
+        ["a", "b"],
+        ["c"],
+        [helper.make_node("Less", ["a", "b"], ["c"])],
+        [helper.make_opsetid("", 17)],
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Greater", ["x", "threshold"], ["y"], domain=domain)],
+            "opaque",
+            [_vi("x", TensorProto.INT32, [2])],
+            [_vi("y", TensorProto.BOOL, [2])],
+            [numpy_helper.from_array(np.asarray(1, np.int32), "threshold")],
+        ),
+        functions=[function],
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("custom", 1)],
+    )
+    _clamp_ir(model)
+    original = model.SerializeToString()
+    feeds = {"x": np.asarray([0, 2], np.int32)}
+    expected = ReferenceEvaluator(model).run(None, feeds)[0]
+    _apply(model)
+    assert model.SerializeToString() == original
+    onnx.checker.check_model(model, full_check=True)
+    np.testing.assert_array_equal(ReferenceEvaluator(model).run(None, feeds)[0], expected)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_greater_allocates_distinct_names_and_legacy_controls(legacy):
+    """Execute repeated unnamed rewrites with occupied node names and legacy declarations."""
+    inputs = [_vi("x", TensorProto.INT32, [2])]
+    initializers = [numpy_helper.from_array(np.asarray(1, np.int32), "threshold")]
+    nodes = [helper.make_node("Greater", ["x", "threshold"], [out]) for out in ("a", "b")]
+    nodes.append(helper.make_node("Identity", ["x"], ["spare"], name="x_cast_to_float32"))
+    outputs = [_vi(out, TensorProto.BOOL, [2]) for out in ("a", "b")]
+    outputs.append(_vi("spare", TensorProto.INT32, [2]))
+    feeds = {"x": np.asarray([0, 2], np.int32)}
+    if legacy:
+        inputs.extend(_vi(t.name, t.data_type, list(t.dims)) for t in initializers)
+    model = helper.make_model(
+        helper.make_graph(nodes, "names_and_legacy", inputs, outputs, initializers),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 3 if legacy else 9
+    expected = _run_ort(copy.deepcopy(model), feeds)
+    transformed = _apply(copy.deepcopy(model))
+    names = [node.name for node in transformed.graph.node if node.name]
+    assert len(names) == len(set(names))
+    for name, actual in _run_ort(transformed, feeds).items():
+        np.testing.assert_array_equal(actual, expected[name])
+
+
+@pytest.mark.parametrize("fixed", [False, True])
+def test_greater_half_precision_operands_convert_together(fixed):
+    """Preserve finite and nonfinite half comparisons with matching FLOAT operand types."""
+    shape = [4]
+    inputs = [_vi("x", TensorProto.FLOAT16, shape)]
+    initializers = []
+    threshold = np.asarray([0, 0, 0, 0], np.float16)
+    feeds = {"x": np.asarray([-1, 1, np.nan, np.inf], np.float16)}
+    if fixed:
+        initializers.append(numpy_helper.from_array(threshold, "threshold"))
+    else:
+        inputs.append(_vi("threshold", TensorProto.FLOAT16, shape))
+        feeds["threshold"] = threshold
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Greater", ["x", "threshold"], ["y"])],
+            "half_operands",
+            inputs,
+            [_vi("y", TensorProto.BOOL, shape)],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    _clamp_ir(model)
+    expected = _run_ort(copy.deepcopy(model), feeds)
+    np.testing.assert_array_equal(_run_ort(_apply(copy.deepcopy(model)), feeds)["y"], expected["y"])
