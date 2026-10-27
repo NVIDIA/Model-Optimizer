@@ -74,6 +74,7 @@ from .hf_dflash import (
     _block_position_weights,
     _block_targets,
     _block_tokens,
+    _first_predicted_position,
     _masked_top1,
 )
 from .modeling_dflash import DFlashBaseModelOutput
@@ -216,7 +217,7 @@ class HFDSparkModel(HFDFlashModel):
         weight_mask = _block_position_weights(
             targets.mask,
             "decay",
-            1 - self._label_shift,
+            _first_predicted_position(self._label_shift),
             self.dflash_loss_decay_factor,
             self.dflash_dpace_alpha,
         )

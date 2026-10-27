@@ -162,6 +162,11 @@ class _BlockTargets(NamedTuple):
     mask: torch.Tensor  # [B, N, bs] 1.0 where the position is supervised
 
 
+def _first_predicted_position(shift):
+    """The first block position whose label comes after the anchor, for a label shift."""
+    return max(0, 1 - shift)
+
+
 def _block_targets(input_ids, anchor_positions, block_keep_mask, loss_mask, block_size, shift):
     """Labels of every block position and where they are supervised.
 
@@ -172,7 +177,7 @@ def _block_targets(input_ids, anchor_positions, block_keep_mask, loss_mask, bloc
     k = torch.arange(block_size, device=input_ids.device).view(1, 1, -1)
     mask = block_keep_mask.unsqueeze(-1).expand(-1, -1, block_size).float()
     mask = mask * inside.float()
-    mask = mask * (k + shift > 0).float()
+    mask = mask * (k >= _first_predicted_position(shift)).float()
     mask = mask * _block_gather(loss_mask, positions)
     return _BlockTargets(_block_gather(input_ids, positions), positions, mask)
 
@@ -981,7 +986,7 @@ class HFDFlashModel(DFlashModel):
         weight_mask = _block_position_weights(
             targets.mask,
             self.dflash_loss_objective,
-            1 - self._label_shift,
+            _first_predicted_position(self._label_shift),
             self.dflash_loss_decay_factor,
             self.dflash_dpace_alpha,
             target_ce=lambda: (
