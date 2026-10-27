@@ -18,7 +18,6 @@
 import copy
 import warnings
 from pathlib import Path
-from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -120,14 +119,25 @@ def _rewrap_expert_rows(local: torch.Tensor, mesh, placements, num_experts: int)
     return DTensor.from_local(local, mesh, placements, run_check=False, shape=shape, stride=stride)
 
 
+class _LocalRows:
+    """``module``, with its fused ``proj`` replaced by this rank's rows of it."""
+
+    def __init__(self, module: nn.Module, proj: str, local: torch.Tensor):
+        self._module, self._proj, self._local = module, proj, local
+
+    def __getattr__(self, name: str):
+        return self._local if name == self._proj else getattr(self._module, name)
+
+
 def _local_expert_weight(module: nn.Module, proj: str, local: torch.Tensor, idx: int, dtype):
     """``module.get_expert_weight(proj, idx, dtype)``, read from ``local`` rather than the module.
 
     The per-expert export packs each expert as that accessor returns it, which casts unpacked native
     FP8 experts, held at the default dtype, to the export dtype. The accessor indexes the fused
-    parameter itself, a sharded DTensor here, so it is handed this rank's rows instead.
+    parameter itself, a sharded DTensor here, so it is handed this rank's rows instead. Whatever
+    else it reads, such as how it picks this rank's experts out of a weight, is the module's own.
     """
-    return type(module).get_expert_weight(SimpleNamespace(**{proj: local}), proj, idx, dtype)
+    return type(module).get_expert_weight(_LocalRows(module, proj, local), proj, idx, dtype)
 
 
 def _refuse_unfoldable_shards(module: nn.Module, proj: str, weight, num_quantizers: int) -> None:
