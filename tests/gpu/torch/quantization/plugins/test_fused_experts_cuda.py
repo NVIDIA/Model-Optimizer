@@ -23,11 +23,12 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.plugins.huggingface as hf_plugin
 from modelopt.torch.quantization import tensor_quant
 
-
-@pytest.mark.skipif(
+pytestmark = pytest.mark.skipif(
     not hasattr(tensor_quant.triton_kernel, "fp4_fake_quant_block"),
     reason="fp4_fake_quant_block requires compute >= 8.9",
 )
+
+
 @pytest.mark.parametrize("pass_through_bwd", [True, False])
 def test_stacked_nvfp4_experts_match_per_expert_quantizers(monkeypatch, pass_through_bwd):
     model = get_tiny_qwen3_moe().cuda().train()
@@ -75,3 +76,18 @@ def test_stacked_nvfp4_experts_match_per_expert_quantizers(monkeypatch, pass_thr
         assert grads.keys() == ref_grads.keys()
         for name, grad in grads.items():
             assert torch.equal(grad, ref_grads[name]), name
+
+
+def test_quantizer_backward_hooks_keep_per_expert_path():
+    """A backward hook on a weight quantizer only fires when that quantizer runs as a module."""
+    model = get_tiny_qwen3_moe().cuda().train()
+    input_ids = torch.randint(0, model.config.vocab_size, (2, 16), device="cuda")
+    mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(input_ids))
+    hook_calls = []
+    for module in model.modules():
+        if isinstance(module, hf_plugin._QuantFusedExperts):
+            for quantizer in module.gate_up_proj_weight_quantizers:
+                quantizer.register_full_backward_hook(lambda *args: hook_calls.append(args))
+
+    model(input_ids, labels=input_ids).loss.backward()
+    assert hook_calls
