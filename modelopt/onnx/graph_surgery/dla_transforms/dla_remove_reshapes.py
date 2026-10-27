@@ -18,22 +18,26 @@
 import numpy as np
 from onnx import TensorProto, helper
 
-from ..utils.graph_utils import GraphCache, add_initializer
+from ..utils.graph_utils import GraphCache, add_initializer, batch_replace_nodes
+from .dla_graph_cleanup import _subgraph_captures
+from .dla_indexing import _operator_nodes
 
 __all__ = []
 
 
 def _apply_remove_reshapes(model):
+    """Collapse fixed reshape chains while retaining rank-sensitive consumers and runtime controls."""
     graph = model.graph
     cache = GraphCache(graph)
-    reshapes = cache.nodes_by_op("Reshape")
+    reshapes = _operator_nodes(model, {"Reshape"})
+    captured = _subgraph_captures(graph)
     chains = []
     chain = []
     for node in reshapes:
         if chain:
             consumers = cache.get_consumers(chain[-1].output[0])
             if (
-                chain[-1].output[0] in cache.graph_output_names
+                chain[-1].output[0] in cache.graph_output_names | captured
                 or len(consumers) != 1
                 or consumers[0][0] is not node
             ):
@@ -45,6 +49,11 @@ def _apply_remove_reshapes(model):
     replacements = {}
     for chain in chains:
         first, last = chain[0], chain[-1]
+        if any(
+            node.input[1] not in cache.init_names or node.input[1] in cache.graph_input_names
+            for node in chain
+        ):
+            continue
         input_shape = cache.get_shape(first.input[0])
         output_shape = cache.get_shape(last.output[0])
         if (
@@ -53,15 +62,18 @@ def _apply_remove_reshapes(model):
             or any(d <= 0 for d in [*input_shape, *output_shape])
         ):
             continue
-        short, long = sorted((input_shape, output_shape), key=len)
-        removable = long[-len(short) :] == short
-        if removable and last.output[0] not in cache.graph_output_names:
+        removable = input_shape == output_shape
+        if removable and last.output[0] not in cache.graph_output_names | captured:
             for consumer, port in cache.get_consumers(last.output[0]):
                 consumer.input[port] = first.input[0]
         elif input_shape == output_shape:
             replacements[id(last)] = [
                 helper.make_node(
-                    "Identity", [first.input[0]], list(last.output), name=last.name + "_identity"
+                    "Identity",
+                    [first.input[0]],
+                    list(last.output),
+                    name=cache.unique_name((last.name or last.output[0]) + "_identity"),
+                    domain=last.domain,
                 )
             ]
         elif len(chain) > 1:
@@ -77,15 +89,20 @@ def _apply_remove_reshapes(model):
                     "Reshape",
                     [first.input[0], target],
                     list(last.output),
-                    name=last.name + "_reshape",
+                    name=cache.unique_name((last.name or last.output[0]) + "_reshape"),
+                    domain=last.domain,
                 )
             ]
         else:
             continue
         for node in chain:
             replacements.setdefault(id(node), [])
-    nodes = list(graph.node)
-    del graph.node[:]
-    for node in nodes:
-        graph.node.extend(replacements.get(id(node), [node]))
+    batch_replace_nodes(
+        graph,
+        {
+            index: ([node], replacements[id(node)])
+            for index, node in enumerate(graph.node)
+            if id(node) in replacements
+        },
+    )
     return model
