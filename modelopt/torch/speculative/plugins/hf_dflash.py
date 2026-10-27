@@ -874,12 +874,17 @@ class HFDFlashModel(DFlashModel):
             attention_mask=attn_mask,
         )
 
-    def _draft_zero_loss(self, device):
+    def _draft_zero_loss(self, device, through=()):
         """A zero loss that every trainable draft parameter feeds, for a step with nothing to train.
 
         DDP expects a gradient for each parameter on every rank; a rank returning a constant
-        loss would leave the others waiting on its reduction.
+        loss would leave the others waiting on its reduction. Once the draft has run, pass all
+        of its outputs as ``through`` (``None`` for an absent head) and the loss goes through
+        them: reading the parameters directly would put this rank's collectives out of step
+        when FSDP2 shards the draft as its own unit.
         """
+        if through:
+            return sum(out.sum() * 0.0 for out in through if out is not None)
         return sum(
             (p.reshape(-1)[0] * 0.0 for p in self.dflash_module.parameters() if p.requires_grad),
             torch.zeros((), device=device),
@@ -1002,8 +1007,7 @@ class HFDFlashModel(DFlashModel):
             with torch.no_grad():
                 accuracy = _masked_top1(flat_logits, flat_targets, binary_eval_mask).item()
         else:
-            # Through the draft's output, so an FSDP unit around the draft still runs its backward.
-            loss = flat_logits.sum() * 0.0
+            loss = self._draft_zero_loss(flat_logits.device, through=(flat_logits,))
             accuracy = 0.0
 
         if return_terms:

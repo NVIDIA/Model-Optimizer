@@ -231,7 +231,7 @@ class HFDominoModel(HFDFlashModel):
                 accuracy = _masked_top1(flat_final, flat_targets, binary_eval_mask).item()
                 base_accuracy = _masked_top1(flat_base, flat_targets, binary_eval_mask).item()
         else:
-            loss = flat_final.sum() * 0.0
+            loss = self._draft_zero_loss(flat_final.device, through=(flat_final,))
             final_loss = loss
             base_loss = loss
             accuracy = 0.0

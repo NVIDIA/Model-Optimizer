@@ -228,8 +228,8 @@ class HFDSparkModel(HFDFlashModel):
         valid_count = flat_weights.sum() + 1e-6
 
         if valid_count <= 1.0:
-            # As forward()'s early return: DDP still reduces the confidence head's gradient.
-            loss = self._draft_zero_loss(flat_final.device)
+            # The confidence head is not behind final_logits.
+            loss = self._draft_zero_loss(flat_final.device, through=(flat_final, confidence_logits))
             metrics = {"ce_loss": 0.0, "l1_loss": 0.0, "confidence_loss": 0.0, "base_accuracy": 0.0}
             return loss, 0.0, metrics
 
