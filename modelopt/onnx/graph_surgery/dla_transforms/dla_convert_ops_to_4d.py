@@ -218,12 +218,19 @@ def _make_squeeze_to_rank(
     return node
 
 
-def _expand_init_dims(init) -> None:
+def _expand_init_dims(init, cache) -> None:
     """Prepend 1-dims to a static initializer to make it 4D. No-op if already ≥ 4D."""
     if len(init.dims) < 4:
         shape = pad4d(list(init.dims))
         del init.dims[:]
         init.dims.extend(shape)
+        info = cache.vi_map.get(init.name)
+        if info is not None and info.type.tensor_type.HasField("shape"):
+            info.type.tensor_type.shape.CopyFrom(
+                helper.make_tensor_value_info(
+                    init.name, init.data_type, shape
+                ).type.tensor_type.shape
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1182,7 +1189,7 @@ def _handle_axis_op(node, graph, shape_map, init_names, unique_init, inits_to_ad
         if inp in init_names:
             for init in graph.initializer:
                 if init.name == inp:
-                    _expand_init_dims(init)
+                    _expand_init_dims(init, shape_map._cache)
                     break
         else:
             s = shape_map.get(inp)
@@ -1508,7 +1515,7 @@ def _handle_generic(node, graph, shape_map, init_names, unique_init, inits_to_ad
                 if init.name == inp:
                     if len(init.dims) == 0:
                         break  # scalar initializer — leave untouched
-                    _expand_init_dims(init)
+                    _expand_init_dims(init, shape_map._cache)
                     break
         else:
             s = shape_map.get(inp)
@@ -1581,7 +1588,7 @@ def _handle_dequantize_linear(
     squeeze = _make_squeeze_to_rank(
         temporary, orig_rank, original, node.name or "dq", unique_init, graph, c
     )
-    _expand_init_dims(data_init)
+    _expand_init_dims(data_init, shape_map._cache)
     if scale_shape:
         axis = _get_attr_i(node, "axis", 1)
         if axis >= 0:

@@ -1376,6 +1376,62 @@ def test_external_weight_promotion_preserves_sidecar_bytes_and_relative_metadata
     assert {entry.key: entry.value for entry in tensor.external_data}["location"] == "weights.bin"
 
 
+@pytest.mark.parametrize("operation", ["Softmax", "Add", "DequantizeLinear"])
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_promoted_initializers_refresh_value_info_without_changing_native_owners(
+    operation, shared, legacy
+):
+    """Refresh promoted initializer annotations and keep shared native owners unchanged."""
+    quantized = operation == "DequantizeLinear"
+    values = np.arange(6, dtype=np.int8 if quantized else np.float32).reshape(2, 3)
+    initializers = [_init("data", values)]
+    if quantized:
+        initializers.extend(
+            [_init("scale", np.asarray(0.25, np.float32)), _init("zero", np.asarray(0, np.int8))]
+        )
+    nodes, outputs = [], []
+    for index in range(2 if shared else 1):
+        output = f"y{index}"
+        nodes.append(
+            helper.make_node(
+                operation,
+                ["data", "scale", "zero"]
+                if quantized
+                else (["x", "data"] if operation == "Add" else ["data"]),
+                [output],
+                **({"axis": index} if operation == "Softmax" else {}),
+            )
+        )
+        outputs.append(_vi(output, TensorProto.FLOAT, [2, 3]))
+    inputs = [_vi("x", TensorProto.FLOAT, [2, 3])] if operation == "Add" else []
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3) / 2} if inputs else {}
+    model = _make_model(nodes, "initializer_annotations", inputs, outputs, initializers)
+    model.graph.value_info.append(
+        _vi("data", TensorProto.INT8 if quantized else TensorProto.FLOAT, [2, 3])
+    )
+    if legacy:
+        model.ir_version = 3
+        model.graph.input.extend(
+            _vi(tensor.name, tensor.data_type, list(tensor.dims))
+            for tensor in model.graph.initializer
+        )
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    promoted = next(tensor for tensor in converted.graph.initializer if tensor.name == "data")
+    assert list(promoted.dims) == ([2, 3] if shared or legacy else [1, 1, 2, 3])
+    annotation = next(value for value in converted.graph.value_info if value.name == "data")
+    assert [dim.dim_value for dim in annotation.type.tensor_type.shape.dim] == list(promoted.dims)
+    if legacy:
+        declaration = next(value for value in converted.graph.input if value.name == "data")
+        assert [dim.dim_value for dim in declaration.type.tensor_type.shape.dim] == list(
+            promoted.dims
+        )
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))
+
+
 @pytest.mark.parametrize("keepdims", [0, 1])
 def test_scalar_reduction_preserves_native_rank(keepdims):
     """Promote a scalar reduction internally and restore its zero-dimensional output."""
