@@ -25,8 +25,12 @@ import pytest
 import torch
 import torch.distributed as dist
 from _test_utils.torch.distributed.utils import DistributedWorkerPool
-from _test_utils.torch.transformers_models import create_tiny_llama_dir
-from transformers import AutoConfig, AutoModelForCausalLM
+from _test_utils.torch.transformers_models import (
+    _TinyQwen35Tokenizer,
+    create_tiny_llama_dir,
+    create_tiny_qwen3_5_moe_vl_dir,
+)
+from transformers import AutoConfig
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
@@ -41,11 +45,17 @@ pytestmark = [
 ]
 
 
-def _run_gradient_autoquant(rank, size, checkpoint_dir, search_dir):
+def _run_gradient_autoquant(rank, size, checkpoint_dir, search_dir, expect_qwen_vlm=False):
     device = torch.device(f"cuda:{rank}")
     model = parallel_load_and_prepare_fsdp2(checkpoint_dir, device, rank, size)
+    if expect_qwen_vlm:
+        assert type(model).__name__.endswith("ForConditionalGeneration")
+        assert hasattr(model.model, "visual")
+        assert not model._modelopt_unplaced_source_keys
     torch.manual_seed(rank)
-    batches = [torch.randint(0, 128, (1, 16), device=device) for _ in range(2)]
+    batches = [
+        torch.randint(5 if expect_qwen_vlm else 0, 128, (1, 16), device=device) for _ in range(2)
+    ]
     _, state = mtq.auto_quantize(
         model,
         constraints={"effective_bits": 8.0},
@@ -185,11 +195,12 @@ def test_fsdp2_kv_autoquant_example(kv_dist_workers, tmp_path, composed):
 
 def test_fsdp2_gradient_qwen_moe_autoquant(dist_workers, tmp_path):
     try:
-        AutoConfig.for_model("qwen3_5_moe_text")
+        AutoConfig.for_model("qwen3_5_moe")
     except ValueError:
         pytest.skip("Qwen3.5 requires a recent Transformers")
-    config = AutoConfig.for_model(
-        "qwen3_5_moe_text",
+    checkpoint = create_tiny_qwen3_5_moe_vl_dir(
+        tmp_path,
+        tokenizer=_TinyQwen35Tokenizer(),
         hidden_size=128,
         intermediate_size=256,
         moe_intermediate_size=64,
@@ -208,9 +219,6 @@ def test_fsdp2_gradient_qwen_moe_autoquant(dist_workers, tmp_path):
         vocab_size=128,
         max_position_embeddings=128,
     )
-    model = AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16)
-    checkpoint = tmp_path / "qwen_moe"
-    model.save_pretrained(checkpoint)
     search_dir = tmp_path / "search"
     search_dir.mkdir()
     dist_workers.run(
@@ -218,5 +226,6 @@ def test_fsdp2_gradient_qwen_moe_autoquant(dist_workers, tmp_path):
             _run_gradient_autoquant,
             checkpoint_dir=str(checkpoint),
             search_dir=str(search_dir),
+            expect_qwen_vlm=True,
         )
     )

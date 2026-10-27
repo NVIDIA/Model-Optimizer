@@ -39,8 +39,10 @@ from modelopt.torch.export.quant_utils import (
     sync_tied_input_amax,
 )
 from modelopt.torch.export.unified_export_hf import (
+    _fuse_shared_input_modules,
     _resolve_export_dtype,
     _source_checkpoint,
+    collect_shared_input_modules,
     read_unplaced_weights,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -550,6 +552,45 @@ def _linear_with_input_quantizer():
     linear = torch.nn.Linear(4, 4, bias=False)
     linear.input_quantizer = TensorQuantizer()
     return linear
+
+
+class _LinearAttention(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        for name in ("in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b"):
+            setattr(self, name, torch.nn.Linear(32, 32))
+
+    def forward(self, inputs):
+        return sum(module(inputs) for module in self.children())
+
+
+@pytest.mark.parametrize("mismatch_within_pair", [None, "qkvz", "ba", "ba_reverse"])
+def test_export_preserves_linear_attention_runtime_groups(mismatch_within_pair):
+    model = torch.nn.Sequential()
+    model.add_module("decoder", torch.nn.Module())
+    model.decoder.add_module("linear_attn", _LinearAttention())
+    inputs = torch.randn(1, 8, 32)
+    for name, module in list(model.decoder.linear_attn.named_children()):
+        fp8 = name in {"in_proj_a", "in_proj_b"} or (
+            mismatch_within_pair == "qkvz" and name == "in_proj_z"
+        )
+        if mismatch_within_pair == "ba":
+            fp8 = name == "in_proj_a"
+        elif mismatch_within_pair == "ba_reverse":
+            fp8 = name == "in_proj_b"
+        mtq.quantize(
+            module, mtq.FP8_DEFAULT_CFG if fp8 else mtq.INT8_DEFAULT_CFG, lambda m: m(inputs)
+        )
+    groups, norms = collect_shared_input_modules(model, lambda: model.decoder.linear_attn(inputs))
+    assert any(len(modules) == 4 for modules in groups.values())
+    if mismatch_within_pair:
+        with pytest.raises(AssertionError, match="different quantization formats"):
+            _fuse_shared_input_modules(model, groups, norms)
+    else:
+        fused = _fuse_shared_input_modules(model, groups, norms)
+        assert {frozenset(names) for names in fused.values()} == {
+            frozenset({"decoder.linear_attn.in_proj_qkv", "decoder.linear_attn.in_proj_z"}),
+        }
 
 
 def test_fuse_prequant_layernorm_skips_modules_without_pre_quant_scale():
