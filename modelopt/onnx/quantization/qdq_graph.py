@@ -16,6 +16,7 @@
 """Q/DQ graph policy for ONNX quantization."""
 
 import re
+from itertools import pairwise
 from typing import Any, cast
 
 import numpy as np
@@ -1045,12 +1046,29 @@ def get_parallel_conv_fusion_tensors(
             ):
                 continue
 
-            final_tensor_name = path_nodes[-1].outputs[0].name
+            is_silu = tail_sig[-2:] == ("Sigmoid", "Mul")
+            if is_silu:
+                mul_inputs = path_nodes[-1].inputs
+                if len(mul_inputs) != 2 or {tensor.name for tensor in mul_inputs} != {
+                    path_nodes[-3].outputs[0].name,
+                    path_nodes[-2].outputs[0].name,
+                }:
+                    continue
 
-            # Verify the final tensor feeds into a quantize node
-            consumers = input_name_to_nodes.get(final_tensor_name, [])
-            if any(c.name in nodes_to_quantize for c in consumers):
-                return (tail_sig, final_tensor_name)
+            for current, following in pairwise(path_nodes):
+                expected_consumers = {following.name}
+                if is_silu and following.op == "Sigmoid":
+                    # SiLU reuses the pre-sigmoid tensor as the other Mul input.
+                    expected_consumers.add(path_nodes[-1].name)
+                if {node.name for node in current.outputs[0].outputs} != expected_consumers:
+                    break
+            else:
+                final_tensor_name = path_nodes[-1].outputs[0].name
+
+                # Verify the final tensor feeds into a quantize node
+                consumers = input_name_to_nodes.get(final_tensor_name, [])
+                if any(c.name in nodes_to_quantize for c in consumers):
+                    return (tail_sig, final_tensor_name)
 
         return None
 
@@ -1082,35 +1100,9 @@ def get_parallel_conv_fusion_tensors(
 
     logger.info("Found %d parallel conv groups", len(parallel_groups))
 
-    # -------------------------------------------------------------------------
-    # Union-Find
-    # -------------------------------------------------------------------------
-    parent: dict[str, str] = {}
-
-    def find(x: str) -> str:
-        if x not in parent:
-            parent[x] = x
-        if parent[x] != x:
-            parent[x] = find(parent[x])
-        return parent[x]
-
-    def union(x: str, y: str) -> None:
-        parent[find(x)] = find(y)
-
-    for tensor_names in parallel_groups.values():
-        for tensor_name in tensor_names[1:]:
-            union(tensor_name, tensor_names[0])
-
-    if not parent:
-        return {}
-
-    groups: dict[str, set[str]] = {}
-    for tensor in parent:
-        root = find(tensor)
-        groups.setdefault(root, set()).add(tensor)
-
     result = {}
-    for tensor in parent:
-        result[tensor] = groups[find(tensor)]
-
+    for names in parallel_groups.values():
+        group = set(names)
+        for tensor in names:
+            result[tensor] = group
     return result
