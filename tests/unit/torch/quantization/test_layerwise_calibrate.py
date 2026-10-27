@@ -31,6 +31,7 @@ from modelopt.torch.quantization.utils.layerwise_calib import (
     _OutsideQuantizerCalibrator,
     _SkipLayer,
 )
+from modelopt.torch.utils.dataset_utils import create_forward_loop
 
 
 class _DecoderBlock(nn.Module):
@@ -677,6 +678,48 @@ def test_set_layer_states_raises_on_empty_collected_inputs(monkeypatch):
         # layer 0 was never in capture mode, so collected_inputs is empty
         with pytest.raises(RuntimeError, match="no collected inputs to replay"):
             collector._set_layer_states(1)
+    finally:
+        collector._unpatch_all_layers()
+
+
+class _OutOfMemoryOnceBlock(_DecoderBlock):
+    """Decoder block whose next forward runs out of memory when ``oom`` is set."""
+
+    oom = False
+
+    def forward(self, x, **kwargs):
+        if self.oom:
+            self.oom = False
+            raise torch.cuda.OutOfMemoryError("out of memory")
+        return super().forward(x, **kwargs)
+
+
+class _InputIdsModel(_SimpleTransformerModel):
+    """Takes ``input_ids`` as the calibration forward loop passes it."""
+
+    def __init__(self):
+        super().__init__(n_layers=3, dim=16)
+        self.layers[0] = _OutOfMemoryOnceBlock(16)
+
+    def forward(self, input_ids, **kwargs):
+        return super().forward(input_ids)
+
+
+def test_out_of_memory_in_a_replayed_layer_is_not_split(monkeypatch):
+    """A batch split on OOM would replay the next cached batch in its place, so the OOM must stop."""
+    _register_test_discoverer(monkeypatch)
+    model = _InputIdsModel()
+    batches = [{"input_ids": torch.randint(0, 32, (4, 8))} for _ in range(3)]
+    forward_loop = create_forward_loop(dataloader=batches)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        collector.get_input_activations(model.layers[0], forward_loop)
+        model.layers[0].oom = True  # layer 0 replays its cached batches while layer 1 is captured
+        with pytest.raises(RuntimeError) as error:
+            collector.get_input_activations(model.layers[1], forward_loop)
+        assert not isinstance(error.value, torch.cuda.OutOfMemoryError)
     finally:
         collector._unpatch_all_layers()
 

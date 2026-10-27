@@ -217,13 +217,24 @@ class PipelineManager:
         distilled_lora_strength = params.pop("distilled_lora_strength", 0.8)
         spatial_upsampler_path = params.pop("spatial_upsampler_path", None)
         gemma_root = params.pop("gemma_root", None)
-        fp8_quantization = params.pop("fp8_quantization", None) or params.pop(
-            "fp8transformer", False
-        )
+        # Pop both aliases: `or` would short-circuit and leave `fp8transformer` in the kwargs.
+        fp8_quantization = params.pop("fp8_quantization", None)
+        fp8_quantization = params.pop("fp8transformer", False) or fp8_quantization
         params.pop("merged_base_safetensor_path", None)
         params.pop("enable_swizzle_layout", None)
         params.pop("padding_strategy", None)
         params.pop("enable_layerwise_quant_metadata", None)
+        # Calibration-only knobs read in calibration.py; the pipeline constructor rejects them.
+        for key in (
+            "height",
+            "width",
+            "num_frames",
+            "frame_rate",
+            "seed",
+            "images",
+            "tiling_config",
+        ):
+            params.pop(key, None)
 
         if not checkpoint_path:
             raise ValueError("Missing required extra_param: checkpoint_path.")

@@ -622,9 +622,9 @@ def test_moe_export_matches(tmp_path, carry_auxiliary_weight):
         source_state[auxiliary_key] = torch.ones(2, 2, dtype=torch.bfloat16)
     save_file(source_state, source / "model.safetensors")
     for model in (baseline, layerwise):
+        # No load-time record, so the unplaced keys are derived: the layerwise exporter's at
+        # bind, before it packs the experts.
         model._modelopt_source_checkpoint = str(source)
-        # Transformers can hide auxiliary weights from its unexpected_keys report.
-        model._modelopt_unplaced_source_keys = []
 
     baseline_dir = tmp_path / "baseline"
     base = _nvfp4_cfg()

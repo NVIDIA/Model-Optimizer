@@ -373,12 +373,8 @@ def quantizer_recipe_to_quant_cfg(recipe: dict[str, Any], model: Any) -> dict[st
     # Uncaptured quantizers stay disabled; exported weights are already folded.
     entries = [{"quantizer_name": "*", "enable": False}]
     for name, state in mapped_recipe.items():
-        entry = {"quantizer_name": name, "enable": not state["_disabled"]}
-        cfg = {
-            key[1:]: value
-            for key, value in state.items()
-            if key in ("_num_bits", "_axis", "_block_sizes", "_backend", "_backend_extra_args")
-        }
+        cfg = TensorQuantizer.attribute_config_from_modelopt_state(state)
+        entry = {"quantizer_name": name, "enable": cfg.pop("enable")}
         if cfg:
             entry["cfg"] = cfg
         entries.append(entry)
@@ -678,6 +674,28 @@ def _validate_quantizer_ranges(model, saved_quant_dict, current_state_dict) -> N
         )
 
 
+def _alias_state_dict_keys(model: Any, state_dict: dict[str, Any]) -> dict[str, list[str]]:
+    """Map each state-dict key of a module registered under several names to its other names' keys.
+
+    vLLM can register one module under two names (e.g. the MoE runner also holds the shared expert
+    as ``experts._shared_experts._layer``), so the state dict lists its tensors once per name.
+    """
+    names_by_module: dict[Any, list[str]] = {}
+    for name, module in model.named_modules(remove_duplicate=False):
+        names_by_module.setdefault(module, []).append(name)
+    aliases = {
+        name: names for names in names_by_module.values() if len(names) > 1 for name in names
+    }
+    alias_keys = {}
+    for key in state_dict:
+        module_name, _, attr = key.rpartition(".")
+        if module_name in aliases:
+            alias_keys[key] = [
+                f"{other}.{attr}" for other in aliases[module_name] if other != module_name
+            ]
+    return alias_keys
+
+
 def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str, Any]:
     """Overlay mapped, TP-sharded quantizer tensors on the model's state dict."""
     # Load on CPU to avoid failures when the checkpoint was saved from a different GPU mapping.
@@ -692,6 +710,12 @@ def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str,
     saved_quant_dict = convert_dict_to_vllm(saved_quant_dict, map_fun=map_fun)
 
     current_state_dict = model.state_dict()
+    # The checkpoint names one of a module's names; load it under all of them, or a stale alias
+    # entry would overwrite the loaded value in ``model.load_state_dict``.
+    for key, aliases in _alias_state_dict_keys(model, current_state_dict).items():
+        if key in saved_quant_dict:
+            for alias in aliases:
+                saved_quant_dict.setdefault(alias, saved_quant_dict[key])
     _validate_quantizer_ranges(model, saved_quant_dict, current_state_dict)
     checkpoint_quant_keys = [key for key in saved_quant_dict if "quantizer" in key]
     local_checkpoint_quantizers = {

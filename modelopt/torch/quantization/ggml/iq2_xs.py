@@ -38,6 +38,7 @@ from .common import (
     GGML_BLOCK_SIZE,
     GGMLFormat,
     chunk_importance,
+    dequantize_blocks,
     importance_blocks,
     iq2_tile_terms,
     narrow_to_float32,
@@ -59,6 +60,7 @@ __all__ = [
 IQ2_XS_BLOCK_SIZE = GGML_BLOCK_SIZE
 IQ2_XS_BLOCK_BYTES = 74
 IQ2_XS_EFFECTIVE_BITS = IQ2_XS_BLOCK_BYTES * 8 / IQ2_XS_BLOCK_SIZE
+_IQ2_XS_INT8_GROUP_SIZE = 16
 _IQ2_XS_NATIVE_MAX = 43 * 31 / 8
 _IQ2_XS_SCALE_ANCHOR_MIN = 0.65
 _IQ2_XS_SCALE_ANCHOR_MAX = 0.92
@@ -239,37 +241,40 @@ def dequantize_iq2_xs(
         if extension is not None:
             grid = iq2_xs_grid(blocks.device)
             return extension.iq2_xs_unpack(blocks, grid, dtype).reshape(shape)
-    bit_positions = torch.arange(8, dtype=torch.int64, device=blocks.device)
-    grid = iq2_xs_grid(blocks.device)
-    decoded = torch.empty((blocks.shape[0], IQ2_XS_BLOCK_SIZE), dtype=dtype, device=blocks.device)
-    for start in range(0, blocks.shape[0], block_chunk_size):
-        stop = min(start + block_chunk_size, blocks.shape[0])
-        block_chunk = blocks[start:stop]
-        d = block_chunk[:, :2].contiguous().view(torch.float16).reshape(-1).float()
-        codes = block_chunk[:, 2:66:2].to(torch.int64) | (
-            block_chunk[:, 3:66:2].to(torch.int64) << 8
-        )
-        entries = codes & 0x1FF
-        sign_index = codes >> 9
-        # XOR-fold the seven payload bits down to bit 0 to recover the eighth sign bit.
-        # The loop this replaces cost seven elementwise passes per chunk, and unlike packing
-        # the decode is not cached -- it runs again on every forward.
-        folded = sign_index ^ (sign_index >> 4)
-        folded ^= folded >> 2
-        folded ^= folded >> 1
-        sign_mask = sign_index | ((folded & 1) << 7)
-        signs = 1.0 - 2.0 * ((sign_mask.unsqueeze(-1) >> bit_positions) & 1).float()
+    return dequantize_blocks(
+        blocks,
+        _unpack_int8,
+        block_size=IQ2_XS_BLOCK_SIZE,
+        group_size=_IQ2_XS_INT8_GROUP_SIZE,
+        dtype=dtype,
+        block_chunk_size=block_chunk_size,
+    ).reshape(shape)
 
-        scale_bytes = block_chunk[:, 66:].to(torch.int64)
-        local = torch.empty((block_chunk.shape[0], 16), dtype=torch.int64, device=blocks.device)
-        local[:, 0::2] = scale_bytes & 0x0F
-        local[:, 1::2] = scale_bytes >> 4
-        # Pinned format rule: d * (0.5 + local) * 0.25 == d * (2 * local + 1) / 8.
-        scales = d.unsqueeze(-1) * (2 * local + 1).float() / 8.0
-        values = grid[entries] * signs
-        chunk_decoded = values * scales.repeat_interleave(2, dim=1).unsqueeze(-1)
-        decoded[start:stop] = chunk_decoded.reshape(-1, IQ2_XS_BLOCK_SIZE)
-    return decoded.reshape(shape)
+
+def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Signed grid levels (±8, ±25, ±43) and the step of each 16-value half sub-block."""
+    bit_positions = torch.arange(8, dtype=torch.int64, device=blocks.device)
+    d = blocks[:, :2].contiguous().view(torch.float16).reshape(-1).float()
+    codes = blocks[:, 2:66:2].to(torch.int64) | (blocks[:, 3:66:2].to(torch.int64) << 8)
+    entries = codes & 0x1FF
+    sign_index = codes >> 9
+    # XOR-fold the seven payload bits down to bit 0 to recover the eighth sign bit.
+    # The loop this replaces cost seven elementwise passes per chunk, and unlike packing
+    # the decode is not cached -- it runs again on every forward.
+    folded = sign_index ^ (sign_index >> 4)
+    folded ^= folded >> 2
+    folded ^= folded >> 1
+    sign_mask = sign_index | ((folded & 1) << 7)
+    signs = 1.0 - 2.0 * ((sign_mask.unsqueeze(-1) >> bit_positions) & 1).float()
+
+    scale_bytes = blocks[:, 66:].to(torch.int64)
+    local = torch.empty((blocks.shape[0], 16), dtype=torch.int64, device=blocks.device)
+    local[:, 0::2] = scale_bytes & 0x0F
+    local[:, 1::2] = scale_bytes >> 4
+    # Pinned format rule: d * (0.5 + local) * 0.25 == d * (2 * local + 1) / 8.
+    steps = d.unsqueeze(-1) * (2 * local + 1).float() / 8.0
+    levels = iq2_xs_grid(blocks.device)[entries] * signs
+    return levels.reshape(-1, IQ2_XS_BLOCK_SIZE), steps
 
 
 IQ2_XS_FORMAT = GGMLFormat(
@@ -280,6 +285,8 @@ IQ2_XS_FORMAT = GGMLFormat(
     dequantize=dequantize_iq2_xs,
     block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
     decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+    int8_group_size=_IQ2_XS_INT8_GROUP_SIZE,
+    unpack_int8=_unpack_int8,
     weighted=True,
 )
 

@@ -28,6 +28,10 @@ from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, Schedul
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+from modelopt.torch.export.plugins.vllm_fakequant_hf import (
+    QUANTIZER_RECIPE_FORMAT,
+    QUANTIZER_RECIPE_VERSION,
+)
 from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
 
 
@@ -331,6 +335,22 @@ def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]
     if quant_config["recipe_path"]:
         recipe_path = Path(quant_config["recipe_path"])
         raw_recipe = yaml.safe_load(recipe_path.read_text()) if recipe_path.is_file() else None
+        if isinstance(raw_recipe, dict) and raw_recipe.get("format") == QUANTIZER_RECIPE_FORMAT:
+            # Versioned per-quantizer recipe, e.g. written by Megatron-Bridge's HF export.
+            if raw_recipe.get("version") != QUANTIZER_RECIPE_VERSION:
+                raise ValueError(
+                    f"Unsupported {QUANTIZER_RECIPE_FORMAT} version {raw_recipe.get('version')!r}; "
+                    f"expected {QUANTIZER_RECIPE_VERSION}"
+                )
+            raw_recipe = raw_recipe.get("quantizers")
+            if not (
+                isinstance(raw_recipe, dict)
+                and raw_recipe
+                and all(isinstance(name, str) and "_quantizer" in name for name in raw_recipe)
+            ):
+                raise ValueError(
+                    f"'quantizers' of {recipe_path} must map quantizer names to states"
+                )
         if (
             isinstance(raw_recipe, dict)
             and raw_recipe
