@@ -1151,7 +1151,7 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
     assert config.text_config.base_model_ep_plan is swapped_plan
 
 
-def _one_rank_fails_after_the_write_job(rank, size, tmp_dir):
+def _one_rank_fails_after_the_write_job(rank, size, tmp_dir, failure):
     model = torch.nn.Linear(2, 2)
     set_distribution_plan(model, DistributionPlan(size, ep_size=size))
     raised = None
@@ -1160,26 +1160,28 @@ def _one_rank_fails_after_the_write_job(rank, size, tmp_dir):
         mock.patch.object(unified_export_hf, "_process_hf_model_for_export", return_value={}),
         mock.patch.object(distributed_writer, "distributed_save_hf_checkpoint") as write,
         # Rank 0 alone writes config.json, once every rank has written its shards.
-        mock.patch.object(
-            unified_export_hf, "_write_base_config", side_effect=OSError("disk full")
-        ),
+        mock.patch.object(unified_export_hf, "_write_base_config", side_effect=failure),
     ):
         # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
         # the shared worker down instead of failing this test alone.
         try:
             unified_export_hf.export_hf_checkpoint(model, export_dir=tmp_dir)
-        except (OSError, RuntimeError) as e:
+        except (OSError, RuntimeError, SystemExit) as e:
             raised = e
     assert write.called
-    assert raised is not None and "disk full" in str(raised), raised
+    if isinstance(failure, SystemExit):  # an exit exits every rank, with its code
+        assert isinstance(raised, SystemExit) and raised.code == failure.code, raised
+    else:
+        assert raised is not None and "disk full" in str(raised), raised
 
 
+@pytest.mark.parametrize("failure", [OSError("disk full"), SystemExit(3)], ids=["error", "exit"])
 def test_every_rank_fails_an_export_that_one_rank_failed_after_the_write(
-    cpu_dist_workers, tmp_path
+    cpu_dist_workers, tmp_path, failure
 ):
     """The ranks that wrote their shards must not return as if the checkpoint were whole while rank 0
-    failed to finish it: a barrier alone would let them."""
-    cpu_dist_workers.run(_one_rank_fails_after_the_write_job, tmp_dir=tmp_path)
+    failed to finish it: a barrier alone would let them, and so would an exit, which is no Exception."""
+    cpu_dist_workers.run(_one_rank_fails_after_the_write_job, tmp_dir=tmp_path, failure=failure)
 
 
 def _one_rank_fails_processing_job(rank, size, tmp_dir):
