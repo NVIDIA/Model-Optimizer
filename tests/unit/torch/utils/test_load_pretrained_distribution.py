@@ -535,7 +535,7 @@ def test_a_launch_that_sets_no_group_up_loads_whole_on_each_process(
         (
             DistributionPlan(dense="fsdp"),
             {},
-            "shards through this 8-rank launch's process group",
+            r"shards through this 8-rank launch's .* DistributionPlan\(8, dense='fsdp'\)",
         ),
         (None, {"MODELOPT_FSDP_SIZE": "world"}, "MODELOPT_FSDP_SIZE=world ask to shard"),
         (None, {"MODELOPT_EP_DEGREE": "4"}, "MODELOPT_EP_DEGREE=4 ask to shard"),
