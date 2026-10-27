@@ -15,6 +15,8 @@
 
 """DLA indexing, reduction and attention passes with deferred rank promotion."""
 
+import math
+
 import numpy as np
 from onnx import TensorProto, helper, numpy_helper
 
@@ -73,6 +75,45 @@ def _known_rank(cache, name):
     return None
 
 
+def _gather_flatten_count(cache, node, index_shape):
+    """Return the flattened count only when leading padding preserves the native output layout."""
+    shape = cache.get_shape(node.input[0])
+    output = cache.get_shape(node.output[0])
+    if (
+        index_shape is None
+        or shape is None
+        or len(shape) not in (2, 3)
+        or output is None
+        or len(output) > 4
+    ):
+        return None
+    axis = _attribute(node, "axis")
+    value = axis.i if axis is not None else 0
+    if not -len(shape) <= value < len(shape):
+        return None
+    value = value % len(shape) + 4 - len(shape)
+    prepared = pad4d(shape)
+    count = math.prod(index_shape)
+    return count if pad4d(output) == [*prepared[:value], count, *prepared[value + 1 :]] else None
+
+
+def _gather_index_needs_view(cache, name, layout_nodes):
+    """Find native index layouts that later rank stages would otherwise promote."""
+    seen = set()
+    producer = cache.get_producer(name)
+    while (
+        producer is not None
+        and id(producer) in layout_nodes
+        and producer.op_type in {"Cast", "Identity"}
+    ):
+        if name in seen:
+            raise ValueError("Cyclic Gather index producers are unsupported")
+        seen.add(name)
+        name = producer.input[0]
+        producer = cache.get_producer(name)
+    return producer is not None and id(producer) in layout_nodes
+
+
 def _apply_gather(model):
     """Prepare Gather indices for the subsequent ordered data-rank promotion."""
     graph = model.graph
@@ -80,7 +121,12 @@ def _apply_gather(model):
     nodes = []
     squeezed_indices = {}
     selected = _operator_nodes(model, {"Gather"})
-    casts = {id(node) for node in _operator_nodes(model, {"Cast"})}
+    layout = _operator_nodes(model, {"Cast", "Identity", "Reshape", "Squeeze", "Unsqueeze"})
+    layout_nodes = {id(node) for node in layout}
+    casts = {id(node) for node in layout if node.op_type == "Cast"}
+    flattened = set()
+    index_views = {}
+    captured = _subgraph_captures(graph)
     for candidate in selected:
         if cache.get_shape(candidate.input[0]) is None:
             raise ValueError(f"{candidate.name!r}: Gather requires a static data shape")
@@ -91,6 +137,10 @@ def _apply_gather(model):
         fixed = cache.get_init(original)
         if rank is None:
             raise ValueError(f"{candidate.name!r}: Gather indices require a known rank")
+        if rank > 1 and original in captured:
+            raise ValueError(
+                f"{candidate.name!r}: captured Gather indices with rank > 1 are unsupported"
+            )
         if rank > 1 and (
             original in cache.graph_input_names
             or fixed is not None
@@ -98,7 +148,17 @@ def _apply_gather(model):
             or index_shape is None
             or 1 in index_shape
         ):
-            raise ValueError(f"{candidate.name!r}: Gather indices with rank > 1 are unsupported")
+            count = _gather_flatten_count(cache, candidate, index_shape)
+            if count is None:
+                raise ValueError(
+                    f"{candidate.name!r}: Gather indices with rank > 1 are unsupported"
+                )
+            flattened.add(original)
+            index_views[original] = 1
+        if rank <= 1 and original not in index_views:
+            index_views[original] = (
+                rank if _gather_index_needs_view(cache, original, layout_nodes) else None
+            )
         if fixed is None and cache.get_dtype(original) not in (
             TensorProto.INT32,
             TensorProto.INT64,
@@ -127,14 +187,41 @@ def _apply_gather(model):
         else:
             original = node.input[1]
             rank = _known_rank(cache, original)
-            if rank is not None and rank <= 1:
+            if rank is not None and (rank <= 1 or original in flattened):
                 if original not in squeezed_indices:
-                    prepared = cache.unique_name(original + "_gather_int32")
-                    nodes.append(
-                        helper.make_node(
-                            "Cast", [original], [prepared], name=prepared, to=TensorProto.INT32
+                    producer = cache.get_producer(original)
+                    if (
+                        original in flattened
+                        and producer is not None
+                        and id(producer) in casts
+                        and len(cache.get_consumers(original)) == 1
+                        and original not in cache.graph_output_names | captured
+                    ):
+                        _attribute(producer, "to").i = TensorProto.INT32
+                        for value in graph.value_info:
+                            if value.name == original:
+                                value.type.tensor_type.elem_type = TensorProto.INT32
+                        prepared = original
+                    else:
+                        prepared = cache.unique_name(original + "_gather_int32")
+                        nodes.append(
+                            helper.make_node(
+                                "Cast", [original], [prepared], name=prepared, to=TensorProto.INT32
+                            )
                         )
-                    )
+                    if index_views.get(original) is not None:
+                        target = add_initializer(
+                            graph,
+                            cache.unique_name(original + "_gather_shape"),
+                            np.asarray([] if index_views[original] == 0 else [-1], np.int64),
+                            dtype=TensorProto.INT64,
+                            with_value_info=False,
+                        )
+                        view = cache.unique_name(original + "_gather_view")
+                        nodes.append(
+                            helper.make_node("Reshape", [prepared, target], [view], name=view)
+                        )
+                        prepared = view
                     squeezed_indices[original] = prepared
             if original in squeezed_indices:
                 node.input[1] = squeezed_indices[original]
@@ -174,6 +261,12 @@ def _apply_gather(model):
             node.name = cache.unique_name((node.name or node.output[0]) + "_axis_updated")
         nodes.append(node)
     _insert_support_nodes(graph, nodes)
+    live = {name for node in graph.node for name in node.input}
+    live |= cache.graph_input_names | cache.graph_output_names | captured
+    for original in squeezed_indices:
+        tensor = cache.get_init(original)
+        if tensor is not None and original not in live:
+            graph.initializer.remove(tensor)
     _add_legacy_initializer_inputs(model)
     return model
 

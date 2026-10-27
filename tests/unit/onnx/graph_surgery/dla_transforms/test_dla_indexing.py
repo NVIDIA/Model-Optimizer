@@ -766,3 +766,124 @@ def test_reduction_recovers_native_axes_behind_an_allocated_input_adapter(axis):
     converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
     for actual, reference in zip(_execute(converted, feeds), expected):
         np.testing.assert_array_equal(actual, reference)
+
+
+def _leading_gather_index_model(producer, shape, *, captured=False, public=True):
+    """Build leading-singleton indices with a public or nested owner of their native values."""
+    values = np.arange(np.prod(shape), dtype=np.int64).reshape(shape) % 5
+    inputs = [helper.make_tensor_value_info("x", TensorProto.FLOAT, [5, 4])]
+    nodes, initializers = [], []
+    feeds = {"x": np.arange(20, dtype=np.float32).reshape(5, 4)}
+    if producer == "fixed":
+        initializers.append(numpy_helper.from_array(values, "indices"))
+    elif producer == "input":
+        inputs.append(helper.make_tensor_value_info("indices", TensorProto.INT64, shape))
+        feeds["indices"] = values
+    else:
+        dtype = TensorProto.FLOAT if producer == "Cast" else TensorProto.INT64
+        inputs.append(helper.make_tensor_value_info("source", dtype, shape))
+        feeds["source"] = values.astype(np.float32) if producer == "Cast" else values
+        nodes.append(
+            helper.make_node(
+                producer,
+                ["source"],
+                ["indices"],
+                **({"to": TensorProto.INT64} if producer == "Cast" else {}),
+            )
+        )
+    nodes.append(helper.make_node("Gather", ["x", "indices"], ["y"], axis=0))
+    outputs = [helper.make_tensor_value_info("y", TensorProto.FLOAT, [*shape, 4])]
+    if captured:
+        branch = helper.make_graph(
+            [helper.make_node("Identity", ["indices"], ["out"])],
+            "branch",
+            [],
+            [helper.make_tensor_value_info("out", TensorProto.INT64, shape)],
+        )
+        initializers.append(numpy_helper.from_array(np.asarray(True), "condition"))
+        nodes.append(
+            helper.make_node("If", ["condition"], ["view"], then_branch=branch, else_branch=branch)
+        )
+        outputs.append(helper.make_tensor_value_info("view", TensorProto.INT64, shape))
+    elif public:
+        outputs.append(helper.make_tensor_value_info("indices", TensorProto.INT64, shape))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "leading_indices",
+            inputs,
+            outputs,
+            initializers,
+            value_info=[]
+            if producer in {"fixed", "input"}
+            else [helper.make_tensor_value_info("indices", TensorProto.INT64, shape)],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    onnx.checker.check_model(model, full_check=True)
+    return model, feeds
+
+
+@pytest.mark.parametrize(
+    ("producer", "public"),
+    [("fixed", True), ("input", True), ("Cast", True), ("Identity", True), ("fixed", False)],
+)
+@pytest.mark.parametrize("shape", [[1, 1], [1, 3]])
+def test_leading_singleton_indices_preserve_native_gather_and_public_index_layouts(
+    producer, public, shape
+):
+    """Keep supported native layouts while preparing private stable four-dimensional views."""
+    model, feeds = _leading_gather_index_model(producer, shape, public=public)
+    expected = _execute(model, feeds)
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    onnx.checker.check_model(converted, full_check=True)
+    for actual, reference in zip(_execute(converted, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
+def test_captured_multidimensional_indices_refuse_before_layout_promotion():
+    """Leave nested owners unchanged when their index layout cannot be promoted safely."""
+    model, _ = _leading_gather_index_model("Cast", [1, 3], captured=True)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match=r"captured Gather indices.*rank"):
+        _apply_gather(model)
+    assert model.SerializeToString() == before
+
+
+def test_leading_runtime_indices_keep_legacy_initializer_declarations():
+    """Declare generated shape and axis controls without changing native legacy public values."""
+    model, feeds = _leading_gather_index_model("input", [1, 3])
+    model.ir_version = 3
+    expected = _execute(model, feeds)
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    onnx.checker.check_model(converted, full_check=True)
+    assert {t.name for t in converted.graph.initializer} <= {v.name for v in converted.graph.input}
+    for actual, reference in zip(_execute(converted, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.timeout(2)
+def test_cyclic_index_layout_ancestry_refuses_before_mutation():
+    """Bound malformed producer walks instead of hanging during index view planning."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Cast", ["second"], ["first"], to=TensorProto.INT64),
+                helper.make_node("Cast", ["first"], ["second"], to=TensorProto.INT64),
+                helper.make_node("Gather", ["x", "first"], ["y"], axis=2),
+            ],
+            "cyclic_indices",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 1, 5, 4])],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 1, 2, 4])],
+            value_info=[
+                helper.make_tensor_value_info(n, TensorProto.INT64, [2])
+                for n in ["first", "second"]
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="Cyclic Gather"):
+        _apply_gather(model)
+    assert model.SerializeToString() == before
