@@ -54,6 +54,8 @@ def _runtime_input_names(model):
 
 def _rank_preparation_proofs(model, cache, prepared_data_ops, *, restoring_outputs=False):
     """Reuse the cached leading-layout proof for rank and axis stages."""
+    # Standalone stages retain deferred inputs; registered calls inspect current layouts.
+    before_boundary = prepared_data_ops is None
     if prepared_data_ops is None:
         prepared_data_ops = (
             _RANK_AGNOSTIC_OPS
@@ -85,7 +87,7 @@ def _rank_preparation_proofs(model, cache, prepared_data_ops, *, restoring_outpu
         prepared_data_ops,
         [node.input[0] for node in model.graph.node if node.input]
         + [value.name for value in model.graph.output],
-        before_boundary=True,
+        before_boundary=before_boundary,
         restoring_outputs=restoring_outputs,
     )
 

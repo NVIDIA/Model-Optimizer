@@ -264,8 +264,13 @@ def _prepared_index_data(
         if node.op_type == "GroupQueryAttention":
             return "GroupQueryAttention" in prepared_ops
         if node.op_type == "Conv":
-            kernel = cache.get_shape(node.input[1])
-            return kernel is not None and len(kernel) == 4
+            weight = cache.get_init(node.input[1])
+            if weight is not None:
+                return len(weight.dims) == 4
+            kernel_rank = _known_rank(cache, node.input[1])
+            if kernel_rank is not None:
+                return kernel_rank == 4
+            return [node.input[1]]
         if (not before_boundary or restoring_outputs) and node.op_type == "MatMul":
             if not restoring_outputs and name in cache.graph_output_names | captured:
                 return False
