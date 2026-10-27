@@ -161,6 +161,10 @@ def _on_group(collective, bound, /, *args, **kwargs):
     return collective(*args, **{**kwargs, "group": bound if group is None else group})
 
 
+# The real barrier: a job may have replaced dist.barrier by the time it enters bounded_collectives.
+_barrier = dist.barrier
+
+
 @contextmanager
 def bounded_collectives(seconds: float = 10):
     """Run the object collectives on a new group that gives up after ``seconds``, within the block.
@@ -172,6 +176,10 @@ def bounded_collectives(seconds: float = 10):
     """
     group = dist.new_group(timeout=timedelta(seconds=seconds))
     try:
+        # gloo's new_group can return on one rank while a peer is still connecting to the group, and
+        # destroying it then, as a job that runs no collective on it does at once, fails the peer's
+        # new_group ("Connection closed by peer"). Past this barrier, every rank has connected.
+        _barrier(group=group)
         with ExitStack() as stack:
             for name in ("broadcast_object_list", "all_gather_object", "barrier"):
                 collective = partial(_on_group, getattr(dist, name), group)
