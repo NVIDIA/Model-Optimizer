@@ -1174,3 +1174,60 @@ def test_legacy_quantizer_schema_keeps_implicit_scalar_axis(operation):
         .astype(np.float32 if input_type == TensorProto.FLOAT else np.uint8)
     }
     _execute(model, feeds)
+
+
+@pytest.mark.parametrize("operation", ["Expand", "Tile"])
+@pytest.mark.parametrize("source", ["input", "default", "shape", "symbolic"])
+def test_native_four_dimensional_runtime_controls_need_no_padding(operation, source):
+    """Execute native rank-four runtime layouts without freezing their controls."""
+    shape = [1, 1, 2, 3]
+    first = [2, 1, 2, 3] if operation == "Expand" else [1, 1, 2, 1]
+    second = [3, 1, 2, 3] if operation == "Expand" else [2, 1, 1, 1]
+    declared = ["batch", 1, 2, 3] if source == "symbolic" else shape
+    inputs = [helper.make_tensor_value_info("x", TensorProto.FLOAT, declared)]
+    nodes = []
+    initializers = []
+    if source == "shape":
+        nodes.append(helper.make_node("Shape", ["x"], ["control"]))
+    else:
+        inputs.append(helper.make_tensor_value_info("control", TensorProto.INT64, [4]))
+    if source == "default":
+        initializers.append(numpy_helper.from_array(np.asarray(first, np.int64), "control"))
+    nodes.append(helper.make_node(operation, ["x", "control"], ["y"]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "native_runtime_controls",
+            inputs,
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [None] * 4)],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    data = np.arange(6, dtype=np.float32).reshape(shape)
+    feeds = (
+        [{"x": data}]
+        if source in {"shape", "default"}
+        else [{"x": data, "control": np.asarray(first, np.int64)}]
+    )
+    if source != "shape":
+        feeds.append({"x": data, "control": np.asarray(second, np.int64)})
+    expected = [_execute(model, values)[0] for values in feeds]
+    if source == "shape":
+        transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    else:
+        # ORT symbolic inference cannot resolve unconstrained runtime Expand controls.
+        transformed = dict(DLA_TRANSFORMS)["Non4D" + operation](copy.deepcopy(model))
+        assert transformed.SerializeToString() == model.SerializeToString()
+    if source == "shape":
+        assert any(node.op_type == "Shape" for node in transformed.graph.node)
+    else:
+        assert any(value.name == "control" for value in transformed.graph.input)
+    if initializers:
+        assert (
+            next(t for t in transformed.graph.initializer if t.name == "control")
+            == model.graph.initializer[0]
+        )
+    for values, reference in zip(feeds, expected):
+        np.testing.assert_array_equal(_execute(transformed, values)[0], reference)

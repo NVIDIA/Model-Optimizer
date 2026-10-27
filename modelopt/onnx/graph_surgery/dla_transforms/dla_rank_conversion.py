@@ -33,7 +33,7 @@ from ..utils.graph_utils import (
 )
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _RANK_AGNOSTIC_OPS, _subgraph_captures
-from .dla_indexing import _insert_support_nodes, _operator_nodes
+from .dla_indexing import _insert_support_nodes, _known_rank, _operator_nodes
 
 __all__ = []
 
@@ -262,12 +262,16 @@ def _apply_non4d_initializers(model):
 
 
 def _pad_shape_inputs(model, op_type, suffix):
-    """Plan fixed structural views before changing nodes or allocating controls."""
+    """Preserve native rank-four layouts and plan fixed control padding otherwise."""
     cache = GraphCache(model.graph)
     runtime_inputs = _runtime_input_names(model)
     plans = []
     for node in _operator_nodes(model, {op_type}):
         tensor = cache.get_init(node.input[1])
+        native = _shape_before_boundary_promotion(cache, node.input[0])
+        rank = len(native) if native is not None else _known_rank(cache, node.input[0])
+        if rank == 4 and cache.get_shape(node.input[1]) == [4]:
+            continue
         if tensor is None or tensor.name in runtime_inputs:
             raise ValueError(f"{node.name!r}: {op_type} target must be fixed")
         values = numpy_helper.to_array(tensor).reshape(-1).tolist()
