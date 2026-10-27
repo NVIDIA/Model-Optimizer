@@ -736,3 +736,33 @@ def test_symbolic_vector_indices_preserve_runtime_length_and_values(producer, le
     converted = _apply_gather(copy.deepcopy(model))
     onnx.checker.check_model(converted, full_check=True)
     np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2])
+def test_reduction_recovers_native_axes_behind_an_allocated_input_adapter(axis):
+    """Recover the native rank when a public tensor occupies the preferred adapter name."""
+    shape = [2, 3, 4]
+    output_shape = shape.copy()
+    output_shape[axis] = 1
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("ReduceSum", ["x", "axes"], ["y"], keepdims=1)],
+            "allocated_reduction",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+            [
+                helper.make_tensor_value_info("y", TensorProto.FLOAT, output_shape),
+                helper.make_tensor_value_info("x_unsqueeze_input", TensorProto.FLOAT, [1]),
+            ],
+            [
+                numpy_helper.from_array(np.asarray([axis], np.int64), "axes"),
+                numpy_helper.from_array(np.asarray([17], np.float32), "x_unsqueeze_input"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    feeds = {"x": np.arange(24, dtype=np.float32).reshape(shape)}
+    expected = _execute(model, feeds)
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    for actual, reference in zip(_execute(converted, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)

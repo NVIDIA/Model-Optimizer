@@ -994,10 +994,25 @@ def _allocated_boundary_name(name, hint):
 def _shape_before_boundary_promotion(cache, name):
     """Recover native shapes at generated input and output boundary views."""
     producer = cache.get_producer(name)
-    if producer is not None and producer.op_type == "Unsqueeze":
+    if (
+        producer is not None
+        and producer.op_type == "Unsqueeze"
+        and producer.domain in {"", "ai.onnx"}
+        and not producer.overload
+    ):
         original = producer.input[0]
-        if original in cache.graph_input_names and name == original + "_unsqueeze_input":
-            return cache.get_shape(original)
+        hint = original + "_unsqueeze_input"
+        allocated = _allocated_boundary_name(name, hint)
+        shape = cache.get_shape(original)
+        axes = cache.get_init_array(producer.input[1]) if len(producer.input) > 1 else None
+        if (
+            original in cache.graph_input_names
+            and allocated
+            and shape is not None
+            and axes is not None
+            and axes.reshape(-1).tolist() == list(range(max(0, 4 - len(shape))))
+        ):
+            return shape
     shape = cache.get_shape(name)
     if shape is not None:
         return shape
