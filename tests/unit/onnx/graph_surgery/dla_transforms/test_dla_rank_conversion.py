@@ -1464,6 +1464,51 @@ def test_rank_one_tile_tracks_registered_rank_restoring_reshape(producer, shape,
         np.testing.assert_array_equal(actual, reference)
 
 
+@pytest.mark.parametrize("operation", ["GatherElements", "ReduceSum"])
+@pytest.mark.parametrize("reshape", [False, True])
+def test_rank_preparation_preserves_unconverted_batched_matrix_consumers(operation, reshape):
+    """Prove runtime matrix rank from a padded view or boundary without requiring Conv eligibility."""
+    shape = [2, 5, 4]
+    source_shape = [1, *shape] if reshape else shape
+    nodes = []
+    initializers = [
+        numpy_helper.from_array(np.tile(np.eye(4, dtype=np.float32), (2, 1, 1)), "weight")
+    ]
+    if reshape:
+        initializers.append(numpy_helper.from_array(np.asarray(shape, np.int64), "native_target"))
+        nodes.append(helper.make_node("Reshape", ["x", "native_target"], ["matrix"]))
+    nodes.append(helper.make_node("MatMul", ["matrix" if reshape else "x", "weight"], ["data"]))
+    if operation == "GatherElements":
+        initializers.append(
+            numpy_helper.from_array(np.arange(40, dtype=np.int64).reshape(shape) % 5, "control")
+        )
+        nodes.append(helper.make_node(operation, ["data", "control"], ["selected"], axis=1))
+        target = [1, *shape]
+    else:
+        initializers.append(numpy_helper.from_array(np.asarray([1], np.int64), "control"))
+        nodes.append(helper.make_node(operation, ["data", "control"], ["selected"], keepdims=0))
+        target = [1, 1, 2, 4]
+    initializers.append(numpy_helper.from_array(np.asarray(target, np.int64), "target"))
+    nodes.append(helper.make_node("Reshape", ["selected", "target"], ["y"]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "matrix_rank_proof",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, source_shape)],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, target)],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    feeds = {"x": np.arange(40, dtype=np.float32).reshape(source_shape)}
+    expected = _execute(model, feeds)
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    assert any(node.op_type == "MatMul" for node in converted.graph.node)
+    for actual, reference in zip(_execute(converted, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
 @pytest.mark.parametrize("operation", ["Tile", "Expand", "Reshape"])
 def test_unknown_structural_data_rank_refuses_before_mutation(operation):
     """Refuse unresolved intermediate ranks before allocating any control view."""
