@@ -255,16 +255,15 @@ def test_a_model_class_of_the_callers_own_loads_whole(
     run_as, serve, loaders, auto_class, monkeypatch, tmp_path, fsdp_size
 ):
     """The sharded loads build their own model class and refuse another, so with nothing asking to
-    shard, a class of the caller's own loads whole on every rank, planned without building the
-    model on the meta device, which the decision's own pick of class may not build (an
-    encoder-decoder loaded through AutoModel). A knob asking to shard still decides, and the
-    sharded load refuses the class."""
+    shard, a class of the caller's own loads whole on every rank, and with a knob asking to shard
+    it is refused. Neither builds the model on the meta device, which the decision's own pick of
+    class may not build (an encoder-decoder loaded through AutoModel)."""
     run_as(2)
     serve(LlamaConfig(**_TINY))
+    monkeypatch.setattr(
+        model_load_utils, "build_meta_causal_lm", lambda *a, **k: pytest.fail("built a model")
+    )
     if fsdp_size is None:
-        monkeypatch.setattr(
-            model_load_utils, "build_meta_causal_lm", lambda *a, **k: pytest.fail("built a model")
-        )
         model = load_pretrained(str(tmp_path), auto_class)
         assert distribution_plan(model) == DistributionPlan(2)
         assert len(auto_class.calls) == 1

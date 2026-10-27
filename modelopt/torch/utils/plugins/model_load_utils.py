@@ -1256,6 +1256,15 @@ def _decide_distribution(
         # to shard, a load with this one gives every rank the whole model: there is nothing to
         # measure, nor a model to build for it.
         return DistributionPlan(world_size)
+    if auto_class not in (None, AutoModelForCausalLM):
+        # Something asks to shard, and every sharded load refuses this class: refuse it here, rather
+        # than build the model of the decision's own pick of class, which may not build at all.
+        raise NotImplementedError(
+            f"A sharded load builds its model class itself, so auto_class={auto_class.__name__} "
+            f"does not apply to it, and ep_size={ep_size!r}, dense={dense!r} ask to shard. To give "
+            "every rank the whole model, plan ep_size=1 and dense='replicate' "
+            "(MODELOPT_EP_DEGREE=1, MODELOPT_FSDP_SIZE=1)."
+        )
     # Building writes to the config it builds from, and only rank 0 decides: build from a copy, so
     # the config returned with the plan, which a sharded load builds from, is alike on every rank.
     hf_config = copy.deepcopy(hf_config)
