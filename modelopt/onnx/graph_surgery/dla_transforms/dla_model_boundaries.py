@@ -401,7 +401,7 @@ def _apply_non4d_model_outputs(
             if _is_standard_node(source, local_functions, {"Reshape", "Expand", "Tile"}):
                 if _has_native_symbolic_data(cache, source.input[0], local_functions):
                     continue
-                target = cache.get_shape(source.input[1])
+                target = cache.get_shape(source.input[1]) if source.op_type == "Reshape" else None
                 if (
                     source.op_type == "Reshape"
                     and target is not None
