@@ -592,22 +592,22 @@ def _legacy_generate_swa_mask(model, ctx_len, bsz, dtype, device):
 class TestGenerateMaskRule:
     """Generation evaluates the training rule for its one block, anchored at ``ctx_len``."""
 
-    @pytest.mark.parametrize("ctx_len", [1, 5, 16])
     @pytest.mark.parametrize("window", [None, BLOCK_SIZE, 2 * BLOCK_SIZE])
     @pytest.mark.parametrize("attention", ["bidirectional", "causal"])
-    def test_matches_the_hand_written_mask(self, ctx_len, window, attention):
+    def test_matches_the_hand_written_mask(self, window, attention):
         model = get_tiny_llama(num_hidden_layers=4)
         config = get_dflash_config(block_size=BLOCK_SIZE)
         config["dflash_swa_window_size"] = window
         config["dflash_draft_attention"] = attention
         mtsp.convert(model, [("dflash", config)])
-        args = (ctx_len, 2, torch.float32, torch.device("cpu"))
-        got = model._build_generate_swa_mask(*args)
-        want = _legacy_generate_swa_mask(model, *args)
-        if want is None:
-            assert got is None
-        else:
-            assert torch.equal(got, want)
+        for ctx_len in (1, 5, 16):
+            args = (ctx_len, 2, torch.float32, torch.device("cpu"))
+            got = model._build_generate_swa_mask(*args)
+            want = _legacy_generate_swa_mask(model, *args)
+            if want is None:
+                assert got is None, f"ctx_len={ctx_len}"
+            else:
+                assert torch.equal(got, want), f"ctx_len={ctx_len}"
 
 
 class TestDFlashSwaMask:
