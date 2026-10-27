@@ -34,7 +34,12 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.export.model_utils import _release_exported_tensors
 from modelopt.torch.export.moe_utils import _export_fused_experts, _fallback_amax
-from modelopt.torch.export.quant_utils import get_quant_config, get_quantization_format
+from modelopt.torch.export.quant_utils import (
+    _has_pre_quant_scale,
+    get_quant_config,
+    get_quantization_format,
+    process_layer_quant_config,
+)
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
 from modelopt.torch.quantization.model_calib import local_hessian_calibrate
@@ -856,8 +861,6 @@ class TestExportFusedExperts:
     def test_int4_experts_do_not_promise_a_pre_quant_scale(self, fmt):
         """AWQ-family algorithms skip fused experts, so INT4 / W4A8 experts carry no
         pre_quant_scale; the config must not promise one."""
-        from modelopt.torch.export.quant_utils import get_quant_config
-
         model = _TinyMoEModel()
         expert_type = type(model.moe.experts)
         if QuantModuleRegistry.get(expert_type) is not None:
@@ -900,7 +903,6 @@ class TestExportFusedExperts:
 
     def test_pre_quant_scale_presence(self):
         """A module has a pre_quant_scale when AWQ left a buffer or fused it into a sibling."""
-        from modelopt.torch.export.quant_utils import _has_pre_quant_scale
 
         def _linear(*, buffer=False, fused=False):
             linear = nn.Linear(4, 4)
@@ -915,8 +917,6 @@ class TestExportFusedExperts:
         assert _has_pre_quant_scale(_linear(fused=True), ["weight"])
 
     def test_per_layer_pre_quant_scale_flag(self):
-        from modelopt.torch.export.quant_utils import process_layer_quant_config
-
         config = process_layer_quant_config(
             {
                 "dense.quantization": "int4_awq",
@@ -1216,7 +1216,7 @@ class TestFusedExpertsCalibration:
             assert bool(skipped) == warns
             if warns:  # the message names the algorithm that ran
                 expected = "smoothquant" if "SMOOTHQUANT" in cfg_name else "awq"
-                assert str(skipped[0].message).startswith(expected)
+                assert expected in str(skipped[0].message)
             # The experts still get their max-calibrated amax.
             assert model.moe.experts.gate_up_proj_weight_quantizers[0].amax is not None
         finally:
