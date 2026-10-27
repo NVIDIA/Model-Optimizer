@@ -48,13 +48,12 @@ from modelopt.onnx.utils import (
 )
 from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 
-# Quantization tests patch GraphSurgeon globally after collection.
-_GS_EXPORT_VALUE_INFO_PROTO = OnnxExporter.export_value_info_proto
-
 
 @pytest.mark.parametrize("layout", ["flat", "local", "capture"])
-def test_export_onnx_large_initializer_metadata(monkeypatch, tmp_path, layout):
-    monkeypatch.setattr(OnnxExporter, "export_value_info_proto", _GS_EXPORT_VALUE_INFO_PROTO)
+@pytest.mark.parametrize("value_type", ["sequence_type", "optional_type"])
+def test_export_onnx_large_initializer_metadata(monkeypatch, tmp_path, layout, value_type):
+    monkeypatch.setattr(OnnxExporter, "export_tensor_proto", _export_tensor_proto)
+    monkeypatch.setattr(OnnxExporter, "export_value_info_proto", _export_value_info_proto)
     weight = gs.Constant("weight", np.arange(2048, dtype=np.float16))
     output = gs.Variable("output", dtype=np.float16, shape=[2048])
     weight_node = gs.Node("Identity", inputs=[weight], outputs=[output])
@@ -87,20 +86,32 @@ def test_export_onnx_large_initializer_metadata(monkeypatch, tmp_path, layout):
     # Sequence value_info is lost by GraphSurgeon copying, even without quantization.
     value = gs.Variable("value", dtype=np.float32, shape=[1])
     sequence = gs.Variable("sequence", dtype=np.float32, shape=[1])
-    sequence.type = "sequence_type"
-    length = gs.Variable("length", dtype=np.int64, shape=[])
+    sequence.type = value_type
+    is_sequence = value_type == "sequence_type"
+    length = gs.Variable("length", dtype=np.int64 if is_sequence else np.bool_, shape=[])
     graph.inputs.append(value)
     graph.nodes.extend(
         [
-            gs.Node("SequenceConstruct", inputs=[value], outputs=[sequence]),
-            gs.Node("SequenceLength", inputs=[sequence], outputs=[length]),
+            gs.Node(
+                "SequenceConstruct" if is_sequence else "Optional",
+                inputs=[value],
+                outputs=[sequence],
+            ),
+            gs.Node(
+                "SequenceLength" if is_sequence else "OptionalHasElement",
+                inputs=[sequence],
+                outputs=[length],
+            ),
         ]
     )
     graph.outputs.append(length)
-    expected_type = next(
-        v.type for v in gs.export_onnx(graph).graph.value_info if v.name == "sequence"
+    expected_type = onnx.helper.make_tensor_type_proto(onnx.TensorProto.FLOAT, [1])
+    wrap_type = (
+        onnx.helper.make_sequence_type_proto
+        if is_sequence
+        else onnx.helper.make_optional_type_proto
     )
-    assert expected_type.HasField("sequence_type")
+    expected_type = wrap_type(expected_type)
     with monkeypatch.context() as patch:
         patch.setattr(onnx.checker, "MAXIMUM_PROTOBUF", 1024)
         model = onnx_utils.export_onnx(graph)
@@ -115,7 +126,7 @@ def test_export_onnx_large_initializer_metadata(monkeypatch, tmp_path, layout):
         initializers = list(model.graph.initializer)
     for tensor in initializers:
         np.testing.assert_array_equal(onnx.numpy_helper.to_array(tensor), weight.values)
-    assert sequence.type == "sequence_type"
+    assert sequence.type == value_type
     assert isinstance(weight, gs.Constant)
     path = str(tmp_path / "model.onnx")
     onnx_utils.save_onnx(model, path, save_as_external_data=True)
@@ -139,7 +150,7 @@ def test_export_onnx_large_initializer_explicit_dtype(monkeypatch):
                 gs.Node("Identity", inputs=[large], outputs=[large_out]),
                 gs.Node("Identity", inputs=[small], outputs=[out]),
             ],
-            outputs=[large_out, out],
+            outputs=[large_out, out, small],
             opset=21,
         )
         model = onnx_utils.export_onnx(graph)
@@ -147,7 +158,9 @@ def test_export_onnx_large_initializer_explicit_dtype(monkeypatch):
         next(t for t in model.graph.initializer if t.name == "small").data_type
         == onnx.TensorProto.BFLOAT16
     )
-    assert model.graph.output[1].type.tensor_type.elem_type == onnx.TensorProto.BFLOAT16
+    assert all(
+        v.type.tensor_type.elem_type == onnx.TensorProto.BFLOAT16 for v in model.graph.output[1:]
+    )
     onnx.checker.check_model(model)
 
 

@@ -20,6 +20,7 @@ import onnx
 import onnx_graphsurgeon as gs
 import pytest
 
+from modelopt.onnx.quantization.autotune.autotuner_base import QDQAutotunerBase
 from modelopt.onnx.quantization.gs_patching import patch_gs_modules
 from modelopt.onnx.quantization.int4 import quantize_rtn
 from modelopt.onnx.trt_utils import infer_types_shapes, load_onnx_model, set_trt_plugin_domain
@@ -29,7 +30,8 @@ from modelopt.onnx.utils import export_onnx, save_onnx
 @pytest.mark.manual
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize(
-    "route", ["load", "rtn", "subgraph", "capture", "plugin_domain", "plugin_shapes"]
+    "route",
+    ["load", "rtn", "subgraph", "capture", "plugin_domain", "plugin_shapes", "autotune_file"],
 )
 def test_export_initializer_over_protobuf_limit(tmp_path, route):
     """Large unquantized weights must survive preprocessing and INT4 graph reconstruction."""
@@ -104,6 +106,13 @@ def test_export_initializer_over_protobuf_limit(tmp_path, route):
             save_onnx(model, input_path, save_as_external_data=True)
             model, _, _, _, external = load_onnx_model(input_path)
             assert external
+        elif route == "autotune_file":
+            patch_gs_modules()
+            autotuner = QDQAutotunerBase(model)
+            autotuner.initialize()
+            output_path = str(tmp_path / "autotune.onnx")
+            assert autotuner.export_onnx(output_path, insert_qdq=False) is None
+            model = onnx.load(output_path)
         elif route == "plugin_domain":
             model = set_trt_plugin_domain(model, ["Identity"])
             assert model.graph.node[-1].domain == "trt.plugins"

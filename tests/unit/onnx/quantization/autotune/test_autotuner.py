@@ -23,13 +23,69 @@ Note: Full integration tests with TensorRT benchmarking should be in separate in
 import os
 import tempfile
 
+import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
 import pytest
 from _test_utils.onnx.quantization.autotune.models import _create_simple_conv_onnx_model
+from google.protobuf.message import EncodeError
 
 from modelopt.onnx.quantization.autotune import Config, QDQAutotuner, RegionPattern
+from modelopt.onnx.quantization.autotune.autotuner_base import QDQAutotunerBase
 from modelopt.onnx.quantization.autotune.common import PatternCache, RegionType
+
+
+@pytest.mark.parametrize("mode", ["file", "small_bytes", "large_bytes"])
+def test_export_external_data_without_serializing_weights(monkeypatch, tmp_path, mode):
+    weight = np.arange(16 if mode == "small_bytes" else 2048, dtype=np.float16)
+    model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            [onnx.helper.make_node("Identity", ["weight"], ["output"])],
+            "external_export",
+            [],
+            [
+                onnx.helper.make_tensor_value_info(
+                    "output", onnx.TensorProto.FLOAT16, list(weight.shape)
+                )
+            ],
+            [onnx.numpy_helper.from_array(weight, "weight")],
+        ),
+        opset_imports=[onnx.helper.make_opsetid("", 21)],
+    )
+    model.ir_version = 10
+    serialize = onnx.ModelProto.SerializeToString
+
+    def bounded_serialize(model, *args, **kwargs):
+        # Exercise the real file path with a small stand-in for protobuf's 2 GiB limit.
+        if model.ByteSize() > 1024:
+            raise EncodeError("model exceeds test serialization limit")
+        return serialize(model, *args, **kwargs)
+
+    monkeypatch.setattr(onnx.ModelProto, "SerializeToString", bounded_serialize)
+    monkeypatch.setattr(onnx.checker, "MAXIMUM_PROTOBUF", 1024)
+    autotuner = QDQAutotunerBase(model)
+    autotuner.initialize()
+    if mode == "large_bytes":
+        with pytest.raises(EncodeError):
+            autotuner.export_onnx(insert_qdq=False)
+        return
+    if mode == "file":
+        path = str(tmp_path / "model.onnx")
+        assert autotuner.export_onnx(path, insert_qdq=False) is None
+        external = onnx.load(path, load_external_data=False)
+        assert external.graph.initializer[0].data_location == onnx.TensorProto.EXTERNAL
+        onnx.checker.check_model(path)
+        model = onnx.load(path)
+        np.testing.assert_array_equal(
+            onnx.numpy_helper.to_array(model.graph.initializer[0]), weight
+        )
+    else:
+        result = autotuner.export_onnx(insert_qdq=False)
+        assert isinstance(result, bytes)
+        np.testing.assert_array_equal(
+            onnx.numpy_helper.to_array(onnx.load_model_from_string(result).graph.initializer[0]),
+            weight,
+        )
 
 
 @pytest.fixture
