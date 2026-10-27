@@ -628,3 +628,111 @@ def test_multidimensional_gather_indices_refuse_before_any_mutation(index_shape,
     with pytest.raises(ValueError, match=r"Gather indices.*rank"):
         _apply_gather(model)
     assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize(
+    ("producer", "shape", "refuse"),
+    [
+        ("Cast", [2, 3], True),
+        ("Cast", [1, 3], True),
+        ("Cast", [1, 2, 3], True),
+        ("Cast", [2, 3, 4], True),
+        ("Cast", [1, 1, 1, 3], True),
+        ("Identity", [1, 3], True),
+        ("Identity", [1, 2, 3], True),
+        ("Identity", [2, 3], False),
+        ("Identity", [2, 3, 4], False),
+    ],
+)
+def test_intermediate_gather_indices_validate_squeeze_layout_before_mutation(
+    producer, shape, refuse
+):
+    """Reject layout-changing squeezes while preserving higher-rank no-op index views."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Gather", ["x", "first_indices"], ["first"], axis=2),
+                helper.make_node(
+                    producer,
+                    ["source"],
+                    ["indices"],
+                    **({"to": TensorProto.INT64} if producer == "Cast" else {}),
+                ),
+                helper.make_node("Gather", ["x", "indices"], ["y"], axis=2),
+            ],
+            "intermediate_indices",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 1, 5, 4]),
+                helper.make_tensor_value_info("source", TensorProto.INT64, shape),
+            ],
+            [
+                helper.make_tensor_value_info("first", TensorProto.FLOAT, [1, 1, 1, 4]),
+                helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 1, *shape, 4]),
+            ],
+            [numpy_helper.from_array(np.asarray([1], np.int64), "first_indices")],
+            value_info=[helper.make_tensor_value_info("indices", TensorProto.INT64, shape)],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    onnx.checker.check_model(model, full_check=True)
+    if refuse:
+        before = model.SerializeToString()
+        with pytest.raises(ValueError, match=r"Gather indices.*rank"):
+            _apply_gather(model)
+        assert model.SerializeToString() == before
+    else:
+        feeds = {
+            "x": np.arange(20, dtype=np.float32).reshape(1, 1, 5, 4),
+            "source": np.arange(np.prod(shape), dtype=np.int64).reshape(shape) % 5,
+        }
+        expected = _execute(model, feeds)
+        converted = _apply_gather(copy.deepcopy(model))
+        onnx.checker.check_model(converted, full_check=True)
+        for actual, reference in zip(_execute(converted, feeds), expected):
+            np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.parametrize("producer", [None, "Cast", "Identity"])
+@pytest.mark.parametrize("length", [0, 1, 3])
+def test_symbolic_vector_indices_preserve_runtime_length_and_values(producer, length):
+    """Keep a known vector rank even when its runtime dimension is symbolic."""
+    name = "source" if producer is None else "indices"
+    nodes = (
+        []
+        if producer is None
+        else [
+            helper.make_node(
+                producer,
+                ["source"],
+                ["indices"],
+                **({"to": TensorProto.INT64} if producer == "Cast" else {}),
+            )
+        ]
+    )
+    nodes.append(helper.make_node("Gather", ["x", name], ["y"], axis=2))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "symbolic_indices",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 1, 5, 4]),
+                helper.make_tensor_value_info("source", TensorProto.INT64, [None]),
+            ],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 1, None, 4])],
+            value_info=[]
+            if producer is None
+            else [helper.make_tensor_value_info("indices", TensorProto.INT64, [None])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {
+        "x": np.arange(20, dtype=np.float32).reshape(1, 1, 5, 4),
+        "source": np.arange(length, dtype=np.int64),
+    }
+    expected = _execute(model, feeds)[0]
+    converted = _apply_gather(copy.deepcopy(model))
+    onnx.checker.check_model(converted, full_check=True)
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)

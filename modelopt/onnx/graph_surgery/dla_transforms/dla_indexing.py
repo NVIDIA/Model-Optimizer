@@ -62,6 +62,17 @@ def _operator_nodes(model, operators, domains=("", "ai.onnx")):
     ]
 
 
+def _known_rank(cache, name):
+    """Read tensor rank even when individual dimensions are symbolic."""
+    shape = cache.get_shape(name)
+    if shape is not None:
+        return len(shape)
+    value = cache.vi_map.get(name)
+    if value is not None and value.type.tensor_type.HasField("shape"):
+        return len(value.type.tensor_type.shape.dim)
+    return None
+
+
 def _apply_gather(model):
     """Prepare Gather indices for the subsequent ordered data-rank promotion."""
     graph = model.graph
@@ -69,28 +80,30 @@ def _apply_gather(model):
     nodes = []
     squeezed_indices = {}
     selected = _operator_nodes(model, {"Gather"})
+    casts = {id(node) for node in _operator_nodes(model, {"Cast"})}
     for candidate in selected:
         if cache.get_shape(candidate.input[0]) is None:
             raise ValueError(f"{candidate.name!r}: Gather requires a static data shape")
-        index_shape = cache.get_shape(candidate.input[1])
-        if (
-            candidate.input[1] in cache.graph_input_names
-            and index_shape is not None
-            and len(index_shape) > 1
+        original = candidate.input[1]
+        index_shape = cache.get_shape(original)
+        rank = _known_rank(cache, original)
+        producer = cache.get_producer(original)
+        fixed = cache.get_init(original)
+        if rank is None:
+            raise ValueError(f"{candidate.name!r}: Gather indices require a known rank")
+        if rank > 1 and (
+            original in cache.graph_input_names
+            or fixed is not None
+            or (producer is not None and id(producer) in casts)
+            or index_shape is None
+            or 1 in index_shape
         ):
-            raise ValueError(
-                f"{candidate.name!r}: graph-input Gather indices with rank > 1 are unsupported"
-            )
-        fixed = cache.get_init(candidate.input[1])
-        if fixed is not None and fixed.name not in cache.graph_input_names and len(fixed.dims) > 1:
-            raise ValueError(
-                f"{candidate.name!r}: fixed Gather indices with rank > 1 are unsupported"
-            )
-        if cache.get_init(candidate.input[1]) is None and cache.get_dtype(
-            candidate.input[1]
-        ) not in (TensorProto.INT32, TensorProto.INT64):
-            producer = cache.get_producer(candidate.input[1])
-            if producer is None or producer.op_type != "Cast":
+            raise ValueError(f"{candidate.name!r}: Gather indices with rank > 1 are unsupported")
+        if fixed is None and cache.get_dtype(original) not in (
+            TensorProto.INT32,
+            TensorProto.INT64,
+        ):
+            if producer is None or id(producer) not in casts:
                 raise ValueError(
                     f"{candidate.name!r}: dynamic Gather indices require an integer Cast"
                 )
@@ -113,8 +126,8 @@ def _apply_gather(model):
             node.input[1] = squeezed_indices[indices.name]
         else:
             original = node.input[1]
-            index_shape = cache.get_shape(original)
-            if index_shape is not None and len(index_shape) <= 1:
+            rank = _known_rank(cache, original)
+            if rank is not None and rank <= 1:
                 if original not in squeezed_indices:
                     prepared = cache.unique_name(original + "_gather_int32")
                     nodes.append(
@@ -136,42 +149,13 @@ def _apply_gather(model):
                 nodes.append(node)
                 continue
             squeezed = cache.unique_name(original + "_squeezed")
-            squeeze_inputs = [original]
-            producer = cache.get_producer(original)
-            if producer is not None and producer.op_type == "Cast":
-                target = _attribute(producer, "to")
-                shared = (
-                    original in cache.graph_output_names or len(cache.get_consumers(original)) > 1
-                )
-                if shared:
-                    integer = cache.unique_name(original + "_gather_int32")
-                    nodes.append(
-                        helper.make_node(
-                            "Cast",
-                            [producer.input[0]],
-                            [integer],
-                            name=integer,
-                            to=TensorProto.INT32,
-                        )
-                    )
-                    squeeze_inputs[0] = integer
-                else:
-                    target.i = TensorProto.INT32
-                    for value in graph.value_info:
-                        if value.name == original:
-                            value.type.tensor_type.elem_type = TensorProto.INT32
-                axes = add_initializer(
-                    graph,
-                    cache.unique_name(node.name + "_indices_squeeze_axes"),
-                    np.asarray([0, 1, 2], dtype=np.int64),
-                    dtype=TensorProto.INT64,
-                    with_value_info=False,
-                )
-                squeeze_inputs.append(axes)
-            elif cache.get_dtype(original) not in (TensorProto.INT32, TensorProto.INT64):
-                raise ValueError(f"{node.name!r}: dynamic Gather indices require an integer Cast")
             nodes.append(
-                helper.make_node("Squeeze", squeeze_inputs, [squeezed], name=node.name + "_squeeze")
+                helper.make_node(
+                    "Squeeze",
+                    [original],
+                    [squeezed],
+                    name=cache.unique_name((node.name or node.output[0]) + "_squeeze"),
+                )
             )
             node.input[1] = squeezed
             squeezed_indices[original] = squeezed
