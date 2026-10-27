@@ -23,7 +23,7 @@ mapped after upstream tensors have been promoted to four dimensions.
 import math
 
 import numpy as np
-from onnx import TensorProto, helper, numpy_helper
+from onnx import TensorProto, defs, helper, numpy_helper
 
 from ..utils.graph_utils import (
     GraphCache,
@@ -32,6 +32,9 @@ from ..utils.graph_utils import (
     add_initializer,
     pad4d,
 )
+from .dla_constants_to_initializers import _add_legacy_initializer_inputs
+from .dla_graph_cleanup import _RANK_AGNOSTIC_OPS, _subgraph_captures
+from .dla_indexing import _insert_support_nodes, _operator_nodes
 
 __all__ = []
 
@@ -39,44 +42,74 @@ __all__ = []
 def _apply_non4d_slice_axis(model):
     """Remap fixed Slice axes before their data rank is promoted."""
     cache = GraphCache(model.graph)
-    for node in model.graph.node:
-        if node.op_type != "Slice" or len(node.input) < 4:
+    plans = []
+    for node in _operator_nodes(model, {"Slice"}):
+        if len(node.input) < 4:
             continue
-        shape = cache.get_shape(node.input[0])
+        shape = _shape_before_boundary_promotion(cache, node.input[0])
         axes = cache.get_init(node.input[3])
-        if shape is None or len(shape) not in (2, 3) or axes is None:
+        if shape is None or len(shape) not in (2, 3):
             continue
+        if axes is None or axes.name in cache.graph_input_names:
+            raise ValueError(f"{node.name!r}: Slice axes must be fixed")
         values = numpy_helper.to_array(axes).reshape(-1)
         if values.size and np.any(values >= 0):
-            node.input[3] = add_initializer(
+            plans.append((node, axes.name, np.where(values >= 0, values + 4 - len(shape), values)))
+    views = {}
+    for node, name, values in plans:
+        key = (name, tuple(values))
+        if key not in views:
+            views[key] = add_initializer(
                 model.graph,
-                axes.name + "_axes_only",
-                np.asarray(np.where(values >= 0, values + 4 - len(shape), values), dtype=np.int64),
+                cache.unique_name(name + "_axes_only"),
+                np.asarray(values, dtype=np.int64),
                 dtype=TensorProto.INT64,
                 with_value_info=False,
             )
+        node.input[3] = views[key]
+    _add_legacy_initializer_inputs(model)
     return model
 
 
 def _apply_non4d_reshape(model):
     """Prepare fixed Reshape targets for the deferred four-dimensional layout."""
     cache = GraphCache(model.graph)
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     replacements = {}
-    for node in model.graph.node:
-        if node.op_type != "Reshape" or len(node.input) < 2:
-            continue
+    users = {}
+    captured = _subgraph_captures(model.graph)
+    for node in _operator_nodes(model, {"Reshape"}):
         tensor = cache.get_init(node.input[1])
-        if tensor is None:
-            continue
+        if tensor is None or tensor.name in cache.graph_input_names:
+            raise ValueError(f"{node.name!r}: Reshape target must be fixed")
         values = numpy_helper.to_array(tensor).reshape(-1).tolist()
         if len(values) < 4:
+            native_rank = len(values)
             values = pad4d(values)
             output_shape = cache.get_shape(node.output[0])
+            if output_shape is None:
+                aliases = [
+                    cache.get_shape(user.output[0])
+                    for user, index in cache.get_consumers(node.output[0])
+                    if index == 0
+                    and user.op_type == "Squeeze"
+                    and user.domain in {"", "ai.onnx"}
+                    and not user.overload
+                    and (user.domain, user.op_type, user.overload) not in local_functions
+                    and user.output[0] in cache.graph_output_names
+                ]
+                aliases = [
+                    shape for shape in aliases if shape is not None and len(shape) == native_rank
+                ]
+                if aliases and all(shape == aliases[0] for shape in aliases):
+                    output_shape = aliases[0]
             if output_shape:
                 output_shape = pad4d(output_shape)
                 values = [
                     output_shape[i] if value == 0 else value for i, value in enumerate(values)
                 ]
+            if 0 in values:
+                raise ValueError(f"{node.name!r}: cannot resolve 0 in Reshape target")
         elif len(values) == 5:
             if 1 not in values:
                 raise ValueError(f"{node.name!r}: 5D Reshape shape has no unary dimension")
@@ -87,16 +120,49 @@ def _apply_non4d_reshape(model):
         if tensor.name in replacements and replacements[tensor.name] != replacement:
             raise ValueError(f"Shared Reshape target {tensor.name!r} requires different shapes")
         replacements[tensor.name] = replacement
-    for tensor in model.graph.initializer:
-        if tensor.name in replacements:
-            tensor.CopyFrom(replacements[tensor.name])
+        users.setdefault(tensor.name, []).append(node)
+    for name, replacement in replacements.items():
+        private = name in cache.graph_output_names | captured or any(
+            index != 1
+            or user.op_type != "Reshape"
+            or user.domain not in {"", "ai.onnx"}
+            or user.overload
+            or (user.domain, user.op_type, user.overload) in local_functions
+            for user, index in cache.get_consumers(name)
+        )
+        if private:
+            target = add_initializer(
+                model.graph,
+                cache.unique_name(name + "_reshape_shape"),
+                numpy_helper.to_array(replacement),
+                dtype=TensorProto.INT64,
+                with_value_info=False,
+            )
+            for user in users[name]:
+                user.input[1] = target
+        else:
+            tensor = cache.get_init(name)
+            assert tensor is not None
+            tensor.CopyFrom(replacement)
+    _add_legacy_initializer_inputs(model)
     return model
 
 
 def _apply_non4d_initializers(model):
     """Promote fixed weight layouts while preserving runtime input defaults."""
     expand, skip, front, avoid = set(), set(), set(), set()
-    for node in model.graph.node:
+    supported = _operator_nodes(model, {node.op_type for node in model.graph.node})
+    if any(op.domain == "com.microsoft" and op.version == 1 for op in model.opset_import):
+        supported += _operator_nodes(
+            model, {"QuantizeLinear", "DequantizeLinear", "GroupQueryAttention"}, ("com.microsoft",)
+        )
+    selected = {id(node) for node in supported}
+    protected = _subgraph_captures(model.graph)
+    protected.update(
+        name for node in model.graph.node if id(node) not in selected for name in node.input
+    )
+    used = {name for node in supported for name in node.input} if protected else set()
+    for node in supported:
         if node.op_type in {"Div", "Sub", "Mul", "Add", "LSTM"}:
             expand.update(node.input)
         if node.op_type == "MatMul":
@@ -112,6 +178,12 @@ def _apply_non4d_initializers(model):
         if tensor.name in avoid:
             continue
         rank = len(tensor.dims)
+        if tensor.name in protected:
+            if tensor.name in used and rank in (1, 2, 3):
+                raise ValueError(
+                    f"Initializer {tensor.name!r} has incompatible opaque or captured usage"
+                )
+            continue
         if (
             (rank == 1 and tensor.name in expand)
             or (rank == 2 and tensor.name in expand_or_front)
@@ -121,7 +193,18 @@ def _apply_non4d_initializers(model):
             updates.append((tensor, shape))
         elif rank == 2 and tensor.name not in skip:
             raise ValueError(f"Initializer {tensor.name!r} has unsupported rank 2 usage")
+    value_info = {value.name for value in model.graph.value_info}
+    native_inputs = {
+        node.input[0]
+        for node in model.graph.node
+        if node.input and node.op_type not in _RANK_AGNOSTIC_OPS
+    }
     for tensor, shape in updates:
+        if tensor.name in native_inputs and tensor.name not in value_info:
+            # Later axis stages read native ranks from the same deferred metadata snapshot.
+            model.graph.value_info.append(
+                helper.make_tensor_value_info(tensor.name, tensor.data_type, list(tensor.dims))
+            )
         del tensor.dims[:]
         tensor.dims.extend(shape)
     return model
@@ -138,58 +221,67 @@ def _apply_non4d_tile(model):
 
 
 def _pad_shape_inputs(model, op_type, suffix):
-    """Pad fixed structural controls for the requested rank stage."""
+    """Plan fixed structural views before changing nodes or allocating controls."""
     cache = GraphCache(model.graph)
-    for node in model.graph.node:
-        if node.op_type != op_type or len(node.input) < 2:
-            continue
+    plans = []
+    for node in _operator_nodes(model, {op_type}):
         tensor = cache.get_init(node.input[1])
-        if tensor is None:
-            continue
+        if tensor is None or tensor.name in cache.graph_input_names:
+            raise ValueError(f"{node.name!r}: {op_type} target must be fixed")
         values = numpy_helper.to_array(tensor).reshape(-1).tolist()
         if len(values) < 4:
-            node.input[1] = add_initializer(
+            plans.append((node, tensor.name, pad4d(values)))
+        elif len(values) > 4:
+            raise ValueError(f"{node.name!r}: {op_type} target has rank {len(values)}")
+    views = {}
+    for node, name, values in plans:
+        if name not in views:
+            views[name] = add_initializer(
                 model.graph,
-                tensor.name + suffix,
-                np.asarray(pad4d(values), dtype=np.int64),
+                cache.unique_name(name + suffix),
+                np.asarray(values, dtype=np.int64),
                 dtype=TensorProto.INT64,
                 with_value_info=False,
             )
-        elif len(values) > 4:
-            raise ValueError(f"{node.name!r}: {op_type} target has rank {len(values)}")
+        node.input[1] = views[name]
+    _add_legacy_initializer_inputs(model)
     return model
 
 
 def _apply_non4d_transpose(model):
     """Remap transpose permutations around added or removed unary axes."""
     cache = GraphCache(model.graph)
-    for node in model.graph.node:
-        if node.op_type != "Transpose":
-            continue
+    plans = []
+    for node in _operator_nodes(model, {"Transpose"}):
         perm = _attribute(node, "perm")
-        if perm is None:
-            continue
-        values = list(perm.ints)
+        shape = _shape_before_boundary_promotion(cache, node.input[0])
+        if perm is None and shape is None:
+            raise ValueError(f"{node.name!r}: default Transpose requires a known input rank")
+        values = list(perm.ints) if perm is not None else list(reversed(range(len(shape))))
         if len(values) in (2, 3):
             delta = 4 - len(values)
             values = list(range(delta)) + [v + delta for v in values]
         elif len(values) == 5:
-            shape = cache.get_shape(node.input[0])
             if shape is None or len(shape) != 5 or 1 not in shape:
                 raise ValueError(f"{node.name!r}: 5D Transpose requires a known unary dimension")
             removed = shape.index(1)
             values = [v - int(v > removed) for v in values if v != removed]
         else:
             continue
-        del perm.ints[:]
-        perm.ints.extend(values)
+        plans.append((node, perm, values))
+    for node, perm, values in plans:
+        if perm is None:
+            node.attribute.append(helper.make_attribute("perm", values))
+        else:
+            del perm.ints[:]
+            perm.ints.extend(values)
     return model
 
 
 def _apply_non4d_lpnorm(model):
     """Preserve normalization axes across leading-dimension promotion."""
     cache = GraphCache(model.graph)
-    for node in model.graph.node:
+    for node in _operator_nodes(model, {"LpNormalization"}):
         if node.op_type == "LpNormalization":
             axis = _attribute(node, "axis")
             shape = _shape_before_boundary_promotion(cache, node.input[0])
@@ -205,75 +297,93 @@ def _apply_flatten(model):
     """Replace Flatten with its four-dimensional equivalent shape."""
     graph = model.graph
     cache = GraphCache(graph)
-    for node in graph.node:
-        if node.op_type == "Flatten":
-            shape = _shape_before_boundary_promotion(cache, node.input[0])
-            axis = _attribute(node, "axis")
-            axis = axis.i if axis is not None else 1
-            if shape is None or any(d <= 0 for d in shape):
-                raise ValueError(f"{node.name!r}: Flatten requires a known input shape")
-            if axis < 0:
-                axis += len(shape)
-            batch = math.prod(shape[:axis])
-            name = add_initializer(
+    plans = []
+    for node in _operator_nodes(model, {"Flatten"}):
+        shape = _shape_before_boundary_promotion(cache, node.input[0])
+        axis = _attribute(node, "axis")
+        axis = axis.i if axis is not None else 1
+        if shape is None or any(d <= 0 for d in shape):
+            raise ValueError(f"{node.name!r}: Flatten requires a known input shape")
+        if not -len(shape) <= axis <= len(shape):
+            raise ValueError(f"{node.name!r}: invalid Flatten axis {axis}")
+        if axis < 0:
+            axis += len(shape)
+        plans.append((node, math.prod(shape[:axis])))
+    targets = {}
+    for node, batch in plans:
+        if batch not in targets:
+            hint = "flatten_reshape_shape" if batch == 1 else f"{node.name}_reshape_shape"
+            targets[batch] = add_initializer(
                 graph,
-                "flatten_reshape_shape" if batch == 1 else f"{node.name}_reshape_shape",
+                cache.unique_name(hint),
                 np.asarray([1, 1, batch, -1], dtype=np.int64),
                 dtype=TensorProto.INT64,
                 with_value_info=False,
             )
-            node.CopyFrom(
-                helper.make_node(
-                    "Reshape", [node.input[0], name], list(node.output), name=node.name + "_reshape"
-                )
+        node.CopyFrom(
+            helper.make_node(
+                "Reshape",
+                [node.input[0], targets[batch]],
+                list(node.output),
+                name=cache.unique_name((node.name or node.output[0]) + "_reshape"),
             )
+        )
+    _add_legacy_initializer_inputs(model)
     return model
 
 
 def _apply_argmax(model):
-    """Preserve ArgMax axes and restore its declared output layout."""
+    """Plan native ArgMax layouts before preparing private output restoration views."""
     cache = GraphCache(model.graph)
+    plans = {}
+    for node in _operator_nodes(model, {"ArgMax"}):
+        shape = _shape_before_boundary_promotion(cache, node.input[0])
+        if not shape or any(dim <= 0 for dim in shape):
+            raise ValueError(f"{node.name!r}: ArgMax requires a static input shape")
+        axis = _attribute(node, "axis")
+        value = axis.i if axis is not None else 0
+        if not -len(shape) <= value < len(shape):
+            raise ValueError(f"{node.name!r}: invalid ArgMax axis {value}")
+        output_shape = [dim for index, dim in enumerate(shape) if index != value % len(shape)]
+        if value >= 0:
+            value += {2: 2, 3: 1}.get(len(shape), 0)
+        plans[id(node)] = (value, output_shape)
     nodes = []
     for node in model.graph.node:
         nodes.append(node)
-        if node.op_type != "ArgMax":
+        if id(node) not in plans:
             continue
-        shape = _shape_before_boundary_promotion(cache, node.input[0])
-        if not shape:
-            continue
+        value, output_shape = plans[id(node)]
         axis = _attribute(node, "axis")
         if axis is None:
-            node.attribute.append(helper.make_attribute("axis", 0))
-            axis = _attribute(node, "axis")
-        if axis.i >= 0 and len(shape) in (2, 3):
-            axis.i += 4 - len(shape)
+            node.attribute.append(helper.make_attribute("axis", value))
+        else:
+            axis.i = value
         keepdims = _attribute(node, "keepdims")
         restore_shape = keepdims is not None and keepdims.i == 0
         if keepdims is not None:
             keepdims.i = 1
-        node.name += "_axis_updated"
+        original = node.output[0]
+        node.name = cache.unique_name((node.name or original) + "_axis_updated")
         if restore_shape:
-            original = node.output[0]
-            output_shape = cache.get_shape(original)
-            if output_shape is None and original.endswith("_squeeze_input"):
-                output_shape = cache.get_shape(original.removesuffix("_squeeze_input"))
-            if output_shape is None:
-                raise ValueError(f"Unknown original ArgMax output shape for {node.name!r}")
             target = add_initializer(
                 model.graph,
-                node.name + "_reshape_shape",
+                cache.unique_name(node.name + "_reshape_shape"),
                 np.asarray(pad4d(output_shape), dtype=np.int64),
                 dtype=TensorProto.INT64,
                 with_value_info=False,
             )
-            node.output[0] = original + "_keepdims"
+            node.output[0] = cache.unique_name(original + "_keepdims")
             nodes.append(
                 helper.make_node(
-                    "Reshape", [node.output[0], target], [original], name=node.name + "_reshape"
+                    "Reshape",
+                    [node.output[0], target],
+                    [original],
+                    name=cache.unique_name(node.name + "_reshape"),
                 )
             )
-    del model.graph.node[:]
-    model.graph.node.extend(nodes)
+    _insert_support_nodes(model.graph, nodes)
+    _add_legacy_initializer_inputs(model)
     return model
 
 
@@ -301,17 +411,62 @@ def _apply_update_axis(model):
         "Flatten",
     }
     cache = GraphCache(model.graph)
-    for node in model.graph.node:
+    plans = []
+    selected = _operator_nodes(model, {node.op_type for node in model.graph.node})
+    if any(op.domain == "com.microsoft" and op.version == 1 for op in model.opset_import):
+        selected += _operator_nodes(
+            model, {"QuantizeLinear", "DequantizeLinear"}, ("com.microsoft",)
+        )
+    versions = {op.domain: op.version for op in model.opset_import}
+    for node in selected:
         axis = _attribute(node, "axis")
-        if axis is None or axis.i < 0 or node.op_type in skip:
+        shape = _shape_before_boundary_promotion(cache, node.input[0]) if node.input else None
+        if (
+            axis is None
+            and node.op_type in update
+            and node.domain in {"", "ai.onnx"}
+            and shape
+            and (
+                len(shape) == 5
+                or (
+                    len(shape) in (2, 3)
+                    and node.op_type not in {"QuantizeLinear", "DequantizeLinear"}
+                )
+            )
+        ):
+            schema = defs.get_schema(
+                node.op_type, versions.get(node.domain, versions.get("", 1)), node.domain
+            )
+            default = schema.attributes.get("axis")
+            if default is not None and default.default_value.type:
+                value = default.default_value.i
+            else:
+                continue
+        elif axis is None or node.op_type in skip or (axis.i < 0 and node.op_type not in update):
             continue
+        else:
+            value = axis.i
         if node.op_type not in update:
             raise ValueError(f"{node.op_type} is unsupported for DLA axis transformation")
         if "axis_updated" in node.name:
             continue
-        shape = _shape_before_boundary_promotion(cache, node.input[0])
-        delta = {2: 2, 3: 1, 5: -1}.get(len(shape) if shape else 0, 0)
-        if delta:
-            axis.i += delta
-            node.name += "_axis_updated"
+        rank = len(shape) if shape else 0
+        original = value
+        if shape and rank == 5:
+            if not -5 <= value < 5 or 1 not in shape or value % 5 == shape.index(1):
+                raise ValueError(f"{node.name!r}: cannot map 5D axis {value}")
+            native_axis = value % 5
+            value = native_axis - int(native_axis > shape.index(1))
+            if original < 0:
+                value -= 4
+        elif value >= 0:
+            value += {2: 2, 3: 1}.get(rank, 0)
+        if value != original:
+            plans.append((node, axis, value))
+    for node, axis, value in plans:
+        if axis is None:
+            node.attribute.append(helper.make_attribute("axis", value))
+        else:
+            axis.i = value
+        node.name += "_axis_updated"
     return model
