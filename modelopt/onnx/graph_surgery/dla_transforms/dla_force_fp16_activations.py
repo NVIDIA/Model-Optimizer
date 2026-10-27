@@ -69,7 +69,7 @@ def _is_cast(node, dtype):
     )
 
 
-def _apply_fp16_lpnorm(model):
+def _apply_fp16_lpnorm(model, *, prepared_data_ops=None):
     """Decompose last-axis L2 normalization followed by a static gamma multiply."""
     graph = model.graph
     cache = GraphCache(graph)
@@ -157,7 +157,7 @@ def _apply_fp16_lpnorm(model):
     )
     _insert_support_nodes(graph, nodes)
     _add_legacy_initializer_inputs(model)
-    return _apply_non4d_lpnorm(model)
+    return _apply_non4d_lpnorm(model, prepared_data_ops=prepared_data_ops)
 
 
 def _validate_float_weights(graph):
