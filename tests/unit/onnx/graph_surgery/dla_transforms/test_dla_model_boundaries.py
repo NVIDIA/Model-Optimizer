@@ -284,6 +284,7 @@ def test_boundary_layer_normalization_preserves_native_axis(axis):
         ("Conv", None),
         ("opaque", None),
         ("Shape", None),
+        ("InstanceNormalization", None),
     ],
 )
 @pytest.mark.parametrize("unary", [False, True])
@@ -332,6 +333,8 @@ def test_normalization_preserves_rank_sensitive_and_opaque_consumers(operation, 
         )
         nodes.append(helper.make_node("NativeLayout", [current], ["y"], domain="opaque.norm"))
         output_shape = [2, 4, 3]
+    elif operation == "InstanceNormalization":
+        nodes.append(helper.make_node(operation, [current, "scale", "bias"], ["y"]))
     else:
         nodes.append(helper.make_node("Shape", [current], ["y"]))
         output_shape, dtype = [3], TensorProto.INT64
@@ -339,6 +342,10 @@ def test_normalization_preserves_rank_sensitive_and_opaque_consumers(operation, 
         helper.make_tensor_value_info("y", dtype, output_shape),
         helper.make_tensor_value_info("normalized", TensorProto.FLOAT, shape),
     ]
+    if operation == "Transpose" and axis is None:
+        for name in ("normalized_squeeze_input", "normalized_squeeze"):
+            controls.append(numpy_helper.from_array(np.array(1, np.int64), name))
+            outputs.append(helper.make_tensor_value_info(name, TensorProto.INT64, []))
     if operation in {"Conv", "opaque", "Shape"}:
         nodes.append(helper.make_node("Softmax", [current], ["side"], axis=-1))
         outputs.append(helper.make_tensor_value_info("side", TensorProto.FLOAT, shape))

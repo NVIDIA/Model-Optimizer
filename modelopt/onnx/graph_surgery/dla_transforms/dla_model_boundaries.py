@@ -18,7 +18,14 @@
 import numpy as np
 from onnx import TensorProto, defs, helper, numpy_helper
 
-from ..utils.graph_utils import GraphCache, _attribute, add_initializer, batch_replace_nodes, pad4d
+from ..utils.graph_utils import (
+    GraphCache,
+    _attribute,
+    _shape_before_boundary_promotion,
+    add_initializer,
+    batch_replace_nodes,
+    pad4d,
+)
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _RANK_AGNOSTIC_OPS, _subgraph_captures
 from .dla_reorder_nodes import priority_topological_order
@@ -154,7 +161,7 @@ def _native_conv1d(node, cache):
         if producer is None:
             return False
         if producer.op_type == "InstanceNormalization":
-            shape = cache.get_shape(producer.input[0])
+            shape = _shape_before_boundary_promotion(cache, producer.input[0])
             return shape is not None and len(shape) == 3
         if producer.op_type not in _RANK_AGNOSTIC_OPS or len(producer.input) != 1:
             return False
@@ -443,9 +450,6 @@ def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False, prepared_o
             existing.input.extend([data_input] + ([axes_name] if axes_name else []))
             continue
         data_input = cache.unique_name(value.name + "_squeeze_input")
-        graph.value_info.append(
-            helper.make_tensor_value_info(data_input, value.type.tensor_type.elem_type, shape)
-        )
         for node in graph.node:
             for index, name in enumerate(node.input):
                 if name == value.name:
@@ -624,6 +628,8 @@ def _apply_fix_instancenorm_channels(model, *, prepared_consumer_ops=()):
                     and consumer.output[0] in cache.graph_output_names
                 ):
                     yield consumer, None, None, False
+                elif standard and consumer.op_type == "InstanceNormalization" and input_index == 0:
+                    continue
                 elif (
                     standard
                     and consumer.op_type in _RANK_AGNOSTIC_OPS
@@ -644,7 +650,7 @@ def _apply_fix_instancenorm_channels(model, *, prepared_consumer_ops=()):
     plans = []
     for index, node in enumerate(graph.node):
         if _is_standard_node(node, local_functions, {"InstanceNormalization"}):
-            shape = cache.get_shape(node.input[0])
+            shape = _shape_before_boundary_promotion(cache, node.input[0])
             if shape is not None and len(shape) == 3:
                 plans.append((index, node, shape, list(output_consumers(node.output[0]))))
     bridges = {}
