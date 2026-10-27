@@ -30,6 +30,7 @@ from modelopt.onnx.graph_surgery.make_dla_compatible import (
 
 def test_logged_pass_order():
     # Recorded by the packaged C++ transform.log files, including both inference stages.
+    """Keep every stage in the established DLA conversion order."""
     expected = [
         "RemoveQDQ",
         "ConstantsToInitializers",
@@ -72,6 +73,7 @@ def test_logged_pass_order():
 
 
 def _run(model, feeds):
+    """Execute a checked model with the CPU runtime."""
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
     options.inter_op_num_threads = 1
@@ -82,6 +84,7 @@ def _run(model, feeds):
 
 @pytest.mark.parametrize("operation", ["ArgMax", "ReduceSum", "Concat", "Flatten"])
 def test_boundary_axis_conversion_preserves_values_and_shapes(operation):
+    """Preserve native axis semantics through boundary promotion."""
     input_shape = [2, 3, 4]
     feeds = {"x": np.arange(24, dtype=np.float32).reshape(input_shape)}
     inputs = [helper.make_tensor_value_info("x", TensorProto.FLOAT, input_shape)]
@@ -124,6 +127,7 @@ def test_boundary_axis_conversion_preserves_values_and_shapes(operation):
 
 
 def test_remove_all_qdq_rejects_conflicting_dtype_filter():
+    """Refuse conflicting QDQ options before changing the graph."""
     with pytest.raises(ValueError, match="not both"):
         _transform_make_dla_compatible(
             None, remove_all_qdq=True, qdq_quantized_dtypes=[TensorProto.INT8]

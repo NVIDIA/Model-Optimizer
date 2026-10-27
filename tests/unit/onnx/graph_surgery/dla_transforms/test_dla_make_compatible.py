@@ -34,10 +34,12 @@ _MAX_IR = 9
 
 
 def _vi(name, dtype, shape):
+    """Declare a typed tensor for a checked graph."""
     return helper.make_tensor_value_info(name, dtype, shape)
 
 
 def _clamp_ir(model):
+    """Use the model IR supported by the CPU runtime."""
     model.ir_version = min(model.ir_version, _MAX_IR)
 
 
@@ -51,6 +53,7 @@ def test_pipeline_reorders_nodes_after_final_unsqueeze(monkeypatch):
     """The final reorder runs after the post-cleanup Unsqueeze transform."""
 
     def fake_unsqueeze(model):
+        """Inject a deliberately unordered fixture for final reorder coverage."""
         graph = model.graph
         del graph.node[:]
         graph.node.extend(
@@ -346,6 +349,7 @@ def test_matmul_dynamic_then_5d_reshape_qdq_reduce():
 
 
 def _count_op(graph, op_type):
+    """Count nodes matching an operator type."""
     return sum(1 for n in graph.node if n.op_type == op_type)
 
 

@@ -58,10 +58,12 @@ from modelopt.onnx.graph_surgery.utils.graph_utils import GraphCache
 
 
 def _vi(name, dtype=T.FLOAT, shape=(2, 3)):
+    """Declare a typed tensor for a checked graph."""
     return h.make_tensor_value_info(name, dtype, shape)
 
 
 def _model(nodes, inputs, outputs, initializers=(), value_info=()):
+    """Build a typed model for a focused safety contract."""
     return h.make_model(
         h.make_graph(nodes, "safety", inputs, outputs, initializers, value_info=value_info),
         opset_imports=[h.make_opsetid("", 21)],
@@ -69,6 +71,7 @@ def _model(nodes, inputs, outputs, initializers=(), value_info=()):
 
 
 def _same_values(model, transform, feeds):
+    """Check output values before and after a graph rewrite."""
     model = onnx.shape_inference.infer_shapes(model)
     expected = ReferenceEvaluator(model).run(None, feeds)
     candidate = transform(copy.deepcopy(model))
@@ -81,6 +84,7 @@ def _same_values(model, transform, feeds):
 
 @pytest.mark.parametrize("static", [False, True])
 def test_shared_where_mask_keeps_both_polarities(static):
+    """Preserve both selections when Where nodes share a condition mask."""
     mask = np.array([[True, False, True]])
     initializers = [nh.from_array(np.float32(0), "zero")]
     inputs = [_vi("x")]
@@ -103,6 +107,7 @@ def test_shared_where_mask_keeps_both_polarities(static):
 
 
 def test_shared_integer_comparisons_have_one_cast_producer():
+    """Reuse one private conversion across shared integer comparisons."""
     model = _model(
         [h.make_node("Greater", ["x", "x"], ["a"]), h.make_node("Greater", ["x", "z"], ["b"])],
         [_vi("x", T.INT32)],
@@ -113,6 +118,7 @@ def test_shared_integer_comparisons_have_one_cast_producer():
 
 
 def test_quantized_graph_output_and_non_dq_consumer_survive():
+    """Keep quantized owners needed by public outputs and other consumers."""
     model = _model(
         [
             h.make_node("QuantizeLinear", ["x", "s", "z"], ["q"]),
@@ -135,6 +141,7 @@ def test_quantized_graph_output_and_non_dq_consumer_survive():
 
 
 def test_shared_quantized_weight_with_different_scales_keeps_outputs():
+    """Respect separate dequantization parameters on a shared weight."""
     model = _model(
         [
             h.make_node("DequantizeLinear", ["w", "s1", "z"], ["a"]),
@@ -153,6 +160,7 @@ def test_shared_quantized_weight_with_different_scales_keeps_outputs():
 
 
 def test_blocked_dequantization_is_left_intact():
+    """Leave unsupported blocked dequantization layouts unchanged."""
     model = _model(
         [h.make_node("DequantizeLinear", ["w", "s", "z"], ["y"], axis=1, block_size=2)],
         [],
@@ -169,6 +177,7 @@ def test_blocked_dequantization_is_left_intact():
 
 
 def test_lossy_cast_roundtrip_keeps_its_rounding():
+    """Retain an intermediate cast whose rounding changes values."""
     model = _model(
         [
             h.make_node("Cast", ["x"], ["half"], to=T.FLOAT16),
@@ -185,6 +194,7 @@ def test_lossy_cast_roundtrip_keeps_its_rounding():
 
 
 def test_symbolic_reshape_is_preserved():
+    """Keep reshape targets whose native dimensions are unresolved."""
     model = _model(
         [h.make_node("Reshape", ["x", "shape"], ["y"])],
         [_vi("x", shape=["N", 6])],
@@ -197,6 +207,7 @@ def test_symbolic_reshape_is_preserved():
 
 
 def test_reshape_chain_keeps_exposed_intermediate():
+    """Do not remove reshape results exposed outside a private chain."""
     model = _model(
         [h.make_node("Reshape", ["x", "s1"], ["a"]), h.make_node("Reshape", ["a", "s2"], ["b"])],
         [_vi("x")],
@@ -212,6 +223,7 @@ def test_reshape_chain_keeps_exposed_intermediate():
 @pytest.mark.parametrize("axis", [None, -2, 0, 1])
 @pytest.mark.parametrize("operation", ["ArgMax", "Softmax", "LpNormalization", "Gather"])
 def test_rank_promotion_preserves_axis_semantics(operation, axis):
+    """Preserve native axes when inserting four-dimensional views."""
     attrs = {} if axis is None else {"axis": axis}
     inputs = ["x"]
     initializers = []
@@ -254,6 +266,7 @@ def test_rank_promotion_preserves_axis_semantics(operation, axis):
 
 
 def test_not_preserves_nonbinary_and_shared_boolean_uses():
+    """Protect nonbinary values and independent boolean consumers."""
     model = _model(
         [
             h.make_node("Cast", ["x"], ["mask"], to=T.BOOL),
@@ -268,6 +281,7 @@ def test_not_preserves_nonbinary_and_shared_boolean_uses():
 
 @pytest.mark.parametrize("change", ["alpha", "bias"])
 def test_unsupported_gemm_refuses_before_mutation(change):
+    """Refuse unsupported Gemm layouts without changing the caller."""
     attrs = {"alpha": 2.0} if change == "alpha" else {}
     bias = np.ones((2, 3) if change == "bias" else (3,), dtype=np.float32)
     model = _model(
@@ -284,6 +298,7 @@ def test_unsupported_gemm_refuses_before_mutation(change):
 
 @pytest.mark.parametrize("deferred", [False, True])
 def test_broadcast_matmul_restores_output_rank(deferred):
+    """Restore the native broadcast MatMul result layout."""
     model = _model(
         [h.make_node("MatMul", ["x", "w"], ["y"])],
         [_vi("x")],
@@ -301,6 +316,7 @@ def test_broadcast_matmul_restores_output_rank(deferred):
 
 @pytest.mark.parametrize("axes", [None, [-1]])
 def test_legacy_reduce_restores_scalar_or_reduced_shape(axes):
+    """Restore scalar and reduced outputs with legacy reduction schemas."""
     inputs = ["x"]
     initializers = []
     if axes is not None:
@@ -318,6 +334,7 @@ def test_legacy_reduce_restores_scalar_or_reduced_shape(axes):
 
 
 def test_legacy_rank_dependent_op_is_left_intact():
+    """Keep unsupported legacy rank-sensitive operators native."""
     model = _model(
         [h.make_node("Einsum", ["x"], ["y"], equation="ij->ji")],
         [_vi("x")],
@@ -329,9 +346,11 @@ def test_legacy_rank_dependent_op_is_left_intact():
 
 
 def test_dispatcher_keeps_existing_return_and_keyword_contract(monkeypatch):
+    """Preserve registry dispatch return values and keyword forwarding."""
     calls = []
 
     def original(**kwargs):
+        """Record registry forwarding and return its sentinel value."""
         calls.append(kwargs)
         return {"converted": 3}
 
@@ -351,6 +370,7 @@ def test_dispatcher_keeps_existing_return_and_keyword_contract(monkeypatch):
 
 
 def test_control_flow_capture_keeps_initializer():
+    """Retain fixed data referenced from a nested control-flow graph."""
     branch = h.make_graph(
         [h.make_node("Identity", ["w"], ["v"])], "branch", [], [_vi("v", shape=[2])]
     )
@@ -364,6 +384,7 @@ def test_control_flow_capture_keeps_initializer():
 
 
 def test_rank_converted_topk_chain_preserves_gathered_values():
+    """Preserve actual gathered values while removing private index tiling."""
     model = _model(
         [
             h.make_node("TopK", ["scores", "k"], ["values", "indices"], axis=3),

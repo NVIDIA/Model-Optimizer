@@ -334,6 +334,9 @@ def dla_make_dla_compatible(
 ) -> onnx.ModelProto:
     """Load an ONNX model, apply the ordered DLA transforms, and save the result.
 
+    Arithmetic lowering of zero-branch ``Where`` assumes finite FP32 branch tensors.
+    NaN and infinity values at those nodes are outside the supported input contract.
+
     Args:
         model_path: Input file; external weights are loaded from its directory.
         output_path: Destination ONNX file.
