@@ -251,6 +251,8 @@ def _prepared_index_data(model, cache, prepared_ops, data_names, *, before_bound
             kernel = cache.get_shape(node.input[1])
             return kernel is not None and len(kernel) == 4
         if not before_boundary and node.op_type == "MatMul":
+            if name in cache.graph_output_names | captured:
+                return False
             ranks = [matrix_rank(value) for value in node.input[:2]]
             return (
                 list(node.input[:2])
