@@ -378,7 +378,9 @@ def distribution_plan(model: torch.nn.Module) -> DistributionPlan:
     A model with no plan recorded is a single process's, unless it shows otherwise: one that is
     FSDP2-sharded, or held in a run of several ranks, raises rather than be taken for one. That
     includes a module added to a model after its plan was recorded: a module does not know the
-    model it was added to, so read the plan off that model.
+    model it was added to, so read the plan off that model. A run is its live process group: before
+    a launch sets its group up, each of its processes runs alone with a model of its own, so a model
+    with no plan reads as a single process's there.
     """
     plan = getattr(model, _PLAN_ATTR, None)
     if plan is not None:
@@ -445,9 +447,10 @@ def _encoded(value: Any) -> bytes:
     which sends the failure to every rank, rather than inside the collective, on one rank alone. A
     load that depends on the loading rank can still fail on a peer alone, a tensor's, which lands on
     the device it was saved from, say: these collectives carry small values, such as a plan, a flag
-    or a size. The check holds one more copy of the value while it runs. The collective carries the
-    bytes, which always pickle. torch.save stands in for plain pickle, which bandit refuses under
-    modelopt/.
+    or a size. The check holds one more copy of the value while it runs, and loads it once more on
+    the sending rank: a value whose load has side effects has them twice there. The collective
+    carries the bytes, which always pickle. torch.save stands in for plain pickle, which bandit
+    refuses under modelopt/.
     """
     buffer = io.BytesIO()
     torch.save(value, buffer)
