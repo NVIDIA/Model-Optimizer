@@ -127,6 +127,11 @@ def _make_model(
             [helper.make_tensor_value_info("X", TensorProto.FLOAT, input_shape)],
             outputs,
             initializer=initializers,
+            value_info=[
+                helper.make_tensor_value_info("runtime_scale", TensorProto.FLOAT, list(scale.shape))
+            ]
+            if quantized and late_control
+            else [],
         ),
         opset_imports=[helper.make_opsetid("", 21)],
     )
