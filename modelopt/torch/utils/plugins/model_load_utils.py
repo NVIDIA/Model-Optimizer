@@ -977,7 +977,7 @@ def _dense_from_env(world_size: int) -> str:
 def _ep_degree(ep_size) -> int | str:
     """``ep_size`` as an EP degree or ``"auto"``; ``None`` reads ``MODELOPT_EP_DEGREE``."""
     value = env.ep_degree() if ep_size is None else ep_size
-    if str(value) in ("auto", "0"):
+    if str(value).lower() in ("auto", "0"):
         return "auto"
     try:
         return int(value)

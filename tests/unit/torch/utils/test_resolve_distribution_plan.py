@@ -413,9 +413,9 @@ def test_an_ep_degree_that_is_not_a_number_names_where_it_came_from(
 
 
 @needs_qwen3_moe_ep_plan
-@pytest.mark.parametrize("value", ["0", ""], ids=["zero", "exported-empty"])
+@pytest.mark.parametrize("value", ["0", "", "AUTO"], ids=["zero", "exported-empty", "capitals"])
 def test_an_ep_degree_of_0_is_auto(run_as, serve, monkeypatch, tmp_path, value):
-    """And so is one exported empty: unset, the plan decides too."""
+    """And so is one exported empty, and auto in any case: the plan decides."""
     monkeypatch.setenv("MODELOPT_EP_DEGREE", value)
     run_as(4)
     serve(_qwen3_moe(num_experts=8))
