@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HuggingFace-coupled FSDP2 model loading helpers."""
+"""HuggingFace model loading: :func:`load_pretrained`, and parallel FSDP2 loading."""
 
 import logging
 import os
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.tensor import DTensor
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
 
@@ -39,7 +39,10 @@ from modelopt.torch.utils.distributed import (
     fsdp2_wrap,
     is_initialized,
 )
+from modelopt.torch.utils.logging import print_rank_0
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    checkpoint_tensor_files,
+    ensure_local_checkpoint,
     indexed_weight_map,
     read_safetensors_subset,
 )
@@ -87,15 +90,22 @@ def _promote_non_dtensor_to_gpu(model: nn.Module, device: torch.device) -> None:
             module._buffers[name] = buf.to(device)
 
 
-def _conversion_plan(model: nn.Module) -> dict | None:
+def _conversion_plan(model: nn.Module, conversions: list | None = None) -> dict | None:
     """Transformers' own conversion mapping for ``model``, or ``None`` if nothing needs converting.
 
     ``legacy_renames`` covers a remote-code model's ``_checkpoint_conversion_mapping``; the
     ``renamings``/``converters`` from HF's engine drive renaming + MoE weight fusion directly.
+    ``conversions`` replaces the model's stock mapping with a given list, such as the one
+    ``from_pretrained`` records of what it ran; that record is complete, so no legacy renames are
+    layered on top of it.
     """
-    legacy_renames = dict(getattr(model, "_checkpoint_conversion_mapping", None) or {})
+    if conversions is None:
+        legacy_renames = dict(getattr(model, "_checkpoint_conversion_mapping", None) or {})
+        conversions = get_model_conversion_mapping(model)
+    else:
+        legacy_renames = {}
     renamings, converters = [], []
-    for entry in get_model_conversion_mapping(model):
+    for entry in conversions:
         (converters if isinstance(entry, WeightConverter) else renamings).append(entry)
     if not (legacy_renames or renamings or converters):
         return None
@@ -118,6 +128,27 @@ def _resolve_target(plan: dict, key: str) -> tuple[str, str | None]:
     return rename_source_key(
         key, plan["renamings"], plan["converters"], plan["prefix"], plan["meta_state_dict"]
     )
+
+
+def _conversion_plans(model: nn.Module) -> list[dict]:
+    """The plans a load of ``model`` may have converted keys with; see :func:`unplaced_source_keys`.
+
+    The stock mapping, and the record ``from_pretrained`` kept of what it ran when it built ``model``.
+    """
+    loaded = getattr(model, "_weight_conversions", None)
+    plans = (_conversion_plan(model), _conversion_plan(model, loaded) if loaded else None)
+    return [plan for plan in plans if plan is not None]
+
+
+def _target_param(plans: list[dict], key: str, model_param_names: set[str]) -> str | None:
+    """The parameter or buffer ``key`` loads into under any of ``plans``, or ``None`` for none."""
+    if not plans:
+        return key if key in model_param_names else None
+    for plan in plans:
+        target = _resolve_target(plan, key)[0]
+        if target in model_param_names:
+            return target
+    return None
 
 
 def _convert_keys(plan: dict, state: dict) -> dict:
@@ -247,7 +278,10 @@ def _broadcast_load_group(
 
 
 def _group_sources_by_layer(
-    weight_map: dict, plan: dict | None, model_param_names: set[str], layer_prefixes: list[str]
+    ckpt_keys: "Iterable[str]",
+    plans: list[dict],
+    model_param_names: set[str],
+    layer_prefixes: list[str],
 ) -> tuple[dict[int, list[str]], list[str], list[str]]:
     """Bucket checkpoint keys by the decoder layer their converted target lives in.
 
@@ -261,9 +295,9 @@ def _group_sources_by_layer(
     layer_sources: dict[int, list[str]] = {i: [] for i in range(len(layer_prefixes))}
     non_layer_sources: list[str] = []
     unplaced: list[str] = []
-    for ckpt_key in weight_map:
-        target = _resolve_target(plan, ckpt_key)[0] if plan else ckpt_key
-        if target not in model_param_names:
+    for ckpt_key in ckpt_keys:
+        target = _target_param(plans, ckpt_key, model_param_names)
+        if target is None:
             unplaced.append(ckpt_key)
             continue
         for i, prefix in enumerate(layer_prefixes):
@@ -275,74 +309,144 @@ def _group_sources_by_layer(
     return layer_sources, non_layer_sources, unplaced
 
 
-def record_unplaced_source_keys(
-    model: nn.Module, ckpt_path: str, unexpected_keys: "Iterable[str] | None"
-) -> list[str]:
-    """Record the checkpoint keys the loader could not place, for the export to carry over.
+def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
+    """Checkpoint tensors the loaded ``model`` has no parameter for, e.g. an MTP head.
 
-    ``unexpected_keys`` is what ``from_pretrained(..., output_loading_info=True)`` reports: keys
-    found in the checkpoint but not expected by the model's architecture. That is the loader's own
-    accounting, produced while loading, so it already reflects any on-the-fly name conversion --
-    unlike re-deriving the set afterwards, which has to replay the conversion plan to avoid
-    mistaking a renamed key for an unplaced one.
+    Every tensor in the weight files the loader opened
+    (:func:`~modelopt.torch.utils.plugins.hf_checkpoint_utils.checkpoint_tensor_files`, which also
+    sees tensors the index omits) is mapped through the conversions the load ran, and is placed if
+    that names a parameter or buffer of ``model``. Architecture-agnostic by construction: nothing
+    here knows what an MTP head looks like.
 
-    How Transformers decides what it has seen
-    -----------------------------------------
-    The index (``model.safetensors.index.json``) selects which FILES the loader opens, not which
-    TENSORS it sees. Within a file it opens, it enumerates every tensor present and reports the
-    ones the architecture does not expect. Two consequences, both load-bearing here:
+    The loader's own ``unexpected_keys`` cannot stand in for this. Transformers drops from it the
+    keys an architecture's ``_keys_to_ignore_on_load_unexpected`` matches -- Qwen3-Next ``^mtp.*``,
+    DeepSeek-V3 and GLM their MTP layers -- which are exactly the weights the export must carry, and
+    it names some keys after conversion (a fused ``...experts.gate_up_proj``) where the export needs
+    the source tensors on disk.
 
-    * A tensor missing from ``weight_map`` but physically present in a shard the index names for
-      OTHER tensors is still reported. An MTP head stored inside a main shard is exactly this
-      shape -- when MTP is not quantized the model never declares it, so it arrives here like any
-      other unplaced key. The corollary is the one that is easy to get wrong: the index is not an
-      inventory of the checkpoint, so looking such a key up in ``weight_map`` to find its file
-      returns nothing. :func:`~modelopt.torch.export.unified_export_hf._locate_source_keys` falls
-      back to scanning shard headers for precisely this reason; resolving through ``weight_map``
-      alone used to drop these tensors from the export silently.
-    * A tensor in a file the index never names is NOT reported -- the loader never opened it, so
-      it had no opportunity to call anything unexpected. Those are handled by
-      :func:`~modelopt.torch.utils.plugins.hf_checkpoint_utils.copy_off_index_safetensors`, which
-      copies the file whole rather than paying host memory to re-serialise it.
+    Two conversion plans are replayed, and a key resolving through either is placed: the model's
+    stock mapping, and ``_weight_conversions``, the record ``from_pretrained`` keeps of what it ran.
+    Only the record has what loading adds to the stock mapping -- a dequantizing quantizer folds FP8
+    ``weight_scale_inv`` and MXFP4 ``*_blocks``/``*_scales`` into the weights, an on-the-fly
+    decompressor feeds ``weight_packed`` experts in -- but it lists only conversions some key used,
+    and a model our own loader built from its config has none, so the stock mapping answers there.
 
-    This is observed behaviour, established by experiment against transformers 5.3.0 (a shard
-    holding one tensor the index omitted reported it; a file the index never named reported
-    nothing), not a published contract. Nothing here depends on it holding: a key that the loader does report is
-    located by header scan whether or not the index lists it, and a file the loader ignores is
-    copied verbatim regardless.
-
-    Prefer this over :func:`unplaced_source_keys` whenever the loading info is available.
+    A checkpoint without safetensors (``pytorch_model.bin``) has nothing the export can carry: ``[]``.
     """
-    keys = sorted(unexpected_keys or [])
+    tensor_files = checkpoint_tensor_files(ckpt_path)
+    if not tensor_files:
+        return []
+    # Every name of a tied parameter: a checkpoint can store the one named_parameters() drops by
+    # default (Qwen3-0.6B stores lm_head.weight beside the embedding it is tied to).
+    model_param_names = {
+        n
+        for n, _ in chain(
+            model.named_parameters(remove_duplicate=False),
+            model.named_buffers(remove_duplicate=False),
+        )
+    }
+    plans = _conversion_plans(model)
+    # A key that already names a parameter is placed as it is: a registered Qwen VLM's checkpoint
+    # uses the model's own names, which its stock mapping would rename away.
+    return [
+        key
+        for key in tensor_files
+        if key not in model_param_names and _target_param(plans, key, model_param_names) is None
+    ]
+
+
+def record_unplaced_source_keys(
+    model: nn.Module, ckpt_path: str, keys: "Iterable[str] | None" = None
+) -> list[str]:
+    """Record on ``model`` the checkpoint tensors it has no parameter for, for the export to carry.
+
+    The load is what knows how the checkpoint maps onto the model, so the list is worked out once,
+    at load time, and the export reads it back (``_modelopt_unplaced_source_keys``, beside the
+    checkpoint in ``_modelopt_source_checkpoint``) rather than deriving it again. Pass ``keys`` when
+    the loader already found them while placing the weights; otherwise :func:`unplaced_source_keys`
+    derives them from the loaded model. Every loader of a model that may be exported calls this:
+    :func:`load_pretrained` and :func:`parallel_load_and_prepare_fsdp2` do.
+    """
+    keys = sorted(unplaced_source_keys(model, ckpt_path) if keys is None else keys)
     model._modelopt_unplaced_source_keys = keys
     model._modelopt_source_checkpoint = str(ckpt_path)
     return keys
 
 
-def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
-    """Checkpoint keys the built model has no parameter for.
+def load_pretrained(
+    ckpt_path: str,
+    auto_class: Any = None,
+    *,
+    model_type: str | None = None,
+    **kwargs,
+) -> nn.Module:
+    """Load a Hugging Face model for ModelOpt to optimize and export.
 
-    Fallback for loaders that do not surface their own accounting. Prefer
-    :func:`record_unplaced_source_keys` with ``from_pretrained(..., output_loading_info=True)``,
-    whose ``unexpected_keys`` is the same set computed by the loader itself.
+    ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
+    ``AutoModelForCausalLM``), plus what ModelOpt needs around the load:
 
-    Architecture-agnostic by construction -- it asks whether a target parameter exists, not whether
-    the key looks like an MTP head or an auxiliary tower.
+    * A Hub model ID is made local first (:func:`ensure_local_checkpoint`, which takes the
+      ``revision``, ``token``, ``cache_dir`` and ``local_files_only`` ``kwargs``): the export reads
+      the source checkpoint from disk. Under ``torch.distributed`` every rank must call this. The
+      config and model loads still take all but ``revision``: an ``auto_map`` entry can name
+      custom code in another Hub repo, which Transformers fetches with them. A ``subfolder`` is
+      part of where the checkpoint is: the config, the loading hook and the record below read it,
+      as the load does.
+    * The model type's loading hook runs
+      (:func:`~modelopt.torch.models.hf.prepare_model_for_loading`), e.g. to keep the MTP head a
+      Nemotron-H checkpoint carries. ``model_type`` selects it; when omitted, the type of the
+      ``config`` passed for the load, else of the checkpoint's config.
+    * The checkpoint tensors the model has no parameter for are recorded
+      (:func:`record_unplaced_source_keys`), so the export carries them over unchanged. The model
+      is returned alone: ``output_loading_info=True`` is refused. So is a ``variant``: the record
+      and the export read the checkpoint's default weight files.
     """
-    weight_map = indexed_weight_map(ckpt_path)
-    if not weight_map:
-        raise RuntimeError(
-            f"No safetensors checkpoint at {ckpt_path} "
-            "(expected model.safetensors or model.safetensors.index.json)."
+    if kwargs.pop("output_loading_info", False):
+        raise ValueError(
+            "load_pretrained returns the model alone and does not take output_loading_info=True; "
+            "the checkpoint tensors the model has no parameter for are recorded on it instead "
+            "(see record_unplaced_source_keys)."
         )
-    plan = _conversion_plan(model)
-    model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
-    return [
-        ckpt_key
-        for ckpt_key in weight_map
-        if ckpt_key not in model_param_names
-        and (_resolve_target(plan, ckpt_key)[0] if plan else ckpt_key) not in model_param_names
-    ]
+    if kwargs.get("variant") is not None:
+        raise ValueError(
+            f"load_pretrained does not take variant={kwargs['variant']!r}: the checkpoint tensors "
+            "the model has no parameter for are recorded from, and carried into the export from, "
+            "the checkpoint's default weight files."
+        )
+    # Importing modelopt.torch.models registers every model spec; only callers of this need them.
+    from modelopt.torch.models.hf import prepare_model_for_loading
+
+    auto_class = auto_class or AutoModelForCausalLM
+    hub_options = {
+        k: kwargs.pop(k) for k in ("token", "cache_dir", "local_files_only") if k in kwargs
+    }
+    revision = {"revision": kwargs.pop("revision")} if "revision" in kwargs else {}
+    _, ckpt_path = ensure_local_checkpoint(ckpt_path, **revision, **hub_options)
+    subfolder = kwargs.pop("subfolder", None)
+    if subfolder:
+        ckpt_path = os.path.join(ckpt_path, subfolder)
+    trust_remote_code = kwargs.get("trust_remote_code", False)
+    if model_type is None:
+        # The load uses the config passed for it, if any, so the loading hook follows that one.
+        model_type = getattr(kwargs.get("config"), "model_type", None) or (
+            AutoConfig.from_pretrained(
+                ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+            ).model_type
+        )
+    with prepare_model_for_loading(
+        model_type,
+        ckpt_path,
+        trust_remote_code,
+        model_class=None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class,
+    ):
+        model = auto_class.from_pretrained(ckpt_path, **hub_options, **kwargs)
+    unplaced = record_unplaced_source_keys(model, ckpt_path)
+    if unplaced:
+        print_rank_0(
+            f"{len(unplaced)} checkpoint tensor(s) the model has no parameter for "
+            f"(e.g. {unplaced[0]}); the export will carry them over unchanged."
+        )
+    return model
 
 
 def parallel_load_and_prepare_fsdp2(
@@ -395,9 +499,15 @@ def parallel_load_and_prepare_fsdp2(
     # Valid targets; keys converting to anything else are aux weights (e.g. an MTP head) we skip.
     model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
 
-    # Bucket each checkpoint key by its target's decoder layer (root params go to non_layer_sources).
+    # Bucket each checkpoint tensor by its target's decoder layer (root params go to
+    # non_layer_sources). Every tensor in the files the index names, not only the ones it lists, so
+    # the unplaced ones fall out of this same pass. A model built from its config ran no
+    # conversions of its own, so the stock plan is the only one.
     layer_sources, non_layer_sources, unplaced = _group_sources_by_layer(
-        weight_map, plan, model_param_names, layer_prefixes
+        checkpoint_tensor_files(resolved_path),
+        [plan] if plan else [],
+        model_param_names,
+        layer_prefixes,
     )
     if unplaced:
         logger.debug(
@@ -408,8 +518,7 @@ def parallel_load_and_prepare_fsdp2(
     # Recorded on the model so export can read them back from the source without being told where
     # it came from. Not a state dict: holding these tensors from load to export would waste the
     # memory this loader exists to save.
-    model._modelopt_unplaced_source_keys = unplaced
-    model._modelopt_source_checkpoint = resolved_path
+    record_unplaced_source_keys(model, resolved_path, unplaced)
 
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
 

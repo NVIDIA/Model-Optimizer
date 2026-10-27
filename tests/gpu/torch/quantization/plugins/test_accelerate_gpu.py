@@ -39,6 +39,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils import (
     enable_weight_access_and_writeback,
     is_quantized_linear,
@@ -140,6 +141,46 @@ def test_cpu_offloaded_tinyllama(tmp_path):
     assert torch.allclose(output_ref.logits, output_test.logits)
 
 
+def test_offloaded_quantizer_keeps_what_its_setter_wrote(tmp_path):
+    """A setter writes through ``.data``, which leaves ``_version`` alone; the offload must keep it."""
+    model, _, _, inputs = make_cpu_offloaded_model(tmp_path)
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda model: model(inputs))
+    linear = model.model.layers[0].self_attn.q_proj
+    quantizer = linear.weight_quantizer
+    with enable_weight_access_and_writeback(linear, model):
+        pass
+    assert quantizer._amax.device.type == "cpu"
+
+    amax = quantizer._amax * 2
+    with enable_weight_access_and_writeback(linear, model):
+        quantizer.amax = amax
+    assert quantizer._amax.device.type == "cpu"
+    assert torch.equal(quantizer._amax, amax)
+
+
+def test_offloaded_layer_keeps_bias_calibration_off_the_gpu(tmp_path):
+    """A static-bias quantizer's bias calibrator leaves the GPU with the offloaded layer's weights."""
+    model, _, _, inputs = make_cpu_offloaded_model(tmp_path)
+    input_cfg = {"num_bits": 8, "axis": None, "bias": {-1: None, "type": "static"}}
+    quant_cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*input_quantizer", "cfg": input_cfg},
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, make_layerwise_cfg(quant_cfg), lambda model: model(inputs))
+    bias_state = [
+        tensor
+        for quantizer in model.model.layers[0].modules()
+        if isinstance(quantizer, TensorQuantizer) and quantizer._bias_calibrator is not None
+        for tensor in vars(quantizer._bias_calibrator).values()
+        if isinstance(tensor, torch.Tensor)
+    ]
+    assert bias_state
+    assert all(tensor.device.type == "cpu" for tensor in bias_state)
+
+
 @pytest.mark.parametrize("use_checkpoint", [False, True], ids=["no_ckpt", "ckpt"])
 def test_layerwise_calibrate_cpu_offloaded(tmp_path, use_checkpoint):
     """Layerwise calibration on CPU-offloaded model matches GPU-only reference."""
@@ -183,6 +224,20 @@ def test_layerwise_calibrate_cpu_offloaded(tmp_path, use_checkpoint):
                 )
 
     assert torch.allclose(output_ref.logits, output_test.logits)
+
+    # Between uses, the offloaded layer's quantizer state stays off the GPU like its weights.
+    offloaded_state = [
+        tensor
+        for quantizer in model.model.layers[0].modules()
+        if isinstance(quantizer, TensorQuantizer)
+        for tensor in [
+            *quantizer.buffers(recurse=False),
+            *(vars(quantizer._calibrator).values() if quantizer._calibrator is not None else ()),
+        ]
+        if isinstance(tensor, torch.Tensor)
+    ]
+    assert offloaded_state
+    assert all(tensor.device.type == "cpu" for tensor in offloaded_state)
 
     if use_checkpoint:
         manifest_path = os.path.join(ckpt_dir, "manifest.json")

@@ -24,6 +24,7 @@ PTQ example).
 import argparse
 
 import pytest
+import torch
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe, presets
@@ -94,6 +95,25 @@ def test_w4a16_nvfp4_preset_disables_vllm_marlin_incompatible_projections():
         "*visual*",
         "*vision_tower*",
     } <= disabled_quantizers
+
+
+def test_default_exclusions_disable_mtp_at_any_depth():
+    # Megatron VLMs nest the MTP block under ``language_model.``; HF and Megatron LLMs keep it at the root.
+    model = torch.nn.Module()
+    for path in ("mtp", "language_model.mtp", "language_model.decoder"):
+        parent = model
+        for part in path.split("."):
+            if not hasattr(parent, part):
+                parent.add_module(part, torch.nn.Module())
+            parent = getattr(parent, part)
+        parent.add_module("proj", torch.nn.Linear(16, 16))
+
+    quant_cfg = load_recipe("general/ptq/fp8_default-kv_fp8").quantize.model_dump()
+    mtq.quantize(model, {**quant_cfg, "algorithm": None})
+
+    assert model.language_model.decoder.proj.input_quantizer.is_enabled
+    assert not model.mtp.proj.input_quantizer.is_enabled
+    assert not model.language_model.mtp.proj.input_quantizer.is_enabled
 
 
 def test_local_hessian_layerwise_is_scoped_to_the_model_recipe():

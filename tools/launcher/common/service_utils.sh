@@ -47,6 +47,27 @@ function report_result {
     fi
 }
 
+function latest_checkpoint {
+    local prefix=$2 best="" best_step=-1 candidate step
+    for candidate in "$1"/"${prefix}"*; do
+        [ -d "$candidate" ] || continue
+        step=${candidate##*/}
+        step=${step#"$prefix"}
+        if [ "$step" = final ]; then
+            echo "$candidate"
+            return
+        fi
+        [[ "$step" =~ ^[0-9]+$ ]] || continue
+        if [ "$step" -gt "$best_step" ]; then
+            best=$candidate
+            best_step=$step
+        fi
+    done
+    if [ -n "$best" ]; then
+        echo "$best"
+    fi
+}
+
 function util_install_extra_dep {
     local _marker=/tmp/.nmm_extra_dep_installed
     if [[ -f "$_marker" ]]; then

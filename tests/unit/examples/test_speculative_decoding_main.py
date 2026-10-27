@@ -70,8 +70,8 @@ def _tiny_causal_lm(vocab_size=VOCAB, hidden=HIDDEN):
 class _FakeTok:
     """Enough of a tokenizer for the vocabulary checks; both sides share one vocab."""
 
-    def __init__(self):
-        self._vocab = {chr(i): i for i in range(VOCAB)}
+    def __init__(self, vocab=None):
+        self._vocab = {chr(i): i for i in range(VOCAB)} if vocab is None else dict(vocab)
 
     def get_vocab(self):
         return dict(self._vocab)
@@ -243,6 +243,30 @@ def test_caller_supplied_base_tokenizer_is_used(main_mod, monkeypatch):
         base_tokenizer=_FakeTok(),
     )
     assert calls == ["draft"], f"base tokenizer re-loaded: {calls}"
+
+
+# None: a fresh draft; otherwise the swap flag the checkpoint was trained with
+@pytest.mark.parametrize("saved_swap", [None, False, True])
+def test_vocab_swap_skips_only_an_already_swapped_draft(main_mod, monkeypatch, saved_swap):
+    """Swapping a base-indexed draft again scrambles its trained rows; equal widths hide it."""
+    draft_tok = _FakeTok({chr(i): VOCAB - 1 - i for i in range(VOCAB)})  # reversed ids
+    monkeypatch.setattr(
+        main_mod.transformers.AutoTokenizer,
+        "from_pretrained",
+        classmethod(lambda cls, name, *a, **k: draft_tok if name == "draft" else _FakeTok()),
+    )
+    recipe = _recipe(offline_data_path="/tmp/hidden")
+    recipe.external.external_vocab_swap = True
+    draft = _tiny_causal_lm()
+    if saved_swap is not None:
+        mtsp.convert(draft, [("external", {"external_vocab_swap": saved_swap})])
+    before = draft.get_input_embeddings().weight.data.clone()
+
+    main_mod.setup_external_draft(
+        recipe, _training_args(), base_model=_tiny_causal_lm(hidden=2 * HIDDEN), draft=draft
+    )
+    after = draft.get_input_embeddings().weight.data
+    assert torch.equal(after, before if saved_swap else before.flip(0))
 
 
 def test_resuming_a_different_speculative_mode_is_refused(main_mod, stub_tokenizers, tmp_path):

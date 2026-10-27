@@ -21,6 +21,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.nn.functional as F
+from _test_utils.torch.quantization.models import TOY_MOE_EXPERTS, TOY_MOE_HIDDEN, ToyMoE
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -33,6 +35,7 @@ from modelopt.torch.quantization.utils.calib_utils import (
     compute_hessian_inverse,
     gptq_blockwise_update,
 )
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 
 def _problem(rows=6, cols=16, seed=0):
@@ -205,6 +208,89 @@ def test_a_module_calibration_never_reached_gets_the_plain_search():
     torch.testing.assert_close(model["unused"].weight.detach(), plain, rtol=0, atol=0)
 
 
+def _int4_config(algorithm):
+    return {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": 4, "block_sizes": {-1: 128}},
+                "enable": True,
+            },
+        ],
+        "algorithm": algorithm,
+    }
+
+
+# iq2_xxs runs GGMLGPTQHelper and INT4 the base GPTQHelper. At this width a GGML weight is one
+# 256-column group, which GGML GPTQ encodes without the Hessian, so only INT4 checks the routing.
+@pytest.mark.parametrize("num_bits", ["iq2_xxs", 4])
+def test_gptq_quantizes_each_fused_expert_as_a_linear_fed_only_its_tokens(moe, num_bits):
+    # The expert no token reaches is compared against a linear calibration never reaches.
+    experts = moe.mlp.experts
+    original = copy.deepcopy(experts)
+    inputs = _inputs()[:96, :TOY_MOE_HIDDEN]
+    config = _iq_config(GPTQ, num_bits) if num_bits == "iq2_xxs" else _int4_config(GPTQ)
+    mtq.quantize(moe, config, forward_loop=lambda m: m(inputs))
+
+    for idx in range(TOY_MOE_EXPERTS):
+        tokens = inputs[idx::3] if idx < 3 else inputs[:0]
+        gate, up = F.linear(tokens, original.gate_up_proj[idx]).chunk(2, dim=-1)
+        for name, expert_inputs in (("gate_up_proj", tokens), ("down_proj", F.silu(gate) * up)):
+            reference = torch.nn.Linear(*getattr(original, name)[idx].shape[::-1], bias=False)
+            reference.weight.data.copy_(getattr(original, name)[idx])
+            mtq.quantize(reference, config, forward_loop=lambda m, x=expert_inputs: m(x))
+
+            assert torch.equal(getattr(experts, name)[idx], reference.weight)
+            if num_bits == "iq2_xxs":
+                quantizer = getattr(experts, f"{name}_weight_quantizers")[idx]
+                assert torch.equal(
+                    pinned_packed_weight(quantizer, "iq2_xxs"),
+                    pinned_packed_weight(reference.weight_quantizer, "iq2_xxs"),
+                )
+
+
+class _MoEStack(torch.nn.Module):
+    """Toy MoE decoder layers under ``layers``."""
+
+    def __init__(self, *layers):
+        super().__init__()
+        self.layers = torch.nn.ModuleList(layers)
+
+    def forward(self, hidden_states):
+        for layer in self.layers:
+            hidden_states = layer(hidden_states)
+        return hidden_states
+
+
+def test_layerwise_gptq_calibrates_fused_experts_on_the_earlier_layers_output(monkeypatch, moe):
+    monkeypatch.setattr(
+        LayerActivationCollector,
+        "_decoder_layer_support",
+        [(lambda m: isinstance(m, _MoEStack), lambda m: m.layers)],
+    )
+    stack = _MoEStack(moe, ToyMoE())
+    inputs = _inputs()[:96, :TOY_MOE_HIDDEN]
+
+    def run(layerwise):
+        model = copy.deepcopy(stack)
+        algorithm = {**GPTQ, "layerwise": {"enable": layerwise}}
+        # INT4: one GGML group per weight here would ignore the Hessian, and with it the inputs.
+        mtq.quantize(model, _int4_config(algorithm), forward_loop=lambda m: m(inputs))
+        return [layer.mlp.experts for layer in model.layers]
+
+    def same(a, b):
+        return all(torch.equal(getattr(a, n), getattr(b, n)) for n in ("gate_up_proj", "down_proj"))
+
+    single_pass, layerwise = run(False), run(True)
+    for before, after in zip(stack.layers, layerwise):
+        assert not same(before.mlp.experts, after)  # GPTQ wrote every layer's experts
+    # Layer 0's experts see unquantized inputs either way.
+    assert same(single_pass[0], layerwise[0])
+    # Layer 1's see layer 0's quantized experts only when layerwise.
+    assert not same(single_pass[1], layerwise[1])
+
+
 def test_pin_outlives_the_weight_tensor():
     model, _ = _gptq_model()
     # Same values in a new tensor, as an offload round trip or a layerwise resume leaves them.
@@ -233,6 +319,8 @@ def test_folding_a_bf16_weight_decodes_the_pinned_payload():
     assert torch.equal(model.weight_quantizer(model.weight.float()).to(torch.bfloat16), decoded)
     mtq.fold_weight(model)
     assert torch.equal(model.weight, decoded)
+    # The folded weight is the decoding, so the payload is dropped with the other quantizer state.
+    assert _pin(model) is None
 
 
 def test_pin_survives_save_and_restore():

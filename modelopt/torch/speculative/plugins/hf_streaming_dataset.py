@@ -37,8 +37,6 @@ consecutive-failure circuit breaker, loss_mask alignment); subclasses override
 :meth:`_fetch` (backend) and :meth:`_format` (algorithm).
 """
 
-from __future__ import annotations
-
 import base64
 import os
 import re

@@ -112,6 +112,10 @@ If adding a new PIP dependency to any of these, make sure to verify the LICENSE 
 
 Do not regenerate or commit `uv.lock` in your PR, even when changing dependencies in `pyproject.toml`. A [weekly workflow](./.github/workflows/bump_uv_lock.yml) refreshes it automatically.
 
+## Using a third-party GitHub Action or container image
+
+Pin third-party actions in `.github/` to a full commit SHA with the version in a trailing comment, e.g. `uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1`. Tags such as `@v7` or `@v7.1.1` can be moved to different code by the action's owner or anyone who compromises it, while a commit SHA cannot. GitHub-owned `actions/*` may stay on major tags. Pin Docker Hub images by digest (`image:tag@sha256:...`). [Dependabot](./.github/dependabot.yml) bumps the pinned actions monthly.
+
 ## 🔒 Security coding practices
 
 All contributors must follow the security coding practices documented in *Security Coding Practices for
@@ -194,7 +198,9 @@ nox -s "unit-3.12(torch_211, tf_latest)"
   subprocesses (`spawn_multiprocess_job`, `subprocess.run` importing torch), train for many steps, or build
   real-size models belong in `tests/gpu*`; batch several cases into one spawn rather than one spawn per case,
   or reuse the session-scoped `cpu_dist_workers` fixture for multi-rank CPU tests.
-  Slow tests for features without active maintenance (e.g. AutoNAS) should be `@pytest.mark.manual` or nightly-only.
+  Slow tests for features without active maintenance (e.g. AutoNAS) should be `@pytest.mark.manual` or `@pytest.mark.nightly`.
+  `nightly` tests are skipped on pull requests and run in the scheduled and on-demand CI; both marks are skipped unless
+  you pass `--run-nightly` / `--run-manual`.
 - **Exercise the behavior a test claims to validate.** Mocks are useful for focused interface and wiring coverage, but
   replacing the implementation under test does not validate its real behavior. Include an end-to-end test that runs
   the actual implementation whenever the test claims backend or runtime behavior. For example, a test of

@@ -13,17 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import logging
 import shutil
 import sys
 from pathlib import Path
-from tempfile import TemporaryDirectory, gettempdir
+from tempfile import TemporaryDirectory, mkdtemp
 
 from ..._runtime.common import read_bytes, timeit, write_bytes, write_string
 from ..._runtime.tensorrt.layerwise_profiling import process_layerwise_result
 from ...utils import OnnxBytes
 from .constants import (
-    DEFAULT_ARTIFACT_DIR,
     DEFAULT_NUM_INFERENCE_PER_RUN,
     SHA_256_HASH_LENGTH,
     TRT_MODE_FLAGS,
@@ -135,6 +135,27 @@ def _update_dynamic_shapes(dynamic_shapes: dict, cmd: list[str]) -> None:
             cmd.extend([f"--{shape}={convert_shape_to_string(dynamic_shapes[shape])}"])
 
 
+@functools.cache
+def _default_artifact_dir() -> Path:
+    """Return this process's private temporary directory for builds without an ``output_dir``.
+
+    The default must not be a fixed path under the shared temp dir: another local user could
+    pre-create it, plant symlinks in it, or swap the engine between its write and read-back. One
+    unpredictable directory per process keeps timing-cache reuse across calls and bounds what is
+    left behind to one directory, however many engines the process builds.
+    """
+    return Path(mkdtemp(prefix="modelopt_trt_"))
+
+
+def _artifact_dir(output_dir: Path | None) -> Path:
+    """Return ``output_dir`` (created if missing), or this process's private temporary directory."""
+    if not output_dir:
+        return _default_artifact_dir()
+    path = Path(output_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 @timeit
 def build_engine(
     onnx_bytes: OnnxBytes,
@@ -183,7 +204,8 @@ def build_engine(
             For more details, please refer to:
             https://docs.nvidia.com/deeplearning/tensorrt/latest/_static/python-api/infer/Core/BuilderConfig.html
         output_dir: Directory to save the engine file and trtexec artifacts.
-            If not provided, the artifacts will be saved in a temporary directory.
+            If not provided, this process's private temporary directory is used (created on first
+            use, not removed at exit).
         verbose: Set trtexec command to verbose or not.
 
     Returns:
@@ -230,8 +252,7 @@ def build_engine(
         onnx_bytes.write_to_disk(str(tmp_onnx_dir))
         onnx_path = tmp_onnx_dir / f"{onnx_bytes.model_name}.onnx"
 
-        final_output_dir = Path(output_dir or Path(gettempdir()) / DEFAULT_ARTIFACT_DIR)
-        final_output_dir.mkdir(parents=True, exist_ok=True)
+        final_output_dir = _artifact_dir(output_dir)
         engine_path = (
             Path(engine_path)
             if engine_path
@@ -294,7 +315,8 @@ def profile_engine(
                 "maxShapes": {"input": [32,3,244,244]}
             }
         output_dir: Directory to save the engine file and trtexec artifacts.
-            If not provided, the artifacts will be saved in a temporary directory.
+            If not provided, this process's private temporary directory is used (created on first
+            use, not removed at exit).
     Returns:
         Layerwise profiling output as a json string.
         Stdout log produced by trtexec tool.
@@ -322,8 +344,7 @@ def profile_engine(
         engine_path = tmp_dir_path / f"{engine_hash}-model.engine"
         write_bytes(engine_bytes[SHA_256_HASH_LENGTH:], engine_path)
 
-        final_output_dir = Path(output_dir or Path(gettempdir()) / DEFAULT_ARTIFACT_DIR)
-        final_output_dir.mkdir(parents=True, exist_ok=True)
+        final_output_dir = _artifact_dir(output_dir)
         profile_path = final_output_dir / f"{engine_hash}-profile.json"
         layer_info_path = final_output_dir / f"{engine_hash}-layerInfo.json"
 
