@@ -60,7 +60,7 @@ def test_index_dtype_and_rank_conversion_preserves_selected_values(operation):
     )
     model.ir_version = 9
     candidate = transform(copy.deepcopy(model))
-    candidate = _apply_non4d_model_inputs(candidate)
+    candidate = _apply_non4d_model_inputs(candidate, prepared_input_ops={operation})
     candidate = _apply_non4d_model_outputs(candidate, defer_rank_conversion=True)
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
@@ -166,7 +166,7 @@ def test_reduction_preserves_negative_and_mixed_axes(axes):
     model = onnx.shape_inference.infer_shapes(model)
     data = np.arange(6, dtype=np.float32).reshape(2, 3)
     expected = ReferenceEvaluator(model).run(None, {"x": data})[0]
-    candidate = _apply_non4d_model_inputs(copy.deepcopy(model))
+    candidate = _apply_non4d_model_inputs(copy.deepcopy(model), prepared_input_ops={"ReduceSum"})
     candidate = _apply_non4d_model_outputs(
         candidate, defer_rank_conversion=True, prepared_output_ops={"ReduceSum"}
     )
