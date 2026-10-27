@@ -225,8 +225,12 @@ _STOCK_PLAN = {
         {"layers.*.mlp.experts": "moe_tp_experts"},
         {"layers.*.mlp.experts": "nemotron_experts_ep"},
         {k: v for k, v in _STOCK_PLAN.items() if v == "grouped_gemm"},
+        {
+            "layers.*.block_sparse_moe.experts": "moe_tp_experts",
+            "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+        },
     ],
-    ids=["stock", "experts-style-only", "nemotron-style-only", "grouped-gemm-only"],
+    ids=["stock", "experts-style-only", "nemotron-style-only", "grouped-gemm-only", "hybrid"],
 )
 @pytest.mark.parametrize(
     "prefix",
@@ -235,9 +239,9 @@ _STOCK_PLAN = {
 )
 def test_routed_experts_are_the_plans_containers_under_any_prefix(plan, prefix):
     """The base-relative plan keys match the decoder wherever the model nests it, at every layer
-    index, the container named by its style or as its grouped-GEMM parameters' parent. The router,
-    the shared experts, and a module whose name merely ends in a key's text are not routed
-    experts."""
+    index, the container named by its style or as its grouped-GEMM parameters' parent, also in a
+    plan that names some containers one way and some the other. The router, the shared experts, and
+    a module whose name merely ends in a key's text are not routed experts."""
     model = _model_with_decoder_at(prefix)
     model.add_module("sublayers", nn.ModuleList([_MoeLayer()]))  # "sublayers.0.mlp.experts"
 
