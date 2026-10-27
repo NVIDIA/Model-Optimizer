@@ -111,15 +111,12 @@ def _routed_expert_modules(model: "nn.Module", ep_plan: dict[str, str]) -> "dict
     from transformers.integrations.tensor_parallel import replace_layer_number_by_wildcard
 
     keys = _routed_expert_keys(ep_plan)
-    return {
-        name: module
-        for name, module in model.named_modules()
-        if any(
-            (generic := replace_layer_number_by_wildcard(name)) == key
-            or generic.endswith("." + key)
-            for key in keys
-        )
-    }
+    found = {}
+    for name, module in model.named_modules():
+        generic = replace_layer_number_by_wildcard(name)
+        if any(generic == key or generic.endswith("." + key) for key in keys):
+            found[name] = module
+    return found
 
 
 # ---------------------------------------------------------------------------------------------------
