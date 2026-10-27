@@ -68,7 +68,8 @@ def _window_root(ctx: ExportContext, unit: nn.Module) -> tuple[nn.Module, Module
     """
     from torch.distributed.fsdp import FSDPModule
 
-    if isinstance(ctx.model, FSDPModule):
+    if isinstance(ctx.model, FSDPModule) or unit is ctx.model:
+        # The model's own names, which _enclosing_unit has built.
         return ctx.model, ctx.module_names
     return unit, module_name_maps(unit)
 
