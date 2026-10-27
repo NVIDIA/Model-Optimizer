@@ -440,11 +440,14 @@ def _received(sent: tuple[bool, Any], rank: int, label: str) -> BaseException:
 def _encoded(value: Any) -> bytes:
     """``value`` as :func:`broadcast_from` and :func:`all_reduce` send it: serialized once, here.
 
-    It is also loaded back here: a value that does not serialize, or that the other ranks could not
-    load (a class a forced weights-only load refuses, say), then fails inside the caller's guard,
-    which sends the failure to every rank, rather than inside the collective, on one rank alone. The
-    collective carries the bytes, which always pickle. torch.save stands in for plain pickle, which
-    bandit refuses under modelopt/.
+    It is also loaded back here: a value that does not serialize, or that every rank's load refuses
+    alike (a class a forced weights-only load rejects, say), then fails inside the caller's guard,
+    which sends the failure to every rank, rather than inside the collective, on one rank alone. A
+    load that depends on the loading rank can still fail on a peer alone, a tensor's, which lands on
+    the device it was saved from, say: these collectives carry small values, such as a plan, a flag
+    or a size. The check holds one more copy of the value while it runs. The collective carries the
+    bytes, which always pickle. torch.save stands in for plain pickle, which bandit refuses under
+    modelopt/.
     """
     buffer = io.BytesIO()
     torch.save(value, buffer)
@@ -456,9 +459,9 @@ def _encoded(value: Any) -> bytes:
 def _decoded(payload: bytes) -> Any:
     """The value :func:`_encoded` serialized into ``payload``.
 
-    A full load, not :func:`_deserialize`'s weights_only one: the peers are this job's own ranks,
-    as the object collectives' own unpickling would trust them, and a DistributionPlan crosses
-    without add_safe_globals.
+    A full load, not :func:`_deserialize`'s weights_only one: the values are whatever the callers
+    compute, of any class, and the peers are this job's own ranks, whose payloads torch's object
+    collectives unpickle just as fully.
     """
     return torch.load(io.BytesIO(payload), weights_only=False)
 
