@@ -245,3 +245,48 @@ def test_padding_view_before_public_unary_output_keeps_its_rank():
     expected = _execute(model, feeds)[0]
     converted = _apply_remove_reshapes(copy.deepcopy(model))
     np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+
+
+@pytest.mark.parametrize("identity", [False, True])
+@pytest.mark.parametrize("public_middle", [False, True])
+def test_interleaved_reshape_chains_follow_data_producers(identity, public_middle):
+    """Collapse independent interleaved branches without crossing a public intermediate."""
+    final_shape = [2, 3] if identity else [6]
+    outputs = [
+        helper.make_tensor_value_info(name, TensorProto.FLOAT, final_shape) for name in ["y", "w"]
+    ]
+    if public_middle:
+        outputs.append(helper.make_tensor_value_info("a", TensorProto.FLOAT, [3, 2]))
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Reshape", ["x", "a_shape"], ["a"]),
+                helper.make_node("Reshape", ["z", "b_shape"], ["b"]),
+                helper.make_node("Reshape", ["a", "final_shape"], ["y"]),
+                helper.make_node("Reshape", ["b", "final_shape"], ["w"]),
+            ],
+            "interleaved_chains",
+            [helper.make_tensor_value_info(name, TensorProto.FLOAT, [2, 3]) for name in ["x", "z"]],
+            outputs,
+            [
+                numpy_helper.from_array(np.array(values, np.int64), name)
+                for name, values in [
+                    ("a_shape", [3, 2]),
+                    ("b_shape", [1, 6]),
+                    ("final_shape", final_shape),
+                ]
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    model = onnx.shape_inference.infer_shapes(model)
+    feeds = {
+        "x": np.arange(6, dtype=np.float32).reshape(2, 3),
+        "z": np.arange(10, 16, dtype=np.float32).reshape(2, 3),
+    }
+    expected = _execute(model, feeds)
+    changed = _apply_remove_reshapes(copy.deepcopy(model))
+    assert len(changed.graph.node) == (3 if public_middle else 2)
+    for actual, reference in zip(_execute(changed, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)

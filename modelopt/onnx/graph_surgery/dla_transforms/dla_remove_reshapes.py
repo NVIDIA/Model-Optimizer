@@ -34,21 +34,21 @@ def _apply_remove_reshapes(model):
     runtime_inputs = _runtime_input_names(model)
     reshapes = _operator_nodes(model, {"Reshape"})
     captured = _subgraph_captures(graph)
-    chains = []
-    chain = []
+    chains, tails = [], {}
     for node in reshapes:
-        if chain:
-            consumers = cache.get_consumers(chain[-1].output[0])
-            if (
-                chain[-1].output[0] in cache.graph_output_names | captured
-                or len(consumers) != 1
-                or consumers[0][0] is not node
-            ):
-                chains.append(chain)
-                chain = []
+        producer = cache.get_producer(node.input[0])
+        chain = tails.pop(id(producer), None)
+        if chain is None:
+            chain = []
+            chains.append(chain)
         chain.append(node)
-    if chain:
-        chains.append(chain)
+        consumers = cache.get_consumers(node.output[0])
+        if (
+            node.output[0] not in cache.graph_output_names | captured
+            and len(consumers) == 1
+            and consumers[0][1] == 0
+        ):
+            tails[id(node)] = chain
     replacements = {}
     for chain in chains:
         first, last = chain[0], chain[-1]
