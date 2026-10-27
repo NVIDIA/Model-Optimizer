@@ -29,6 +29,8 @@ from modelopt.onnx.graph_surgery.dla_transforms.dla_force_fp16_activations impor
     _apply_force_fp16_activations,
     _apply_fp16_lpnorm,
 )
+from modelopt.onnx.graph_surgery.dla_transforms.dla_rank_conversion import _apply_non4d_reshape
+from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
 
 
 def _value(name, shape, dtype=T.FLOAT):
@@ -169,6 +171,74 @@ def test_scaled_l2_normalization_keeps_zero_slices_finite():
     actual = ReferenceEvaluator(result).run(None, {"x": data})[0]
     assert np.isfinite(actual).all()
     np.testing.assert_allclose(actual, [[[[0, 0], [0.6, 0.8]]]], atol=3e-4)
+
+
+def _scaled_collapsed_lpnorm_model(shape, axis, prefix=False):
+    """Build checked native normalization around a real singleton Reshape collapse."""
+    collapsed = shape.copy()
+    collapsed.remove(1)
+    nodes = [
+        h.make_node("Reshape", ["x", "native_shape"], ["native"]),
+        h.make_node("LpNormalization", ["native"], ["norm"], axis=axis, p=2),
+        h.make_node("Mul", ["norm", "gamma"], ["scaled"]),
+        h.make_node("Reshape", ["scaled", "output_shape"], ["y"]),
+    ]
+    outputs = [_value("y", collapsed)]
+    initializers = [
+        nh.from_array(np.asarray(shape, np.int64), "native_shape"),
+        nh.from_array(np.asarray(collapsed, np.int64), "output_shape"),
+        nh.from_array(np.ones(shape[-1], np.float32), "gamma"),
+    ]
+    if prefix:
+        nodes = [
+            h.make_node("LpNormalization", ["x"], ["first_norm"], axis=-1, p=2),
+            h.make_node("Mul", ["first_norm", "first_gamma"], ["first"]),
+            *nodes,
+        ]
+        outputs.insert(0, _value("first", collapsed))
+        initializers.append(nh.from_array(np.ones(collapsed[-1], np.float32), "first_gamma"))
+    return _model(nodes, [_value("x", collapsed)], outputs, initializers, opset=17)
+
+
+@pytest.mark.parametrize("shape", [[1, 2, 3, 4, 5], [2, 3, 1, 4, 5]])
+@pytest.mark.parametrize("axis", [-1, 4])
+def test_fp16_scaled_lpnorm_uses_actual_collapsed_axis(shape, axis):
+    """Use the mapped last axis after the registered five-dimensional collapse."""
+    model = _scaled_collapsed_lpnorm_model(shape, axis)
+    collapsed = shape.copy()
+    collapsed.remove(1)
+    feeds = {"x": np.linspace(0.25, 2, np.prod(collapsed), dtype=np.float32).reshape(collapsed)}
+    onnx.checker.check_model(model, full_check=True)
+    expected = ReferenceEvaluator(model).run(None, feeds)[0]
+    converted = _transform_make_dla_compatible(model, verbose=False, force_fp16_activations=True)
+    onnx.checker.check_model(converted, full_check=True)
+    actual = ReferenceEvaluator(converted).run(None, feeds)[0]
+    np.testing.assert_allclose(actual, expected, rtol=2e-3, atol=3e-4)
+
+
+@pytest.mark.parametrize("axis", [-1, 4])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_scaled_lpnorm_refuses_normalizing_over_the_removed_axis(axis, enabled):
+    """Give FP16 and FP32 the same refusal for a normalization axis removed by collapse."""
+    model = _scaled_collapsed_lpnorm_model([2, 3, 4, 5, 1], axis)
+    feeds = {"x": np.ones([2, 3, 4, 5], np.float32)}
+    onnx.checker.check_model(model, full_check=True)
+    np.testing.assert_array_equal(ReferenceEvaluator(model).run(None, feeds)[0], feeds["x"])
+    with pytest.raises(ValueError, match="cannot map axis"):
+        _transform_make_dla_compatible(model, verbose=False, force_fp16_activations=enabled)
+
+
+@pytest.mark.parametrize("axis", [-1, 4])
+def test_fp16_lpnorm_validates_late_collapsed_axis_before_decomposition(axis):
+    """Refuse unsupported normalization before mutating an earlier eligible FP16 branch."""
+    model = _scaled_collapsed_lpnorm_model([2, 3, 4, 5, 1], axis, prefix=True)
+    onnx.checker.check_model(model, full_check=True)
+    ReferenceEvaluator(model).run(None, {"x": np.ones([2, 3, 4, 5], np.float32)})
+    _apply_non4d_reshape(model)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="cannot map axis"):
+        _apply_fp16_lpnorm(model)
+    assert model.SerializeToString() == before
 
 
 def test_terminal_projection_splits_channels_and_preserves_values():

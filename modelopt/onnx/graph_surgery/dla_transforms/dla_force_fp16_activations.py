@@ -24,13 +24,18 @@ from onnx import AttributeProto, TensorProto, defs, helper, numpy_helper
 from ..utils.graph_utils import (
     GraphCache,
     _attribute,
+    _shape_before_boundary_promotion,
     batch_replace_nodes,
     convert_initializers_to_dtype,
 )
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _subgraph_captures
 from .dla_indexing import _insert_support_nodes, _operator_nodes
-from .dla_rank_conversion import _apply_non4d_lpnorm, _runtime_input_names
+from .dla_rank_conversion import (
+    _apply_non4d_lpnorm,
+    _runtime_input_names,
+    _specialized_collapsed_axis,
+)
 
 __all__ = []
 
@@ -73,6 +78,17 @@ def _apply_fp16_lpnorm(model):
         node.output[0] for node in graph.node if node.op_type == "Constant" and id(node) in standard
     }
     opset = next((o.version for o in model.opset_import if o.domain in ("", "ai.onnx")), 1)
+    reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
+    mapped_axes = {}
+    for node in _operator_nodes(model, {"LpNormalization"}):
+        attribute = _attribute(node, "axis")
+        axis = attribute.i if attribute is not None else -1
+        shape = _shape_before_boundary_promotion(cache, node.input[0])
+        mapped_axes[id(node)] = (
+            _specialized_collapsed_axis(cache, node, shape, axis, reshapes)
+            if shape and len(shape) == 5
+            else axis
+        )
     nodes = []
     for node in graph.node:
         if node.op_type != "LpNormalization" or id(node) not in standard:
@@ -96,6 +112,7 @@ def _apply_fp16_lpnorm(model):
             nodes.append(node)
             continue
         base = node.name or node.output[0] + "_lpnorm"
+        axis = mapped_axes[id(node)]
         axes = cache.unique_name(base + "_axes")
         epsilon = cache.unique_name(base + "_epsilon")
         if opset >= 13:
