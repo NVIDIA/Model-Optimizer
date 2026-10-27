@@ -364,11 +364,7 @@ def _handle_reshape(node, graph, shape_map, init_names, unique_init, inits_to_ad
     if len(node.input) < 2 or node.input[1] not in init_names:
         return None  # dynamic shape — skip
 
-    shape_init = None
-    for init in graph.initializer:
-        if init.name == node.input[1]:
-            shape_init = init
-            break
+    shape_init = shape_map._cache.get_init(node.input[1])
     if shape_init is None:
         return None
 
@@ -469,7 +465,7 @@ def _handle_slice(node, graph, shape_map, init_names, unique_init, inits_to_add,
     pre: list = []
     post: list = []
     if len(node.input) < 4 or not node.input[3]:
-        starts = next((init for init in graph.initializer if init.name == node.input[1]), None)
+        starts = shape_map._cache.get_init(node.input[1])
         if starts is None:
             return None
         axes_name = unique_init.unique_name(f"{pfx}_default_axes_{c}")
@@ -484,21 +480,20 @@ def _handle_slice(node, graph, shape_map, init_names, unique_init, inits_to_add,
 
     # ── Update axes (input[3]) ────────────────────────────────────────────────
     if len(node.input) > 3 and node.input[3] and node.input[3] in init_names:
-        for init in graph.initializer:
-            if init.name == node.input[3]:
-                axes_arr = numpy_helper.to_array(init)
-                delta = _axis_delta(rank)
-                new_axes = np.array(
-                    [int(a) + delta if int(a) >= 0 else int(a) for a in axes_arr],
-                    dtype=np.int64,
-                )
-                c_a = cnt_ref[0]
-                cnt_ref[0] += 1
-                new_axes_name = unique_init.unique_name(f"{init.name}_4d_{c_a}")
-                # Add new init with unique name; leave old init for other consumers.
-                inits_to_add.append(numpy_helper.from_array(new_axes, new_axes_name))
-                node.input[3] = new_axes_name
-                break
+        init = shape_map._cache.get_init(node.input[3])
+        if init is not None:
+            axes_arr = numpy_helper.to_array(init)
+            delta = _axis_delta(rank)
+            new_axes = np.array(
+                [int(a) + delta if int(a) >= 0 else int(a) for a in axes_arr],
+                dtype=np.int64,
+            )
+            c_a = cnt_ref[0]
+            cnt_ref[0] += 1
+            new_axes_name = unique_init.unique_name(f"{init.name}_4d_{c_a}")
+            # Add new init with unique name; leave old init for other consumers.
+            inits_to_add.append(numpy_helper.from_array(new_axes, new_axes_name))
+            node.input[3] = new_axes_name
 
     # ── Unsqueeze data input ──────────────────────────────────────────────────
     out4d, unsq = _make_unsqueeze_to_4d(in_name, rank, pfx, unique_init, graph, c)
@@ -608,19 +603,18 @@ def _handle_reduce(node, graph, shape_map, init_names, unique_init, inits_to_add
 
     if len(node.input) > 1 and node.input[1] and node.input[1] in init_names:
         # axes as input[1] initializer (opset 13+)
-        for init in graph.initializer:
-            if init.name == node.input[1]:
-                orig_axes = list(numpy_helper.to_array(init).astype(int))
-                adjusted_axes = [a + delta if a >= 0 else a for a in orig_axes]
-                c_a = cnt_ref[0]
-                cnt_ref[0] += 1
-                new_axes_name = unique_init.unique_name(f"{init.name}_4d_{c_a}")
-                # Add new init; leave old for any other consumers.
-                inits_to_add.append(
-                    numpy_helper.from_array(np.array(adjusted_axes, dtype=np.int64), new_axes_name)
-                )
-                node.input[1] = new_axes_name
-                break
+        init = shape_map._cache.get_init(node.input[1])
+        if init is not None:
+            orig_axes = list(numpy_helper.to_array(init).astype(int))
+            adjusted_axes = [a + delta if a >= 0 else a for a in orig_axes]
+            c_a = cnt_ref[0]
+            cnt_ref[0] += 1
+            new_axes_name = unique_init.unique_name(f"{init.name}_4d_{c_a}")
+            # Add new init; leave old for any other consumers.
+            inits_to_add.append(
+                numpy_helper.from_array(np.array(adjusted_axes, dtype=np.int64), new_axes_name)
+            )
+            node.input[1] = new_axes_name
     else:
         for attr in node.attribute:
             if attr.name == "axes":
@@ -733,13 +727,16 @@ def _handle_gather(node, graph, shape_map, init_names, unique_init, inits_to_add
         node.input[1] = shape_map._index_views[idx_name]
     else:
         # Check if the producer of idx_name is already a Cast node — reuse it.
-        producer_cast = None
-        for n in graph.node:
-            if n.op_type == "Cast" and n.output and n.output[0] == idx_name:
-                producer_cast = n
-                break
-
         cache = shape_map._cache
+        producer = cache.get_producer(idx_name)
+        producer_cast = (
+            producer
+            if producer is not None
+            and producer.op_type == "Cast"
+            and producer.output
+            and producer.output[0] == idx_name
+            else None
+        )
         exclusive = (
             producer_cast is not None
             and len(cache.get_consumers(idx_name)) == 1
@@ -748,9 +745,9 @@ def _handle_gather(node, graph, shape_map, init_names, unique_init, inits_to_add
         )
         if exclusive:
             _set_attr_i(producer_cast, "to", TensorProto.INT32)
-            for value in graph.value_info:
-                if value.name == idx_name:
-                    value.type.tensor_type.elem_type = TensorProto.INT32
+            value = cache.vi_map.get(idx_name)
+            if value is not None:
+                value.type.tensor_type.elem_type = TensorProto.INT32
             cast_name = idx_name
         elif shape_map._cache.get_dtype(idx_name) != TensorProto.INT32:
             # Insert a new Cast to INT32
@@ -1000,17 +997,16 @@ def _handle_expand(node, graph, shape_map, init_names, unique_init, inits_to_add
 
     # ── Update shape initializer (input[1]) to 4D ────────────────────────────
     if len(node.input) > 1 and node.input[1] and node.input[1] in init_names:
-        for init in graph.initializer:
-            if init.name == node.input[1]:
-                arr = numpy_helper.to_array(init)
-                if len(arr) < 4:
-                    new_arr = np.array(pad4d(arr.tolist()), dtype=arr.dtype)
-                    c_t = cnt_ref[0]
-                    cnt_ref[0] += 1
-                    new_tile_name = unique_init.unique_name(f"{init.name}_4d_{c_t}")
-                    inits_to_add.append(numpy_helper.from_array(new_arr, new_tile_name))
-                    node.input[1] = new_tile_name
-                break
+        init = shape_map._cache.get_init(node.input[1])
+        if init is not None:
+            arr = numpy_helper.to_array(init)
+            if len(arr) < 4:
+                new_arr = np.array(pad4d(arr.tolist()), dtype=arr.dtype)
+                c_t = cnt_ref[0]
+                cnt_ref[0] += 1
+                new_tile_name = unique_init.unique_name(f"{init.name}_4d_{c_t}")
+                inits_to_add.append(numpy_helper.from_array(new_arr, new_tile_name))
+                node.input[1] = new_tile_name
 
     # ── Unsqueeze data input to 4D (skip for scalar / unknown input shape) ───
     in_rank = len(orig_in_shape) if orig_in_shape is not None else None
@@ -1066,15 +1062,14 @@ def _handle_tile(node, graph, shape_map, init_names, unique_init, inits_to_add, 
 
     # ── Update repeats initializer (input[1]) if 3D ───────────────────────────
     if len(node.input) > 1 and node.input[1] and node.input[1] in init_names:
-        for init in graph.initializer:
-            if init.name == node.input[1]:
-                arr = numpy_helper.to_array(init)
-                if len(arr) < 4:
-                    new_arr = np.asarray(pad4d(arr.tolist()), dtype=arr.dtype)
-                    name = unique_init.unique_name(f"{init.name}_tile4d_{c}")
-                    inits_to_add.append(numpy_helper.from_array(new_arr, name))
-                    node.input[1] = name
-                break
+        init = shape_map._cache.get_init(node.input[1])
+        if init is not None:
+            arr = numpy_helper.to_array(init)
+            if len(arr) < 4:
+                new_arr = np.asarray(pad4d(arr.tolist()), dtype=arr.dtype)
+                name = unique_init.unique_name(f"{init.name}_tile4d_{c}")
+                inits_to_add.append(numpy_helper.from_array(new_arr, name))
+                node.input[1] = name
 
     # ── Unsqueeze data input ──────────────────────────────────────────────────
     out4d, unsq = _make_unsqueeze_to_4d(in_name, rank, pfx, unique_init, graph, c)

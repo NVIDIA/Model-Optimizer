@@ -2031,3 +2031,28 @@ def test_expand_with_unknown_native_input_and_output_stays_unchanged():
     assert converted.SerializeToString() == before
     onnx.checker.check_model(converted, full_check=True)
     _assert_match(expected, _run_ort(converted, feeds))
+
+
+def test_gather_does_not_retarget_a_cast_after_its_output_was_wrapped():
+    """Keep the native Cast dtype when an earlier handler has renamed its output."""
+    model = _make_model(
+        [
+            helper.make_node(
+                "Cast", ["source"], ["indices"], name="source_cast", to=TensorProto.INT64
+            ),
+            helper.make_node("Gather", ["X", "indices"], ["Y"], axis=2),
+        ],
+        "wrapped_cast_indices",
+        [_vi("X", TensorProto.FLOAT, [1, 1, 5, 4]), _vi("source", TensorProto.FLOAT, [2])],
+        [_vi("Y", TensorProto.FLOAT, [1, 1, 2, 4])],
+    )
+    feeds = {
+        "X": np.arange(20, dtype=np.float32).reshape(1, 1, 5, 4),
+        "source": np.asarray([1, 3], np.float32),
+    }
+    expected = _run_ort(model, feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))
+    cast = next(node for node in converted.graph.node if node.name == "source_cast")
+    assert next(attr.i for attr in cast.attribute if attr.name == "to") == TensorProto.INT64
