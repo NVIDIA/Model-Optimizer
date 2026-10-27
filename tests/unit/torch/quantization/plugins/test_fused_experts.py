@@ -1356,6 +1356,17 @@ class TestNormalizeExpertsImpl:
         normalize_experts_impl_on_the_fly(model)
         assert cfg._experts_implementation == "grouped_mm"
 
+    def test_falls_back_to_eager_without_the_grouped_forward(self, monkeypatch):
+        """A transformers without `_grouped_linear` leaves grouped_mm intercepted nowhere, so it is
+        neither kept nor redirected to: every backend but eager goes to eager, as main forced."""
+        monkeypatch.setattr(
+            "modelopt.torch.quantization.plugins.huggingface._HAS_GROUPED_LINEAR", False
+        )
+        text_cfg = _StubConfig(impl="grouped_mm")
+        root_cfg = _StubConfig(impl="batched_mm", text_config=text_cfg)
+        normalize_experts_impl_on_the_fly(_TinyMoEModelWithConfig(root_cfg))
+        assert root_cfg._experts_implementation == text_cfg._experts_implementation == "eager"
+
     def test_recurses_into_nested_configs(self):
         """VLM-style nested text_config / vision_config are also normalized."""
         text_cfg = _StubConfig(impl="grouped_mm")  # already supported -> unchanged

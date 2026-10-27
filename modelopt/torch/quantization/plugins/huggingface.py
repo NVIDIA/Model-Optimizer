@@ -58,6 +58,12 @@ try:
 except ImportError:
     _transformers_moe = None
 
+# Whether transformers has the grouped experts forward's `_grouped_linear`, the call _QuantFusedExperts
+# intercepts on it: without it nothing intercepts grouped_mm, so calibration cannot use that backend.
+_HAS_GROUPED_LINEAR = _transformers_moe is not None and hasattr(
+    _transformers_moe, "_grouped_linear"
+)
+
 try:
     import kitchen
     from kitchen.fa import KitchenFlashAttentionModule
@@ -1026,7 +1032,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         # per-expert weight quantizers / shared input quantizers apply. Only one
         # backend's hook fires per forward, so patching both F.linear and
         # _grouped_linear is safe.
-        if _transformers_moe is not None and hasattr(_transformers_moe, "_grouped_linear"):
+        if _HAS_GROUPED_LINEAR:
             _orig_grouped_linear = _transformers_moe._grouped_linear
 
             def _quantized_grouped_linear(input, weight, offs, bias=None, is_transposed=False):
@@ -1675,7 +1681,8 @@ def normalize_experts_impl_on_the_fly(model):
 
     To avoid that while keeping the fast grouped path, this redirects any
     unsupported backend to ``grouped_mm`` (which has a CPU / old-HW fallback, so
-    it is universally runnable). ``eager``, ``grouped_mm`` and ``torch_a2a`` are
+    it is universally runnable), or to ``eager`` on a transformers without the
+    ``_grouped_linear`` grouped_mm is intercepted at. ``eager``, ``grouped_mm`` and ``torch_a2a`` are
     left untouched, and so is ``None``, which dispatches to the eager ``F.linear``
     forward -- but transformers resolves an unrequested backend to ``grouped_mm``
     wherever that can dispatch, when it builds the model, so a model calibrates on
@@ -1693,8 +1700,12 @@ def normalize_experts_impl_on_the_fly(model):
     nested_cfg_attrs = ("text_config", "vision_config", "audio_config", "speech_config")
     # Backends already intercepted by _QuantFusedExperts (None => eager F.linear forward). `torch_a2a`
     # (all-to-all DP=EP) runs its local experts through the same `_grouped_linear`, so _QuantFusedExperts
-    # intercepts it too -- don't clobber it back to grouped_mm.
-    supported_impls = (None, "eager", "grouped_mm", "torch_a2a")
+    # intercepts it too -- don't clobber it back to grouped_mm. Without `_grouped_linear` grouped_mm is
+    # intercepted nowhere, so it is neither kept nor redirected to: main's eager is.
+    supported_impls = (None, "eager", "torch_a2a") + (
+        ("grouped_mm",) if _HAS_GROUPED_LINEAR else ()
+    )
+    fallback_impl = "grouped_mm" if _HAS_GROUPED_LINEAR else "eager"
     # A class with its own quantized wrapper -- GPT-OSS's quantizes down_proj's input by intercepting
     # the eager forward's bmm/matmul -- only works on the eager forward, and so does a fused-experts
     # wrapper that says so (FP8's), so keep main's forced eager for such a model. The plugins run in
@@ -1731,7 +1742,7 @@ def normalize_experts_impl_on_the_fly(model):
         if eager_only:
             cfg._experts_implementation = "eager"
         elif cfg._experts_implementation not in supported_impls:
-            cfg._experts_implementation = "grouped_mm"
+            cfg._experts_implementation = fallback_impl
 
 
 def assert_fused_experts_intercepted(model):
