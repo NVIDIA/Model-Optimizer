@@ -482,13 +482,19 @@ def test_the_run_ends_the_group_it_set_up(
 def test_the_run_leaves_a_group_it_found_alone(monkeypatch, world_size, raises):
     """Under a launch too, and when the body raises: a caller that set its group up before the run
     keeps it, and gets the error. The state is this rank's place in that group, also when the
-    caller set it up without the launch's environment."""
+    caller set it up without the launch's environment. Under a launch the run binds this rank's
+    CUDA device all the same, since the caller may not have: the state's device is then the one
+    NCCL runs on."""
+    bound: list[int] = []
     if world_size is None:
         monkeypatch.delenv("WORLD_SIZE", raising=False)
     else:
         monkeypatch.setenv("WORLD_SIZE", world_size)
-        monkeypatch.setattr(dist, "setup", lambda timeout=None: pytest.fail("set it up again"))
-        monkeypatch.setattr(dist, "local_rank", lambda: 0)
+        monkeypatch.setattr(
+            torch.distributed, "init_process_group", lambda *a, **k: pytest.fail("set it up again")
+        )
+        monkeypatch.setattr(torch.cuda, "set_device", bound.append)
+        monkeypatch.setattr(dist, "local_rank", lambda: 1)
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(dist, "rank", lambda group=None: 1)
     monkeypatch.setattr(dist, "size", lambda group=None: 2)
@@ -499,5 +505,7 @@ def test_the_run_leaves_a_group_it_found_alone(monkeypatch, world_size, raises):
     expected = pytest.raises(ValueError, match="calibration failed") if raises else nullcontext()
     with expected, distributed_run(device="cpu" if world_size is None else "cuda") as state:
         assert (state.rank, state.world_size) == (1, 2)
+        assert torch.device(state.device) == torch.device("cpu" if world_size is None else "cuda:1")
+        assert bound == ([] if world_size is None else [1])
         if raises:
             raise ValueError("calibration failed")

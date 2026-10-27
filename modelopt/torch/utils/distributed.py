@@ -548,8 +548,8 @@ def distributed_run(
 ) -> Iterator[DistributedState]:
     """Own the run's process group for the block, and yield this process's state.
 
-    On a distributed launch (``WORLD_SIZE>1``) this sets the process group up, binding this rank's
-    CUDA device, with ``timeout``, unless the caller set one up already. It yields this rank's
+    On a distributed launch (``WORLD_SIZE>1``) this binds this rank's CUDA device, and sets the
+    process group up with ``timeout`` unless the caller set one up already. It yields this rank's
     :class:`DistributedState`, on that CUDA device, and refuses any other ``device``. Without a
     launch it sets nothing up, and the state is on ``device``. The state's rank and size are always
     the live group's, which the block's collectives run on: rank 0 of a run of one for a single
@@ -569,7 +569,9 @@ def distributed_run(
             "CUDA device, chosen from LOCAL_RANK; pass device='cuda' or run a single process."
         )
     group_was_there = is_initialized()
-    if launched and not group_was_there:
+    if launched:
+        # setup() binds the device even to a group the caller set up, which may not have bound one:
+        # the state's device is then the one this rank's NCCL collectives run on.
         setup(timeout=timeout)
     # The body's own exception: sys.exc_info() would also report one a caller up the stack is
     # handling, which would make a clean exit from a run entered in an except block abort the rank,
