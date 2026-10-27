@@ -49,7 +49,9 @@ class ClipFunction(Function):
 
         if clip_value_min.requires_grad or clip_value_max.requires_grad:
             warnings.warn("Learning enabled for clip min/max. This is an experimental feature.")
-        if clip_value_min.numel() != 1 or clip_value_max.numel() != 1:
+        if (clip_value_min.requires_grad and clip_value_min.numel() != 1) or (
+            clip_value_max.requires_grad and clip_value_max.numel() != 1
+        ):
             raise ValueError(
                 f"Learnable min/max can only be scalar, got size {clip_value_min.size()} and {clip_value_max.size()}."
             )

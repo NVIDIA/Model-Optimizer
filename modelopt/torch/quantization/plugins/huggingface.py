@@ -812,6 +812,9 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     _first_proj_attr = "gate_up_proj"
     # Whether the first projection packs a gate half that must be split on export.
     _is_gated = True
+    # Under expert parallelism each rank's experts see only the tokens routed to them, so calibration
+    # shares the layer's input amax over the expert-parallel group (see max_calibrate).
+    _share_input_amax_across_ep = True
 
     @property
     def _first_proj_input_quantizer_attr(self) -> str:

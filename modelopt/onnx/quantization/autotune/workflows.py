@@ -29,7 +29,11 @@ import onnx
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.autotune.autotuner import QDQAutotuner
-from modelopt.onnx.quantization.autotune.benchmark import TensorRTPyBenchmark, TrtExecBenchmark
+from modelopt.onnx.quantization.autotune.benchmark import (
+    TensorRTPyBenchmark,
+    TrtExecBenchmark,
+    default_timing_cache_file,
+)
 from modelopt.onnx.quantization.autotune.common import Config, PatternCache
 from modelopt.onnx.quantization.qdq_utils import get_quantized_tensors
 
@@ -97,7 +101,8 @@ def init_benchmark_instance(
                           These plugins will be loaded by trtexec or TensorRT Python API during engine building.
                           If None, no custom plugins are loaded.
         timing_cache_file: Path to TensorRT timing cache file for faster engine builds.
-                          If None, uses default "trtexec_timing.cache" (default: None)
+                          If None, uses "trtexec_timing.cache" in a private temporary directory
+                          (default: None)
         warmup_runs: Number of warmup inference iterations before measurement.
                     Allows GPU to reach stable performance state (default: 5)
         timing_runs: Number of timed inference iterations for latency measurement.
@@ -126,7 +131,8 @@ def init_benchmark_instance(
             logger.info("TensorRT Python API benchmark initialized")
         logger.debug(
             f"Settings: warmup={warmup_runs}, timing={timing_runs}, "
-            f"cache={timing_cache_file or 'trtexec_timing.cache'}, plugin_libraries={plugin_libraries}"
+            f"cache={timing_cache_file or default_timing_cache_file()}, "
+            f"plugin_libraries={plugin_libraries}"
         )
         return _benchmark_instance
     except Exception as e:
