@@ -1078,7 +1078,7 @@ def resolve_distribution_plan(
     * ``dense``: ``"replicate"`` or ``"fsdp"`` for the rest of the model, or ``"auto"``, which
       FSDP2-shards it when a whole copy of it and the rank's share of the routed experts would take
       more than 60% of one GPU's memory. That GPU is rank 0's, by its total memory, so ``"auto"``
-      assumes the run's GPUs are alike.
+      assumes the run's GPUs are alike; a rank 0 without a GPU replicates it.
 
     ``None`` reads ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE`` (``1`` replicates; ``world``,
     or the world size as a number, shards) from rank 0's environment, both defaulting to
