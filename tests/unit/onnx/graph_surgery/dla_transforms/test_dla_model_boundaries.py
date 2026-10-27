@@ -1177,6 +1177,86 @@ def test_native_vector_unary_outputs_keep_their_rank(shape, tail):
     np.testing.assert_array_equal(_checked_run(converted, feeds)[0], expected)
 
 
+def _rank_sensitive_adapter_model(operation, unary, metadata):
+    """Build an eligible prefix before a rank-sensitive branch to expose partial rewiring."""
+    nodes = [
+        helper.make_node("Relu", ["x"], ["a"]),
+        helper.make_node("Squeeze", ["a", "axes"], ["b"]),
+        helper.make_node("Relu", ["b"], ["early"]),
+        helper.make_node("Relu", ["x"], ["r"]),
+        helper.make_node("Squeeze", ["r", "axes"], ["s"]),
+    ]
+    if unary:
+        nodes.append(helper.make_node("Relu", ["s"], ["native"]))
+    nodes.append(
+        helper.make_node(
+            operation,
+            ["native" if unary else "s"],
+            ["y"],
+            **({"perm": [1, 2, 0]} if operation == "Transpose" else {"axis": 1}),
+        )
+    )
+    model = _make_model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 3, 4, 4])],
+        [
+            helper.make_tensor_value_info("early", TensorProto.FLOAT, [3, 4, 4]),
+            helper.make_tensor_value_info(
+                "y", TensorProto.FLOAT, [4, 4, 3] if operation == "Transpose" else [3, 4, 4]
+            ),
+        ],
+        [numpy_helper.from_array(np.array([0], np.int64), "axes")],
+    )
+    if metadata:
+        model = onnx.shape_inference.infer_shapes(model)
+    feeds = {"x": np.linspace(0.1, 4, 48, dtype=np.float32).reshape(1, 3, 4, 4)}
+    return model, feeds
+
+
+@pytest.mark.parametrize("operation", ["Softmax", "LogSoftmax", "Transpose"])
+@pytest.mark.parametrize("unary", [False, True])
+@pytest.mark.parametrize(
+    ("entrypoint", "metadata"), [("stage", True), ("pipeline", True), ("pipeline", False)]
+)
+def test_rank_changing_adapter_requires_actual_consumer_preparation(
+    operation, unary, entrypoint, metadata, monkeypatch
+):
+    """Refuse unsupported reader ranks before changing an earlier eligible adapter."""
+    model, feeds = _rank_sensitive_adapter_model(operation, unary, metadata)
+    _checked_run(model, feeds)
+    pipeline = import_module(_transform_make_dla_compatible.__module__)
+    unavailable = "Non4DTranspose" if operation == "Transpose" else "UpdateAxis"
+    monkeypatch.setattr(
+        pipeline,
+        "DLA_TRANSFORMS",
+        tuple(
+            (name, callback) for name, callback in pipeline.DLA_TRANSFORMS if name != unavailable
+        ),
+    )
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="rank"):
+        if entrypoint == "stage":
+            _apply_remove_intermediary_squeeze_unsqueeze(model, rank_converted=True)
+        else:
+            _transform_make_dla_compatible(model, verbose=False)
+    assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("operation", ["Softmax", "LogSoftmax", "Transpose"])
+@pytest.mark.parametrize("unary", [False, True])
+def test_rank_changing_adapter_uses_registered_consumer_preparation(operation, unary):
+    """Execute preserved adapter ownership through the matching later axis stage."""
+    pipeline = import_module(_transform_make_dla_compatible.__module__)
+    stage = "Non4DTranspose" if operation == "Transpose" else "UpdateAxis"
+    if not any(name == stage for name, _ in pipeline.DLA_TRANSFORMS):
+        pytest.skip("The matching rank stage is introduced by a later series part")
+    model, feeds = _rank_sensitive_adapter_model(operation, unary, True)
+    expected = _checked_run(model, feeds)
+    converted = _transform_make_dla_compatible(model, verbose=False)
+    for actual, reference in zip(_checked_run(converted, feeds), expected):
+        np.testing.assert_allclose(actual, reference, rtol=1e-5, atol=1e-6)
+
+
 def test_output_preflight_does_not_copy_for_missing_intermediate_squeeze_metadata(monkeypatch):
     """Avoid a prerequisite model copy when normal shape inference can prepare Squeeze."""
     model = _make_model(

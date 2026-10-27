@@ -492,13 +492,65 @@ def _apply_non4d_model_outputs(
     return model
 
 
-def _apply_remove_intermediary_squeeze_unsqueeze(model, *, rank_converted=False):
+def _apply_remove_intermediary_squeeze_unsqueeze(
+    model, *, rank_converted=False, prepared_consumer_ops=(), validate_only=False
+):
     """Remove no-op adapters, or reconcile adapters within the ordered rank-converted pipeline."""
     graph = model.graph
     cache = GraphCache(graph)
     captured = _subgraph_captures(graph)
     removed = set()
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    checked_readers = set()
+    runtime_inputs = (
+        cache.graph_input_names - cache.init_names
+        if model.ir_version <= 3
+        else cache.graph_input_names
+    )
+
+    def require_prepared_readers(name):
+        """Follow shared rank-agnostic paths before allowing any adapter rewiring."""
+        pending, seen = [name], set()
+        while pending:
+            current = pending.pop()
+            if current in seen or current in checked_readers:
+                continue
+            seen.add(current)
+            if current in captured - cache.graph_output_names:
+                raise ValueError("Intermediary adapter changes a captured native rank")
+            for reader, port in cache.get_consumers(current):
+                standard = _is_standard_node(reader, local_functions, {reader.op_type})
+                if (
+                    standard
+                    and reader.op_type == "Squeeze"
+                    and reader.output[0] in cache.graph_output_names
+                ):
+                    continue
+                if standard and reader.op_type in _RANK_AGNOSTIC_OPS | {"Squeeze", "Unsqueeze"}:
+                    pending.extend(reader.output)
+                    continue
+                target = (
+                    cache.get_init_array(reader.input[1])
+                    if standard
+                    and reader.op_type == "Reshape"
+                    and port == 0
+                    and reader.input[1] not in runtime_inputs
+                    else None
+                )
+                if target is not None and not np.any(target == 0):
+                    continue
+                if (
+                    standard
+                    and reader.op_type in prepared_consumer_ops
+                    and (port == 0 or reader.op_type == "Concat")
+                ):
+                    continue
+                raise ValueError(
+                    f"Intermediary adapter feeds unprepared rank-sensitive {reader.op_type}"
+                )
+        checked_readers.update(seen)
+
+    plans = []
     for node in list(graph.node):
         if not _is_standard_node(node, local_functions, {"Squeeze", "Unsqueeze"}):
             continue
@@ -511,9 +563,17 @@ def _apply_remove_intermediary_squeeze_unsqueeze(model, *, rank_converted=False)
         input_shape = cache.get_shape(node.input[0])
         output_shape = cache.get_shape(node.output[0])
         if not input_shape or not output_shape:
+            if validate_only and rank_converted:
+                require_prepared_readers(node.output[0])
             continue
         if not rank_converted and input_shape != output_shape:
             continue
+        if rank_converted and len(input_shape) != len(output_shape):
+            require_prepared_readers(node.output[0])
+        plans.append((node, input_shape, output_shape))
+    if validate_only:
+        return model
+    for node, input_shape, output_shape in plans:
         short, long = (
             (output_shape, input_shape)
             if node.op_type == "Squeeze"

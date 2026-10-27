@@ -123,6 +123,8 @@ def _boundary_stage_options(name, quant_types, verbose, prepared_input_ops, prep
         return {"prepared_input_ops": prepared_input_ops}
     if name == "Non4dModelOutputs":
         return {"prepared_output_ops": prepared_output_ops}
+    if name == "RemoveIntermediarySqueezeAndUnsqueeze":
+        return {"prepared_consumer_ops": prepared_input_ops}
     if name == "FixInstanceNormChannelMismatch":
         return {"prepared_consumer_ops": prepared_input_ops}
     return {}
@@ -150,6 +152,10 @@ def _validate_boundary_contract(model, prepared_input_ops, prepared_output_ops):
         prepared_output_ops=prepared_output_ops,
         validate_only=True,
     )
+    if "RemoveIntermediarySqueezeAndUnsqueeze" in prepared_input_ops:
+        _apply_remove_intermediary_squeeze_unsqueeze(
+            model, rank_converted=True, prepared_consumer_ops=prepared_input_ops, validate_only=True
+        )
 
 
 def _transform_make_dla_compatible(
@@ -179,8 +185,17 @@ def _transform_make_dla_compatible(
         "Non4DTranspose": {"Transpose"},
         "Non4dSliceAxis": {"Slice"},
         "Non4DLpNorm": {"LpNormalization"},
+        "FixInstanceNormChannelMismatch": {"InstanceNormalization"},
         "RemoveIntermediarySqueezeAndUnsqueeze": {"Squeeze"},
-        "UpdateAxis": {"TopK", "Concat", "Split", "QuantizeLinear", "DequantizeLinear"},
+        "UpdateAxis": {
+            "Softmax",
+            "LogSoftmax",
+            "TopK",
+            "Concat",
+            "Split",
+            "QuantizeLinear",
+            "DequantizeLinear",
+        },
     }.items():
         if stage in stages:
             prepared_input_ops.update(operations)
