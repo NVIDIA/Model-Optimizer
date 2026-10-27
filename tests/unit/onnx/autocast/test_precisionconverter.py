@@ -2787,3 +2787,16 @@ def test_default_plugin_lists_are_isolated(simple_model, kind):
     first = create()
     first.trt_plugins.append("custom_plugin.so")
     assert create().trt_plugins == []
+
+
+def test_tensor_block_dict_does_not_change_default_skip_rules(simple_model):
+    model, value_info_map, initializer_map, node_to_init_map = simple_model
+    PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        tensor_block_dict={"Add": {"inp": [0, 1]}},
+    )
+    converter = PrecisionConverter(model, value_info_map, initializer_map, node_to_init_map)
+    assert "Add" not in converter.skip_inputs_map

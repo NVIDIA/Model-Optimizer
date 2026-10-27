@@ -1859,9 +1859,9 @@ class PrecisionConverter:
         skip_inputs_map = {}
         match self.low_precision_type.str_short:
             case "fp16":
-                skip_inputs_map = SKIP_LOW_PRECISION_MAPPING_FP16
+                skip_inputs_map = dict(SKIP_LOW_PRECISION_MAPPING_FP16)
             case "bf16":
-                skip_inputs_map = SKIP_LOW_PRECISION_MAPPING_BF16
+                skip_inputs_map = dict(SKIP_LOW_PRECISION_MAPPING_BF16)
             case _:
                 raise ValueError(f"Unsupported low precision type: {self.low_precision_type}")
 
