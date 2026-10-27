@@ -19,33 +19,63 @@ import copy
 import math
 
 import numpy as np
-from onnx import TensorProto, helper, numpy_helper
+from onnx import AttributeProto, TensorProto, defs, helper, numpy_helper
 
-from ..utils.graph_utils import GraphCache, _attribute, convert_initializers_to_dtype
-from .dla_rank_conversion import _apply_non4d_lpnorm
+from ..utils.graph_utils import (
+    GraphCache,
+    _attribute,
+    batch_replace_nodes,
+    convert_initializers_to_dtype,
+)
+from .dla_constants_to_initializers import _add_legacy_initializer_inputs
+from .dla_graph_cleanup import _subgraph_captures
+from .dla_indexing import _insert_support_nodes, _operator_nodes
+from .dla_rank_conversion import _apply_non4d_lpnorm, _runtime_input_names
 
 __all__ = []
 
 
-def _cast(source, output, dtype):
+def _cast(source, output, dtype, cache):
+    """Allocate a boundary cast without colliding with existing graph owners."""
     name = source + "_to_fp16" if dtype == TensorProto.FLOAT16 else output + "_to_fp32"
-    return helper.make_node("Cast", [source], [output], name=name, to=dtype)
+    return helper.make_node("Cast", [source], [output], name=cache.unique_name(name), to=dtype)
+
+
+def _fp16_operator_nodes(model, operations):
+    """Select standard operations and supported contrib schemas for FP16 policy."""
+    nodes = _operator_nodes(model, operations)
+    if any(op.domain == "com.microsoft" and op.version == 1 for op in model.opset_import):
+        nodes += _operator_nodes(
+            model, operations & {"QuantizeLinear", "DequantizeLinear", "Gelu"}, ("com.microsoft",)
+        )
+    return nodes
 
 
 def _is_cast(node, dtype):
+    """Match a standard Cast with the requested destination type."""
     target = _attribute(node, "to") if node is not None else None
-    return node is not None and node.op_type == "Cast" and target is not None and target.i == dtype
+    return (
+        node is not None
+        and node.domain in {"", "ai.onnx"}
+        and not node.overload
+        and node.op_type == "Cast"
+        and target is not None
+        and target.i == dtype
+    )
 
 
 def _apply_fp16_lpnorm(model):
     """Decompose last-axis L2 normalization followed by a static gamma multiply."""
     graph = model.graph
     cache = GraphCache(graph)
-    static = cache.init_names | {n.output[0] for n in graph.node if n.op_type == "Constant"}
+    standard = {id(node) for node in _operator_nodes(model, {"LpNormalization", "Mul", "Constant"})}
+    static = cache.init_names - _runtime_input_names(model) | {
+        node.output[0] for node in graph.node if node.op_type == "Constant" and id(node) in standard
+    }
     opset = next((o.version for o in model.opset_import if o.domain in ("", "ai.onnx")), 1)
     nodes = []
     for node in graph.node:
-        if node.op_type != "LpNormalization":
+        if node.op_type != "LpNormalization" or id(node) not in standard:
             nodes.append(node)
             continue
         axis_attr, p_attr = _attribute(node, "axis"), _attribute(node, "p")
@@ -55,6 +85,7 @@ def _apply_fp16_lpnorm(model):
         scaled = (
             len(consumers) == 1
             and consumers[0][0].op_type == "Mul"
+            and id(consumers[0][0]) in standard
             and any(name in static for name in consumers[0][0].input if name != node.output[0])
         )
         if (
@@ -77,48 +108,219 @@ def _apply_fp16_lpnorm(model):
         nodes.extend(
             [
                 helper.make_node(
-                    "Mul", [node.input[0], node.input[0]], [power], name=base + "_square"
+                    "Mul",
+                    [node.input[0], node.input[0]],
+                    [power],
+                    name=cache.unique_name(base + "_square"),
                 ),
                 helper.make_node(
                     "ReduceSum",
                     [power, axes] if opset >= 13 else [power],
                     [total],
-                    name=base + "_sum",
+                    name=cache.unique_name(base + "_sum"),
                     **({} if opset >= 13 else {"axes": [axis]}),
                     keepdims=1,
                 ),
-                helper.make_node("Sqrt", [total], [norm], name=base + "_sqrt"),
-                helper.make_node("Max", [norm, epsilon], [safe], name=base + "_safe_norm"),
+                helper.make_node("Sqrt", [total], [norm], name=cache.unique_name(base + "_sqrt")),
                 helper.make_node(
-                    "Div", [node.input[0], safe], list(node.output), name=base + "_divide"
+                    "Max", [norm, epsilon], [safe], name=cache.unique_name(base + "_safe_norm")
+                ),
+                helper.make_node(
+                    "Div",
+                    [node.input[0], safe],
+                    list(node.output),
+                    name=cache.unique_name(base + "_divide"),
                 ),
             ]
         )
-    del graph.node[:]
-    graph.node.extend(nodes)
+    retained = {id(node) for node in nodes}
+    batch_replace_nodes(
+        graph,
+        {index: ([node], []) for index, node in enumerate(graph.node) if id(node) not in retained},
+    )
+    _insert_support_nodes(graph, nodes)
+    _add_legacy_initializer_inputs(model)
     return _apply_non4d_lpnorm(model)
+
+
+def _validate_float_weights(graph):
+    """Validate all FLOAT payloads before calling the existing weight converter."""
+    for tensor in graph.initializer:
+        if tensor.data_type != TensorProto.FLOAT:
+            continue
+        count = math.prod(tensor.dims)
+        raw = tensor.HasField("raw_data")
+        if (
+            count < 0
+            or (raw and len(tensor.raw_data) != count * 4)
+            or (not raw and len(tensor.float_data) != count)
+            or (tensor.data_location == TensorProto.EXTERNAL and not raw)
+        ):
+            raise ValueError(f"Invalid or unloaded FLOAT initializer {tensor.name!r}")
+
+
+def _fp32_control(node, port, native, required):
+    """Retain schema-mandated FLOAT inputs and inputs of native FP32 regions."""
+    return id(node) in native or (id(node), port) in required
+
+
+def _fp32_regions(model, cache):
+    """Preserve native floating dependencies and schema-required FLOAT bindings."""
+    supported = _fp16_operator_nodes(model, {node.op_type for node in model.graph.node})
+    contrib = {id(node) for node in supported if node.domain == "com.microsoft"}
+    standard = {id(node) for node in supported}
+    native = {
+        id(node)
+        for node in model.graph.node
+        if id(node) not in standard
+        or any(
+            attr.type in {AttributeProto.GRAPH, AttributeProto.GRAPHS} for attr in node.attribute
+        )
+        or any(
+            (info := cache.vi_map.get(name)) is not None
+            and info.type.WhichOneof("value") not in {None, "tensor_type"}
+            for name in [*node.input, *node.output]
+        )
+    }
+    version = next((op.version for op in model.opset_import if op.domain in {"", "ai.onnx"}), 1)
+    if _operator_nodes(model, {"QuantizeLinear", "DequantizeLinear"}):
+        version = max(version, 19)
+    pending = list(_subgraph_captures(model.graph))
+    schemas, required, outputs = {}, set(), set()
+    for node in model.graph.node:
+        if id(node) in native:
+            pending.extend([*node.input, *node.output])
+        if id(node) not in standard:
+            continue
+        schema_version = version
+        if id(node) in contrib:
+            # Contrib v1 supports HALF without upgrading the standard opset.
+            schema_version = 20 if node.op_type == "Gelu" else 19
+        key = node.op_type, schema_version
+        if key not in schemas:
+            schema = defs.get_schema(node.op_type, schema_version)
+            only_fp32 = {
+                item.type_param_str
+                for item in schema.type_constraints
+                if "tensor(float)" in item.allowed_type_strs
+                and "tensor(float16)" not in item.allowed_type_strs
+            }
+            schemas[key] = schema, only_fp32 | {"tensor(float)"}
+        schema, only_fp32 = schemas[key]
+        for port, name in enumerate(node.input):
+            if name and (
+                schema.inputs[min(port, len(schema.inputs) - 1)].type_str in only_fp32
+                or (node.op_type == "Resize" and port in (1, 2))
+            ):
+                required.add((id(node), port))
+                pending.append(name)
+        float_outputs = {name for name in node.output if cache.get_dtype(name) == TensorProto.FLOAT}
+        dtype = _attribute(node, "dtype")
+        if (dtype is not None and dtype.i == TensorProto.FLOAT) or (
+            node.op_type != "Cast"
+            and not any(cache.get_dtype(name) == TensorProto.FLOAT for name in node.input)
+        ):
+            outputs.update(float_outputs)
+        outputs.update(
+            name
+            for port, name in enumerate(node.output)
+            if name in float_outputs
+            and schema.outputs[min(port, len(schema.outputs) - 1)].type_str in only_fp32
+        )
+    values = set()
+    while pending:
+        name = pending.pop()
+        if name in values or cache.get_dtype(name) != TensorProto.FLOAT:
+            continue
+        values.add(name)
+        producer = cache.get_producer(name)
+        if producer is not None:
+            native.add(id(producer))
+            pending.extend([*producer.input, *producer.output])
+    return values | outputs, native, required
+
+
+def _upgrade_fp16_quantizers(model, cache):
+    """Migrate inherited reduction schemas when FP16 quantizers require opset 19."""
+    if not _operator_nodes(model, {"QuantizeLinear", "DequantizeLinear"}):
+        return
+    opset = next(op for op in model.opset_import if op.domain in {"", "ai.onnx"})
+    if opset.version >= 19:
+        return
+    functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    pending = [model.graph]
+    while pending:
+        graph = pending.pop()
+        allocator = cache if graph is model.graph else GraphCache(graph)
+        allocator._names.update(_subgraph_captures(graph))
+        for node in graph.node:
+            for attr in node.attribute:
+                if attr.type == AttributeProto.GRAPH:
+                    pending.append(attr.g)
+                elif attr.type == AttributeProto.GRAPHS:
+                    pending.extend(attr.graphs)
+            if (
+                node.domain not in {"", "ai.onnx"}
+                or node.overload
+                or (node.domain, node.op_type, node.overload) in functions
+            ):
+                continue
+            axes = _attribute(node, "axes")
+            if axes is None or not node.op_type.startswith("Reduce"):
+                continue
+            if any(value.name == "axes" for value in defs.get_schema(node.op_type, 19).inputs):
+                control = allocator.unique_name((node.name or node.output[0]) + "_axes")
+                length = len(axes.ints)
+                graph.initializer.append(
+                    numpy_helper.from_array(np.asarray(axes.ints, np.int64), control)
+                )
+                node.input.append(control)
+                node.attribute.remove(axes)
+                if model.ir_version < 4:
+                    graph.input.append(
+                        helper.make_tensor_value_info(control, TensorProto.INT64, [length])
+                    )
+    opset.version = 19
 
 
 def _apply_force_fp16_activations(model):
     """Run after the ordered DLA passes and their final symbolic shape inference."""
     graph = model.graph
     cache = GraphCache(graph)
+    opset = next((op.version for op in model.opset_import if op.domain in {"", "ai.onnx"}), 1)
+    if opset < 13 and _operator_nodes(model, {"QuantizeLinear", "DequantizeLinear"}):
+        raise ValueError("FP16 quantizer migration requires ONNX opset 13 or newer")
     fp32, fp16 = TensorProto.FLOAT, TensorProto.FLOAT16
+    runtime = _runtime_input_names(model)
+    native_values, native_nodes, fp32_inputs = _fp32_regions(model, cache)
     preserved_inits = {
         name
         for name in cache.init_names
-        if any(n.op_type == "Resize" and port in (1, 2) for n, port in cache.get_consumers(name))
+        if name in runtime
+        or name in native_values
+        or any(
+            _fp32_control(node, port, native_nodes, fp32_inputs)
+            for node, port in cache.get_consumers(name)
+        )
     }
-    excluded_inits = [init for init in graph.initializer if init.name in preserved_inits]
-    for init in excluded_inits:
-        graph.initializer.remove(init)
-    try:
-        convert_initializers_to_dtype(graph, "float16")
-    finally:
-        graph.initializer.extend(excluded_inits)
-    # Conversion replaces initializer objects, invalidating the cached references.
-    cache = GraphCache(graph)
-    preserved = set()
+    _validate_float_weights(graph)
+    if any(
+        tensor.data_type == fp32 and tensor.name not in preserved_inits
+        for tensor in graph.initializer
+    ):
+        excluded = [
+            tensor
+            for tensor in graph.initializer
+            if tensor.data_type == fp32 and tensor.name in preserved_inits
+        ]
+        for tensor in excluded:
+            graph.initializer.remove(tensor)
+        try:
+            convert_initializers_to_dtype(graph, "float16")
+        finally:
+            graph.initializer.extend(excluded)
+        cache = GraphCache(graph)
+    preserved = set(native_values)
     terminal_concats = set()
     for node in graph.node:
         if not _is_cast(node, fp32) or cache.get_dtype(node.input[0]) in (fp32, fp16, None):
@@ -155,22 +357,50 @@ def _apply_force_fp16_activations(model):
             value.type.tensor_type.elem_type = fp16
     before, after = {}, {}
     front, back = [], []
+    for tensor in graph.initializer:
+        if tensor.name not in preserved_inits - runtime or tensor.data_type != fp32:
+            continue
+        consumers = [
+            (node, port)
+            for node, port in cache.get_consumers(tensor.name)
+            if not _fp32_control(node, port, native_nodes, fp32_inputs) and not _is_cast(node, fp16)
+        ]
+        if consumers:
+            output = cache.unique_name(tensor.name + "_fp16")
+            front.append(_cast(tensor.name, output, fp16, cache))
+            for node, port in consumers:
+                node.input[port] = output
+    for node in graph.node:
+        for name in node.output:
+            if name not in native_values:
+                continue
+            consumers = [
+                (consumer, port)
+                for consumer, port in cache.get_consumers(name)
+                if not _fp32_control(consumer, port, native_nodes, fp32_inputs)
+                and not _is_cast(consumer, fp16)
+            ]
+            if consumers:
+                output = cache.unique_name(name + "_fp16")
+                after.setdefault(id(node), []).append(_cast(name, output, fp16, cache))
+                for consumer, port in consumers:
+                    consumer.input[port] = output
     for node in graph.node:
         if id(node) not in terminal_concats:
             continue
         for port, source in enumerate(node.input):
             if source not in preserved:
                 output = cache.unique_name(source + "_concat_fp32")
-                before.setdefault(id(node), []).append(_cast(source, output, fp32))
+                before.setdefault(id(node), []).append(_cast(source, output, fp32, cache))
                 node.input[port] = output
                 preserved.add(output)
     for value in graph.input:
-        if value.name in cache.init_names or value.type.tensor_type.elem_type != fp32:
+        if value.name in cache.init_names - runtime or value.type.tensor_type.elem_type != fp32:
             continue
         direct = None
         rank = len(value.type.tensor_type.shape.dim)
         for consumer, port in cache.get_consumers(value.name):
-            if _is_cast(consumer, fp16):
+            if _fp32_control(consumer, port, native_nodes, fp32_inputs) or _is_cast(consumer, fp16):
                 continue
             shape_info = cache.vi_map.get(consumer.output[0])
             adapter = (
@@ -183,7 +413,7 @@ def _apply_force_fp16_activations(model):
                 assert shape_info is not None
                 source = consumer.output[0]
                 output = cache.unique_name(source + "_fp16")
-                after.setdefault(id(consumer), []).append(_cast(source, output, fp16))
+                after.setdefault(id(consumer), []).append(_cast(source, output, fp16, cache))
                 for downstream, slot in cache.get_consumers(source):
                     if not _is_cast(downstream, fp16):
                         downstream.input[slot] = output
@@ -191,26 +421,18 @@ def _apply_force_fp16_activations(model):
             else:
                 if direct is None:
                     direct = cache.unique_name(value.name + "_fp16")
-                    front.append(_cast(value.name, direct, fp16))
+                    front.append(_cast(value.name, direct, fp16, cache))
                 consumer.input[port] = direct
-    if any(
-        n.op_type in {"QuantizeLinear", "DequantizeLinear"} and n.domain in ("", "ai.onnx")
-        for n in graph.node
-    ):
-        opsets = [o for o in model.opset_import if o.domain in ("", "ai.onnx")]
-        if opsets:
-            opsets[0].version = max(19, opsets[0].version)
-        else:
-            model.opset_import.append(helper.make_opsetid("", 19))
+    _upgrade_fp16_quantizers(model, cache)
     for value in graph.output:
-        if value.type.tensor_type.elem_type != fp32:
+        if value.type.tensor_type.elem_type != fp32 or value.name in native_values:
             continue
         producer = cache.get_producer(value.name)
         if producer is not None and producer.op_type == "Squeeze":
             source = producer.input[0]
             if source not in preserved:
                 output = cache.unique_name(source + "_to_fp32_fp16")
-                before.setdefault(id(producer), []).append(_cast(source, output, fp32))
+                before.setdefault(id(producer), []).append(_cast(source, output, fp32, cache))
                 producer.input[0] = output
             continue
         if _is_cast(producer, fp32):
@@ -222,6 +444,10 @@ def _apply_force_fp16_activations(model):
         if producer is None:
             assert tensor is not None
             tensor.name = internal
+            if model.ir_version < 4:
+                for declaration in graph.input:
+                    if declaration.name == value.name:
+                        declaration.name = internal
         else:
             for port, name in enumerate(producer.output):
                 if name == value.name:
@@ -233,26 +459,33 @@ def _apply_force_fp16_activations(model):
                 annotation.type.tensor_type.elem_type = fp16
         for consumer, port in cache.get_consumers(value.name):
             consumer.input[port] = internal
-        back.append(_cast(internal, value.name, fp32))
+        back.append(_cast(internal, value.name, fp32, cache))
     nodes = list(front)
     for node in graph.node:
         nodes.extend(before.get(id(node), []))
         nodes.append(node)
         nodes.extend(after.get(id(node), []))
     nodes.extend(back)
-    del graph.node[:]
-    graph.node.extend(nodes)
-    _rewrite_terminal_projections(graph)
+    _insert_support_nodes(graph, nodes)
+    _rewrite_terminal_projections(model)
+    _add_legacy_initializer_inputs(model)
     return model
 
 
-def _rewrite_terminal_projections(graph):
-    """Bound terminal projection channels to DLA's 8192-element dimension limit."""
+def _rewrite_terminal_projections(model):
+    """Bound private fixed projection channels while preserving native owners."""
+    graph = model.graph
     cache = GraphCache(graph)
+    standard = {
+        id(node) for node in _fp16_operator_nodes(model, {node.op_type for node in graph.node})
+    }
+    protected = cache.graph_output_names | _subgraph_captures(graph)
+    runtime = _runtime_input_names(model)
     removed, removed_values, removed_inits = set(), set(), set()
     replacements, additions = {}, []
 
     def attributes(node, key, expected):
+        """Match one fixed operator attribute used by the projection pattern."""
         value = _attribute(node, key)
         return (
             value is not None
@@ -260,6 +493,7 @@ def _rewrite_terminal_projections(graph):
         )
 
     def axes(node, expected):
+        """Match fixed axes without changing their initializer owner."""
         value = cache.get_init_array(node.input[1]) if len(node.input) == 2 else None
         return value is not None and value.reshape(-1).tolist() == expected
 
@@ -270,7 +504,7 @@ def _rewrite_terminal_projections(graph):
         current = output.name
         for op in ("Squeeze", "Cast", "Concat", "ReduceSum", "Concat", "Transpose", "Conv"):
             node = cache.get_producer(current)
-            if node is None or node.op_type != op:
+            if node is None or id(node) not in standard or node.op_type != op:
                 break
             chain.append(node)
             current = node.input[0]
@@ -286,6 +520,7 @@ def _rewrite_terminal_projections(graph):
             and attributes(transpose, "perm", [0, 3, 2, 1])
             and len(conv.input) == 2
             and len(conv.output) == 1
+            and ((_attribute(conv, "group") is None) or _attribute(conv, "group").i == 1)
         ):
             continue
         weight = cache.get_init(conv.input[1])
@@ -294,6 +529,7 @@ def _rewrite_terminal_projections(graph):
             parameters = [cache.get_init(name) for name in dq.input[1:]]
             if (
                 dq.op_type != "DequantizeLinear"
+                or id(dq) not in standard
                 or len(dq.input) < 2
                 or any(
                     parameter is None or math.prod(parameter.dims) != 1 for parameter in parameters
@@ -313,6 +549,12 @@ def _rewrite_terminal_projections(graph):
             continue
         chain_ids = {id(n) for n in chain}
         if any(
+            name in protected | runtime for name in (weight.name, squeeze.input[1], reduce.input[1])
+        ):
+            continue
+        if any(name in protected for item in chain[1:] for name in item.output):
+            continue
+        if any(
             id(consumer) not in chain_ids
             for name in (weight.name, squeeze.input[1], reduce.input[1])
             for consumer, _ in cache.get_consumers(name)
@@ -324,7 +566,8 @@ def _rewrite_terminal_projections(graph):
         if cache.get_shape(output.name) != [1, 1, channels]:
             continue
         bytes_per_channel = math.prod(weight.dims[1:]) * (1 if dq is not None else 2)
-        if bytes_per_channel <= 0 or len(weight.raw_data) != channels * bytes_per_channel:
+        payload = weight.raw_data
+        if bytes_per_channel <= 0 or len(payload) != channels * bytes_per_channel:
             continue
         nodes, outputs = [], []
         for index, start in enumerate(range(0, channels, 8192)):
@@ -335,7 +578,7 @@ def _rewrite_terminal_projections(graph):
                 data_type=weight.data_type,
                 dims=[count, *weight.dims[1:]],
             )
-            chunk.raw_data = weight.raw_data[
+            chunk.raw_data = payload[
                 start * bytes_per_channel : (start + count) * bytes_per_channel
             ]
             additions.append(chunk)
@@ -364,7 +607,7 @@ def _rewrite_terminal_projections(graph):
                 )
             )
             result = cache.unique_name(conv.output[0] + suffix + "_fp32")
-            nodes.append(_cast(bounded, result, TensorProto.FLOAT))
+            nodes.append(_cast(bounded, result, TensorProto.FLOAT, cache))
             outputs.append(result)
         nodes.append(
             helper.make_node(
@@ -381,16 +624,22 @@ def _rewrite_terminal_projections(graph):
         removed_inits.update([weight.name, squeeze.input[1], reduce.input[1]])
     if not replacements:
         return
-    nodes = []
-    for node in graph.node:
-        nodes.extend(replacements.get(id(node), []))
-        if id(node) not in removed:
-            nodes.append(node)
-    retained_inits = [t for t in graph.initializer if t.name not in removed_inits]
-    retained_info = [v for v in graph.value_info if v.name not in removed_values]
-    del graph.node[:]
-    graph.node.extend(nodes)
-    del graph.initializer[:]
-    graph.initializer.extend([*retained_inits, *additions])
-    del graph.value_info[:]
-    graph.value_info.extend(retained_info)
+    batch_replace_nodes(
+        graph,
+        {
+            index: ([node], replacements.get(id(node), []))
+            for index, node in enumerate(graph.node)
+            if id(node) in removed
+        },
+    )
+    for index in range(len(graph.initializer) - 1, -1, -1):
+        if graph.initializer[index].name in removed_inits:
+            del graph.initializer[index]
+    graph.initializer.extend(additions)
+    for index in range(len(graph.value_info) - 1, -1, -1):
+        if graph.value_info[index].name in removed_values:
+            del graph.value_info[index]
+    if model.ir_version < 4:
+        for index in range(len(graph.input) - 1, -1, -1):
+            if graph.input[index].name in removed_inits:
+                del graph.input[index]
