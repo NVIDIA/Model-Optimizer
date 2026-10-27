@@ -964,3 +964,55 @@ def test_fp16_supported_contrib_gelu_keeps_upstream_half_precision():
     np.testing.assert_allclose(
         _checked_cpu_outputs(changed, feeds)[0], expected, rtol=2e-3, atol=1e-4
     )
+
+
+@pytest.mark.parametrize("operation", ["Mul", "Add"])
+@pytest.mark.parametrize("control_reader", [False, True])
+def test_public_squeeze_has_private_fp16_readers_and_native_controls(operation, control_reader):
+    """Preserve public FP32 Squeeze values while keeping internal arithmetic well typed."""
+    nodes = [
+        h.make_node("Relu", ["x"], ["r4"]),
+        h.make_node("Squeeze", ["r4", "axes"], ["public"]),
+        h.make_node(operation, ["public", "weight"], ["result"]),
+        h.make_node("Cast", ["public"], ["half"], to=T.FLOAT16),
+        h.make_node("Cast", ["public"], ["integer"], to=T.INT32),
+    ]
+    inputs = [_value("x", [1, 1, 1, 2])]
+    outputs = [
+        _value("public", [2]),
+        _value("result", [2]),
+        _value("half", [2], T.FLOAT16),
+        _value("integer", [2], T.INT32),
+    ]
+    if control_reader:
+        nodes.append(h.make_node("Resize", ["image", "", "public"], ["resized"], mode="nearest"))
+        inputs.append(_value("image", [1, 2]))
+        outputs.append(_value("resized", [1, 4]))
+    model = _model(
+        nodes,
+        inputs,
+        outputs,
+        [
+            nh.from_array(np.array([0, 1, 2], np.int64), "axes"),
+            nh.from_array(np.array([2, 3], np.float32), "weight"),
+        ],
+    )
+    feeds = {"x": np.array([[[[1, 2]]]], np.float32)}
+    if control_reader:
+        feeds["image"] = np.array([[4, 5]], np.float32)
+    expected = ReferenceEvaluator(model).run(None, feeds)
+    changed = _apply_force_fp16_activations(model)
+    onnx.checker.check_model(changed, full_check=True)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    actual = ort.InferenceSession(
+        changed.SerializeToString(), options, providers=["CPUExecutionProvider"]
+    ).run(None, feeds)
+    for left, right in zip(actual, expected):
+        np.testing.assert_array_equal(left, right)
+    assert actual[0].dtype == np.float32
+    casts = {node.output[0]: node for node in changed.graph.node if node.op_type == "Cast"}
+    assert casts["half"].input[0] == "public"
+    if control_reader:
+        resize = next(node for node in changed.graph.node if node.op_type == "Resize")
+        assert resize.input[2] == "public"

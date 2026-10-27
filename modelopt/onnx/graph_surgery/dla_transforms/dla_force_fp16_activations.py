@@ -460,6 +460,17 @@ def _apply_force_fp16_activations(model):
                 output = cache.unique_name(source + "_to_fp32_fp16")
                 before.setdefault(id(producer), []).append(_cast(source, output, fp32, cache))
                 producer.input[0] = output
+            internal = [
+                (consumer, port)
+                for consumer, port in cache.get_consumers(value.name)
+                if not _fp32_control(consumer, port, native_nodes, fp32_inputs)
+                and not _is_cast(consumer, fp16)
+            ]
+            if internal:
+                view = cache.unique_name(value.name + "_fp16")
+                after.setdefault(id(producer), []).append(_cast(value.name, view, fp16, cache))
+                for consumer, port in internal:
+                    consumer.input[port] = view
             continue
         if _is_cast(producer, fp32):
             continue
