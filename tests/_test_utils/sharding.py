@@ -49,11 +49,13 @@ def select_shard(config, items, index: int, count: int) -> None:
         raise pytest.UsageError(
             f"--shard-index must be between 1 and --shard-count ({count}), got {index}"
         )
+    if count == 1:
+        return
 
     def file_of(item):
         return item.path.relative_to(config.rootpath).as_posix()
 
-    durations = json.loads(DURATIONS_FILE.read_text()) if DURATIONS_FILE.exists() else {}
+    durations = json.loads(DURATIONS_FILE.read_text())
     mine = set(assign_files(durations, sorted({file_of(item) for item in items}), count)[index - 1])
     kept = [item for item in items if file_of(item) in mine]
     deselected = [item for item in items if file_of(item) not in mine]

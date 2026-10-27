@@ -116,10 +116,9 @@ def pytest_collection_modifyitems(config, items):
             )
         item.add_marker(pytest.mark.timeout(_DEFAULT_TIMEOUT[group]))
 
-    if config.getoption("--shard-count") > 1:
-        select_shard(
-            config, items, config.getoption("--shard-index"), config.getoption("--shard-count")
-        )
+    select_shard(
+        config, items, config.getoption("--shard-index"), config.getoption("--shard-count")
+    )
 
 
 # General Fixtures #################################################################################

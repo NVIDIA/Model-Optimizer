@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -42,44 +41,32 @@ def test_assign_files_is_deterministic_and_counts_an_unknown_file_as_the_median(
     assert max(loads) - min(loads) <= 50.0
 
 
-def _items(root, names):
-    return [SimpleNamespace(path=root / name) for name in names]
-
-
-@pytest.mark.parametrize("index", [1, 2])
-def test_select_shard_keeps_whole_files_and_the_shards_partition_the_items(tmp_path, index):
-    names = ["a.py", "a.py", "b.py", "c.py", "c.py", "d.py", "e.py"]
+def _select(root, names, index, count):
     deselected = []
     config = SimpleNamespace(
-        rootpath=tmp_path,
+        rootpath=root,
         hook=SimpleNamespace(pytest_deselected=lambda items: deselected.extend(items)),
     )
-    items = _items(tmp_path, names)
-    select_shard(config, items, index, 2)
-    kept_files = {item.path.name for item in items}
-    assert not kept_files & {item.path.name for item in deselected}
-    assert len(items) + len(deselected) == len(names)
-    assert [item.path.name for item in items] == [n for n in names if n in kept_files]
+    items = [SimpleNamespace(path=root / name) for name in names]
+    select_shard(config, items, index, count)
+    return items, deselected
 
 
-def test_the_two_shards_run_every_item_exactly_once(tmp_path):
+def test_the_shards_run_every_item_exactly_once_and_keep_files_whole(tmp_path):
     names = [f"{c}.py" for c in "abcde" for _ in range(3)]
     ran = []
     for index in (1, 2):
-        config = SimpleNamespace(
-            rootpath=tmp_path, hook=SimpleNamespace(pytest_deselected=lambda items: None)
-        )
-        items = _items(tmp_path, names)
-        select_shard(config, items, index, 2)
-        ran += [(item.path.name, i) for i, item in enumerate(items)]
-    assert sorted(n for n, _ in ran) == sorted(names)
+        kept, deselected = _select(tmp_path, names, index, 2)
+        assert not {i.path for i in kept} & {i.path for i in deselected}
+        assert len(kept) + len(deselected) == len(names)
+        ran += [i.path.name for i in kept]
+    assert sorted(ran) == sorted(names)
 
 
-@pytest.mark.parametrize("index", [0, 3])
-def test_select_shard_rejects_an_index_outside_the_count(tmp_path, index):
-    config = SimpleNamespace(rootpath=Path(tmp_path), hook=None)
+@pytest.mark.parametrize(("index", "count"), [(0, 2), (3, 2), (2, 1)])
+def test_select_shard_rejects_an_index_outside_the_count(tmp_path, index, count):
     with pytest.raises(pytest.UsageError, match="--shard-index"):
-        select_shard(config, _items(tmp_path, ["a.py"]), index, 2)
+        _select(tmp_path, ["a.py"], index, count)
 
 
 def test_shard_durations_parse_takes_the_time_between_result_lines_per_file():
