@@ -19,8 +19,10 @@ import fnmatch
 import math
 import time
 import warnings
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from functools import partial
 from typing import Any, TypeAlias
 
@@ -65,10 +67,12 @@ from .utils import (
     enable_weight_access_and_writeback,
     is_quantized_column_parallel_linear,
     is_quantized_linear,
+    is_quantized_parallel_linear,
     is_quantized_row_parallel_linear,
     module_name_maps,
     persistent_materialization,
     promote_static_block_weight_quantizers,
+    requires_weight_materialization,
 )
 from .utils.calib_utils import (
     _GPTQ_HELPER_REGISTRY,
@@ -2716,19 +2720,62 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
         for handle in handles:
             handle.remove()
 
+    def encode(weight, quantizer):
+        sum_sq, count = targets[id(quantizer)]
+        second_moments = None if count == 0 else sum_sq.to(weight.device) / count
+        encoder = _IMATRIX_ENCODER_REGISTRY[quantizer.backend]
+        weight.copy_(encoder.encode(weight, quantizer, second_moments))
+
+    # Weights readable as they stand are grouped by device and encoded by one thread per GPU: a
+    # model that device_map spreads over GPUs would otherwise keep all but one of them idle.
+    # Offloaded or sharded weights are encoded in turn, each inside its materialization window.
+    by_device: dict[torch.device, list] = defaultdict(list)
     encoded = 0
     for _, module in target_modules:
-        with enable_weight_access_and_writeback(module, model, names):
+        in_window = requires_weight_materialization(
+            module, model, names
+        ) or is_quantized_parallel_linear(module)
+        with (
+            enable_weight_access_and_writeback(module, model, names) if in_window else nullcontext()
+        ):
             for weight, quantizer in module.iter_weights_for_calibration():
-                entry = targets.get(id(quantizer))
-                if entry is None:
+                if id(quantizer) not in targets:
                     continue
-                sum_sq, count = entry
-                second_moments = None if count == 0 else sum_sq.to(weight.device) / count
-                encoder = _IMATRIX_ENCODER_REGISTRY[quantizer.backend]
-                weight.copy_(encoder.encode(weight, quantizer, second_moments))
+                if in_window:
+                    encode(weight, quantizer)
+                else:
+                    by_device[weight.device].append((weight, quantizer))
                 encoded += 1
+    _encode_on_each_gpu(by_device, encode)
     print_rank_0(f"imatrix: encoded {encoded} weights")
+
+
+def _encode_on_each_gpu(by_device, encode):
+    """Call ``encode(weight, quantizer)`` on every item, one thread per GPU when several hold items."""
+    gpus = [device for device in by_device if device.type == "cuda"]
+    if len(gpus) < 2:
+        gpus = []
+    for device, items in by_device.items():
+        if device not in gpus:
+            for item in items:
+                encode(*item)
+    if not gpus:
+        return
+    # The first encode runs here, so lazy setup that is not thread-safe, such as loading a format's
+    # CUDA extension, happens once before the workers start.
+    first, *by_device[gpus[0]] = by_device[gpus[0]]
+    encode(*first)
+
+    def worker(device):
+        torch.cuda.set_device(device)  # per thread, like grad mode
+        with torch.no_grad():
+            for item in by_device[device]:
+                encode(*item)
+        torch.cuda.synchronize(device)
+
+    with ThreadPoolExecutor(len(gpus)) as pool:
+        for future in [pool.submit(worker, gpu) for gpu in gpus]:
+            future.result()
 
 
 def _run_weight_scale_calibration(model, forward_loop, scale_algorithm):
