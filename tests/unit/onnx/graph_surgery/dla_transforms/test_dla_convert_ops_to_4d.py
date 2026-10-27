@@ -1798,3 +1798,128 @@ def test_generic_broadcast_output_without_intermediate_metadata(operation, fixed
     converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
     onnx.checker.check_model(converted, full_check=True)
     _assert_match(expected, _run_ort(converted, feeds))
+
+
+@pytest.mark.parametrize("owner", ["peer", "public", "capture", "two_gathers", "default", "legacy"])
+def test_gather_preserves_four_dimensional_initializer_owners(owner):
+    """Keep the original index type, shape, and runtime override semantics for every owner."""
+    indices = np.asarray([0, 3], np.int64).reshape(1, 1, 1, 2)
+    nodes = [helper.make_node("Gather", ["x", "indices"], ["y"], axis=0)]
+    inputs = [_vi("x", TensorProto.FLOAT, [8])]
+    outputs = [_vi("y", TensorProto.FLOAT, [1, 1, 1, 2])]
+    if owner == "peer":
+        nodes.append(helper.make_node("Identity", ["indices"], ["peer"]))
+        outputs.append(_vi("peer", TensorProto.INT64, [1, 1, 1, 2]))
+    elif owner == "public":
+        outputs.append(_vi("indices", TensorProto.INT64, [1, 1, 1, 2]))
+    elif owner == "two_gathers":
+        nodes.append(helper.make_node("Gather", ["x", "indices"], ["z"], axis=0))
+        outputs.append(_vi("z", TensorProto.FLOAT, [1, 1, 1, 2]))
+    elif owner == "capture":
+        branch = helper.make_graph(
+            [helper.make_node("Identity", ["indices"], ["branch_result"])],
+            "capture",
+            [],
+            [_vi("branch_result", TensorProto.INT64, [1, 1, 1, 2])],
+        )
+        nodes.append(
+            helper.make_node(
+                "If", ["condition"], ["captured"], then_branch=branch, else_branch=branch
+            )
+        )
+        inputs.append(_vi("condition", TensorProto.BOOL, []))
+        outputs.append(_vi("captured", TensorProto.INT64, [1, 1, 1, 2]))
+    if owner in {"default", "legacy"}:
+        inputs.append(_vi("indices", TensorProto.INT64, [1, 1, 1, 2]))
+    model = _make_model(
+        nodes,
+        "owned_gather_indices",
+        inputs,
+        outputs,
+        [_init("indices", indices)],
+        infer_symbolic_shapes=False,
+    )
+    if owner == "legacy":
+        model.ir_version = 3
+    original = model.graph.initializer[0].SerializeToString()
+    feeds = {"x": np.arange(8, dtype=np.float32)}
+    if owner == "capture":
+        feeds["condition"] = np.asarray(True)
+    cases = [feeds]
+    if owner == "default":
+        cases.append({**feeds, "indices": np.asarray([7, 5], np.int64).reshape(1, 1, 1, 2)})
+    expected = [_run_ort(copy.deepcopy(model), case) for case in cases]
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    assert (
+        next(t for t in converted.graph.initializer if t.name == "indices").SerializeToString()
+        == original
+    )
+    onnx.checker.check_model(converted, full_check=True)
+    for case, reference in zip(cases, expected):
+        _assert_match(reference, _run_ort(converted, case))
+    if owner == "two_gathers":
+        gathers = [node for node in converted.graph.node if node.op_type == "Gather"]
+        assert gathers[0].input[1] == gathers[1].input[1]
+
+
+@pytest.mark.parametrize("missing", ["indices", "output", "both", "unequal_extents"])
+@pytest.mark.parametrize("fixed", [False, True])
+def test_gather_elements_restores_native_rank_without_intermediate_metadata(missing, fixed):
+    """Derive both adapter ranks from the schema, including unequal non-axis extents."""
+    data_shape, index_shape, axis = [2, 3], [2, 3], 1
+    if missing == "unequal_extents":
+        data_shape, index_shape, axis = [2, 1, 4], [1, 2, 4], 1
+    indices = np.zeros(index_shape, np.int64)
+    nodes = []
+    inputs = [_vi("x", TensorProto.FLOAT, data_shape)]
+    initializers = []
+    if fixed:
+        initializers.append(_init("indices", indices))
+    else:
+        inputs.append(_vi("indices", TensorProto.INT64, index_shape))
+    index_name = "indices"
+    if missing in {"indices", "both"}:
+        nodes.append(helper.make_node("Identity", ["indices"], ["hidden_indices"]))
+        index_name = "hidden_indices"
+    result_name = "hidden_result" if missing in {"output", "both", "unequal_extents"} else "y"
+    nodes.append(helper.make_node("GatherElements", ["x", index_name], [result_name], axis=axis))
+    if result_name != "y":
+        nodes.append(helper.make_node("Identity", [result_name], ["y"]))
+    model = _make_model(
+        nodes,
+        "missing_gather_elements_metadata",
+        inputs,
+        [_vi("y", TensorProto.FLOAT, index_shape)],
+        initializers,
+        infer_symbolic_shapes=False,
+    )
+    feeds = {"x": np.arange(np.prod(data_shape), dtype=np.float32).reshape(data_shape)}
+    if not fixed:
+        feeds["indices"] = indices
+    expected = _run_ort(copy.deepcopy(model), feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))
+
+
+def test_expand_with_unknown_native_input_and_output_stays_unchanged():
+    """Leave a fixed Expand native when neither operand rank nor result rank is known."""
+    model = _make_model(
+        [
+            helper.make_node("Identity", ["x"], ["hidden_input"]),
+            helper.make_node("Expand", ["hidden_input", "target"], ["hidden_output"]),
+            helper.make_node("Identity", ["hidden_output"], ["y"]),
+        ],
+        "unknown_expand_rank",
+        [_vi("x", TensorProto.FLOAT, [1, 3])],
+        [_vi("y", TensorProto.FLOAT, [2, 3])],
+        [_init("target", np.asarray([2, 3], np.int64))],
+        infer_symbolic_shapes=False,
+    )
+    before = model.SerializeToString()
+    feeds = {"x": np.arange(3, dtype=np.float32).reshape(1, 3)}
+    expected = _run_ort(copy.deepcopy(model), feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    assert converted.SerializeToString() == before
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))

@@ -54,6 +54,7 @@ from ..utils.graph_utils import (
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _subgraph_captures
 from .dla_indexing import _operator_nodes
+from .dla_rank_conversion import _runtime_input_names
 
 
 class _InitializerNames(set[str]):
@@ -74,13 +75,15 @@ class _InitializerNames(set[str]):
 class _CacheShapeProxy:
     """Dict-like wrapper around ``GraphCache.get_shape`` for handler compatibility."""
 
-    __slots__ = ("_cache", "_captured", "_standard_nodes")
+    __slots__ = ("_cache", "_captured", "_index_views", "_runtime_inputs", "_standard_nodes")
 
-    def __init__(self, cache: GraphCache, standard_nodes, captured) -> None:
+    def __init__(self, cache: GraphCache, standard_nodes, captured, runtime_inputs) -> None:
         """Retain native shape lookups and precomputed operator ownership guards."""
         self._cache = cache
         self._standard_nodes = {id(node) for node in standard_nodes}
         self._captured = captured
+        self._runtime_inputs = runtime_inputs
+        self._index_views = {}
 
     def get(self, name, default=None):
         """Return a native shape or the caller default."""
@@ -671,7 +674,7 @@ def _handle_gather(node, graph, shape_map, init_names, unique_init, inits_to_add
         output_rank = 4 - 1 + 1 = 4  (no output squeeze needed).
 
     Indices are also cast to INT32 (DLA requirement).
-    For initializer indices: cast + flatten done in-place.
+    Fixed indices use a shared private flattened view; runtime defaults stay dynamic.
     For dynamic indices: Cast node followed by Squeeze node(s).
     """
     in_name = node.input[0]
@@ -703,20 +706,20 @@ def _handle_gather(node, graph, shape_map, init_names, unique_init, inits_to_add
     cnt_ref[0] += 1
 
     pre: list = []
-    is_init = idx_name in init_names
+    is_init = idx_name in init_names and idx_name not in shape_map._runtime_inputs
 
     # ── 1. Cast indices to INT32 and flatten to 1-D ───────────────────────────
     if is_init:
-        for init in graph.initializer:
-            if init.name == idx_name:
-                arr = numpy_helper.to_array(init)
-                new_arr = (
-                    np.array([arr.item()], dtype=np.int32)
-                    if arr.ndim == 0
-                    else arr.flatten().astype(np.int32)
-                )
-                init.CopyFrom(numpy_helper.from_array(new_arr, idx_name))
-                break
+        if idx_name not in shape_map._index_views:
+            flat = (
+                numpy_helper.to_array(shape_map._cache.get_init(idx_name))
+                .reshape(-1)
+                .astype(np.int32, copy=False)
+            )
+            private = unique_init.unique_name(f"{pfx}_idx_i32_{c}")
+            inits_to_add.append(numpy_helper.from_array(flat, private))
+            shape_map._index_views[idx_name] = private
+        node.input[1] = shape_map._index_views[idx_name]
     else:
         # Check if the producer of idx_name is already a Cast node — reuse it.
         producer_cast = None
@@ -865,9 +868,9 @@ def _handle_gather(node, graph, shape_map, init_names, unique_init, inits_to_add
 def _handle_gatherelements(node, graph, shape_map, init_names, unique_init, inits_to_add, cnt_ref):
     """Promote GatherElements to 4D output.
 
-    GatherElements requires data.shape == indices.shape and produces output
+    GatherElements requires equal data and index ranks and produces output
     with the same shape as indices.  After unsqueezing data to 4D, indices must
-    also be unsqueezed to 4D so the shapes match → output is naturally 4D.
+    also be unsqueezed to 4D so the ranks match → output is naturally 4D.
 
     Indices are cast to INT32 (DLA requirement).
     For initializer indices: cast + reshape to 4D done in-place.
@@ -933,13 +936,12 @@ def _handle_gatherelements(node, graph, shape_map, init_names, unique_init, init
                 idx_after_cast = idx_name
 
             # Unsqueeze indices to 4D to match data
-            idx_shape = shape_map.get(idx_name)
-            if idx_shape is not None and len(idx_shape) < 4:
+            if rank < 4:
                 c_usq = cnt_ref[0]
                 cnt_ref[0] += 1
                 idx_4d, idx_unsq = _make_unsqueeze_to_4d(
                     idx_after_cast,
-                    len(idx_shape),
+                    rank,
                     unique_init.unique_name(f"{pfx}_idx"),
                     unique_init,
                     graph,
@@ -956,14 +958,13 @@ def _handle_gatherelements(node, graph, shape_map, init_names, unique_init, init
     for oi, orig_out in enumerate(node.output):
         if not orig_out:
             continue
-        orig_out_shape = shape_map.get(orig_out)
-        if orig_out_shape is not None and len(orig_out_shape) < 4:
+        if rank < 4:
             c_sq = cnt_ref[0]
             cnt_ref[0] += 1
             temp_out = unique_init.unique_name(f"{pfx}_gathel_4d_{c_sq}_o{oi}")
             sq = _make_squeeze_to_rank(
                 temp_out,
-                len(orig_out_shape),
+                rank,
                 orig_out,
                 pfx,
                 unique_init,
@@ -988,6 +989,8 @@ def _handle_expand(node, graph, shape_map, init_names, unique_init, inits_to_add
     if orig_in_shape is not None:
         target = shape_map._cache.get_init_array(node.input[1])
         native_output = list(np.broadcast_shapes(orig_in_shape, target.tolist()))
+    if native_output is None and any(shape_map.get(name) is None for name in node.output if name):
+        return None
     pfx = node.name or f"exp_{cnt_ref[0]}"
     c = cnt_ref[0]
     cnt_ref[0] += 1
@@ -1683,7 +1686,7 @@ def _apply_convert_ops_to_4d(model: onnx.ModelProto) -> onnx.ModelProto:
     unique_init = _InitializerNames(cache)
     standard_nodes = _operator_nodes(model, {node.op_type for node in graph.node})
     captured = _subgraph_captures(graph)
-    shape_map = _CacheShapeProxy(cache, standard_nodes, captured)
+    shape_map = _CacheShapeProxy(cache, standard_nodes, captured, _runtime_input_names(model))
     init_names = cache.init_names
 
     node_idx = {id(n): i for i, n in enumerate(graph.node)}
