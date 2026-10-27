@@ -92,9 +92,13 @@ def test_qsa_indexer_fast_path_matches_the_reference(monkeypatch, budget, pads, 
         prepare_model_for_calibration(model)
         if SEQ // config.indexer_compress_ratio <= model.indexer.block_topk:
             monkeypatch.setattr(type(model.indexer), "forward", _reference_must_not_run)
+        projections = []
+        model.indexer.index_qk_proj.register_forward_hook(lambda *_: projections.append(None))
         actual = model.indexer(hidden, rope, mask, cache_seen)
 
     assert actual.dtype == expected.dtype
     assert torch.equal(actual, expected)
+    # The projection still runs once, as in the reference, so a quantizer on it gets calibrated.
+    assert len(projections) == 1
     if cache:
         assert torch.equal(cache_seen.keys[0], expected_cache.keys[0])

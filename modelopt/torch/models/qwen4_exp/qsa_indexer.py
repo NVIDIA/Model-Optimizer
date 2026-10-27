@@ -35,10 +35,12 @@ def _forward(self, hidden_states, position_embeddings, attention_mask, past_key_
         return self._modelopt_reference_forward(
             hidden_states, position_embeddings, attention_mask, past_key_values
         )
+    # The reference runs the projection on every forward, so a quantizer on it gets calibrated.
+    qk = self.index_qk_proj(hidden_states)
     if past_key_values is not None:
         # The reference appends this step's indexer keys to the cache before selecting.
         batch_size, seq_length, _ = hidden_states.shape
-        token_k = self.index_qk_proj(hidden_states)[..., self.index_n_heads * self.index_head_dim :]
+        token_k = qk[..., self.index_n_heads * self.index_head_dim :]
         past_key_values.update_indexer(
             token_k.reshape(batch_size, seq_length, -1, self.index_head_dim).squeeze(2),
             self.layer_idx,
