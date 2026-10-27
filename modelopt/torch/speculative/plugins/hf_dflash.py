@@ -891,13 +891,14 @@ class HFDFlashModel(DFlashModel):
         )
 
     @torch.no_grad()
-    def _teacher_logits(self, base_outputs, label_positions, token_ids=None):
+    def _teacher_logits(self, base_outputs, *, label_positions, token_ids=None):
         """The base model's logits for the tokens at ``label_positions`` ([B, ...]) -> [B, ..., vocab].
 
         Next-token logits: the ones that predict the token at position ``i`` sit at ``i - 1``.
         Only those rows of the base hidden go through the final norm and lm_head, so no
         full-sequence logits are built from it; ``token_ids`` ([B, ..., k]) narrows the
-        projection to just those vocab entries.
+        projection to just those vocab entries. ``label_positions`` is keyword-only, so every
+        call says which positions it passes: handing it the logit rows reads one row early.
         """
         positions = (label_positions - 1).clamp(min=0)
         if base_outputs.logits is not None:
@@ -995,7 +996,7 @@ class HFDFlashModel(DFlashModel):
 
         if valid_count > 1.0:
             if kd:
-                flat_teacher = self._teacher_logits(base_outputs, targets.positions)
+                flat_teacher = self._teacher_logits(base_outputs, label_positions=targets.positions)
                 flat_teacher = flat_teacher.reshape(flat_logits.shape)
                 target_soft = torch.softmax(flat_teacher, dim=-1)
                 draft_logsoft = torch.log_softmax(flat_logits, dim=-1)

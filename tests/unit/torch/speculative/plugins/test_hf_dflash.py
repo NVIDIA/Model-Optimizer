@@ -1559,7 +1559,9 @@ class TestTeacherLogits:
         model = self._model()
         hidden = self._hidden(model)
         labels = self._labels()
-        got = model._teacher_logits(DFlashBaseModelOutput(None, base_hidden=hidden), labels)
+        got = model._teacher_logits(
+            DFlashBaseModelOutput(None, base_hidden=hidden), label_positions=labels
+        )
         want = self._rows(model._base_model_lm_head(hidden), labels - 1)
         torch.testing.assert_close(got, want)
 
@@ -1569,16 +1571,17 @@ class TestTeacherLogits:
         labels = self._labels()
         outputs = DFlashBaseModelOutput(None, base_hidden=hidden, base_hidden_prenorm=True)
         want = self._rows(model._base_model_lm_head(model._base_model_norm(hidden)), labels - 1)
-        torch.testing.assert_close(model._teacher_logits(outputs, labels), want)
+        torch.testing.assert_close(model._teacher_logits(outputs, label_positions=labels), want)
 
     def test_token_ids_pick_entries_of_the_full_rows(self):
         model = self._model()
         outputs = DFlashBaseModelOutput(None, base_hidden=self._hidden(model))
         labels = self._labels()
         token_ids = torch.randint(0, model.config.vocab_size, (*labels.shape, 5))
-        rows = model._teacher_logits(outputs, labels)
+        rows = model._teacher_logits(outputs, label_positions=labels)
         torch.testing.assert_close(
-            model._teacher_logits(outputs, labels, token_ids), rows.gather(-1, token_ids)
+            model._teacher_logits(outputs, label_positions=labels, token_ids=token_ids),
+            rows.gather(-1, token_ids),
         )
 
     def test_handed_over_logits_are_gathered_not_recomputed(self):
@@ -1588,22 +1591,23 @@ class TestTeacherLogits:
         labels = self._labels()
         token_ids = torch.randint(0, model.config.vocab_size, (*labels.shape, 5))
         want = self._rows(logits, labels - 1)
-        assert torch.equal(model._teacher_logits(outputs, labels), want)
+        assert torch.equal(model._teacher_logits(outputs, label_positions=labels), want)
         assert torch.equal(
-            model._teacher_logits(outputs, labels, token_ids), want.gather(-1, token_ids)
+            model._teacher_logits(outputs, label_positions=labels, token_ids=token_ids),
+            want.gather(-1, token_ids),
         )
 
     def test_label_zero_does_not_wrap_to_the_last_row(self):
         model = self._model()
         logits = torch.randn(1, SEQ_LEN, model.config.vocab_size)
         outputs = DFlashBaseModelOutput(None, logits=logits)
-        got = model._teacher_logits(outputs, torch.tensor([[0]]))
+        got = model._teacher_logits(outputs, label_positions=torch.tensor([[0]]))
         assert torch.equal(got[0, 0], logits[0, 0])
 
     def test_missing_base_distribution_raises(self):
         model = self._model()
         with pytest.raises(ValueError, match="base_model_hidden_states"):
-            model._teacher_logits(DFlashBaseModelOutput(None), self._labels())
+            model._teacher_logits(DFlashBaseModelOutput(None), label_positions=self._labels())
 
     def test_offline_dict_keeps_the_hidden_unprojected(self):
         d = {

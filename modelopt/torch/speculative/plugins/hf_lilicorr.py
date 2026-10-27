@@ -520,7 +520,7 @@ class HFLiLiCorrModel(HFDFlashModel):
         labels = labels[..., 1:]
         candidate_target_logits = self._teacher_logits(
             base_outputs,
-            labels,
+            label_positions=labels,
             token_ids=candidate_ids.reshape(bsz, n_blocks, num_slots, topk),
         )
         return candidate_target_logits.reshape(batch_blocks, num_slots, topk).float()
