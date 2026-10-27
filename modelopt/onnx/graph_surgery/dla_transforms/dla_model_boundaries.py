@@ -193,6 +193,14 @@ def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=Fal
             if not _is_standard_node(consumer, local_functions, {"Unsqueeze"}):
                 continue
             tensor = cache.get_init(consumer.input[1])
+            control = cache.get_producer(consumer.input[1])
+            if (
+                tensor is None
+                and validate_only
+                and control is not None
+                and _is_standard_node(control, local_functions, {"Constant"})
+            ):
+                continue
             if tensor is None or tensor.name in cache.graph_input_names:
                 raise ValueError(f"Unsqueeze axes must be fixed for {consumer.name!r}")
             output_shape = list(shape)
