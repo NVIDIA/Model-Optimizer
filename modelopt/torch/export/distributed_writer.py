@@ -865,7 +865,7 @@ def _distributed_save_hf_checkpoint_impl(
     # exactly one rank (never gathered to a single rank), which is what lets the reverse run: the
     # transformers conversion ops are written against whole tensors and cannot express a placement.
     # The reverse must precede the shard layout, since it renames keys and splits tensors.
-    _materialize_owned(local_sd, expert_key_set, rank, world)
+    _materialize_owned(local_sd, expert_key_set, rank, world, _merge_groups(model, local_sd))
     reverted = _revert_whole_sd(model, local_sd)
 
     # Tensors the model does not own -- whatever the caller hands in via extra_state_dict, e.g.
