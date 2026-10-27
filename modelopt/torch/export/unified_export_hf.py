@@ -2109,7 +2109,8 @@ def export_hf_checkpoint(
             from .distributed_writer import distributed_save_hf_checkpoint
 
             _qlora = kwargs.get("is_modelopt_qlora", False)
-            _dtype, _tied, hf_quant_config = _prepare_model_for_export(model, dtype, _qlora)
+            # The writer builds its own name-based tied-weight map, so this one is not handed down.
+            _dtype, _, hf_quant_config = _prepare_model_for_export(model, dtype, _qlora)
             # main split preparation from packing, so pack explicitly. keep_fused_experts leaves
             # MoE experts fused + sharded through the fold, so each rank folds only its LOCAL
             # experts; the writer splits them after consolidation.
