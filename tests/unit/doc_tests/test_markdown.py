@@ -222,6 +222,8 @@ def test_process_group_cleanup(tmp_path, ending):
 
 
 def _assert_dead(pid):
+    if not Path("/proc/self/stat").exists():
+        pytest.skip("Requires /proc to verify descendant exit")
     for _ in range(100):
         status = Path(f"/proc/{pid}/stat")
         if not status.exists() or status.read_text().split()[2] == "Z":
