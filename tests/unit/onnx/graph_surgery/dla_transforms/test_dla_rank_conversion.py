@@ -91,6 +91,35 @@ def test_rank_conversion_preserves_operator_values(operation):
     np.testing.assert_array_equal(actual[0], expected[0])
 
 
+@pytest.mark.parametrize("operation", ["Flatten", "ArgMax"])
+@pytest.mark.parametrize("tail", [False, True])
+def test_registered_rank_reducers_restore_native_public_outputs(operation, tail):
+    """Allow deferred output restoration when its actual later conversion stage is installed."""
+    shape = [1, 48] if operation == "Flatten" else [1, 4, 4]
+    attributes = {"axis": 1} if operation == "Flatten" else {"axis": 1, "keepdims": 0}
+    nodes = [helper.make_node(operation, ["x"], ["middle" if tail else "y"], **attributes)]
+    if tail:
+        nodes.append(helper.make_node("Identity", ["middle"], ["y"]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "registered_rank_reducer",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 3, 4, 4])],
+            [
+                helper.make_tensor_value_info(
+                    "y", TensorProto.FLOAT if operation == "Flatten" else TensorProto.INT64, shape
+                )
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    feeds = {"x": np.arange(48, dtype=np.float32).reshape(1, 3, 4, 4)}
+    expected = _execute(model, feeds)[0]
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+
+
 def test_converted_reshape_target_preserves_skipped_native_owner():
     """Give the converted Reshape a private target when a native 4D owner is skipped."""
     model = helper.make_model(
