@@ -525,18 +525,23 @@ def test_fused_vs_unfused_nvfp4(quant_block_size, gptq_block_size):
 
 @requires_triton
 @pytest.mark.parametrize(
-    ("in_features", "block_size", "four_over_six"),
+    ("in_features", "block_size", "cfg_update", "takes_fused"),
     [
-        (96, 48, False),  # non-power-of-two GPTQ block
-        (208, 128, False),  # non-power-of-two final block
-        (70, 128, False),  # width the NVFP4 group size does not divide
-        (96, 40, False),  # GPTQ block not a multiple of the group size
-        (64, 128, True),  # 4/6 scaling falls back to the unfused update
+        (96, 48, {}, True),  # non-power-of-two GPTQ block
+        (208, 128, {}, True),  # non-power-of-two final block
+        (70, 128, {}, True),  # width the NVFP4 group size does not divide
+        (96, 40, {}, True),  # GPTQ block not a multiple of the group size
+        # The quantizer forward does more than a per-row static QDQ, so GPTQ stays unfused.
+        (64, 128, {"block_sizes": {"four_over_six": True}}, False),
+        (64, 128, {"block_sizes": {-2: 16}}, False),
+        (64, 128, {"rotate": {"enable": True, "mode": "rotate_back"}}, False),
     ],
 )
-def test_gptq_fused_matches_unfused(in_features, block_size, four_over_six, monkeypatch):
+def test_gptq_fused_matches_unfused(in_features, block_size, cfg_update, takes_fused, monkeypatch):
     if torch.cuda.get_device_capability() < (8, 9):
         pytest.skip("fused GPTQ needs SM89+")
+    if "rotate" in cfg_update:
+        pytest.importorskip("fast_hadamard_transform")
     fused_calls = []
     fused_update = calib_utils.gptq_blockwise_update_fused_scalar
     monkeypatch.setattr(
@@ -547,14 +552,11 @@ def test_gptq_fused_matches_unfused(in_features, block_size, four_over_six, monk
     torch.manual_seed(0)
     model = torch.nn.Linear(in_features, 32, bias=False, device="cuda")
     inp = torch.randn(4, 16, in_features, device="cuda")
+    block_sizes = {-1: 16, "type": "static", "scale_bits": (4, 3)}
     weight_cfg = {
         "num_bits": (2, 1),
-        "block_sizes": {
-            -1: 16,
-            "type": "static",
-            "scale_bits": (4, 3),
-            "four_over_six": four_over_six,
-        },
+        **cfg_update,
+        "block_sizes": {**block_sizes, **cfg_update.get("block_sizes", {})},
     }
     weights = []
     for fused in (True, False):
@@ -567,7 +569,7 @@ def test_gptq_fused_matches_unfused(in_features, block_size, four_over_six, monk
         }
         qmodel = mtq.quantize(copy.deepcopy(model), quant_cfg, forward_loop=lambda m: m(inp))
         weights.append(qmodel.weight.data)
-    assert len(fused_calls) == (0 if four_over_six else 1)
+    assert len(fused_calls) == int(takes_fused)
     torch.testing.assert_close(weights[0], weights[1], atol=1e-4, rtol=1e-4)
 
 

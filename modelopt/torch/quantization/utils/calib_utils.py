@@ -523,9 +523,16 @@ class GPTQHelper:
             gptq_blockwise_update(self.weight, self.h_inv, block_size, quantizer)
 
     def _fused_supported(self, quantizer, weight):
-        # The fused kernel needs FP8 Triton casts (SM89+) and the default FP8 scale range (no 4/6).
+        # The fused kernel stands in for the quantizer's forward with a plain static QDQ over
+        # last-dim groups, so anything else that forward does (pre-quant scale, rotation, LSQ,
+        # 2-D blocks) takes the unfused loop. It also needs FP8 Triton casts (SM89+) and the
+        # default FP8 scale range (no 4/6).
         return (
             getattr(quantizer, "_is_nvfp4_static_quantizer", False)
+            and {k for k in quantizer.block_sizes if isinstance(k, int)} in ({-1}, {1})
+            and quantizer.pre_quant_scale is None
+            and not quantizer.rotate_is_enabled
+            and not quantizer._lsq
             and fp8_max_for_normalization(quantizer) == E4M3_MAX
             and triton_kernel.IS_AVAILABLE
             and weight.is_cuda
