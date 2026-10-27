@@ -1293,6 +1293,19 @@ def test_expert_parallel_ranks_agree_on_their_experts_quantization_before_foldin
     )
 
 
+def test_an_expert_parallel_export_refuses_to_save_the_modelopt_state(tmp_path):
+    """Each expert-parallel rank holds only its own experts' ModelOpt state, so saving rank 0's
+    would write an incomplete one: refused before anything is written."""
+    model = torch.nn.Sequential(torch.nn.Linear(16, 16))
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))
+    set_distribution_plan(model, DistributionPlan(2, ep_size=2))
+
+    with pytest.raises(NotImplementedError, match="expert-parallel export"):
+        export_hf_checkpoint(model, export_dir=tmp_path / "export", save_modelopt_state=True)
+
+    assert not (tmp_path / "export").exists()
+
+
 def test_an_expert_parallel_plan_with_replicated_dense_shards_is_refused_before_folding(tmp_path):
     """Below the world size, EP leaves FSDP2's dense shards replicated across the expert-parallel
     groups, which the no-gather writer cannot write: refused before the export folds anything."""
