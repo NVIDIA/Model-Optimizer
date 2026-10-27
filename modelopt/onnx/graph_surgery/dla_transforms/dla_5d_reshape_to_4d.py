@@ -37,6 +37,7 @@ from ..utils.graph_utils import (
     infer_shapes,
     resolve_reshape_shape,
 )
+from .dla_graph_cleanup import _subgraph_captures
 from .dla_reorder_nodes import priority_topological_order
 
 _REDUCE_OPS = frozenset({"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"})
@@ -688,6 +689,7 @@ def _apply_5d_reshape_to_4d(model, *, skip_symbolic_shape_inference: bool = Fals
                 ):
                     output.type.ParseFromString(output_type)
         cache = GraphCache(graph)
+        captured = _subgraph_captures(graph)
         producer_positions = {
             output: index
             for index, node in enumerate(graph.node)
@@ -703,6 +705,10 @@ def _apply_5d_reshape_to_4d(model, *, skip_symbolic_shape_inference: bool = Fals
             nodes_to_remove, nodes_to_add = _dispatch_5d_reshape_candidate(
                 model, node, unique_initializer, len(batch), cache
             )
+            removed_outputs = {name for removed in nodes_to_remove for name in removed.output}
+            recreated_outputs = {name for added in nodes_to_add for name in added.output}
+            if lost := (removed_outputs - recreated_outputs) & captured:
+                raise ValueError(f"5D Reshape {node.name!r} cannot replace captured tensors {lost}")
             needs_reorder |= any(
                 producer_positions.get(name, -1) > idx
                 for removed in nodes_to_remove

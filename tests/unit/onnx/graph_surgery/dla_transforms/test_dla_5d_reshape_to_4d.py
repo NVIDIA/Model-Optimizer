@@ -142,6 +142,50 @@ def _make_transpose_reshape_model() -> onnx.ModelProto:
     return model
 
 
+@pytest.mark.parametrize("captured", ["T", "clip", "quantized", "dequantized", "Y"])
+@pytest.mark.parametrize("skip_inference", [False, True])
+def test_nested_capture_retains_native_producer(captured, skip_inference):
+    """Refuse removed middleware captures while allowing the recreated terminal output."""
+    model = _make_reduce_min_axis4_model()
+    model.graph.initializer.extend(
+        [_init("scale", np.array(0.25, np.float32)), _init("zero", np.array(128, np.uint8))]
+    )
+    model.graph.node[1].input[0] = "dequantized"
+    model.graph.node.insert(1, helper.make_node("Clip", ["T"], ["clip"]))
+    model.graph.node.insert(
+        2, helper.make_node("QuantizeLinear", ["clip", "scale", "zero"], ["quantized"])
+    )
+    model.graph.node.insert(
+        3, helper.make_node("DequantizeLinear", ["quantized", "scale", "zero"], ["dequantized"])
+    )
+    dtype = TensorProto.UINT8 if captured == "quantized" else TensorProto.FLOAT
+    shape = [2, 4, 12, 4] if captured == "Y" else [2, 4, 12, 4, 4]
+    branch = helper.make_graph(
+        [helper.make_node("Identity", [captured], ["view"])],
+        "capturing_branch",
+        [],
+        [helper.make_tensor_value_info("view", dtype, shape)],
+    )
+    model.graph.initializer.append(_init("condition", np.array(True)))
+    model.graph.node.append(
+        helper.make_node("If", ["condition"], ["captured"], then_branch=branch, else_branch=branch)
+    )
+    model.graph.output.append(helper.make_tensor_value_info("captured", dtype, shape))
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"X": np.arange(1536, dtype=np.float32).reshape(6, 4, 4, 16) / 128}
+    expected = _run_ort(model, feeds)
+    before = model.SerializeToString()
+    if captured != "Y":
+        with pytest.raises(ValueError, match="captur"):
+            _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=skip_inference)
+        assert model.SerializeToString() == before
+    else:
+        _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=skip_inference)
+        onnx.checker.check_model(model, full_check=True)
+        for name, actual in _run_ort(model, feeds).items():
+            np.testing.assert_array_equal(actual, expected[name])
+
+
 def _make_reduce_axis0_model() -> onnx.ModelProto:
     """Invalid for this pass: ReduceMin axis 0 on 5D."""
     inits = [
