@@ -1952,6 +1952,11 @@ def export_hf_checkpoint(
 
     exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
     if exporter is not None:
+        if save_modelopt_state:
+            warnings.warn(
+                "save_modelopt_state=True is not supported in the layerwise export "
+                "path and will be ignored."
+            )
         # Per-layer export wrote the shards during calibration; this writes the rest.
         exporter.finalize(extra_state_dict=extra_state_dict)
         # Into the exporter's directory, which is where finalize() wrote: export_dir may differ
