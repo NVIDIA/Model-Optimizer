@@ -603,9 +603,10 @@ def distributed_run(
     On exit, even if the body raises, it destroys the group the run set up: the launch's, or one the
     body set up, such as the one-rank group a single process's FSDP2 load shards through. A group
     that was already there when the run began is the caller's, and is left as it is. A rank whose
-    body raised in a run of several ranks exits through :func:`abort` instead, and the launcher
-    tears the job down: destroying the group would wait on peers that may sit in a collective this
-    rank never reaches.
+    body raised, in a run of several ranks on a group that was not there when it began, exits
+    through :func:`abort` instead, and the launcher tears the job down: destroying the group would
+    wait on peers that may sit in a collective this rank never reaches. In a run that found the
+    caller's group, the error goes on to the caller, which owns the peers.
     """
     launched = is_distributed_launch()
     if launched and torch.device(device) != torch.device("cuda"):
