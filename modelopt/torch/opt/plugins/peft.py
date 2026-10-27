@@ -41,24 +41,27 @@ def _get_quantizer_state_save_path(dir):
 
 def _new_save_pretrained_peft(self, save_directory, *args, **kwargs):
     outputs = self._modelopt_cache["save_pretrained"](self, save_directory, *args, **kwargs)
-    if ModeloptStateManager.is_converted(self):
-        path = _get_modelopt_state_path(save_directory)
-        torch.save(modelopt_state(self), path)
-        print_rank_0(f"Saved ModelOpt state to {path}")
+    if not ModeloptStateManager.is_converted(self):
+        return outputs
+    path = _get_modelopt_state_path(save_directory)
+    torch.save(modelopt_state(self), path)
+    print_rank_0(f"Saved ModelOpt state to {path}")
 
-        if ModeloptStateManager.has_state_for_mode_type("quantization", model=self):
-            # Lets save the quantizer state_dict separately
-            # PEFT save_pretrained only saves the state_dict corresponding to the adapters
-            # However our quantizers are part of the LoraLinear layers and not the adapters
-            # Also there might non-LoraLinear layers which have quantizers in the model which also wont be saved by PEFT
-            # So we need to save the quantizer state_dict separately
+    if not ModeloptStateManager.has_state_for_mode_type("quantization", model=self):
+        return outputs
 
-            # TODO: Move this to modelopt.torch.quantization.plugins.peft
-            from modelopt.torch.quantization.utils import get_quantizer_state_dict
+    # Lets save the quantizer state_dict separately
+    # PEFT save_pretrained only saves the state_dict corresponding to the adapters
+    # However our quantizers are part of the LoraLinear layers and not the adapters
+    # Also there might non-LoraLinear layers which have quantizers in the model which also wont be saved by PEFT
+    # So we need to save the quantizer state_dict separately
 
-            quantizer_state_dict = get_quantizer_state_dict(self)
-            if len(quantizer_state_dict) > 0:
-                torch.save(quantizer_state_dict, _get_quantizer_state_save_path(save_directory))
+    # TODO: Move this to modelopt.torch.quantization.plugins.peft
+    from modelopt.torch.quantization.utils import get_quantizer_state_dict
+
+    quantizer_state_dict = get_quantizer_state_dict(self)
+    if len(quantizer_state_dict) > 0:
+        torch.save(quantizer_state_dict, _get_quantizer_state_save_path(save_directory))
     return outputs
 
 
@@ -73,10 +76,11 @@ def _new_load_adapter(self, model_id, adapter_name, *args, **kwargs):
 
     outputs = self._modelopt_cache["load_adapter"](self, model_id, adapter_name, *args, **kwargs)
 
+    if not ModeloptStateManager.has_state_for_mode_type("quantization", model=self):
+        return outputs
+
     # TODO: Move this to modelopt.torch.quantization.plugins.peft
-    if ModeloptStateManager.has_state_for_mode_type("quantization", model=self) and os.path.isfile(
-        _get_quantizer_state_save_path(model_id)
-    ):
+    if os.path.isfile(_get_quantizer_state_save_path(model_id)):
         from modelopt.torch.quantization.nn import TensorQuantizer
 
         quantizer_state_dict = safe_load(

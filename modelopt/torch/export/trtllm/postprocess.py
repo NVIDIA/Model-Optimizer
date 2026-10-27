@@ -97,9 +97,6 @@ def _split_model_config_for_tp(merged_config, split_factor):
             config.weight = weights[i]
 
     elif isinstance(merged_config, ExpertConfig):
-        assert merged_config.fc is not None and merged_config.proj is not None, (
-            "Expert config requires FC and output projections."
-        )
         assert merged_config.proj.linear_type != LINEAR_COLUMN  # row
         assert merged_config.fc.linear_type == LINEAR_COLUMN  # column
         # Avoid deepcopy and instantiate expert configs manually to avoid OOM
@@ -796,7 +793,6 @@ def check_weight_shape_valid(config, inference_tensor_parallel=1, training_tenso
         return
 
     if isinstance(config, ExpertConfig):
-        assert config.fc is not None, "Expert FC projection is required."
         _, _, k = config.fc.weight.shape
         merged_k = k * training_tensor_parallel
         _check_merged_channel_is_valid(

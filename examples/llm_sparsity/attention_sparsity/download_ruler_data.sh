@@ -25,7 +25,7 @@ URLS_URL="https://raw.githubusercontent.com/NVIDIA/RULER/main/scripts/data/synth
 mkdir -p "${ESSAYS_DIR}"
 
 # Download URL list if not exists
-if [[ ! -f "${URLS_FILE}" ]]; then
+if [ ! -f "${URLS_FILE}" ]; then
     echo "Downloading URL list..."
     curl -fsSL "${URLS_URL}" -o "${URLS_FILE}"
 fi
@@ -33,11 +33,11 @@ fi
 # Download essays from GitHub URLs
 echo -n "Downloading essays"
 count=0
-while IFS= read -r url || [[ -n "$url" ]]; do
+while IFS= read -r url || [ -n "$url" ]; do
     if [[ "${url}" == https://github.com*.txt ]]; then
         filename=$(basename "${url}")
         filepath="${ESSAYS_DIR}/${filename}"
-        if [[ ! -f "${filepath}" ]]; then
+        if [ ! -f "${filepath}" ]; then
             raw_url="${url/github.com/raw.githubusercontent.com}"
             raw_url="${raw_url/\/raw\//\/}"
             curl -fsSL "${raw_url}" -o "${filepath}" 2>/dev/null && echo -n "."

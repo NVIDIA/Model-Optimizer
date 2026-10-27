@@ -390,21 +390,24 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
     @model_validator(mode="after")
     def validate_num_bits(self):
         """Validate `num_bits`."""
-        if self.backend is None:
-            num_bits = self.num_bits
-            if isinstance(num_bits, int) and num_bits < 1:
-                raise ValueError(
-                    f"num_bits must be a positive integer or a tuple of positive integers. {num_bits}"
-                )
-            if isinstance(num_bits, tuple):
-                self._validate_float_bits(num_bits, self.block_sizes)
-        return self
+        if self.backend is not None:
+            # For custom backends, we don't need to validate num_bits
+            return self
 
-    @staticmethod
-    def _validate_float_bits(num_bits, block_sizes):
+        num_bits = self.num_bits
+
+        if isinstance(num_bits, int) and num_bits < 1:
+            raise ValueError(
+                f"num_bits must be a positive integer or a tuple of positive integers. {num_bits}"
+            )
+
+        if not isinstance(num_bits, tuple):
+            return self
+
         if not all(x > 0 for x in num_bits):
             raise ValueError("num_bits must be a positive integer or a tuple of positive integers.")
 
+        block_sizes = self.block_sizes
         if num_bits not in [
             (4, 3),
             (5, 2),
@@ -425,6 +428,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
                 "Only blockwise dynamic quantization is supported with quantization "
                 f"formats E{num_bits[0]}M{num_bits[1]}."
             )
+        return self
 
     axis: int | tuple[int, ...] | None = ModeloptField(
         default=None,

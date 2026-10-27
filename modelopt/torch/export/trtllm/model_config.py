@@ -134,7 +134,7 @@ class LinearConfig:
 class LinearActConfig:
     """The linear + activation layer config."""
 
-    linear: LinearConfig | None = None
+    linear: LinearConfig = None
     hidden_act: str = ""
 
 
@@ -151,15 +151,9 @@ class ConvConfig:
 class QKVConfig:
     """The QKV layer config."""
 
-    q: LinearConfig | None = None
-    k: LinearConfig | None = None
-    v: LinearConfig | None = None
-
-    def _require_projections(self) -> tuple[LinearConfig, LinearConfig, LinearConfig]:
-        assert self.q is not None and self.k is not None and self.v is not None, (
-            "QKVConfig requires Q, K and V projections."
-        )
-        return self.q, self.k, self.v
+    q: LinearConfig = None
+    k: LinearConfig = None
+    v: LinearConfig = None
 
     @property
     def weight(self):
@@ -167,8 +161,7 @@ class QKVConfig:
 
         The Q, K, V weights are concat together to fit the TensorRT-LLM QKV linear layer.
         """
-        q, k, v = self._require_projections()
-        return torch.cat((q.weight, k.weight, v.weight))
+        return torch.cat((self.q.weight, self.k.weight, self.v.weight))
 
     @property
     def bias(self):
@@ -176,11 +169,12 @@ class QKVConfig:
 
         The Q, K, V bias are concat together to fit the TensorRT-LLM QKV linear layer.
         """
-        q, k, v = self._require_projections()
-        if q.bias is None:
-            assert k.bias is None and v.bias is None, "K and V should have valid bias as Q"
+        if self.q.bias is None:
+            assert self.k.bias is None and self.v.bias is None, (
+                "K and V should have valid bias as Q"
+            )
             return None
-        return torch.cat((q.bias, k.bias, v.bias))
+        return torch.cat((self.q.bias, self.k.bias, self.v.bias))
 
     @property
     def activation_scaling_factor(self):
@@ -188,20 +182,19 @@ class QKVConfig:
 
         The max of the Q, K, V activation scaling factors is returned.
         """
-        q, k, v = self._require_projections()
         if (
-            q.activation_scaling_factor is None
-            or k.activation_scaling_factor is None
-            or v.activation_scaling_factor is None
+            self.q.activation_scaling_factor is None
+            or self.k.activation_scaling_factor is None
+            or self.v.activation_scaling_factor is None
         ):
             return None
 
         return (
             torch.stack(
                 [
-                    q.activation_scaling_factor,
-                    k.activation_scaling_factor,
-                    v.activation_scaling_factor,
+                    self.q.activation_scaling_factor,
+                    self.k.activation_scaling_factor,
+                    self.v.activation_scaling_factor,
                 ]
             )
             .max(dim=0)
@@ -215,18 +208,17 @@ class QKVConfig:
         If the quantization is FP8, the max of the Q, K, V weight scaling factors is returned.
         If the quanitzation is INT8_SQ, the concat value is returned.
         """
-        q, k, v = self._require_projections()
         if (
-            q.weights_scaling_factor is None
-            or k.weights_scaling_factor is None
-            or v.weights_scaling_factor is None
+            self.q.weights_scaling_factor is None
+            or self.k.weights_scaling_factor is None
+            or self.v.weights_scaling_factor is None
         ):
             return None
 
-        if q.weights_scaling_factor.numel() != 1:
+        if self.q.weights_scaling_factor.numel() != 1:
             # for NVFP4, Int4 AWQ, Int8 SQ and Int8 WO case, we concatenate the
             # q_weight_scaling_factor, k_weight_scaling_factor, v_weight_scaling_factor
-            if q.weights_scaling_factor.dtype == torch.float8_e4m3fn:
+            if self.q.weights_scaling_factor.dtype == torch.float8_e4m3fn:
                 # For NVFP4, we recompute the weights_scaling_factor using max weights_scaling_factor2
                 qkv_weights_scaling_factor, _ = NVFP4QTensor.get_weights_scaling_factor(
                     self.weight, self.awq_block_size, self.weights_scaling_factor_2
@@ -234,9 +226,9 @@ class QKVConfig:
             else:
                 qkv_weights_scaling_factor = torch.cat(
                     (
-                        q.weights_scaling_factor,
-                        k.weights_scaling_factor,
-                        v.weights_scaling_factor,
+                        self.q.weights_scaling_factor,
+                        self.k.weights_scaling_factor,
+                        self.v.weights_scaling_factor,
                     )
                 )
         else:
@@ -245,9 +237,9 @@ class QKVConfig:
             qkv_weights_scaling_factor = (
                 torch.stack(
                     [
-                        q.weights_scaling_factor,
-                        k.weights_scaling_factor,
-                        v.weights_scaling_factor,
+                        self.q.weights_scaling_factor,
+                        self.k.weights_scaling_factor,
+                        self.v.weights_scaling_factor,
                     ],
                 )
                 .max(dim=0)
@@ -261,25 +253,24 @@ class QKVConfig:
 
         weight_scaling_factor_2 is needed for W4A8 AWQ.
         """
-        q, k, v = self._require_projections()
         if (
-            q.weights_scaling_factor_2 is None
-            or k.weights_scaling_factor_2 is None
-            or v.weights_scaling_factor_2 is None
+            self.q.weights_scaling_factor_2 is None
+            or self.k.weights_scaling_factor_2 is None
+            or self.v.weights_scaling_factor_2 is None
         ):
             return None
 
         # For W4A8 AWQ, weight_scaling_factor_2 corresponds to the per-tensor FP8 quantization.
         # Hence weight_scaling_factor_2 should be a scalar.
-        assert q.weights_scaling_factor_2.numel() == 1
+        assert self.q.weights_scaling_factor_2.numel() == 1
 
         # set qkv_weight_scaling_factor_2 to the max of q,k,v weight_scaling_factor_2
         qkv_weights_scaling_factor_2 = (
             torch.stack(
                 [
-                    q.weights_scaling_factor_2,
-                    k.weights_scaling_factor_2,
-                    v.weights_scaling_factor_2,
+                    self.q.weights_scaling_factor_2,
+                    self.k.weights_scaling_factor_2,
+                    self.v.weights_scaling_factor_2,
                 ]
             )
             .max(dim=0)
@@ -294,27 +285,27 @@ class QKVConfig:
 
         Prequant scaling factors for Q, K, V should be the same. So just return one of them.
         """
-        q, k, v = self._require_projections()
         if (
-            q.prequant_scaling_factor is None
-            or k.prequant_scaling_factor is None
-            or v.prequant_scaling_factor is None
+            self.q.prequant_scaling_factor is None
+            or self.k.prequant_scaling_factor is None
+            or self.v.prequant_scaling_factor is None
         ):
             return None
 
-        assert torch.equal(q.prequant_scaling_factor, k.prequant_scaling_factor) and torch.equal(
-            k.prequant_scaling_factor, v.prequant_scaling_factor
-        ), "Prequant scaling factors of Q, K and V should be the same"
-        return q.prequant_scaling_factor
+        assert torch.equal(
+            self.q.prequant_scaling_factor, self.k.prequant_scaling_factor
+        ) and torch.equal(self.k.prequant_scaling_factor, self.v.prequant_scaling_factor), (
+            "Prequant scaling factors of Q, K and V should be the same"
+        )
+        return self.q.prequant_scaling_factor
 
     @property
     def awq_block_size(self):
         """Returns the awq_block_size of this QKV layer."""
-        q, k, v = self._require_projections()
-        assert q.awq_block_size == k.awq_block_size == v.awq_block_size, (
+        assert self.q.awq_block_size == self.k.awq_block_size == self.v.awq_block_size, (
             "awq_block_size of QKV should be the same."
         )
-        return q.awq_block_size
+        return self.q.awq_block_size
 
 
 @dataclass
@@ -330,8 +321,8 @@ class AttentionConfig:
 
     # QKV can either be stored as split (for easier postprocessing)
     # or merged (for TRT LLM export)
-    qkv: QKVConfig | LinearConfig | None = None
-    dense: LinearConfig | None = None
+    qkv: QKVConfig | LinearConfig = None
+    dense: LinearConfig = None
     # KV cache related attributes
     k_cache_scaling_factor: torch.Tensor = None
     v_cache_scaling_factor: torch.Tensor = None
@@ -341,22 +332,22 @@ class AttentionConfig:
 
     rotary_dim: int = -math.inf
     # MPT variants
-    clip_qkv: float | None = None
+    clip_qkv: float = None
     # T5
-    rel_attn_table: RelativeAttentionTableConfig | None = None
+    rel_attn_table: RelativeAttentionTableConfig = None
 
     # Mllama
-    q_layernorm: LayernormConfig | None = None
-    k_layernorm: LayernormConfig | None = None
+    q_layernorm: LayernormConfig = None
+    k_layernorm: LayernormConfig = None
 
 
 @dataclass
 class MLPConfig:
     """The MLP layer config."""
 
-    fc: LinearConfig | None = None
-    gate: LinearConfig | None = None
-    proj: LinearConfig | None = None
+    fc: LinearConfig = None
+    gate: LinearConfig = None
+    proj: LinearConfig = None
     hidden_act: str = ""
     merge_gate_fc: bool = False
 
@@ -366,8 +357,8 @@ class ExpertConfig:
     """The Expert config."""
 
     # Aligning the naming conversion with TRT-LLM
-    fc: LinearConfig | None = None  # stacked experts for concatenated w3 and w1
-    proj: LinearConfig | None = None  # stacked experts for w2
+    fc: LinearConfig = None  # stacked experts for concatenated w3 and w1
+    proj: LinearConfig = None  # stacked experts for w2
 
 
 @dataclass
@@ -375,36 +366,35 @@ class RgLruConfig:
     """The RG LRU from recurrentgemma."""
 
     recurrent_param: torch.Tensor = None
-    input_gate: LinearConfig | None = None
-    recurrent_gate: LinearConfig | None = None
+    input_gate: LinearConfig = None
+    recurrent_gate: LinearConfig = None
 
 
 @dataclass
 class RecurrentConfig:
     """The RecurrentBlock from recurrentgemma."""
 
-    linear_y: LinearConfig | None = None
+    linear_y: LinearConfig = None
     y_bias: torch.Tensor = None
-    linear_x: LinearConfig | None = None
-    linear_out: LinearConfig | None = None
-    conv1d: ConvConfig | None = None
-    rg_lru: RgLruConfig | None = None
+    linear_x: LinearConfig = None
+    linear_out: LinearConfig = None
+    conv1d: ConvConfig = None
+    rg_lru: RgLruConfig = None
 
 
 @dataclass
 class MOEConfig:
     """The Mixture of Expert layer config."""
 
-    router: LinearConfig | None = None
-    experts: ExpertConfig | None = None
-    shared_expert: MLPConfig | None = None  # Deepseek MOE
-    shared_expert_gate: LinearConfig | None = None  # Qwen MOE
+    router: LinearConfig = None
+    experts: ExpertConfig = None
+    shared_expert: MLPConfig = None  # Deepseek MOE
+    shared_expert_gate: LinearConfig = None  # Qwen MOE
     hidden_act: str = ""
 
     @property
     def fc(self):
         """Return the fc module from experts."""
-        assert self.experts is not None, "MoE config requires experts."
         return self.experts.fc
 
 
@@ -413,18 +403,18 @@ class DecoderLayerConfig:
     """The decoder layer config."""
 
     decoder_type: str = ""
-    input_layernorm: LayernormConfig | None = None
-    mlp_layernorm: LayernormConfig | None = None
-    attention: AttentionConfig | None = None
-    recurrent: RecurrentConfig | None = None  # recurrent gemma
-    post_layernorm: LayernormConfig | None = None
-    pre_feedforward_layernorm: LayernormConfig | None = None  # gemma 2
-    post_feedforward_layernorm: LayernormConfig | None = None  # gemma 2
-    mlp: MLPConfig | MOEConfig | None = None
+    input_layernorm: LayernormConfig = None
+    mlp_layernorm: LayernormConfig = None
+    attention: AttentionConfig = None
+    recurrent: RecurrentConfig = None  # recurrent gemma
+    post_layernorm: LayernormConfig = None
+    pre_feedforward_layernorm: LayernormConfig = None  # gemma 2
+    post_feedforward_layernorm: LayernormConfig = None  # gemma 2
+    mlp: MLPConfig | MOEConfig = None
 
     num_attention_heads: int = 0
     # Supporting different attention_head_size per layer.
-    attention_head_size: int | None = None
+    attention_head_size: int = None
 
     num_kv_heads: int = 0
     max_position_embeddings: int = 0
@@ -453,8 +443,8 @@ class DecoderLayerConfig:
 
     # Phi3
     original_max_position_embeddings: int = 0
-    longrope_scaling_short_factors: list[float] | None = None
-    longrope_scaling_long_factors: list[float] | None = None
+    longrope_scaling_short_factors: list[float] = None
+    longrope_scaling_long_factors: list[float] = None
 
     # Phi3 small
     mup_attn_multiplier: float = 0
@@ -480,8 +470,8 @@ class DecoderLayerConfig:
     alibi_bias_max: int = 0
 
     # Arctic variants
-    residual_layernorm: LayernormConfig | None = None
-    residual_mlp: MLPConfig | None = None
+    residual_layernorm: LayernormConfig = None
+    residual_mlp: MLPConfig = None
 
     # Recurrent Gemma
     rnn_hidden_size: int = 0
@@ -490,9 +480,9 @@ class DecoderLayerConfig:
     layer_types: list[str] = field(default_factory=list)
 
     # Deci models
-    attn_replacing_linear: LinearConfig | None = None
-    mlp_replacing_linear: LinearConfig | None = None
-    block_config: dict | None = None
+    attn_replacing_linear: LinearConfig = None
+    mlp_replacing_linear: LinearConfig = None
+    block_config: dict = None
 
     # Gemma2
     final_logit_softcapping: float = 0
@@ -503,19 +493,19 @@ class DecoderLayerConfig:
     clip_qkv: int = 0
 
     # T5, Mllama
-    cross_attention: AttentionConfig | None = None
-    cross_attention_layernorm: LayernormConfig | None = None
-    self_attention: AttentionConfig | None = None
-    self_attention_layernorm: LayernormConfig | None = None
-    attention_layernorm: LayernormConfig | None = None
+    cross_attention: AttentionConfig = None
+    cross_attention_layernorm: LayernormConfig = None
+    self_attention: AttentionConfig = None
+    self_attention_layernorm: LayernormConfig = None
+    attention_layernorm: LayernormConfig = None
     rel_attn_max_distance: int = 0
     rel_attn_num_buckets: int = 0
 
     # Llama 3.1
-    rope_scaling: dict | None = None
+    rope_scaling: dict = None
 
     # Mllama
-    cross_attention_layers: dict | None = None
+    cross_attention_layers: dict = None
     vision_output_dim: int = 0
     gate_ffwd: torch.Tensor = None
     gate_attn: torch.Tensor = None
@@ -524,26 +514,33 @@ class DecoderLayerConfig:
     sparse_mixer_epsilon: float = 0
 
     # Mcore
-    position_embedding_type: str | None = None
+    position_embedding_type: str = None
 
     @property
     def hidden_size(self):
         """Returns the hidden size of the transformer model."""
-        assert self.mlp is not None and self.mlp.fc is not None, "MLP projection is required."
-        fc = self.mlp.fc
-        k = fc.weight.shape[-1] if isinstance(self.mlp, MOEConfig) else fc.weight.shape[1]
-        if fc.quantization in [
-            QUANTIZATION_NVFP4,
-            QUANTIZATION_NVFP4_AWQ,
-            QUANTIZATION_NVFP4_SVDQUANT,
-        ]:
-            return k * 2
-        return k
+        if isinstance(self.mlp, MOEConfig):
+            # fc.weight for MOE is stacked
+            if self.mlp.fc.quantization in [
+                QUANTIZATION_NVFP4,
+                QUANTIZATION_NVFP4_AWQ,
+                QUANTIZATION_NVFP4_SVDQUANT,
+            ]:
+                return self.mlp.fc.weight.shape[-1] * 2
+            return self.mlp.fc.weight.shape[-1]
+        else:
+            k = self.mlp.fc.weight.shape[1]
+            if self.mlp.fc.quantization in [
+                QUANTIZATION_NVFP4,
+                QUANTIZATION_NVFP4_AWQ,
+                QUANTIZATION_NVFP4_SVDQUANT,
+            ]:
+                return k * 2
+            return k
 
     @property
     def ffn_hidden_size_local(self):
         """Returns the ffn hidden size of the transformer model."""
-        assert self.mlp is not None and self.mlp.fc is not None, "MLP projection is required."
         fc = self.mlp.fc
         # fc in MoE merge fc and gate
         k = fc.weight.shape[1] // 2 if isinstance(self.mlp, MOEConfig) else fc.weight.shape[0]
@@ -556,8 +553,8 @@ class DecoderLayerConfig:
 class MedusaHeadConfig:
     """The decoder layer config."""
 
-    medusa_layers: list[LinearActConfig] | None = None
-    lm_head: LinearConfig | None = None
+    medusa_layers: list[LinearActConfig] = None
+    lm_head: LinearConfig = None
 
 
 @dataclass
@@ -580,18 +577,18 @@ class ModelConfig:
     pipeline_parallel: int = 1
 
     # Model structure and weights
-    vocab_embedding: EmbeddingConfig | None = None
-    position_embedding: EmbeddingConfig | None = None
-    block_embedding: EmbeddingConfig | None = None
-    ln_embed: LayernormConfig | None = None
+    vocab_embedding: EmbeddingConfig = None
+    position_embedding: EmbeddingConfig = None
+    block_embedding: EmbeddingConfig = None
+    ln_embed: LayernormConfig = None
     layers: list[DecoderLayerConfig] = field(default_factory=list)
 
-    ln_f: LayernormConfig | None = None
+    ln_f: LayernormConfig = None
 
-    lm_head: LinearConfig | None = None
+    lm_head: LinearConfig = None
     share_embedding_table: bool = False
 
-    medusa_heads: list[MedusaHeadConfig] | None = None
+    medusa_heads: list[MedusaHeadConfig] = None
     num_medusa_heads: int = 0
     num_medusa_layers: int = 0
 
@@ -602,14 +599,14 @@ class ModelConfig:
     encoder_hidden_size: int = 0
     encoder_num_heads: int = 0
     encoder_head_size: int = 0
-    decoder_start_token_id: int | None = None
-    eos_token_id: int | None = None
-    bos_token_id: int | None = None
-    pad_token_id: int | None = None
+    decoder_start_token_id: int = None
+    eos_token_id: int = None
+    bos_token_id: int = None
+    pad_token_id: int = None
 
     # For whisper encoder feature extractor
-    conv1: ConvConfig | None = None
-    conv2: ConvConfig | None = None
+    conv1: ConvConfig = None
+    conv2: ConvConfig = None
 
     @property
     def vocab_size_padded(self):
@@ -647,9 +644,7 @@ class ModelConfig:
     @property
     def hidden_act(self):
         """Returns the hidden_act of the model."""
-        mlp = self.layers[0].mlp
-        assert mlp is not None, "MLP config is required."
-        return mlp.hidden_act
+        return self.layers[0].mlp.hidden_act
 
 
 # Register all config classes as safe globals

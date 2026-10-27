@@ -716,9 +716,9 @@ class AutoQuantizeKVSearcher(BaseSearcher):
             raise ValueError("forward_step must be provided for KV-cache AutoQuantize.")
         return config
 
-    def load_search_checkpoint(self, strict=False) -> bool:
+    def load_search_checkpoint(self) -> bool:
         """Load compatible fields before validating the resolved KV search signature."""
-        return super().load_search_checkpoint(strict=strict)
+        return super().load_search_checkpoint(strict=False)
 
     @property
     def _collective_device(self) -> torch.device:

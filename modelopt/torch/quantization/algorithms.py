@@ -753,8 +753,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     def validate_search_input(self, constraints, config) -> None:
         """Validate method-specific inputs before quantizing the model."""
 
-    def load_search_checkpoint(self, strict=False) -> bool:
-        return super().load_search_checkpoint(strict=strict)
+    def load_search_checkpoint(self) -> bool:
+        return super().load_search_checkpoint(strict=False)
 
     @staticmethod
     def _is_auto_quantize_module(module):
@@ -1701,11 +1701,13 @@ class _AutoQuantizeGradientScoringSession(_AutoQuantizeCandidateReplayScoringSes
         output, base = self._run_unquantized(module, *args, **kwargs)
 
         # Checkpointed modules recompute with gradients enabled during backward.
-        if torch.is_grad_enabled() and base.requires_grad:
-            output_diffs = self._replay_candidates(
-                module, base, lambda hparam: hparam.choices, *args, **kwargs
-            )
-            self._register_candidate_score_hook(module, base, output_diffs)
+        if not torch.is_grad_enabled() or not base.requires_grad:
+            return output
+
+        output_diffs = self._replay_candidates(
+            module, base, lambda hparam: hparam.choices, *args, **kwargs
+        )
+        self._register_candidate_score_hook(module, base, output_diffs)
         return output
 
     def _score_contribution(self, grad_output, output_diff):

@@ -98,9 +98,7 @@ def remove_quantization_config_from_original_config(export_dir: str) -> None:
 
 def load_and_preprocess_state_dict(modelopt_state_root, world_size=8):
     state_dict_list = [
-        torch.load(
-            f"{modelopt_state_root}/amax_dict_rank{rank}-mp{world_size}.pt", weights_only=True
-        )
+        torch.load(f"{modelopt_state_root}/amax_dict_rank{rank}-mp{world_size}.pt")
         for rank in range(world_size)
     ]
 

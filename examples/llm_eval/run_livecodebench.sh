@@ -23,7 +23,7 @@ BUILD_MAX_BATCH_SIZE=${2:-1}
 BUILD_MAX_OUTPUT_LEN=${3:-8192}
 PORT=${4:-8000}
 
-if [[ ! -d "LiveCodeBench" ]]; then
+if [ ! -d "LiveCodeBench" ]; then
     git clone https://github.com/LiveCodeBench/LiveCodeBench.git
 fi
 pushd LiveCodeBench

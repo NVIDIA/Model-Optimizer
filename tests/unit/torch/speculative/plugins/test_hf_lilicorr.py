@@ -779,19 +779,3 @@ class TestLiLiCorrRoundTrip:
         assert not result.missing_keys and not result.unexpected_keys
         weight = module.lilicorr.out_head.weight
         assert torch.allclose(weight, torch.full_like(weight, 0.25))
-
-
-def test_loss_can_return_terms_through_training_forward(monkeypatch):
-    model = _converted()
-    model.train()
-    compute_loss = model._compute_loss
-
-    def loss_with_terms(*args, **kwargs):
-        loss, accuracy, terms = compute_loss(*args, **kwargs, return_terms=True)
-        assert terms.supervised_mask.sum() > 0
-        return loss, accuracy
-
-    monkeypatch.setattr(model, "_compute_loss", loss_with_terms)
-    out = model(**_make_batch(model.dflash_config.vocab_size))
-    assert torch.isfinite(out.loss)
-    out.loss.backward()

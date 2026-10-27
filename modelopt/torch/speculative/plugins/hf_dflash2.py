@@ -208,7 +208,6 @@ class HFDFlash2Model(HFDFlashModel):
         *,
         draft_hidden=None,
         base_outputs=None,
-        return_terms=False,
     ):
         """Backbone DFlash loss plus the candidate-selector cross-entropy.
 
@@ -230,7 +229,7 @@ class HFDFlash2Model(HFDFlashModel):
         if self.dflash_lk_loss_type != "ce":
             loss = self._lk_loss(terms)
         if self.dflash_selector_loss_alpha <= 0 or draft_hidden is None:
-            return (loss, accuracy, terms) if return_terms else (loss, accuracy)
+            return loss, accuracy
 
         bsz, seq_len = input_ids.shape
         block_size = self.dflash_block_size
@@ -276,5 +275,4 @@ class HFDFlash2Model(HFDFlashModel):
             "selector_accuracy": selector_accuracy,
             "selector_coverage": selector_coverage,
         }
-        loss = loss + self.dflash_selector_loss_alpha * selector_loss
-        return (loss, accuracy, terms) if return_terms else (loss, accuracy)
+        return loss + self.dflash_selector_loss_alpha * selector_loss, accuracy

@@ -137,15 +137,6 @@ def convert_to_tensorrt_llm_config(
         else:
             config_architecture = MODEL_NAME_TO_HF_ARCH_MAP["dec"]
 
-    norm = (
-        first_attention_decoder_config.mlp_layernorm
-        if is_enc_dec
-        else first_attention_decoder_config.input_layernorm
-    )
-    assert norm is not None, "Attention normalization config is required."
-    assert first_mlp_decoder_config.mlp is not None, "MLP config is required."
-    assert first_attention_config.dense is not None, "Attention output projection is required."
-
     config = {
         "producer": {
             "name": "modelopt",
@@ -158,7 +149,11 @@ def convert_to_tensorrt_llm_config(
         "num_attention_heads": model_config.num_attention_heads,
         "num_key_value_heads": model_config.num_kv_heads,
         "hidden_size": first_mlp_decoder_config.hidden_size,
-        "norm_epsilon": norm.eps,
+        "norm_epsilon": (
+            first_attention_decoder_config.mlp_layernorm.eps
+            if is_enc_dec
+            else first_attention_decoder_config.input_layernorm.eps
+        ),
         "vocab_size": model_config.vocab_size,
         "max_position_embeddings": model_config.max_position_embeddings,
         "hidden_act": first_mlp_decoder_config.mlp.hidden_act,
@@ -275,20 +270,16 @@ def convert_to_tensorrt_llm_config(
         config["share_embedding_table"] = getattr(model_config, "share_embedding_table")
         config["has_position_embedding"] = bool(getattr(model_config, "position_embedding"))
         # fallback to RmsNorm if not specified as HF might change class naming for layernorm
-        first_layer = model_config.layers[0]
-        assert first_layer.mlp_layernorm is not None, "Encoder-decoder normalization is required."
-        attention = (
-            first_layer.attention if model_config.enc_dec == "enc" else first_layer.self_attention
-        )
-        assert attention is not None and attention.qkv is not None, "QKV projection is required."
-        mlp = first_layer.mlp
-        assert mlp is not None and mlp.fc is not None, "MLP projection is required."
-        layernorm_type = first_layer.mlp_layernorm.layernorm_type
+        layernorm_type = model_config.layers[0].mlp_layernorm.layernorm_type
         if not layernorm_type:
             layernorm_type = "RmsNorm"
         config["layernorm_type"] = layernorm_type_map[layernorm_type]
-        config["has_attention_qkvo_bias"] = attention.qkv.bias is not None
-        config["has_mlp_bias"] = mlp.fc.bias is not None
+        config["has_attention_qkvo_bias"] = bool(
+            model_config.layers[0].attention.qkv.bias is not None
+            if model_config.enc_dec == "enc"
+            else model_config.layers[0].self_attention.qkv.bias is not None
+        )
+        config["has_mlp_bias"] = model_config.layers[0].mlp.fc.bias is not None
         config["has_model_final_layernorm"] = bool(model_config.ln_f)
 
         mlp_type_map = {i.name: i.value for i in MLPType}
@@ -305,7 +296,7 @@ def convert_to_tensorrt_llm_config(
         config["has_position_embedding"] = bool(model_config.position_embedding)
         config["has_embedding_layernorm"] = bool(model_config.ln_embed)
         config["has_embedding_scale"] = False
-        config["ffn_hidden_size"] = mlp.fc.weight.shape[0]
+        config["ffn_hidden_size"] = model_config.layers[0].mlp.fc.weight.shape[0]
         # T5 uses q_scaling to offset attention scaling effect. Bart does not.
         config["q_scaling"] = 1 / config["head_size"] ** 0.5 if decoder_type == "t5" else 1.0
         config["layernorm_position"] = (
@@ -332,7 +323,7 @@ def convert_to_tensorrt_llm_config(
     elif decoder_type == "mllama":
         num_layers = config["num_hidden_layers"]
         num_kv_heads = model_config.num_kv_heads
-        cross_attention_layers = set(model_config.layers[0].cross_attention_layers or [])
+        cross_attention_layers = set(model_config.layers[0].cross_attention_layers)
 
         config["num_kv_heads_per_layer"] = [
             0 if i in cross_attention_layers else num_kv_heads for i in range(num_layers)
@@ -378,7 +369,7 @@ def convert_to_tensorrt_llm_config(
         # NOTE: max_draft_len is related to the medusa tree len. Currently it is hardcoded to 63.
         config["max_draft_len"] = 63
         config["num_medusa_heads"] = len(model_config.medusa_heads)
-        config["num_medusa_layers"] = len(model_config.medusa_heads[0].medusa_layers or [])
+        config["num_medusa_layers"] = len(model_config.medusa_heads[0].medusa_layers)
 
     return config
 
@@ -403,11 +394,7 @@ def prepare_t5_decoder_layer(
     """Prepare the config for each decoder layer of encoder-decoder model."""
     layer_config.rel_attn_max_distance = model_config.relative_attention_max_distance
     layer_config.rel_attn_num_buckets = model_config.relative_attention_num_buckets
-    if enc_dec in ("enc", "dec"):
-        attention = layer_config.attention if enc_dec == "enc" else layer_config.self_attention
-        first_attention = layers[0].attention if enc_dec == "enc" else layers[0].self_attention
-        assert attention is not None and first_attention is not None, (
-            "Attention config is required."
-        )
-        if attention.rel_attn_table is None:
-            attention.rel_attn_table = first_attention.rel_attn_table
+    if enc_dec == "enc" and layer_config.attention.rel_attn_table is None:
+        layer_config.attention.rel_attn_table = layers[0].attention.rel_attn_table
+    elif enc_dec == "dec" and layer_config.self_attention.rel_attn_table is None:
+        layer_config.self_attention.rel_attn_table = layers[0].self_attention.rel_attn_table

@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-if [[ $# -lt 10 ]]; then
+if [ $# -lt 10 ]; then
     echo "Usage: $0 <job_id> <backend> <model_path> <shard_path> <output_path> <scripts_path> <start_shard> <jobs_per_node> <media_path> [num_frames] <comma_separated_node_names> [system_prompt]"
     echo "Also accepted: $0 <job_id> <backend> <model_path> <shard_path> <output_path> <scripts_path> <start_shard> <jobs_per_node> <comma_separated_node_names> <media_path> [num_frames] [system_prompt]"
     echo "Example: $0 245387 sglang /model/ /shards/ /output/ /scripts/ 0 10 /media/ 16 cluster-01"
@@ -49,14 +49,14 @@ else
     SYSTEM_PROMPT="$ARG12"
 fi
 
-if [[ -z "${NODE_NAME:-}" ]] || [[ -z "${MEDIA_PATH:-}" ]]; then
+if [ -z "${NODE_NAME:-}" ] || [ -z "${MEDIA_PATH:-}" ]; then
     echo "ERROR: both media_path and node_name are required." >&2
     exit 1
 fi
 
 IFS=',' read -r -a NODE_LIST <<< "$NODE_NAME"
 
-if [[ "$BACKEND" != "sglang" ]]; then
+if [ "$BACKEND" != "sglang" ]; then
     echo "Multimodal generation currently supports backend=sglang."
     exit 1
 fi
@@ -90,7 +90,7 @@ for worker_pid in "${worker_pids[@]}"; do
     fi
 done
 
-if [[ "$worker_status" -ne 0 ]]; then
+if [ "$worker_status" -ne 0 ]; then
     echo "ERROR: one or more multimodal workers failed." >&2
 fi
 exit "$worker_status"

@@ -240,7 +240,6 @@ class HFLiLiCorrModel(HFDFlashModel):
         *,
         draft_hidden=None,
         base_outputs=None,
-        return_terms=False,
     ):
         """Add the LiLiCorr lattice terms to the DFlash block loss.
 
@@ -261,17 +260,14 @@ class HFLiLiCorrModel(HFDFlashModel):
                 "committed target row."
             )
 
-        origin_result = super()._compute_loss(
+        origin_loss, origin_accuracy = super()._compute_loss(
             logits,
             input_ids,
             anchor_positions,
             block_keep_mask,
             loss_mask,
-            draft_hidden=draft_hidden,
             base_outputs=base_outputs,
-            return_terms=return_terms,
         )
-        origin_loss, origin_accuracy = origin_result[:2]
         target_ids, slot_mask = self._block_targets(
             input_ids, anchor_positions, block_keep_mask, loss_mask
         )
@@ -295,8 +291,7 @@ class HFLiLiCorrModel(HFDFlashModel):
         ).tolist()
         metrics["origin_loss"], metrics["origin_accuracy"] = origin_scalars
         self._lilicorr_metrics = metrics
-        loss = origin_loss + lilicorr_loss
-        return (loss, accuracy, origin_result[2]) if return_terms else (loss, accuracy)
+        return origin_loss + lilicorr_loss, accuracy
 
     def _compute_lilicorr_loss(
         self,

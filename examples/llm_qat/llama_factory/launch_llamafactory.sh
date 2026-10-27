@@ -36,13 +36,13 @@ check_distill_enabled() {
     local config_file="$1"
 
     if [[ ! -f "$config_file" ]]; then
-        echo "Error: Config file $config_file not found" >&2
+        echo "Error: Config file $config_file not found"
         return 1
     fi
 
     # Check if file is YAML
     if [[ "$config_file" != *.yaml && "$config_file" != *.yml ]]; then
-        echo "Error: Config file must be YAML format (.yaml or .yml)" >&2
+        echo "Error: Config file must be YAML format (.yaml or .yml)"
         return 1
     fi
 
@@ -60,13 +60,13 @@ check_compress_enabled() {
     local config_file="$1"
 
     if [[ ! -f "$config_file" ]]; then
-        echo "Error: Config file $config_file not found" >&2
+        echo "Error: Config file $config_file not found"
         return 1
     fi
 
     # Check if file is YAML
     if [[ "$config_file" != *.yaml && "$config_file" != *.yml ]]; then
-        echo "Error: Config file must be YAML format (.yaml or .yml)" >&2
+        echo "Error: Config file must be YAML format (.yaml or .yml)"
         return 1
     fi
 
@@ -121,13 +121,13 @@ validate_yaml_config() {
 
     # Check if config file exists
     if [[ ! -f "$config_file" ]]; then
-        echo "Error: Config file $config_file not found" >&2
+        echo "Error: Config file $config_file not found"
         exit 1
     fi
 
     # Check if config file is a YAML file
     if [[ ! "$config_file" =~ \.(yaml|yml)$ ]]; then
-        echo "Error: Config file $config_file is not a YAML file (.yaml or .yml extension required)" >&2
+        echo "Error: Config file $config_file is not a YAML file (.yaml or .yml extension required)"
         exit 1
     fi
 
@@ -186,7 +186,7 @@ else
     ACCELERATE_CONFIG=""
     USE_FSDP2="true"
 
-    while [[ $# -gt 0 ]]; do
+    while [ $# -gt 0 ]; do
         case "$1" in
             --accelerate_config*)
             if [[ "$1" != *=* ]]; then shift; fi
@@ -220,7 +220,7 @@ else
     OUTPUT_DIR=$(strip_surrounding_quotes "$(get_yaml_value "output_dir" "$CONFIG_FILE")")
 
     if [[ -z "$MODEL" || -z "$OUTPUT_DIR" ]]; then
-        echo "Error: Failed to extract 'model_name_or_path' or 'output_dir' from $CONFIG_FILE" >&2
+        echo "Error: Failed to extract 'model_name_or_path' or 'output_dir' from $CONFIG_FILE"
         exit 1
     fi
 

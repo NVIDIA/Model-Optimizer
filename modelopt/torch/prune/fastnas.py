@@ -166,11 +166,11 @@ class BinarySearcher(IterativeSearcher):
             "original_score": None,
         }
 
-    def load_search_checkpoint(self, strict=True) -> bool:
+    def load_search_checkpoint(self) -> bool:
         """We only want to load sensitivity map and original_score here and keep the rest."""
         state_dict = self.state_dict()
         keys_to_load = ("sensitivity_map", "original_score")
-        is_loaded = super().load_search_checkpoint(strict=strict)
+        is_loaded = super().load_search_checkpoint()
         if is_loaded:
             for k, v in state_dict.items():
                 if k not in keys_to_load:

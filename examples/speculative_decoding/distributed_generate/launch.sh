@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-if [[ $# -lt 9 ]]; then
+if [ $# -lt 9 ]; then
     echo "Usage: $0 <job_id> <backend> <model_path> <data_path> <output_path> <scripts_path> <start_shard> <jobs_per_node> <comma_separated_node_names> <system_prompt>"
     echo "Example: $0 245387 vllm /model/ /input_data/ /output_data/ /scripts/ 0 20 cluster-01,cluster-02 "\"You are a helpful assistant.\"""
     exit 1
@@ -38,12 +38,12 @@ IFS=',' read -r -a NODE_LIST <<< "$NODE_NAME"
 mkdir -p "$OUTPUT_PATH"
 
 # backend needs to be either vllm or sglang
-if [[ "$BACKEND" != "vllm" ]] && [[ "$BACKEND" != "sglang" ]]; then
+if [ "$BACKEND" != "vllm" ] && [ "$BACKEND" != "sglang" ]; then
     echo "Invalid backend: $BACKEND"
     exit 1
 fi
 
-if [[ "$BACKEND" == "vllm" ]]; then
+if [ "$BACKEND" == "vllm" ]; then
     DEFAULT_CONTAINER_IMAGE="vllm/vllm-openai:v0.24.0"
 else
     DEFAULT_CONTAINER_IMAGE="lmsysorg/sglang:v0.5.3-cu129"
@@ -74,7 +74,7 @@ for worker_pid in "${worker_pids[@]}"; do
     fi
 done
 
-if [[ "$worker_status" -ne 0 ]]; then
+if [ "$worker_status" -ne 0 ]; then
     echo "ERROR: one or more workers failed." >&2
 fi
 exit "$worker_status"

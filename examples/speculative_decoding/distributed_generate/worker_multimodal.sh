@@ -22,12 +22,12 @@ JOBS_PER_NODE="$3"
 NUM_FRAMES="${4:-32}"
 SYSTEM_PROMPT="${5:-}"
 
-if [[ "$BACKEND" != "sglang" ]]; then
+if [ "$BACKEND" != "sglang" ]; then
     echo "Multimodal generation currently uses the SGLang native video client; backend must be sglang."
     exit 1
 fi
 
-if [[ "${INSTALL_OPENCV_HEADLESS:-0}" = "1" ]]; then
+if [ "${INSTALL_OPENCV_HEADLESS:-0}" = "1" ]; then
     python3 -c "import cv2" || python3 -m pip install --user opencv-python-headless
 fi
 
@@ -40,15 +40,15 @@ MEDIA_URL_BASE=${MEDIA_URL_BASE:-http://127.0.0.1:${MEDIA_HTTP_PORT}}
 STARTUP_TIMEOUT_SECONDS=${STARTUP_TIMEOUT_SECONDS:-600}
 GPU_COUNT=${GPU_COUNT:-$(nvidia-smi -L 2>/dev/null | wc -l || true)}
 
-if [[ "$GPU_COUNT" -le 0 ]]; then
+if [ "$GPU_COUNT" -le 0 ]; then
     echo "ERROR: no GPUs are visible inside the container." >&2
     exit 1
 fi
-if [[ "$SGLANG_TP_SIZE" -gt "$GPU_COUNT" ]]; then
+if [ "$SGLANG_TP_SIZE" -gt "$GPU_COUNT" ]; then
     echo "ERROR: SGLANG_TP_SIZE=$SGLANG_TP_SIZE exceeds GPU_COUNT=$GPU_COUNT." >&2
     exit 1
 fi
-if [[ "$SGLANG_TP_SIZE" -eq 1 ]] && [[ "$NUM_TEMPERATURES" -gt "$GPU_COUNT" ]]; then
+if [ "$SGLANG_TP_SIZE" -eq 1 ] && [ "$NUM_TEMPERATURES" -gt "$GPU_COUNT" ]; then
     echo "ERROR: NUM_TEMPERATURES=$NUM_TEMPERATURES exceeds GPU_COUNT=$GPU_COUNT for single-GPU serving." >&2
     exit 1
 fi
@@ -64,25 +64,25 @@ MEDIA_HTTP_PID=""
 cleanup() {
     local attempt pid still_running
     for pid in "${SERVER_PIDS[@]}" "${MEDIA_HTTP_PID:-}"; do
-        [[ -n "${pid:-}" ]] && kill "$pid" 2>/dev/null || true
+        [ -n "${pid:-}" ] && kill "$pid" 2>/dev/null || true
     done
     for attempt in $(seq 1 10); do
         still_running=0
         for pid in "${SERVER_PIDS[@]}" "${MEDIA_HTTP_PID:-}"; do
-            if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+            if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
                 still_running=1
             fi
         done
-        [[ "$still_running" -eq 0 ]] && break
+        [ "$still_running" -eq 0 ] && break
         sleep 1
     done
     for pid in "${SERVER_PIDS[@]}" "${MEDIA_HTTP_PID:-}"; do
-        if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+        if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
             kill -KILL "$pid" 2>/dev/null || true
         fi
     done
     for pid in "${SERVER_PIDS[@]}" "${MEDIA_HTTP_PID:-}"; do
-        [[ -n "${pid:-}" ]] && wait "$pid" 2>/dev/null || true
+        [ -n "${pid:-}" ] && wait "$pid" 2>/dev/null || true
     done
 }
 
@@ -90,7 +90,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if [[ "$API_MODE" = "openai" ]]; then
+if [ "$API_MODE" = "openai" ]; then
     python3 -m http.server "$MEDIA_HTTP_PORT" --bind 127.0.0.1 --directory /media_data \
         >/tmp/multimodal_media_http_${MEDIA_HTTP_PORT}.log 2>&1 &
     MEDIA_HTTP_PID=$!
@@ -110,7 +110,7 @@ if [[ "$API_MODE" = "openai" ]]; then
 fi
 
 SERVER_PORTS=()
-if [[ "$SGLANG_TP_SIZE" -eq 1 ]]; then
+if [ "$SGLANG_TP_SIZE" -eq 1 ]; then
     for gpu in $(seq 0 $((NUM_TEMPERATURES - 1))); do
         port=$((BASE_PORT + gpu))
         SERVER_PORTS+=("$port")
@@ -157,11 +157,11 @@ wait_for_servers() {
         ready=0
         for port in "${SERVER_PORTS[@]}"; do
             response=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:${port}/health" || true)
-            if [[ "$response" -eq 200 ]]; then
+            if [ "$response" -eq 200 ]; then
                 ready=$((ready + 1))
             fi
         done
-        if [[ "$ready" -eq "${#SERVER_PORTS[@]}" ]]; then
+        if [ "$ready" -eq "${#SERVER_PORTS[@]}" ]; then
             echo "All servers are up!"
             return 0
         fi
@@ -180,9 +180,9 @@ mpi_rank=${PMIX_RANK:-$native_mpi_rank}
 echo "Rank: $mpi_rank"
 echo "Counter: $_CURRENT_COUNTER"
 
-if [[ "$API_MODE" = "openai" ]]; then
+if [ "$API_MODE" = "openai" ]; then
     NUM_THREADS=${NUM_THREADS:-4}
-elif [[ "$SGLANG_TP_SIZE" -eq 1 ]]; then
+elif [ "$SGLANG_TP_SIZE" -eq 1 ]; then
     NUM_THREADS=${NUM_THREADS:-64}
 else
     NUM_THREADS=${NUM_THREADS:-8}
@@ -191,7 +191,7 @@ MAX_TOKENS=${MAX_TOKENS:-6144}
 VISION_TOKEN_FORMAT=${VISION_TOKEN_FORMAT:-qwen_vl}
 MODEL_NAME=${MODEL_NAME:-model}
 
-if [[ "$mpi_rank" -eq 0 ]]; then
+if [ "$mpi_rank" -eq 0 ]; then
     start_shard=$((_CURRENT_COUNTER + 0))
     end_shard=$((_CURRENT_COUNTER + JOBS_PER_NODE - 1))
 
@@ -206,7 +206,7 @@ if [[ "$mpi_rank" -eq 0 ]]; then
             echo "Temperature $temperature processing shard $i"
 
             shard=$(printf "/input_data/train-%05d-%05d.jsonl" "$i" "$i")
-            if [[ ! -s "$shard" ]]; then
+            if [ ! -s "$shard" ]; then
                 echo "Skipping missing shard: $shard"
                 continue
             fi
@@ -233,11 +233,11 @@ if [[ "$mpi_rank" -eq 0 ]]; then
                 --url "http://localhost:$port"
             )
 
-            if [[ "${OVERWRITE_OUTPUT:-0}" = "1" ]]; then
+            if [ "${OVERWRITE_OUTPUT:-0}" = "1" ]; then
                 cmd+=(--overwrite)
             fi
 
-            if [[ -n "$SYSTEM_PROMPT" ]]; then
+            if [ -n "$SYSTEM_PROMPT" ]; then
                 echo "WARNING: SYSTEM_PROMPT is ignored for multimodal generation; include it in the shard prompts instead."
             fi
 
@@ -248,7 +248,7 @@ if [[ "$mpi_rank" -eq 0 ]]; then
         done
     }
 
-    if [[ "$SGLANG_TP_SIZE" -eq 1 ]]; then
+    if [ "$SGLANG_TP_SIZE" -eq 1 ]; then
         for server_id in $(seq 0 $((NUM_TEMPERATURES - 1))); do
             (
                 port=$((BASE_PORT + server_id))

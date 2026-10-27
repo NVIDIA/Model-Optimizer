@@ -90,27 +90,27 @@ parse_options() {
   DEFAULT_BUILD_MAX_OUTPUT_LEN=1024
   DEFAULT_BUILD_MAX_BATCH_SIZE=2
 
-  if [[ -z "$CALIB_SIZE" ]]; then
+  if [ -z "$CALIB_SIZE" ]; then
     CALIB_SIZE=$DEFAULT_CALIB_SIZE
   fi
-  if [[ -z "$CALIB_SEQ" ]]; then
+  if [ -z "$CALIB_SEQ" ]; then
     CALIB_SEQ=$DEFAULT_CALIB_SEQ
   fi
-  if [[ -z "$CALIB_BATCH_SIZE" ]]; then
+  if [ -z "$CALIB_BATCH_SIZE" ]; then
     CALIB_BATCH_SIZE=$DEFAULT_CALIB_BATCH_SIZE
   fi
-  if [[ -z "$BUILD_MAX_INPUT_LEN" ]]; then
+  if [ -z "$BUILD_MAX_INPUT_LEN" ]; then
     BUILD_MAX_INPUT_LEN=$DEFAULT_BUILD_MAX_INPUT_LEN
   fi
-  if [[ -z "$BUILD_MAX_OUTPUT_LEN" ]]; then
+  if [ -z "$BUILD_MAX_OUTPUT_LEN" ]; then
     BUILD_MAX_OUTPUT_LEN=$DEFAULT_BUILD_MAX_OUTPUT_LEN
   fi
-  if [[ -z "$BUILD_MAX_BATCH_SIZE" ]]; then
+  if [ -z "$BUILD_MAX_BATCH_SIZE" ]; then
     BUILD_MAX_BATCH_SIZE=$DEFAULT_BUILD_MAX_BATCH_SIZE
   fi
 
   # Verify required options are provided
-  if [[ -z "$MODEL_PATH" ]] || [[ -z "$TASKS" ]] || ([[ -z "$QFORMAT" ]] && [[ -z "$RECIPE" ]]); then
+  if [ -z "$MODEL_PATH" ] || [ -z "$TASKS" ] || ([ -z "$QFORMAT" ] && [ -z "$RECIPE" ]); then
     echo "Usage: $0 --model=<MODEL_PATH> (--quant=<QFORMAT> | --recipe=<RECIPE>) --tasks=<TASK,...>"
     echo "Optional args: --sparsity=<SPARSITY_FMT> --awq_block_size=<AWQ_BLOCK_SIZE> --calib=<CALIB_SIZE>"
     exit 1
@@ -118,7 +118,7 @@ parse_options() {
 
   # --quant and --recipe are mutually exclusive: --recipe is a full PTQ spec, while
   # --quant selects a built-in qformat preset. Pick exactly one.
-  if [[ -n "$QFORMAT" ]] && [[ -n "$RECIPE" ]]; then
+  if [ -n "$QFORMAT" ] && [ -n "$RECIPE" ]; then
     echo "Cannot specify both --quant and --recipe; pick one." >&2
     exit 1
   fi
@@ -133,7 +133,7 @@ parse_options() {
         break
       fi
     done
-    if [[ "$is_valid_task" = false ]]; then
+    if [ "$is_valid_task" = false ]; then
       echo "task $task is not valid"
       VALID_TASKS_STRING=$(IFS=','; echo "${VALID_TASKS[*]}")
       echo "Allowed tasks are: $VALID_TASKS_STRING"

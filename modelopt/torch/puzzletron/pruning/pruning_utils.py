@@ -205,7 +205,7 @@ def _cache_activations_log(mlp_init_config: dict[str, Any]) -> None:
             {
                 module_name: module_log
                 for p in Path(activations_log_dir).glob("rank_*.pth")
-                for module_name, module_log in torch.load(p, weights_only=True).items()
+                for module_name, module_log in torch.load(p).items()
             }
         )
 
@@ -316,28 +316,41 @@ def _init_attention_weights(
 
         reduction_factor = orig_num_kv_heads // num_kv_heads
 
-        ## Wq option 2 - keep the original queries. At init they will not be used (see the Wo zeroing), during training they can adapt to new kv heads like in variable GQA.
-        ## We need to interleave them to keep the matching between queries and kv heads.
-        kv_heads_to_keep = kv_heads_to_keep.tolist()
-        kv_heads_to_remove = kv_heads_to_remove.tolist()
-        kv_head_ordering = []
-        zero_out_mask = []
-        for i_head in range(orig_num_kv_heads):
-            if i_head % reduction_factor == 0:
-                kv_head_ordering.append(kv_heads_to_keep.pop(0))
-                zero_out_mask.append(False)
-            else:
-                kv_head_ordering.append(kv_heads_to_remove.pop(0))
-                zero_out_mask.append(True)
+        prune_via_duplication = False
+        if prune_via_duplication:
+            ## Wq option 1 - replicate the query groups to match the total number of attention heads. Queries work with familiar kv heads.
+            wq = wq[kv_heads_to_keep]
+            wq = torch.repeat_interleave(wq, repeats=reduction_factor, dim=0)
 
-        wq = wq[kv_head_ordering]
+            ## Wo option 1 - replicate the groups of the original Wo. Multiple by the reduction factor to mimic pruning of the other groups.
+            ## This makes sense with Wq option 1, but it will not be more expressive than true pruning due to symmetry, unless we add noise.
+            wo = wo[:, kv_heads_to_keep]
+            wo = torch.repeat_interleave(wo, repeats=reduction_factor, dim=1)
+            wo = wo / reduction_factor
 
-        ## Wo option 2 - zero-out the contribution of queries that do not belong to chosen kv heads.
-        ## At initialization it's exactly like pruning, but the extra weights will have the chance to adapt to new kv heads if we train the model.
-        ## Even though the weight is 0 it can still train, like initializing biases to 0 does not prevent them from training.
-        ## Matmul backprop: if Y = AB and dY is the gradient of Y, then dA = dY @ B.T and dB = A.T @ dY, so the gradient of the zeroed-out weights depends on the gradient of what multiplies them.
-        wo = wo[:, kv_head_ordering]
-        wo[:, zero_out_mask] = 0.0
+        else:  # prune via zeroing out
+            ## Wq option 2 - keep the original queries. At init they will not be used (see the Wo zeroing), during training they can adapt to new kv heads like in variable GQA.
+            ## We need to interleave them to keep the matching between queries and kv heads.
+            kv_heads_to_keep = kv_heads_to_keep.tolist()
+            kv_heads_to_remove = kv_heads_to_remove.tolist()
+            kv_head_ordering = []
+            zero_out_mask = []
+            for i_head in range(orig_num_kv_heads):
+                if i_head % reduction_factor == 0:
+                    kv_head_ordering.append(kv_heads_to_keep.pop(0))
+                    zero_out_mask.append(False)
+                else:
+                    kv_head_ordering.append(kv_heads_to_remove.pop(0))
+                    zero_out_mask.append(True)
+
+            wq = wq[kv_head_ordering]
+
+            ## Wo option 2 - zero-out the contribution of queries that do not belong to chosen kv heads.
+            ## At initialization it's exactly like pruning, but the extra weights will have the chance to adapt to new kv heads if we train the model.
+            ## Even though the weight is 0 it can still train, like initializing biases to 0 does not prevent them from training.
+            ## Matmul backprop: if Y = AB and dY is the gradient of Y, then dA = dY @ B.T and dB = A.T @ dY, so the gradient of the zeroed-out weights depends on the gradient of what multiplies them.
+            wo = wo[:, kv_head_ordering]
+            wo[:, zero_out_mask] = 0.0
 
     else:
         raise ValueError(f"{gqa_init_mode=} not supported")
@@ -488,30 +501,49 @@ def _init_attention_biases(
 
         reduction_factor = orig_num_kv_heads // num_kv_heads
 
-        ## Wq option 2 - keep the original queries. At init they will not be used (see the Wo zeroing), during training they can adapt to new kv heads like in variable GQA.
-        ## We need to interleave them to keep the matching between queries and kv heads.
-        kv_heads_to_keep = kv_heads_to_keep.tolist()
-        kv_heads_to_remove = kv_heads_to_remove.tolist()
-        kv_head_ordering = []
-        zero_out_mask = []
-        for i_head in range(orig_num_kv_heads):
-            if i_head % reduction_factor == 0:
-                kv_head_ordering.append(kv_heads_to_keep.pop(0))
-                zero_out_mask.append(False)
-            else:
-                kv_head_ordering.append(kv_heads_to_remove.pop(0))
-                zero_out_mask.append(True)
+        prune_via_duplication = False
+        if prune_via_duplication:
+            if attention_bias:
+                ## Wq option 1 - replicate the query groups to match the total number of attention heads. Queries work with familiar kv heads.
+                bias_sd["q"] = bias_sd["q"][kv_heads_to_keep]
+                bias_sd["q"] = torch.repeat_interleave(
+                    bias_sd["q"], repeats=reduction_factor, dim=0
+                )
 
-        if attention_bias:
-            bias_sd["q"] = bias_sd["q"][kv_head_ordering]
+            if o_proj_bias:
+                ## Wo option 1 - replicate the groups of the original Wo. Multiple by the reduction factor to mimic pruning of the other groups.
+                ## This makes sense with Wq option 1, but it will not be more expressive than true pruning due to symmetry, unless we add noise.
+                bias_sd["o"] = bias_sd["o"][:, kv_heads_to_keep]
+                bias_sd["o"] = torch.repeat_interleave(
+                    bias_sd["o"], repeats=reduction_factor, dim=1
+                )
+                bias_sd["o"] = bias_sd["o"] / reduction_factor
 
-        if o_proj_bias:
-            ## Wo option 2 - zero-out the contribution of queries that do not belong to chosen kv heads.
-            ## At initialization it's exactly like pruning, but the extra weights will have the chance to adapt to new kv heads if we train the model.
-            ## Even though the weight is 0 it can still train, like initializing biases to 0 does not prevent them from training.
-            ## Matmul backprop: if Y = AB and dY is the gradient of Y, then dA = dY @ B.T and dB = A.T @ dY, so the gradient of the zeroed-out weights depends on the gradient of what multiplies them.
-            bias_sd["o"] = bias_sd["o"][:, kv_head_ordering]
-            bias_sd["o"][:, zero_out_mask] = 0.0
+        else:  # prune via zeroing out
+            ## Wq option 2 - keep the original queries. At init they will not be used (see the Wo zeroing), during training they can adapt to new kv heads like in variable GQA.
+            ## We need to interleave them to keep the matching between queries and kv heads.
+            kv_heads_to_keep = kv_heads_to_keep.tolist()
+            kv_heads_to_remove = kv_heads_to_remove.tolist()
+            kv_head_ordering = []
+            zero_out_mask = []
+            for i_head in range(orig_num_kv_heads):
+                if i_head % reduction_factor == 0:
+                    kv_head_ordering.append(kv_heads_to_keep.pop(0))
+                    zero_out_mask.append(False)
+                else:
+                    kv_head_ordering.append(kv_heads_to_remove.pop(0))
+                    zero_out_mask.append(True)
+
+            if attention_bias:
+                bias_sd["q"] = bias_sd["q"][kv_head_ordering]
+
+            if o_proj_bias:
+                ## Wo option 2 - zero-out the contribution of queries that do not belong to chosen kv heads.
+                ## At initialization it's exactly like pruning, but the extra weights will have the chance to adapt to new kv heads if we train the model.
+                ## Even though the weight is 0 it can still train, like initializing biases to 0 does not prevent them from training.
+                ## Matmul backprop: if Y = AB and dY is the gradient of Y, then dA = dY @ B.T and dB = A.T @ dY, so the gradient of the zeroed-out weights depends on the gradient of what multiplies them.
+                bias_sd["o"] = bias_sd["o"][:, kv_head_ordering]
+                bias_sd["o"][:, zero_out_mask] = 0.0
 
     else:
         raise ValueError(f"{gqa_init_mode=} not supported")

@@ -600,22 +600,3 @@ class TestDFlash2Export:
         assert dflash_config["selector_top_k"] == SELECTOR_TOP_K
         assert "mask_token_id" in dflash_config
         assert "target_layer_ids" in dflash_config
-
-
-@pytest.mark.parametrize("selector_loss_alpha", [0.0, 1.0])
-def test_loss_can_return_terms_through_training_forward(monkeypatch, selector_loss_alpha):
-    model = get_tiny_llama(num_hidden_layers=4)
-    mtsp.convert(model, [("dflash", _get_dflash2_config(selector_loss_alpha=selector_loss_alpha))])
-    model.train()
-    compute_loss = model._compute_loss
-
-    def loss_with_terms(*args, **kwargs):
-        loss, accuracy, terms = compute_loss(*args, **kwargs, return_terms=True)
-        assert terms.supervised_mask.sum() > 0
-        return loss, accuracy
-
-    monkeypatch.setattr(model, "_compute_loss", loss_with_terms)
-    input_ids, attention_mask, labels = _make_batch(model.dflash_config.vocab_size)
-    out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-    assert torch.isfinite(out.loss)
-    out.loss.backward()

@@ -132,7 +132,7 @@ class ScoringCheckpointManager:
             try:
                 import torch
 
-                hook_states = torch.load(hook_states_path, map_location="cpu", weights_only=True)
+                hook_states = torch.load(hook_states_path, map_location="cpu")
 
                 # Load states into corresponding hooks
                 loaded_count = 0

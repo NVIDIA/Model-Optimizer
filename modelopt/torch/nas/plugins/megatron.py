@@ -599,7 +599,7 @@ class _DynamicSelfAttention(_DynamicAttention):
         assert isinstance(self.core_attention, TEDotProductAttention)
         # Use type(self.core_attention) (not TEDotProductAttention) so model-specific subclasses
         # (e.g. Gemma3's Gemma3TEDotProductAttention) keep their overridden behavior post-conversion.
-        _DynamicTEDotProductAttention: type[DynamicModule] = type(  # noqa: N806
+        _DynamicTEDotProductAttention: DynamicModule = type(  # noqa: N806
             "_DynamicTEDotProductAttention",
             (DynamicModule, type(self.core_attention)),
             {"_setup": lambda self: None},
