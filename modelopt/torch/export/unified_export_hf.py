@@ -996,13 +996,10 @@ def _process_quantized_modules(
         model_type=hf_model_type(model),
     )
 
-    try:
+    # A keep-fused export packs each FSDP2 unit's modules in one weight window, held across them.
+    with _hf_export_handlers.held_fsdp2_weight_windows(ctx):
         for name, sub_module in model.named_modules():
             _dispatch_export_handler(name, sub_module, ctx)
-    finally:
-        # A keep-fused export's handlers hold an FSDP2 unit's weight window open across its
-        # modules; close the last one.
-        _hf_export_handlers.close_fsdp2_weight_window(ctx)
 
 
 def _prepare_model_for_export(model, dtype, is_modelopt_qlora):

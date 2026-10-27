@@ -728,7 +728,8 @@ def test_fused_experts_fold_in_a_weight_window_when_the_plan_shards_the_dense_pa
     monkeypatch, dense
 ):
     """FSDP2 owns the fused weights when it shards the dense part around them: folded outside a
-    weight-update window, they would be overwritten with its original shards at the next reshard."""
+    weight-update window, they would be overwritten with its original shards at the next reshard.
+    Outside held windows the handler closes the window itself."""
     events = []
 
     @contextlib.contextmanager
@@ -748,22 +749,24 @@ def test_fused_experts_fold_in_a_weight_window_when_the_plan_shards_the_dense_pa
     ctx = ExportContext(model=container, dtype=torch.bfloat16, keep_fused_experts=True)
 
     ExportModuleRegistry.match(experts)(PREFIX, experts, ctx)
-    handlers.close_fsdp2_weight_window(ctx)
 
     assert events == (["open", "fold", "close"] if dense == "fsdp" else ["fold"])
 
 
+@pytest.mark.parametrize("held", [True, False], ids=["held", "per-module"])
 @pytest.mark.parametrize("root_sharded", [True, False], ids=["fsdp2", "expert-parallel"])
 def test_quant_linear_handlers_pack_an_fsdp2_unit_in_one_weight_window(
-    monkeypatch, gloo_world_of_one, root_sharded
+    monkeypatch, gloo_world_of_one, root_sharded, held
 ):
     """On the no-gather path the model is still sharded when a linear is packed.
 
     Packing NVFP4 straight off the sharded weight is not possible (the in-place cast on the
     DTensor's local view is refused under autograd), so the handlers pack inside a weight-update
     window, on the layer's own unit where expert parallelism leaves the root unsharded. The window
-    gathers the whole unit, so it opens once for all of the unit's linears; the sharded state dict
-    must then carry the packed weights, as an unsharded pack has them.
+    gathers the whole unit, so within held windows it opens once for all of the unit's linears;
+    any other dispatch loop gets a window per linear, closed by its handler. Either way the unit is
+    sharded again afterwards, and the sharded state dict carries the packed weights, as an
+    unsharded pack has them.
     """
     torch.manual_seed(0)
     layer = nn.Sequential(nn.Linear(32, 16, bias=False), nn.Linear(16, 8, bias=False))
@@ -785,11 +788,12 @@ def test_quant_linear_handlers_pack_an_fsdp2_unit_in_one_weight_window(
         FSDPModule, "unshard", lambda unit, *a, **k: unshards.append(unit) or unshard(unit, *a, **k)
     )
 
-    for i, linear in enumerate(layer):
-        ExportModuleRegistry.match(linear)(f"0.{i}", linear, ctx)
-    handlers.close_fsdp2_weight_window(ctx)
+    with handlers.held_fsdp2_weight_windows(ctx) if held else contextlib.nullcontext():
+        for i, linear in enumerate(layer):
+            ExportModuleRegistry.match(linear)(f"0.{i}", linear, ctx)
 
-    assert unshards == [layer]
+    assert unshards == ([layer] if held else [layer, layer])
+    assert all(isinstance(linear.weight, DTensor) for linear in layer)
     sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
     for i, ref in enumerate(refs):
         packed = sd[f"0.{i}.weight"]
