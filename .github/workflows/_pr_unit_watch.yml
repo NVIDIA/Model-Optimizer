@@ -24,7 +24,8 @@ jobs:
   # A separate job, so that the third-party action above never sees a token that can cancel runs.
   cancel-run:
     needs: [wait]
-    if: ${{ needs.wait.result == 'failure' }}
+    # `always()`: without a status function a job whose dependency failed is skipped
+    if: ${{ always() && needs.wait.result == 'failure' }}
     runs-on: ubuntu-24.04
     permissions:
       actions: write
