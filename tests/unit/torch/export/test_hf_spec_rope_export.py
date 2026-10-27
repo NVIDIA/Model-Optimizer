@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from transformers import LlamaConfig
 
 from modelopt.torch.export.plugins.hf_spec_export import (
     DFlashExporter,
@@ -112,7 +113,7 @@ def _make_dflash_exporter(dflash_export_rope_scaling=None, base_rope_theta=50000
         initializer_range=0.02,
         num_hidden_layers=8,
         rope_theta=base_rope_theta,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
     )
     draft_config = SimpleNamespace(num_hidden_layers=2)
     model = SimpleNamespace(
@@ -138,6 +139,17 @@ def test_dflash_rope_not_injected_when_field_empty():
     """Empty dict (default) disables rope scaling injection."""
     config = _make_dflash_exporter(dflash_export_rope_scaling={})._export_config()
     assert config["rope_scaling"] is None
+
+
+@pytest.mark.parametrize(
+    ("base_dtype", "expected"), [(torch.float16, "float16"), (None, "bfloat16")]
+)
+def test_dflash_torch_dtype_inherits_base_or_defaults(base_dtype, expected):
+    """An unset base config dtype is None, not absent, so it must fall back to bfloat16."""
+    exporter = _make_dflash_exporter()
+    # A real config, unlike SimpleNamespace, keeps the deprecated `torch_dtype` alias that returns None.
+    exporter.model.config = LlamaConfig(num_hidden_layers=8, dtype=base_dtype)
+    assert exporter._export_config()["torch_dtype"] == expected
 
 
 def test_dflash_rope_theta_inherits_base():
