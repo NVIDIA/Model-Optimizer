@@ -142,23 +142,14 @@ def test_a_stream_shorter_than_the_world_is_refused_on_every_rank():
             _ids(shard_dataloader(_loader(_Stream(3)), rank, 4))
 
 
-def test_iterable_shards_split_their_groups_across_worker_processes(monkeypatch):
-    """Each worker process iterates its own copy of the stream. Unless the workers split the groups
-    between them, every one yields the whole shard and each sample comes out once per worker.
+def test_a_stream_loaded_with_workers_is_refused():
+    """A stream that splits itself across the loader's workers, as a Hugging Face streaming dataset
+    does, would be split again by rank and silently lose samples. A lone rank keeps its loader."""
+    loader = DataLoader(_Stream(16), batch_size=2, collate_fn=_collate, num_workers=2)
 
-    Each worker's pass runs here, in this process, as the worker it is told it is.
-    """
-    n, world_size, num_workers = 16, 2, 2
-    for rank in range(world_size):
-        loader = DataLoader(_Stream(n), batch_size=2, collate_fn=_collate, num_workers=num_workers)
-        shard = shard_dataloader(loader, rank, world_size).dataset
-        yielded = []
-        for worker in range(num_workers):
-            info = types.SimpleNamespace(num_workers=num_workers, id=worker)
-            monkeypatch.setattr(mto_dist, "get_worker_info", lambda info=info: info)
-            yielded += list(shard)
-
-        assert sorted(yielded) == list(range(rank, n, world_size))
+    with pytest.raises(ValueError, match="num_workers=2 is refused"):
+        shard_dataloader(loader, 0, 2)
+    assert shard_dataloader(loader, 0, 1) is loader
 
 
 @pytest.mark.parametrize(
@@ -211,21 +202,28 @@ def test_the_shard_batches_as_the_loader_does(kind, batching, batches):
 
 @pytest.mark.parametrize("dataset", [list(range(8)), _Stream(8)], ids=["map-style", "iterable"])
 def test_sharded_loader_keeps_the_original_loader_settings(dataset):
-    """Batching, workers, pinning, timeout, worker init, RNG and prefetching carry over to the
-    shard."""
+    """Batching, pinning, timeout, worker init and RNG carry over to the shard, and for a map-style
+    loader its workers and prefetching too (a stream is refused workers)."""
+    workers = (
+        {}
+        if isinstance(dataset, _Stream)
+        else {
+            "num_workers": 2,
+            "multiprocessing_context": "spawn",
+            "prefetch_factor": 3,
+            "persistent_workers": True,
+        }
+    )
     loader = DataLoader(
         dataset,
         batch_size=4,
         drop_last=True,
         collate_fn=_collate,
-        num_workers=2,
         pin_memory=True,
         timeout=7.0,
         worker_init_fn=_seed_worker,
-        multiprocessing_context="spawn",
         generator=torch.Generator(),
-        prefetch_factor=3,
-        persistent_workers=True,
+        **workers,
     )
     shard = shard_dataloader(loader, 1, 2)
 
