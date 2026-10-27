@@ -287,7 +287,10 @@ Examples:
     dla_parser.add_argument(
         "--force-fp16-activations",
         action="store_true",
-        help="Use FP16 internal activations and weights with FP32 model boundaries",
+        help=(
+            "Use FP16 internal activations and weights with FP32 model boundaries; "
+            "L2 normalization intermediates can overflow or underflow"
+        ),
     )
 
     # Analyze subcommand

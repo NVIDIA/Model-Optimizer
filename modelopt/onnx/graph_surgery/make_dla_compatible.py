@@ -354,6 +354,13 @@ def dla_make_dla_compatible(
     Masked multiplication can change the sign of zero even for finite inputs; validate
     sign-sensitive downstream operations before using this conversion.
 
+    With ``force_fp16_activations=True``, last-axis L2 normalization followed by a
+    static gamma multiply uses FP16 arithmetic with a denominator floor of ``2**-14``.
+    This decomposition does not rescale inputs: squares or their sum can overflow,
+    and small squares can underflow, even for finite FP32 inputs. Validate numerical
+    accuracy on the target runtime; leave this option disabled when its intermediate
+    computations need a wider floating-point range.
+
     Args:
         model_path: Input file; external weights are loaded from its directory.
         output_path: Destination ONNX file.
