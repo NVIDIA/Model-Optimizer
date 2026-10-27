@@ -1770,9 +1770,12 @@ def _has_pre_quant_scale(module: nn.Module, weight_names: list[str]) -> bool:
     """Whether the export writes a ``pre_quant_scale`` for ``module``.
 
     AWQ leaves it on every input quantizer of the module, or fuses it into a sibling and marks the
-    module (loaders accept the missing tensor there). Without AWQ (max calibration, or fused
-    experts that AWQ skips) there is none, even though the INT4 label is ``*_AWQ``.
+    module (loaders accept the missing tensor there). Without AWQ (max calibration) there is none,
+    even though the INT4 label is ``*_AWQ``. Fused experts never get one: AWQ skips them and
+    ``_export_fused_experts`` does not write the scale even if an input quantizer held one.
     """
+    if any(hasattr(module, f"{wn}_weight_quantizers") for wn in weight_names):
+        return False
     return getattr(module, "fused_with_prequant", False) or (
         bool(weight_names)
         and all(

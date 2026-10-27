@@ -886,13 +886,14 @@ class TestExportFusedExperts:
             assert config["quant_algo"] == fmt.upper().replace("INT4", "W4A16")
             assert config["pre_quant_scale"] is False
 
-            # Once an input quantizer carries a scale, the same layout promises it again.
+            # The exporter does not write a scale for fused experts, even if an input quantizer
+            # held one, so the config still must not promise it.
             for input_q, dim in (
                 (experts.gate_up_proj_input_quantizer, HIDDEN_DIM),
                 (experts.down_proj_input_quantizer, INTERMEDIATE_DIM),
             ):
                 input_q.register_buffer("_pre_quant_scale", torch.ones(dim))
-            assert get_quant_config(model)["quantization"]["pre_quant_scale"] is True
+            assert get_quant_config(model)["quantization"]["pre_quant_scale"] is False
         finally:
             if QuantModuleRegistry.get(expert_type) is not None:
                 QuantModuleRegistry.unregister(expert_type)
