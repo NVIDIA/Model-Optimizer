@@ -31,6 +31,7 @@ from modelopt.onnx.graph_surgery.dla_transforms.dla_model_boundaries import (
     _apply_remove_intermediary_squeeze_unsqueeze,
 )
 from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
+from modelopt.onnx.graph_surgery.utils.graph_utils import infer_shapes
 
 
 @pytest.mark.parametrize("identity", ["custom", "local", "overload"])
@@ -1298,6 +1299,64 @@ def test_rank_changing_adapter_preserves_safe_normalization_readers(operation, u
     converted = _transform_make_dla_compatible(model, verbose=False)
     for actual, reference in zip(execute(converted), expected):
         np.testing.assert_allclose(actual, reference, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("unary", [False, True])
+@pytest.mark.parametrize("same_layout", [False, True])
+@pytest.mark.parametrize("entrypoint", ["stage", "pipeline"])
+def test_adapter_roundtrip_checks_the_restored_layout(unary, same_layout, entrypoint):
+    """Accept matching rank restoration while retaining refusal for a different bypass layout."""
+    nodes = [
+        helper.make_node("Relu", ["x"], ["private"]),
+        helper.make_node("Squeeze", ["private", "squeeze_axes"], ["squeezed"]),
+    ]
+    current = "squeezed"
+    if unary:
+        nodes.append(helper.make_node("Relu", [current], ["middle"]))
+        current = "middle"
+    nodes.extend(
+        [
+            helper.make_node("Unsqueeze", [current, "unsqueeze_axes"], ["restored"]),
+            helper.make_node("Conv", ["restored", "weight"], ["y"]),
+        ]
+    )
+    channels = 3 if same_layout else 1
+    model = _make_model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 3, 4, 4])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1 if same_layout else 3, 2, 4, 4])],
+        [
+            numpy_helper.from_array(np.array([0], np.int64), "squeeze_axes"),
+            numpy_helper.from_array(
+                np.array([0 if same_layout else 1], np.int64), "unsqueeze_axes"
+            ),
+            numpy_helper.from_array(
+                np.arange(2 * channels, dtype=np.float32).reshape(2, channels, 1, 1), "weight"
+            ),
+        ],
+    )
+    model = onnx.shape_inference.infer_shapes(model)
+    feeds = {"x": np.arange(48, dtype=np.float32).reshape(1, 3, 4, 4)}
+    expected = _checked_run(model, feeds)
+    before = model.SerializeToString()
+    if not same_layout:
+        with pytest.raises(ValueError, match="unprepared rank-sensitive Conv"):
+            if entrypoint == "stage":
+                _apply_remove_intermediary_squeeze_unsqueeze(model, rank_converted=True)
+            else:
+                _transform_make_dla_compatible(model, verbose=False)
+        assert model.SerializeToString() == before
+        return
+    converted = (
+        _apply_remove_intermediary_squeeze_unsqueeze(model, rank_converted=True)
+        if entrypoint == "stage"
+        else _transform_make_dla_compatible(model, verbose=False)
+    )
+    if entrypoint == "stage":
+        converted = infer_shapes(converted)
+    assert not any(node.op_type in {"Squeeze", "Unsqueeze"} for node in converted.graph.node)
+    for actual, reference in zip(_checked_run(converted, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
 
 
 def test_output_preflight_does_not_copy_for_missing_intermediate_squeeze_metadata(monkeypatch):

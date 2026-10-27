@@ -503,18 +503,25 @@ def _apply_remove_intermediary_squeeze_unsqueeze(
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     checked_readers = set()
     contrib_ops = _boundary_contrib_ops(model)
+    protected_inputs = (
+        cache.graph_input_names | cache.init_names | cache.graph_output_names | captured
+    )
+    protected_outputs = cache.graph_output_names | captured
     runtime_inputs = (
         cache.graph_input_names - cache.init_names
         if model.ir_version <= 3
         else cache.graph_input_names
     )
 
-    def require_prepared_readers(name):
+    def require_prepared_readers(name, output_shape):
         """Follow shared rank-agnostic paths before allowing any adapter rewiring."""
+        layout = tuple(pad4d(output_shape)) if output_shape else None
+        if layout is not None and len(layout) == 4 and cache.get_shape(name) == list(layout):
+            return
         pending, seen = [name], set()
         while pending:
             current = pending.pop()
-            if current in seen or current in checked_readers:
+            if current in seen or (current, layout) in checked_readers:
                 continue
             seen.add(current)
             if current in captured - cache.graph_output_names:
@@ -534,6 +541,15 @@ def _apply_remove_intermediary_squeeze_unsqueeze(
                     "Squeeze",
                     "Unsqueeze",
                 }:
+                    if (
+                        reader.op_type in {"Squeeze", "Unsqueeze"}
+                        and layout is not None
+                        and len(layout) == 4
+                        and cache.get_shape(reader.output[0]) == list(layout)
+                        and reader.input[0] not in protected_inputs
+                        and reader.output[0] not in protected_outputs
+                    ):
+                        continue
                     pending.extend(reader.output)
                     continue
                 if standard and port == 0:
@@ -566,7 +582,7 @@ def _apply_remove_intermediary_squeeze_unsqueeze(
                 raise ValueError(
                     f"Intermediary adapter feeds unprepared rank-sensitive {reader.op_type}"
                 )
-        checked_readers.update(seen)
+        checked_readers.update((current, layout) for current in seen)
 
     plans = []
     for node in list(graph.node):
@@ -582,12 +598,12 @@ def _apply_remove_intermediary_squeeze_unsqueeze(
         output_shape = cache.get_shape(node.output[0])
         if not input_shape or not output_shape:
             if validate_only and rank_converted:
-                require_prepared_readers(node.output[0])
+                require_prepared_readers(node.output[0], output_shape)
             continue
         if not rank_converted and input_shape != output_shape:
             continue
         if rank_converted and len(input_shape) != len(output_shape):
-            require_prepared_readers(node.output[0])
+            require_prepared_readers(node.output[0], output_shape)
         plans.append((node, input_shape, output_shape))
     if validate_only:
         return model
