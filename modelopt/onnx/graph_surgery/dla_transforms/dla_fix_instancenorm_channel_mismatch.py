@@ -53,7 +53,7 @@ from ..utils.graph_utils import (
     batch_replace_nodes,
 )
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
-from .dla_indexing import _operator_nodes
+from .dla_indexing import _known_rank, _operator_nodes
 from .dla_model_boundaries import _require_adapter_opset
 
 
@@ -70,10 +70,10 @@ def _apply_fix_instancenorm_channel_mismatch(model: onnx.ModelProto) -> onnx.Mod
 
     nodes = _operator_nodes(model, {"InstanceNormalization"})
     for node in nodes:
-        shape = cache.get_shape(node.input[0])
-        if shape is not None and len(shape) not in (3, 4):
+        rank = _known_rank(cache, node.input[0])
+        if rank is not None and rank not in (3, 4):
             raise ValueError(
-                f"InstanceNormalization {node.name!r}: input rank {len(shape)} is not supported"
+                f"InstanceNormalization {node.name!r}: input rank {rank} is not supported"
             )
     if any(
         (shape := cache.get_shape(node.input[0])) is not None and len(shape) == 3 and all(shape)

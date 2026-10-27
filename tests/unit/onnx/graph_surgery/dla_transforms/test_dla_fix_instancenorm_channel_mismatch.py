@@ -382,7 +382,8 @@ def test_instancenorm_preserves_dtype_epsilon_and_allocated_names(dtype, legacy)
     np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
 
 
-def test_instancenorm_late_unsupported_rank_leaves_caller_unchanged():
+@pytest.mark.parametrize("symbolic", [False, True])
+def test_instancenorm_late_unsupported_rank_leaves_caller_unchanged(symbolic):
     """Reject a later five-dimensional operation before adapting an earlier valid one."""
     model = _make_instancenorm_model([2, 4, 6])
     model.graph.input.append(_vi("x5", TensorProto.FLOAT, [2, 4, 2, 3, 4]))
@@ -390,6 +391,15 @@ def test_instancenorm_late_unsupported_rank_leaves_caller_unchanged():
     model.graph.node.append(
         helper.make_node("InstanceNormalization", ["x5", "scale", "bias"], ["y5"])
     )
+    if symbolic:
+        model.graph.input[-1].type.tensor_type.shape.dim[0].dim_param = "batch"
+        model.graph.output[-1].type.tensor_type.shape.dim[0].dim_param = "batch"
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {
+        "X": np.arange(48, dtype=np.float32).reshape(2, 4, 6),
+        "x5": np.arange(192, dtype=np.float32).reshape(2, 4, 2, 3, 4),
+    }
+    _run_ort(copy.deepcopy(model), feeds)
     before = model.SerializeToString()
     with pytest.raises(ValueError, match="rank"):
         _apply_fix_instancenorm(model)
