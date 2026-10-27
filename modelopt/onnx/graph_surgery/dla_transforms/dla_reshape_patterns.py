@@ -225,6 +225,7 @@ def _apply_reshape_transpose_reshape(model):
     graph = model.graph
     cache = GraphCache(graph)
     replacements = {}
+    inferred_value_info = []
     count = 0
     initializer_count = len(graph.initializer)
     try:
@@ -240,12 +241,21 @@ def _apply_reshape_transpose_reshape(model):
             if id(first) in replacements:
                 raise ValueError(f"{first.name!r}: overlapping reshape patterns")
             removed, added = _build_transpose_replacement_or_raise(
-                model, first, [], transpose, set(cache.init_names), count, cache
+                model,
+                first,
+                [],
+                transpose,
+                set(cache.init_names),
+                count,
+                cache,
+                inferred_value_info=inferred_value_info,
             )
             replacements.update({id(node): [] for node in removed})
             replacements[id(first)] = added
             count += 1
         _replace(graph, replacements)
+        # Ordered reduction stages read new Concat shapes before the next global inference.
+        graph.value_info.extend(inferred_value_info)
     except Exception:
         del graph.initializer[initializer_count:]
         raise

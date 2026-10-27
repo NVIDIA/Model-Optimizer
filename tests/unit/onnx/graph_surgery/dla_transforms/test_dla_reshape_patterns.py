@@ -28,6 +28,7 @@ from modelopt.onnx.graph_surgery.dla_transforms.dla_reshape_patterns import (
     _apply_reshape_reduce_sum,
     _apply_reshape_transpose_reshape,
 )
+from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
 
 ort = pytest.importorskip("onnxruntime", reason="ORT required for numerical stage checks")
 
@@ -173,6 +174,54 @@ def test_registered_reshape_paths_execute(pattern, runtime):
         assert sum(node.op_type == "DequantizeLinear" for node in transformed.graph.node) == 2
     for actual, reference in zip(_execute(transformed, feeds, runtime), expected):
         np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.parametrize("runtime", ["reference", "ort"])
+@pytest.mark.parametrize("quantized", [False, True])
+@pytest.mark.parametrize("entrypoint", ["stages", "pipeline"])
+def test_transpose_then_reduction_recovers_generated_concat_shape(runtime, quantized, entrypoint):
+    """Execute reduction of a new 5D transpose result without a full inference pass between stages."""
+    model, feeds = _make_model("transpose")
+    target = next(tensor for tensor in model.graph.initializer if tensor.name == "target")
+    target.CopyFrom(numpy_helper.from_array(np.array([2, 3, 1, 5, 4], np.int64), "target"))
+    model.graph.node[-1].output[0] = "wide"
+    current = "wide"
+    if quantized:
+        model.graph.initializer.extend(
+            [
+                numpy_helper.from_array(np.float32(0.25), "scale"),
+                numpy_helper.from_array(np.uint8(128), "zero"),
+            ]
+        )
+        model.graph.node.extend(
+            [
+                helper.make_node("QuantizeLinear", [current, "scale", "zero"], ["quantized"]),
+                helper.make_node(
+                    "DequantizeLinear", ["quantized", "scale", "zero"], ["dequantized"]
+                ),
+            ]
+        )
+        current = "dequantized"
+    model.graph.initializer.append(numpy_helper.from_array(np.array([4], np.int64), "reduce_axes"))
+    model.graph.node.append(
+        helper.make_node("ReduceSum", [current, "reduce_axes"], ["Y"], keepdims=0)
+    )
+    model.graph.output[0].CopyFrom(
+        helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 3, 1, 5])
+    )
+    model = onnx.shape_inference.infer_shapes(model)
+    onnx.checker.check_model(model, full_check=True)
+    expected = _execute(model, feeds, runtime)
+    if entrypoint == "pipeline":
+        transformed = _transform_make_dla_compatible(
+            copy.deepcopy(model), verbose=False, qdq_quantized_dtypes=[]
+        )
+    else:
+        transformed = _apply_reshape_transpose_reshape(copy.deepcopy(model))
+        transformed = _apply_reshape_qdq_reduce_sum(transformed)
+        transformed = _apply_reshape_reduce_sum(transformed)
+    onnx.checker.check_model(transformed, full_check=True)
+    np.testing.assert_array_equal(_execute(transformed, feeds, runtime)[0], expected[0])
 
 
 @pytest.mark.parametrize("runtime", ["reference", "ort"])

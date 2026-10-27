@@ -250,7 +250,15 @@ def _transpose_path_concat_axis_4d(slice_axis: int, transpose_perm: list[int]) -
 
 
 def _build_transpose_replacement_or_raise(
-    model, reshape_node, mid_a, tr, unique_initializer: set, counter: int, cache: GraphCache
+    model,
+    reshape_node,
+    mid_a,
+    tr,
+    unique_initializer: set,
+    counter: int,
+    cache: GraphCache,
+    *,
+    inferred_value_info: list | None = None,
 ) -> tuple[list, list]:
     """Build the slice-based transpose decomposition from reshape targets and permutation.
 
@@ -430,6 +438,16 @@ def _build_transpose_replacement_or_raise(
         )
     )
     to_remove = [reshape_node, *mid_a, tr, *mid_b, r2]
+    if inferred_value_info is not None:
+        concat_shape = [int(reshape_4d_vals[index]) for index in new_transpose_perm]
+        concat_shape[concat_axis] *= num_slices
+        inferred_value_info.append(
+            helper.make_tensor_value_info(
+                concat_out,
+                cache.get_dtype(output_name) or cache.get_dtype(input_tensor) or TensorProto.FLOAT,
+                concat_shape,
+            )
+        )
     return to_remove, nodes_to_add
 
 
