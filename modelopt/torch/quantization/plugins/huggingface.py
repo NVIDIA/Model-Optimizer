@@ -1465,26 +1465,33 @@ def register_sparse_moe_on_the_fly(model):
             )
 
 
-def _fused_experts_wrapper_class(module):
-    """Return the _QuantFusedExperts subclass for a fused MoE expert container, or None.
+def _fused_experts_wrapper(module):
+    """Return the ``_QuantFusedExperts`` subclass for a fused-MoE-experts module, else None.
 
-    Two 3-D fused layouts are recognized, both requiring ``num_experts`` and a
-    3-D ``down_proj`` parameter:
+    Detects the standardized HuggingFace transformers 5.0+ fused expert pattern: ``num_experts``,
+    a 3-D ``down_proj`` and a 3-D first projection, either
 
-    * gated (``_QuantFusedExperts``): a 3-D ``gate_up_proj`` fusing gate+up. Matches
+    * gated (:class:`_QuantFusedExperts`): a 3-D ``gate_up_proj`` fusing gate+up. Matches
       ``MixtralExperts``, ``Qwen2MoeExperts``, ``Qwen3MoeExperts``,
       ``Qwen3_5MoeExperts``, ``DeepseekV3NaiveMoe``, ``JambaExperts``,
       ``OlmoeExperts``, ``MiniMaxM2Experts``, ``MiniMaxM3VLExperts``, etc.
     * non-gated (``_QuantNonGatedFusedExperts``): a 3-D ``up_proj`` with no
       ``gate_proj`` and no ``gate_up_proj``. Matches NemotronH ``NemotronHExperts``.
 
-    Returns ``None`` for non-standard layouts (GptOss, GraniteMoE,
-    Llama4TextExperts) which have their own explicit registrations.
+    Matching is by shape alone, so GptOss and Llama4TextExperts -- transposed layouts with their own
+    explicit registrations -- match too; :func:`register_fused_experts_on_the_fly` never reaches
+    them while those registrations stand.
 
     ``act_fn`` is not required: these wrappers only intercept the two ``F.linear``
     calls, so modules with a custom gated activation (e.g. ``MiniMaxM3VLExperts``)
     are still supported.
     """
+    # ``act_fn`` is a common marker of the standard HF fused-experts pattern, but it is NOT required by
+    # _QuantFusedExperts: the wrapper only quantizes the two projections; the activation is applied by the
+    # module's OWN forward. Models with a custom activation applied inline -- e.g. MiniMax-M3's SwiGLU via
+    # ``_apply_gate`` (``swiglu_alpha``/``swiglu_limit``, no ``act_fn``) -- are otherwise standard fused
+    # experts, so gate on the STRUCTURAL signature (num_experts + two 3-D fused projections) and treat
+    # ``act_fn`` as optional.
     if not hasattr(module, "num_experts"):
         return None
     down = getattr(module, "down_proj", None)
@@ -1504,10 +1511,10 @@ def _fused_experts_wrapper_class(module):
 def _is_fused_experts_module(module):
     """Check if a module is a fused MoE expert container compatible with _QuantFusedExperts.
 
-    See :func:`_fused_experts_wrapper_class` for the recognized layouts (gated
+    See :func:`_fused_experts_wrapper` for the recognized layouts (gated
     ``gate_up_proj`` and non-gated ``up_proj``).
     """
-    return _fused_experts_wrapper_class(module) is not None
+    return _fused_experts_wrapper(module) is not None
 
 
 def register_fused_experts_on_the_fly(model):
@@ -1529,13 +1536,31 @@ def register_fused_experts_on_the_fly(model):
 
         visited_types.add(mod_type)
 
-        wrapper_cls = _fused_experts_wrapper_class(module)
-        if wrapper_cls is not None:
+        wrapper = _fused_experts_wrapper(module)
+        if wrapper is not None and (
+            getattr(module, "is_transposed", False)
+            # Stored `(num_experts, out_dim, in_dim)`, the first projection takes the dim down_proj
+            # puts out; a gated container stored transposed never does, whether it says so or not.
+            or getattr(module, wrapper._first_proj_attr).shape[-1] != module.down_proj.shape[1]
+        ):
+            # `_fused_experts_wrapper` matches on parameter SHAPE only, so it also claims a
+            # transposed `(num_experts, in_dim, out_dim)` container. The fused-experts export
+            # (export/moe_utils.py) then splits gate/up by slicing dim 1 at `intermediate_dim`, the
+            # wrong axis for that layout, and writes silently wrong weights. Leave it unquantized.
+            warnings.warn(
+                f"Fused MoE experts '{name}' ({mod_type.__name__}) store their weights transposed "
+                "(num_experts, in_dim, out_dim), which the generic _QuantFusedExperts export path "
+                "does not support: it splits gate/up along dim 1, which is the input dim for this "
+                "layout. Leaving them unquantized; such a class needs its own quantized wrapper, as "
+                "GptOssExperts and Llama4TextExperts have."
+            )
+            continue
+        if wrapper is not None:
             print(
                 f"\033[1mDetected fused MoE experts '{name}' of type {mod_type.__name__}, "
-                f"registering with {wrapper_cls.__name__}.\033[0m"
+                f"registering with {wrapper.__name__}.\033[0m"
             )
-            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(wrapper_cls)
+            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(wrapper)
 
 
 def force_eager_experts_impl_on_the_fly(model):
