@@ -88,7 +88,10 @@ def _fsdp2_weight_window(
         return fsdp2_aware_weight_update(root, module, names=names)
     held = ctx.fsdp2_window
     if held is not None and held.unit is unit:
-        held.modules.append(module)
+        # A module with several quantized weights (fused BMM experts) packs each in turn: it joins
+        # the window once, or the window would re-register its weights with FSDP2 twice.
+        if not any(m is module for m in held.modules):
+            held.modules.append(module)
         return contextlib.nullcontext()
     _close_fsdp2_weight_window(ctx)
     root, names = _window_root(ctx, unit)
