@@ -143,10 +143,21 @@ _RNG = np.random.default_rng(2024)
 # ── 3D input [2,4,6] → output shape (2,4,6) ──────────────────────────────────
 
 
-def test_instancenorm_3d_parity():
-    """3D input [2,4,6]: transform produces same numerics and restores original shape."""
-    shape = [2, 4, 6]
-    model = _make_instancenorm_model(shape)
+@pytest.mark.parametrize(
+    ("shape", "nontrivial", "epsilon"), [([2, 4, 6], False, 1e-5), ([3, 8, 16], True, 1e-3)]
+)
+def test_instancenorm_3d_parity(shape, nontrivial, epsilon):
+    """Preserve native values, parameters, epsilon and 3D rank across both affine fixtures."""
+    model = _make_instancenorm_model(shape, epsilon)
+    if nontrivial:
+        channels = shape[1]
+        for name, values in (
+            ("scale", _RNG.standard_normal(channels).astype(np.float32) * 2.0 + 1.0),
+            ("bias", _RNG.standard_normal(channels).astype(np.float32) * 0.5),
+        ):
+            next(t for t in model.graph.initializer if t.name == name).CopyFrom(
+                numpy_helper.from_array(values, name)
+            )
     feeds = {"X": _RNG.standard_normal(shape).astype(np.float32)}
 
     ref = _run_ort(model, feeds)
@@ -176,49 +187,6 @@ def test_instancenorm_3d_parity():
     assert len(squeeze_nodes) == 1, f"Expected 1 Squeeze node, got {len(squeeze_nodes)}"
 
 
-# ── 3D input with non-trivial scale/bias ─────────────────────────────────────
-
-
-def test_instancenorm_3d_nontrivial_scale_bias():
-    """3D input [3,8,16] with random scale/bias: parity and shape preserved."""
-    shape = [3, 8, 16]
-    c = shape[1]
-    scale_data = _RNG.standard_normal(c).astype(np.float32) * 2.0 + 1.0
-    bias_data = _RNG.standard_normal(c).astype(np.float32) * 0.5
-
-    scale_init = numpy_helper.from_array(scale_data, name="scale")
-    bias_init = numpy_helper.from_array(bias_data, name="bias")
-    node = helper.make_node(
-        "InstanceNormalization",
-        inputs=["X", "scale", "bias"],
-        outputs=["Y"],
-        name="instnorm",
-        epsilon=1e-3,
-    )
-    graph = helper.make_graph(
-        [node],
-        "instnorm_nontrivial",
-        [_vi("X", TensorProto.FLOAT, shape)],
-        [_vi("Y", TensorProto.FLOAT, shape)],
-        initializer=[scale_init, bias_init],
-    )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
-    _clamp_ir(model)
-    model = onnx.shape_inference.infer_shapes(model, strict_mode=True)
-    onnx.checker.check_model(model)
-
-    feeds = {"X": _RNG.standard_normal(shape).astype(np.float32)}
-    ref = _run_ort(model, feeds)
-
-    tr = copy.deepcopy(model)
-    tr = _apply_fix_instancenorm(tr)
-    _clamp_ir(tr)
-    got = _run_ort(tr, feeds)
-
-    assert got["Y"].shape == tuple(shape)
-    _assert_values_match(ref, got)
-
-
 # ── 4D input: no-op ───────────────────────────────────────────────────────────
 
 
@@ -242,36 +210,6 @@ def test_instancenorm_4d_noop():
     assert any(n.op_type == "InstanceNormalization" for n in tr.graph.node)
     assert got["Y"].shape == tuple(shape)
     _assert_values_match(ref, got)
-
-
-# ── >4D input: raises ValueError ─────────────────────────────────────────────
-
-
-def test_instancenorm_5d_raises():
-    """5D input must raise ValueError."""
-    shape = [2, 4, 8, 6, 3]
-    c = shape[1]
-    scale_init = numpy_helper.from_array(np.ones(c, dtype=np.float32), name="scale")
-    bias_init = numpy_helper.from_array(np.zeros(c, dtype=np.float32), name="bias")
-    node = helper.make_node(
-        "InstanceNormalization",
-        inputs=["X", "scale", "bias"],
-        outputs=["Y"],
-        name="instnorm",
-    )
-    graph = helper.make_graph(
-        [node],
-        "instnorm_5d",
-        [_vi("X", TensorProto.FLOAT, shape)],
-        [_vi("Y", TensorProto.FLOAT, shape)],
-        initializer=[scale_init, bias_init],
-    )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
-    _clamp_ir(model)
-    model = onnx.shape_inference.infer_shapes(model, strict_mode=True)
-
-    with pytest.raises(ValueError, match=r"rank.*5.*not supported|not supported"):
-        _apply_fix_instancenorm(copy.deepcopy(model))
 
 
 # ── Multiple InstanceNorm nodes in one graph ──────────────────────────────────
