@@ -454,28 +454,37 @@ def test_a_single_process_fsdp2_load_sets_up_its_group_of_one(
     assert (call["rank"], call["world_size"]) == (0, 1)
 
 
-@pytest.mark.parametrize(
-    ("launch", "match"),
-    [(None, "torchrun --nproc_per_node=1"), ("8", "8-rank launch's process group")],
-    ids=["no-launcher", "launch-without-its-group"],
-)
-def test_a_single_process_fsdp2_load_needs_a_launcher(
-    monkeypatch, serve, loaders, tmp_path, launch, match
-):
+def test_a_single_process_fsdp2_load_needs_a_launcher(monkeypatch, serve, loaders, tmp_path):
     """Started without one, the process cannot set its group of one up; it is told to launch with
-    torchrun rather than fail inside init_process_group. One of a multi-rank launch whose group is
-    not up yet would set up the launch's group instead, over ranks its plan was not decided for."""
+    torchrun rather than fail inside init_process_group."""
     serve(LlamaConfig(**_TINY))
-    if launch is None:
-        monkeypatch.delenv("RANK", raising=False)
-    else:
-        monkeypatch.setenv("RANK", "0")
-        monkeypatch.setenv("WORLD_SIZE", launch)
+    monkeypatch.delenv("RANK", raising=False)
     monkeypatch.setattr(dist, "is_initialized", lambda: False)
     monkeypatch.setattr(dist, "setup", lambda timeout=None: pytest.fail("set a group up"))
 
-    with pytest.raises(RuntimeError, match=match):
+    with pytest.raises(RuntimeError, match="torchrun --nproc_per_node=1"):
         load_pretrained(str(tmp_path), distribution=DistributionPlan(dense="fsdp"))
+    assert loaders == {}
+
+
+@pytest.mark.parametrize("distribution", [None, DistributionPlan(dense="fsdp")], ids=["decided", "fsdp"])
+def test_a_rank_of_a_launch_without_its_group_is_refused(
+    monkeypatch, serve, loaders, auto_class, tmp_path, distribution
+):
+    """Without its group every collective runs on this rank alone, so each rank of the launch would
+    plan and load the model as a single process's, the whole model on every rank, and record a
+    one-rank plan on a model the whole launch holds."""
+    serve(LlamaConfig(**_TINY))
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(dist, "setup", lambda timeout=None: pytest.fail("set a group up"))
+
+    with pytest.raises(RuntimeError, match="8-rank launch whose process group is not set up"):
+        load_pretrained(
+            str(tmp_path), auto_class if distribution is None else None, distribution=distribution
+        )
+    assert auto_class.calls == []
     assert loaders == {}
 
 
