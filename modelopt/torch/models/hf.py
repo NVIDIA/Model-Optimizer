@@ -26,7 +26,8 @@ __all__ = [
 ]
 
 # Keep modeling dependencies lazy: importing model specs must not import calibration code.
-# A plugin defines any of prepare_for_loading, has_mtp_weights and prepare_for_calibration.
+# A plugin defines any of prepare_for_loading, has_mtp_weights, prefers_bundled_code and
+# prepare_for_calibration.
 _PLUGINS = {
     "nemotron_h": "nemotron_h.mtp",
     "nemotron_h_omni": "nemotron_h.mtp",
@@ -59,10 +60,8 @@ def checkpoint_has_mtp(model_type, checkpoint_path: str) -> bool:
 
 def prefers_bundled_code(model_type, hf_config, checkpoint_path: str, config_kwargs: dict) -> bool:
     """Use the model plugin to tell whether the checkpoint's bundled code must replace the built-in class."""
-    plugin = _get_plugin(model_type)
-    return plugin is not None and plugin.prefers_bundled_code(
-        hf_config, checkpoint_path, config_kwargs
-    )
+    hook = getattr(_get_plugin(model_type), "prefers_bundled_code", None)
+    return hook is not None and hook(hf_config, checkpoint_path, config_kwargs)
 
 
 def prepare_model_for_calibration(model) -> None:

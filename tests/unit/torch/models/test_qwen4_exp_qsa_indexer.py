@@ -24,7 +24,11 @@ import torch.nn as nn
 modeling = pytest.importorskip("transformers.models.qwen4_exp.modeling_qwen4_exp")
 from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
 
-from modelopt.torch.models.hf import prepare_model_for_calibration
+from modelopt.torch.models.hf import (
+    checkpoint_has_mtp,
+    prefers_bundled_code,
+    prepare_model_for_calibration,
+)
 
 SEQ = 64
 
@@ -102,3 +106,10 @@ def test_qsa_indexer_fast_path_matches_the_reference(monkeypatch, budget, pads, 
     assert len(projections) == 1
     if cache:
         assert torch.equal(cache_seen.keys[0], expected_cache.keys[0])
+
+
+@pytest.mark.parametrize("model_type", ["qwen4_exp", "qwen4_exp_text"])
+def test_loading_hooks_the_plugin_lacks_keep_their_defaults(model_type):
+    """The Qwen3.8 plugin only has a calibration hook; the loading hooks fall back to the defaults."""
+    assert not prefers_bundled_code(model_type, None, "ckpt", {})
+    assert not checkpoint_has_mtp(model_type, "ckpt")
