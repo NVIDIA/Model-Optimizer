@@ -197,37 +197,19 @@ _RNG = np.random.default_rng(2024)
 # ── Reshape ─────────────────────────────────────────────────────────────────────────────────────────
 
 
-def test_reshape_2d_to_4d():
-    """Reshape [8,16] → [16,8]: shape init promoted [1,1,16,8]; output squeezed back to [16,8]."""
-    shape = _init("shape", np.array([16, 8], dtype=np.int64))
+@pytest.mark.parametrize(("shape", "output_shape"), [([8, 16], [16, 8]), ([3, 8, 16], [3, 128])])
+def test_reshape_to_4d(shape, output_shape):
+    """Preserve native Reshape outputs after private target promotion."""
     model = _make_model(
         [helper.make_node("Reshape", ["X", "shape"], ["Y"], name="rs")],
-        "rs2d",
-        [_vi("X", TensorProto.FLOAT, [8, 16])],
-        [_vi("Y", TensorProto.FLOAT, [16, 8])],
-        [shape],
+        "reshape",
+        [_vi("X", TensorProto.FLOAT, shape)],
+        [_vi("Y", TensorProto.FLOAT, output_shape)],
+        [_init("shape", np.array(output_shape, dtype=np.int64))],
     )
-    feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
-    ref, got, tr = _apply_and_run(model, feeds)
+    feeds = {"X": _RNG.standard_normal(shape).astype(np.float32)}
+    ref, got, _ = _apply_and_run(model, feeds)
     _assert_match(ref, got)
-
-
-def test_reshape_3d_to_4d():
-    """Reshape [3,8,16] → [3,128]: shape init promoted to [1,3,128]; output squeezed to [3,128]."""
-    shape = _init("shape", np.array([3, 128], dtype=np.int64))
-    model = _make_model(
-        [helper.make_node("Reshape", ["X", "shape"], ["Y"], name="rs")],
-        "rs3d",
-        [_vi("X", TensorProto.FLOAT, [3, 8, 16])],
-        [_vi("Y", TensorProto.FLOAT, [3, 128])],
-        [shape],
-    )
-    feeds = {"X": _RNG.standard_normal((3, 8, 16)).astype(np.float32)}
-    ref, got, tr = _apply_and_run(model, feeds)
-    _assert_match(ref, got)
-
-
-# ── Transpose ───────────────────────────────────────────────────────────────────────────────────────
 
 
 def test_transpose_2d():
@@ -974,99 +956,29 @@ def _assert_flatten_chain(tr, *, expect_unsqueeze: bool) -> None:
         assert "Unsqueeze" not in op_types, "Unsqueeze must NOT be inserted for 4D input"
 
 
-def test_flatten_3d_axis2():
-    """Flatten [1,3,4] axis=2: outer=3, inner=4 → output [3,4]; ORT parity."""
+@pytest.mark.parametrize(
+    ("shape", "axis", "output_shape"),
+    [
+        ([1, 3, 4], 2, [3, 4]),
+        ([8, 16], 0, [1, 128]),
+        ([8, 16], 1, [8, 16]),
+        ([3, 8, 16], 1, [3, 128]),
+        ([3, 8, 16], -1, [24, 16]),
+        ([1, 3, 8, 16], 1, [1, 384]),
+    ],
+)
+def test_flatten_native_axes(shape, axis, output_shape):
+    """Execute Flatten across native ranks and verify the rank adapter chain."""
     model = _make_model(
-        [helper.make_node("Flatten", ["X"], ["Y"], name="fl", axis=2)],
-        "fl3d_ax2",
-        [_vi("X", TensorProto.FLOAT, [1, 3, 4])],
-        [_vi("Y", TensorProto.FLOAT, [3, 4])],
+        [helper.make_node("Flatten", ["X"], ["Y"], name="fl", axis=axis)],
+        "flatten",
+        [_vi("X", TensorProto.FLOAT, shape)],
+        [_vi("Y", TensorProto.FLOAT, output_shape)],
     )
-    feeds = {"X": _RNG.standard_normal((1, 3, 4)).astype(np.float32)}
+    feeds = {"X": _RNG.standard_normal(shape).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-
-    assert got["Y"].shape == (3, 4), f"Expected (3,4), got {got['Y'].shape}"
-    _assert_flatten_chain(tr, expect_unsqueeze=True)
-    np.testing.assert_allclose(ref["Y"], got["Y"], rtol=1e-5, atol=1e-6)
-
-
-def test_flatten_2d_axis0():
-    """Flatten [8,16] axis=0: outer=1, inner=128 → output [1,128]; ORT parity."""
-    model = _make_model(
-        [helper.make_node("Flatten", ["X"], ["Y"], name="fl", axis=0)],
-        "fl2d_ax0",
-        [_vi("X", TensorProto.FLOAT, [8, 16])],
-        [_vi("Y", TensorProto.FLOAT, [1, 128])],
-    )
-    feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
-    ref, got, tr = _apply_and_run(model, feeds)
-
-    assert got["Y"].shape == (1, 128), f"Expected (1,128), got {got['Y'].shape}"
-    _assert_flatten_chain(tr, expect_unsqueeze=True)
-    np.testing.assert_allclose(ref["Y"], got["Y"], rtol=1e-5, atol=1e-6)
-
-
-def test_flatten_2d_axis1():
-    """Flatten [8,16] axis=1: outer=8, inner=16 → output [8,16]; ORT parity."""
-    model = _make_model(
-        [helper.make_node("Flatten", ["X"], ["Y"], name="fl", axis=1)],
-        "fl2d_ax1",
-        [_vi("X", TensorProto.FLOAT, [8, 16])],
-        [_vi("Y", TensorProto.FLOAT, [8, 16])],
-    )
-    feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
-    ref, got, tr = _apply_and_run(model, feeds)
-
-    assert got["Y"].shape == (8, 16), f"Expected (8,16), got {got['Y'].shape}"
-    _assert_flatten_chain(tr, expect_unsqueeze=True)
-    np.testing.assert_allclose(ref["Y"], got["Y"], rtol=1e-5, atol=1e-6)
-
-
-def test_flatten_3d_axis1():
-    """Flatten [3,8,16] axis=1: outer=3, inner=128 → output [3,128]; ORT parity."""
-    model = _make_model(
-        [helper.make_node("Flatten", ["X"], ["Y"], name="fl", axis=1)],
-        "fl3d_ax1",
-        [_vi("X", TensorProto.FLOAT, [3, 8, 16])],
-        [_vi("Y", TensorProto.FLOAT, [3, 128])],
-    )
-    feeds = {"X": _RNG.standard_normal((3, 8, 16)).astype(np.float32)}
-    ref, got, tr = _apply_and_run(model, feeds)
-
-    assert got["Y"].shape == (3, 128), f"Expected (3,128), got {got['Y'].shape}"
-    _assert_flatten_chain(tr, expect_unsqueeze=True)
-    np.testing.assert_allclose(ref["Y"], got["Y"], rtol=1e-5, atol=1e-6)
-
-
-def test_flatten_3d_neg_axis():
-    """Flatten [3,8,16] axis=-1 (→2): outer=24, inner=16 → output [24,16]; ORT parity."""
-    model = _make_model(
-        [helper.make_node("Flatten", ["X"], ["Y"], name="fl", axis=-1)],
-        "fl3d_neg_ax",
-        [_vi("X", TensorProto.FLOAT, [3, 8, 16])],
-        [_vi("Y", TensorProto.FLOAT, [24, 16])],
-    )
-    feeds = {"X": _RNG.standard_normal((3, 8, 16)).astype(np.float32)}
-    ref, got, tr = _apply_and_run(model, feeds)
-
-    assert got["Y"].shape == (24, 16), f"Expected (24,16), got {got['Y'].shape}"
-    _assert_flatten_chain(tr, expect_unsqueeze=True)
-    np.testing.assert_allclose(ref["Y"], got["Y"], rtol=1e-5, atol=1e-6)
-
-
-def test_flatten_4d_axis1_no_unsqueeze():
-    """Flatten [1,3,8,16] axis=1: already 4D; no Unsqueeze inserted; output [1,384]; ORT parity."""
-    model = _make_model(
-        [helper.make_node("Flatten", ["X"], ["Y"], name="fl", axis=1)],
-        "fl4d_ax1",
-        [_vi("X", TensorProto.FLOAT, [1, 3, 8, 16])],
-        [_vi("Y", TensorProto.FLOAT, [1, 384])],
-    )
-    feeds = {"X": _RNG.standard_normal((1, 3, 8, 16)).astype(np.float32)}
-    ref, got, tr = _apply_and_run(model, feeds)
-
-    assert got["Y"].shape == (1, 384), f"Expected (1,384), got {got['Y'].shape}"
-    _assert_flatten_chain(tr, expect_unsqueeze=False)
+    assert got["Y"].shape == tuple(output_shape)
+    _assert_flatten_chain(tr, expect_unsqueeze=len(shape) < 4)
     np.testing.assert_allclose(ref["Y"], got["Y"], rtol=1e-5, atol=1e-6)
 
 
