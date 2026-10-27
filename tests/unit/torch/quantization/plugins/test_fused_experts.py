@@ -46,7 +46,7 @@ from modelopt.torch.quantization.conversion import _normalize_fused_experts_quan
 from modelopt.torch.quantization.model_calib import local_hessian_calibrate
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
-    _fused_experts_wrapper_class,
+    _fused_experts_wrapper,
     _is_fused_experts_module,
     _is_sparse_sequaential_moe_block,
     _QuantFusedExperts,
@@ -471,6 +471,30 @@ class TestQuantFusedExperts:
         # Block is NOT registered because fused experts are not iterable
         assert QuantModuleRegistry.get(block_type) is None
         self._cleanup_registry(expert_type)
+
+    @pytest.mark.parametrize("declared", [True, False], ids=["declared", "by-shape"])
+    def test_transposed_fused_experts_are_left_unquantized(self, declared):
+        """Matched by shape, a transposed container would export with gate/up split along its input
+        dim; registration leaves it unquantized, with a warning, rather than let export write wrong
+        weights or abort the rest of the model's quantization. A gated container's shapes give it
+        away when it does not say so."""
+
+        class _TransposedExperts(_SyntheticFusedExperts):
+            pass
+
+        experts = _TransposedExperts()
+        if declared:
+            experts.is_transposed = True
+        else:
+            for name in ("gate_up_proj", "down_proj"):
+                weight = getattr(experts, name).detach().transpose(1, 2).contiguous()
+                setattr(experts, name, nn.Parameter(weight))
+        model = nn.Module()
+        model.experts = experts
+
+        with pytest.warns(UserWarning, match="store their weights transposed"):
+            register_fused_experts_on_the_fly(model)
+        assert QuantModuleRegistry.get(_TransposedExperts) is None
 
     def test_a_wrapper_that_defines_its_weights_in_get_expert_weight_is_eager_only(self):
         """The grouped_mm forward quantizes the stored weight without get_expert_weight, so a wrapper
@@ -1916,10 +1940,10 @@ class TestNonGatedFusedExperts:
     def test_detected_and_picks_nongated_wrapper(self):
         module = _SyntheticNonGatedFusedExperts()
         assert _is_fused_experts_module(module) is True
-        assert _fused_experts_wrapper_class(module) is _QuantNonGatedFusedExperts
+        assert _fused_experts_wrapper(module) is _QuantNonGatedFusedExperts
 
     def test_gated_still_picks_base_wrapper(self):
-        assert _fused_experts_wrapper_class(_SyntheticFusedExperts()) is _QuantFusedExperts
+        assert _fused_experts_wrapper(_SyntheticFusedExperts()) is _QuantFusedExperts
 
     def test_register_uses_nongated_wrapper(self):
         model = _TinyNonGatedMoEModel()
@@ -2107,7 +2131,7 @@ class TestNonGatedFusedExperts:
                 self.act_fn = nn.SiLU()
 
         module = _SplitGatedExperts()
-        assert _fused_experts_wrapper_class(module) is None
+        assert _fused_experts_wrapper(module) is None
         assert _is_fused_experts_module(module) is False
 
     def test_get_quant_config_resolves_nongated_experts(self):
@@ -2188,11 +2212,11 @@ class TestQwen3VLMoeTextExperts:
 
         return Qwen3VLMoeTextExperts
 
-    def test_left_to_generic_fused_experts_wrapper_class(self):
+    def test_left_to_generic_fused_experts_wrapper(self):
         """The experts must be left to the generic fused-experts wrapper."""
         # A static registration would shadow on-the-fly detection.
         assert QuantModuleRegistry.get(self._experts_type()) is None
-        assert _fused_experts_wrapper_class(_make_qwen3_vl_moe_experts()) is _QuantFusedExperts
+        assert _fused_experts_wrapper(_make_qwen3_vl_moe_experts()) is _QuantFusedExperts
 
     def test_convert_and_forward_matches_reference(self):
         """Conversion must succeed and stay numerically transparent before calibration."""
