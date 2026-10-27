@@ -997,6 +997,8 @@ def _decide_distribution(
         _routed_expert_modules,
     )
 
+    # What the caller set the EP degree with, for a refusal to name it.
+    knob = "MODELOPT_EP_DEGREE" if ep_size is None else "ep_size"
     if world_size == 1:
         # Nothing to shard over, so nothing about the model matters, nor do the knobs: a shell still
         # exporting a multi-GPU run's would otherwise reshape a single process's load. The caller's
@@ -1028,7 +1030,7 @@ def _decide_distribution(
         ep_size = _choose_ep_degree(world_size, num_experts)
     elif ep_size > 1 and (num_experts == 0 or num_experts % ep_size):
         raise ValueError(
-            f"ep_size={ep_size} must divide the routed experts {hf_config.model_type} shards "
+            f"{knob}={ep_size} must divide the routed experts {hf_config.model_type} shards "
             f"({num_experts})."
         )
     if dense == "auto":
