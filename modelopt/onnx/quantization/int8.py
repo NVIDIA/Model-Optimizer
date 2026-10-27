@@ -55,6 +55,7 @@ from modelopt.onnx.quantization.qdq_graph import (
     remove_scalar_input_qdq,
 )
 from modelopt.onnx.quantization.qdq_utils import has_qdq_nodes, replace_scale_values
+from modelopt.onnx.utils import export_onnx
 
 
 def _find_nodes_to_quantize(
@@ -301,7 +302,7 @@ def quantize(
         graph = gs.import_onnx(onnx_model)
         remove_partial_input_qdq(graph, no_quantize_inputs)
         remove_scalar_input_qdq(graph, target_dla=kwargs.get("target_dla", False))
-        onnx_model = gs.export_onnx(graph)
+        onnx_model = export_onnx(graph)
 
         if calibration_cache_path:
             replace_scale_values(onnx_model.graph, act_scales_dict)

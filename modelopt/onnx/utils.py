@@ -71,6 +71,8 @@ def export_onnx(graph: gs.Graph, **kwargs) -> onnx.ModelProto:
             original = original_tensors[name]
             if hasattr(original, "explicit_dtype"):
                 tensor.explicit_dtype = original.explicit_dtype
+            if isinstance(original, gs.Variable):
+                tensor.type = original.type
             if isinstance(tensor, gs.Constant):
                 tensor.data_location = original.data_location
             if name in large[path]:
@@ -977,7 +979,7 @@ def _infer_types_only(model: onnx.ModelProto) -> onnx.ModelProto:
             gs_graph = gs.import_onnx(temp_model)
             gs_graph.toposort()
             # Convert back to ONNX to get topologically sorted nodes
-            sorted_model = gs.export_onnx(gs_graph)
+            sorted_model = export_onnx(gs_graph)
             sorted_graph = sorted_model.graph
         except Exception as e:
             logger.debug(

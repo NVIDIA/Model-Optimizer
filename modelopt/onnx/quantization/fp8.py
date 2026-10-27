@@ -302,7 +302,7 @@ def quantize(
         graph = gs.import_onnx(onnx_model)
         remove_partial_input_qdq(graph, no_quantize_inputs)
         remove_scalar_input_qdq(graph)
-        onnx_model = gs.export_onnx(graph)
+        onnx_model = onnx_utils.export_onnx(graph)
 
     onnx_model = _convert_to_runtime_precision(
         onnx_model,

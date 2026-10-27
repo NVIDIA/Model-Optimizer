@@ -53,6 +53,7 @@ from modelopt.onnx.quantization.autotune.insertion_points import (
 )
 from modelopt.onnx.quantization.autotune.region_pattern import RegionPattern
 from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
+from modelopt.onnx.utils import export_onnx
 
 _MUTATION_SPECS = [
     ("node_inputs", "node input points", lambda p: (p.node_index, p.input_index)),
@@ -104,7 +105,7 @@ class QDQAutotunerBase:
         if isinstance(model, onnx.ModelProto):
             self.onnx_model = model
         elif isinstance(model, gs.Graph):
-            self.onnx_model = gs.export_onnx(model)
+            self.onnx_model = export_onnx(model)
         else:
             raise TypeError(f"Expected onnx.ModelProto or gs.Graph, got {type(model)}")
 

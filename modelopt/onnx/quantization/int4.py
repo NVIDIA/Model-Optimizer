@@ -690,7 +690,7 @@ def _quantize_awq_clip(
 
         logger.info("Exporting the quantized graph")
         t = time.time()
-        model = gs.export_onnx(graph_gs)
+        model = export_onnx(graph_gs)
         # Set ir_version to 10, remove it once ORT supports ir_version 11
         model.ir_version = 10
         logger.info(f"Exporting took {time.time() - t} seconds")
@@ -1421,7 +1421,7 @@ def _quantize_awq_lite(
 
         logger.info("Exporting the quantized graph")
         t = time.time()
-        model = gs.export_onnx(graph_gs)
+        model = export_onnx(graph_gs)
         # Set ir_version to 10, remove it once ORT supports ir_version 11
         model.ir_version = 10
         logger.info(f"Exporting took {time.time() - t} seconds")
