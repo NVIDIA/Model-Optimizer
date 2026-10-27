@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import copy
+from functools import partial
 
 import pytest
 import torch
@@ -203,10 +204,15 @@ def test_quantize_forward_backward():
 
 
 @pytest.mark.parametrize("freeze_weight", [False, True])
-def test_layernorm_linear_lsq_scale_grad(freeze_weight):
-    """The learnable weight scale of a quantized TE LayerNormLinear receives a gradient."""
+@pytest.mark.parametrize(
+    "module_cls",
+    [te.pytorch.Linear, partial(te.pytorch.LayerNormLinear, normalization="RMSNorm")],
+    ids=["Linear", "LayerNormLinear"],
+)
+def test_lsq_scale_grad(module_cls, freeze_weight):
+    """The learnable weight scale of a quantized TE linear receives a gradient."""
     set_seed()
-    model = te.pytorch.LayerNormLinear(32, 16, normalization="RMSNorm").cuda()
+    model = module_cls(32, 16).cuda()
     x = torch.randn(4, 32, device="cuda")
     mtq.quantize(model, NVFP4_LSQ_TIED_CFG, lambda m: m(x))
     model.weight.requires_grad_(not freeze_weight)
