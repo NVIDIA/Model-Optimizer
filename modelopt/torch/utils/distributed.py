@@ -416,6 +416,19 @@ def _sendable(error: BaseException | None) -> tuple[bool, Any] | None:
     return False, f"{type(error).__name__}: {error}"
 
 
+def _refuse_a_launch_without_its_group(label: str) -> None:
+    """Raise if this process is a rank of a multi-rank launch whose process group is not set up.
+
+    Each rank would otherwise compute ``label`` alone, and the ranks could disagree with nothing
+    telling them so.
+    """
+    if is_distributed_launch() and not is_initialized():
+        raise RuntimeError(
+            f"{label!r} needs this {os.environ['WORLD_SIZE']}-rank launch's process group, which is "
+            "not set up yet; compute it inside distributed_run(), which sets the group up."
+        )
+
+
 def _received(sent: tuple[bool, Any], rank: int, label: str) -> BaseException:
     """The exception to raise for what ``rank`` sent (:func:`_sendable`) on failing ``label``."""
     exited, detail = sent
@@ -434,8 +447,10 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
     with its code if that is what it was, so that every rank exits, else a RuntimeError. A rank
     broadcasting another label than ``rank`` at the same point fails; ``rank`` sees no other rank's
     label, and returns. Collective: every rank calls it at the same point, with the same ``rank``.
-    Outside a distributed run ``fn`` runs alone.
+    In a single process ``fn`` runs alone; a rank of a launch whose process group is not set up yet
+    raises instead.
     """
+    _refuse_a_launch_without_its_group(label)
     if not 0 <= rank < size():
         raise ValueError(f"rank={rank} is not a rank of this {size()}-rank run.")
     if not is_distributed_run():
@@ -481,12 +496,14 @@ def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _
     rank alike: if any rank's error is not a SystemExit, a rank with such an error raises its own
     and the others a RuntimeError naming the first one; else every rank exits, a rank that exited
     with its own SystemExit and the others with the first one's code. Ranks reducing different
-    labels at the same point fail. Collective; outside a distributed run ``fn`` runs alone.
+    labels at the same point fail. Collective; in a single process ``fn`` runs alone, and a rank of a
+    launch whose process group is not set up yet raises instead.
 
     It runs ``fn`` itself so that a rank whose ``fn`` fails still joins the gather, which
     :func:`allreduce`, handed values the ranks already hold, cannot do; :func:`broadcast_from`
     differs from :func:`broadcast` and :func:`master_only` in the same way.
     """
+    _refuse_a_launch_without_its_group(label)
     if not is_distributed_run():
         return combine([fn()])
     value, error = None, None

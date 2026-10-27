@@ -216,6 +216,21 @@ def test_a_single_process_computes_alone(monkeypatch):
         broadcast_from("x", lambda: 3, rank=1)
 
 
+def test_a_launch_without_its_group_refuses_the_collectives(monkeypatch):
+    """A rank of a multi-rank launch whose group is not set up yet would compute its own value,
+    which another rank's could differ from with nothing telling them; it raises instead."""
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+    ran = []
+    for collective in (
+        lambda: broadcast_from("x", lambda: ran.append("broadcast_from")),
+        lambda: all_reduce("x", lambda: ran.append("all_reduce"), min),
+    ):
+        with pytest.raises(RuntimeError, match="'x' needs this 2-rank launch's process group"):
+            collective()
+    assert ran == []
+
+
 def _broadcast_from_job(rank, size):
     ran = []
 
