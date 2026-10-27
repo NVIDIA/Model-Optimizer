@@ -44,6 +44,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix ONNX AutoCast requiring standalone TensorRT Python bindings for ORT contrib operators. AutoCast now skips unavailable TensorRT introspection and only adds the TensorRT execution provider for confirmed plugins.
 - Preserve accumulated histogram counts when computing an entropy calibration threshold with NumPy histograms.
 - ``mtq.quantize`` and ``mtq.calibrate`` now give every module back the training mode it had. They used to leave every module in the mode of the model passed in, so a module in eval mode inside a model in training mode came back in training mode.
 - Diffusers ``export_hf_checkpoint`` now honors ``save_modelopt_state=False`` (the default) when HuggingFace checkpointing is enabled. Pass ``save_modelopt_state=True`` to retain the ModelOpt state file.
