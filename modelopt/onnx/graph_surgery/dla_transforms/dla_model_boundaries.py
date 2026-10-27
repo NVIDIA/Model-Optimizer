@@ -156,7 +156,14 @@ def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=Fal
             continue
         _require_adapter_opset(model)
         for consumer in consumers:
-            safe = _RANK_AGNOSTIC_OPS | {"Unsqueeze", "Concat", "Softmax", "LogSoftmax", "Gelu"}
+            safe = _RANK_AGNOSTIC_OPS | {
+                "Unsqueeze",
+                "Concat",
+                "Softmax",
+                "LogSoftmax",
+                "LayerNormalization",
+                "Gelu",
+            }
             if consumer.op_type == "MatMul":
                 other = cache.get_shape(consumer.input[1])
                 if other is not None and len(other) >= 2:
@@ -170,7 +177,9 @@ def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=Fal
                     safe |= {consumer.op_type}
             if consumer.op_type not in safe and consumer.op_type not in prepared_input_ops:
                 raise ValueError(f"Input rank conversion is unavailable for {consumer.op_type}")
-            if _is_standard_node(consumer, local_functions, {"Softmax", "LogSoftmax"}):
+            if _is_standard_node(
+                consumer, local_functions, {"Softmax", "LogSoftmax", "LayerNormalization"}
+            ):
                 axis = _attribute(consumer, "axis")
                 axis_value = (
                     axis.i

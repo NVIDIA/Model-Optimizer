@@ -258,6 +258,21 @@ def test_boundary_softmax_preserves_native_axes(operation, shape, axis, opset):
     np.testing.assert_array_equal(_checked_run(converted, feeds)[0], expected)
 
 
+@pytest.mark.parametrize("axis", [1, -1])
+def test_boundary_layer_normalization_preserves_native_axis(axis):
+    """Preserve LayerNormalization reductions after adding leading singleton dimensions."""
+    model = _make_model(
+        [helper.make_node("LayerNormalization", ["x", "scale"], ["y"], axis=axis)],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 3])],
+        [numpy_helper.from_array(np.ones(3, np.float32), "scale")],
+    )
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    expected = _checked_run(model, feeds)[0]
+    converted = _transform_make_dla_compatible(model, verbose=False)
+    np.testing.assert_allclose(_checked_run(converted, feeds)[0], expected, rtol=1e-6, atol=1e-7)
+
+
 @pytest.mark.parametrize("batch", [1, 2, 3])
 @pytest.mark.parametrize("operation", ["Add", "Mul"])
 @pytest.mark.parametrize("tail", [False, True])
