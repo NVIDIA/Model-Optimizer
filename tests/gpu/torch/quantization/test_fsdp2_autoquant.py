@@ -52,9 +52,10 @@ def _run_gradient_autoquant(rank, size, checkpoint_dir, search_dir, expect_qwen_
         assert type(model).__name__.endswith("ForConditionalGeneration")
         assert hasattr(model.model, "visual")
         assert not model._modelopt_unplaced_source_keys
-    torch.manual_seed(rank)
+    generator = torch.Generator(device=device).manual_seed(rank)
     batches = [
-        torch.randint(5 if expect_qwen_vlm else 0, 128, (1, 16), device=device) for _ in range(2)
+        torch.randint(5 if expect_qwen_vlm else 0, 128, (1, 16), device=device, generator=generator)
+        for _ in range(2)
     ]
     _, state = mtq.auto_quantize(
         model,
