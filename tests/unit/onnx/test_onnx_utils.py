@@ -177,6 +177,47 @@ def test_save_onnx(tmp_path):
     assert os.path.exists(os.path.join(tmp_path, "test.onnx"))
 
 
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("same_cwd", [False, True])
+def test_save_onnx_preserves_unloaded_external_data(tmp_path, monkeypatch, mixed, same_cwd):
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    path = model_dir / "model.onnx"
+    sidecar = model_dir / "model.onnx_data"
+    weight = np.arange(2048, dtype=np.float32)
+    model = make_model(
+        make_graph(
+            [make_node("Identity", ["weight"], ["output"])],
+            "external_weights",
+            [],
+            [make_tensor_value_info("output", onnx.TensorProto.FLOAT, [2048])],
+            initializer=[onnx.numpy_helper.from_array(weight, "weight")],
+        ),
+        opset_imports=[make_opsetid("", 21)],
+    )
+    monkeypatch.chdir(model_dir if same_cwd else tmp_path)
+    onnx.save_model(
+        model, path, save_as_external_data=True, location=sidecar.name, size_threshold=0
+    )
+    unloaded = onnx.load(path, load_external_data=False)
+    if mixed:
+        unloaded.graph.initializer.append(onnx.numpy_helper.from_array(weight + 1, "new_weight"))
+        unloaded.graph.node.append(make_node("Identity", ["new_weight"], ["new_output"]))
+        unloaded.graph.output.append(
+            make_tensor_value_info("new_output", onnx.TensorProto.FLOAT, [2048])
+        )
+    original_graph = unloaded.graph.SerializeToString()
+
+    onnx_utils.save_onnx(unloaded, str(path), save_as_external_data=True)
+
+    onnx.checker.check_model(str(path))
+    loaded = onnx.load(path)
+    for i, tensor in enumerate(loaded.graph.initializer):
+        np.testing.assert_array_equal(onnx.numpy_helper.to_array(tensor), weight + i)
+    assert sidecar.read_bytes() == weight.tobytes() + ((weight + 1).tobytes() if mixed else b"")
+    assert unloaded.graph.SerializeToString() == original_graph
+
+
 def _make_external_initializer(
     name: str, location: str = "missing-shared-data.bin"
 ) -> onnx.TensorProto:

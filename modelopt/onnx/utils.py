@@ -800,7 +800,20 @@ def save_onnx(model: onnx.ModelProto, onnx_path: str, save_as_external_data: boo
     if save_as_external_data:
         external_data_name = os.path.basename(onnx_path) + "_data"
         external_data_path = os.path.join(os.path.dirname(onnx_path), external_data_name)
-        if os.path.exists(external_data_path):
+        # Unloaded weights still need their existing offsets; new weights can append safely.
+        sidecar_is_referenced = any(
+            onnx.external_data_helper.uses_external_data(tensor)
+            and not tensor.HasField("raw_data")
+            and os.path.realpath(
+                os.path.join(
+                    os.path.dirname(onnx_path),
+                    onnx.external_data_helper.ExternalDataInfo(tensor).location,
+                )
+            )
+            == os.path.realpath(external_data_path)
+            for tensor in onnx.external_data_helper._get_all_tensors(model)
+        )
+        if os.path.exists(external_data_path) and not sidecar_is_referenced:
             logger.warning(f"Removing existing external data file: {external_data_path}")
             os.remove(external_data_path)
 
