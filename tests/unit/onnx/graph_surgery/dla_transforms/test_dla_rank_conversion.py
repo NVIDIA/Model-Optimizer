@@ -1082,6 +1082,117 @@ def test_native_index_views_survive_rank_preparation(producer, copied):
     np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
 
 
+@pytest.mark.parametrize("operation", ["Tile", "Expand", "Reshape"])
+@pytest.mark.parametrize("batch", [1, 2])
+@pytest.mark.parametrize("static_output", [False, True])
+@pytest.mark.parametrize("tail", [False, True])
+def test_symbolic_structural_controls_keep_native_data_rank(operation, batch, static_output, tail):
+    """Retain symbolic native layouts, including fixed public outputs and unary readers."""
+    target = {
+        "Tile": [0, 1] if static_output else [2, 1],
+        "Expand": [2, 3] if static_output else [1, 3],
+        "Reshape": [3, 1] if static_output else [3, -1],
+    }[operation]
+    if static_output and operation == "Reshape" and batch != 1:
+        target = [3, 2]
+    output_shape = (
+        {"Tile": [0, 3], "Expand": [2, 3], "Reshape": [3, batch]}[operation]
+        if static_output
+        else ([3, "N"] if operation == "Reshape" else ["M", 3])
+    )
+    nodes = [helper.make_node(operation, ["x", "control"], ["middle" if tail else "y"])]
+    if tail:
+        nodes.append(helper.make_node("Identity", ["middle"], ["y"]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "symbolic_control",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, ["N", 3])],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, output_shape)],
+            [numpy_helper.from_array(np.array(target, np.int64), "control")],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    feeds = {"x": np.arange(batch * 3, dtype=np.float32).reshape(batch, 3)}
+    expected = _execute(model, feeds)[0]
+    original_control = model.graph.initializer[0].SerializeToString()
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+    assert converted.graph.initializer[0].SerializeToString() == original_control
+
+
+@pytest.mark.parametrize("operation", ["Tile", "Reshape"])
+def test_runtime_slice_extents_retain_promoted_control_layouts(operation):
+    """Follow already-promoted data through unknown Slice extents before adapting controls."""
+    values = [1, 2, 1] if operation == "Tile" else [4, -1]
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Slice", ["x", "starts", "ends"], ["middle"]),
+                helper.make_node(operation, ["middle", "control"], ["y"]),
+            ],
+            "promoted_slice_control",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3, 4]),
+                helper.make_tensor_value_info("starts", TensorProto.INT64, [2]),
+            ],
+            [
+                helper.make_tensor_value_info(
+                    "y", TensorProto.FLOAT, ["A", "B", 4] if operation == "Tile" else ["A", "B"]
+                )
+            ],
+            [
+                numpy_helper.from_array(np.array([2, 3], np.int64), "ends"),
+                numpy_helper.from_array(np.array(values, np.int64), "control"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    feeds = {
+        "x": np.arange(24, dtype=np.float32).reshape(2, 3, 4),
+        "starts": np.array([0, 1], np.int64),
+    }
+    expected = _execute(model, feeds)[0]
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+
+
+@pytest.mark.parametrize("operation", ["Tile", "Expand", "Reshape"])
+def test_unknown_structural_data_rank_refuses_before_mutation(operation):
+    """Refuse unresolved intermediate ranks before allocating any control view."""
+    values = [2, 1] if operation == "Tile" else [2, 3]
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Identity", ["x"], ["hidden"]),
+                helper.make_node(operation, ["hidden", "control"], ["y"]),
+            ],
+            "unknown_control_rank",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3])],
+            [
+                helper.make_tensor_value_info(
+                    "y", TensorProto.FLOAT, [4, 3] if operation == "Tile" else [2, 3]
+                )
+            ],
+            [numpy_helper.from_array(np.array(values, np.int64), "control")],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    _execute(model, {"x": np.arange(6, dtype=np.float32).reshape(2, 3)})
+    before = model.SerializeToString()
+    callback = {
+        "Tile": _apply_non4d_tile,
+        "Expand": _apply_non4d_expand,
+        "Reshape": _apply_non4d_reshape,
+    }[operation]
+    with pytest.raises(ValueError, match="input rank"):
+        callback(model)
+    assert model.SerializeToString() == before
+
+
 @pytest.mark.parametrize("batch", [1, 2])
 def test_symbolic_input_output_remains_native(batch):
     """Leave symbolic input ranks intact instead of restoring an unpromoted output."""
