@@ -116,6 +116,32 @@ def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
     return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
 
 
+@pytest.mark.parametrize("operation", ["Concat", "TopK"])
+def test_axis_operator_with_unknown_data_rank_stays_native(operation):
+    """Missing intermediate data metadata must not select a control rank or partially promote data."""
+    nodes = [helper.make_node("Identity", ["x"], ["hidden"])]
+    inputs = [_vi("x", TensorProto.FLOAT, [2, 3])]
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    if operation == "Concat":
+        inputs.append(_vi("other", TensorProto.FLOAT, [2, 3]))
+        feeds["other"] = -feeds["x"]
+        nodes.append(helper.make_node("Concat", ["other", "hidden"], ["y"], axis=1))
+        outputs = [_vi("y", TensorProto.FLOAT, [2, 6])]
+    else:
+        inputs.append(_vi("k", TensorProto.INT64, [1]))
+        feeds["k"] = np.array([2], np.int64)
+        nodes.append(helper.make_node("TopK", ["hidden", "k"], ["y", "indices"], axis=1))
+        outputs = [_vi("y", TensorProto.FLOAT, [2, 2]), _vi("indices", TensorProto.INT64, [2, 2])]
+    model = _make_model(nodes, "unknown_axis_data", inputs, outputs, infer_symbolic_shapes=False)
+    expected = _run_ort(model, feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    target = next(n for n in converted.graph.node if n.op_type == operation)
+    assert target.SerializeToString() == model.graph.node[-1].SerializeToString()
+    onnx.checker.check_model(converted, full_check=True)
+    for name, actual in _run_ort(converted, feeds).items():
+        np.testing.assert_array_equal(actual, expected[name])
+
+
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """Compare finite tensor directions in double precision."""
     a64, b64 = a.astype(np.float64).ravel(), b.astype(np.float64).ravel()

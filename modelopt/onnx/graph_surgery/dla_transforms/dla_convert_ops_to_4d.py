@@ -1137,17 +1137,17 @@ def _handle_lpnorm(node, graph, shape_map, init_names, unique_init, inits_to_add
 
 def _handle_axis_op(node, graph, shape_map, init_names, unique_init, inits_to_add, cnt_ref):
     """Softmax, LogSoftmax, Concat, Split, TopK, DequantizeLinear."""
-    # Determine orig_rank from first non-initializer tensor input
-    first_inp_name = None
-    orig_rank = None
-    for inp in node.input:
-        if inp and inp not in init_names:
-            s = shape_map.get(inp)
-            if s is not None:
-                first_inp_name = inp
-                orig_rank = len(s)
-                break
-    if orig_rank is None or orig_rank == 4:
+    skip_input_indices = (
+        {1, 2}
+        if node.op_type == "DequantizeLinear"
+        else ({1} if node.op_type in {"Split", "TopK"} else set())
+    )
+    data_inputs = [inp for i, inp in enumerate(node.input) if inp and i not in skip_input_indices]
+    if not data_inputs or any(shape_map.get(inp) is None for inp in data_inputs):
+        return None
+    first_inp_name = data_inputs[0]
+    orig_rank = len(shape_map.get(first_inp_name))
+    if orig_rank == 4:
         return None
 
     pfx = node.name or f"axop_{cnt_ref[0]}"
@@ -1182,17 +1182,6 @@ def _handle_axis_op(node, graph, shape_map, init_names, unique_init, inits_to_ad
             break
 
     # ── Unsqueeze tensor inputs; expand initializer inputs ────────────────────
-    # Some ops have non-data inputs that must NOT be expanded:
-    #   DequantizeLinear:  inputs[1] (scale), inputs[2] (zero_point) — 1D per-channel
-    #   Split:             input[1] (split_sizes) — 1D size list
-    #   TopK:              input[1] (K) — scalar
-    if node.op_type == "DequantizeLinear":
-        skip_input_indices: set = {1, 2}
-    elif node.op_type in ("Split", "TopK"):
-        skip_input_indices = {1}
-    else:
-        skip_input_indices = set()
-
     for i, inp in enumerate(node.input):
         if not inp or i in skip_input_indices:
             continue
