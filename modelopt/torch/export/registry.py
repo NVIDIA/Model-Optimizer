@@ -28,7 +28,7 @@ editing if/elif chains inside ``unified_export_hf.py``.
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -71,6 +71,10 @@ class ExportContext:
     module_names: "ModuleNames | None" = None
     """``model``'s name maps, built once per export by the first handler that looks a module up
     (:func:`~modelopt.torch.quantization.utils.module_name_maps`)."""
+
+    fsdp2_window: Any = None
+    """The FSDP2 unit's weight-update window the handlers hold open across its modules, closed by
+    :func:`~modelopt.torch.export.hf_export_handlers.close_fsdp2_weight_window`."""
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]

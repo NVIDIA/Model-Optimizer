@@ -104,7 +104,7 @@ except ImportError:
     export_sparse_attention_config = None
 
 # Importing the built-in handlers installs their entries in the two registries.
-from . import hf_export_handlers as _hf_export_handlers  # noqa: F401
+from . import hf_export_handlers as _hf_export_handlers
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import get_experts_list, is_layernorm, is_quantlinear, sync_moe_gate_up_amax
 from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
@@ -996,8 +996,13 @@ def _process_quantized_modules(
         model_type=hf_model_type(model),
     )
 
-    for name, sub_module in model.named_modules():
-        _dispatch_export_handler(name, sub_module, ctx)
+    try:
+        for name, sub_module in model.named_modules():
+            _dispatch_export_handler(name, sub_module, ctx)
+    finally:
+        # A keep-fused export's handlers hold an FSDP2 unit's weight window open across its
+        # modules; close the last one.
+        _hf_export_handlers.close_fsdp2_weight_window(ctx)
 
 
 def _prepare_model_for_export(model, dtype, is_modelopt_qlora):

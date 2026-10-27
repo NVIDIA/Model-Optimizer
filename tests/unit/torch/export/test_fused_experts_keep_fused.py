@@ -36,7 +36,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
 pytest.importorskip("transformers")
@@ -733,12 +733,12 @@ def test_fused_experts_fold_in_a_weight_window_when_the_plan_shards_the_dense_pa
     events = []
 
     @contextlib.contextmanager
-    def window(root, module):
+    def window(root, modules, names=None):
         events.append("open")
         yield
         events.append("close")
 
-    monkeypatch.setattr(handlers, "_fsdp2_weight_window", window)
+    monkeypatch.setattr(handlers, "fsdp2_aware_weight_update", window)
     monkeypatch.setattr(
         handlers, "_export_fused_experts_keep_fused", lambda module, dtype: events.append("fold")
     )
@@ -749,40 +749,54 @@ def test_fused_experts_fold_in_a_weight_window_when_the_plan_shards_the_dense_pa
     ctx = ExportContext(model=container, dtype=torch.bfloat16, keep_fused_experts=True)
 
     ExportModuleRegistry.match(experts)(PREFIX, experts, ctx)
+    handlers.close_fsdp2_weight_window(ctx)
 
     assert events == (["open", "fold", "close"] if dense == "fsdp" else ["fold"])
 
 
 @pytest.mark.parametrize("root_sharded", [True, False], ids=["fsdp2", "expert-parallel"])
-def test_quant_linear_handler_packs_an_fsdp2_sharded_nvfp4_weight(gloo_world_of_one, root_sharded):
+def test_quant_linear_handlers_pack_an_fsdp2_unit_in_one_weight_window(
+    monkeypatch, gloo_world_of_one, root_sharded
+):
     """On the no-gather path the model is still sharded when a linear is packed.
 
     Packing NVFP4 straight off the sharded weight is not possible (the in-place cast on the
-    DTensor's local view is refused under autograd), so the handler packs inside a weight-update
-    window, on the layer's own unit where expert parallelism leaves the root unsharded; the sharded
-    state dict must then carry the packed weight, as an unsharded pack has it.
+    DTensor's local view is refused under autograd), so the handlers pack inside a weight-update
+    window, on the layer's own unit where expert parallelism leaves the root unsharded. The window
+    gathers the whole unit, so it opens once for all of the unit's linears; the sharded state dict
+    must then carry the packed weights, as an unsharded pack has them.
     """
     torch.manual_seed(0)
     layer = nn.Sequential(nn.Linear(32, 16, bias=False), nn.Linear(16, 8, bias=False))
     model = nn.Sequential(layer)
     mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(torch.randn(4, 32)))
-    ref = copy.deepcopy(model)[0][0]
-    ExportModuleRegistry.match(ref)("0.0", ref, ExportContext(model=ref, dtype=torch.bfloat16))
+    refs = copy.deepcopy(model)[0]
+    for i, ref in enumerate(refs):
+        ExportModuleRegistry.match(ref)(f"0.{i}", ref, ExportContext(model=ref, dtype=torch.bfloat16))
     fully_shard(layer, mesh=gloo_world_of_one)
     if root_sharded:
         fully_shard(model, mesh=gloo_world_of_one)
     set_distribution_plan(model, DistributionPlan(dense="fsdp"))
     ctx = ExportContext(model=model, dtype=torch.bfloat16, keep_fused_experts=True)
+    unshards = []
+    unshard = FSDPModule.unshard
+    monkeypatch.setattr(
+        FSDPModule, "unshard", lambda unit, *a, **k: unshards.append(unit) or unshard(unit, *a, **k)
+    )
 
-    ExportModuleRegistry.match(layer[0])("0.0", layer[0], ctx)
+    for i, linear in enumerate(layer):
+        ExportModuleRegistry.match(linear)(f"0.{i}", linear, ctx)
+    handlers.close_fsdp2_weight_window(ctx)
 
+    assert unshards == [layer]
     sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
-    packed = sd["0.0.weight"]
-    assert isinstance(packed, DTensor)
-    assert packed.dtype == torch.uint8
-    assert torch.equal(packed.full_tensor(), ref.weight)
-    for name in ("weight_scale", "weight_scale_2", "input_scale"):
-        assert torch.equal(_raw_bytes(sd[f"0.0.{name}"]), _raw_bytes(getattr(ref, name))), name
+    for i, ref in enumerate(refs):
+        packed = sd[f"0.{i}.weight"]
+        assert isinstance(packed, DTensor)
+        assert packed.dtype == torch.uint8
+        assert torch.equal(packed.full_tensor(), ref.weight)
+        for name in ("weight_scale", "weight_scale_2", "input_scale"):
+            assert torch.equal(_raw_bytes(sd[f"0.{i}.{name}"]), _raw_bytes(getattr(ref, name))), name
 
 
 def test_nvfp4_packs_a_sharded_weight_into_the_same_codes(gloo_world_of_one):
