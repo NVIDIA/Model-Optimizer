@@ -1529,6 +1529,51 @@ def test_block_targets_follow_the_label_shift(model_cls, expected):
     assert torch.equal(targets.mask, torch.tensor([mask], dtype=torch.float32))
 
 
+# DSpark's zero losses, whose confidence head adds a second output, are tested in
+# test_hf_dspark.py::TestDdpGradientCoverage.
+_ZERO_LOSS_HEADS = {
+    "dflash": {},
+    "domino": {"projector_type": "domino", "gru_hidden_dim": 32, "emb_dim": 16},
+}
+
+
+@pytest.mark.parametrize("draft_runs", [False, True], ids=["no_block", "zero_weight"])
+@pytest.mark.parametrize("head", list(_ZERO_LOSS_HEADS))
+def test_a_step_with_nothing_to_train_reaches_every_draft_parameter(head, draft_runs):
+    """DDP needs each trainable draft parameter's gradient on every rank, even at zero loss.
+
+    Once the draft has run, the loss must reach it through its output, which an FSDP2 unit
+    around the draft needs.
+    """
+    model = get_tiny_llama(num_hidden_layers=4)
+    config = get_dflash_config()
+    config["dflash_architecture_config"].update(_ZERO_LOSS_HEADS[head])
+    mtsp.convert(model, [("dflash", config)])
+    model.train()
+    outputs = []
+
+    def keep_output(module, args, output):
+        output.retain_grad()
+        outputs.append(output)
+
+    model.dflash_module.register_forward_hook(keep_output)
+    input_ids = torch.randint(1, model.config.vocab_size, (2, SEQ_LEN))
+    loss_mask = torch.zeros(2, SEQ_LEN)
+    if draft_runs:
+        # Anchors are drawn from the loss mask, so each row keeps one block, anchored at 2
+        # or 9, and none of its labels is in the mask.
+        loss_mask[:, [2, 9]] = 1.0
+    out = model(input_ids=input_ids, attention_mask=torch.ones_like(input_ids), loss_mask=loss_mask)
+    assert out.loss.item() == 0.0
+    out.loss.backward()
+    ungraded = [
+        n for n, p in model.dflash_module.named_parameters() if p.requires_grad and p.grad is None
+    ]
+    assert not ungraded, f"no gradient for {ungraded}"
+    assert len(outputs) == int(draft_runs)
+    assert all(output.grad is not None for output in outputs)
+
+
 class TestTeacherLogits:
     """The base distribution is projected only at the rows, and vocab entries, asked for.
 
