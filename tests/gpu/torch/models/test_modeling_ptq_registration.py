@@ -76,6 +76,13 @@ except ImportError:
 else:
     assert GptOssExperts in QuantModuleRegistry, "GptOssExperts not registered"
 
+try:
+    from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHExperts
+except ImportError:
+    pass
+else:
+    assert NemotronHExperts in QuantModuleRegistry, "NemotronHExperts not registered"
+
 assert register_falcon_linears_on_the_fly in CUSTOM_MODEL_PLUGINS, "Falcon callback missing"
 assert register_moe_linear_on_the_fly in CUSTOM_MODEL_PLUGINS, "Step callback missing"
 
