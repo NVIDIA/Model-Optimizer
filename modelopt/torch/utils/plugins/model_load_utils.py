@@ -200,11 +200,12 @@ def build_meta_causal_lm(
 ):
     """Build a meta-init causal LM (no real storage allocated), or ``auto_class``'s model.
 
-    It leaves ``auto_class`` as it found it. Building a remote-code model through an auto class
-    registers its class there, as it is, and a later load through that auto class builds the
-    registered class, without the ``GenerationMixin`` a first load adds: a rank that built one more
-    meta model than its peers, as rank 0 deciding a distribution does, would load its model without
-    the ``generate`` theirs have.
+    It leaves ``auto_class`` as it found it, and the auto classes a remote model's ``__init__``
+    builds its parts through (``AutoModel``, ``AutoModelForCausalLM``). Building a remote-code
+    model through an auto class registers its class there, as it is, and a later load through that
+    auto class builds the registered class, without the ``GenerationMixin`` a first load adds: a
+    rank that built one more meta model than its peers, as rank 0 deciding a distribution does,
+    would load its model without the ``generate`` theirs have.
     """
     if hf_config is None:
         config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
@@ -225,18 +226,22 @@ def build_meta_causal_lm(
             from transformers import AutoModelForImageTextToText
 
             model_factory = AutoModelForImageTextToText
-    # Where transformers records the class a remote-code build registers. Read without a fallback:
-    # if a release moves it, this fails here rather than leave one rank's model without generate.
-    registered = model_factory._model_mapping._extra_content
-    kept = dict(registered)
+    # Where transformers records the class a remote-code build registers: in the auto class built
+    # through, and in those a remote VLM builds its towers through. Read without a fallback: if a
+    # release moves it, this fails here rather than leave one rank's model without generate.
+    kept = [
+        (cls._model_mapping._extra_content, dict(cls._model_mapping._extra_content))
+        for cls in (model_factory, AutoModel, AutoModelForCausalLM)
+    ]
     try:
         with init_empty_weights(include_buffers=False):
             model = model_factory.from_config(
                 hf_config, dtype=dtype, trust_remote_code=trust_remote_code
             )
     finally:
-        registered.clear()
-        registered.update(kept)
+        for registered, saved in kept:
+            registered.clear()
+            registered.update(saved)
     model.eval()
     return model
 

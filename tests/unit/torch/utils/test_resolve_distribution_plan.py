@@ -569,6 +569,37 @@ def test_a_model_that_cannot_be_built_on_meta_names_itself(run_as, serve, monkey
         resolve_distribution_plan(str(tmp_path))
 
 
+def test_a_meta_build_leaves_the_auto_class_a_part_registers_in_as_it_found_it(monkeypatch):
+    """A remote VLM's ``__init__`` can build its text model through ``AutoModelForCausalLM`` while
+    the whole model builds through another auto class. That registers the text model's class in
+    ``AutoModelForCausalLM`` too, which would leave rank 0's later load of it without the
+    ``generate`` its peers' have."""
+
+    class ProbeConfig(transformers.PretrainedConfig):
+        model_type = "meta_build_part_probe"
+
+    class ProbeModel(transformers.PreTrainedModel):
+        config_class = ProbeConfig
+
+    for auto in (AutoModel, AutoModelForCausalLM):
+        mapping = auto._model_mapping
+        monkeypatch.setattr(mapping, "_extra_content", dict(mapping._extra_content))
+    from_config = AutoModel.from_config
+
+    def remote_vlm_from_config(config, **kwargs):
+        # What a remote VLM's __init__ does for its text model before the whole model is built.
+        AutoModelForCausalLM.register(ProbeConfig, ProbeModel, exist_ok=True)
+        return from_config(config, **kwargs)
+
+    monkeypatch.setattr(AutoModel, "from_config", remote_vlm_from_config)
+
+    model_load_utils.build_meta_causal_lm(
+        None, False, None, LlamaConfig(**_TINY), auto_class=AutoModel
+    )
+
+    assert ProbeConfig not in AutoModelForCausalLM._model_mapping
+
+
 def test_a_meta_build_leaves_the_auto_class_as_it_found_it(monkeypatch):
     """Building a remote-code model through an auto class registers its class there, as it is, and a
     later load through that auto class builds the registered class, without the ``generate`` a first
