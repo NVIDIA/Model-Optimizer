@@ -311,8 +311,12 @@ def test_reshape_resolves_copied_dimensions_across_output_aliases(target, collis
 
 
 @pytest.mark.parametrize("axis", [0, 1, 2, -1])
-@pytest.mark.parametrize("value_info", [False, True])
-def test_registered_axis_update_reads_native_initializer_rank(axis, value_info):
+@pytest.mark.parametrize("value_info", [False, True, "symbolic"])
+@pytest.mark.parametrize("ir_version", [3, 9])
+@pytest.mark.parametrize("entrypoint", ["stages", "pipeline"])
+def test_registered_axis_update_reads_native_initializer_rank(
+    axis, value_info, ir_version, entrypoint
+):
     """Keep Concat axes correct with fixed inputs that lack optional value metadata."""
     shape = [2, 3, 4]
     output_shape = shape.copy()
@@ -328,18 +332,28 @@ def test_registered_axis_update_reads_native_initializer_rank(axis, value_info):
         ),
         opset_imports=[helper.make_opsetid("", 17)],
     )
-    model.ir_version = 9
-    if value_info:
-        model.graph.value_info.extend(
+    model.ir_version = ir_version
+    if ir_version <= 3:
+        model.graph.input.extend(
             helper.make_tensor_value_info(name, TensorProto.FLOAT, shape)
             for name in ["first", "second"]
         )
+    if value_info:
+        model.graph.value_info.extend(
+            helper.make_tensor_value_info(
+                name, TensorProto.FLOAT, ["a", "b", "c"] if value_info == "symbolic" else shape
+            )
+            for name in ["first", "second"]
+        )
     expected = _execute(model, {})[0]
-    transformed = _apply_non4d_model_outputs(copy.deepcopy(model), defer_rank_conversion=True)
-    for name, transform in DLA_TRANSFORMS:
-        if name in {"Non4dInitializers", "UpdateAxis"}:
-            transformed = transform(transformed)
-    transformed.graph.ClearField("value_info")
+    if entrypoint == "pipeline":
+        transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    else:
+        transformed = _apply_non4d_model_outputs(copy.deepcopy(model), defer_rank_conversion=True)
+        for name, transform in DLA_TRANSFORMS:
+            if name in {"Non4dInitializers", "UpdateAxis"}:
+                transformed = transform(transformed)
+        transformed.graph.ClearField("value_info")
     np.testing.assert_array_equal(_execute(transformed, {})[0], expected)
 
 
@@ -1588,7 +1602,10 @@ def test_legacy_initializer_controls_remain_fixed(operation):
 @pytest.mark.parametrize("operation", ["QuantizeLinear", "DequantizeLinear"])
 @pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
 @pytest.mark.parametrize("per_channel", [False, True, "singleton"])
-def test_registered_implicit_quantizer_axis_preserves_channel_values(operation, shape, per_channel):
+@pytest.mark.parametrize("domain", ["", "com.microsoft"])
+def test_registered_implicit_quantizer_axis_preserves_channel_values(
+    operation, shape, per_channel, domain
+):
     """Map every vector scale's channel axis, including a single-channel vector."""
     shape = shape.copy()
     if per_channel == "singleton":
@@ -1601,13 +1618,14 @@ def test_registered_implicit_quantizer_axis_preserves_channel_values(operation, 
     output_type = TensorProto.UINT8 if operation == "QuantizeLinear" else TensorProto.FLOAT
     model = helper.make_model(
         helper.make_graph(
-            [helper.make_node(operation, ["x", "scale", "zero"], ["y"])],
+            [helper.make_node(operation, ["x", "scale", "zero"], ["y"], domain=domain)],
             "implicit_quantizer",
             [helper.make_tensor_value_info("x", input_type, shape)],
             [helper.make_tensor_value_info("y", output_type, shape)],
             [numpy_helper.from_array(scales, "scale"), numpy_helper.from_array(zeros, "zero")],
         ),
-        opset_imports=[helper.make_opsetid("", 17)],
+        opset_imports=[helper.make_opsetid("", 17)]
+        + ([helper.make_opsetid(domain, 1)] if domain else []),
     )
     model.ir_version = 9
     data = (

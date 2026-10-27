@@ -744,6 +744,7 @@ class GraphCache:
     __slots__ = (
         "_arr_cache",
         "_graph",
+        "_initializer_vi_map",
         "_names",
         "consumer_map",
         "graph_input_names",
@@ -772,6 +773,9 @@ class GraphCache:
             self._names.update([node.name, *node.input, *node.output])
         self.init_map: dict[str, onnx.TensorProto] = {init.name: init for init in graph.initializer}
         self.init_names: set[str] = set(self.init_map)
+        self._initializer_vi_map = {
+            vi.name: vi for vi in graph.value_info if vi.name in self.init_names
+        }
         self.producer_map: dict[str, onnx.NodeProto] = {}
         for node in graph.node:
             for out in node.output:
@@ -993,6 +997,14 @@ def _allocated_boundary_name(name, hint):
 
 def _shape_before_boundary_promotion(cache, name):
     """Recover native shapes at generated input and output boundary views."""
+    snapshot = cache._initializer_vi_map.get(name)
+    if snapshot is not None and snapshot.type.tensor_type.HasField("shape"):
+        dimensions = snapshot.type.tensor_type.shape.dim
+        return (
+            [dimension.dim_value for dimension in dimensions]
+            if all(dimension.HasField("dim_value") for dimension in dimensions)
+            else None
+        )
     producer = cache.get_producer(name)
     if (
         producer is not None

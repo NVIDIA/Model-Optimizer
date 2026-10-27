@@ -55,7 +55,10 @@ def _runtime_input_names(model):
 def _promoted_input_shape(cache, name, local_functions, native_sources):
     """Distinguish native symbolic paths from inputs prepared for four-dimensional data."""
     shape = _shape_before_boundary_promotion(cache, name)
+    snapshot = cache._initializer_vi_map.get(name)
     rank = len(shape) if shape is not None else _known_rank(cache, name)
+    if snapshot is not None and snapshot.type.tensor_type.HasField("shape"):
+        rank = len(snapshot.type.tensor_type.shape.dim)
     current, seen = name, set()
     while rank is None and current not in seen:
         seen.add(current)
@@ -629,7 +632,7 @@ def _apply_update_axis(model):
         if (
             axis is None
             and node.op_type in update
-            and node.domain in {"", "ai.onnx"}
+            and node.domain in {"", "ai.onnx", "com.microsoft"}
             and (
                 rank == 5
                 or (
@@ -638,14 +641,17 @@ def _apply_update_axis(model):
                 )
             )
         ):
-            schema = defs.get_schema(
-                node.op_type, versions.get(node.domain, versions.get("", 1)), node.domain
-            )
-            default = schema.attributes.get("axis")
-            if default is not None and default.default_value.type:
-                value = default.default_value.i
+            if node.domain == "com.microsoft":
+                value = 1
             else:
-                continue
+                schema = defs.get_schema(
+                    node.op_type, versions.get(node.domain, versions.get("", 1)), node.domain
+                )
+                default = schema.attributes.get("axis")
+                if default is not None and default.default_value.type:
+                    value = default.default_value.i
+                else:
+                    continue
         elif axis is None or node.op_type in skip or (axis.i < 0 and node.op_type not in update):
             continue
         else:
