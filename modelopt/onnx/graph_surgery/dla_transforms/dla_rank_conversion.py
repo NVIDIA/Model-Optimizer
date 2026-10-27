@@ -34,7 +34,12 @@ from ..utils.graph_utils import (
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _RANK_AGNOSTIC_OPS, _subgraph_captures
 from .dla_indexing import _insert_support_nodes, _known_rank, _operator_nodes
-from .dla_model_boundaries import _REDUCTION_OPS, _has_native_symbolic_data, _is_standard_node
+from .dla_model_boundaries import (
+    _REDUCTION_OPS,
+    _has_native_symbolic_data,
+    _is_standard_node,
+    _native_conv1d,
+)
 
 __all__ = []
 
@@ -244,6 +249,8 @@ def _apply_non4d_initializers(model):
             model, {"QuantizeLinear", "DequantizeLinear", "GroupQueryAttention"}, ("com.microsoft",)
         )
     selected = {id(node) for node in supported}
+    cache = GraphCache(model.graph)
+    avoid.update(name for node in supported if _native_conv1d(node, cache) for name in node.input)
     protected = _subgraph_captures(model.graph) | {value.name for value in model.graph.output}
     protected.update(
         name for node in model.graph.node if id(node) not in selected for name in node.input
