@@ -15,8 +15,6 @@
 
 """Thin PDD objective integration for AutoModel's diffusion recipe."""
 
-from __future__ import annotations
-
 import logging
 from collections.abc import Mapping
 from pathlib import Path

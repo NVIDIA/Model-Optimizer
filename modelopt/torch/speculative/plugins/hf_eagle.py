@@ -155,7 +155,7 @@ class HFEagleModel(EagleModel):
         for name, kwargs in compile_targets:
             try:
                 setattr(self, name, torch.compile(getattr(self, name), dynamic=False, **kwargs))
-            except Exception:  # noqa: PERF203
+            except Exception:
                 print_rank_0(f"Disabling torch.compile for {name} due to compilation error.")
 
     def get_dummy_inputs(self) -> dict:

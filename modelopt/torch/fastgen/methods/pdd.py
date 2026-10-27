@@ -21,11 +21,9 @@ packing remain behind the adapter protocol and belong in
 ``modelopt.torch.fastgen.plugins``.
 """
 
-from __future__ import annotations
-
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, Self
 
 import torch
 import torch.nn.functional as F
@@ -150,7 +148,7 @@ class PDDOutputProjection(nn.Linear):
         base_linear: nn.Linear,
         grid_size: int,
         layer_spec: PDDLayerSpec,
-    ) -> PDDOutputProjection:
+    ) -> Self:
         """Convert a loaded base linear without modifying it.
 
         Repeating a compatible conversion is idempotent. A PDD projection with

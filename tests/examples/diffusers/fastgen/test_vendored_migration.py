@@ -27,8 +27,6 @@ The GPU/container end-to-end positive tests (smoke train, FSDP2 resume, preproce
 images) are exercised via SLURM, not here; see ``round-*-summary`` / the run docs.
 """
 
-from __future__ import annotations
-
 import inspect
 import pathlib
 import re

@@ -32,8 +32,6 @@ mismatched reasoning-effort variant) and keep only runs at the largest ``success
 when that shared count is below a run one side has, ``truncated_comparison`` says so.
 """
 
-from __future__ import annotations
-
 import argparse
 import glob as globmod
 import json

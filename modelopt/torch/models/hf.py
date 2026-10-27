@@ -20,6 +20,7 @@ from contextlib import nullcontext
 
 __all__ = [
     "checkpoint_has_mtp",
+    "prefers_bundled_code",
     "prepare_model_for_calibration",
     "prepare_model_for_loading",
 ]
@@ -51,6 +52,14 @@ def checkpoint_has_mtp(model_type, checkpoint_path: str) -> bool:
     """Use the model plugin to detect MTP tensors before selecting a supported loading path."""
     plugin = _get_plugin(model_type)
     return plugin is not None and plugin.has_mtp_weights(checkpoint_path)
+
+
+def prefers_bundled_code(model_type, hf_config, checkpoint_path: str, config_kwargs: dict) -> bool:
+    """Use the model plugin to tell whether the checkpoint's bundled code must replace the built-in class."""
+    plugin = _get_plugin(model_type)
+    return plugin is not None and plugin.prefers_bundled_code(
+        hf_config, checkpoint_path, config_kwargs
+    )
 
 
 def prepare_model_for_calibration(model) -> None:
