@@ -62,6 +62,7 @@ Reverse rules are derived from the model's conversion mapping via transformers'
 (in-memory-name) behavior rather than emit a silently-wrong checkpoint.
 """
 
+import contextlib
 import functools
 import logging
 import re
@@ -765,14 +766,18 @@ def _quantization_codec_ops() -> tuple[type, ...]:
     Includes the identity op, which is what older releases (5.5, 5.6) reverse ``Fp8Dequantize``
     into; later ones reverse it into ``Fp8Quantize``.
     """
-    try:
-        from transformers import core_model_loading
+    ops: list[Any] = []
+    # Imported apart: 5.5 imports triton atop its FP8 integration, so without triton that import
+    # fails, while the identity op those releases reverse into lives in core_model_loading.
+    with contextlib.suppress(Exception):  # transformers without the FP8 integration
         from transformers.integrations import finegrained_fp8
-    except Exception:  # transformers without the FP8 integration
-        return ()
-    names = ("Fp8Dequantize", "Fp8Quantize", "Fp8DecodeScale", "Fp8EncodeScale")
-    ops = [getattr(finegrained_fp8, n, None) for n in names]
-    ops.append(getattr(core_model_loading, "_IdentityOp", None))
+
+        names = ("Fp8Dequantize", "Fp8Quantize", "Fp8DecodeScale", "Fp8EncodeScale")
+        ops += [getattr(finegrained_fp8, n, None) for n in names]
+    with contextlib.suppress(Exception):
+        from transformers import core_model_loading
+
+        ops.append(getattr(core_model_loading, "_IdentityOp", None))
     return tuple(op for op in ops if op is not None)
 
 
