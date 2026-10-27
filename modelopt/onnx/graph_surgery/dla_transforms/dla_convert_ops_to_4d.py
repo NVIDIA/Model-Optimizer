@@ -1187,10 +1187,7 @@ def _handle_axis_op(node, graph, shape_map, init_names, unique_init, inits_to_ad
         if not inp or i in skip_input_indices:
             continue
         if inp in init_names:
-            for init in graph.initializer:
-                if init.name == inp:
-                    _expand_init_dims(init, shape_map._cache)
-                    break
+            _expand_init_dims(shape_map._cache.get_init(inp), shape_map._cache)
         else:
             s = shape_map.get(inp)
             if s is None or len(s) == 4:
@@ -1511,12 +1508,9 @@ def _handle_generic(node, graph, shape_map, init_names, unique_init, inits_to_ad
         if i in conv_bias_indices:
             continue  # Conv/ConvTranspose bias — leave untouched
         if inp in init_names:
-            for init in graph.initializer:
-                if init.name == inp:
-                    if len(init.dims) == 0:
-                        break  # scalar initializer — leave untouched
-                    _expand_init_dims(init, shape_map._cache)
-                    break
+            init = shape_map._cache.get_init(inp)
+            if len(init.dims) != 0:
+                _expand_init_dims(init, shape_map._cache)
         else:
             s = shape_map.get(inp)
             if s is None:
