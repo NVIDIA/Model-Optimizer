@@ -474,12 +474,12 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
     returns a value that does not serialize and load back (:func:`_encoded`), every rank raises
     instead of waiting in a broadcast ``rank`` never sends: ``rank`` its own error, the others a
     SystemExit with its code if that is what it was, so that every rank exits, else a RuntimeError.
-    Every rank, ``rank`` too, gets the value loaded from the bytes sent, so the result shares nothing
-    with what ``fn`` returned, on any rank, as with :func:`all_reduce`.
+    On a distributed run every rank, ``rank`` too, gets the value loaded from the bytes sent, so the
+    result shares nothing with what ``fn`` returned, as with :func:`all_reduce`.
     A rank broadcasting another label than ``rank`` at the same point fails; ``rank`` sees no other
     rank's label, and returns. Collective: every rank calls it at the same point, with the same
-    ``rank``. In a single process ``fn`` runs alone; a rank of a launch whose process group is not
-    set up yet raises instead.
+    ``rank``. In a single process ``fn`` runs alone, and its value comes back as it is, neither
+    serialized nor copied; a rank of a launch whose process group is not set up yet raises instead.
     """
     _refuse_a_launch_without_its_group(label)
     if not 0 <= rank < size():
@@ -523,8 +523,9 @@ def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _
     and every rank alike: if any rank's error is not a SystemExit, a rank with such an error raises
     its own and the others a RuntimeError naming the first one; else every rank exits, a rank that
     exited with its own SystemExit and the others with the first one's code. Ranks reducing
-    different labels at the same point fail. Collective; in a single process ``fn`` runs alone, and
-    a rank of a launch whose process group is not set up yet raises instead.
+    different labels at the same point fail. Collective. In a single process ``fn`` runs alone and
+    ``combine`` gets its value as it is, neither serialized nor copied; a rank of a launch whose
+    process group is not set up yet raises instead.
 
     It runs ``fn`` itself so that a rank whose ``fn`` fails still joins the gather, which
     :func:`allreduce`, handed values the ranks already hold, cannot do; :func:`broadcast_from`
