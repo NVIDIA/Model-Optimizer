@@ -118,11 +118,13 @@ class FakeBaseConfig(PretrainedConfig):
         rms_norm_eps=1e-6,
         rope_theta=None,
         final_norm_type=None,
+        embedding_scale=1.0,
         **kwargs,
     ):
         """Initialize FakeBaseConfig with minimal model configuration parameters."""
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
         self.rms_norm_eps = rms_norm_eps
+        self.embedding_scale = embedding_scale
         # Which self-implemented final-norm class FakeBaseModel builds, or None to build no norm
         # (model whose final-norm type we don't know). See _FINAL_NORM_CLASSES /
         # _FINAL_NORM_TYPE_BY_MODEL_TYPE. Persisted so a reloaded config rebuilds the same norm.
@@ -161,6 +163,18 @@ class FakeBaseConfig(PretrainedConfig):
         self.dtype = dtype
 
 
+class _ScaledEmbedding(nn.Embedding):
+    """Apply input scaling without changing raw embedding or shared-head values."""
+
+    def __init__(self, *args, scale=1.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scale = scale
+
+    def forward(self, input_ids):
+        hidden = super().forward(input_ids)
+        return hidden if self.scale == 1.0 else hidden * self.scale
+
+
 class FakeBaseModel(PreTrainedModel):
     """Minimal base model for offline speculative decoding.
 
@@ -184,7 +198,9 @@ class FakeBaseModel(PreTrainedModel):
         self.model = nn.Module()
         self.model.layers = nn.ModuleList()
         self.model.dtype = config.dtype
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, dtype=config.dtype)
+        self.embed_tokens = _ScaledEmbedding(
+            config.vocab_size, config.hidden_size, dtype=config.dtype, scale=config.embedding_scale
+        )
         self.lm_head = nn.Linear(
             config.hidden_size, config.vocab_size, bias=False, dtype=config.dtype
         )
@@ -200,7 +216,9 @@ class FakeBaseModel(PreTrainedModel):
         self.post_init()
 
     @classmethod
-    def from_source(cls, source: str, trust_remote_code: bool = False) -> "FakeBaseModel":
+    def from_source(
+        cls, source: str, trust_remote_code: bool = False, *, embedding_scale: float = 1.0
+    ) -> "FakeBaseModel":
         """Load lm_head and embed_tokens from a local directory or HuggingFace Hub repo.
 
         Args:
@@ -209,6 +227,7 @@ class FakeBaseModel(PreTrainedModel):
                 automatically: if ``source`` is an existing local directory it is treated as a
                 local checkpoint; otherwise it is treated as a Hub repo ID and the required
                 files are downloaded via ``huggingface_hub``.
+            embedding_scale: Explicit input-embedding multiplier, persisted through reload.
         """
         from modelopt.torch.export.plugins.hf_spec_export import _get_rope_theta
 
@@ -226,6 +245,7 @@ class FakeBaseModel(PreTrainedModel):
         )
         # Extract necessary info for spec training from base config
         config = FakeBaseConfig(
+            embedding_scale=embedding_scale,
             num_hidden_layers=getattr(base_cfg, "num_hidden_layers", None),
             hidden_size=getattr(base_cfg, "hidden_size", None),
             vocab_size=getattr(base_cfg, "vocab_size", None),
