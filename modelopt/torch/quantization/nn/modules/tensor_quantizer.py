@@ -1187,6 +1187,8 @@ class TensorQuantizer(nn.Module):
         # Early return if nothing is collected during the forward (e.g. MoE)
         if inputs.numel() == 0:
             return inputs
+        # The weight cache keys on this tensor, not on the fresh ones (scaled, padded) made from it below.
+        cache_source = inputs
 
         # Activation scaling for smoothquant
         if self.pre_quant_scale is not None:
@@ -1252,7 +1254,7 @@ class TensorQuantizer(nn.Module):
                 inputs = inputs.contiguous()
             if self.fake_quant:
                 with same_device_as(inputs):
-                    outputs = cached_fake_quantize(self, inputs)
+                    outputs = cached_fake_quantize(self, inputs, cache_source)
             elif not self._dequantize:
                 outputs = self._real_quantize(inputs)
             else:

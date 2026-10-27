@@ -56,8 +56,8 @@ class WeightCacheStats:
 @dataclass
 class _Entry:
     key: tuple
-    # Holds the input's storage so that its address cannot be reused by another tensor. For an input
-    # made afresh on each call (e.g. a padded weight), this keeps one more copy alive per entry.
+    # Holds the source's storage so that its address cannot be reused by another tensor. For a source
+    # made afresh on each call (e.g. an onloaded weight), this keeps one more copy alive per entry.
     anchor: torch.Tensor
     value: torch.Tensor
     value_version: int
@@ -68,8 +68,8 @@ class _Session:
     stats: WeightCacheStats = field(default_factory=WeightCacheStats)
     entries: dict = field(default_factory=dict)
 
-    def add(self, quantizer, key, inputs, value) -> _Entry:
-        entry = _Entry(key, inputs.detach(), value, value._version)
+    def add(self, quantizer, key, source, value) -> _Entry:
+        entry = _Entry(key, source.detach(), value, value._version)
         self.entries[quantizer] = entry
         self.stats.misses += 1
         self.stats.retained_bytes += value.untyped_storage().nbytes()
@@ -106,8 +106,8 @@ def enable_weight_cache(
 
     Enrollment alone changes nothing; enrolled quantizers reuse their output only inside
     :func:`weight_cache_scope`. A cache hit passes the gradient straight through to the weight, so
-    each enrolled quantizer must have a straight-through backward: ``pass_through_bwd=True`` for
-    the built-in formats, and the same contract for a registered custom ``backend``.
+    each enrolled quantizer must have a straight-through backward: ``pass_through_bwd=True``, which
+    a registered custom ``backend`` must also honor, and no LSQ.
 
     Args:
         model: The quantized model, or a list of its model chunks (e.g. Megatron virtual pipeline
@@ -142,8 +142,10 @@ def enable_weight_cache(
                     )
                 if not quantizer.is_enabled:
                     continue
-                if quantizer.backend is None and not quantizer._pass_through_bwd:
+                if not quantizer._pass_through_bwd:
                     raise ValueError(f"{name}: the weight cache requires pass_through_bwd=True.")
+                if getattr(quantizer, "_lsq", False):  # LSQ's backward is not straight-through
+                    raise ValueError(f"{name}: the weight cache does not support LSQ quantizers.")
                 if any(p.requires_grad for p in quantizer.parameters()):
                     raise ValueError(f"{name}: the weight cache does not support learned scales.")
                 owner = _ENROLLED.get(quantizer)
@@ -223,13 +225,17 @@ def invalidate_weight_cache(model: nn.Module | list[nn.Module]) -> None:
             session.drop(quantizer)
 
 
-def cached_fake_quantize(quantizer, inputs: torch.Tensor) -> torch.Tensor:
-    """``quantizer._fake_quantize(inputs)``, reused while ``quantizer`` is in an open scope."""
+def cached_fake_quantize(quantizer, inputs: torch.Tensor, source: torch.Tensor) -> torch.Tensor:
+    """``quantizer._fake_quantize(inputs)``, reused while ``quantizer`` is in an open scope.
+
+    ``source`` is the tensor the quantizer received, from which ``inputs`` was derived (e.g. by
+    padding). It keys the entry, so that a derived tensor made afresh on each call still hits.
+    """
     session = _ACTIVE.get(quantizer) if _num_open_scopes else None
     if session is None:
         return quantizer._fake_quantize(inputs)
 
-    key = _input_key(inputs)
+    key = _input_key(source)
     entry = session.entries.get(quantizer)
     if entry is not None and entry.key != key:
         session.drop(quantizer)
@@ -241,7 +247,7 @@ def cached_fake_quantize(quantizer, inputs: torch.Tensor) -> torch.Tensor:
             raise ValueError("A cached fake quant must keep the weight's shape, dtype and device.")
         if value.untyped_storage().data_ptr() == inputs.untyped_storage().data_ptr():
             raise ValueError("A cached fake quant must not return a view of the weight.")
-        entry = session.add(quantizer, key, inputs, value)
+        entry = session.add(quantizer, key, source, value)
     elif entry.value._version != entry.value_version:
         session.drop(quantizer)
         raise RuntimeError("A cached fake-quantized weight was modified in place.")

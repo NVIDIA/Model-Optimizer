@@ -21,8 +21,10 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import (
     SequentialQuantizer,
+    StaticBlockScaleQuantizer,
     TensorQuantizer,
     register_quant_backend,
     unregister_quant_backend,
@@ -76,7 +78,10 @@ def _accumulate(model, micro_batches):
     return [out.detach() for out in outputs], [p.grad.clone() for p in model.parameters()]
 
 
-@pytest.mark.parametrize("weight_cfg", [{}, {"backend": "ste_round"}])
+# The block size of 12 pads both weights, making a fresh quantizer input on every forward.
+@pytest.mark.parametrize(
+    "weight_cfg", [{}, {"backend": "ste_round"}, {"axis": None, "block_sizes": {-1: 12}}]
+)
 def test_cached_step_matches_uncached(ste_round_backend, weight_cfg):
     model = _quantized_mlp(**weight_cfg)
     micro_batches = [torch.randn(4, 16) for _ in range(3)]
@@ -91,7 +96,7 @@ def test_cached_step_matches_uncached(ste_round_backend, weight_cfg):
         assert torch.equal(out, ref)
     # Each weight is fake-quantized once, then reused by 3 forwards and 3 recomputations.
     assert (stats.misses, stats.hits) == (2, 10)
-    if weight_cfg:
+    if "backend" in weight_cfg:
         assert len(BACKEND_CALLS) == 2
     assert stats.retained_bytes == 0 and stats.peak_bytes > 0
 
@@ -112,12 +117,22 @@ def test_weight_and_quantizer_changes_recompute():
     assert (stats.misses, stats.invalidations) == (5, 3)
 
 
-def test_weight_cache_contract():
+def test_weight_cache_contract(ste_round_backend):
     model = _quantized_mlp()
     with pytest.raises(ValueError, match="enable_weight_cache"), weight_cache_scope(model):
         pass
-    with pytest.raises(ValueError, match="pass_through_bwd"):
-        enable_weight_cache(_quantized_mlp(pass_through_bwd=False))
+    for weight_cfg in [{}, {"backend": "ste_round"}]:
+        with pytest.raises(ValueError, match="pass_through_bwd"):
+            enable_weight_cache(_quantized_mlp(pass_through_bwd=False, **weight_cfg))
+    # Frozen LSQ scales have no gradient, but LSQ's backward still clips and rescales.
+    for tied_amax in [False, True]:
+        lsq = _quantized_mlp()
+        quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=4, block_sizes={-1: 16}))
+        quantizer.amax = torch.ones(32)
+        lsq[0].weight_quantizer = StaticBlockScaleQuantizer.from_tensor_quantizer(quantizer)
+        lsq[0].weight_quantizer.enable_lsq(False, learnable_amax=[], tied_amax=tied_amax)
+        with pytest.raises(ValueError, match="LSQ"):
+            enable_weight_cache(lsq)
     learned = _quantized_mlp()
     learned[0].weight_quantizer.register_parameter("scale", nn.Parameter(torch.ones(1)))
     with pytest.raises(ValueError, match="learned scales"):
