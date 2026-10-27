@@ -309,38 +309,19 @@ def init_quantized_weights(
                 pretrained_model_name_or_path, trust_remote_code=trust_remote_code
             )
 
-        # Model-construction kwargs must not reach load_checkpoint_and_dispatch(),
-        # which does not accept them (e.g. attn_implementation -> TypeError).
-        # Both dtype aliases are popped: torch_dtype is not a parameter of
-        # load_checkpoint_and_dispatch() either, and the resolved value is
-        # passed back explicitly below.
+        # load_checkpoint_and_dispatch() takes `dtype` but not these model-construction kwargs.
         attn_implementation = kwargs.pop("attn_implementation", None)
-        dtype_kwarg = kwargs.pop("dtype", None)
-        legacy_dtype_kwarg = kwargs.pop("torch_dtype", None)
+        legacy_dtype = kwargs.pop("torch_dtype", None)
+        if kwargs.get("dtype") is None and legacy_dtype is not None:
+            kwargs["dtype"] = legacy_dtype
 
         with init_empty_weights():
-            # Fix dtype to match original model.
-            # `config.torch_dtype` is a deprecated alias of `config.dtype` in
-            # transformers >= 5, and it RETURNS None rather than being absent
-            # when unset -- so `getattr(config, "torch_dtype", torch.float16)`
-            # yields None and the float16 fallback never fires. Read `dtype`
-            # first, then the alias, then fall back explicitly.
-            config_dtype = getattr(config, "dtype", None)
-            if config_dtype is None:
-                config_dtype = getattr(config, "torch_dtype", None)
-            torch_dtype = (
-                dtype_kwarg
-                if dtype_kwarg is not None
-                else legacy_dtype_kwarg
-                if legacy_dtype_kwarg is not None
-                else config_dtype
-                if config_dtype is not None
-                else torch.float16
-            )
+            # config.dtype is None, not absent, when unset, so a getattr default never applies.
+            dtype = kwargs.get("dtype") or getattr(config, "dtype", None) or torch.float16
             from_config_kwargs = {}
             if attn_implementation is not None:
                 from_config_kwargs["attn_implementation"] = attn_implementation
-            model = cls.from_config(config, dtype=torch_dtype, **from_config_kwargs)
+            model = cls.from_config(config, dtype=dtype, **from_config_kwargs)
         # init_empty_weights re-wraps every registered parameter, so the tie made inside
         # from_config is lost; without it the absent tied checkpoint key (e.g. lm_head) stays meta.
         model.tie_weights()
@@ -353,10 +334,6 @@ def init_quantized_weights(
             model,
             checkpoint=pretrained_model_name_or_path,
             device_map=_device_map,
-            # Passed explicitly because both aliases were popped above;
-            # load_checkpoint_and_dispatch() accepts `dtype` but not
-            # `torch_dtype`, so forwarding kwargs verbatim was unsafe.
-            dtype=torch_dtype,
             *args,
             **kwargs,
         )
