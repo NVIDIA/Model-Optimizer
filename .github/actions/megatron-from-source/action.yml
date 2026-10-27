@@ -6,7 +6,7 @@ description: >-
 inputs:
   commit:
     description: Megatron-Bridge commit. Keep in sync with examples/megatron_bridge/README.md.
-    default: 1d9caf7324e608aca7181de40be26a6387976210
+    default: 7342f0cf43137be3f4413fed389fa2e6fb2c7658
 
 runs:
   using: composite
