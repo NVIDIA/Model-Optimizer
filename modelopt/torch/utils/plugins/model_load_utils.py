@@ -205,7 +205,9 @@ def build_meta_causal_lm(
     model through an auto class registers its class there, as it is, and a later load through that
     auto class builds the registered class, without the ``GenerationMixin`` a first load adds: a
     rank that built one more meta model than its peers, as rank 0 deciding a distribution does,
-    would load its model without the ``generate`` theirs have.
+    would load its model without the ``generate`` theirs have. That assumes a remote model registers
+    its classes while it is built: one its module registered when imported is undone as well, and a
+    later load in the process, which finds the module imported, does not register it again.
     """
     if hf_config is None:
         config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
