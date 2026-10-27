@@ -169,6 +169,9 @@ def test_unnamed_public_identity_reshapes_allocate_distinct_node_names():
     }
     expected = _execute(model, feeds)
     converted = _apply_remove_reshapes(copy.deepcopy(model))
+    names = [node.name for node in converted.graph.node]
+    assert all(names)
+    assert len(set(names)) == len(names)
     for actual, reference in zip(_execute(converted, feeds), expected):
         np.testing.assert_array_equal(actual, reference)
 
