@@ -1,0 +1,46 @@
+schema_version: 1
+recorded_date: '2026-10-26'
+release_container:
+  image: nvcr.io/nvidia/nemo-rl:v0.7.0
+  observed_nemo_rl_version: 0.6.0+19244a094
+  python: 3.13.13
+  torch: 2.11.0+cu130
+  transformers: 5.8.1
+  bridge_version: 0.6.0
+  bridge_commit: 151168f36372132c8fb8f926501f573019feb967
+  core_version: 0.19.0+7b8495881
+  installed_modelopt_version: 0.46.0.dev86+gc3b913b9c
+  note: Quantized release paths overlay the actual QAD ModelOpt source; installed version is not sufficient
+    provenance.
+qad_container:
+  image: nvcr.io/nvidia/nemo:26.08.00
+  python: '3.12'
+  transformers: 5.12.1
+  transformer_engine: 2.17.1
+  torch: 2.13.0a0+8145d630e8.nv26.06
+  bridge_version: 0.6.0
+  bridge_commit: c93251151adeeadbae3ff2a2bf5ee7a1c34cff01
+  core_version: 0.19.0+16ad357ee
+  modelopt_source: Actual round-3 QAD source; fingerprinted separately
+  saved_modelopt_state_version: 0.46rc1
+current_main:
+  nemo_rl_commit: 4d464d5f3359f9ecbfc58a5e33c8ce5bdaf15335
+  nemo_rl_version: 0.8.0
+  bridge_commit: 7e9dcd609edf2bb9478d3fa4d9b9f8ee3875c16e
+  bridge_version: 0.7.0
+  core_commit: 3e95097b4a9ab6ea6b2a39eb2b2b24e4a6dfa54a
+  modelopt_commit: 43fd41a58d52c4e6e5dec1d1ff5989ecc737ae1a
+  python: 3.13.14
+  uv: 0.11.28
+  core_version: 0.20.0+3e95097
+  locked_torch: 2.13.0+cu130
+  locked_transformers: 5.16.1
+  locked_transformer_engine: 2.18.0
+  is_stock_unmodified: false
+serving:
+  image: vllm/vllm-openai:v0.28.0
+  tensor_parallel_size: 1
+notes:
+- Record module __file__ and version inside Ray workers, not only in the driver.
+- Image tag v0.7.0 and package-reported version differ in this saved image.
+- Current main means the pinned commit above, not a moving branch.
