@@ -189,7 +189,8 @@ def _refuse_unfoldable_shards(module: nn.Module, proj: str, weight, num_quantize
                 )
             shards *= size
     # FSDP2 keeps every expert's quantizer on every rank; expert parallelism keeps only this rank's,
-    # in the order of its shard, as _QuantFusedExperts._local_experts reads them.
+    # in the order of its shard: transformers sets num_experts to the local count, so the quantized
+    # module makes one quantizer per expert of its local weight, which its forward picks by offset.
     if num_quantizers != weight.shape[0] and num_quantizers * shards != weight.shape[0]:
         raise NotImplementedError(
             f"{name}: {num_quantizers} weight quantizers for {weight.shape[0]} experts in {shards} "
