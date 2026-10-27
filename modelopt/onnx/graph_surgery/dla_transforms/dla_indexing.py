@@ -167,6 +167,29 @@ def _prepared_index_data(model, cache, prepared_ops, data_names, *, before_bound
         )
     expand_ops = {"Add", "Sub", "Mul", "Div", "LSTM"}
 
+    def unsqueezed_rank(node):
+        """Read adapter rank from metadata without decoding its fixed axes payload."""
+        source_rank = _known_rank(cache, node.input[0])
+        axes = cache.get_init(node.input[1]) if len(node.input) > 1 else None
+        return (
+            source_rank + math.prod(axes.dims)
+            if axes is not None and source_rank is not None
+            else None
+        )
+
+    def matrix_rank(name):
+        """Prove that an operand is a matrix even when a generated adapter has no value info."""
+        rank = _known_rank(cache, name)
+        producer = cache.get_producer(name)
+        if (
+            rank is None
+            and producer is not None
+            and id(producer) in standard
+            and producer.op_type == "Unsqueeze"
+        ):
+            rank = unsqueezed_rank(producer)
+        return rank
+
     def classify(name):
         """Return a proven layout or the rank-preserving parents needed to establish it."""
         shape = cache.get_shape(name)
@@ -227,19 +250,20 @@ def _prepared_index_data(model, cache, prepared_ops, data_names, *, before_bound
         if node.op_type == "Conv":
             kernel = cache.get_shape(node.input[1])
             return kernel is not None and len(kernel) == 4
+        if not before_boundary and node.op_type == "MatMul":
+            ranks = [matrix_rank(value) for value in node.input[:2]]
+            return (
+                list(node.input[:2])
+                if all(rank is not None and rank >= 2 for rank in ranks)
+                else False
+            )
         if node.op_type == "Transpose":
             perm = _attribute(node, "perm")
             if perm is not None and sorted(perm.ints) == [0, 1, 2, 3]:
                 return True
         if node.op_type in {"Squeeze", "Unsqueeze"}:
             if node.op_type == "Unsqueeze":
-                source_rank = _known_rank(cache, node.input[0])
-                axes = cache.get_init(node.input[1]) if len(node.input) > 1 else None
-                if (
-                    axes is not None
-                    and source_rank is not None
-                    and source_rank + math.prod(axes.dims) == 4
-                ):
+                if unsqueezed_rank(node) == 4:
                     return True
             if "RemoveIntermediarySqueezeAndUnsqueeze" not in prepared_ops:
                 return False
