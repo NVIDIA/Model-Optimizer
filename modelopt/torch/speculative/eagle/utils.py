@@ -112,6 +112,8 @@ class OfflineSupervisedDataset(Dataset):
             ``--no-aux-hidden-states``, yielding an empty ``(seq_len, 0)`` plane in
             their place. Only modes that never read the aux planes may set this; for
             the others a missing key must still raise.
+        shift_labels (bool): Shift next-token labels for EAGLE by default. False
+            preserves same-position DFlash labels, including the final EOS.
     """
 
     def __init__(
@@ -120,6 +122,7 @@ class OfflineSupervisedDataset(Dataset):
         answer_only_loss: bool = False,
         tokenizer=None,
         aux_hidden_states_optional: bool = False,
+        shift_labels: bool = True,
     ):
         """Initialize with a list of .pt file paths."""
         super().__init__()
@@ -127,6 +130,7 @@ class OfflineSupervisedDataset(Dataset):
         self.answer_only_loss = answer_only_loss
         self.tokenizer = tokenizer
         self.aux_hidden_states_optional = aux_hidden_states_optional
+        self.shift_labels = shift_labels
 
     def __len__(self):
         return len(self.dumped_files)
@@ -145,8 +149,10 @@ class OfflineSupervisedDataset(Dataset):
     def __getitem__(self, i) -> dict[str, torch.Tensor]:
         offline_data = torch.load(self.dumped_files[i], weights_only=True)
 
-        labels = torch.full_like(offline_data["input_ids"], IGNORE_TOKEN_ID)
-        labels[..., :-1] = offline_data["input_ids"][..., 1:]
+        labels = offline_data["input_ids"].clone()
+        if self.shift_labels:
+            labels.fill_(IGNORE_TOKEN_ID)
+            labels[..., :-1] = offline_data["input_ids"][..., 1:]
 
         if self.answer_only_loss:
             recovery = get_loss_mask_recovery(self.tokenizer) if self.tokenizer else None
