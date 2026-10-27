@@ -708,6 +708,22 @@ def test_fused_experts_handler_keeps_experts_fused_only_when_asked(keep_fused):
         assert "gate_up_proj" not in names
 
 
+
+def test_keep_fused_refuses_fused_experts_not_named_experts():
+    """The split finds a fused weight by its ``experts.<proj>`` key, as the writer does: a container
+    named otherwise is refused before anything is folded, not written fused to fail at load."""
+    experts = _quantized_experts(_KeepFusedGatedExperts, mtq.FP8_DEFAULT_CFG)
+    container = nn.Module()
+    container.moe = experts
+    before = copy.deepcopy(experts.state_dict())
+    ctx = ExportContext(model=container, dtype=torch.bfloat16, keep_fused_experts=True)
+
+    with pytest.raises(NotImplementedError, match="named 'moe'"):
+        ExportModuleRegistry.match(experts)("model.layers.0.mlp.moe", experts, ctx)
+
+    torch.testing.assert_close(experts.state_dict(), before, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("dense", ["fsdp", "replicate"])
 def test_fused_experts_fold_in_a_weight_window_when_the_plan_shards_the_dense_part(
     monkeypatch, dense

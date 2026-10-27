@@ -180,6 +180,14 @@ def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContex
     the per-expert split happens later on the sharded weight (``split_fused_experts_state_dict``).
     Otherwise (single process, or gather export) it splits into full per-expert submodules here.
     """
+    attr = name.rpartition(".")[2]
+    if ctx.keep_fused_experts and attr != "experts":
+        # The split into per-expert keys finds a fused weight by its ``experts.<proj>`` key, as the
+        # writer does, so one named otherwise would be written fused and fail only at load.
+        raise NotImplementedError(
+            f"{name}: the keep-fused export splits fused experts into per-expert keys by their "
+            f"`experts` attribute name, and this module is named {attr!r}."
+        )
     if ctx.keep_fused_experts and distribution_plan(ctx.model).is_fsdp_dense:
         # FSDP2 owns the fused weights here: fold them inside a weight-update window, which hands
         # FSDP2 the packed weights. Replaced behind its back, they would be overwritten with its
