@@ -32,12 +32,13 @@ class _QuantNemotronHExperts(_QuantFusedExperts):
     """Quantized ``NemotronHExperts``: non-gated fused experts, ``down_proj(act_fn(up_proj(x)))``.
 
     The container holds 3-D ``up_proj`` and ``down_proj`` parameters instead of the gated
-    ``gate_up_proj``, and its forward runs ``up_proj`` then ``down_proj`` once per expert on the eager
-    path, or once per expert-sorted batch on ``grouped_mm``. So only the first projection's name
-    differs from :class:`_QuantFusedExperts`: its per-expert weight quantizers and shared input
-    quantizer live under ``up_proj_*``. Registered explicitly, these experts skip the transposed-layout
-    check of :func:`register_fused_experts_on_the_fly`: the wrapper relies on transformers storing their
-    weights ``(num_experts, out_dim, in_dim)``, as every supported release does.
+    ``gate_up_proj``, and its forward runs ``up_proj`` then ``down_proj`` once per expert on the
+    eager path, or once per expert-sorted batch on ``grouped_mm``. So only the first projection's
+    name differs from :class:`_QuantFusedExperts`: its per-expert weight quantizers and shared input
+    quantizer live under ``up_proj_*``. Registered explicitly, these experts skip the
+    transposed-layout check of :func:`register_fused_experts_on_the_fly`: the wrapper relies on
+    transformers storing their weights ``(num_experts, out_dim, in_dim)``, as every supported
+    release does.
     """
 
     _first_proj_attr = "up_proj"
