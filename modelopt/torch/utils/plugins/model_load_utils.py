@@ -1092,7 +1092,8 @@ def resolve_distribution_plan(
     records it on the model (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), and
     every later step reads it back from there
     (:func:`~modelopt.torch.utils.distributed.distribution_plan`). Returns ``(plan, hf_config)``,
-    ``hf_config`` being the config the plan was decided from, for a sharded load to build from.
+    ``hf_config`` being this rank's own copy of the config (rank 0 decides the plan from its copy),
+    for a sharded load to build from.
 
     Rank 0 decides, from the model built on the meta device: from its parameters rather than
     estimates of them, and from its routed experts as an expert-parallel load finds them. Every rank
