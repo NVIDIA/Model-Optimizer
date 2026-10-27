@@ -411,6 +411,24 @@ def test_an_ep_plan_naming_no_module_of_the_model_is_refused(
         assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4)
 
 
+@pytest.mark.parametrize("source", ["MODELOPT_EP_DEGREE", "ep_size"])
+def test_an_ep_degree_that_does_not_divide_the_world_names_where_it_came_from(
+    run_as, serve, monkeypatch, tmp_path, source
+):
+    """Every rank belongs to one EP group, so the degree must divide the world; the refusal names
+    the knob or argument the degree came from, as the one for the experts does."""
+    run_as(4)
+    serve(LlamaConfig(**_TINY))
+    arguments = {}
+    if source == "ep_size":
+        arguments["ep_size"] = 3
+    else:
+        monkeypatch.setenv(source, "3")
+
+    with pytest.raises(ValueError, match=rf"{source}=3 must divide the world size \(4\)"):
+        resolve_distribution_plan(str(tmp_path), **arguments)
+
+
 @pytest.mark.parametrize(
     ("world_size", "source"),
     [(4, "MODELOPT_EP_DEGREE"), (1, "ep_size")],

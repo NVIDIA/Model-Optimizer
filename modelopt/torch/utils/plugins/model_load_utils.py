@@ -1046,6 +1046,8 @@ def _decide_distribution(
         )
     if ep_size == "auto":
         ep_size = _choose_ep_degree(world_size, num_experts)
+    elif ep_size > 1 and world_size % ep_size:
+        raise ValueError(f"{knob}={ep_size} must divide the world size ({world_size}).")
     elif ep_size > 1 and (num_experts == 0 or num_experts % ep_size):
         raise ValueError(
             f"{knob}={ep_size} must divide the routed experts {hf_config.model_type} shards "
