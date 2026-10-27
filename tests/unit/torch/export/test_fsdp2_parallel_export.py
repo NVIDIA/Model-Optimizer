@@ -25,6 +25,7 @@ on GPU are covered in ``tests/gpu``.
 import copy
 import faulthandler
 import json
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,11 @@ from modelopt.torch.export.unified_export_hf import _export_transformers_checkpo
 from modelopt.torch.export.unified_export_hf_streaming import _export_fsdp2_checkpoint_streaming
 
 transformers = pytest.importorskip("transformers")
+from _test_utils.torch.export.unified_checkpoint import (
+    assert_expert_scales_match_source,
+    fused_experts_source_weights,
+)
+from _test_utils.torch.transformers_models import get_tiny_qwen3_moe
 from transformers import AutoModelForCausalLM, LlamaConfig
 
 
@@ -62,6 +68,17 @@ def _tiny_quantized_llama(quant_cfg=None, tie=True, mesh=None):
         fully_shard(model, mesh=mesh)
     calib = [torch.randint(0, 128, (1, 8)) for _ in range(4)]
     return mtq.quantize(model, quant_cfg or mtq.FP8_DEFAULT_CFG, lambda m: [m(x) for x in calib])
+
+
+def _tiny_quantized_moe(mesh=None):
+    mto.enable_huggingface_checkpointing()
+    model = get_tiny_qwen3_moe().eval()
+    if mesh is not None:
+        for layer in model.model.layers:
+            fully_shard(layer, mesh=mesh)
+        fully_shard(model, mesh=mesh)
+    calib = [torch.randint(0, 32, (1, 8)) for _ in range(4)]
+    return mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: [m(x) for x in calib])
 
 
 def _load_all(export_dir: Path) -> dict:
@@ -153,21 +170,20 @@ def test_streaming_export_extra_state_dict_mtp(tmp_path):
     assert torch.equal(loaded["model.layers.99.mtp.weight"], extra["model.layers.99.mtp.weight"])
 
 
-def _two_rank_streaming_export(rank, size, export_dir):
+def _two_rank_streaming_export(rank, size, export_dir, moe=False):
     # A deadlocked rank exits with its stack instead of hanging the run on the join. Cancelled in
     # ``finally`` because the worker is reused: a leftover timer would kill it in a later test.
     faulthandler.dump_traceback_later(45, exit=True)
     try:
         # The unsharded reference is built and exported on every rank, so any collective its
         # calibration or export issues has a partner.
-        expected, _ = _export_transformers_checkpoint(
-            _tiny_quantized_llama(tie=False), torch.bfloat16
-        )
+        build = _tiny_quantized_moe if moe else partial(_tiny_quantized_llama, tie=False)
+        expected, _ = _export_transformers_checkpoint(build(), torch.bfloat16)
         # Calibrating after sharding leaves the root's parameters unsharded: FSDP2 skips the
         # root's post-forward reshard. That is the state in which the owner's state_dict() used
         # to reshard them on its rank alone, so the next gather window ran a collective the
         # other rank skipped.
-        model = _tiny_quantized_llama(tie=False, mesh=init_device_mesh("cpu", (size,)))
+        model = build(mesh=init_device_mesh("cpu", (size,)))
         _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=export_dir)
         torch.distributed.barrier()
     finally:
@@ -178,8 +194,16 @@ def _two_rank_streaming_export(rank, size, export_dir):
     assert set(exported) == set(expected)
     for key, tensor in expected.items():
         assert torch.equal(exported[key].float(), tensor.float()), key
+    if moe:
+        source = fused_experts_source_weights(get_tiny_qwen3_moe())
+        # Three projections per expert.
+        assert assert_expert_scales_match_source(exported, source) == len(source) // 3
 
 
-def test_streaming_export_two_cpu_ranks(tmp_path, cpu_dist_workers):
-    """Two gloo ranks export what a single process does, without a rank waiting on the other."""
-    cpu_dist_workers.run(_two_rank_streaming_export, export_dir=str(tmp_path))
+@pytest.mark.parametrize("moe", [False, True], ids=["dense", "moe"])
+def test_streaming_export_two_cpu_ranks(tmp_path, cpu_dist_workers, moe):
+    """Two gloo ranks export what a single process does, without a rank waiting on the other.
+
+    The MoE case also checks that each expert's scales come from that expert's own weights.
+    """
+    cpu_dist_workers.run(_two_rank_streaming_export, export_dir=str(tmp_path), moe=moe)

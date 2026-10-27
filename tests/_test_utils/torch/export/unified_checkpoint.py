@@ -20,6 +20,7 @@ the exported tensors against the HuggingFace checkpoint the model came from.
 
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 
 import torch
@@ -28,9 +29,11 @@ from safetensors.torch import load_file
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
 __all__ = [
+    "assert_expert_scales_match_source",
     "assert_exported_checkpoint_matches",
     "assert_per_expert_experts_complete",
     "assert_safetensors_index_consistent",
+    "fused_experts_source_weights",
     "load_safetensors_dir",
 ]
 
@@ -213,3 +216,78 @@ def assert_per_expert_experts_complete(export_dir: Path | str) -> None:
     assert found, "no per-expert routed-expert tensors in the export"
     incomplete = {k: sorted(v) for k, v in found.items() if len(v) != 3}
     assert not incomplete, f"experts missing projections: {sorted(incomplete.items())[:4]}"
+
+
+def fused_experts_source_weights(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """Weights of every gated fused-experts module, keyed like the per-expert export names them."""
+    source = {}
+    for name, module in model.named_modules():
+        if hasattr(module, "gate_up_proj") and hasattr(module, "num_experts"):
+            gate, up = module.gate_up_proj.detach().clone().chunk(2, dim=1)
+            down = module.down_proj.detach().clone()
+            for idx in range(module.num_experts):
+                source[f"{name}.{idx}.gate_proj.weight"] = gate[idx]
+                source[f"{name}.{idx}.up_proj.weight"] = up[idx]
+                source[f"{name}.{idx}.down_proj.weight"] = down[idx]
+    return source
+
+
+_E2M1_MAX = 6.0
+_E4M3_MAX = 448.0
+# Projections that share one weight quantizer, hence one scale: vLLM fuses gate and up at load.
+_SCALE_SHARING_PROJECTIONS = (("gate_proj", "up_proj"), ("down_proj",))
+
+
+def assert_expert_scales_match_source(
+    exported: Mapping[str, torch.Tensor], source: Mapping[str, torch.Tensor], *, rtol: float = 1e-5
+) -> int:
+    """Assert every routed expert's weight scales come from that expert's own source weights.
+
+    A global scale borrowed from a larger expert moves the dequantized values by a few percent, inside
+    the tolerance of :func:`assert_exported_checkpoint_matches`, so compare the scales themselves:
+    NVFP4 ``weight_scale_2 == amax / (6 * 448)`` with the expert's largest block scale at 448, and
+    per-tensor FP8 ``weight_scale == amax / 448``, where ``amax`` is taken over the projections that
+    share a quantizer. Experts with equal amax cannot tell a borrowed scale from their own, so the
+    caller must make them differ.
+
+    Args:
+        exported: Exported tensors keyed ``<prefix><expert>.<proj>.<weight_scale | weight_scale_2>``.
+        source: Unquantized weights keyed ``<prefix><expert>.<proj>.weight``.
+
+    Returns:
+        The number of experts checked, for the caller to assert the check was not vacuous.
+    """
+    pattern = re.compile(r"^(.*?)(\d+)\.(gate_proj|up_proj|down_proj)\.weight_scale(?:_2)?$")
+    exported_projections: dict[tuple[str, str], set[str]] = {}
+    for key in exported:
+        match = pattern.match(key)
+        if match:
+            exported_projections.setdefault((match[1], match[2]), set()).add(match[3])
+
+    wrong, checked = [], set()
+    for (prefix, expert), present in sorted(exported_projections.items()):
+        for group in _SCALE_SHARING_PROJECTIONS:
+            names = [f"{prefix}{expert}.{proj}" for proj in group if proj in present]
+            if not names:
+                continue
+            nvfp4 = f"{names[0]}.weight_scale_2" in exported
+            if not nvfp4 and exported[f"{names[0]}.weight_scale"].numel() != 1:
+                continue  # per-channel / per-block FP8: no single scale to compare
+            amax = max(source[f"{name}.weight"].abs().amax().float() for name in names)
+            want = amax / (_E2M1_MAX * _E4M3_MAX if nvfp4 else _E4M3_MAX)
+            scale_name = "weight_scale_2" if nvfp4 else "weight_scale"
+            for name in names:
+                got = exported[f"{name}.{scale_name}"].float()
+                if not torch.isclose(got, want, rtol=rtol, atol=0.0).all():
+                    wrong.append(f"{name}.{scale_name}={got.flatten()[0]:.6g}, want {want:.6g}")
+            if nvfp4:
+                largest_block = max(
+                    exported[f"{name}.weight_scale"].float().max() for name in names
+                )
+                if largest_block != _E4M3_MAX:
+                    wrong.append(f"{names[0]}: largest block scale {largest_block}, want 448")
+            checked.add((prefix, expert))
+    assert not wrong, (
+        f"{len(wrong)} scale(s) not derived from the expert's own weights: {wrong[:6]}"
+    )
+    return len(checked)

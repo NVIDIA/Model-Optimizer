@@ -26,6 +26,10 @@ import torch.nn.functional as F
 
 pytest.importorskip("transformers")
 
+from _test_utils.torch.export.unified_checkpoint import (
+    assert_expert_scales_match_source,
+    fused_experts_source_weights,
+)
 from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_params
 from transformers import PretrainedConfig
 from transformers.integrations.finegrained_fp8 import FP8Experts
@@ -576,6 +580,53 @@ class TestExportFusedExperts:
         # Leaving the block releases the holders; nothing else can free them.
         for idx in range(NUM_EXPERTS):
             assert not hasattr(converted, str(idx)), f"Expert submodule {idx} survived release"
+
+        self._cleanup_registry(expert_type)
+
+    @pytest.mark.parametrize(
+        ("quant_cfg", "scale_name"),
+        [(mtq.NVFP4_DEFAULT_CFG, "weight_scale_2"), (mtq.FP8_DEFAULT_CFG, "weight_scale")],
+        ids=["nvfp4", "fp8"],
+    )
+    def test_exported_scales_come_from_each_experts_own_weights(self, quant_cfg, scale_name):
+        """Each expert's exported weight scale follows from that expert's source weights alone.
+
+        Dequantized values barely move when an expert borrows a larger neighbour's global scale, so the
+        scales are compared exactly, against experts whose amax all differ.
+        """
+        model = _TinyMoEModel()
+        experts = model.moe.experts
+        expert_type = type(experts)
+        self._cleanup_registry(expert_type)
+
+        gains = torch.tensor([1.0, 3.0, 0.5, 2.0])
+        with torch.no_grad():
+            experts.gate_up_proj.mul_(gains.view(-1, 1, 1))
+            experts.down_proj.mul_(gains.view(-1, 1, 1))
+        source = fused_experts_source_weights(model)
+        assert len({w.abs().amax().item() for k, w in source.items() if "down" in k}) == NUM_EXPERTS
+
+        def forward_loop(m):
+            torch.manual_seed(0)
+            _route_once_to_each_expert(m)
+
+        mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
+
+        with _release_exported_tensors(experts):
+            _export_fused_experts(experts, torch.float16)
+            exported = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        assert assert_expert_scales_match_source(exported, source) == NUM_EXPERTS
+
+        # The check has teeth: a scale taken from another expert, or inflated, must fail it.
+        first, second = (
+            f"moe.experts.0.down_proj.{scale_name}",
+            f"moe.experts.1.down_proj.{scale_name}",
+        )
+        swapped = {**exported, first: exported[second], second: exported[first]}
+        inflated = {**exported, first: exported[first] * 1.1}
+        for tampered in (swapped, inflated):
+            with pytest.raises(AssertionError):
+                assert_expert_scales_match_source(tampered, source)
 
         self._cleanup_registry(expert_type)
 
