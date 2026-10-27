@@ -66,15 +66,8 @@ class MaxCalibrator(_Calibrator):
         if x.device.type == "meta":
             self._calib_amax = local_amax
             return
-        assert not torch.any(torch.isnan(local_amax)), (
-            f"detected nan values in amax. nan in original tensor: {torch.any(torch.isnan(x))}"
-        )
-        assert torch.all(local_amax >= 0), (
-            "detected negative values after abs, could be torch or cuda bug"
-        )
-        assert not torch.any(torch.isinf(local_amax)), (
-            f"detected inf values in amax. inf in original tensor: {torch.any(torch.isinf(x))}"
-        )
+        # Validated once in compute_amax: torch.max carries nan/inf through, and a check here
+        # would sync the host on every quantizer of every calibration batch.
         if self._calib_amax is None:
             self._calib_amax = local_amax
         else:
@@ -91,7 +84,14 @@ class MaxCalibrator(_Calibrator):
 
     def compute_amax(self):
         """Return the absolute max of all tensors collected."""
-        return self._calib_amax
+        amax = self._calib_amax
+        if amax is not None and amax.device.type != "meta":
+            assert not torch.isnan(amax).any(), "detected nan values in amax"
+            assert not torch.isinf(amax).any(), "detected inf values in amax"
+            assert (amax >= 0).all(), (
+                "detected negative values after abs, could be torch or cuda bug"
+            )
+        return amax
 
     def __str__(self):
         s = "MaxCalibrator("
