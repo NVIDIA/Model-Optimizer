@@ -525,6 +525,12 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
     if not dist.is_initialized():
         # FSDP2 shards through a process group even on one rank; a plan for more ranks than one
         # was refused without a group. A run (distributed_run) destroys the group on exit.
+        if dist.is_distributed_launch():
+            # One rank of a launch of several cannot set the group up for itself.
+            raise RuntimeError(
+                f"The {route} load shards through this {os.environ['WORLD_SIZE']}-rank launch's "
+                "process group, which is not set up; load inside distributed_run(), which sets it up."
+            )
         if "RANK" not in os.environ:
             raise RuntimeError(
                 f"The {route} load shards through a process group, even on one rank, which a "
@@ -569,8 +575,10 @@ def load_pretrained(
       whole model, ``device_map`` defaulting to the rank's GPU.
 
     A plan with ``ep_size > 1`` raises: no load here shards the routed experts. On a distributed run
-    every rank loads the plan rank 0 was handed. A rank of a multi-rank launch whose process group
-    is not set up is refused on every route: set it up first, with
+    every rank loads the plan rank 0 was handed. A launch whose processes set no process group up (a
+    launcher that only exports ``WORLD_SIZE``) has each process load as a single process does, the
+    whole model with no plan to agree on; a plan for several ranks and a sharded load need the group,
+    so there they are refused: set it up first, with
     :func:`~modelopt.torch.utils.distributed.distributed_run`. The plan is recorded on the model
     (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), where calibration and export
     read it back.
@@ -618,13 +626,15 @@ def load_pretrained(
     from modelopt.torch.models.hf import prepare_model_for_loading
     from modelopt.torch.utils import distributed as dist
 
-    if dist.is_distributed_launch() and not dist.is_initialized():
-        # Without its group every collective below runs on this rank alone: each rank would plan
-        # and load the model as a single process's, and record a one-rank plan on a model the whole
-        # launch holds.
+    # A launcher can start several processes that set no process group up (hf_ptq without
+    # --use_fsdp2, say): each then loads as a single process does, the whole model with no plan to
+    # agree on, as before plans existed. A plan for several ranks needs the group.
+    alone = dist.is_distributed_launch() and not dist.is_initialized()
+    if alone and isinstance(distribution, DistributionPlan) and distribution.world_size > 1:
         raise RuntimeError(
-            f"This process is one of a {os.environ['WORLD_SIZE']}-rank launch whose process group "
-            "is not set up; set it up first, with distributed_run()."
+            f"{distribution!r} is for {distribution.world_size} ranks, whose process group this "
+            f"{os.environ['WORLD_SIZE']}-rank launch has not set up; load inside distributed_run(), "
+            "which sets it up."
         )
     config = kwargs.get("config")
     config = config if isinstance(config, PretrainedConfig) else None
@@ -644,7 +654,7 @@ def load_pretrained(
     # ranks loading different plans would build mismatched meshes. Rank 0 checks it before it sends,
     # so one it refuses raises on every rank instead of leaving them in the broadcast, and before
     # the checkpoint is fetched.
-    plan = dist.broadcast_from("distribution", handed)
+    plan = handed() if alone else dist.broadcast_from("distribution", handed)
     if plan is None and "hf_config" in kwargs:
         # The load builds from hf_config as given, so the plan must be the one it came with, not
         # one decided here from another config.
@@ -662,7 +672,9 @@ def load_pretrained(
         ckpt_path = os.path.join(ckpt_path, subfolder)
     trust_remote_code = kwargs.get("trust_remote_code", False)
     hf_config = kwargs.get("hf_config")
-    if plan is None:
+    if plan is None and alone:
+        plan = DistributionPlan()
+    elif plan is None:
         plan, hf_config = resolve_distribution_plan(
             ckpt_path,
             config=config,

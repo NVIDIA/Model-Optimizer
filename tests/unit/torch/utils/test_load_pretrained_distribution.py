@@ -489,26 +489,47 @@ def test_a_single_process_fsdp2_load_needs_a_launcher(monkeypatch, serve, loader
     assert loaders == {}
 
 
-@pytest.mark.parametrize(
-    "distribution", [None, DistributionPlan(dense="fsdp")], ids=["decided", "fsdp"]
-)
-def test_a_rank_of_a_launch_without_its_group_is_refused(
-    monkeypatch, serve, loaders, auto_class, tmp_path, distribution
-):
-    """Without its group every collective runs on this rank alone, so each rank of the launch would
-    plan and load the model as a single process's, the whole model on every rank, and record a
-    one-rank plan on a model the whole launch holds."""
-    serve(LlamaConfig(**_TINY))
+@pytest.fixture
+def launch_without_its_group(monkeypatch):
+    """Rank 0 of an 8-rank launch whose processes set no process group up."""
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setenv("WORLD_SIZE", "8")
     monkeypatch.setattr(dist, "is_initialized", lambda: False)
     monkeypatch.setattr(dist, "setup", lambda timeout=None: pytest.fail("set a group up"))
 
-    with pytest.raises(RuntimeError, match="8-rank launch whose process group is not set up"):
-        load_pretrained(
-            str(tmp_path), auto_class if distribution is None else None, distribution=distribution
-        )
-    assert auto_class.calls == []
+
+def test_a_launch_that_sets_no_group_up_loads_whole_on_each_process(
+    launch_without_its_group, serve, loaders, auto_class, tmp_path
+):
+    """A launcher can start several processes that never set a group up (hf_ptq without
+    --use_fsdp2): each loads the whole model as a single process does, with no collective to wait
+    in and no plan to agree on."""
+    serve(LlamaConfig(**_TINY))
+
+    model = load_pretrained(str(tmp_path), auto_class)
+
+    assert auto_class.calls == [{}]
+    assert distribution_plan(model) == DistributionPlan()
+    assert loaders == {}
+
+
+@pytest.mark.parametrize(
+    ("distribution", "match"),
+    [
+        (DistributionPlan(8), "is for 8 ranks, whose process group this 8-rank launch has not"),
+        (DistributionPlan(dense="fsdp"), "shards through this 8-rank launch's process group"),
+    ],
+    ids=["several-ranks", "sharded"],
+)
+def test_what_needs_the_group_is_refused_in_a_launch_that_sets_none_up(
+    launch_without_its_group, serve, loaders, tmp_path, distribution, match
+):
+    """A plan for several ranks and a sharded load need the launch's group, which one rank cannot
+    set up for itself: refused before anything loads."""
+    serve(LlamaConfig(**_TINY))
+
+    with pytest.raises(RuntimeError, match=match):
+        load_pretrained(str(tmp_path), distribution=distribution)
     assert loaders == {}
 
 
