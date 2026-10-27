@@ -33,11 +33,26 @@ from .dla_reorder_nodes import priority_topological_order
 __all__ = []
 
 
+
 class _BoundaryPreflightError(ValueError):
     """Prerequisite lowering cannot freeze an exposed runtime control."""
 
 
-_RANK_FLOW_OPS = _RANK_AGNOSTIC_OPS | {"Slice", "Transpose", "Reshape", "Expand", "Tile"}
+_RANK_FLOW_OPS = _RANK_AGNOSTIC_OPS | {
+    "Slice",
+    "Transpose",
+    "Reshape",
+    "Expand",
+    "Tile",
+    "Softmax",
+    "LogSoftmax",
+    "LpNormalization",
+    "ArgMax",
+    "QuantizeLinear",
+    "DequantizeLinear",
+    "TopK",
+    "Split",
+}
 _REDUCTION_OPS = frozenset({"ReduceSum", "ReduceMean", "ReduceMin", "ReduceMax"})
 
 
@@ -445,7 +460,7 @@ def _apply_non4d_model_outputs(
                 source, local_functions, {source.op_type}, contrib_ops=contrib_ops
             ):
                 continue
-            if _is_standard_node(source, local_functions, {"Reshape", "Expand", "Tile"}):
+            if _is_standard_node(source, local_functions, _RANK_FLOW_OPS):
                 if _has_native_symbolic_data(
                     cache, source.input[0], local_functions, native_sources
                 ):

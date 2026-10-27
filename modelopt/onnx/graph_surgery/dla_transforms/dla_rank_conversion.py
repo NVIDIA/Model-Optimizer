@@ -47,13 +47,29 @@ def _runtime_input_names(model):
     return names
 
 
+def _promoted_input_shape(cache, name, local_functions, native_sources):
+    """Distinguish native symbolic paths from inputs prepared for four-dimensional data."""
+    shape = _shape_before_boundary_promotion(cache, name)
+    rank = len(shape) if shape is not None else _known_rank(cache, name)
+    native = (
+        rank is not None
+        and rank < 4
+        and _has_native_symbolic_data(cache, name, local_functions, native_sources)
+    )
+    return shape, native
+
+
 def _apply_non4d_slice_axis(model):
     """Remap fixed Slice axes before their data rank is promoted."""
     cache = GraphCache(model.graph)
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    native_sources = {}
     runtime_inputs = _runtime_input_names(model)
     plans = []
     for node in _operator_nodes(model, {"Slice"}):
-        shape = _shape_before_boundary_promotion(cache, node.input[0])
+        shape, native = _promoted_input_shape(cache, node.input[0], local_functions, native_sources)
+        if native:
+            continue
         if shape is None or len(shape) not in (2, 3):
             continue
         if len(node.input) < 4 or not node.input[3]:
@@ -340,11 +356,15 @@ def _collapsed_reshape_axes(cache, name, shape, reshapes):
 def _apply_non4d_transpose(model):
     """Remap transpose permutations around added or removed unary axes."""
     cache = GraphCache(model.graph)
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    native_sources = {}
     plans = []
     reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
     for node in _operator_nodes(model, {"Transpose"}):
         perm = _attribute(node, "perm")
-        shape = _shape_before_boundary_promotion(cache, node.input[0])
+        shape, native = _promoted_input_shape(cache, node.input[0], local_functions, native_sources)
+        if native:
+            continue
         if perm is None and shape is None:
             raise ValueError(f"{node.name!r}: default Transpose requires a known input rank")
         values = list(perm.ints) if perm is not None else list(reversed(range(len(shape))))
@@ -389,11 +409,15 @@ def _specialized_collapsed_axis(cache, node, shape, value, reshapes):
 def _apply_non4d_lpnorm(model):
     """Preserve normalization axes across leading-dimension promotion."""
     cache = GraphCache(model.graph)
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    native_sources = {}
     reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
     plans = []
     for node in _operator_nodes(model, {"LpNormalization"}):
         axis = _attribute(node, "axis")
-        shape = _shape_before_boundary_promotion(cache, node.input[0])
+        shape, native = _promoted_input_shape(cache, node.input[0], local_functions, native_sources)
+        if native:
+            continue
         value = axis.i if axis is not None else -1
         if shape and len(shape) == 5:
             value = _specialized_collapsed_axis(cache, node, shape, value, reshapes)
@@ -451,10 +475,14 @@ def _apply_flatten(model):
 def _apply_argmax(model):
     """Plan native ArgMax layouts before preparing private output restoration views."""
     cache = GraphCache(model.graph)
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    native_sources = {}
     plans = {}
     reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
     for node in _operator_nodes(model, {"ArgMax"}):
-        shape = _shape_before_boundary_promotion(cache, node.input[0])
+        shape, native = _promoted_input_shape(cache, node.input[0], local_functions, native_sources)
+        if native:
+            continue
         if not shape or any(dim <= 0 for dim in shape):
             raise ValueError(f"{node.name!r}: ArgMax requires a static input shape")
         axis = _attribute(node, "axis")
@@ -513,6 +541,8 @@ def _apply_update_axis(model):
     skip = {"Gather", "GatherElements", "LpNormalization", "ArgMax", "Slice", "Flatten"}
     skip |= {"ReduceMax", "ReduceMin", "ReduceSum", "ReduceMean"}
     cache = GraphCache(model.graph)
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    native_sources = {}
     plans = []
     reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
     selected = _operator_nodes(model, {node.op_type for node in model.graph.node})
@@ -521,7 +551,13 @@ def _apply_update_axis(model):
     versions = {op.domain: op.version for op in model.opset_import}
     for node in selected:
         axis = _attribute(node, "axis")
-        shape = _shape_before_boundary_promotion(cache, node.input[0]) if node.input else None
+        shape, native = (
+            _promoted_input_shape(cache, node.input[0], local_functions, native_sources)
+            if node.input
+            else (None, False)
+        )
+        if native:
+            continue
         if (
             axis is None
             and node.op_type in update

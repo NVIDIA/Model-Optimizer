@@ -120,6 +120,75 @@ def test_registered_rank_reducers_restore_native_public_outputs(operation, tail)
     np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
 
 
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("batch", [1, 2])
+def test_symbolic_native_transpose_keeps_its_permutation(explicit, batch):
+    """Keep rank-two permutation semantics when symbolic graph inputs remain native."""
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Transpose", ["x"], ["y"], **({"perm": [1, 0]} if explicit else {}))],
+            "native_transpose",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, ["N", 3])],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [3, "N"])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    feeds = {"x": np.arange(batch * 3, dtype=np.float32).reshape(batch, 3)}
+    expected = _execute(model, feeds)[0]
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+
+
+@pytest.mark.parametrize(
+    "operation", ["Softmax", "LogSoftmax", "LpNormalization", "ArgMax", "Slice", "Transpose"]
+)
+@pytest.mark.parametrize("negative", [False, True])
+@pytest.mark.parametrize("tail", [False, True])
+def test_symbolic_native_axis_chain_preserves_concrete_intermediate_rank(operation, negative, tail):
+    """Retain native axes after symbolic data acquires concrete Reshape metadata."""
+    axis = -1 if negative else 1
+    controls = [numpy_helper.from_array(np.asarray([2, 3], np.int64), "target")]
+    inputs = ["middle"]
+    attributes = {"axis": axis}
+    output = [2, 3]
+    dtype = TensorProto.FLOAT
+    if operation == "ArgMax":
+        attributes["keepdims"] = 0
+        output, dtype = [2], TensorProto.INT64
+    elif operation == "Transpose":
+        attributes = {} if negative else {"perm": [1, 0]}
+        output = [3, 2]
+    elif operation == "Slice":
+        attributes = {}
+        output = [2, 2]
+        for name, values in [("starts", [0]), ("ends", [2]), ("axes", [axis])]:
+            inputs.append(name)
+            controls.append(numpy_helper.from_array(np.asarray(values, np.int64), name))
+    nodes = [
+        helper.make_node("Reshape", ["x", "target"], ["middle"]),
+        helper.make_node(operation, inputs, ["result" if tail else "y"], **attributes),
+    ]
+    if tail:
+        nodes.append(helper.make_node("Identity", ["result"], ["y"]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "native_axis_chain",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, ["N", 3])],
+            [helper.make_tensor_value_info("y", dtype, output)],
+            controls,
+            value_info=[helper.make_tensor_value_info("middle", TensorProto.FLOAT, [2, 3])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    feeds = {"x": np.arange(1, 7, dtype=np.float32).reshape(2, 3)}
+    expected = _execute(model, feeds)[0]
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+
+
 def test_converted_reshape_target_preserves_skipped_native_owner():
     """Give the converted Reshape a private target when a native 4D owner is skipped."""
     model = helper.make_model(
@@ -525,11 +594,13 @@ def test_late_unknown_argmax_shape_refuses_without_changing_an_earlier_node():
             "argmax_refusal",
             [
                 helper.make_tensor_value_info("first", TensorProto.FLOAT, [2, 3, 4]),
-                helper.make_tensor_value_info("second", TensorProto.FLOAT, [None, None, None]),
+                helper.make_tensor_value_info(
+                    "second", TensorProto.FLOAT, [None, None, None, None]
+                ),
             ],
             [
                 helper.make_tensor_value_info("first_out", TensorProto.INT64, [2, 4]),
-                helper.make_tensor_value_info("second_out", TensorProto.INT64, [None, None]),
+                helper.make_tensor_value_info("second_out", TensorProto.INT64, [None, None, None]),
             ],
         ),
         opset_imports=[helper.make_opsetid("", 17)],
