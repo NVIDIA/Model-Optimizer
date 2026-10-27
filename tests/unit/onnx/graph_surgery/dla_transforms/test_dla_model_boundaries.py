@@ -19,6 +19,7 @@ from importlib import import_module
 
 import numpy as np
 import onnx
+import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, inliner, numpy_helper
 from onnx.reference import ReferenceEvaluator
@@ -1254,6 +1255,48 @@ def test_rank_changing_adapter_uses_registered_consumer_preparation(operation, u
     expected = _checked_run(model, feeds)
     converted = _transform_make_dla_compatible(model, verbose=False)
     for actual, reference in zip(_checked_run(converted, feeds), expected):
+        np.testing.assert_allclose(actual, reference, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("operation", ["LayerNormalization", "Gelu", "QuantizeLinear"])
+@pytest.mark.parametrize("unary", [False, True])
+def test_rank_changing_adapter_preserves_safe_normalization_readers(operation, unary):
+    """Execute suffix normalization and scalar quantization across leading singleton promotion."""
+    model, feeds = _rank_sensitive_adapter_model("Softmax", unary, True)
+    model.ir_version = 9
+    reader = model.graph.node[-1]
+    reader.op_type = operation
+    del reader.attribute[:]
+    if operation == "Gelu":
+        reader.domain = "com.microsoft"
+        model.opset_import.append(helper.make_opsetid("com.microsoft", 1))
+    else:
+        reader.input.append("scale")
+        model.graph.initializer.append(
+            numpy_helper.from_array(
+                np.ones([4, 4], np.float32)
+                if operation == "LayerNormalization"
+                else np.asarray(0.5, np.float32),
+                "scale",
+            )
+        )
+        if operation == "LayerNormalization":
+            reader.attribute.append(helper.make_attribute("axis", -2))
+        else:
+            model.graph.output[-1].type.tensor_type.elem_type = TensorProto.UINT8
+
+    def execute(value):
+        """Use the CPU runtime, including its registered contrib Gelu implementation."""
+        onnx.checker.check_model(value, full_check=True)
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 1
+        return ort.InferenceSession(
+            value.SerializeToString(), options, providers=["CPUExecutionProvider"]
+        ).run(None, feeds)
+
+    expected = execute(model)
+    converted = _transform_make_dla_compatible(model, verbose=False)
+    for actual, reference in zip(execute(converted), expected):
         np.testing.assert_allclose(actual, reference, rtol=1e-5, atol=1e-6)
 
 

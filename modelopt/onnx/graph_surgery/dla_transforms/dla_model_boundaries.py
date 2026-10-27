@@ -502,6 +502,7 @@ def _apply_remove_intermediary_squeeze_unsqueeze(
     removed = set()
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     checked_readers = set()
+    contrib_ops = _boundary_contrib_ops(model)
     runtime_inputs = (
         cache.graph_input_names - cache.init_names
         if model.ir_version <= 3
@@ -519,16 +520,33 @@ def _apply_remove_intermediary_squeeze_unsqueeze(
             if current in captured - cache.graph_output_names:
                 raise ValueError("Intermediary adapter changes a captured native rank")
             for reader, port in cache.get_consumers(current):
-                standard = _is_standard_node(reader, local_functions, {reader.op_type})
+                standard = _is_standard_node(
+                    reader, local_functions, {reader.op_type}, contrib_ops=contrib_ops
+                )
                 if (
                     standard
                     and reader.op_type == "Squeeze"
                     and reader.output[0] in cache.graph_output_names
                 ):
                     continue
-                if standard and reader.op_type in _RANK_AGNOSTIC_OPS | {"Squeeze", "Unsqueeze"}:
+                if standard and reader.op_type in _RANK_AGNOSTIC_OPS | {
+                    "Gelu",
+                    "Squeeze",
+                    "Unsqueeze",
+                }:
                     pending.extend(reader.output)
                     continue
+                if standard and port == 0:
+                    axis = _attribute(reader, "axis")
+                    if reader.op_type == "LayerNormalization" and (axis is None or axis.i < 0):
+                        pending.extend(reader.output)
+                        continue
+                    if (
+                        reader.op_type in {"QuantizeLinear", "DequantizeLinear"}
+                        and cache.get_shape(reader.input[1]) == []
+                    ):
+                        pending.extend(reader.output)
+                        continue
                 target = (
                     cache.get_init_array(reader.input[1])
                     if standard
