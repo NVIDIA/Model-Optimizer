@@ -530,17 +530,8 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
             f"or distribution=DistributionPlan({dist.size()}, dense='replicate')."
         )
     if not dist.is_initialized():
-        # FSDP2 shards through a process group even on one rank; a plan for more ranks than one
-        # was refused without a group. A run (distributed_run) destroys the group on exit.
-        if dist.is_distributed_launch():
-            # One rank of a launch of several cannot set the group up for itself, and the one-rank
-            # plan that reaches here is no plan for the launch.
-            world = os.environ["WORLD_SIZE"]
-            raise RuntimeError(
-                f"The {route} load shards through this {world}-rank launch's process group, which "
-                "is not set up; load inside distributed_run(), which sets it up, with a plan for "
-                f"the launch: DistributionPlan({world}, dense='fsdp')."
-            )
+        # FSDP2 shards through a process group even on one rank; a launch without its group was
+        # refused before the load. A run (distributed_run) destroys the group on exit.
         if "RANK" not in os.environ:
             raise RuntimeError(
                 f"The {route} load shards through a process group, even on one rank, which a "
@@ -650,6 +641,15 @@ def load_pretrained(
             f"{distribution!r} is for {distribution.world_size} ranks, whose process group this "
             f"{os.environ['WORLD_SIZE']}-rank launch has not set up; load inside distributed_run(), "
             "which sets it up."
+        )
+    if alone and isinstance(distribution, DistributionPlan) and _route(distribution) is not None:
+        # One rank of a launch of several cannot set the group up for itself, and a one-rank plan
+        # for a sharded load is no plan for the launch.
+        launch = os.environ["WORLD_SIZE"]
+        raise RuntimeError(
+            f"The {_route(distribution)} load shards through this {launch}-rank launch's process "
+            "group, which is not set up; load inside distributed_run(), which sets it up, with a "
+            f"plan for the launch: DistributionPlan({launch}, dense='fsdp')."
         )
     if alone and distribution is None:
         # The knobs ask to shard over the launch, rather than leave each process the whole model. A

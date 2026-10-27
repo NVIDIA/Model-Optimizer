@@ -566,12 +566,15 @@ def test_what_needs_the_group_is_refused_in_a_launch_that_sets_none_up(
     match,
 ):
     """A plan for several ranks, a sharded load, and knobs asking to shard over the launch need its
-    group, which one rank cannot set up for itself: refused before anything loads, rather than
+    group, which one rank cannot set up for itself: refused before anything is fetched, rather than
     leave each process the whole model the knobs did not ask for. A knob that is not one is refused
     as the plan decision refuses it, not dropped."""
     serve(LlamaConfig(**_TINY))
     for name, value in knobs.items():
         monkeypatch.setenv(name, value)
+    monkeypatch.setattr(
+        model_load_utils, "ensure_local_checkpoint", lambda *a, **k: pytest.fail("fetched it")
+    )
 
     with pytest.raises(error, match=match):
         load_pretrained(str(tmp_path), distribution=distribution)
