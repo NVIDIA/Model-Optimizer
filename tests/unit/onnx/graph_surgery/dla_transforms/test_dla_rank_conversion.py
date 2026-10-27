@@ -91,6 +91,42 @@ def test_rank_conversion_preserves_operator_values(operation):
     np.testing.assert_array_equal(actual[0], expected[0])
 
 
+def test_converted_reshape_target_preserves_skipped_native_owner():
+    """Give the converted Reshape a private target when a native 4D owner is skipped."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Reshape", ["a", "target"], ["ay"]),
+                helper.make_node("Reshape", ["b", "target"], ["by"]),
+            ],
+            "shared_target",
+            [
+                helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3]),
+                helper.make_tensor_value_info("b", TensorProto.FLOAT, [5, 6, 1, 1]),
+            ],
+            [
+                helper.make_tensor_value_info("ay", TensorProto.FLOAT, [2, 1, 1, 3]),
+                helper.make_tensor_value_info("by", TensorProto.FLOAT, [5, 1, 1, 6]),
+            ],
+            [numpy_helper.from_array(np.array([0, 1, 1, -1], np.int64), "target")],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    feeds = {
+        "a": np.arange(6, dtype=np.float32).reshape(2, 3),
+        "b": np.arange(30, dtype=np.float32).reshape(5, 6, 1, 1),
+    }
+    expected = ort.InferenceSession(model.SerializeToString()).run(None, feeds)
+    converted = _apply_non4d_reshape(copy.deepcopy(model))
+    assert converted.graph.node[0].input[1] != converted.graph.node[1].input[1]
+    onnx.checker.check_model(converted, full_check=True)
+    for actual, reference in zip(
+        ort.InferenceSession(converted.SerializeToString()).run(None, feeds), expected
+    ):
+        np.testing.assert_array_equal(actual, reference)
+
+
 @pytest.mark.parametrize("shape", [[4], [3, 4], [2, 3, 4]])
 def test_initializer_rank_conversion_preserves_overridable_defaults(shape):
     """Preserve a runtime input's rank and default payload while preparing fixed weights."""

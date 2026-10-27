@@ -95,7 +95,6 @@ def _apply_non4d_reshape(model):
     runtime_inputs = _runtime_input_names(model)
     reshapes = _operator_nodes(model, {"Reshape"})
     gathers = {id(node) for node in _operator_nodes(model, {"Gather"})}
-    reshape_ids = {id(node) for node in reshapes}
     squeezes = {id(node) for node in _operator_nodes(model, {"Squeeze"})}
     replacements = {}
     users = {}
@@ -164,8 +163,9 @@ def _apply_non4d_reshape(model):
         replacements[tensor.name] = replacement
         users.setdefault(tensor.name, []).append(node)
     for name, replacement in replacements.items():
+        converted = {id(user) for user in users[name]}
         private = name in cache.graph_output_names | cache.graph_input_names | captured or any(
-            index != 1 or id(user) not in reshape_ids for user, index in cache.get_consumers(name)
+            index != 1 or id(user) not in converted for user, index in cache.get_consumers(name)
         )
         if private:
             target = add_initializer(
