@@ -681,6 +681,7 @@ def load_vlm_or_llm(
     device_map: str | None = None,
     trust_remote_code: bool = False,
     config_overrides: dict | None = None,
+    embedding_scale: float = 1.0,
 ):
     """Load a VLM or LLM. Returns the model.
 
@@ -698,6 +699,8 @@ def load_vlm_or_llm(
         config_overrides: Optional config field overrides applied to the model config and
             its ``text_config`` before instantiation (e.g. to correct dims that don't
             propagate from a checkpoint's nested text config).
+        embedding_scale: Input-embedding multiplier for offline fake bases. Defaults to 1.0;
+            other loading paths retain the source model's embedding behavior.
     """
 
     def _warn_overrides_on_fake_base():
@@ -719,7 +722,9 @@ def load_vlm_or_llm(
         _warn_overrides_on_fake_base()
         from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
 
-        return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
+        return FakeBaseModel.from_source(
+            model_name_or_path, trust_remote_code=trust_remote_code, embedding_scale=embedding_scale
+        )
 
     # Import the transformers-cosmos3 plugin if available: it registers the `cosmos3_omni`
     # architecture with AutoConfig on import, so the from_pretrained below recognizes it.
@@ -775,7 +780,9 @@ def load_vlm_or_llm(
         _warn_overrides_on_fake_base()
         from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
 
-        return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
+        return FakeBaseModel.from_source(
+            model_name_or_path, trust_remote_code=trust_remote_code, embedding_scale=embedding_scale
+        )
 
     if _is_vlm:
         # Transformers 5 renamed AutoModelForVision2Seq to

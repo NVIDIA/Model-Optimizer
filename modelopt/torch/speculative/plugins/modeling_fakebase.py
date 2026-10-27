@@ -167,10 +167,12 @@ class _ScaledEmbedding(nn.Embedding):
     """Apply input scaling without changing raw embedding or shared-head values."""
 
     def __init__(self, *args, scale=1.0, **kwargs):
+        """Initialize raw embedding weights and the separate input multiplier."""
         super().__init__(*args, **kwargs)
         self.scale = scale
 
     def forward(self, input_ids):
+        """Return scaled input embeddings while leaving stored weights unchanged."""
         hidden = super().forward(input_ids)
         return hidden if self.scale == 1.0 else hidden * self.scale
 
