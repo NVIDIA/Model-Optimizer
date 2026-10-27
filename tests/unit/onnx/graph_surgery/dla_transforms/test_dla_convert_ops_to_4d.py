@@ -58,12 +58,13 @@ import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms.dla_convert_ops_to_4d import (
     _apply_convert_ops_to_4d,
 )
 
-pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
 _REPO_ROOT = Path(__file__).resolve().parents[5]
 _OPSET_VERSION = 17
@@ -74,42 +75,49 @@ _MAX_IR_VERSION_FOR_ORT = 9
 
 
 def _init(name: str, arr: np.ndarray) -> onnx.TensorProto:
+    """Build a named fixed tensor for a synthetic graph."""
     return numpy_helper.from_array(arr, name=name)
 
 
 def _vi(name: str, elem_type: int, shape: list) -> onnx.ValueInfoProto:
+    """Declare tensor metadata for a synthetic graph."""
     return helper.make_tensor_value_info(name, elem_type, shape)
 
 
 def _clamp_ir(model: onnx.ModelProto) -> None:
+    """Use the model IR supported by the installed CPU runtime."""
     model.ir_version = min(model.ir_version, _MAX_IR_VERSION_FOR_ORT)
 
 
-def _make_model(nodes, name, inputs, outputs, inits=None):
+def _make_model(nodes, name, inputs, outputs, inits=None, *, infer_symbolic_shapes=True):
+    """Build and check a model with optional symbolic shape inference."""
     graph = helper.make_graph(nodes, name, inputs, outputs, initializer=inits or [])
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
-    try:
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
+    if infer_symbolic_shapes:
+        try:
+            # Shape inference is optional in partial runtime installations.
+            from onnxruntime.tools.symbolic_shape_infer import (
+                SymbolicShapeInference,  # type: ignore[import-untyped]
+            )
 
-        model = SymbolicShapeInference.infer_shapes(model, auto_merge_symbolic_dims=True) or model
-    except Exception:
-        pass
+        except ImportError:
+            pass
+        else:
+            model = SymbolicShapeInference.infer_shapes(model, auto_merge=True) or model
     onnx.checker.check_model(model)
     return model
 
 
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
-    import onnxruntime as ort  # type: ignore[import-not-found]
-
+    """Execute all public outputs on the CPU runtime."""
     _clamp_ir(model)
     sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
     return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Compare finite tensor directions in double precision."""
     a64, b64 = a.astype(np.float64).ravel(), b.astype(np.float64).ravel()
     na, nb = float(np.linalg.norm(a64)), float(np.linalg.norm(b64))
     if na == 0.0 and nb == 0.0:
@@ -120,6 +128,7 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _assert_match(ref: dict, got: dict) -> None:
+    """Check public output shapes and numerical parity."""
     assert ref.keys() == got.keys()
     for name in ref:
         a, b = ref[name], got[name]
@@ -147,6 +156,7 @@ def _assert_values_match(ref: dict, got: dict) -> None:
 
 
 def _apply_and_run(model, feeds):
+    """Execute native and converted graphs for parity checks."""
     ref = _run_ort(model, feeds)
     tr = copy.deepcopy(model)
     tr = _apply_convert_ops_to_4d(tr)
@@ -927,6 +937,7 @@ def test_layernorm_2d_data_input_promoted():
 
 
 def _assert_flatten_chain(tr, *, expect_unsqueeze: bool) -> None:
+    """Check the expected structural Flatten conversion chain."""
     op_types = [n.op_type for n in tr.graph.node]
     assert "Flatten" not in op_types, "Flatten must be removed"
     assert "Reshape" in op_types, "Reshape must be present"
@@ -1031,3 +1042,677 @@ def test_flatten_4d_axis1_no_unsqueeze():
     assert got["Y"].shape == (1, 384), f"Expected (1,384), got {got['Y'].shape}"
     _assert_flatten_chain(tr, expect_unsqueeze=False)
     np.testing.assert_allclose(ref["Y"], got["Y"], rtol=1e-5, atol=1e-6)
+
+
+def test_five_dimensional_transpose_without_singleton_is_unchanged():
+    """Skip a valid permutation whose native layout cannot collapse to four dimensions."""
+    shape = [2, 3, 4, 5, 6]
+    model = _make_model(
+        [helper.make_node("Transpose", ["X"], ["Y"], perm=[4, 3, 2, 1, 0])],
+        "no_unary",
+        [_vi("X", TensorProto.FLOAT, shape)],
+        [_vi("Y", TensorProto.FLOAT, shape[::-1])],
+    )
+    before = model.SerializeToString()
+    converted = _apply_convert_ops_to_4d(model)
+    assert converted.SerializeToString() == before
+    feeds = {"X": np.arange(np.prod(shape), dtype=np.float32).reshape(shape)}
+    np.testing.assert_array_equal(_run_ort(converted, feeds)["Y"], np.transpose(feeds["X"]))
+
+
+@pytest.mark.parametrize("target", [[0, -1], [0, 0, -1]])
+def test_unresolved_reshape_copied_dimensions_preserve_intermediate_layout(target):
+    """Leave copied-zero targets native when intermediate shape metadata is absent."""
+    output_shape = [2, 12] if len(target) == 2 else [2, 3, 4]
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Identity", ["X"], ["hidden_input"]),
+                helper.make_node("Reshape", ["hidden_input", "target"], ["hidden_output"]),
+                helper.make_node("Identity", ["hidden_output"], ["Y"]),
+            ],
+            "missing_metadata",
+            [_vi("X", TensorProto.FLOAT, [2, 3, 4])],
+            [_vi("Y", TensorProto.FLOAT, output_shape)],
+            [_init("target", np.asarray(target, np.int64))],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    _clamp_ir(model)
+    onnx.checker.check_model(model, full_check=True)
+    before = model.SerializeToString()
+    converted = _apply_convert_ops_to_4d(model)
+    assert converted.SerializeToString() == before
+    feeds = {"X": np.arange(24, dtype=np.float32).reshape(2, 3, 4)}
+    np.testing.assert_array_equal(_run_ort(converted, feeds)["Y"], feeds["X"].reshape(output_shape))
+
+
+@pytest.mark.parametrize("owner", ["private", "public", "peer", "capture"])
+def test_gather_cast_preserves_other_owners_and_updates_private_metadata(owner):
+    """Retarget only exclusive standard Cast outputs and preserve shared integer tensors."""
+    nodes = [
+        helper.make_node("Cast", ["source"], ["indices"], to=TensorProto.INT64),
+        helper.make_node("Gather", ["X", "indices"], ["Y"], axis=2),
+    ]
+    outputs = [_vi("Y", TensorProto.FLOAT, [1, 1, 2, 4])]
+    inits = []
+    if owner == "public":
+        outputs.append(_vi("indices", TensorProto.INT64, [2]))
+    elif owner == "peer":
+        nodes.append(helper.make_node("Identity", ["indices"], ["other"]))
+        outputs.append(_vi("other", TensorProto.INT64, [2]))
+    elif owner == "capture":
+        branch = helper.make_graph(
+            [helper.make_node("Identity", ["indices"], ["out"])],
+            "branch",
+            [],
+            [_vi("out", TensorProto.INT64, [2])],
+        )
+        inits.append(_init("condition", np.asarray(True)))
+        nodes.append(
+            helper.make_node("If", ["condition"], ["other"], then_branch=branch, else_branch=branch)
+        )
+        outputs.append(_vi("other", TensorProto.INT64, [2]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "cast_owner",
+            [_vi("X", TensorProto.FLOAT, [1, 1, 5, 4]), _vi("source", TensorProto.FLOAT, [None])],
+            outputs,
+            inits,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    _clamp_ir(model)
+    model.graph.value_info.extend([_vi("indices", TensorProto.INT64, [2])])
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {
+        "X": np.arange(20, dtype=np.float32).reshape(1, 1, 5, 4),
+        "source": np.asarray([1, 3], np.float32),
+    }
+    expected = _run_ort(model, feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))
+    cast = next(n for n in converted.graph.node if n.op_type == "Cast" and n.output[0] == "indices")
+    expected_type = TensorProto.INT32 if owner == "private" else TensorProto.INT64
+    assert next(a.i for a in cast.attribute if a.name == "to") == expected_type
+    assert (
+        next(
+            v for v in converted.graph.value_info if v.name == "indices"
+        ).type.tensor_type.elem_type
+        == expected_type
+    )
+
+
+@pytest.mark.parametrize("axis", [None, 0, -1])
+def test_fixed_dequantization_restores_public_and_convolution_bias_ranks(axis):
+    """Preserve native DQ outputs needed by public values and rank-one Conv biases."""
+    scale = np.asarray(0.25, np.float32) if axis is None else np.asarray([0.25, 0.5], np.float32)
+    model = _make_model(
+        [
+            helper.make_node(
+                "DequantizeLinear",
+                ["quantized", "scale", "zero"],
+                ["bias"],
+                **({} if axis is None else {"axis": axis}),
+            ),
+            helper.make_node("Conv", ["X", "weight", "bias"], ["Y"]),
+        ],
+        "dq_bias",
+        [_vi("X", TensorProto.FLOAT, [1, 1, 2, 2])],
+        [_vi("bias", TensorProto.FLOAT, [2]), _vi("Y", TensorProto.FLOAT, [1, 2, 2, 2])],
+        [
+            _init("quantized", np.asarray([2, 4], np.int8)),
+            _init("scale", scale),
+            _init("zero", np.zeros(scale.shape, np.int8)),
+            _init("weight", np.ones((2, 1, 1, 1), np.float32)),
+        ],
+    )
+    feeds = {"X": np.arange(4, dtype=np.float32).reshape(1, 1, 2, 2)}
+    expected = _run_ort(model, feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))
+    assert (
+        next(n for n in converted.graph.node if n.op_type == "DequantizeLinear").output[0] != "bias"
+    )
+
+
+def test_blocked_dequantization_layout_is_unchanged():
+    """Leave blocked quantization native because its scale layout is rank-sensitive."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "DequantizeLinear", ["data", "scale", "zero"], ["Y"], axis=1, block_size=2
+                )
+            ],
+            "blocked",
+            [],
+            [_vi("Y", TensorProto.FLOAT, [2, 4])],
+            [
+                _init("data", np.arange(8, dtype=np.int8).reshape(2, 4)),
+                _init("scale", np.full((2, 2), 0.25, np.float32)),
+                _init("zero", np.zeros((2, 2), np.int8)),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+    )
+    _clamp_ir(model)
+    onnx.checker.check_model(model, full_check=True)
+    before = model.SerializeToString()
+    assert _apply_convert_ops_to_4d(model).SerializeToString() == before
+
+
+@pytest.mark.parametrize("storage", ["raw", "typed"])
+def test_fixed_weight_promotion_preserves_payload_representation_and_metadata(storage):
+    """Change only dimension metadata when promoting a fixed elementwise weight."""
+    data = np.arange(6, dtype=np.float32).reshape(2, 3)
+    tensor = (
+        _init("weight", data)
+        if storage == "raw"
+        else helper.make_tensor("weight", TensorProto.FLOAT, [2, 3], data.reshape(-1))
+    )
+    tensor.doc_string = "Preserve caller metadata"
+    model = _make_model(
+        [helper.make_node("Add", ["X", "weight"], ["Y"])],
+        "weight_metadata",
+        [_vi("X", TensorProto.FLOAT, [2, 3])],
+        [_vi("Y", TensorProto.FLOAT, [2, 3])],
+        [tensor],
+    )
+    expected = copy.deepcopy(model.graph.initializer[0])
+    expected.ClearField("dims")
+    converted = _apply_convert_ops_to_4d(model)
+    actual = copy.deepcopy(next(t for t in converted.graph.initializer if t.name == "weight"))
+    actual.ClearField("dims")
+    assert actual.SerializeToString() == expected.SerializeToString()
+    np.testing.assert_array_equal(_run_ort(converted, {"X": data})["Y"], data * 2)
+
+
+@pytest.mark.parametrize(
+    ("operation", "mixed"), [("Relu", False), ("Add", False), ("Add", True), ("Mul", True)]
+)
+def test_scalar_inputs_preserve_native_values_with_optional_tensor_broadcast(operation, mixed):
+    """Choose a nonscalar data layout and leave entirely scalar operations native."""
+    inputs = [_vi("scalar", TensorProto.FLOAT, [])]
+    node_inputs = ["scalar"]
+    feeds = {"scalar": np.asarray(2, np.float32)}
+    shape = [2, 3] if mixed else []
+    if operation != "Relu":
+        inputs.append(_vi("other", TensorProto.FLOAT, shape))
+        node_inputs.append("other")
+        feeds["other"] = (
+            np.arange(6, dtype=np.float32).reshape(shape) if mixed else np.asarray(3, np.float32)
+        )
+    model = _make_model(
+        [helper.make_node(operation, node_inputs, ["Y"])],
+        "scalar_layout",
+        inputs,
+        [_vi("Y", TensorProto.FLOAT, shape)],
+    )
+    expected = _run_ort(model, feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))
+
+
+@pytest.mark.parametrize(
+    ("shape", "dtype", "opset"), [([], np.float32, 17), ([2, 3], np.float16, 19)]
+)
+def test_fixed_dequantization_preserves_scalar_and_half_precision_outputs(shape, dtype, opset):
+    """Restore native DQ ranks and keep the scale-selected output dtype."""
+    data = np.asarray(4, np.int8) if not shape else np.arange(6, dtype=np.int8).reshape(shape)
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("DequantizeLinear", ["data", "scale", "zero"], ["Y"])],
+            "dq_output_types",
+            [],
+            [_vi("Y", TensorProto.FLOAT if dtype == np.float32 else TensorProto.FLOAT16, shape)],
+            [
+                _init("data", data),
+                _init("scale", np.asarray(0.25, dtype)),
+                _init("zero", np.asarray(0, np.int8)),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", opset)],
+    )
+    _clamp_ir(model)
+    expected = _run_ort(model, {})
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, {}))
+
+
+def test_external_weight_promotion_preserves_sidecar_bytes_and_relative_metadata(tmp_path):
+    """Promote unloaded external weights without reading or rewriting their payload sidecar."""
+    weight = np.arange(6, dtype=np.float32).reshape(2, 3)
+    model = _make_model(
+        [helper.make_node("Add", ["X", "weight"], ["Y"])],
+        "external_weight",
+        [_vi("X", TensorProto.FLOAT, [2, 3])],
+        [_vi("Y", TensorProto.FLOAT, [2, 3])],
+        [_init("weight", weight)],
+    )
+    native = tmp_path / "native.onnx"
+    onnx.save_model(
+        model,
+        str(native),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="weights.bin",
+        size_threshold=0,
+    )
+    payload = (tmp_path / "weights.bin").read_bytes()
+    feeds = {"X": weight}
+    expected = ort.InferenceSession(str(native), providers=["CPUExecutionProvider"]).run(
+        None, feeds
+    )[0]
+    unloaded = onnx.load(str(native), load_external_data=False)
+    converted = _apply_convert_ops_to_4d(unloaded)
+    target = tmp_path / "converted.onnx"
+    onnx.save_model(converted, str(target))
+    onnx.checker.check_model(str(target), full_check=True)
+    actual = ort.InferenceSession(str(target), providers=["CPUExecutionProvider"]).run(None, feeds)[
+        0
+    ]
+    np.testing.assert_array_equal(actual, expected)
+    assert (tmp_path / "weights.bin").read_bytes() == payload
+    tensor = next(t for t in converted.graph.initializer if t.name == "weight")
+    assert tensor.data_location == TensorProto.EXTERNAL and not tensor.HasField("raw_data")
+    assert {entry.key: entry.value for entry in tensor.external_data}["location"] == "weights.bin"
+
+
+@pytest.mark.parametrize("keepdims", [0, 1])
+def test_scalar_reduction_preserves_native_rank(keepdims):
+    """Promote a scalar reduction internally and restore its zero-dimensional output."""
+    model = _make_model(
+        [helper.make_node("ReduceSum", ["X"], ["Y"], keepdims=keepdims)],
+        "scalar_reduce",
+        [_vi("X", TensorProto.FLOAT, [])],
+        [_vi("Y", TensorProto.FLOAT, [])],
+    )
+    feeds = {"X": np.asarray(3, np.float32)}
+    expected = _run_ort(model, feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))
+
+
+@pytest.mark.parametrize("axes", [[0], [0, 1]])
+def test_runtime_reduction_axes_remain_native(axes):
+    """Leave unsupported runtime axes unchanged instead of reducing all promoted dimensions."""
+    # The optional symbolic inferencer cannot handle runtime axes with keepdims=0.
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("ReduceSum", ["X", "axes"], ["Y"], keepdims=0)],
+            "runtime_reduce",
+            [_vi("X", TensorProto.FLOAT, [1, 1, 1]), _vi("axes", TensorProto.INT64, [len(axes)])],
+            [_vi("Y", TensorProto.FLOAT, [1] * (3 - len(axes)))],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    _clamp_ir(model)
+    feeds = {"X": np.asarray([[[3]]], np.float32), "axes": np.asarray(axes, np.int64)}
+    expected = _run_ort(model, feeds)
+    before = model.SerializeToString()
+    converted = _apply_convert_ops_to_4d(model)
+    assert converted.SerializeToString() == before
+    _assert_match(expected, _run_ort(converted, feeds))
+
+
+@pytest.mark.parametrize("owner", ["default", "capture"])
+def test_fixed_dequantization_preserves_runtime_and_captured_data_owners(owner):
+    """Keep native quantized layouts owned by callers or nested graphs."""
+    data = np.arange(6, dtype=np.int8).reshape(2, 3)
+    inputs = [_vi("data", TensorProto.INT8, [2, 3])] if owner == "default" else []
+    nodes = [helper.make_node("DequantizeLinear", ["data", "scale", "zero"], ["Y"])]
+    outputs = [_vi("Y", TensorProto.FLOAT, [2, 3])]
+    inits = [
+        _init("data", data),
+        _init("scale", np.asarray(0.25, np.float32)),
+        _init("zero", np.asarray(0, np.int8)),
+    ]
+    if owner == "capture":
+        branch = helper.make_graph(
+            [helper.make_node("Identity", ["data"], ["out"])],
+            "branch",
+            [],
+            [_vi("out", TensorProto.INT8, [2, 3])],
+        )
+        inits.append(_init("condition", np.asarray(True)))
+        nodes.append(
+            helper.make_node("If", ["condition"], ["view"], then_branch=branch, else_branch=branch)
+        )
+        outputs.append(_vi("view", TensorProto.INT8, [2, 3]))
+    model = _make_model(nodes, "dq_owners", inputs, outputs, inits)
+    feeds = {"data": data + np.int8(10)} if owner == "default" else {}
+    expected = _run_ort(model, feeds)
+    before = model.SerializeToString()
+    converted = _apply_convert_ops_to_4d(model)
+    assert converted.SerializeToString() == before
+    _assert_match(expected, _run_ort(converted, feeds))
+
+
+@pytest.mark.parametrize("operation", ["Transpose", "Gather", "DequantizeLinear"])
+def test_standalone_converter_preserves_opaque_layout_functions(operation):
+    """Leave opaque functions intact even when their names match supported handlers."""
+    attrs = {"perm": [1, 0]} if operation == "Transpose" else {}
+    inputs = [] if operation == "DequantizeLinear" else [_vi("X", TensorProto.FLOAT, [2, 3])]
+    inits = [_init("X", np.arange(6, dtype=np.float32).reshape(2, 3))] if not inputs else []
+    function = helper.make_function(
+        "opaque",
+        operation,
+        ["x"],
+        ["y"],
+        [helper.make_node("Neg", ["x"], ["y"])],
+        [helper.make_opsetid("", 17)],
+        attributes=list(attrs),
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node(operation, ["X"], ["Y"], domain="opaque", **attrs)],
+            "opaque_layout",
+            inputs,
+            [_vi("Y", TensorProto.FLOAT, [2, 3])],
+            inits,
+        ),
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("opaque", 1)],
+        functions=[function],
+    )
+    _clamp_ir(model)
+    model = onnx.shape_inference.infer_shapes(model)
+    feeds = {"X": np.arange(6, dtype=np.float32).reshape(2, 3)} if inputs else {}
+    expected = ReferenceEvaluator(model).run(None, feeds)
+    before = model.SerializeToString()
+    converted = _apply_convert_ops_to_4d(model)
+    assert converted.SerializeToString() == before
+    onnx.checker.check_model(converted, full_check=True)
+    np.testing.assert_array_equal(ReferenceEvaluator(converted).run(None, feeds)[0], expected[0])
+
+
+def test_gather_does_not_retarget_an_opaque_cast_producer():
+    """Prepare a standard private Cast while preserving the opaque producer's attributes."""
+    function = helper.make_function(
+        "opaque",
+        "Cast",
+        ["x"],
+        ["y"],
+        [helper.make_node("Neg", ["x"], ["y"])],
+        [helper.make_opsetid("", 17)],
+        attributes=["to"],
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "Cast", ["source"], ["indices"], domain="opaque", to=TensorProto.INT64
+                ),
+                helper.make_node("Gather", ["X", "indices"], ["Y"], axis=2),
+            ],
+            "opaque_cast",
+            [_vi("source", TensorProto.INT64, [2]), _vi("X", TensorProto.FLOAT, [1, 1, 5, 4])],
+            [_vi("Y", TensorProto.FLOAT, [1, 1, 2, 4]), _vi("indices", TensorProto.INT64, [2])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("opaque", 1)],
+        functions=[function],
+    )
+    _clamp_ir(model)
+    model = onnx.shape_inference.infer_shapes(model)
+    feeds = {
+        "source": np.asarray([1, 3], np.int64),
+        "X": np.arange(20, dtype=np.float32).reshape(1, 1, 5, 4),
+    }
+    expected = ReferenceEvaluator(model).run(None, feeds)
+    producer = model.graph.node[0].SerializeToString()
+    converted = _apply_convert_ops_to_4d(model)
+    assert converted.graph.node[0].SerializeToString() == producer
+    onnx.checker.check_model(converted, full_check=True)
+    for actual, reference in zip(ReferenceEvaluator(converted).run(None, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.parametrize("omit_mean", [False, True])
+def test_layernorm_restores_optional_statistics_and_shared_public_views(omit_mean):
+    """Restore every optional normalization output and its internal consumers to native rank."""
+    names = ["Y", "" if omit_mean else "Mean", "Inv"]
+    statistic = "Inv" if omit_mean else "Mean"
+    outputs = [
+        _vi("Y", TensorProto.FLOAT, [2, 3, 4]),
+        _vi("Inv", TensorProto.FLOAT, [2, 1, 1]),
+        _vi("view", TensorProto.FLOAT, [2, 1, 1]),
+    ]
+    if not omit_mean:
+        outputs.insert(1, _vi("Mean", TensorProto.FLOAT, [2, 1, 1]))
+    model = _make_model(
+        [
+            helper.make_node("LayerNormalization", ["X", "scale", "bias"], names, axis=1),
+            helper.make_node("Add", [statistic, "zero"], ["view"]),
+        ],
+        "layernorm_statistics",
+        [_vi("X", TensorProto.FLOAT, [2, 3, 4])],
+        outputs,
+        [
+            _init("scale", np.ones((3, 4), np.float32)),
+            _init("bias", np.zeros((3, 4), np.float32)),
+            _init("zero", np.asarray(0, np.float32)),
+        ],
+        # The optional inferencer cannot handle an omitted middle output.
+        infer_symbolic_shapes=not omit_mean,
+    )
+    feeds = {"X": np.random.default_rng(31).standard_normal((2, 3, 4)).astype(np.float32)}
+    expected = _run_ort(model, feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))
+
+
+def test_generated_rank_adapters_preserve_existing_control_value_and_node_names():
+    """Allocate around simultaneous control, tensor and node-name collisions."""
+    model = _make_model(
+        [
+            helper.make_node("Relu", ["X"], ["Y"], name="relu"),
+            helper.make_node("Identity", ["other"], ["relu_unsq4d_0"], name="relu_sq_node_1"),
+        ],
+        "adapter_names",
+        [_vi("X", TensorProto.FLOAT, [2, 3]), _vi("other", TensorProto.FLOAT, [1])],
+        [
+            _vi("Y", TensorProto.FLOAT, [2, 3]),
+            _vi("relu_unsq4d_0", TensorProto.FLOAT, [1]),
+            _vi("relu_unsq_axes_0", TensorProto.INT64, [1]),
+        ],
+        [_init("relu_unsq_axes_0", np.asarray([99], np.int64))],
+    )
+    feeds = {
+        "X": np.arange(6, dtype=np.float32).reshape(2, 3) - 3,
+        "other": np.asarray([17], np.float32),
+    }
+    expected = _run_ort(model, feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))
+
+
+@pytest.mark.parametrize("collision", [False, True])
+def test_shared_squeeze_preserves_partial_rank_metadata_and_existing_aliases(collision):
+    """Copy the native partial shape while allocating private consumer aliases."""
+    nodes = [
+        helper.make_node("Squeeze", ["X", "axes"], ["Y"], name="sq"),
+        helper.make_node("Identity", ["Y"], ["Z"]),
+    ]
+    inputs = [_vi("X", TensorProto.FLOAT, [1, None, 3, None])]
+    outputs = [
+        _vi("Y", TensorProto.FLOAT, [None, 3, None]),
+        _vi("Z", TensorProto.FLOAT, [None, 3, None]),
+    ]
+    feeds = {"X": np.arange(24, dtype=np.float32).reshape(1, 2, 3, 4)}
+    if collision:
+        nodes.append(helper.make_node("Identity", ["other"], ["Y_sq"], name="sq_internal"))
+        inputs.append(_vi("other", TensorProto.FLOAT, [1]))
+        outputs.append(_vi("Y_sq", TensorProto.FLOAT, [1]))
+        feeds["other"] = np.asarray([17], np.float32)
+    model = helper.make_model(
+        helper.make_graph(
+            nodes, "partial_squeeze", inputs, outputs, [_init("axes", np.asarray([0], np.int64))]
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    _clamp_ir(model)
+    expected = _run_ort(model, feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))
+    alias = next(
+        n.input[0] for n in converted.graph.node if n.op_type == "Identity" and n.output[0] == "Z"
+    )
+    metadata = copy.deepcopy(next(v for v in converted.graph.value_info if v.name == alias))
+    metadata.name = "Y"
+    assert metadata.SerializeToString() == model.graph.output[0].SerializeToString()
+
+
+def test_opaque_squeeze_with_shared_public_output_is_not_split_as_a_standard_operator():
+    """Keep opaque function semantics intact when its public result also feeds internal nodes."""
+    function = helper.make_function(
+        "opaque",
+        "Squeeze",
+        ["x"],
+        ["y"],
+        [helper.make_node("Neg", ["x"], ["y"])],
+        [helper.make_opsetid("", 17)],
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Squeeze", ["X"], ["Y"], domain="opaque"),
+                helper.make_node("Relu", ["Y"], ["Z"]),
+            ],
+            "opaque_shared_squeeze",
+            [_vi("X", TensorProto.FLOAT, [1, 2, 3])],
+            [_vi("Y", TensorProto.FLOAT, [1, 2, 3]), _vi("Z", TensorProto.FLOAT, [1, 2, 3])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("opaque", 1)],
+        functions=[function],
+    )
+    _clamp_ir(model)
+    model = onnx.shape_inference.infer_shapes(model)
+    feeds = {"X": np.arange(6, dtype=np.float32).reshape(1, 2, 3) - 3}
+    expected = ReferenceEvaluator(model).run(None, feeds)
+    opaque = model.graph.node[0].SerializeToString()
+    converted = _apply_convert_ops_to_4d(model)
+    assert converted.graph.node[0].SerializeToString() == opaque
+    onnx.checker.check_model(converted, full_check=True)
+    for actual, reference in zip(ReferenceEvaluator(converted).run(None, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.parametrize("transpose", [False, True])
+def test_five_dimensional_reshape_restores_native_public_and_downstream_layouts(transpose):
+    """Restore the original five-dimensional contract after computing with a collapsed target."""
+    shape = [1, 2, 3, 4, 5]
+    nodes = [helper.make_node("Reshape", ["X", "target"], ["middle" if transpose else "Y"])]
+    output_shape = shape
+    if transpose:
+        nodes.append(helper.make_node("Transpose", ["middle"], ["Y"], perm=[1, 2, 3, 4, 0]))
+        output_shape = [2, 3, 4, 5, 1]
+    model = _make_model(
+        nodes,
+        "reshape_five",
+        [_vi("X", TensorProto.FLOAT, [2, 3, 4, 5])],
+        [_vi("Y", TensorProto.FLOAT, output_shape)],
+        [_init("target", np.asarray(shape, np.int64))],
+    )
+    feeds = {"X": np.arange(120, dtype=np.float32).reshape(2, 3, 4, 5)}
+    expected = _run_ort(model, feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))
+
+
+@pytest.mark.parametrize(
+    ("operation", "control"), [("Slice", [0]), ("Slice", [1]), ("Expand", [2, 3]), ("Tile", [2, 1])]
+)
+def test_runtime_structural_controls_preserve_native_intermediate_layouts(operation, control):
+    """Skip unsupported runtime controls even when their intermediate metadata is absent."""
+    shape = [1, 3] if operation == "Expand" else [2, 3]
+    inits = []
+    if operation == "Slice":
+        names = ["X", "starts", "ends", "control"]
+        inits = [
+            _init("starts", np.asarray([1], np.int64)),
+            _init("ends", np.asarray([2], np.int64)),
+        ]
+    else:
+        names = ["X", "control"]
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(operation, names, ["hidden"]),
+                helper.make_node("Identity", ["hidden"], ["Y"]),
+            ],
+            "runtime_structural",
+            [_vi("X", TensorProto.FLOAT, shape), _vi("control", TensorProto.INT64, [len(control)])],
+            [_vi("Y", TensorProto.FLOAT, [None, None])],
+            inits,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    _clamp_ir(model)
+    feeds = {
+        "X": np.arange(np.prod(shape), dtype=np.float32).reshape(shape),
+        "control": np.asarray(control, np.int64),
+    }
+    expected = _run_ort(model, feeds)
+    before = model.SerializeToString()
+    converted = _apply_convert_ops_to_4d(model)
+    assert converted.SerializeToString() == before
+    _assert_match(expected, _run_ort(converted, feeds))
+
+
+def test_fixed_expand_derives_output_rank_without_intermediate_metadata():
+    """Restore the broadcast output rank from fixed control values and the native input shape."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Expand", ["X", "target"], ["hidden"]),
+                helper.make_node("Identity", ["hidden"], ["Y"]),
+            ],
+            "expand_without_metadata",
+            [_vi("X", TensorProto.FLOAT, [1, 3])],
+            [_vi("Y", TensorProto.FLOAT, [2, 2, 3])],
+            [_init("target", np.asarray([2, 2, 3], np.int64))],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    _clamp_ir(model)
+    feeds = {"X": np.arange(3, dtype=np.float32).reshape(1, 3)}
+    expected = _run_ort(model, feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))
+
+
+@pytest.mark.parametrize("operation", ["Relu", "Softmax"])
+def test_legacy_opset_without_input_axes_adapters_stays_native(operation):
+    """Preserve legacy schemas instead of inserting newer Squeeze/Unsqueeze inputs."""
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node(operation, ["x"], ["y"])],
+            "legacy_adapter_schema",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3])],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 3])],
+        ),
+        opset_imports=[helper.make_opsetid("", 11)],
+    )
+    model.ir_version = 9
+    original = model.SerializeToString()
+    _apply_convert_ops_to_4d(model)
+    assert model.SerializeToString() == original
+    onnx.checker.check_model(model, full_check=True)
+    data = np.arange(6, dtype=np.float32).reshape(2, 3)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    output = ort.InferenceSession(
+        model.SerializeToString(), options, providers=["CPUExecutionProvider"]
+    ).run(None, {"x": data})[0]
+    assert output.shape == data.shape
