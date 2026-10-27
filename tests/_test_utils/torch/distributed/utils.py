@@ -225,7 +225,7 @@ class DistributedWorkerPool:
                 return self._result_queue.get(
                     timeout=max(0.01, min(1.0, deadline - time.monotonic()))
                 )
-            except queue.Empty:  # noqa: PERF203
+            except queue.Empty:
                 dead = [
                     (rank, p.exitcode) for rank, p in enumerate(self._processes) if not p.is_alive()
                 ]

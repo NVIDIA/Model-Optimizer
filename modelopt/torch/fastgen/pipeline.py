@@ -24,17 +24,11 @@ Concrete methods — for now :class:`~modelopt.torch.fastgen.methods.dmd.DMDPipe
 subclass this and add ``compute_*_loss`` methods.
 """
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
 import torch
 from torch import nn
 
+from .config import DistillationConfig
 from .flow_matching import sample_timesteps
-
-if TYPE_CHECKING:
-    from .config import DistillationConfig
 
 __all__ = ["DistillationPipeline"]
 

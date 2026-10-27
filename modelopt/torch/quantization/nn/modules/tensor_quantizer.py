@@ -159,11 +159,15 @@ class TensorQuantizer(nn.Module):
     """
 
     _skip_properties_for_save_restore = {
+        # Buffer/parameter layouts are serialized separately from quantizer properties.
+        "_pytorch_state_metadata",
         "_calibrator",
         "_bias_calibrator",
         "_original_shape",
         "_block_reshape_size",
         "_padding",
+        # Not saved: ranks restore one shared state, so they agree on the layout without it.
+        "_consumed_block_sizes",
         # Extra flags added by huggingface
         "_is_hf_initialized",
         # Extra flags added by accelerate
@@ -243,6 +247,11 @@ class TensorQuantizer(nn.Module):
         def _axis_setter(val):
             if getattr(self, "_calibrator", None) is not None:
                 self._calibrator._axis = val
+            if val is not None:
+                # axis and block_sizes are mutually exclusive; clear block_sizes when axis is set,
+                # including any the forward consumed and the config restored, so every rank ends
+                # in this layout
+                setattr(self, "_block_sizes", None)
             return val
 
         def _block_sizes_setter(val):
@@ -273,6 +282,14 @@ class TensorQuantizer(nn.Module):
             "use_constant_amax": ("_use_constant_amax", lambda val: val),
             "constant_amax": ("_constant_amax", _constant_amax_setter),
         }
+
+        consumed = getattr(self, "_consumed_block_sizes", None)
+        if consumed is not None and {"axis", "block_sizes"} & set(attribute_cfg.keys()):
+            # A new layout starts from the configured one the forward rewrote, which a rank that
+            # never ran the forward still holds, so every rank ends in the same layout.
+            self._axis, self._block_sizes, self._consumed_block_sizes = None, consumed, None
+            if getattr(self, "_calibrator", None) is not None:
+                self._calibrator._axis = None
 
         for attribute, val in attribute_cfg.items():
             assert attribute in QuantizerAttributeConfig.model_fields, (
@@ -441,6 +458,7 @@ class TensorQuantizer(nn.Module):
     def block_sizes(self, value):
         self._axis = None
         self._block_sizes = value
+        self._consumed_block_sizes = None
 
     @property
     def bias(self):
@@ -1102,8 +1120,12 @@ class TensorQuantizer(nn.Module):
             axis = tuple(k if k >= 0 else k + x.dim() for k in block_sizes if isinstance(k, int))
             self.axis = tuple(i for i in range(x.dim()) if i not in axis) or None
 
-            # remove block_sizes
+            # remove block_sizes, keeping them for the tensor-parallel amax sync and for a later
+            # configuration, so that both treat this quantizer as on a rank that never ran this
+            # forward and still holds them: the axis can read per-tensor (block sizes spanning
+            # every dimension)
             self._block_sizes = None
+            self._consumed_block_sizes = block_sizes
 
     def _sanitize_export_amax(self, amax: torch.Tensor) -> torch.Tensor:
         """Replace zero/NaN amax entries with ``maxbound`` so exported scales stay positive.
@@ -1418,19 +1440,94 @@ class TensorQuantizer(nn.Module):
                 modelopt_state.get("_pytorch_state_metadata", {})
             )
 
-    def sync_amax_across_distributed_group(self, parallel_group: DistributedProcessGroup):
-        """Synchronize the amax across all ranks in the given group."""
-        if parallel_group.is_initialized() and getattr(self, "_amax", None) is not None:
-            try:
-                dist.all_reduce(self._amax, op=dist.ReduceOp.MAX, group=parallel_group.group)
-            except RuntimeError as e:
-                # This error happens if the distributed backend is using GPU and
-                # the tensor is not on GPU (or vice versa).
-                warnings.warn(
-                    f"Failed to synchronize amax: {e}, probably because the tensor is on a device which is not"
-                    "supported by the current distributed backend. This warning can be ignored"
-                    "if happening during modelopt restore."
+    def sync_amax_across_distributed_group(
+        self, parallel_group: DistributedProcessGroup, state_device: torch.device | None = None
+    ):
+        """Synchronize amax across all ranks in ``parallel_group`` with a MAX all-reduce every rank joins.
+
+        With data-parallel calibration a module can be activated on some ranks but not others (a
+        sparsely-routed MoE expert, or any module a rank's calib batch never exercises), so ``_amax``
+        ends up present on only a SUBSET of the group's ranks. Every rank must still join the
+        collective or the participant set mismatches and NCCL deadlocks.
+
+        The ranks agree on whether anyone calibrated the quantizer from a presence flag, never from
+        the amax value: a calibrated amax can legitimately be zero (an all-zero weight). A quantizer
+        that no rank calibrated keeps no amax, so downstream ``amax is None`` handling still applies.
+        A calibrated amax keeps its own dtype and device, exactly as an in-place reduce leaves it. A rank
+        that never calibrated it adopts the group's amax where it keeps its quantizer state: on a tensor
+        it holds itself, else on ``state_device``, which a caller passes as the device it keeps the
+        module's quantizer state on, else on the collective's device. A one-value amax travels in
+        float32, so a float64 one comes back rounded to float32 precision.
+        """
+        if not parallel_group.is_initialized():
+            return
+        group = parallel_group.group
+        # A fully dynamic quantizer stores no amax on any rank, and a one-rank group reduces to the
+        # local value: both settled by the config, so every rank returns alike.
+        if self._dynamic or dist.get_world_size(group) == 1:
+            return
+        amax = getattr(self, "_amax", None)
+        device = _collective_device(group)
+        # Every rank joins this all-reduce, and its result alone picks what follows, so every rank
+        # issues the same collectives. It carries what only the ranks holding an amax know: whether
+        # any rank calibrated the quantizer, and the size, shape and dtype of each rank's amax. The layout
+        # attributes cannot tell: the forward rewrites ``axis`` and ``block_sizes``, so a rank that
+        # never ran it reads a different layout. One value -- per-tensor, or a dynamic block
+        # quantizer's global scale (NVFP4) -- rides along, so a rank that never calibrated the
+        # quantizer still ends up with it. float32 throughout: NCCL hangs rather than raising when
+        # ranks pair mismatched dtypes, which a group split between calibrated and uncalibrated ranks
+        # otherwise would (Kimi-K3, NVFP4, EP64: 8 ranks held an expert input amax and 56 did not).
+        numel, shape_key, dtype_code = 0, 0, 0  # a rank without an amax holds no elements
+        if amax is not None:
+            numel = amax.numel()
+            # Tells apart shapes of one size, such as (8, 1) and (1, 8). A tuple of ints hashes alike
+            # in every process (a str would not), and the key stays exact in float32, as a numel
+            # above 2**24 may not.
+            shape_key = hash(tuple(amax.shape)) % (1 << 24)
+            dtype_code = _AMAX_DTYPES.index(amax.dtype) + 1 if amax.dtype in _AMAX_DTYPES else 0
+        # MAX turns each [x, -x] pair into x's largest and negated smallest value across the ranks.
+        packed = torch.tensor(
+            [0.0, numel, -numel, shape_key, -shape_key, dtype_code, -dtype_code],
+            dtype=torch.float32,
+            device=device,
+        )
+        if amax is not None and numel == 1:
+            packed[0] = amax.detach().reshape(()).to(device=device, dtype=torch.float32)
+        _all_reduce_amax(packed, group)
+        # One host sync for the flags; the value stays on the device.
+        flags = packed[1:].tolist()
+        max_numel, neg_min_numel, max_shape, neg_min_shape, max_code, neg_min_code = flags
+        if max_numel == 0:
+            return  # no rank calibrated it
+        if max_numel > 1:
+            # A tensor amax (per-channel, static per-block) has a shape only the ranks holding one
+            # know, so the ranks reduce it only when every rank holds one of the same shape and of
+            # the same listed dtype (an unlisted one codes as 0, like a rank without an amax), and
+            # all raise together otherwise.
+            same_shape = -neg_min_numel == max_numel and -neg_min_shape == max_shape
+            if not same_shape or -neg_min_code != max_code or max_code == 0:
+                raise RuntimeError(
+                    f"Cannot amax-sync unevenly-calibrated non-per-tensor quantizer {type(self).__name__}: "
+                    "some ranks hold no amax for it, or one of another shape or dtype, or of a dtype "
+                    "outside the listed ones, and a per-channel / per-block amax is reduced only when "
+                    "every rank holds one alike. Ensure every rank calibrates it (e.g. increase "
+                    "--calib-size)."
                 )
+            assert amax is not None  # every rank holds one
+            reduced = amax.to(device=device)  # the backend's device; a no-op when already there
+            _all_reduce_amax(reduced, group)
+            if reduced is not amax:
+                amax.copy_(reduced)
+            return
+        if amax is not None:
+            amax.copy_(packed[0])
+        else:
+            dtype = _AMAX_DTYPES[int(max_code) - 1] if max_code > 0 else torch.float32
+            held = [
+                t for t in (*self._buffers.values(), *self._parameters.values()) if t is not None
+            ]
+            target = held[0].device if held else (state_device or packed.device)
+            self._set_buffer("_amax", packed[0].to(device=target, dtype=dtype).clone())
 
     @contextlib.contextmanager
     def disable_pre_quant_scale(self):
@@ -1527,6 +1624,39 @@ def _to_local(t: torch.Tensor) -> torch.Tensor:
     if DTensor is not None and isinstance(t, DTensor):
         return t.to_local()
     return t
+
+
+# The dtypes a calibrated amax can have, so a rank that never calibrated a quantizer adopts the same one.
+_AMAX_DTYPES = (torch.float32, torch.bfloat16, torch.float16, torch.float64)
+
+
+def _all_reduce_amax(tensor: torch.Tensor, group) -> None:
+    """MAX all-reduce ``tensor`` in place, naming the likely cause of a failure."""
+    try:
+        dist.all_reduce(tensor, op=dist.ReduceOp.MAX, group=group)
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"Failed to synchronize amax across the calibration group: {e}. Common causes: a CUDA OOM "
+            "when NCCL lazily allocates communication buffers under calibration memory pressure (free "
+            "cached activations with gc.collect()/torch.cuda.empty_cache() before the sync, or reduce "
+            "the calibration sequence length / batch size), or an amax on a device the group's "
+            "backend does not serve."
+        ) from e
+
+
+def _collective_device(group) -> torch.device:
+    """The device every rank of ``group`` hands its collectives: CUDA when NCCL serves it, else CPU.
+
+    Derived from the group's backends, which all ranks share, rather than from a local tensor: a rank
+    that never calibrated a quantizer has no amax to ask, and ranks that disagree on the device type
+    reach different backends and hang. Read from the group's configuration, not its name:
+    ``init_process_group()`` without a backend names the group ``undefined`` but configures NCCL for
+    CUDA (``cuda:nccl``, next to ``cpu:gloo`` in some torch builds). A gloo-only group has no CUDA
+    backend at all.
+    """
+    if torch.cuda.is_available() and "nccl" in dist.get_backend_config(group):
+        return torch.device("cuda", torch.cuda.current_device())
+    return torch.device("cpu")
 
 
 class StaticBlockScaleQuantizer(TensorQuantizer):

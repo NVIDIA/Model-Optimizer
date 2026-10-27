@@ -56,18 +56,13 @@ Smoke test (``--verify``) loads the assembled dir via QwenImagePipeline and
 checks the transformer config matches the student's.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import logging
 import os
 import shutil
 import sys
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 

@@ -42,8 +42,6 @@ finished — but they classify as INFRA_TRANSIENT (wait for NEL to resume/finish
 not a real regression), distinct from a terminal FAILED.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import math

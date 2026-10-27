@@ -38,7 +38,7 @@ import warnings
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -201,7 +201,7 @@ def default_run_name() -> str:
     Used by :class:`MlflowRunLogger` and by a caller handing the name to something else that
     opens the run, so both honour the documented default rather than MLflow's random one.
     """
-    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
 
 
 def current_user() -> str:
@@ -582,7 +582,7 @@ class MlflowRunLogger:
         otherwise stop at the last line the script printed. Written to the file only, so the
         console still shows the traceback exactly once.
         """
-        if sys.exc_info()[0] is None or self._saved_streams is None:
+        if sys.exception() is None or self._saved_streams is None:
             return
         sink = self._saved_streams[2]
         if not sink.closed:

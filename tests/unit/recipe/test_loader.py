@@ -15,8 +15,8 @@
 
 """Unit tests for modelopt.recipe.loader and modelopt.recipe.loader.load_config."""
 
+import contextlib
 import json
-import os
 import re
 import sys
 import types
@@ -2042,13 +2042,8 @@ def test_import_circular_via_path_aliases_raises(tmp_path):
         f"  algorithm: max\n"
         f"  quant_cfg: []\n"
     )
-    cwd = os.getcwd()
-    os.chdir(tmp_path)
-    try:
-        with pytest.raises(ValueError, match="Circular import"):
-            load_recipe(recipe_file)
-    finally:
-        os.chdir(cwd)
+    with contextlib.chdir(tmp_path), pytest.raises(ValueError, match="Circular import"):
+        load_recipe(recipe_file)
 
 
 def test_import_cross_file_same_name_no_conflict(tmp_path):

@@ -19,11 +19,10 @@ description = "Nvidia Model Optimizer: A unified library of SOTA model optimizat
 readme = { text = "Checkout https://github.com/nvidia/Model-Optimizer for more information.", content-type = "text/markdown" }
 license = "Apache-2.0"
 license-files = ["LICENSE_HEADER"]
-requires-python = ">=3.10,<3.15"
+requires-python = ">=3.11,<3.15"
 authors = [{ name = "NVIDIA Corporation" }]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -54,33 +53,27 @@ dependencies = [
 [project.optional-dependencies]
 onnx = [
     "cppimport",
-    "cupy-cuda12x; (python_version <= '3.10' or platform_system != 'Linux' or platform_machine != 'x86_64') and platform_machine != 'aarch64' and platform_machine != 'ARM64' and platform_system != 'Darwin'",
-    "cupy-cuda13x; python_version > '3.10' and platform_system == 'Linux' and platform_machine == 'x86_64'",
     "lief",
     "ml_dtypes",
     "onnx-graphsurgeon>=0.6.1",
     "onnx~=1.21.0; platform_system != 'Windows'",
     "onnx~=1.23.2; platform_system == 'Windows'",
     "onnxconverter-common~=1.16.0",
-    # Python 3.10 support for ModelOpt ONNX is deprecated and will be removed in a future release.
-    # Native Windows ARM64 does not support ModelOpt ONNX on Python 3.10.
-    # ORT for Windows x64
-    "onnxruntime-gpu==1.22.0; platform_system == 'Windows' and platform_machine == 'AMD64'",
-    # ORT host and standalone TensorRT-RTX ABI EP for native Windows ARM64.
-    "onnxruntime~=1.24.2; python_version > '3.10' and platform_system == 'Windows' and platform_machine == 'ARM64'",
-    "onnxruntime-ep-nv-tensorrt-rtx-cu13==0.4.0; python_version > '3.10' and platform_system == 'Windows' and platform_machine == 'ARM64'",
-    # ORT with Python <= 3.10 on supported platforms
-    "onnxruntime~=1.22.0; python_version <= '3.10' and (platform_machine == 'aarch64' or platform_system == 'Darwin')",
-    "onnxruntime-gpu~=1.22.0; python_version <= '3.10' and platform_machine != 'aarch64' and platform_system != 'Darwin' and platform_system != 'Windows'",
-    # ORT with Python > 3.10; the 1.30 CUDA 13 upgrade is validated on Linux x86-64.
-    # CUDA 12.8 users on that platform: see docs/source/getting_started/_installation_for_Linux.rst.
-    # Retain existing pins on other platforms until their runtime/EP tests pass.
-    "onnxruntime~=1.24.2; python_version > '3.10' and (platform_machine == 'aarch64' or platform_system == 'Darwin')",
-    "onnxruntime-gpu~=1.24.2; python_version > '3.10' and platform_machine != 'aarch64' and platform_system != 'Darwin' and platform_system != 'Windows' and (platform_system != 'Linux' or platform_machine != 'x86_64')",
-    "onnxruntime-gpu>=1.29,<1.31; python_version > '3.10' and platform_system == 'Linux' and platform_machine == 'x86_64'",
     "onnxscript",
     "onnxslim>=0.1.76",
     "polygraphy>=0.53.4",
+    # Linux x86-64: CUDA 13. For CUDA 12, see docs/source/getting_started/_installation_for_Linux.rst.
+    "cupy-cuda13x; platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "onnxruntime-gpu>=1.29,<1.31; platform_system == 'Linux' and platform_machine == 'x86_64'",
+    # Linux aarch64 and macOS: CPU-only ORT.
+    "onnxruntime~=1.24.2; platform_machine == 'aarch64' or platform_system == 'Darwin'",
+    # Windows x64: CUDA 12.
+    "cupy-cuda12x; platform_system == 'Windows' and platform_machine == 'AMD64'",
+    "onnxruntime-gpu==1.22.0; platform_system == 'Windows' and platform_machine == 'AMD64'",
+    # Windows ARM64: ORT host plus the standalone TensorRT-RTX ABI EP.
+    "cupy-cuda13x>=14.2.0; platform_system == 'Windows' and platform_machine == 'ARM64'",
+    "onnxruntime~=1.26.0; platform_system == 'Windows' and platform_machine == 'ARM64'",
+    "onnxruntime-ep-nv-tensorrt-rtx-cu13==0.4.0; platform_system == 'Windows' and platform_machine == 'ARM64'",
 ]
 hf = [
     "accelerate>=1.0.0",
@@ -111,7 +104,7 @@ dev-lint = [
     "pre-commit==4.6.0",
     "ruff==0.15.20",
 ]
-# Docs are only built on Python >=3.12 (sphinx 9.x requires it); markers keep `uv lock` from resolving these for 3.10/3.11, which we don't care about for building docs.
+# Docs are only built on Python >=3.12 (sphinx 9.x requires it); markers keep `uv lock` from resolving these for 3.11, which we don't care about for building docs.
 dev-docs = [
     "autodoc_pydantic~=2.2.0; python_version >= '3.12'",
     "sphinx~=9.1.0; python_version >= '3.12'",
@@ -131,7 +124,6 @@ dev-test = [
     "pytest-instafail==0.5.0",
     "pytest-timeout~=2.4.0",
     "pytest-xdist~=3.8.0",
-    "tomli; python_version < '3.11'",
     "uv",
     # test-specific dependencies
     "psutil", # tools/resource_monitor.py sidecar (tests/unit/tools)
@@ -196,7 +188,7 @@ managed = true
 ###############################  LINTING, FORMATTING CONFIGURATION  ################################
 ####################################################################################################
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 100        # Line length limit for code
 fix = true
 
@@ -292,7 +284,7 @@ split-on-trailing-comma = false
 
 [tool.mypy]
 files = "."
-python_version = "3.10"
+python_version = "3.11"
 install_types = true
 non_interactive = true
 show_error_codes = true

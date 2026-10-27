@@ -30,8 +30,6 @@ Run it once after building the cache, pointing ``--output`` at the cache directo
 Then set the config's ``negative_prompt_embedding_path`` to that file.
 """
 
-from __future__ import annotations
-
 import argparse
 import logging
 import os
