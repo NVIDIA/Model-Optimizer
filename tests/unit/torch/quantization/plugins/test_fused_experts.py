@@ -17,6 +17,7 @@
 
 import copy
 import warnings
+import weakref
 from contextlib import nullcontext
 
 import pytest
@@ -55,6 +56,7 @@ from modelopt.torch.quantization.plugins.huggingface import (
     register_sparse_moe_on_the_fly,
 )
 from modelopt.torch.quantization.utils.core_utils import weight_attr_names
+from modelopt.torch.utils.moe import torch_a2a_experts_forward
 
 
 def test_native_fp8_experts_dequantized_before_nvfp4_export():
@@ -286,6 +288,121 @@ def _route_once_to_each_expert(model):
 
 
 # ---------------------------------------------------------------------------
+# grouped_mm backend fixtures: a synthetic fused-experts module that can run
+# either the eager (F.linear) forward or the real transformers grouped_mm
+# forward, selected by ``config._experts_implementation``. Used to verify
+# grouped_mm calibration matches eager and that local-Hessian capture works in
+# grouped mode. The class avoids the ``@use_experts_implementation`` decorator so
+# it imports on transformers builds that predate the grouped_mm backend.
+# ---------------------------------------------------------------------------
+try:
+    import transformers.integrations.moe as _moe_integration
+
+    HAS_GROUPED_MM = hasattr(_moe_integration, "_grouped_linear")
+except ImportError:
+    HAS_GROUPED_MM = False
+
+
+class _ExpertsConfig:
+    """Minimal config carrying the experts-implementation selector."""
+
+    def __init__(self, impl="grouped_mm"):
+        self._experts_implementation = impl
+        self.hidden_act = "silu"
+        self.ep_group = None  # the expert-parallel group a torch_a2a forward dispatches over
+
+
+class _SyntheticGroupedExperts(nn.Module):
+    """Fused experts dispatching to eager or the real grouped_mm forward.
+
+    Mirrors the HF transformers 5.x fused-experts contract
+    (``has_gate``/``has_bias``/``is_transposed``/``_apply_gate`` + 3-D
+    ``gate_up_proj``/``down_proj``) that ``grouped_mm_experts_forward`` expects.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.num_experts = NUM_EXPERTS
+        self.hidden_dim = HIDDEN_DIM
+        self.intermediate_dim = INTERMEDIATE_DIM
+        self.has_gate = True
+        self.has_bias = False
+        self.is_transposed = False
+        self.is_concatenated = True
+        # What transformers' @use_experts_implementation sets (5.18+ reads it in grouped_mm).
+        self._is_expert_parallel = False
+        self.gate_up_proj = nn.Parameter(
+            torch.randn(NUM_EXPERTS, 2 * INTERMEDIATE_DIM, HIDDEN_DIM) * 0.02
+        )
+        self.down_proj = nn.Parameter(torch.randn(NUM_EXPERTS, HIDDEN_DIM, INTERMEDIATE_DIM) * 0.02)
+        self.act_fn = nn.SiLU()
+
+    def _apply_gate(self, gate_up_out):
+        gate, up = gate_up_out.chunk(2, dim=-1)
+        return self.act_fn(gate) * up
+
+    def _eager_forward(self, hidden_states, top_k_index, top_k_weights):
+        final_hidden_states = torch.zeros_like(hidden_states)
+        with torch.no_grad():
+            expert_mask = F.one_hot(top_k_index, num_classes=self.num_experts).permute(2, 1, 0)
+            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+        for expert_idx in expert_hit:
+            expert_idx = expert_idx[0]
+            if expert_idx == self.num_experts:
+                continue
+            top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+            current_state = hidden_states[token_idx]
+            gate, up = F.linear(current_state, self.gate_up_proj[expert_idx]).chunk(2, dim=-1)
+            current_hidden_states = self.act_fn(gate) * up
+            current_hidden_states = F.linear(current_hidden_states, self.down_proj[expert_idx])
+            current_hidden_states = (
+                current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
+            )
+            final_hidden_states.index_add_(
+                0, token_idx, current_hidden_states.to(final_hidden_states.dtype)
+            )
+        return final_hidden_states
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        if self.config._experts_implementation == "grouped_mm":
+            return _moe_integration.grouped_mm_experts_forward(
+                self, hidden_states, top_k_index, top_k_weights
+            )
+        if self.config._experts_implementation == "torch_a2a":
+            return torch_a2a_experts_forward(
+                self, hidden_states, top_k_index, top_k_weights, self.config.ep_group
+            )
+        return self._eager_forward(hidden_states, top_k_index, top_k_weights)
+
+
+class _GroupedSparseMoeBlock(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.gate = _SyntheticTopKRouter()
+        self.experts = _SyntheticGroupedExperts(config)
+
+    def forward(self, hidden_states):
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+        _, top_k_weights, top_k_index = self.gate(hidden_states)
+        hidden_states = self.experts(hidden_states, top_k_index, top_k_weights)
+        return hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+
+
+class _GroupedMoEModel(nn.Module):
+    """Minimal MoE model whose experts run the selected backend."""
+
+    def __init__(self, impl):
+        super().__init__()
+        self.config = _ExpertsConfig(impl=impl)
+        self.moe = _GroupedSparseMoeBlock(self.config)
+
+    def forward(self, x):
+        return self.moe(x)
+
+
+# ---------------------------------------------------------------------------
 # Tests for _is_fused_experts_module
 # ---------------------------------------------------------------------------
 class TestIsFusedExpertsModule:
@@ -354,6 +471,28 @@ class TestQuantFusedExperts:
         # Block is NOT registered because fused experts are not iterable
         assert QuantModuleRegistry.get(block_type) is None
         self._cleanup_registry(expert_type)
+
+    def test_a_wrapper_that_defines_its_weights_in_get_expert_weight_is_eager_only(self):
+        """The grouped_mm forward quantizes the stored weight without get_expert_weight, so a wrapper
+        that defines its weight domain there must calibrate on the eager forward. One that does not
+        say so is refused when it is defined, rather than calibrating the stored weights."""
+        with pytest.raises(TypeError, match="_eager_only"):
+
+            class _Scaled(_QuantFusedExperts):
+                def get_expert_weight(self, name, idx, dtype=None):
+                    return super().get_expert_weight(name, idx, dtype)
+
+        class _ScaledOnEager(_QuantFusedExperts):
+            _eager_only = True
+
+            def get_expert_weight(self, name, idx, dtype=None):
+                return super().get_expert_weight(name, idx, dtype)
+
+        # Inheriting the override does not take it off the eager forward either.
+        with pytest.raises(TypeError, match="_eager_only"):
+
+            class _ScaledOnGroupedMM(_ScaledOnEager):
+                _eager_only = False
 
     def test_convert_creates_quantizers(self):
         """After conversion, fused experts should have shared input and per-expert weight quantizers."""
@@ -1596,6 +1735,174 @@ class TestNormalizeFusedExpertsQuantizerName:
 
 
 # ---------------------------------------------------------------------------
+# Tests for the grouped_mm backend: _QuantFusedExperts intercepts the real
+# transformers grouped_mm forward (via _grouped_linear), and grouped calibration
+# must produce the same per-expert quantizer state as the eager F.linear path.
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(not HAS_GROUPED_MM, reason="transformers grouped_mm backend unavailable")
+class TestGroupedMMExperts:
+    @staticmethod
+    def _cleanup_registry(mod_type):
+        if QuantModuleRegistry.get(mod_type) is not None:
+            QuantModuleRegistry.unregister(mod_type)
+
+    @staticmethod
+    def _quant_cfg():
+        return {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*gate_up_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*down_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*gate_up_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+                {
+                    "quantizer_name": "*down_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+            ],
+            "algorithm": "max",
+        }
+
+    @staticmethod
+    def _forward_loop_all_experts(m):
+        # Route every token to all experts (round-robin) so eager and grouped both
+        # calibrate every expert's weight quantizer — eager only sees routed experts.
+        torch.manual_seed(0)
+        seq = 16
+        hidden = torch.randn(seq, HIDDEN_DIM)
+        top_k_index = torch.stack(
+            [torch.arange(seq) % NUM_EXPERTS, (torch.arange(seq) + 1) % NUM_EXPERTS], dim=1
+        )
+        top_k_weights = torch.softmax(torch.randn(seq, TOP_K), dim=1)
+        with torch.no_grad():
+            m.moe.experts(hidden, top_k_index, top_k_weights)
+
+    def test_forward_passthrough_matches(self):
+        """Converted grouped experts with their quantizers disabled match the unconverted forward."""
+        self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.manual_seed(0)
+        model = _GroupedMoEModel("grouped_mm")
+        ref = _SyntheticGroupedExperts(_ExpertsConfig("grouped_mm"))
+        ref.load_state_dict(model.moe.experts.state_dict())
+
+        register_fused_experts_on_the_fly(model)
+        converted = QuantModuleRegistry.convert(model.moe.experts)
+        for q in converted.modules():
+            if isinstance(q, TensorQuantizer):
+                q.disable()
+
+        seq = 8
+        hidden = torch.randn(seq, HIDDEN_DIM)
+        top_k_index = torch.randint(0, NUM_EXPERTS, (seq, TOP_K))
+        top_k_weights = torch.softmax(torch.randn(seq, TOP_K), dim=1)
+        with torch.no_grad():
+            out_ref = ref(hidden, top_k_index, top_k_weights)
+            out_test = converted(hidden, top_k_index, top_k_weights)
+        assert torch.allclose(out_ref, out_test, atol=1e-6), (
+            f"Max diff: {(out_ref - out_test).abs().max().item()}"
+        )
+        self._cleanup_registry(_SyntheticGroupedExperts)
+
+    def test_calibration_matches_eager(self):
+        """grouped_mm PTQ calibration yields the same quantizer state as eager PTQ.
+
+        Identical weights + identical routing ⇒ the shared input quantizers see the
+        same activation set and each per-expert weight quantizer sees the same slice,
+        so amax must match (max abs is order-free; only the down-proj input flows
+        through a GEMM, hence the small tolerance there).
+        """
+        self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.manual_seed(0)
+        eager_model = _GroupedMoEModel("eager")
+        grouped_model = _GroupedMoEModel("grouped_mm")
+        grouped_model.load_state_dict(eager_model.state_dict())
+
+        for model in (eager_model, grouped_model):
+            impl = model.config._experts_implementation
+            # quantize() calibrates every model on eager; calibrate on the backend under test.
+            mtq.quantize(model, self._quant_cfg())
+            model.config._experts_implementation = impl
+            mtq.calibrate(model, "max", self._forward_loop_all_experts)
+
+        e = eager_model.moe.experts
+        g = grouped_model.moe.experts
+
+        # Shared input quantizers (down flows through a GEMM -> small tolerance).
+        for q_name in ("gate_up_proj_input_quantizer", "down_proj_input_quantizer"):
+            ea = getattr(e, q_name).amax
+            ga = getattr(g, q_name).amax
+            assert ea is not None and ga is not None, f"{q_name} not calibrated"
+            assert torch.allclose(ea, ga, atol=1e-3, rtol=1e-2), (
+                f"{q_name} amax mismatch: eager={ea} grouped={ga}"
+            )
+
+        # Per-expert weight amax (weights identical -> tight match), all experts calibrated.
+        for idx in range(NUM_EXPERTS):
+            for q_list in ("gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"):
+                eq = getattr(e, q_list)[idx].amax
+                gq = getattr(g, q_list)[idx].amax
+                assert eq is not None and gq is not None, f"{q_list}[{idx}] not calibrated"
+                assert torch.allclose(eq, gq, atol=1e-5), f"{q_list}[{idx}] weight amax mismatch"
+        self._cleanup_registry(_SyntheticGroupedExperts)
+
+    def test_fake_quantizing_a_projection_keeps_one_experts_slice_alive(self):
+        """Without autograd each expert's fake-quantized slice goes into the output as it is made:
+        a projection's slices all alive beside the output would double its memory."""
+        model = _GroupedMoEModel("grouped_mm")
+        try:
+            mtq.quantize(model, self._quant_cfg(), self._forward_loop_all_experts)
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+        experts = model.moe.experts
+        weight, quantizers = experts.gate_up_proj, experts.gate_up_proj_weight_quantizers
+        made = []
+
+        def one_alive(_quantizer, _args, output):
+            assert all(ref() is None for ref in made), "an earlier expert's slice is still alive"
+            made.append(weakref.ref(output))
+
+        handles = [q.register_forward_hook(one_alive) for q in quantizers]
+        try:
+            with torch.no_grad():
+                out = experts._quantize_grouped_weight(weight, quantizers)
+        finally:
+            for handle in handles:
+                handle.remove()
+
+        assert len(made) == NUM_EXPERTS
+        with torch.no_grad():
+            expected = torch.stack([q(weight[idx]) for idx, q in enumerate(quantizers)])
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+    def test_an_eager_only_wrapper_refuses_the_grouped_forward(self):
+        """A wrapper whose weights are defined on the eager forward raises if the grouped one runs,
+        rather than quantize the stored weight."""
+
+        class _EagerOnlyExperts(_QuantFusedExperts):
+            _eager_only = True
+
+        self._cleanup_registry(_SyntheticGroupedExperts)
+        QuantModuleRegistry.register({_SyntheticGroupedExperts: "test.SyntheticGroupedExperts"})(
+            _EagerOnlyExperts
+        )
+        try:
+            model = _GroupedMoEModel("grouped_mm")
+            QuantModuleRegistry.convert(model.moe.experts)
+            with pytest.raises(RuntimeError, match="eager experts forward only"):
+                self._forward_loop_all_experts(model)
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+
+
+# ---------------------------------------------------------------------------
 # Tests for the non-gated fused-experts path (NemotronH NemotronHExperts):
 # single up_proj (no gate half) + down_proj. Quantizers are named after the
 # backing weights: up_proj_* and down_proj_*.
@@ -1881,7 +2188,7 @@ class TestQwen3VLMoeTextExperts:
 
         return Qwen3VLMoeTextExperts
 
-    def test_left_to_generic_fused_experts_wrapper(self):
+    def test_left_to_generic_fused_experts_wrapper_class(self):
         """The experts must be left to the generic fused-experts wrapper."""
         # A static registration would shadow on-the-fly detection.
         assert QuantModuleRegistry.get(self._experts_type()) is None
