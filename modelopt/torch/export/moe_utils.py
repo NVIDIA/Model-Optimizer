@@ -140,6 +140,23 @@ def _local_expert_weight(module: nn.Module, proj: str, local: torch.Tensor, idx:
     return type(module).get_expert_weight(_LocalRows(module, proj, local), proj, idx, dtype)
 
 
+def _stack_row(stack: torch.Tensor | None, idx: int, row: torch.Tensor, rows: int, device):
+    """Write ``row`` as row ``idx`` of a ``rows``-row stack, made on ``device`` for the first row.
+
+    The fold packs one expert at a time: copied into one stack as each is packed, the projection is
+    held once, where a list of the packed experts and their ``torch.stack`` would hold it twice.
+    """
+    if stack is None:
+        stack = torch.empty((rows, *row.shape), dtype=row.dtype, device=device)
+    elif row.shape != stack.shape[1:] or row.dtype != stack.dtype:
+        raise ValueError(
+            f"Expert {idx} packs to {row.dtype} {tuple(row.shape)}, the experts before it to "
+            f"{stack.dtype} {tuple(stack.shape[1:])}; they cannot be stacked."
+        )
+    stack[idx].copy_(row)
+    return stack
+
+
 def _refuse_unfoldable_shards(module: nn.Module, proj: str, weight, num_quantizers: int) -> None:
     """Refuse a sharded fused expert weight the keep-fused fold cannot fold, on every rank alike.
 
@@ -282,8 +299,8 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
             local_w = wdata
             local_indices = list(range(n))
 
-        fp8_weights: list[torch.Tensor] = []
-        weight_scales: list[torch.Tensor] = []
+        local_fp8: torch.Tensor | None = None
+        local_ws: torch.Tensor | None = None
         weight_scale_2s: list[torch.Tensor] = []
         input_scale: torch.Tensor | None = None
         for local_idx, global_idx in enumerate(local_indices):
@@ -308,8 +325,12 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
             if input_quantizer is not None:
                 wrapper.input_quantizer = input_quantizer
             _export_quantized_weight(wrapper, dtype)
-            fp8_weights.append(wrapper.weight.data)
-            weight_scales.append(wrapper.weight_scale)
+            rows = len(local_indices)
+            packed = wrapper.weight.data
+            local_fp8 = _stack_row(local_fp8, local_idx, packed, rows, packed.device)
+            # On the weight's device: per-tensor FP8 builds each expert's scale from a Python float,
+            # on the CPU, and a DTensor rewrap would label a CPU shard with the weight's device mesh.
+            local_ws = _stack_row(local_ws, local_idx, wrapper.weight_scale, rows, local_w.device)
             # NVFP4 carries a SECOND per-tensor weight scale (weight_scale_2) that dequantizes the
             # per-block weight_scale; FP8 has none. Keep it so the fused buffer (and the per-expert
             # split) stay dequantizable.
@@ -317,10 +338,8 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
                 weight_scale_2s.append(wrapper.weight_scale_2)
             if hasattr(wrapper, "input_scale"):
                 input_scale = wrapper.input_scale
-        local_fp8 = torch.stack(fp8_weights, dim=0)
-        # On the weight's device: per-tensor FP8 builds each expert's scale from a Python float, on
-        # the CPU, and a DTensor rewrap would label a CPU shard with the weight's device mesh.
-        local_ws = torch.stack(weight_scales, dim=0).to(local_w.device)
+        # Every rank holds an expert (_refuse_unfoldable_shards), so both stacks have a row.
+        assert local_fp8 is not None and local_ws is not None
         if is_dt:
             # Keep the global expert count: from_local would infer it as local x world, which is
             # wrong for an uneven shard (3 experts on 2 ranks) and misnumbers the experts.
