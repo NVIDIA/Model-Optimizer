@@ -21,9 +21,12 @@ import copy
 import importlib
 
 import numpy as np
+import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 from onnx.reference import ReferenceEvaluator
+
+from modelopt.onnx.graph_surgery import run_graph_surgery
 
 ort = pytest.importorskip("onnxruntime", reason="onnxruntime required")
 _dla_pipeline = importlib.import_module("modelopt.onnx.graph_surgery.make_dla_compatible")
@@ -396,10 +399,6 @@ def test_qdq_dtypes_custom_removes_int8_pair():
 
 def test_qdq_dtypes_threaded_through_run_graph_surgery(tmp_path):
     """The kwarg is forwarded by the dispatcher to the make-dla-compatible surgery."""
-    import onnx
-
-    from modelopt.onnx.graph_surgery import run_graph_surgery
-
     model = _int8_qdq_relu_model()
     _clamp_ir(model)
     in_path = tmp_path / "in.onnx"

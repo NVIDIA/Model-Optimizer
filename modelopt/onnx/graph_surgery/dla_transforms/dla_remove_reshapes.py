@@ -19,8 +19,10 @@ import numpy as np
 from onnx import TensorProto, helper
 
 from ..utils.graph_utils import GraphCache, add_initializer, batch_replace_nodes
+from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _subgraph_captures
 from .dla_indexing import _operator_nodes
+from .dla_rank_conversion import _runtime_input_names
 
 __all__ = []
 
@@ -29,6 +31,7 @@ def _apply_remove_reshapes(model):
     """Collapse fixed reshape chains while retaining rank-sensitive consumers and runtime controls."""
     graph = model.graph
     cache = GraphCache(graph)
+    runtime_inputs = _runtime_input_names(model)
     reshapes = _operator_nodes(model, {"Reshape"})
     captured = _subgraph_captures(graph)
     chains = []
@@ -50,7 +53,7 @@ def _apply_remove_reshapes(model):
     for chain in chains:
         first, last = chain[0], chain[-1]
         if any(
-            node.input[1] not in cache.init_names or node.input[1] in cache.graph_input_names
+            node.input[1] not in cache.init_names or node.input[1] in runtime_inputs
             for node in chain
         ):
             continue
@@ -105,4 +108,5 @@ def _apply_remove_reshapes(model):
             if id(node) in replacements
         },
     )
+    _add_legacy_initializer_inputs(model)
     return model

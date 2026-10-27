@@ -34,6 +34,39 @@ def _execute(model, feeds):
     )
 
 
+@pytest.mark.parametrize("ir_version", [3, 9])
+def test_fixed_chain_controls_respect_legacy_initializer_declarations(ir_version):
+    """Collapse legacy fixed targets, declare new controls, and retain modern runtime defaults."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Reshape", ["x", "first_shape"], ["middle"]),
+                helper.make_node("Reshape", ["middle", "last_shape"], ["y"]),
+            ],
+            "legacy_chain",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 1, 2, 3]),
+                helper.make_tensor_value_info("first_shape", TensorProto.INT64, [2]),
+                helper.make_tensor_value_info("last_shape", TensorProto.INT64, [3]),
+            ],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [3, 1, 2])],
+            [
+                numpy_helper.from_array(np.array([2, 3], np.int64), "first_shape"),
+                numpy_helper.from_array(np.array([3, 1, 2], np.int64), "last_shape"),
+            ],
+            value_info=[helper.make_tensor_value_info("middle", TensorProto.FLOAT, [2, 3])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = ir_version
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(1, 1, 2, 3)}
+    expected = _execute(model, feeds)
+    converted = _apply_remove_reshapes(copy.deepcopy(model))
+    assert len(converted.graph.node) == (1 if ir_version == 3 else 2)
+    for actual, reference in zip(_execute(converted, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("cast", [False, True])
 def test_native_gather_index_views_are_not_bypassed(legacy, cast):
