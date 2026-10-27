@@ -34,7 +34,7 @@ from ..utils.graph_utils import (
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _RANK_AGNOSTIC_OPS, _subgraph_captures
 from .dla_indexing import _insert_support_nodes, _known_rank, _operator_nodes
-from .dla_model_boundaries import _has_native_symbolic_data, _is_standard_node
+from .dla_model_boundaries import _REDUCTION_OPS, _has_native_symbolic_data, _is_standard_node
 
 __all__ = []
 
@@ -56,8 +56,13 @@ def _promoted_input_shape(cache, name, local_functions, native_sources):
         seen.add(current)
         producer = cache.get_producer(current)
         if producer is None or not _is_standard_node(
-            producer, local_functions, {"Reshape", "Slice", "QuantizeLinear", "DequantizeLinear"}
+            producer,
+            local_functions,
+            {"Reshape", "Slice", "QuantizeLinear", "DequantizeLinear"} | _REDUCTION_OPS,
         ):
+            break
+        keepdims = _attribute(producer, "keepdims")
+        if producer.op_type in _REDUCTION_OPS and keepdims is not None and keepdims.i == 0:
             break
         if producer.op_type == "Reshape":
             target_shape = cache.get_shape(producer.input[1])
@@ -323,7 +328,9 @@ def _pad_shape_inputs(model, op_type, suffix):
         if rank is None:
             raise ValueError(f"{node.name!r}: {op_type} input rank must be known")
         if op_type == "Tile" and rank == 1:
-            continue
+            data = cache.get_init(node.input[0])
+            if data is None or len(data.dims) == 1:
+                continue
         if rank < 4 and _has_native_symbolic_data(
             cache, node.input[0], local_functions, native_sources
         ):

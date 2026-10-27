@@ -1332,20 +1332,26 @@ def test_runtime_slice_extents_retain_promoted_axes(operation):
     np.testing.assert_allclose(_execute(converted, feeds)[0], expected, rtol=1e-6, atol=1e-7)
 
 
-@pytest.mark.parametrize("initializer", [False, True])
+@pytest.mark.parametrize(("initializer", "shared"), [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("tail", [False, True])
-def test_rank_one_tile_data_and_repeats_remain_native(initializer, tail):
+def test_rank_one_tile_data_and_repeats_remain_native(initializer, shared, tail):
     """Execute rank-one Tile for graph inputs and fixed data without padding repeats."""
     data = np.array([1, 2, 3], np.float32)
     nodes = [helper.make_node("Tile", ["x", "repeats"], ["tiled" if tail else "y"])]
     if tail:
         nodes.append(helper.make_node("Relu", ["tiled"], ["y"]))
+    inputs = [] if initializer else [helper.make_tensor_value_info("x", TensorProto.FLOAT, [3])]
+    outputs = [helper.make_tensor_value_info("y", TensorProto.FLOAT, [6])]
+    if shared:
+        nodes.append(helper.make_node("Add", ["other", "x"], ["added"]))
+        inputs.append(helper.make_tensor_value_info("other", TensorProto.FLOAT, [1, 1, 2, 3]))
+        outputs.append(helper.make_tensor_value_info("added", TensorProto.FLOAT, [1, 1, 2, 3]))
     model = helper.make_model(
         helper.make_graph(
             nodes,
             "native_tile",
-            [] if initializer else [helper.make_tensor_value_info("x", TensorProto.FLOAT, [3])],
-            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [6])],
+            inputs,
+            outputs,
             [numpy_helper.from_array(np.array([2], np.int64), "repeats")]
             + ([numpy_helper.from_array(data, "x")] if initializer else []),
         ),
@@ -1353,9 +1359,12 @@ def test_rank_one_tile_data_and_repeats_remain_native(initializer, tail):
         ir_version=9,
     )
     feeds = {} if initializer else {"x": data}
-    expected = _execute(model, feeds)[0]
+    if shared:
+        feeds["other"] = np.arange(6, dtype=np.float32).reshape(1, 1, 2, 3)
+    expected = _execute(model, feeds)
     converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
-    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+    for actual, reference in zip(_execute(converted, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
 
 
 @pytest.mark.parametrize("operation", ["Tile", "Expand", "Reshape"])
