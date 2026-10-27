@@ -359,7 +359,17 @@ def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> Non
     A model is distributed once, and its plan recorded once: recording a plan on a model that, or
     any of whose submodules, already records one raises, the same plan included, and leaves the
     model as it was. No code reloads or re-distributes a model it loaded.
+
+    In a run of several ranks, a plan for another number of ranks raises too, and records nothing:
+    a single process's plan there would be taken at its word, and the model replicated. A plan
+    recorded before the run's group is set up is not checked, nor one in a run of one, where a rank
+    can stand in for several.
     """
+    if size() > 1 and plan.world_size != size():
+        raise ValueError(
+            f"{plan!r} is for {plan.world_size} ranks, but the run it is recorded in has "
+            f"{size()}; a plan's world_size is the ranks that hold the model."
+        )
     for name, module in model.named_modules():
         recorded = getattr(module, _PLAN_ATTR, None)
         if recorded is not None:

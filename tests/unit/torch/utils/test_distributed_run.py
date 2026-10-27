@@ -138,7 +138,10 @@ def _outcome(call):
 
 
 def _no_plan_on_several_ranks_job(rank, size):
-    _, error = _outcome(lambda: distribution_plan(_model()))
+    model = _model()
+    _, error = _outcome(lambda: set_distribution_plan(model, DistributionPlan()))
+    assert isinstance(error, ValueError), error
+    _, error = _outcome(lambda: distribution_plan(model))
     assert isinstance(error, RuntimeError), error
     assert f"is held in a run of {size} ranks" in str(error), error
     model = _model()
@@ -158,8 +161,9 @@ def _no_plan_on_several_ranks_job(rank, size):
 
 def test_a_model_with_no_plan_raises_in_a_run_of_several_ranks(cpu_dist_workers):
     """Held whole or FSDP2-sharded, rather than be taken for a single process's; once a plan is
-    recorded, that plan is what it reads. A module added after the plan was recorded has none, and
-    raises too, rather than read as a single process's."""
+    recorded, that plan is what it reads. A single process's plan cannot be recorded there either,
+    and records nothing. A module added after the plan was recorded has none, and raises too, rather
+    than read as a single process's."""
     cpu_dist_workers.run(_no_plan_on_several_ranks_job)
 
 
