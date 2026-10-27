@@ -453,7 +453,9 @@ def _route(plan: DistributionPlan) -> str | None:
     from modelopt.torch.utils import distributed as dist
 
     if plan.world_size != dist.size():
-        raise ValueError(f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}.")
+        raise ValueError(
+            f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}."
+        )
     if plan.is_expert_parallel:
         raise NotImplementedError(
             f"{plan!r} shards the routed experts, which load_pretrained has no load for. Plan "

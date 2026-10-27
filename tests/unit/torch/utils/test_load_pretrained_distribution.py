@@ -466,7 +466,9 @@ def test_a_single_process_fsdp2_load_needs_a_launcher(monkeypatch, serve, loader
     assert loaders == {}
 
 
-@pytest.mark.parametrize("distribution", [None, DistributionPlan(dense="fsdp")], ids=["decided", "fsdp"])
+@pytest.mark.parametrize(
+    "distribution", [None, DistributionPlan(dense="fsdp")], ids=["decided", "fsdp"]
+)
 def test_a_rank_of_a_launch_without_its_group_is_refused(
     monkeypatch, serve, loaders, auto_class, tmp_path, distribution
 ):
