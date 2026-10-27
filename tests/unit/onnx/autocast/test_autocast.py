@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
+import onnxruntime as ort
 import pytest
 from _test_utils.onnx.lib_test_models import build_conv_isinf_model, build_conv_resize_model
 
@@ -119,6 +120,20 @@ def test_convert_contrib_op_without_tensorrt(tmp_path, monkeypatch):
     )
     assert all(opset.domain != "trt.plugins" for opset in converted.opset_import)
     onnx.checker.check_model(converted)
+
+    inputs = {"X": np.array([[-2.0, -0.5, 0.5, 2.0]], dtype=np.float32)}
+    original_session = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    converted_session = ort.InferenceSession(
+        converted.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    np.testing.assert_allclose(
+        converted_session.run(None, inputs)[0],
+        original_session.run(None, inputs)[0],
+        rtol=2e-3,
+        atol=2e-3,
+    )
 
 
 def test_setup_mappings(simple_model):

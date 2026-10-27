@@ -152,7 +152,8 @@ def get_parser() -> argparse.ArgumentParser:
         help=(
             "List of Execution Providers (EPs) for ONNX-Runtime backend. "
             "Any subset of ['trt', 'cuda:x', 'cpu'], where 'x' is the device id. "
-            "If a custom op is detected in the model, 'trt' will automatically be added to the EP list."
+            "If TensorRT introspection confirms a custom TensorRT plugin, 'trt' is automatically added. "
+            "Without TensorRT Python bindings, introspection is skipped and the selected EPs are kept."
         ),
     )
     parser.add_argument(

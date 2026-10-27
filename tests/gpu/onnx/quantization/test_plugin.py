@@ -192,8 +192,33 @@ def test_trt_plugin_autocast(tmp_path, node_name):
     with open(os.path.join(tmp_path, "model_with_trt_plugin_autocast.onnx"), "w") as f:
         onnx.save_model(model, f.name)
 
+        # TensorRT can lower standard RoiAlign to a plugin without changing its ONNX domain.
+        mixed_model = onnx.ModelProto()
+        mixed_model.CopyFrom(model)
+        mixed_model.graph.initializer.extend(
+            [
+                onnx.numpy_helper.from_array(
+                    np.array([[0, 0, 4, 4]], dtype=np.float32), name="rois"
+                ),
+                onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), name="roi_batch"),
+            ]
+        )
+        mixed_model.graph.node.append(
+            onnx.helper.make_node(
+                "RoiAlign",
+                ["output", "rois", "roi_batch"],
+                ["roi_output"],
+                name="roi_align",
+                output_height=2,
+                output_width=2,
+            )
+        )
+        mixed_model.graph.output.append(
+            onnx.helper.make_tensor_value_info("roi_output", onnx.TensorProto.FLOAT, [1, 16, 2, 2])
+        )
+
         # Check that the model contains TRT custom op
-        graph_sanitizer = GraphSanitizer(model)
+        graph_sanitizer = GraphSanitizer(mixed_model)
         graph_sanitizer.sanitize()
         assert graph_sanitizer.custom_ops == {"CustomSkipLayerNormPluginDynamic"}
         assert graph_sanitizer.trt_plugin_ops == {"CustomSkipLayerNormPluginDynamic"}
@@ -204,6 +229,14 @@ def test_trt_plugin_autocast(tmp_path, node_name):
                 if node.op_type == "CustomSkipLayerNormPluginDynamic"
             )
             == "trt.plugins"
+        )
+        assert (
+            next(
+                node.domain
+                for node in graph_sanitizer.model.graph.node
+                if node.op_type == "RoiAlign"
+            )
+            == ""
         )
 
         # Convert model to FP16

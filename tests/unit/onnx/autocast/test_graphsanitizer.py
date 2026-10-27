@@ -456,13 +456,18 @@ def test_sanitize_large_external_initializer_metadata():
 def test_find_custom_nodes_uses_source_model_path(tmp_path, monkeypatch, is_trt_plugin, node_name):
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
     y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
-    custom_node = helper.make_node("CustomOp", [x.name], [y.name], name=node_name)
-    graph = helper.make_graph([custom_node], "custom_graph", [x], [y])
+    standard_name = "standard" if node_name else ""
+    standard_node = helper.make_node("Relu", [x.name], ["standard_out"], name=standard_name)
+    custom_node = helper.make_node("CustomOp", ["standard_out"], [y.name], name=node_name)
+    graph = helper.make_graph([standard_node, custom_node], "custom_graph", [x], [y])
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 22)])
     model_path = tmp_path / "custom.onnx"
     tensor_info = {"Y": {"dtype": TensorProto.FLOAT, "shape": [1]}}
     layer_name = node_name or "node_of_Y"
-    get_custom_layers = Mock(return_value=([layer_name] if is_trt_plugin else [], tensor_info))
+    plugin_layers = [standard_name or "node_of_standard_out"]
+    if is_trt_plugin:
+        plugin_layers.append(layer_name)
+    get_custom_layers = Mock(return_value=(plugin_layers, tensor_info))
     infer_types_shapes = Mock(return_value=model)
 
     monkeypatch.setattr(graphsanitizer, "TRT_PYTHON_AVAILABLE", True)

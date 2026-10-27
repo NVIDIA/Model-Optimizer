@@ -145,7 +145,8 @@ class GraphSanitizer:
             self.trt_plugin_ops = {
                 node.op_type
                 for node in self.model.graph.node
-                if (node.name or (f"node_of_{node.output[0]}" if node.output else ""))
+                if node.op_type in self.custom_ops
+                and (node.name or (f"node_of_{node.output[0]}" if node.output else ""))
                 in custom_layer_names
             }
 
