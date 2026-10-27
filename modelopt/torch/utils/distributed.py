@@ -695,7 +695,7 @@ class _StridedIterableShard(IterableDataset):
 
     ``DistributedSampler`` only works with map-style datasets. Streaming calibration datasets (e.g. the
     Nemotron image-text ``NemotronTarPlusJsonlIterable``) are iterable, so each rank instead builds its
-    own copy of the stream, the same on every rank and worker as :func:`shard_dataloader` requires,
+    own copy of the stream, the same on every rank as :func:`shard_dataloader` requires,
     and takes slot ``rank`` from every complete group of ``world_size`` consecutive samples. Any
     trailing incomplete group is dropped so every rank yields exactly the same count -- preserving
     the equal-per-rank-batch invariant that keeps per-step EP collectives from hanging when one rank
@@ -738,11 +738,11 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
     rather than silently widened. For streaming ``IterableDataset`` datasets (which have no ``len()``
     and so can't use a sampler) each rank strides its own copy of the stream via
     :class:`_StridedIterableShard`. That stream must yield the same samples in the same order on
-    every rank and in every DataLoader worker, or the shards overlap and the ranks' step counts can
-    differ, which hangs the collectives: one that shuffles needs a fixed seed of its own, as torch
-    seeds each worker's RNG differently and the ranks' RNGs need not agree. A stream loaded with
-    workers is refused: a dataset that splits itself across them by ``get_worker_info()``, as a
-    Hugging Face streaming dataset does, would be split twice and silently lose samples.
+    every rank, or the shards overlap and the ranks' step counts can differ, which hangs the
+    collectives: one that shuffles needs a fixed seed of its own, as the ranks' RNGs need not agree.
+    A stream loaded with workers is refused: a dataset that splits itself across them by
+    ``get_worker_info()``, as a Hugging Face streaming dataset does, would be split twice and
+    silently lose samples.
 
     Forwards all non-sampler DataLoader settings from ``loader`` (batching, workers, pinning,
     prefetch, init fn, generator, ...). With one rank there is nothing to shard: ``loader`` itself
