@@ -34,7 +34,7 @@ from ..utils.graph_utils import (
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _RANK_AGNOSTIC_OPS, _subgraph_captures
 from .dla_indexing import _insert_support_nodes, _known_rank, _operator_nodes
-from .dla_model_boundaries import _has_native_symbolic_data
+from .dla_model_boundaries import _has_native_symbolic_data, _is_standard_node
 
 __all__ = []
 
@@ -51,6 +51,21 @@ def _promoted_input_shape(cache, name, local_functions, native_sources):
     """Distinguish native symbolic paths from inputs prepared for four-dimensional data."""
     shape = _shape_before_boundary_promotion(cache, name)
     rank = len(shape) if shape is not None else _known_rank(cache, name)
+    current, seen = name, set()
+    while rank is None and current not in seen:
+        seen.add(current)
+        producer = cache.get_producer(current)
+        if producer is None or not _is_standard_node(
+            producer, local_functions, {"Reshape", "Slice", "QuantizeLinear", "DequantizeLinear"}
+        ):
+            break
+        if producer.op_type == "Reshape":
+            target_shape = cache.get_shape(producer.input[1])
+            if target_shape is not None and len(target_shape) == 1:
+                rank = target_shape[0]
+            break
+        current = producer.input[0]
+        rank = _known_rank(cache, current)
     native = (
         rank is not None
         and rank < 4
