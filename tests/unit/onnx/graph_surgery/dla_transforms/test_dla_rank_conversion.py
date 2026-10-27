@@ -78,6 +78,8 @@ def test_rank_conversion_preserves_operator_values(operation):
     transformed = copy.deepcopy(model)
     for apply in (_apply_non4d_model_inputs, _apply_non4d_model_outputs, transform):
         options = {"defer_rank_conversion": True} if apply is _apply_non4d_model_outputs else {}
+        if apply is _apply_non4d_model_inputs:
+            options = {"prepared_input_ops": {operation}}
         transformed = apply(transformed, **options)
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
@@ -1498,7 +1500,13 @@ def test_legacy_initializer_controls_remain_fixed(operation):
     for apply in transforms:
         transformed = apply(
             transformed,
-            **({"defer_rank_conversion": True} if apply is _apply_non4d_model_outputs else {}),
+            **(
+                {"defer_rank_conversion": True}
+                if apply is _apply_non4d_model_outputs
+                else {"prepared_input_ops": {operation}}
+                if apply is _apply_non4d_model_inputs
+                else {}
+            ),
         )
     if operation == "Add":
         assert list(transformed.graph.initializer[0].dims) == [1, 1, 2, 3]
