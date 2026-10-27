@@ -1127,6 +1127,6 @@ def resolve_distribution_plan(
             ckpt_path, hf_config, world_size, ep_size, dense, trust_remote_code
         ),
     )
-    if plan != DistributionPlan() and dist.is_master():
-        print(f"Distribution: {plan!r}", flush=True)
+    if plan != DistributionPlan():
+        print_rank_0(f"Distribution: {plan!r}")
     return plan, hf_config
