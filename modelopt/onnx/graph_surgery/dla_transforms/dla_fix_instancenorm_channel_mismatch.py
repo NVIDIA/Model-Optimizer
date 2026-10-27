@@ -52,6 +52,9 @@ from ..utils.graph_utils import (
     add_value_info,
     batch_replace_nodes,
 )
+from .dla_constants_to_initializers import _add_legacy_initializer_inputs
+from .dla_indexing import _operator_nodes
+from .dla_model_boundaries import _require_adapter_opset
 
 
 def _apply_fix_instancenorm_channel_mismatch(model: onnx.ModelProto) -> onnx.ModelProto:
@@ -60,12 +63,25 @@ def _apply_fix_instancenorm_channel_mismatch(model: onnx.ModelProto) -> onnx.Mod
     graph = model.graph
     cache = GraphCache(graph)
     node_idx = {id(n): i for i, n in enumerate(graph.node)}
-    unique_init: set = set()
+    unique_init: set = set(cache.init_names)
 
     replacements: dict[int, tuple[list, list]] = {}
     cnt = 0
 
-    for node in cache.nodes_by_op("InstanceNormalization"):
+    nodes = _operator_nodes(model, {"InstanceNormalization"})
+    for node in nodes:
+        shape = cache.get_shape(node.input[0])
+        if shape is not None and len(shape) not in (3, 4):
+            raise ValueError(
+                f"InstanceNormalization {node.name!r}: input rank {len(shape)} is not supported"
+            )
+    if any(
+        (shape := cache.get_shape(node.input[0])) is not None and len(shape) == 3 and all(shape)
+        for node in nodes
+    ):
+        _require_adapter_opset(model)
+
+    for node in nodes:
         in_name = node.input[0]
         out_name = node.output[0]
 
@@ -81,73 +97,63 @@ def _apply_fix_instancenorm_channel_mismatch(model: onnx.ModelProto) -> onnx.Mod
         if rank == 4:
             continue  # Already 4D — nothing to do.
 
-        if rank > 4:
-            raise ValueError(
-                f"InstanceNormalization node {node.name!r}: input rank {rank} > 4 is not supported."
-            )
+        if not all(in_shape):
+            continue
 
-        if rank < 3:
-            raise ValueError(
-                f"InstanceNormalization node {node.name!r}: input rank {rank} < 3 is not supported."
-            )
-
-        # ── rank == 3: [N,C,D] → 4D pipeline ─────────────────────────────────
         n, c, d = in_shape
         pfx = node.name or f"instnorm_{cnt}"
 
         # 1. Pre-Reshape: [N,C,D] → [N,C,D,1]  (add trailing unary spatial dim)
         pre_shape_init = numpy_helper.from_array(
             np.array([n, c, d, 1], dtype=np.int64),
-            name=f"{pfx}_pre_shape_{cnt}",
+            name=cache.unique_name(f"{pfx}_pre_shape_{cnt}"),
         )
         add_unique_initializers(graph, unique_init, [pre_shape_init])
-        pre_out = f"{in_name}_trail4d_{cnt}"
+        pre_out = cache.unique_name(f"{in_name}_trail4d_{cnt}")
         pre_reshape = helper.make_node(
             "Reshape",
             inputs=[in_name, pre_shape_init.name],
             outputs=[pre_out],
-            name=f"{pfx}_pre_reshape_{cnt}",
+            name=cache.unique_name(f"{pfx}_pre_reshape_{cnt}"),
         )
         in_dtype = cache.get_dtype(in_name) or onnx.TensorProto.FLOAT
         add_value_info(graph, pre_out, in_dtype, [n, c, d, 1])
 
         # 2. InstanceNorm on [N,C,D,1] → [N,C,D,1]
-        instrnorm_out = f"{out_name}_4d_{cnt}"
-        new_instrnorm = helper.make_node(
-            "InstanceNormalization",
-            inputs=[pre_out, *list(node.input[1:])],
-            outputs=[instrnorm_out],
-            name=f"{pfx}_4d_{cnt}",
-        )
-        new_instrnorm.attribute.extend(node.attribute)
-        add_value_info(graph, instrnorm_out, onnx.TensorProto.FLOAT, [n, c, d, 1])
+        instrnorm_out = cache.unique_name(f"{out_name}_4d_{cnt}")
+        new_instrnorm = onnx.NodeProto()
+        new_instrnorm.CopyFrom(node)
+        new_instrnorm.input[0] = pre_out
+        new_instrnorm.output[0] = instrnorm_out
+        new_instrnorm.name = cache.unique_name(f"{pfx}_4d_{cnt}")
+        add_value_info(graph, instrnorm_out, in_dtype, [n, c, d, 1])
 
         # 3. Post-Reshape: [N,C,D,1] → [1,N,C,D]  (move spatial dim to batch position)
         post_shape_init = numpy_helper.from_array(
             np.array([1, n, c, d], dtype=np.int64),
-            name=f"{pfx}_post_shape_{cnt}",
+            name=cache.unique_name(f"{pfx}_post_shape_{cnt}"),
         )
         add_unique_initializers(graph, unique_init, [post_shape_init])
-        post_out = f"{out_name}_1ncd_{cnt}"
+        post_out = cache.unique_name(f"{out_name}_1ncd_{cnt}")
         post_reshape = helper.make_node(
             "Reshape",
             inputs=[instrnorm_out, post_shape_init.name],
             outputs=[post_out],
-            name=f"{pfx}_post_reshape_{cnt}",
+            name=cache.unique_name(f"{pfx}_post_reshape_{cnt}"),
         )
-        add_value_info(graph, post_out, onnx.TensorProto.FLOAT, [1, n, c, d])
+        add_value_info(graph, post_out, in_dtype, [1, n, c, d])
 
         # 4. Squeeze axis=0: [1,N,C,D] → [N,C,D]  (restore original rank)
         squeeze_axes_init = numpy_helper.from_array(
             np.array([0], dtype=np.int64),
-            name=f"{pfx}_squeeze_axes_{cnt}",
+            name=cache.unique_name(f"{pfx}_squeeze_axes_{cnt}"),
         )
         add_unique_initializers(graph, unique_init, [squeeze_axes_init])
         squeeze = helper.make_node(
             "Squeeze",
             inputs=[post_out, squeeze_axes_init.name],
             outputs=[out_name],
-            name=f"{pfx}_squeeze_{cnt}",
+            name=cache.unique_name(f"{pfx}_squeeze_{cnt}"),
         )
 
         replacements[node_idx[id(node)]] = (
@@ -165,6 +171,7 @@ def _apply_fix_instancenorm_channel_mismatch(model: onnx.ModelProto) -> onnx.Mod
 
     # ── Apply replacements ─────────────────────────────────────────────────────
     batch_replace_nodes(graph, replacements)
+    _add_legacy_initializer_inputs(model)
 
     logger.debug(
         "fix_instancenorm_channel_mismatch: transformed %d InstanceNormalization node(s).",

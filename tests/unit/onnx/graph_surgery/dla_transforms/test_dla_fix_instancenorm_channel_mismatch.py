@@ -48,6 +48,7 @@ import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms.dla_fix_instancenorm_channel_mismatch import (
     _apply_fix_instancenorm_channel_mismatch as _apply_fix_instancenorm,
@@ -65,10 +66,12 @@ _MAX_IR_VERSION_FOR_ORT = 9
 
 
 def _vi(name: str, elem_type: int, shape: list) -> onnx.ValueInfoProto:
+    """Declare a typed native tensor."""
     return helper.make_tensor_value_info(name, elem_type, shape)
 
 
 def _clamp_ir(model: onnx.ModelProto) -> None:
+    """Use a model IR supported by the CPU runtime."""
     model.ir_version = min(model.ir_version, _MAX_IR_VERSION_FOR_ORT)
 
 
@@ -99,19 +102,13 @@ def _make_instancenorm_model(input_shape: list, epsilon: float = 1e-5) -> onnx.M
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
-    try:
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
-
-        model = SymbolicShapeInference.infer_shapes(model, auto_merge_symbolic_dims=True) or model
-    except Exception:
-        pass
+    model = onnx.shape_inference.infer_shapes(model, strict_mode=True)
     onnx.checker.check_model(model)
     return model
 
 
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
+    """Execute all public outputs on the CPU runtime."""
     import onnxruntime as ort  # type: ignore[import-not-found]
 
     _clamp_ir(model)
@@ -120,6 +117,7 @@ def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Compare finite tensor directions in double precision."""
     a64, b64 = a.astype(np.float64).ravel(), b.astype(np.float64).ravel()
     na, nb = float(np.linalg.norm(a64)), float(np.linalg.norm(b64))
     if na == 0.0 and nb == 0.0:
@@ -130,6 +128,7 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _assert_values_match(ref: dict, got: dict) -> None:
+    """Compare restored values after checking element counts."""
     assert ref.keys() == got.keys()
     for name in ref:
         a, b = ref[name].ravel(), got[name].ravel()
@@ -207,14 +206,7 @@ def test_instancenorm_3d_nontrivial_scale_bias():
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
-    try:
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
-
-        model = SymbolicShapeInference.infer_shapes(model, auto_merge_symbolic_dims=True) or model
-    except Exception:
-        pass
+    model = onnx.shape_inference.infer_shapes(model, strict_mode=True)
     onnx.checker.check_model(model)
 
     feeds = {"X": _RNG.standard_normal(shape).astype(np.float32)}
@@ -278,14 +270,7 @@ def test_instancenorm_5d_raises():
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
-    try:
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
-
-        model = SymbolicShapeInference.infer_shapes(model, auto_merge_symbolic_dims=True) or model
-    except Exception:
-        pass
+    model = onnx.shape_inference.infer_shapes(model, strict_mode=True)
 
     with pytest.raises(ValueError, match=r"rank.*5.*not supported|not supported"):
         _apply_fix_instancenorm(copy.deepcopy(model))
@@ -330,14 +315,7 @@ def test_instancenorm_multiple_nodes():
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
-    try:
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
-
-        model = SymbolicShapeInference.infer_shapes(model, auto_merge_symbolic_dims=True) or model
-    except Exception:
-        pass
+    model = onnx.shape_inference.infer_shapes(model, strict_mode=True)
     onnx.checker.check_model(model)
 
     feeds = {
@@ -360,3 +338,108 @@ def test_instancenorm_multiple_nodes():
     # Exactly 2 InstanceNorm nodes remain (1 original 4D + 1 new for 3D)
     in_nodes = [n for n in tr.graph.node if n.op_type == "InstanceNormalization"]
     assert len(in_nodes) == 2, f"Expected 2 InstanceNorm nodes, got {len(in_nodes)}"
+
+
+@pytest.mark.parametrize("dtype", [TensorProto.FLOAT, TensorProto.FLOAT16])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_instancenorm_preserves_dtype_epsilon_and_allocated_names(dtype, legacy):
+    """Keep typed metadata, attributes, legacy declarations and existing name owners."""
+    model = _make_instancenorm_model([2, 4, 6], epsilon=0.125)
+    numpy_dtype = np.float16 if dtype == TensorProto.FLOAT16 else np.float32
+    for tensor in model.graph.initializer:
+        tensor.CopyFrom(
+            numpy_helper.from_array(numpy_helper.to_array(tensor).astype(numpy_dtype), tensor.name)
+        )
+    for value in [*model.graph.input, *model.graph.output]:
+        value.type.tensor_type.elem_type = dtype
+    model.graph.initializer.append(
+        numpy_helper.from_array(np.asarray([99], np.int64), "instnorm_pre_shape_0")
+    )
+    model.graph.node.insert(
+        0,
+        helper.make_node(
+            "Constant",
+            [],
+            ["X_trail4d_0"],
+            name="instnorm_pre_reshape_0",
+            value=numpy_helper.from_array(np.asarray([42], np.float32)),
+        ),
+    )
+    constant = model.graph.node[0]
+    constant_bytes = constant.SerializeToString()
+    if legacy:
+        model.ir_version = 3
+        model.graph.input.extend(
+            _vi(t.name, t.data_type, list(t.dims)) for t in model.graph.initializer
+        )
+    feed = {"X": np.arange(48, dtype=numpy_dtype).reshape(2, 4, 6)}
+    onnx.checker.check_model(model, full_check=True)
+    expected = ReferenceEvaluator(model).run(None, feed)[0]
+    changed = _apply_fix_instancenorm(model)
+    assert next(node for node in changed.graph.node if node.op_type == "Constant") is constant
+    assert constant.SerializeToString() == constant_bytes
+    onnx.checker.check_model(changed, full_check=True)
+    actual = ReferenceEvaluator(changed).run(None, feed)[0]
+    assert actual.dtype == numpy_dtype and actual.shape == expected.shape
+    np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
+
+
+def test_instancenorm_late_unsupported_rank_leaves_caller_unchanged():
+    """Reject a later five-dimensional operation before adapting an earlier valid one."""
+    model = _make_instancenorm_model([2, 4, 6])
+    model.graph.input.append(_vi("x5", TensorProto.FLOAT, [2, 4, 2, 3, 4]))
+    model.graph.output.append(_vi("y5", TensorProto.FLOAT, [2, 4, 2, 3, 4]))
+    model.graph.node.append(
+        helper.make_node("InstanceNormalization", ["x5", "scale", "bias"], ["y5"])
+    )
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="rank"):
+        _apply_fix_instancenorm(model)
+    assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("version", [11, 12])
+def test_instancenorm_legacy_opset_refuses_before_mutation(version):
+    """Refuse unsupported axes-input adapters before allocating controls."""
+    model = _make_instancenorm_model([2, 4, 6])
+    model.opset_import[0].version = version
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="opset"):
+        _apply_fix_instancenorm(model)
+    assert model.SerializeToString() == before
+
+
+def test_opaque_instancenorm_function_is_unchanged():
+    """Do not replace model-local operators by interpreting their standard-op names."""
+    model = _make_instancenorm_model([2, 4, 6])
+    model.graph.node[0].domain = "opaque"
+    model.functions.append(
+        helper.make_function(
+            "opaque",
+            "InstanceNormalization",
+            ["x", "s", "b"],
+            ["y"],
+            [helper.make_node("Neg", ["x"], ["y"])],
+            [helper.make_opsetid("", 17)],
+            attributes=["epsilon"],
+        )
+    )
+    model.opset_import.append(helper.make_opsetid("opaque", 1))
+    before = model.SerializeToString()
+    feeds = {"X": np.arange(48, dtype=np.float32).reshape(2, 4, 6)}
+    expected = ReferenceEvaluator(model).run(None, feeds)[0]
+    changed = _apply_fix_instancenorm(model)
+    assert changed.SerializeToString() == before
+    np.testing.assert_array_equal(ReferenceEvaluator(changed).run(None, feeds)[0], expected)
+
+
+def test_instancenorm_zero_batch_stays_native():
+    """Preserve zero dimensions instead of applying copied-zero Reshape semantics."""
+    model = _make_instancenorm_model([0, 4, 6])
+    before = model.SerializeToString()
+    changed = _apply_fix_instancenorm(model)
+    assert changed.SerializeToString() == before
+    onnx.checker.check_model(changed, full_check=True)
+    assert ReferenceEvaluator(changed).run(None, {"X": np.empty((0, 4, 6), np.float32)})[
+        0
+    ].shape == (0, 4, 6)
