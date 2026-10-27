@@ -1032,6 +1032,40 @@ def test_two_ranks_write_one_checkpoint_and_reject_inconsistent_state(cpu_dist_w
     _assert_byte_identical(_load_checkpoint(tmp_path / "moe_export"), want)
 
 
+def _merge_export_job(rank, world_size, tmp_dir):
+    model = _load(tmp_dir / "dense")
+    # A checkpoint that fuses each layer's q, k and v, which the model holds as three projections:
+    # the reverse merges them back, which needs each layer's three on one rank.
+    model._weight_conversions = [
+        WeightConverter(
+            source_patterns="self_attn.qkv_proj.weight",
+            target_patterns=[f"self_attn.{part}_proj.weight" for part in "qkv"],
+            operations=[Chunk(dim=0)],
+        )
+    ]
+    with bounded_collectives():
+        _write(_fsdp2_shard(model, init_device_mesh("cpu", (world_size,))), tmp_dir / "merged")
+
+
+def test_distributed_save_merges_a_group_its_ranks_hold_apart(cpu_dist_workers, tmp_path):
+    """Each layer's q, k and v go to one owner, so the written checkpoint fuses them as the gather
+    export does, instead of keeping every in-memory name because one layer's split over the ranks."""
+    _save(_llama_config(), tmp_path / "dense")
+    cpu_dist_workers.run(_merge_export_job, tmp_dir=tmp_path)
+
+    got = _load_checkpoint(tmp_path / "merged")
+    src = _load(tmp_path / "dense").state_dict()
+    layers = sorted({k.rsplit(".self_attn.", 1)[0] for k in src if ".self_attn.q_proj." in k})
+    assert layers
+    for layer in layers:
+        attn = f"{layer}.self_attn"
+        assert f"{attn}.q_proj.weight" not in got
+        want = torch.cat([src[f"{attn}.{part}_proj.weight"] for part in "qkv"])
+        assert torch.equal(
+            got[f"{attn}.qkv_proj.weight"], want.to(got[f"{attn}.qkv_proj.weight"].dtype)
+        )
+
+
 def _expert_input_scale_job(rank, world_size, tmp_dir):
     mesh = init_device_mesh("cpu", (world_size,))
     model = _load(tmp_dir / "src")
