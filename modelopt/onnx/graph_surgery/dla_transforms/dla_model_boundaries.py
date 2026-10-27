@@ -513,9 +513,9 @@ def _apply_remove_intermediary_squeeze_unsqueeze(
         else cache.graph_input_names
     )
 
-    def require_prepared_readers(name, output_shape):
+    def require_prepared_readers(name, planned_shape):
         """Follow shared rank-agnostic paths before allowing any adapter rewiring."""
-        layout = tuple(pad4d(output_shape)) if output_shape else None
+        layout = tuple(planned_shape) if planned_shape else None
         if layout is not None and len(layout) == 4 and cache.get_shape(name) == list(layout):
             return
         pending, seen = [name], set()
@@ -598,22 +598,23 @@ def _apply_remove_intermediary_squeeze_unsqueeze(
         output_shape = cache.get_shape(node.output[0])
         if not input_shape or not output_shape:
             if validate_only and rank_converted:
-                require_prepared_readers(node.output[0], output_shape)
+                require_prepared_readers(node.output[0], None)
             continue
         if not rank_converted and input_shape != output_shape:
             continue
-        if rank_converted and len(input_shape) != len(output_shape):
-            require_prepared_readers(node.output[0], output_shape)
-        plans.append((node, input_shape, output_shape))
-    if validate_only:
-        return model
-    for node, input_shape, output_shape in plans:
         short, long = (
             (output_shape, input_shape)
             if node.op_type == "Squeeze"
             else (input_shape, output_shape)
         )
-        if len(short) <= len(long) and long[-len(short) :] == short:
+        bypass = len(short) <= len(long) and long[-len(short) :] == short
+        if rank_converted and len(input_shape) != len(output_shape):
+            require_prepared_readers(node.output[0], pad4d(input_shape if bypass else output_shape))
+        plans.append((node, output_shape, bypass))
+    if validate_only:
+        return model
+    for node, output_shape, bypass in plans:
+        if bypass:
             old, new = node.input[0], node.output[0]
             for other in graph.node:
                 if other is node:

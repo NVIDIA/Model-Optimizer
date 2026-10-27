@@ -1359,6 +1359,30 @@ def test_adapter_roundtrip_checks_the_restored_layout(unary, same_layout, entryp
         np.testing.assert_array_equal(actual, reference)
 
 
+def test_rank_restoration_requires_an_actual_four_dimensional_bypass():
+    """Do not infer a 4D bypass solely from the original adapter output annotation."""
+    model = _make_model(
+        [
+            helper.make_node("Reshape", ["x", "target"], ["wide"]),
+            helper.make_node("Squeeze", ["wide", "axes"], ["restored"]),
+            helper.make_node("Conv", ["restored", "weight"], ["y"]),
+        ],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 3, 4, 4])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 2, 4, 4])],
+        [
+            numpy_helper.from_array(np.array([1, 1, 3, 4, 4], np.int64), "target"),
+            numpy_helper.from_array(np.array([0], np.int64), "axes"),
+            numpy_helper.from_array(np.ones([2, 3, 1, 1], np.float32), "weight"),
+        ],
+    )
+    model = onnx.shape_inference.infer_shapes(model)
+    _checked_run(model, {"x": np.arange(48, dtype=np.float32).reshape(1, 3, 4, 4)})
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="unprepared rank-sensitive Conv"):
+        _apply_remove_intermediary_squeeze_unsqueeze(model, rank_converted=True)
+    assert model.SerializeToString() == before
+
+
 def test_output_preflight_does_not_copy_for_missing_intermediate_squeeze_metadata(monkeypatch):
     """Avoid a prerequisite model copy when normal shape inference can prepare Squeeze."""
     model = _make_model(
