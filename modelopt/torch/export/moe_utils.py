@@ -825,7 +825,8 @@ def _split_local_fused_module(
         only gives the WITHIN-group offset, so we add the EP block base ``ep_rank * group_size``.
       * **all-experts** (size == total): an EP DTensor sharded across the ep mesh spanning all experts
         (classic DP x EP). ``_dtensor_dim0_offset`` already returns the TRUE global offset -> no base.
-    ``total_experts == 0`` keeps the legacy per-EP-group behavior.
+    ``total_experts == 0``, a count the caller could not read off the model's config, takes the
+    tensor for a per-EP-group slice.
     """
     from torch.distributed.tensor import DTensor
 
@@ -841,7 +842,7 @@ def _split_local_fused_module(
     )
     group_size = int(fw.shape[0]) if fw is not None else 0
     # Add the EP block base only when the tensor is a per-EP-group slice (size < total_experts) or
-    # total is unknown (legacy). When it spans all experts, dp_offset is already global.
+    # total is unknown (0). When it spans all experts, dp_offset is already global.
     add_ep_base = (
         bool(ep_rank) and group_size > 0 and (total_experts == 0 or group_size < total_experts)
     )
