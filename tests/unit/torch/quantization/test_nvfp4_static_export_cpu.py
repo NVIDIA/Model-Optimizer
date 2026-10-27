@@ -239,29 +239,23 @@ class TestNVFP4StaticVsDynamicEquivalence:
         assert torch.allclose(static_ws_2, dynamic_ws_2)
 
 
-def test_lsq_export_uses_post_amax_for_tied_and_dual_lsq():
-    weight = torch.ones(2, BLOCK_SIZE, dtype=torch.bfloat16)
+@pytest.mark.parametrize("tied_amax", [True, False])
+def test_lsq_export_requires_tied_amax(tied_amax):
+    weight = torch.full((2, BLOCK_SIZE), 3.0, dtype=torch.bfloat16)
+    quantizer = _make_static_quantizer(torch.ones(2, 1), torch.tensor(6.0))
+    quantizer.enable_lsq(learnable_amax=["pre", "post"], tied_amax=tied_amax)
+    with torch.no_grad():
+        quantizer.amax_post.fill_(3.0)
 
-    for tied_amax in (False, True):
-        quantizer = _make_static_quantizer(
-            torch.ones(2, 1),
-            torch.tensor(6.0),
-        )
-        quantizer.enable_lsq(
-            learnable_amax=["pre", "post"],
-            tied_amax=tied_amax,
-        )
-        quantizer._amax_post.data.fill_(3.0)
-        if not tied_amax:
-            quantizer._amax_pre.data.fill_(1.0)
+    if not tied_amax:
+        with pytest.raises(RuntimeError, match="untied"):
+            _export_round_trip(weight, quantizer)
+        return
 
-        scale, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
-            quantizer,
-            weight,
-            keep_high_precision=True,
-        )
+    scale, scale_2, dequant = _export_round_trip(weight, quantizer)
 
-        assert torch.equal(scale, torch.full((2, 1), 0.5))
+    assert torch.equal(scale.float() * scale_2, torch.full((2, 1), 0.5))
+    torch.testing.assert_close(dequant, weight, rtol=0, atol=0)
 
 
 class TestNVFP4StaticManualRoundTrip:

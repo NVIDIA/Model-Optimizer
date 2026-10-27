@@ -18,8 +18,10 @@ metadata:
   description: >-
     QAD recipe using static NVFP4 E2M1 weights, dynamic NVFP4 E2M1
     activations and FP8 KV cache. Unlike the default multimodal-safe recipe,
-    this recipe explicitly re-enables Qwen3-VL visual attention, MLP and
+    this recipe explicitly re-enables visual attention, MLP and
     merger Linear modules after importing the default visual exclusions.
+    Covers Qwen3-VL and Qwen3.5-VL. QAT/QAD-only: the LSQ scales are learned
+    during training, so this recipe is not suitable for calibration-only PTQ.
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers

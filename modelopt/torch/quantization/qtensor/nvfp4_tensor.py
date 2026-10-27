@@ -159,9 +159,9 @@ class NVFP4QTensor(BaseQuantizedTensor):
             # Static path: use pre-computed per-block amax values from quantizer
             global_amax = cls._get_static_global_amax(weight_quantizer).float()
             per_block_amax = (
-                weight_quantizer.amax_post
+                weight_quantizer.amax
                 if getattr(weight_quantizer, "_lsq", False)
-                else weight_quantizer.amax
+                else weight_quantizer._amax
             ).float()
 
             # Compute scales in float
