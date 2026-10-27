@@ -636,6 +636,12 @@ def _export_quantized_weight(
     The export includes converting weight tensor to correct quantized values and quantized dtype,
     and registering scaling factors.
 
+    An export handler packs through ``hf_export_handlers._export_weight`` rather than calling this
+    directly: on the keep-fused export an FSDP2-owned weight must be packed inside its unit's
+    weight-update window, which that helper (or the fused-experts handler, around its fold) opens.
+    Packed outside it, the unit's next reshard puts FSDP2's unquantized shard back, and the
+    checkpoint is written unquantized.
+
     Tied-weight dedup is not handled here: both sides of a tie are packed independently
     (identically, once ``sync_tied_input_amax`` has equalized their scales), and the
     duplicate is dropped by name in :func:`postprocess_state_dict`. Deduping per-module at
