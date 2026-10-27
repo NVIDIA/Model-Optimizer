@@ -355,18 +355,39 @@ def _apply_non4d_transpose(model):
     return model
 
 
+def _specialized_collapsed_axis(cache, node, shape, value, reshapes):
+    """Map a specialized operator axis only when its native singleton was actually collapsed."""
+    removed = _collapsed_reshape_axes(cache, node.input[0], shape, reshapes)
+    if not removed:
+        return value
+    if len(removed) != 1 or value % 5 in removed:
+        raise ValueError(
+            f"{node.name!r}: cannot map axis {value} through an ambiguous collapsed Reshape"
+        )
+    native = value % 5
+    return native - int(native > removed[0]) - (4 if value < 0 else 0)
+
+
 def _apply_non4d_lpnorm(model):
     """Preserve normalization axes across leading-dimension promotion."""
     cache = GraphCache(model.graph)
+    reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
+    plans = []
     for node in _operator_nodes(model, {"LpNormalization"}):
-        if node.op_type == "LpNormalization":
-            axis = _attribute(node, "axis")
-            shape = _shape_before_boundary_promotion(cache, node.input[0])
-            if axis is not None and axis.i >= 0 and shape and len(shape) in (2, 3):
-                axis.i = -1 if axis.i == len(shape) - 1 else axis.i + 4 - len(shape)
-            elif axis is None:
-                node.attribute.append(helper.make_attribute("axis", -1))
-            node.name += "_axis_updated"
+        axis = _attribute(node, "axis")
+        shape = _shape_before_boundary_promotion(cache, node.input[0])
+        value = axis.i if axis is not None else -1
+        if shape and len(shape) == 5:
+            value = _specialized_collapsed_axis(cache, node, shape, value, reshapes)
+        elif value >= 0 and shape and len(shape) in (2, 3):
+            value = -1 if value == len(shape) - 1 else value + 4 - len(shape)
+        plans.append((node, axis, value))
+    for node, axis, value in plans:
+        if axis is None:
+            node.attribute.append(helper.make_attribute("axis", value))
+        else:
+            axis.i = value
+        node.name += "_axis_updated"
     return model
 
 
@@ -413,6 +434,7 @@ def _apply_argmax(model):
     """Plan native ArgMax layouts before preparing private output restoration views."""
     cache = GraphCache(model.graph)
     plans = {}
+    reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
     for node in _operator_nodes(model, {"ArgMax"}):
         shape = _shape_before_boundary_promotion(cache, node.input[0])
         if not shape or any(dim <= 0 for dim in shape):
@@ -422,7 +444,9 @@ def _apply_argmax(model):
         if not -len(shape) <= value < len(shape):
             raise ValueError(f"{node.name!r}: invalid ArgMax axis {value}")
         output_shape = [dim for index, dim in enumerate(shape) if index != value % len(shape)]
-        if value >= 0:
+        if len(shape) == 5:
+            value = _specialized_collapsed_axis(cache, node, shape, value, reshapes)
+        elif value >= 0:
             value += {2: 2, 3: 1}.get(len(shape), 0)
         plans[id(node)] = (value, output_shape)
     nodes = []

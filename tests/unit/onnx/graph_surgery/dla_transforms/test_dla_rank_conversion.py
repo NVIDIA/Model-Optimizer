@@ -920,6 +920,62 @@ def test_five_dimensional_axis_tracks_the_actually_removed_target_dimension(
     np.testing.assert_allclose(_execute(transformed, feeds)[0], expected, rtol=1e-6, atol=1e-7)
 
 
+@pytest.mark.parametrize("operation", ["ArgMax", "LpNormalization"])
+@pytest.mark.parametrize("axis", [2, -3])
+@pytest.mark.parametrize("collapse", [False, True])
+def test_specialized_axes_follow_only_actually_collapsed_reshapes(operation, axis, collapse):
+    """Remap specialized axes after a singleton collapse while keeping untouched native 5D axes."""
+    shape = [1, 2, 3, 4, 5]
+    data_shape = shape[1:] if collapse else shape
+    reduced = [1, 2, 4, 5]
+    output_shape = reduced if operation == "ArgMax" else data_shape
+    inits = []
+    nodes = []
+    source = "x"
+    if collapse:
+        inits.append(numpy_helper.from_array(np.array(shape, np.int64), "native_shape"))
+        nodes.append(helper.make_node("Reshape", ["x", "native_shape"], ["native"]))
+        source = "native"
+    nodes.append(
+        helper.make_node(
+            operation,
+            [source],
+            ["result" if collapse else "y"],
+            axis=axis,
+            **({"keepdims": 0} if operation == "ArgMax" else {}),
+        )
+    )
+    if collapse:
+        inits.append(numpy_helper.from_array(np.array(output_shape, np.int64), "output_shape"))
+        nodes.append(helper.make_node("Reshape", ["result", "output_shape"], ["y"]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "specialized_axes",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, data_shape)],
+            [
+                helper.make_tensor_value_info(
+                    "y",
+                    TensorProto.INT64 if operation == "ArgMax" else TensorProto.FLOAT,
+                    output_shape,
+                )
+            ],
+            inits,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    model = onnx.shape_inference.infer_shapes(model)
+    feeds = {"x": np.random.default_rng(73).standard_normal(data_shape).astype(np.float32)}
+    expected = _execute(model, feeds)[0]
+    converted = copy.deepcopy(model)
+    if collapse:
+        converted = _transform_make_dla_compatible(converted, verbose=False)
+    else:
+        converted = (_apply_argmax if operation == "ArgMax" else _apply_non4d_lpnorm)(converted)
+    np.testing.assert_allclose(_execute(converted, feeds)[0], expected, rtol=1e-6, atol=1e-7)
+
+
 @pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
 def test_public_initializer_outputs_keep_their_native_dimensions(shape):
     """Preserve fixed public values that have no internal layout-changing consumer."""
