@@ -593,13 +593,9 @@ def _apply_update_axis(model):
             if node.input
             else (None, None, False)
         )
-        if native:
+        if native or "axis_updated" in node.name:
             continue
-        if (
-            node.op_type in update
-            and "axis_updated" not in node.name
-            and (rank is None or (rank == 5 and shape is None))
-        ):
+        if node.op_type in update and (rank is None or (rank == 5 and shape is None)):
             raise ValueError(f"{node.name!r}: {node.op_type} input layout must be known")
         if (
             axis is None
@@ -629,8 +625,6 @@ def _apply_update_axis(model):
             if shape is not None and len(shape) not in (2, 3, 5):
                 continue
             raise ValueError(f"{node.op_type} is unsupported for DLA axis transformation")
-        if "axis_updated" in node.name:
-            continue
         original = value
         if shape and rank == 5:
             removed_axes = _collapsed_reshape_axes(cache, node.input[0], shape, reshapes)
