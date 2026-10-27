@@ -63,5 +63,7 @@ def gloo_world_of_one(skip_on_windows, tmp_path_factory):
 
     store = tmp_path_factory.mktemp("pg") / "store"
     torch.distributed.init_process_group("gloo", init_method=store.as_uri(), rank=0, world_size=1)
-    yield init_device_mesh("cpu", (1,))
-    torch.distributed.destroy_process_group()
+    try:
+        yield init_device_mesh("cpu", (1,))
+    finally:
+        torch.distributed.destroy_process_group()
