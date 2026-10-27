@@ -511,12 +511,13 @@ def test_indexing_preserves_opaque_model_local_operators(operator, transform):
     )
     model = onnx.shape_inference.infer_shapes(model)
     feeds = {"x": np.arange(6, dtype=np.float32).reshape(shape)}
-    expected = _execute(model, feeds)
+    # Use the independent interpreter for opaque custom-function semantics.
+    expected = ReferenceEvaluator(model).run(None, feeds)
     before = model.SerializeToString()
     transform(model)
     assert model.SerializeToString() == before
     onnx.checker.check_model(model, full_check=True)
-    np.testing.assert_array_equal(_execute(model, feeds)[0], expected[0])
+    np.testing.assert_array_equal(ReferenceEvaluator(model).run(None, feeds)[0], expected[0])
 
 
 @pytest.mark.parametrize(
