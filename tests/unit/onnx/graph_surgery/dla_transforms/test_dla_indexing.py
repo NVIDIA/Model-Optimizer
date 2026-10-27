@@ -167,7 +167,9 @@ def test_reduction_preserves_negative_and_mixed_axes(axes):
     data = np.arange(6, dtype=np.float32).reshape(2, 3)
     expected = ReferenceEvaluator(model).run(None, {"x": data})[0]
     candidate = _apply_non4d_model_inputs(copy.deepcopy(model))
-    candidate = _apply_non4d_model_outputs(candidate, defer_rank_conversion=True)
+    candidate = _apply_non4d_model_outputs(
+        candidate, defer_rank_conversion=True, prepared_output_ops={"ReduceSum"}
+    )
     candidate = _apply_standalone_reduce_operations(candidate)
     onnx.checker.check_model(candidate)
     actual = ReferenceEvaluator(candidate).run(None, {"x": data})[0]
@@ -604,7 +606,9 @@ def test_reduction_registers_legacy_initializer_inputs():
     model.ir_version = 3
     feeds = {"x": np.arange(6, dtype=np.float32).reshape(1, 1, 2, 3)}
     expected = _execute(model, feeds)[0]
-    transformed = _apply_non4d_model_outputs(copy.deepcopy(model), defer_rank_conversion=True)
+    transformed = _apply_non4d_model_outputs(
+        copy.deepcopy(model), defer_rank_conversion=True, prepared_output_ops={"ReduceMean"}
+    )
     transformed = _apply_standalone_reduce_operations(transformed)
     np.testing.assert_array_equal(_execute(transformed, feeds)[0], expected)
 
