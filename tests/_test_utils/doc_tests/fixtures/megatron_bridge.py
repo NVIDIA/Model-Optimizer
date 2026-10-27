@@ -20,6 +20,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from _test_utils.doc_tests.parser import parse_markdown
+
 __all__ = [
     "prepare_bridge_full_scale",
     "prepare_bridge_smoke",
@@ -33,6 +35,7 @@ __all__ = [
 
 def prepare_bridge_smoke(ctx):
     """Prepare reduced Bridge inputs through documented variables, preserving command flags."""
+    # Tiny-model generation requires the optional Torch/Transformers stack.
     from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 
     ctx.cwd = ctx.tmp / "megatron_bridge"
@@ -79,6 +82,7 @@ def prepare_bridge_smoke(ctx):
 
 
 def verify_bridge_quantized(ctx):
+    # Megatron-Core is optional; import it only for checkpoint verification.
     from _test_utils.torch.megatron.modelopt_state import assert_has_modelopt_state
 
     output = Path(ctx.env["OUTPUT_ROOT"])
@@ -91,6 +95,7 @@ def verify_bridge_quantized(ctx):
 
 
 def verify_bridge_distilled(ctx):
+    # Torch and Transformers are optional outside model verification.
     import torch
     from transformers import AutoModelForCausalLM
 
@@ -105,6 +110,7 @@ def verify_bridge_distilled(ctx):
 
 
 def verify_bridge_pruned(ctx):
+    # Transformers is optional outside model verification.
     from transformers import AutoModelForCausalLM
 
     output = Path(ctx.env["OUTPUT_ROOT"]) / "Qwen3-8B-Pruned-6B-manual"
@@ -122,8 +128,6 @@ def prepare_bridge_full_scale(ctx):
 
 def run_bridge_distill_prerequisite(ctx):
     """Build real checkpoints using the README's training fence, in the same process group."""
-    from _test_utils.doc_tests.parser import parse_markdown
-
     snippet = parse_markdown(ctx.repo / "examples/megatron_bridge/README.md")["bridge-distill"]
     code = snippet.code
     subprocess.run(["bash", "-euo", "pipefail", "-c", code], cwd=ctx.cwd, env=ctx.env, check=True)
