@@ -2064,18 +2064,6 @@ def export_hf_checkpoint(
     # buffer instead of the whole quantized state dict.
     _offloaded = has_accelerate_offload(model)
 
-    # An offloaded model takes the streaming path below; otherwise a distributed FSDP2 model takes
-    # the no-gather path, which writes weights and config itself instead of going through
-    # save_pretrained. extra_state_dict IS honoured there (one rank adds those tensors to its write
-    # set); save_modelopt_state is not, so reject it explicitly rather than dropping it silently
-    # (the streaming path declines it the same way).
-    if use_no_gather_writer and not _offloaded:
-        if save_modelopt_state:
-            raise NotImplementedError(
-                "save_modelopt_state=True is not supported by the no-gather FSDP2 distributed "
-                "export: it writes the checkpoint directly rather than through "
-                "model.save_pretrained(). Save the ModelOpt state separately with mto.save()."
-            )
     try:
         if _offloaded:
             # Imported here rather than at module scope: the streaming exporter imports the
@@ -2127,6 +2115,9 @@ def export_hf_checkpoint(
             )
             if rank == 0:
                 _write_base_config(model, export_dir)
+                # As the streaming path below: every FSDP2 rank holds the same ModelOpt state.
+                if save_modelopt_state and ModeloptStateManager.is_converted(model):
+                    torch.save(modelopt_state(model), export_dir / _MODELOPT_STATE_SAVE_NAME)
                 # The weights keep their in-memory names when any rank could not revert them, and
                 # the quant config has to name the modules as the weights do.
                 if reverted:
