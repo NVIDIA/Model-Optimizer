@@ -132,6 +132,29 @@ class TestLocalHessianCalibrateDense:
         assert any(not torch.allclose(lh[n], max_amax[n]) for n in lh)  # refined past max-cal
         assert any(not torch.allclose(lh[n], mse[n]) for n in lh)  # Hessian changed the choice
 
+    @pytest.mark.parametrize(
+        ("input_cfg", "forwards"),
+        [(None, 1), ({"num_bits": 8, "axis": None}, 2)],
+        ids=["weight_only", "static_input_amax"],
+    )
+    def test_max_calibration_runs_a_forward_only_for_activation_amax(self, input_cfg, forwards):
+        """Local Hessian's own forward collects its Hessians, so max calibration adds one only
+        when an activation quantizer needs a data-driven amax."""
+        quant_cfg = {**INT8_WEIGHT_CFG, "quant_cfg": list(INT8_WEIGHT_CFG["quant_cfg"])}
+        if input_cfg is not None:
+            quant_cfg["quant_cfg"].append({"quantizer_name": "*input_quantizer", "cfg": input_cfg})
+        torch.manual_seed(0)
+        model = SimpleLinear()
+        mtq.quantize(model, quant_cfg, forward_loop=_make_forward_loop())
+        calls = []
+
+        def forward_loop(model):
+            calls.append(None)
+            _make_forward_loop()(model)
+
+        local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=False)
+        assert len(calls) == forwards
+
     def test_warns_with_module_name_when_cin_not_divisible(self):
         class _OddModel(nn.Module):
             def __init__(self):

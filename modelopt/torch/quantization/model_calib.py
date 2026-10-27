@@ -400,8 +400,8 @@ def max_calibrate(
         skip_forward_without_activation_calib: If True, skip the (potentially expensive)
             ``forward_loop`` when no enabled quantizer needs data-driven activation statistics
             (see :func:`_needs_activation_forward_for_max_calib`). Weight calibration still runs.
-            Opted into by the top-level ``max`` path and by GPTQ and imatrix, which run their own
-            forward; algorithms that always need activations (MSE, local Hessian, SmoothQuant,
+            Opted into by the top-level ``max`` path and by GPTQ, imatrix and local Hessian, which
+            run their own forward; algorithms that always need activations (MSE, SmoothQuant,
             SVDQuant) call this with the default False.
 
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
@@ -1214,9 +1214,16 @@ def local_hessian_calibrate(
         warnings.warn("forward_loop must be provided for local_hessian; skipping local_hessian")
         return
 
-    # Phase 1: max-calibrate (also bootstraps dead experts + promotes/syncs NVFP4 static).
+    # Phase 1: max-calibrate (also bootstraps dead experts + promotes/syncs NVFP4 static). The
+    # Hessian pass below is local Hessian's own forward; max only runs one if activations need amax.
     print_rank_0("local_hessian: Running max calibration for all quantizers...")
-    max_calibrate(model, forward_loop, distributed_sync, shared_states=shared_states)
+    max_calibrate(
+        model,
+        forward_loop,
+        distributed_sync,
+        shared_states=shared_states,
+        skip_forward_without_activation_calib=True,
+    )
 
     names = module_name_maps(model)
 
