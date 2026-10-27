@@ -23,6 +23,7 @@ import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
+from modelopt.onnx.graph_surgery import make_dla_compatible as dla_pipeline
 from modelopt.onnx.graph_surgery.dla_transforms.dla_model_boundaries import (
     _apply_non4d_model_inputs,
     _apply_non4d_model_outputs,
@@ -2104,3 +2105,34 @@ def test_rank_one_adapters_keep_native_controls_unless_reshape_promotes(operatio
     changed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
     for feeds, reference in zip(cases, expected):
         np.testing.assert_allclose(_execute(changed, feeds)[0], reference, rtol=1e-6, atol=1e-7)
+
+
+def test_registered_slice_without_input_promotion_retains_native_axes(monkeypatch):
+    """Keep native Slice controls when the registered sequence omits input promotion."""
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Slice", ["x", "starts", "ends", "axes"], ["y"])],
+            "slice_without_input_promotion",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3])],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 2])],
+            [
+                numpy_helper.from_array(np.array(values, np.int64), name)
+                for name, values in [("starts", [0]), ("ends", [2]), ("axes", [1])]
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    expected = _execute(model, feeds)[0]
+    monkeypatch.setattr(
+        dla_pipeline,
+        "DLA_TRANSFORMS",
+        tuple(
+            (name, callback)
+            for name, callback in dla_pipeline.DLA_TRANSFORMS
+            if name != "Non4dModelInputs"
+        ),
+    )
+    changed = dla_pipeline._transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(changed, feeds)[0], expected)

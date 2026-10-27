@@ -52,10 +52,13 @@ def _runtime_input_names(model):
     return names
 
 
-def _rank_preparation_proofs(model, cache, prepared_data_ops, *, restoring_outputs=False):
+def _rank_preparation_proofs(
+    model, cache, prepared_data_ops, *, restoring_outputs=False, before_boundary=None
+):
     """Reuse the cached leading-layout proof for rank and axis stages."""
     # Standalone stages retain deferred inputs; registered calls inspect current layouts.
-    before_boundary = prepared_data_ops is None
+    if before_boundary is None:
+        before_boundary = prepared_data_ops is None
     if prepared_data_ops is None:
         prepared_data_ops = (
             _RANK_AGNOSTIC_OPS
@@ -135,7 +138,12 @@ def _apply_non4d_slice_axis(model, *, prepared_data_ops=None):
     cache = GraphCache(model.graph)
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     native_sources = {}
-    prepared = _rank_preparation_proofs(model, cache, prepared_data_ops)
+    prepared = _rank_preparation_proofs(
+        model,
+        cache,
+        prepared_data_ops,
+        before_boundary=prepared_data_ops is None or "Non4dModelInputs" in prepared_data_ops,
+    )
     runtime_inputs = _runtime_input_names(model)
     plans = []
     for node in _operator_nodes(model, {"Slice"}):
