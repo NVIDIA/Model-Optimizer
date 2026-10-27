@@ -279,6 +279,47 @@ def test_no_not_nodes_noop():
     np.testing.assert_array_equal(ref["Y"], got["Y"])
 
 
+@pytest.mark.parametrize(
+    "target", [TensorProto.STRING, TensorProto.FLOAT, TensorProto.INT32, TensorProto.BOOL]
+)
+@pytest.mark.parametrize("runtime", ["reference", "ort"])
+def test_not_preserves_downstream_cast_representation(target, runtime):
+    """Keep string representations stable and continue lowering eligible numeric Cast consumers."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Cast", ["x"], ["casted"], to=TensorProto.BOOL),
+                helper.make_node("Not", ["casted"], ["inverted"]),
+                helper.make_node("Cast", ["inverted"], ["y"], to=target),
+            ],
+            "cast_representation",
+            [_vi("x", TensorProto.BOOL, [2])],
+            [_vi("y", target, [2])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    _clamp_ir(model)
+    model = onnx.shape_inference.infer_shapes(model)
+    feeds = {"x": np.asarray([False, True])}
+    expected = (
+        ReferenceEvaluator(model).run(None, feeds)[0]
+        if runtime == "reference"
+        else _run_ort(model, feeds)["y"]
+    )
+    before = model.SerializeToString()
+    changed = _apply(copy.deepcopy(model))
+    actual = (
+        ReferenceEvaluator(changed).run(None, feeds)[0]
+        if runtime == "reference"
+        else _run_ort(changed, feeds)["y"]
+    )
+    np.testing.assert_array_equal(actual, expected)
+    if target == TensorProto.STRING:
+        assert changed.SerializeToString() == before
+    else:
+        assert not any(node.op_type == "Not" for node in changed.graph.node)
+
+
 @pytest.mark.parametrize("owner", ["capture", "identity", "override"])
 def test_not_preserves_boolean_owners_and_runtime_sources(owner):
     """Keep captured Casts, boolean aliases and overridable numeric sources native."""

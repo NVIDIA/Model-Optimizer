@@ -39,6 +39,7 @@ from ..utils.graph_utils import (
     add_unique_initializers,
     add_value_info,
     batch_replace_nodes,
+    get_node_attr_i,
 )
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _subgraph_captures
@@ -95,7 +96,9 @@ def _apply_not(model: onnx.ModelProto) -> onnx.ModelProto:
             binary[source] = _binary_source(cache, source, runtime)
         binary_source = binary[source]
         if not binary_source or any(
-            user.op_type != "Cast" or id(user) not in casts
+            user.op_type != "Cast"
+            or id(user) not in casts
+            or get_node_attr_i(user, "to", 0) == TensorProto.STRING
             for user, _port in cache.get_consumers(node.output[0])
         ):
             continue
