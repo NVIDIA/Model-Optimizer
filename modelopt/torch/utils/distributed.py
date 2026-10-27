@@ -437,18 +437,44 @@ def _received(sent: tuple[bool, Any], rank: int, label: str) -> BaseException:
     return RuntimeError(f"rank {rank} failed to compute {label}: {detail}")
 
 
+def _encoded(value: Any) -> bytes:
+    """``value`` as :func:`broadcast_from` and :func:`all_reduce` send it: serialized once, here.
+
+    It is also loaded back here: a value that does not serialize, or that the other ranks could not
+    load (a class a forced weights-only load refuses, say), then fails inside the caller's guard,
+    which sends the failure to every rank, rather than inside the collective, on one rank alone. The
+    collective carries the bytes, which always pickle. torch.save stands in for plain pickle, which
+    bandit refuses under modelopt/.
+    """
+    buffer = io.BytesIO()
+    torch.save(value, buffer)
+    payload = buffer.getvalue()
+    _decoded(payload)
+    return payload
+
+
+def _decoded(payload: bytes) -> Any:
+    """The value :func:`_encoded` serialized into ``payload``.
+
+    A full load, not :func:`_deserialize`'s weights_only one: the peers are this job's own ranks,
+    as the object collectives' own unpickling would trust them, and a DistributionPlan crosses
+    without add_safe_globals.
+    """
+    return torch.load(io.BytesIO(payload), weights_only=False)
+
+
 def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
     """Return ``fn()`` run on ``rank`` only, on every rank.
 
     For a value that depends on what each rank reads for itself -- the environment, its GPU, files
     on its node -- so that ranks computing it for themselves could disagree. If ``fn`` raises, or
-    returns a value that does not pickle, as the broadcast needs, every rank raises instead of
-    waiting in a broadcast ``rank`` never sends: ``rank`` its own error, the others a SystemExit
-    with its code if that is what it was, so that every rank exits, else a RuntimeError. A rank
-    broadcasting another label than ``rank`` at the same point fails; ``rank`` sees no other rank's
-    label, and returns. Collective: every rank calls it at the same point, with the same ``rank``.
-    In a single process ``fn`` runs alone; a rank of a launch whose process group is not set up yet
-    raises instead.
+    returns a value that does not serialize and load back (:func:`_encoded`), every rank raises
+    instead of waiting in a broadcast ``rank`` never sends: ``rank`` its own error, the others a
+    SystemExit with its code if that is what it was, so that every rank exits, else a RuntimeError.
+    A rank broadcasting another label than ``rank`` at the same point fails; ``rank`` sees no other
+    rank's label, and returns. Collective: every rank calls it at the same point, with the same
+    ``rank``. In a single process ``fn`` runs alone; a rank of a launch whose process group is not
+    set up yet raises instead.
     """
     _refuse_a_launch_without_its_group(label)
     if not 0 <= rank < size():
@@ -457,26 +483,21 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
         return fn()
     sending = torch.distributed.get_rank() == rank
     value: Any = None
+    payload: Any = None
     error = None
     if sending:
         try:
             value = fn()
-            # Pickle it here, as the broadcast will: a value that does not pickle then fails as this
-            # rank's error, which the broadcast sends, rather than in the broadcast, on this rank
-            # alone, leaving the others waiting. torch.save stands in for the broadcast's pickle,
-            # which bandit refuses under modelopt/, so the check is close rather than exact.
-            torch.save(value, io.BytesIO())
+            payload = _encoded(value)
         except BaseException as e:
             # Still send: the other ranks would otherwise wait in the broadcast for this one. A
             # SystemExit or KeyboardInterrupt too, which argparse-style checks raise.
-            value, error = None, e
+            value, payload, error = None, None, e
     # One message from the sending rank: its label, so a rank broadcasting another learns the two
-    # are out of step, and its value or its error. The object collectives unpickle with plain
-    # pickle, not _deserialize's weights_only load: the peers are this job's own ranks, and a
-    # DistributionPlan crosses without add_safe_globals.
-    message = [(label, value, _sendable(error))]
+    # are out of step, and its serialized value or its error.
+    message = [(label, payload, _sendable(error))]
     torch.distributed.broadcast_object_list(message, group_src=rank)
-    sent_label, value, sent_error = message[0]
+    sent_label, payload, sent_error = message[0]
     if error is not None:
         raise error
     if sent_error is not None:
@@ -486,7 +507,7 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
             f"Ranks broadcast out of step: this rank broadcast {label!r} while rank {rank} sent "
             f"{sent_label!r}. Every rank must broadcast them in the same order."
         )
-    return value
+    return value if sending else _decoded(payload)
 
 
 def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _V]) -> _V:
@@ -494,13 +515,13 @@ def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _
 
     ``combine`` takes the ranks' values in rank order and returns the one every rank gets, e.g.
     ``min`` for a batch size each rank's memory bounds, where one rank's choice could run another
-    out of memory. If ``fn`` raises on any rank, or returns a value that does not pickle, as the
-    gather needs, every rank raises instead of waiting in a gather that rank never joins, and every
-    rank alike: if any rank's error is not a SystemExit, a rank with such an error raises its own
-    and the others a RuntimeError naming the first one; else every rank exits, a rank that exited
-    with its own SystemExit and the others with the first one's code. Ranks reducing different
-    labels at the same point fail. Collective; in a single process ``fn`` runs alone, and a rank of a
-    launch whose process group is not set up yet raises instead.
+    out of memory. If ``fn`` raises on any rank, or returns a value that does not serialize and load
+    back (:func:`_encoded`), every rank raises instead of waiting in a gather that rank never joins,
+    and every rank alike: if any rank's error is not a SystemExit, a rank with such an error raises
+    its own and the others a RuntimeError naming the first one; else every rank exits, a rank that
+    exited with its own SystemExit and the others with the first one's code. Ranks reducing
+    different labels at the same point fail. Collective; in a single process ``fn`` runs alone, and
+    a rank of a launch whose process group is not set up yet raises instead.
 
     It runs ``fn`` itself so that a rank whose ``fn`` fails still joins the gather, which
     :func:`allreduce`, handed values the ranks already hold, cannot do; :func:`broadcast_from`
@@ -509,18 +530,14 @@ def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _
     _refuse_a_launch_without_its_group(label)
     if not is_distributed_run():
         return combine([fn()])
-    value, error = None, None
+    payload, error = None, None
     try:
-        value = fn()
-        # Pickle it here, as the gather will: a value that does not pickle then fails as this
-        # rank's error, which the gather carries, rather than in the gather, on this rank alone,
-        # leaving the others waiting.
-        torch.save(value, io.BytesIO())
+        payload = _encoded(fn())
     except BaseException as e:
         # Still join the gather: the other ranks would otherwise wait in it for this one, a
         # SystemExit or KeyboardInterrupt included.
-        value, error = None, e
-    mine = (label, value, _sendable(error))
+        payload, error = None, e
+    mine = (label, payload, _sendable(error))
     gathered: list[Any] = [None] * torch.distributed.get_world_size()
     torch.distributed.all_gather_object(gathered, mine)
     failures = [(rank_, sent) for rank_, (_, _, sent) in enumerate(gathered) if sent is not None]
@@ -541,8 +558,9 @@ def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _
             f"Ranks reduced out of step: {labels} at the same point. Every rank must reduce "
             "them in the same order."
         )
-    # The gathered values are unpickled copies, so the result shares nothing with the callers'.
-    return combine([rank_value for _, rank_value, _ in gathered])
+    # Every rank's value is loaded from what it sent, this rank's too, so the result shares nothing
+    # with the callers'.
+    return combine([_decoded(rank_payload) for _, rank_payload, _ in gathered])
 
 
 @dataclass(frozen=True)

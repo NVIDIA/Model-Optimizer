@@ -231,6 +231,18 @@ def test_a_launch_without_its_group_refuses_the_collectives(monkeypatch):
     assert ran == []
 
 
+class _Protocol2Only:
+    """Pickles at protocol 2, as torch.save does, and refuses plain pickle's higher default."""
+
+    def __init__(self, n):
+        self.n = n
+
+    def __reduce_ex__(self, protocol):
+        if protocol > 2:
+            raise TypeError("protocol 2 only")
+        return _Protocol2Only, (self.n,)
+
+
 def _broadcast_from_job(rank, size):
     ran = []
 
@@ -266,6 +278,8 @@ def _broadcast_from_job(rank, size):
         else:
             assert isinstance(error, RuntimeError), error
             assert "rank 0 failed to compute x: TypeError" in str(error), error
+        # Serialized once, where the sending rank catches a failure, not again by the broadcast.
+        assert broadcast_from("x", lambda: _Protocol2Only(7)).n == 7
         sent, error = _outcome(lambda: broadcast_from("plan" if rank == 0 else "other", lambda: 7))
         if rank == 0:
             assert (sent, error) == (7, None)
@@ -277,8 +291,9 @@ def _broadcast_from_job(rank, size):
 def test_broadcast_from_gives_every_rank_the_sending_ranks_value(cpu_dist_workers):
     """Over a real broadcast: any rank can send, and only it runs fn. A rank outside the run is
     refused, the sending rank's failure stops every rank and its exit exits every rank with its
-    code, so that distributed_run tears every rank down alike. A value that does not pickle fails as
-    fn raising does, rather than in the broadcast, and ranks out of step fail."""
+    code, so that distributed_run tears every rank down alike. A value that does not serialize
+    fails as fn raising does, rather than in the broadcast; one only torch.save's pickle protocol
+    takes crosses, serialized once; and ranks out of step fail."""
     cpu_dist_workers.run(_broadcast_from_job)
 
 
@@ -331,6 +346,11 @@ def _all_reduce_job(rank, size):
         else:
             assert isinstance(error, RuntimeError), error
             assert "rank 1 failed to compute smallest: TypeError" in str(error), error
+        # Serialized once, where each rank catches a failure, not again by the gather.
+        reduced = all_reduce(
+            "x", lambda: _Protocol2Only(rank), lambda values: [v.n for v in values]
+        )
+        assert reduced == list(range(size)), reduced
         _, error = _outcome(
             lambda: all_reduce("smallest" if rank == 0 else "other", lambda: 4, min)
         )
@@ -342,8 +362,8 @@ def test_all_reduce_gives_every_rank_the_combined_value(cpu_dist_workers):
     """Over a real gather: every rank's value counts and every rank gets the same result. One rank's
     failure stops every rank and its exit exits every rank with its code. A rank's error outranks
     another's exit, so that no rank waits in the exit's barrier for one that aborted. A value that
-    does not pickle fails as fn raising does, rather than in the gather, and ranks out of step
-    fail."""
+    does not serialize fails as fn raising does, rather than in the gather; one only torch.save's
+    pickle protocol takes crosses, serialized once; and ranks out of step fail."""
     cpu_dist_workers.run(_all_reduce_job)
 
 
