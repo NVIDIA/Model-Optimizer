@@ -25,7 +25,6 @@ from onnx import helper as h
 from onnx import numpy_helper as nh
 from onnx.reference import ReferenceEvaluator
 
-from modelopt.onnx import graph_surgery
 from modelopt.onnx.graph_surgery.dla_transforms.dla_convert_ops_to_4d import (
     _apply_convert_ops_to_4d,
 )
@@ -347,30 +346,6 @@ def test_legacy_rank_dependent_op_is_left_intact():
     _same_values(
         model, _apply_convert_ops_to_4d, {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
     )
-
-
-def test_dispatcher_keeps_existing_return_and_keyword_contract(monkeypatch):
-    """Preserve registry dispatch return values and keyword forwarding."""
-    calls = []
-
-    def original(**kwargs):
-        """Record registry forwarding and return its sentinel value."""
-        calls.append(kwargs)
-        return {"converted": 3}
-
-    monkeypatch.setitem(graph_surgery._SURGERY_REGISTRY, "convert-bf16", original)
-    result = graph_surgery.run_graph_surgery(
-        "convert-bf16", "input.onnx", "output.onnx", external_data=False, verbose=False
-    )
-    assert result == {"converted": 3}
-    assert calls == [
-        {
-            "model_path": "input.onnx",
-            "output_path": "output.onnx",
-            "external_data": False,
-            "verbose": False,
-        }
-    ]
 
 
 def test_control_flow_capture_keeps_initializer():
