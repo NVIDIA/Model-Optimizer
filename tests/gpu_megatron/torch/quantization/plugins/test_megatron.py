@@ -2306,6 +2306,8 @@ def _test_dsa_kv_cache_quant_helper(tmp_path, rank, size):
     assert all(m.k_bmm_quantizer.is_enabled and m.v_bmm_quantizer.is_enabled for m in restored)
 
 
+# Intermittent since 2026-10-27 (5 of ~45 CI runs), always in the DSA forward during calibration.
+@skip_flaky_on_blackwell
 def test_dsa_kv_cache_quant(dist_workers_size_1, tmp_path):
     """DSAttention gets calibrated K/V KV-cache quantizers that survive a checkpoint round-trip."""
     pytest.importorskip("megatron.core.transformer.experimental_attention_variant.dsa")
