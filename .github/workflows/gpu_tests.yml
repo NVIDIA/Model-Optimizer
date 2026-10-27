@@ -18,12 +18,13 @@ jobs:
   pr-gate:
     uses: ./.github/workflows/_pr_gate.yml
     permissions:
-      checks: read
+      contents: read
     secrets: inherit
     with:
       files: |
         .github/actions/**
         .github/workflows/_pr_gate.yml
+        .github/workflows/_pr_unit_watch.yml
         .github/workflows/gpu_tests.yml
         modelopt/**
         modelopt_recipes/**
@@ -35,6 +36,15 @@ jobs:
         tests/gpu_megatron/**
         tests/gpu_trtllm/**
         tests/gpu_vllm/**
+
+  # Runs next to the lanes and cancels the run if the unit tests fail (see _pr_unit_watch.yml).
+  unit-watch:
+    needs: [pr-gate]
+    if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && needs.pr-gate.outputs.any_changed == 'true' }}
+    uses: ./.github/workflows/_pr_unit_watch.yml
+    permissions:
+      checks: read
+      actions: write
 
   gpu-tests:
     needs: [pr-gate]
@@ -142,7 +152,7 @@ jobs:
   gpu-pr-required-check:
     # Run even if gpu-tests is skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [pr-gate, gpu-tests]
+    needs: [pr-gate, unit-watch, gpu-tests]
     runs-on: ubuntu-24.04
     steps:
       - name: Stacked PR, GPU tests deferred
@@ -151,5 +161,8 @@ jobs:
           echo "::error::This PR targets another PR's branch, so GPU tests are deferred until it targets main. After retargeting, push or use 'Re-run all jobs'."
           exit 1
       - name: Required GPU tests did not succeed
-        if: ${{ needs.pr-gate.result != 'success' || (needs.pr-gate.outputs.any_changed == 'true' && needs.gpu-tests.result != 'success') }}
+        if: >-
+          ${{ needs.pr-gate.result != 'success' || (needs.pr-gate.outputs.any_changed == 'true' && (
+            needs.unit-watch.result != 'success' || needs.gpu-tests.result != 'success'
+          )) }}
         run: exit 1

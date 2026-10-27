@@ -31,7 +31,6 @@ jobs:
   pr-gate:
     runs-on: ubuntu-24.04
     permissions:
-      checks: read
       contents: read
     outputs:
       any_changed: ${{ steps.lanes.outputs.any_changed }}
@@ -63,6 +62,7 @@ jobs:
             common:
               - .github/actions/**
               - .github/workflows/_example_tests_runner.yml
+              - .github/workflows/_pr_unit_watch.yml
               - .github/workflows/example_tests.yml
               - modelopt/**
               - modelopt_recipes/**
@@ -119,13 +119,15 @@ jobs:
             echo "${lane,,}=$run" | tee --append "$GITHUB_OUTPUT"
           done
           echo "any_changed=$any" | tee --append "$GITHUB_OUTPUT"
-      - name: Wait for unit tests before spending GPU runners
-        if: ${{ steps.lanes.outputs.any_changed == 'true' && startsWith(github.ref, 'refs/heads/pull-request/') }}
-        uses: poseidon/wait-for-status-checks@e7e24423722c5b8e97a6dd5848827d2a412f812d # v0.7.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          match_pattern: "^linux$" # Wait for Unit tests / linux
-          delay: 300s
+
+  # Runs next to the lanes and cancels the run if the unit tests fail (see _pr_unit_watch.yml).
+  unit-watch:
+    needs: [pr-gate]
+    if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && needs.pr-gate.outputs.any_changed == 'true' }}
+    uses: ./.github/workflows/_pr_unit_watch.yml
+    permissions:
+      checks: read
+      actions: write
 
   ##### PyTorch Example Tests #####
   torch:
@@ -252,7 +254,7 @@ jobs:
   example-pr-required-check:
     # Run even if example tests are skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [pr-gate, torch, vllm, trtllm, megatron, diffusers, onnx]
+    needs: [pr-gate, unit-watch, torch, vllm, trtllm, megatron, diffusers, onnx]
     runs-on: ubuntu-24.04
     steps:
       - name: Stacked PR, example tests deferred
@@ -264,6 +266,7 @@ jobs:
         if: |
           needs.pr-gate.result != 'success' ||
           (needs.pr-gate.outputs.any_changed == 'true' && (
+            needs.unit-watch.result != 'success' ||
             !contains(fromJSON('["success", "skipped"]'), needs.torch.result) ||
             !contains(fromJSON('["success", "skipped"]'), needs.vllm.result) ||
             !contains(fromJSON('["success", "skipped"]'), needs.trtllm.result) ||

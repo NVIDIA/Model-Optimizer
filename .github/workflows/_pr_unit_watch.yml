@@ -1,0 +1,34 @@
+name: PR unit watch
+
+# The GPU, example and regression lanes start without waiting for the unit tests, which would put their
+# 8 min on the critical path of every push. This workflow runs next to them and cancels the whole run if the
+# unit `linux` check fails, so GPU runners are not spent on a commit that cannot pass. The calling workflow's
+# required-check job still fails its check: this workflow fails, and the lanes end up cancelled.
+on:
+  workflow_call:
+
+jobs:
+  wait:
+    runs-on: ubuntu-24.04
+    permissions:
+      checks: read
+    steps:
+      - uses: poseidon/wait-for-status-checks@e7e24423722c5b8e97a6dd5848827d2a412f812d # v0.7.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # A check that does not exist yet counts as passed, so the first poll comes late enough for `linux`
+          # to have been created.
+          match_pattern: "^linux$" # Wait for Unit tests / linux
+          delay: 300s
+
+  # A separate job, so that the third-party action above never sees a token that can cancel runs.
+  cancel-run:
+    needs: [wait]
+    if: ${{ needs.wait.result == 'failure' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"

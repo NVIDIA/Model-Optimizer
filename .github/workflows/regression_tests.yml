@@ -19,12 +19,13 @@ jobs:
   pr-gate:
     uses: ./.github/workflows/_pr_gate.yml
     permissions:
-      checks: read
+      contents: read
     secrets: inherit
     with:
       files: |
         .github/actions/**
         .github/workflows/_pr_gate.yml
+        .github/workflows/_pr_unit_watch.yml
         .github/workflows/regression_tests.yml
         modelopt/torch/**
         noxfile.py
@@ -36,6 +37,15 @@ jobs:
         examples/dataset/**
         modelopt_recipes/general/speculative_decoding/**
         tools/launcher/**
+
+  # Runs next to the lanes and cancels the run if the unit tests fail (see _pr_unit_watch.yml).
+  unit-watch:
+    needs: [pr-gate]
+    if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && needs.pr-gate.outputs.any_changed == 'true' }}
+    uses: ./.github/workflows/_pr_unit_watch.yml
+    permissions:
+      checks: read
+      actions: write
 
   regression-tests:
     needs: [pr-gate]
@@ -76,7 +86,7 @@ jobs:
   regression-pr-required-check:
     # Run even if regression-tests is skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [pr-gate, regression-tests]
+    needs: [pr-gate, unit-watch, regression-tests]
     runs-on: ubuntu-24.04
     steps:
       - name: Stacked PR, regression tests deferred
@@ -87,5 +97,7 @@ jobs:
       - name: Required regression tests did not succeed
         if: |
           needs.pr-gate.result != 'success' ||
-          (needs.pr-gate.outputs.any_changed == 'true' && needs.regression-tests.result != 'success')
+          (needs.pr-gate.outputs.any_changed == 'true' && (
+            needs.unit-watch.result != 'success' || needs.regression-tests.result != 'success'
+          ))
         run: exit 1
