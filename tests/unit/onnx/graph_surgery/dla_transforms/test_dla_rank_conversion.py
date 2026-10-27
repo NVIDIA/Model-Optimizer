@@ -988,3 +988,118 @@ def test_native_index_views_survive_rank_preparation(producer, copied):
     expected = _execute(model, feeds)[0]
     converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
     np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+
+
+@pytest.mark.parametrize("batch", [1, 2])
+def test_symbolic_input_output_remains_native(batch):
+    """Leave symbolic input ranks intact instead of restoring an unpromoted output."""
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Softmax", ["x"], ["y"], axis=-1)],
+            "symbolic_native",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, ["N", 3, 4])],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, ["N", 3, 4])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    feeds = {"x": np.arange(batch * 12, dtype=np.float32).reshape(batch, 3, 4)}
+    expected = _execute(model, feeds)
+    transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_allclose(_execute(transformed, feeds)[0], expected[0])
+
+
+@pytest.mark.parametrize("operation", ["ArgMin", "Hardmax", "LayerNormalization"])
+def test_axis_update_preserves_native_four_dimensional_operators(operation):
+    """Allow axis-bearing operators that already consume their final rank."""
+    shape = [2, 3, 4, 5]
+    inputs = ["x"]
+    initializers = []
+    output_shape = [2, 1, 4, 5] if operation == "ArgMin" else shape
+    if operation == "LayerNormalization":
+        inputs.append("scale")
+        initializers.append(numpy_helper.from_array(np.ones(shape[1:], np.float32), "scale"))
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node(operation, inputs, ["y"], axis=1)],
+            "native_four_dimensional",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+            [
+                helper.make_tensor_value_info(
+                    "y",
+                    TensorProto.INT64 if operation == "ArgMin" else TensorProto.FLOAT,
+                    output_shape,
+                )
+            ],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    feeds = {"x": np.arange(120, dtype=np.float32).reshape(shape)}
+    expected = _execute(model, feeds)
+    transformed = _apply_update_axis(copy.deepcopy(model))
+    assert transformed == model
+    np.testing.assert_array_equal(_execute(transformed, feeds)[0], expected[0])
+
+
+@pytest.mark.parametrize("operation", ["Reshape", "Expand", "Tile", "Slice", "Add"])
+def test_legacy_initializer_controls_remain_fixed(operation):
+    """Execute IR3 initializer declarations through boundary and rank conversion."""
+    shape = [2, 3]
+    controls = {
+        "Reshape": [3, 2],
+        "Expand": [2, 3],
+        "Tile": [2, 1],
+        "Slice": [0],
+        "Add": [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+    }
+    output_shape = {"Reshape": [3, 2], "Tile": [4, 3], "Slice": [1, 3]}.get(operation, shape)
+    inputs = ["x", "control"]
+    initializers = [
+        numpy_helper.from_array(
+            np.asarray(controls[operation], np.float32 if operation == "Add" else np.int64),
+            "control",
+        )
+    ]
+    if operation == "Slice":
+        for name, values in (("ends", [1]), ("axes", [0])):
+            initializers.append(numpy_helper.from_array(np.asarray(values, np.int64), name))
+            inputs.append(name)
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node(operation, inputs, ["y"])],
+            "legacy_controls",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)]
+            + [
+                helper.make_tensor_value_info(t.name, t.data_type, list(t.dims))
+                for t in initializers
+            ],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, output_shape)],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 3
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(shape)}
+    expected = _execute(model, feeds)
+    transformed = copy.deepcopy(model)
+    transforms = (
+        _apply_non4d_model_inputs,
+        _apply_non4d_model_outputs,
+        {
+            "Reshape": _apply_non4d_reshape,
+            "Expand": _apply_non4d_expand,
+            "Tile": _apply_non4d_tile,
+            "Slice": _apply_non4d_slice_axis,
+            "Add": _apply_non4d_initializers,
+        }[operation],
+    )
+    for apply in transforms:
+        transformed = apply(
+            transformed,
+            **({"defer_rank_conversion": True} if apply is _apply_non4d_model_outputs else {}),
+        )
+    if operation == "Add":
+        assert list(transformed.graph.initializer[0].dims) == [1, 1, 2, 3]
+    np.testing.assert_array_equal(_execute(transformed, feeds)[0], expected[0])

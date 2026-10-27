@@ -398,9 +398,19 @@ def _apply_non4d_model_outputs(
                     native_broadcasts.update(node.output)
     rank_sources = {}
     contrib_ops = _boundary_contrib_ops(model)
+    inputs_promotable = all(
+        cache.get_shape(value.name) is not None
+        for value in graph.input
+        if value.name not in cache.init_names
+    )
     for value in graph.output:
         shape: list | None = cache.get_shape(value.name)
-        if shape is None and defer_rank_conversion and value.type.tensor_type.HasField("shape"):
+        if (
+            shape is None
+            and defer_rank_conversion
+            and inputs_promotable
+            and value.type.tensor_type.HasField("shape")
+        ):
             shape = [
                 dim.dim_value if dim.HasField("dim_value") else dim.dim_param or None
                 for dim in value.type.tensor_type.shape.dim

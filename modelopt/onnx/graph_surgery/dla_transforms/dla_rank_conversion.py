@@ -38,9 +38,18 @@ from .dla_indexing import _insert_support_nodes, _operator_nodes
 __all__ = []
 
 
+def _runtime_input_names(model):
+    """Exclude fixed initializer declarations required by legacy ONNX IR."""
+    names = {value.name for value in model.graph.input}
+    if model.ir_version <= 3:
+        names.difference_update(tensor.name for tensor in model.graph.initializer)
+    return names
+
+
 def _apply_non4d_slice_axis(model):
     """Remap fixed Slice axes before their data rank is promoted."""
     cache = GraphCache(model.graph)
+    runtime_inputs = _runtime_input_names(model)
     plans = []
     for node in _operator_nodes(model, {"Slice"}):
         shape = _shape_before_boundary_promotion(cache, node.input[0])
@@ -56,7 +65,7 @@ def _apply_non4d_slice_axis(model):
             plans.append((node, node.input[1], values))
             continue
         axes = cache.get_init(node.input[3])
-        if axes is None or axes.name in cache.graph_input_names:
+        if axes is None or axes.name in runtime_inputs:
             raise ValueError(f"{node.name!r}: Slice axes must be fixed")
         values = numpy_helper.to_array(axes).reshape(-1)
         if values.size and np.any(values >= 0):
@@ -83,6 +92,7 @@ def _apply_non4d_slice_axis(model):
 def _apply_non4d_reshape(model):
     """Prepare fixed Reshape targets for the deferred four-dimensional layout."""
     cache = GraphCache(model.graph)
+    runtime_inputs = _runtime_input_names(model)
     reshapes = _operator_nodes(model, {"Reshape"})
     gathers = {id(node) for node in _operator_nodes(model, {"Gather"})}
     reshape_ids = {id(node) for node in reshapes}
@@ -101,7 +111,7 @@ def _apply_non4d_reshape(model):
         native_input = _shape_before_boundary_promotion(cache, node.input[0])
         if target_shape == [4] and native_input is not None and len(native_input) == 4:
             continue
-        if tensor is None or tensor.name in cache.graph_input_names:
+        if tensor is None or tensor.name in runtime_inputs:
             raise ValueError(f"{node.name!r}: Reshape target must be fixed")
         values = numpy_helper.to_array(tensor).reshape(-1).tolist()
         if len(values) < 4:
@@ -154,7 +164,7 @@ def _apply_non4d_reshape(model):
         replacements[tensor.name] = replacement
         users.setdefault(tensor.name, []).append(node)
     for name, replacement in replacements.items():
-        private = name in cache.graph_output_names | captured or any(
+        private = name in cache.graph_output_names | cache.graph_input_names | captured or any(
             index != 1 or id(user) not in reshape_ids for user, index in cache.get_consumers(name)
         )
         if private:
@@ -203,7 +213,7 @@ def _apply_non4d_initializers(model):
         if node.op_type in {"Unsqueeze", "GroupQueryAttention"}:
             avoid.update(node.input)
     updates = []
-    avoid.update(value.name for value in model.graph.input)
+    avoid.update(_runtime_input_names(model))
     expand_or_front = expand | front
     for tensor in model.graph.initializer:
         if tensor.name in avoid:
@@ -231,6 +241,9 @@ def _apply_non4d_initializers(model):
         for node in model.graph.node
         if node.input and node.op_type not in _RANK_AGNOSTIC_OPS
     }
+    legacy_inputs = (
+        {value.name: value for value in model.graph.input} if model.ir_version <= 3 else {}
+    )
     for tensor, shape in updates:
         if tensor.name in native_inputs and tensor.name not in value_info:
             # Later axis stages read native ranks from the same deferred metadata snapshot.
@@ -239,16 +252,23 @@ def _apply_non4d_initializers(model):
             )
         del tensor.dims[:]
         tensor.dims.extend(shape)
+        if tensor.name in legacy_inputs:
+            legacy_inputs[tensor.name].type.tensor_type.shape.CopyFrom(
+                helper.make_tensor_value_info(
+                    tensor.name, tensor.data_type, shape
+                ).type.tensor_type.shape
+            )
     return model
 
 
 def _pad_shape_inputs(model, op_type, suffix):
     """Plan fixed structural views before changing nodes or allocating controls."""
     cache = GraphCache(model.graph)
+    runtime_inputs = _runtime_input_names(model)
     plans = []
     for node in _operator_nodes(model, {op_type}):
         tensor = cache.get_init(node.input[1])
-        if tensor is None or tensor.name in cache.graph_input_names:
+        if tensor is None or tensor.name in runtime_inputs:
             raise ValueError(f"{node.name!r}: {op_type} target must be fixed")
         values = numpy_helper.to_array(tensor).reshape(-1).tolist()
         if len(values) < 4:
@@ -476,6 +496,8 @@ def _apply_update_axis(model):
         else:
             value = axis.i
         if node.op_type not in update:
+            if shape is not None and len(shape) not in (2, 3, 5):
+                continue
             raise ValueError(f"{node.op_type} is unsupported for DLA axis transformation")
         if "axis_updated" in node.name:
             continue
