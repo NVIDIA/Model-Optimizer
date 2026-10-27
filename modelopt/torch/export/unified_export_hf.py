@@ -2202,7 +2202,7 @@ def export_hf_checkpoint(
     # buffer instead of the whole quantized state dict.
     _offloaded = has_accelerate_offload(model)
 
-    error: Exception | None = None
+    error: BaseException | None = None
     try:
         if _offloaded:
             # Imported here rather than at module scope: the streaming exporter imports the
@@ -2367,6 +2367,11 @@ def export_hf_checkpoint(
             " can be saved with torch.save for further inspection."
         )
         raise e
+    except BaseException as e:
+        # An exit or an interrupt on one rank must fail the others too, or they return as if the
+        # checkpoint were whole.
+        error = e
+        raise
     finally:
         # Every rank waits for the writer to finish. Without this the ranks that wrote nothing exit
         # first and the job hangs on the ones still writing.
@@ -2440,7 +2445,7 @@ def _process_together(
     return quant_config[0]
 
 
-def _finish_export_together(error: Exception | None) -> None:
+def _finish_export_together(error: BaseException | None) -> None:
     """Wait for every rank to finish writing, and raise on all of them if any failed.
 
     A barrier alone lets the ranks whose writes succeeded return, and the run carries on as if the
