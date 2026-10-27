@@ -355,10 +355,10 @@ def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> Non
     """Record that ``model`` is distributed as ``plan``, on it and on every submodule it has now.
 
     Code handed a submodule, such as a VLM's language model, then reads the same plan as code handed
-    the whole model; a module added afterwards records none. Code that distributes a model records
-    its plan here before calibrating or exporting the model. The plan says how the model is placed
-    over the run; the :class:`ParallelState` a quantized module holds names the process groups its
-    collectives run on.
+    the whole model; a module added afterwards records none. ``load_pretrained`` records the plan it
+    loads by once the model is built; code that distributes a model itself records it here before
+    calibrating or exporting the model. The plan says how the model is placed over the run; the
+    :class:`ParallelState` a quantized module holds names the process groups its collectives run on.
 
     A model is distributed once, and its plan recorded once: recording a plan on a model that, or
     any of whose submodules, already records one raises, the same plan included, and leaves the
@@ -403,9 +403,10 @@ def distribution_plan(model: torch.nn.Module) -> DistributionPlan:
     if sharded or size() > 1:
         how = "is FSDP2-sharded" if sharded else f"is held in a run of {size()} ranks"
         raise RuntimeError(
-            f"{type(model).__name__} {how}, but has no distribution plan recorded. Record how it "
-            "is distributed with set_distribution_plan(); a module added to a model after its plan "
-            "was recorded has none, so read the plan off that model."
+            f"{type(model).__name__} {how}, but has no distribution plan recorded. Load it with "
+            "load_pretrained, or record how it is distributed with set_distribution_plan(); a "
+            "module added to a model after its plan was recorded has none, so read the plan off "
+            "that model."
         )
     return DistributionPlan()
 
