@@ -139,6 +139,9 @@ def test_calibration_matches_eager():
         mtq.quantize(model, QUANT_CFG, forward_loop=_forward_loop)
     e, g = eager.experts, grouped.experts
     assert (e._running_grouped_mm, g._running_grouped_mm) == (False, True)
+    # grouped_mm went through `_grouped_linear`, one call per projection, not through per-expert
+    # `F.linear` calls as eager does: the amaxes below are the grouped hook's.
+    assert (e._intercept_count, g._intercept_count) == (2 * NUM_EXPERTS, 2)
 
     for name in ("up_proj_input_quantizer", "down_proj_input_quantizer"):
         assert getattr(e, name).amax is not None, name
