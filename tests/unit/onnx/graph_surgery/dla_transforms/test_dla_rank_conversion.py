@@ -16,6 +16,7 @@
 """Numerical checks for independently reviewable rank and boundary passes."""
 
 import copy
+import importlib
 
 import numpy as np
 import onnx
@@ -23,7 +24,6 @@ import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
-from modelopt.onnx.graph_surgery import make_dla_compatible as dla_pipeline
 from modelopt.onnx.graph_surgery.dla_transforms.dla_model_boundaries import (
     _apply_non4d_model_inputs,
     _apply_non4d_model_outputs,
@@ -44,6 +44,8 @@ from modelopt.onnx.graph_surgery.make_dla_compatible import (
     DLA_TRANSFORMS,
     _transform_make_dla_compatible,
 )
+
+dla_pipeline = importlib.import_module("modelopt.onnx.graph_surgery.make_dla_compatible")
 
 
 @pytest.mark.parametrize("operation", ["Transpose", "Reshape", "Tile", "Expand"])

@@ -271,7 +271,12 @@ def _prepared_index_data(
             if kernel_rank is not None:
                 return kernel_rank == 4
             return [node.input[1]]
-        if (not before_boundary or restoring_outputs) and node.op_type == "MatMul":
+        if node.op_type == "MatMul" and (
+            not before_boundary
+            or restoring_outputs
+            or {"MatMulToTransposeConvTranspose", "RemoveIntermediarySqueezeAndUnsqueeze"}
+            <= set(prepared_ops)
+        ):
             if not restoring_outputs and name in cache.graph_output_names | captured:
                 return False
             ranks = [matrix_rank(value) for value in node.input[:2]]
