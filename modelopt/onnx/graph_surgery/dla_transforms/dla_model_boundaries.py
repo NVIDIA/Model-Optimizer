@@ -137,6 +137,23 @@ def _require_adapter_opset(model):
         raise ValueError("DLA boundary rank adapters require ONNX opset 13 or newer")
 
 
+def _native_conv1d(node, cache):
+    """Recognize Conv kernels whose native spatial layout is one-dimensional."""
+    kernel = (
+        cache.get_shape(node.input[1]) if node.op_type == "Conv" and len(node.input) > 1 else None
+    )
+    return kernel is not None and len(kernel) == 3
+
+
+def _promoted_axis(node, rank, default):
+    """Map an explicit or schema-default axis after adding leading singleton dimensions."""
+    axis = _attribute(node, "axis")
+    value = axis.i if axis is not None else default
+    if not -rank <= value < rank:
+        raise ValueError(f"Invalid native normalization axis for {node.name!r}")
+    return axis, value + 4 - rank if value >= 0 else value
+
+
 def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=False):
     """Promote selected boundary uses while preserving explicit adapter results."""
     graph = model.graph
@@ -167,6 +184,7 @@ def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=Fal
                 _is_standard_node(node, local_functions, {"Squeeze"}) and "Gather" in node.name
             )
             and node.op_type not in {"InstanceNormalization", "Gemm"}
+            and not _native_conv1d(node, cache)
         ]
         if not consumers:
             continue
@@ -196,16 +214,13 @@ def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=Fal
             if _is_standard_node(
                 consumer, local_functions, {"Softmax", "LogSoftmax", "LayerNormalization"}
             ):
-                axis = _attribute(consumer, "axis")
-                axis_value = (
-                    axis.i
-                    if axis is not None
-                    else defs.get_schema(consumer.op_type, opset).attributes["axis"].default_value.i
+                axis, axis_value = _promoted_axis(
+                    consumer,
+                    len(shape),
+                    defs.get_schema(consumer.op_type, opset).attributes["axis"].default_value.i,
                 )
-                if not -len(shape) <= axis_value < len(shape):
-                    raise ValueError(f"Invalid native normalization axis for {consumer.name!r}")
                 if axis_value >= 0:
-                    normalization_axes[id(consumer)] = (consumer, axis, axis_value + 4 - len(shape))
+                    normalization_axes[id(consumer)] = (consumer, axis, axis_value)
             if not _is_standard_node(consumer, local_functions, {"Unsqueeze"}):
                 continue
             tensor = cache.get_init(consumer.input[1])
@@ -345,7 +360,9 @@ def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False, prepared_o
         producer = cache.get_producer(value.name)
         source = _output_rank_source(cache, producer, local_functions, rank_sources)
         if source is not None:
-            if _is_standard_node(source, local_functions, {"Gemm", "Shape"}):
+            if _is_standard_node(source, local_functions, {"Gemm", "Shape"}) or _native_conv1d(
+                source, cache
+            ):
                 continue
             if defer_rank_conversion:
                 _require_output_rank_conversion(source, local_functions, prepared_output_ops, cache)
@@ -409,6 +426,9 @@ def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False, prepared_o
             existing.input.extend([data_input] + ([axes_name] if axes_name else []))
             continue
         data_input = cache.unique_name(value.name + "_squeeze_input")
+        graph.value_info.append(
+            helper.make_tensor_value_info(data_input, value.type.tensor_type.elem_type, shape)
+        )
         for node in graph.node:
             for index, name in enumerate(node.input):
                 if name == value.name:
@@ -496,15 +516,80 @@ def _apply_remove_intermediary_squeeze_unsqueeze(model, *, rank_converted=False)
     return model
 
 
-def _apply_fix_instancenorm_channels(model):
+def _apply_fix_instancenorm_channels(model, *, prepared_consumer_ops=()):
     """Append spatial singleton dimensions while retaining normalization channels and outputs."""
     graph = model.graph
     cache = GraphCache(graph)
     replacements = {}
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    contrib_ops = _boundary_contrib_ops(model)
+    opset = next(
+        (entry.version for entry in model.opset_import if entry.domain in {"", "ai.onnx"}), 1
+    )
+    axis_plans, perm_plans = {}, {}
+    axis_ops = {
+        "Softmax",
+        "LogSoftmax",
+        "LayerNormalization",
+        "Concat",
+        "Split",
+        "TopK",
+        "QuantizeLinear",
+        "DequantizeLinear",
+    }
+
+    def consumer_layout(consumer, port, standard):
+        """Plan native views or axis/permutation preparation before widening any tensor."""
+        if (
+            not standard
+            or consumer.op_type in {"Shape", "GroupQueryAttention"}
+            or _native_conv1d(consumer, cache)
+            or (port != 0 and consumer.op_type not in {"Concat", "MatMul"})
+        ):
+            return True
+        if consumer.op_type in axis_ops:
+            if "axis_updated" in consumer.name:
+                return False
+            quantizer = consumer.op_type in {"QuantizeLinear", "DequantizeLinear"}
+            if quantizer and cache.get_shape(consumer.input[1]) == []:
+                return False
+            schema = (
+                defs.get_schema(consumer.op_type, opset)
+                if consumer.domain in {"", "ai.onnx"}
+                else None
+            )
+            default = schema.attributes.get("axis") if schema is not None else None
+            if default is not None or (quantizer and consumer.domain == "com.microsoft"):
+                axis, value = _promoted_axis(
+                    consumer, 3, default.default_value.i if default is not None else 1
+                )
+                if value >= 0:
+                    axis_plans[id(consumer)] = (consumer, axis, value)
+        elif consumer.op_type == "Transpose":
+            perm = _attribute(consumer, "perm")
+            values = list(perm.ints) if perm is not None else [2, 1, 0]
+            if len(values) == 3 and sorted(values) == [0, 1, 2]:
+                perm_plans[id(consumer)] = (consumer, perm, [0, *[value + 1 for value in values]])
+            elif len(values) != 4 or sorted(values) != [0, 1, 2, 3]:
+                raise ValueError(f"Unsupported normalization Transpose {consumer.name!r}")
+        elif consumer.op_type not in prepared_consumer_ops and consumer.op_type not in {
+            "Gelu",
+            "InstanceNormalization",
+        }:
+            target = cache.get_shape(consumer.input[1]) if consumer.op_type == "Reshape" else None
+            operands = (
+                [cache.get_shape(name) for name in consumer.input]
+                if consumer.op_type == "MatMul"
+                else []
+            )
+            if target != [4] and not (
+                operands and all(shape is not None and len(shape) >= 2 for shape in operands)
+            ):
+                raise ValueError(f"Unsupported normalization consumer {consumer.op_type}")
+        return False
 
     def output_consumers(name):
-        """Find public adapters and binary edges after layout-preserving unary paths."""
+        """Plan leading or native views for every edge after layout-preserving unary paths."""
         pending, visited = [name], set()
         while pending:
             tensor = pending.pop()
@@ -512,19 +597,32 @@ def _apply_fix_instancenorm_channels(model):
                 continue
             visited.add(tensor)
             for consumer, input_index in cache.get_consumers(tensor):
-                if not _is_standard_node(consumer, local_functions, {consumer.op_type}):
-                    continue
+                standard = _is_standard_node(
+                    consumer, local_functions, {consumer.op_type}, contrib_ops=contrib_ops
+                )
                 if (
-                    input_index == 0
+                    standard
+                    and input_index == 0
                     and consumer.op_type == "Squeeze"
                     and consumer.output[0] in cache.graph_output_names
                 ):
-                    yield consumer, None, None
-                elif consumer.op_type in _RANK_AGNOSTIC_OPS and len(consumer.output) == 1:
+                    yield consumer, None, None, False
+                elif (
+                    standard
+                    and consumer.op_type in _RANK_AGNOSTIC_OPS
+                    and len(consumer.output) == 1
+                ):
                     if len(consumer.input) == 1 and input_index == 0:
                         pending.append(consumer.output[0])
                     elif len(consumer.input) > 1:
-                        yield consumer, tensor, input_index
+                        yield consumer, tensor, input_index, False
+                else:
+                    yield (
+                        consumer,
+                        tensor,
+                        input_index,
+                        consumer_layout(consumer, input_index, standard),
+                    )
 
     plans = []
     for index, node in enumerate(graph.node):
@@ -550,11 +648,12 @@ def _apply_fix_instancenorm_channels(model):
         )
         node.input[0] = output
         replacements[index] = ([node], [reshape, node])
-        for consumer, tensor, port in consumers:
+        for consumer, tensor, port, native in consumers:
             if tensor is not None:
-                if tensor not in bridges:
-                    bridges[tensor] = (shape, [])
-                bridges[tensor][1].append((consumer, port))
+                key = (tensor, native)
+                if key not in bridges:
+                    bridges[key] = (shape, [])
+                bridges[key][1].append((consumer, port))
                 continue
             if len(consumer.input) < 2:
                 continue
@@ -571,15 +670,16 @@ def _apply_fix_instancenorm_channels(model):
                 )
     positions = {id(node): index for index, node in enumerate(graph.node)}
     prefixes = {}
-    for tensor, (shape, edges) in bridges.items():
+    for (tensor, native), (shape, edges) in bridges.items():
+        layout = "native" if native else "leading"
         target = add_initializer(
             graph,
-            cache.unique_name(tensor + "_leading_shape"),
-            np.asarray(pad4d(shape), np.int64),
+            cache.unique_name(tensor + "_" + layout + "_shape"),
+            np.asarray(shape if native else pad4d(shape), np.int64),
             dtype=TensorProto.INT64,
             with_value_info=False,
         )
-        output = cache.unique_name(tensor + "_leading")
+        output = cache.unique_name(tensor + "_" + layout)
         view = helper.make_node(
             "Reshape", [tensor, target], [output], name=cache.unique_name(output + "_reshape")
         )
@@ -590,6 +690,18 @@ def _apply_fix_instancenorm_channels(model):
     for index, nodes in prefixes.items():
         removed, added = replacements.get(index, ([graph.node[index]], [graph.node[index]]))
         replacements[index] = (removed, [*nodes, *added])
+    for consumer, axis, value in axis_plans.values():
+        if axis is None:
+            consumer.attribute.append(helper.make_attribute("axis", value))
+        else:
+            axis.i = value
+        consumer.name = cache.unique_name((consumer.name or consumer.output[0]) + "_axis_updated")
+    for consumer, perm, values in perm_plans.values():
+        if perm is None:
+            consumer.attribute.append(helper.make_attribute("perm", values))
+        else:
+            del perm.ints[:]
+            perm.ints.extend(values)
     batch_replace_nodes(graph, replacements)
     _add_legacy_initializer_inputs(model)
     return model

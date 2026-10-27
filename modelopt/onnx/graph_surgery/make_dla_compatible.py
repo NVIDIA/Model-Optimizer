@@ -123,6 +123,8 @@ def _boundary_stage_options(name, quant_types, verbose, prepared_input_ops, prep
         return {"prepared_input_ops": prepared_input_ops}
     if name == "Non4dModelOutputs":
         return {"prepared_output_ops": prepared_output_ops}
+    if name == "FixInstanceNormChannelMismatch":
+        return {"prepared_consumer_ops": prepared_input_ops}
     return {}
 
 
@@ -172,7 +174,7 @@ def _transform_make_dla_compatible(
         "Non4dSliceAxis": {"Slice"},
         "Non4DLpNorm": {"LpNormalization"},
         "RemoveIntermediarySqueezeAndUnsqueeze": {"Squeeze"},
-        "UpdateAxis": {"TopK", "Split", "QuantizeLinear", "DequantizeLinear"},
+        "UpdateAxis": {"TopK", "Concat", "Split", "QuantizeLinear", "DequantizeLinear"},
     }.items():
         if stage in stages:
             prepared_input_ops.update(operations)

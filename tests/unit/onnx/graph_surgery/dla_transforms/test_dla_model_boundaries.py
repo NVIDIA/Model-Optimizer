@@ -273,6 +273,116 @@ def test_boundary_layer_normalization_preserves_native_axis(axis):
     np.testing.assert_allclose(_checked_run(converted, feeds)[0], expected, rtol=1e-6, atol=1e-7)
 
 
+@pytest.mark.parametrize(
+    ("operation", "axis"),
+    [
+        ("Softmax", -1),
+        ("Softmax", 1),
+        ("LogSoftmax", None),
+        ("Transpose", None),
+        ("Transpose", 1),
+        ("Conv", None),
+        ("opaque", None),
+        ("Shape", None),
+    ],
+)
+@pytest.mark.parametrize("unary", [False, True])
+def test_normalization_preserves_rank_sensitive_and_opaque_consumers(operation, axis, unary):
+    """Execute native and promoted consumers alongside a shared public normalization output."""
+    shape = [2, 3, 4]
+    nodes = [helper.make_node("InstanceNormalization", ["x", "scale", "bias"], ["normalized"])]
+    current = "normalized"
+    if unary:
+        nodes.append(helper.make_node("Relu", [current], ["activated"]))
+        current = "activated"
+    controls = [
+        numpy_helper.from_array(np.ones(3, np.float32), "scale"),
+        numpy_helper.from_array(np.zeros(3, np.float32), "bias"),
+    ]
+    output_shape, dtype, functions = shape, TensorProto.FLOAT, []
+    if operation in {"Softmax", "LogSoftmax"}:
+        nodes.append(
+            helper.make_node(
+                operation, [current], ["y"], **({"axis": axis} if axis is not None else {})
+            )
+        )
+    elif operation == "Transpose":
+        nodes.append(
+            helper.make_node(
+                operation, [current], ["y"], **({"perm": [0, 2, 1]} if axis is not None else {})
+            )
+        )
+        output_shape = [2, 4, 3] if axis is not None else [4, 3, 2]
+    elif operation == "Conv":
+        controls.append(
+            numpy_helper.from_array(np.arange(18, dtype=np.float32).reshape(2, 3, 3) / 18, "kernel")
+        )
+        nodes.append(helper.make_node("Conv", [current, "kernel"], ["y"]))
+        output_shape = [2, 2, 2]
+    elif operation == "opaque":
+        functions.append(
+            helper.make_function(
+                "opaque.norm",
+                "NativeLayout",
+                ["value"],
+                ["result"],
+                [helper.make_node("Transpose", ["value"], ["result"], perm=[0, 2, 1])],
+                [helper.make_opsetid("", 21)],
+            )
+        )
+        nodes.append(helper.make_node("NativeLayout", [current], ["y"], domain="opaque.norm"))
+        output_shape = [2, 4, 3]
+    else:
+        nodes.append(helper.make_node("Shape", [current], ["y"]))
+        output_shape, dtype = [3], TensorProto.INT64
+    outputs = [
+        helper.make_tensor_value_info("y", dtype, output_shape),
+        helper.make_tensor_value_info("normalized", TensorProto.FLOAT, shape),
+    ]
+    if operation in {"Conv", "opaque", "Shape"}:
+        nodes.append(helper.make_node("Softmax", [current], ["side"], axis=-1))
+        outputs.append(helper.make_tensor_value_info("side", TensorProto.FLOAT, shape))
+    model = _make_model(
+        nodes, [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)], outputs, controls
+    )
+    model.functions.extend(functions)
+    if functions:
+        model.opset_import.append(helper.make_opsetid("opaque.norm", 1))
+    feeds = {"x": np.linspace(-1, 2, 24, dtype=np.float32).reshape(shape)}
+    expected = _checked_run(inliner.inline_local_functions(model), feeds)
+    converted = _transform_make_dla_compatible(model, verbose=False)
+    if operation == "Conv":
+        assert list(
+            next(tensor for tensor in converted.graph.initializer if tensor.name == "kernel").dims
+        ) == [2, 3, 3]
+    for actual, reference in zip(
+        _checked_run(inliner.inline_local_functions(converted), feeds), expected
+    ):
+        np.testing.assert_allclose(actual, reference, rtol=1e-5, atol=1e-6)
+
+
+def test_normalization_refuses_unprepared_consumers_before_mutation():
+    """Refuse a rank-sensitive consumer before widening any eligible normalization node."""
+    shape = [2, 3, 4]
+    model = _make_model(
+        [
+            helper.make_node("InstanceNormalization", ["x", "scale", "bias"], ["normalized"]),
+            helper.make_node("Hardmax", ["normalized"], ["y"], axis=1),
+        ],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)],
+        [
+            numpy_helper.from_array(np.ones(3, np.float32), "scale"),
+            numpy_helper.from_array(np.zeros(3, np.float32), "bias"),
+        ],
+    )
+    _checked_run(model, {"x": np.arange(24, dtype=np.float32).reshape(shape)})
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="Unsupported normalization consumer"):
+        _apply_fix_instancenorm_channels(model)
+    assert model.SerializeToString() == before
+
+
 @pytest.mark.parametrize("batch", [1, 2, 3])
 @pytest.mark.parametrize("operation", ["Add", "Mul"])
 @pytest.mark.parametrize("tail", [False, True])
