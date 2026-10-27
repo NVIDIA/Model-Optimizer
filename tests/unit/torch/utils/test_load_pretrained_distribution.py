@@ -169,11 +169,18 @@ def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
     assert loaders == {}
 
 
+@pytest.mark.parametrize(
+    "dtype",
+    [{"dtype": "auto"}, {"dtype": None}, {"torch_dtype": "auto"}],
+    ids=["auto", "none", "torch_dtype"],
+)
 def test_an_fsdp_plan_loads_through_the_parallel_fsdp2_loader(
-    run_as, loaders, process_group, monkeypatch, tmp_path
+    run_as, loaders, process_group, monkeypatch, tmp_path, dtype
 ):
     """FSDP2 shards over the process group it reads its rank and GPU from, by a config read once,
-    with the Hub options the load was given (custom code an ``auto_map`` names in another repo)."""
+    with the Hub options the load was given (custom code an ``auto_map`` names in another repo).
+    It keeps the checkpoint's dtype, as from_pretrained does for "auto" and for None, under either
+    name of the argument."""
     run_as(2, rank=1)
     served, reads = LlamaConfig(**_TINY), []
     monkeypatch.setattr(
@@ -182,7 +189,7 @@ def test_an_fsdp_plan_loads_through_the_parallel_fsdp2_loader(
     plan = DistributionPlan(2, dense="fsdp")
 
     model = load_pretrained(
-        str(tmp_path), distribution=plan, cpu_offload=True, dtype="auto", local_files_only=True
+        str(tmp_path), distribution=plan, cpu_offload=True, local_files_only=True, **dtype
     )
 
     call = loaders.pop("fsdp2")
@@ -321,6 +328,11 @@ def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path, 
     [
         ({"kwargs": {"device_map": "auto"}}, TypeError, r"\['device_map'\] do not apply"),
         ({"kwargs": {"dtype": torch.bfloat16}}, TypeError, "keeps their dtype"),
+        (
+            {"kwargs": {"torch_dtype": torch.bfloat16}},
+            TypeError,
+            r"keeps their dtype, so torch_dtype=torch\.bfloat16",
+        ),
         ({"auto_class": AutoModel}, NotImplementedError, "builds its model class itself"),
         ({"mtp": True}, NotImplementedError, "cannot build the MTP head"),
         (
@@ -329,7 +341,7 @@ def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path, 
             "config and hf_config both name",
         ),
     ],
-    ids=["placement", "dtype", "model_class", "mtp_head", "two_configs"],
+    ids=["placement", "dtype", "torch_dtype", "model_class", "mtp_head", "two_configs"],
 )
 def test_a_sharded_load_refuses_what_it_cannot_honor(
     run_as, serve, loaders, process_group, monkeypatch, tmp_path, change, error, match

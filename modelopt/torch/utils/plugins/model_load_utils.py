@@ -476,14 +476,15 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
             "does not apply to it."
         )
     kwargs = dict(kwargs)
-    if kwargs.get("dtype", "auto") == "auto":
-        kwargs.pop("dtype", None)  # A sharded load keeps the checkpoint's dtype.
-    if "dtype" in kwargs:
-        raise TypeError(
-            f"The {route} load reads the checkpoint's tensors as stored and keeps their dtype, so "
-            f"dtype={kwargs['dtype']!r} does not apply to it; FSDP2's mp_policy sets the dtype "
-            "it computes in."
-        )
+    # torch_dtype is from_pretrained's older name for dtype, and None means "auto" to it.
+    for name in ("dtype", "torch_dtype"):
+        value = kwargs.pop(name, None)
+        if value not in (None, "auto"):  # A sharded load keeps the checkpoint's dtype.
+            raise TypeError(
+                f"The {route} load reads the checkpoint's tensors as stored and keeps their dtype, "
+                f"so {name}={value!r} does not apply to it; FSDP2's mp_policy sets the dtype it "
+                "computes in."
+            )
     unknown = sorted(set(kwargs) - _SHARDED_LOAD_OPTIONS[route])
     if unknown:
         whole = (
