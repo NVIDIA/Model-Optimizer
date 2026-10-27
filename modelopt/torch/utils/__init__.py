@@ -18,6 +18,7 @@
 from ._pytree import *
 from .cpp_extension import *
 from .dataset_utils import *
+from .determinism import *
 from .graph import *
 from .import_utils import *
 from .list import *

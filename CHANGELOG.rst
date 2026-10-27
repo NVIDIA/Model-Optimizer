@@ -18,6 +18,8 @@ Changelog
 - Add a checkpoint-specific NVIDIA Nemotron 3.5 Super VL AutoQuantize recipe with a 4.9-effective-bit NVFP4-MSE/FP8/BF16 search and fixed NVFP4 MTP experts. Select it under ``models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/auto_quantize/``.
 - Add ``hessian_input_dtype`` to the GPTQ and ``local_hessian`` algorithm configs. ``bfloat16`` accumulates the float32 Hessian with a tensor-core GEMM on bfloat16 activations, several times faster and without a float32 copy of each batch; the default ``float32`` keeps the existing float32 GEMM.
 - Add ``examples/hf_ptq/convert_ggml_to_int8.py`` to expand a checkpoint exported with a GGML recipe (IQ formats, ``q8_0``) into an INT8 weight-only compressed-tensors checkpoint. Stock vLLM serves it with its integer kernels at about half the BF16 weight memory, reproducing the GGML weights up to rounding their scales to the model dtype.
+- Add ``python -m modelopt.torch.quantization.utils.scale_compare`` to diff the quantization scales of two exported checkpoints within a tolerance, e.g. to check how reproducible a PTQ run is across repeats or parallel layouts.
+- Add ``--deterministic`` to ``examples/hf_ptq/hf_ptq.py`` for best-effort reproducible PTQ: it seeds every random number generator and selects deterministic torch kernels, and requires an explicit ``--batch_size`` because the default probes it from free GPU memory.
 
 *Speculative Decoding*
 

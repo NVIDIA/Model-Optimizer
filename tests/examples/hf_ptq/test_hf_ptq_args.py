@@ -1021,6 +1021,42 @@ def test_main_makes_a_hub_checkpoint_local_before_loading(monkeypatch, tmp_path)
     ]
 
 
+def test_deterministic_needs_an_explicit_batch_size(monkeypatch):
+    flags = ["--pyt_ckpt_path", "/models/Qwen3-0.6B", "--deterministic"]
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(monkeypatch, *flags)
+
+    _, args = _parse_hf_ptq_args(monkeypatch, *flags, "--batch_size", "8")
+
+    assert args.deterministic
+
+
+@pytest.mark.usefixtures("clean_env")
+def test_main_enables_determinism_before_loading(monkeypatch, tmp_path):
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "org/model", "--deterministic", "--batch_size", "8"
+    )
+    seeds = []
+
+    class _LoadReachedError(Exception):
+        pass
+
+    def load_model(args):
+        raise _LoadReachedError
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.compiler, "set_stance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_ptq, "launch_memory_monitor", lambda: None)
+    monkeypatch.setattr(hf_ptq, "ensure_local_checkpoint", lambda path: (path, str(tmp_path)))
+    monkeypatch.setattr(hf_ptq, "enable_determinism", seeds.append)
+    monkeypatch.setattr(hf_ptq, "load_model", load_model)
+
+    with pytest.raises(_LoadReachedError):
+        hf_ptq.main(args)
+
+    assert seeds == [hf_ptq.RAND_SEED]
+
+
 def test_tensorrt_llm_export_copies_non_model_files_from_the_local_copy(monkeypatch, tmp_path):
     """The deprecated TensorRT-LLM exporter does not copy them itself; hf_ptq does, from disk."""
     hf_ptq, args = _parse_hf_ptq_args(

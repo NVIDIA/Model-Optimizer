@@ -92,7 +92,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import enable_determinism, print_rank_0
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
@@ -1214,6 +1214,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=512,
     )
+    parser.add_argument(
+        "--deterministic",
+        help=(
+            "Best-effort reproducible PTQ: seed every random number generator and use "
+            "deterministic torch kernels (an op without one only warns). Needs an explicit "
+            "--batch_size, since the default probes it from free GPU memory and so differs "
+            "between GPUs and runs."
+        ),
+        default=False,
+        action="store_true",
+    )
     parser.add_argument("--export_path", default="exported_model")
     parser.add_argument(
         "--dataset",
@@ -1442,6 +1453,12 @@ def parse_args() -> argparse.Namespace:
     if args.calib_seq <= 0:
         parser.error("--calib_seq must be positive.")
 
+    if args.deterministic and args.batch_size == 0:
+        parser.error(
+            "--deterministic needs an explicit --batch_size: the default probes it from free GPU "
+            "memory, so it differs between GPUs and runs."
+        )
+
     if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
         parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")
 
@@ -1505,10 +1522,13 @@ def main(args: argparse.Namespace):
     if not torch.cuda.is_available():
         raise OSError("GPU is required for inference.")
 
-    random.seed(RAND_SEED)
-    np.random.seed(RAND_SEED)
-
     setup_distributed_args(args)
+
+    if args.deterministic:
+        enable_determinism(RAND_SEED)
+    else:
+        random.seed(RAND_SEED)
+        np.random.seed(RAND_SEED)
 
     try:
         # Entered inside the try: opening the run is fatal by design, and skipping
