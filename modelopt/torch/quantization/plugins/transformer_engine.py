@@ -58,6 +58,24 @@ def _is_calibrating(quantizer):
     return getattr(quantizer, "_if_calib", False)
 
 
+def _sync_te_linear_wgrad_flags(weight, args):
+    """Ask TE ``_Linear`` for the weight gradient when only the quantized weight needs it.
+
+    ``LinearFwdArgs.weight_requires_grad`` comes from the module's weight, before a learnable weight
+    quantizer (e.g. LSQ scales) makes the quantized weight require grad.
+    """
+    fwd_args_cls = getattr(te_linear, "LinearFwdArgs", None)
+    if fwd_args_cls is None or not weight.requires_grad:
+        return
+    for fwd_args in args:
+        if isinstance(fwd_args, fwd_args_cls) and not fwd_args.weight_requires_grad:
+            fwd_args.weight_requires_grad = True
+            # As TE's Linear.forward sets it for a weight that requires grad.
+            fwd_args.backward_input_needs_gather = (
+                fwd_args.parallel_mode == "column" and fwd_args.sequence_parallel
+            )
+
+
 @QuantModuleRegistry.register({te.pytorch.Linear: "te_Linear"})
 class _QuantTELinear(_ParallelLinear):
     @property
@@ -102,6 +120,7 @@ class _QuantTELinear(_ParallelLinear):
         new_args = list(args)
         new_args[weight_pos] = self.weight_quantizer(args[weight_pos])
         new_args[inp_pos] = self.input_quantizer(args[inp_pos])
+        _sync_te_linear_wgrad_flags(new_args[weight_pos], new_args)
         output = getattr(package, func_name)(*new_args, **kwargs)
         # TE 2.15+ returns `(out, new_weight_workspace)`; TE <= 2.14 returns just `out`.
         # Only the activation tensor participates in output quantization.

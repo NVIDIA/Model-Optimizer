@@ -44,7 +44,7 @@ from _test_utils.torch.megatron.utils import (
 )
 from _test_utils.torch.misc import set_seed
 from _test_utils.torch.quantization.models import RegularQuantModelForTP
-from _test_utils.torch.quantization.quant_utils import get_model_size
+from _test_utils.torch.quantization.quant_utils import NVFP4_LSQ_TIED_CFG, get_model_size
 from _test_utils.torch.quantization.quantize_common import (
     auto_quantize_helper,
     data_tensor_context_parallel_test_helper,
@@ -358,6 +358,67 @@ def _gpt_model_provider(
     if not meta_device:
         model = model.cuda()
     return model.eval()
+
+
+@pytest.fixture
+def megatron_size_1(distributed_setup_size_1):
+    # Tears down even when the test fails, so later in-process tests can initialize again.
+    initialize_for_megatron(seed=SEED)
+    yield
+    destroy_model_parallel()
+
+
+@pytest.fixture
+def deterministic_algorithms():
+    # MoE token permutation accumulates with atomics unless deterministic algorithms are enabled.
+    enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    yield
+    torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
+
+
+@pytest.mark.parametrize(
+    ("transformer_impl", "num_moe_experts", "moe_grouped_gemm"),
+    # Megatron-Core Column/RowParallelLinear; TE Linear, LayerNormLinear and GroupedLinear.
+    [("modelopt", None, False), ("transformer_engine", 4, True)],
+)
+def test_lsq_scale_grad_with_frozen_weights(
+    megatron_size_1, deterministic_algorithms, transformer_impl, num_moe_experts, moe_grouped_gemm
+):
+    """LSQ weight scales get the same gradient whether the weights are trainable or frozen."""
+    set_seed(SEED)
+    model = _gpt_model_provider(
+        tp_size=1,
+        transformer_impl=transformer_impl,
+        num_moe_experts=num_moe_experts,
+        moe_grouped_gemm=moe_grouped_gemm,
+    )
+    for module in model.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+    forward = get_forward(model)
+    mtq.quantize(model, NVFP4_LSQ_TIED_CFG, forward)
+
+    def is_scale(name):
+        return name.endswith(("._amax_pre", "._amax_post"))
+
+    scale_grads = {}
+    for freeze_weights in (False, True):
+        model.zero_grad(set_to_none=True)
+        for name, param in model.named_parameters():
+            param.requires_grad_(is_scale(name) or not freeze_weights)
+        forward(model).sum().backward()
+        scale_grads[freeze_weights] = {
+            name: param.grad for name, param in model.named_parameters() if is_scale(name)
+        }
+
+    assert all(param.grad is None for name, param in model.named_parameters() if not is_scale(name))
+    assert scale_grads[False]
+    for name, grad in scale_grads[False].items():
+        assert grad is not None and grad.abs().sum() > 0, name
+        frozen_grad = scale_grads[True][name]
+        assert frozen_grad is not None and torch.equal(frozen_grad, grad), name
 
 
 def _test_sharded_state_dict(

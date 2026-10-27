@@ -527,6 +527,17 @@ class _MegatronParallelLinear(_ParallelLinear):
 
         super()._setup()
 
+    def _forward_impl(self, input, weight, *args, **kwargs):
+        # For a frozen weight Megatron-Core takes linear_with_frozen_weight, which computes no weight
+        # gradient; a learnable weight quantizer (e.g. LSQ scales) still needs it.
+        if not weight.requires_grad and any(
+            param.requires_grad for param in self.weight_quantizer.parameters()
+        ):
+            return megatron_parallel.linear_with_grad_accumulation_and_async_allreduce(
+                input, weight, *args, **kwargs
+            )
+        return super()._forward_impl(input, weight, *args, **kwargs)
+
     def _process_quantizer_amax(self, k, v, quantizer_state_dict):
         if v.ndim == 4:
             quantizer_state_dict[k] = v.squeeze(1).squeeze(-1)
