@@ -912,7 +912,8 @@ def _auto_class(hf_config, trust_remote_code: bool = False) -> Any:
     ``AutoModelForCausalLM`` when the checkpoint registers its ``*ForConditionalGeneration`` there,
     its code is trusted and it registers no image-text class, else through
     ``AutoModelForImageTextToText`` if that recognizes the config or, its code trusted, the
-    checkpoint registers one, else through ``AutoModel``, which leaves the head out.
+    checkpoint registers one, else through ``AutoModel``, which leaves the head out. An
+    encoder-decoder model, whose architecture reads the same, builds through its seq2seq class.
     """
     architectures = getattr(hf_config, "architectures", None) or []
     is_vlm = (
@@ -929,6 +930,11 @@ def _auto_class(hf_config, trust_remote_code: bool = False) -> Any:
     )
     if remote_with_head and "AutoModelForImageTextToText" not in auto_map:
         return AutoModelForCausalLM
+    from transformers import AutoModelForSeq2SeqLM, AutoModelForSpeechSeq2Seq
+
+    for seq2seq in (AutoModelForSeq2SeqLM, AutoModelForSpeechSeq2Seq):
+        if type(hf_config) in seq2seq._model_mapping:
+            return seq2seq
     try:
         from transformers import AutoModelForImageTextToText
     except ImportError:

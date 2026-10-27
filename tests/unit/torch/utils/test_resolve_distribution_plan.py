@@ -38,9 +38,13 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    AutoModelForSeq2SeqLM,
+    AutoModelForSpeechSeq2Seq,
     LlamaConfig,
     Qwen2_5_VLConfig,
     Qwen3MoeConfig,
+    T5Config,
+    WhisperConfig,
 )
 
 import modelopt.torch.utils.distributed as dist
@@ -293,6 +297,12 @@ _REMOTE_IMAGE_TEXT_VLM = {
         (_vlm_config(auto_map=_REMOTE_IMAGE_TEXT_VLM), True, AutoModelForImageTextToText),
         (_tiny_qwen2_5_vl(), False, AutoModelForImageTextToText),
         (_vlm_config(), False, AutoModel),
+        (T5Config(architectures=["T5ForConditionalGeneration"]), False, AutoModelForSeq2SeqLM),
+        (
+            WhisperConfig(architectures=["WhisperForConditionalGeneration"]),
+            False,
+            AutoModelForSpeechSeq2Seq,
+        ),
     ],
     ids=[
         "causal-lm",
@@ -301,12 +311,15 @@ _REMOTE_IMAGE_TEXT_VLM = {
         "remote-image-text-vlm",
         "native-vlm-with-head",
         "unknown-vlm",
+        "encoder-decoder",
+        "speech-encoder-decoder",
     ],
 )
 def test_the_class_that_builds_the_whole_model(config, trust_remote_code, expected):
     """A VLM's AutoModel leaves the LM head out: it builds through the class that carries the head,
     keeping the headless backbone only when no class recognizes the config. A remote class counts
-    only when the checkpoint's code is trusted."""
+    only when the checkpoint's code is trusted. An encoder-decoder model's architecture reads like a
+    VLM's, but its seq2seq class carries its head."""
     assert _auto_class(config, trust_remote_code) is expected
 
 
