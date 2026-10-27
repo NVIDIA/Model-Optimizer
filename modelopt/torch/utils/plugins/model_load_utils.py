@@ -1023,7 +1023,7 @@ def _decide_distribution(
         ) from e
     ep_plan = getattr(_ep_config(hf_config), "base_model_ep_plan", None) or {}
     experts = _routed_expert_modules(model, ep_plan)
-    num_experts = _num_experts_from_config(hf_config) if experts else 0
+    num_experts = _num_experts_from_config(_ep_config(hf_config)) if experts else 0
     if ep_size == "auto":
         ep_size = _choose_ep_degree(world_size, num_experts)
     elif ep_size > 1 and (num_experts == 0 or num_experts % ep_size):

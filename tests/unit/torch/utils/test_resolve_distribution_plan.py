@@ -540,6 +540,23 @@ def test_a_vlm_is_decided_from_its_whole_model(run_as, serve, gpu_memory, tmp_pa
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2, dense="fsdp")
 
 
+def test_the_expert_count_is_read_from_the_config_holding_the_plan(
+    run_as, serve, monkeypatch, tmp_path
+):
+    """A VLM whose nested config holds the MoE and its plan counts the experts there, not by an
+    expert-ish field on its root config."""
+    text = SimpleNamespace(
+        base_model_ep_plan={"layers.*.mlp.experts": "moe_tp_experts"}, num_experts=8
+    )
+    serve(SimpleNamespace(model_type="vlm", architectures=[], text_config=text, num_experts=3))
+    monkeypatch.setattr(
+        model_load_utils, "build_meta_causal_lm", lambda *a, **k: _model_with_decoder_at("model.")
+    )
+    run_as(4)
+
+    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4)
+
+
 def test_a_model_that_cannot_be_built_on_meta_names_itself(run_as, serve, monkeypatch, tmp_path):
     def unbuildable(*args, **kwargs):
         raise NotImplementedError("custom init touches the weights")
