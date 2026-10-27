@@ -359,6 +359,79 @@ def test_gemm_transa_converts():
     _assert_outputs_match(ref, got)
 
 
+@pytest.mark.parametrize("trans_b", [False, True])
+@pytest.mark.parametrize(
+    "form", ["alpha", "beta", "row", "matrix", "scalar", "singleton", "symbolic", "dynamic"]
+)
+def test_ineligible_gemm_preserves_native_broadcast_and_attributes(form, trans_b):
+    """Leave valid unsupported Gemm forms intact, including broadcast biases and dynamic weights."""
+    bias_shape = {"row": [1, 4], "matrix": [2, 4], "scalar": [], "singleton": [1]}.get(form, [4])
+    bias = np.ones(bias_shape, np.float32)
+    weight = np.arange(12, dtype=np.float32).reshape(3, 4)
+    if trans_b:
+        weight = weight.T.copy()
+    attrs = {"transB": int(trans_b)}
+    if form in {"alpha", "dynamic"}:
+        attrs["alpha"] = 2.0
+    if form == "beta":
+        attrs["beta"] = 0.5
+    inputs = [_vi("A", TensorProto.FLOAT, [2, 3])]
+    feeds = {"A": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    inits = []
+    if form == "dynamic":
+        inputs.append(_vi("W", TensorProto.FLOAT, list(weight.shape)))
+        feeds["W"] = weight
+    else:
+        inits.append(_init("W", weight))
+    if form == "symbolic":
+        inputs.append(_vi("Bias", TensorProto.FLOAT, ["channels"]))
+        feeds["Bias"] = bias
+    else:
+        inits.append(_init("Bias", bias))
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Gemm", ["A", "W", "Bias"], ["Y"], **attrs)],
+            "native_gemm",
+            inputs,
+            [_vi("Y", TensorProto.FLOAT, [2, 4])],
+            inits,
+        ),
+        opset_imports=[helper.make_opsetid("", _OPSET_VERSION)],
+    )
+    _clamp_ir_version(model)
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    before = model.SerializeToString()
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model))
+    assert transformed.SerializeToString() == before
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("operation", ["MatMul", "Gemm"])
+@pytest.mark.parametrize("defer", [False, True])
+def test_initializer_activation_without_value_info_preserves_values(operation, defer):
+    """Fixed activations need not have graph-input or intermediate metadata to remain valid."""
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node(operation, ["A", "W"], ["Y"])],
+            "fixed_activation",
+            [],
+            [_vi("Y", TensorProto.FLOAT, [2, 4])],
+            [
+                _init("A", np.arange(6, dtype=np.float32).reshape(2, 3)),
+                _init("W", np.arange(12, dtype=np.float32).reshape(3, 4)),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", _OPSET_VERSION)],
+    )
+    _clamp_ir_version(model)
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, {})
+    converted = _apply_matmul_to_conv(copy.deepcopy(model), defer_rank_conversion=defer)
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_outputs_match(expected, _run_ort(converted, {}))
+
+
 def test_gemm_with_bias_converts():
     """Gemm with 1D bias: bias forwarded to Conv as third input; output must match Gemm."""
     model, feeds = _make_gemm_bias()

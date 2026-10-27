@@ -108,18 +108,6 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
             and any(tensor_rank(name) == 1 for name in candidate.input[:2])
         ):
             raise ValueError(f"{candidate.name!r}: vector MatMul rank promotion is unsupported")
-        if candidate.op_type == "Gemm":
-            if any(
-                attribute.name in {"alpha", "beta"} and attribute.f != 1.0
-                for attribute in candidate.attribute
-            ):
-                raise ValueError(
-                    f"{candidate.name!r}: Gemm alpha/beta other than 1 are unsupported"
-                )
-            if len(candidate.input) > 2 and candidate.input[2]:
-                bias_shape = cache.get_shape(candidate.input[2])
-                if bias_shape is None or len(bias_shape) != 1:
-                    raise ValueError(f"Bias for {candidate.name!r} must have a known 1-D shape")
 
     def update_weight_metadata(name, shape):
         """Keep private weight annotations consistent with an in-place layout change."""
@@ -226,8 +214,22 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
         weight = cache.get_init(weight_name)
         dtype = cache.get_dtype(node.input[0])
         activation_shape = cache.get_shape(node.input[0])
+        unsupported_gemm = False
+        if node.op_type == "Gemm":
+            unsupported_gemm = any(
+                attribute.name in {"alpha", "beta"} and attribute.f != 1.0
+                for attribute in node.attribute
+            )
+            if len(node.input) > 2 and node.input[2]:
+                channels = (
+                    weight.dims[-2 if get_node_attr_i(node, "transB", 0) else -1]
+                    if weight is not None and len(weight.dims) >= 2
+                    else None
+                )
+                unsupported_gemm |= channels is None or cache.get_shape(node.input[2]) != [channels]
         if (
-            not known_dq
+            unsupported_gemm
+            or not known_dq
             or weight is None
             or weight_name in cache.graph_input_names
             or any(tensor_rank(name) == 1 for name in node.input[:2])
@@ -241,6 +243,7 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
             ineligible_nodes.append(node)
         elif (
             activation_shape is not None
+            and node.input[0] in tensor_name_dim_map
             and (
                 len(activation_shape) in (2, 3)
                 or (len(activation_shape) == 4 and activation_shape[0] == 1)
@@ -442,11 +445,6 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
 
         conv_inputs = [transposed_a, conv_input1]
         if len(node.input) >= 3 and node.input[2]:
-            bias_shape = cache.get_shape(node.input[2])
-            if bias_shape is not None and len(bias_shape) != 1:
-                raise ValueError(
-                    f"[matmul_to_conv] Bias for {node.name!r} must be 1-D, got {bias_shape}"
-                )
             conv_inputs.append(node.input[2])
 
         # ── Step 5: Conv ──────────────────────────────────────────────────────
