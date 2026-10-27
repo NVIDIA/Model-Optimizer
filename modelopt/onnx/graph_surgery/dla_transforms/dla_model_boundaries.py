@@ -403,35 +403,27 @@ def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=Fal
 
 
 def _apply_non4d_model_outputs(
-    model, *, defer_rank_conversion=False, prepared_output_ops=(), validate_only=False
+    model,
+    *,
+    defer_rank_conversion=False,
+    prepared_output_ops=(),
+    prepared_data_ops=None,
+    validate_only=False,
 ):
     """Restore outputs or only validate producer rank availability before shape inference."""
+    # Rank stages import the boundary predicates; defer their shared proof to avoid the cycle.
+    from .dla_rank_conversion import _rank_preparation_proofs
+
     graph = model.graph
     cache = GraphCache(graph)
+    prepared = (
+        _rank_preparation_proofs(model, cache, prepared_data_ops) if defer_rank_conversion else {}
+    )
     captured = _subgraph_captures(graph)
     boundary_names = cache.graph_input_names | cache.init_names
     append = []
     plans = []
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
-    native_broadcasts = set()
-    if defer_rank_conversion and "Non4dInitializers" not in prepared_output_ops:
-        live_ranks = {
-            name: len(shape)
-            for name in boundary_names
-            if (shape := cache.get_shape(name)) is not None
-        }
-        for node in graph.node:
-            if (
-                _is_standard_node(node, local_functions, _RANK_AGNOSTIC_OPS)
-                and node.input
-                and all(name in live_ranks for name in node.input)
-            ):
-                rank = max(live_ranks[name] for name in node.input)
-                live_ranks.update(dict.fromkeys(node.output, rank))
-                if rank < 4 and (
-                    len(node.input) > 1 or any(name in native_broadcasts for name in node.input)
-                ):
-                    native_broadcasts.update(node.output)
     rank_sources = {}
     contrib_ops = _boundary_contrib_ops(model)
     native_sources = {}
@@ -455,7 +447,7 @@ def _apply_non4d_model_outputs(
             ]
         if shape is None or len(shape) >= 4 or value.name in boundary_names:
             continue
-        if value.name in native_broadcasts:
+        if defer_rank_conversion and not prepared[value.name]:
             continue
         producer = cache.get_producer(value.name)
         source = _output_rank_source(cache, producer, local_functions, rank_sources)

@@ -2038,3 +2038,69 @@ def test_native_four_dimensional_runtime_controls_need_no_padding(operation, sou
         )
     for values, reference in zip(feeds, expected):
         np.testing.assert_array_equal(_execute(transformed, values)[0], reference)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["Slice", "Transpose", "Softmax", "LogSoftmax", "LpNormalization", "ArgMax", "Expand", "Tile"],
+)
+@pytest.mark.parametrize("rank", [2, 3])
+@pytest.mark.parametrize("source", ["unsqueeze", "unary", "reshape"])
+def test_rank_one_adapters_keep_native_controls_unless_reshape_promotes(operation, rank, source):
+    """Distinguish native rank-one input adapters from an explicitly padded Reshape."""
+    shape = [1] * (rank - 1) + [6]
+    initializers = [
+        numpy_helper.from_array(np.array(list(range(rank - 1)), np.int64), "unsqueeze_axes")
+    ]
+    if source == "reshape":
+        initializers.append(numpy_helper.from_array(np.array(shape, np.int64), "target"))
+        nodes = [helper.make_node("Reshape", ["x", "target"], ["adapted"])]
+    else:
+        nodes = [helper.make_node("Unsqueeze", ["x", "unsqueeze_axes"], ["adapted"])]
+    data = "adapted"
+    if source == "unary":
+        nodes.append(helper.make_node("Relu", [data], ["unary"]))
+        data = "unary"
+    operands, attributes = [data], {"axis": rank - 1}
+    output_shape = shape.copy()
+    if operation == "Slice":
+        operands += ["starts", "ends", "slice_axes"]
+        attributes = {}
+        for name, values in [("starts", [1]), ("ends", [5]), ("slice_axes", [rank - 1])]:
+            initializers.append(numpy_helper.from_array(np.array(values, np.int64), name))
+        output_shape[-1] = 4
+    elif operation == "Transpose":
+        attributes = {"perm": list(reversed(range(rank)))}
+        output_shape.reverse()
+    elif operation == "ArgMax":
+        attributes["keepdims"] = 1
+        output_shape[-1] = 1
+    elif operation in {"Expand", "Tile"}:
+        output_shape[0] = 2
+        values = output_shape if operation == "Expand" else [2] + [1] * (rank - 1)
+        initializers.append(numpy_helper.from_array(np.array(values, np.int64), "control"))
+        operands.append("control")
+        attributes = {}
+    nodes.append(helper.make_node(operation, operands, ["y"], **attributes))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "rank_one_adapter_contract",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [6])],
+            [
+                helper.make_tensor_value_info(
+                    "y",
+                    TensorProto.INT64 if operation == "ArgMax" else TensorProto.FLOAT,
+                    output_shape,
+                )
+            ],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    cases = [{"x": np.arange(1, 7, dtype=np.float32)}, {"x": np.arange(6, 0, -1, dtype=np.float32)}]
+    expected = [_execute(model, feeds)[0] for feeds in cases]
+    changed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    for feeds, reference in zip(cases, expected):
+        np.testing.assert_allclose(_execute(changed, feeds)[0], reference, rtol=1e-6, atol=1e-7)

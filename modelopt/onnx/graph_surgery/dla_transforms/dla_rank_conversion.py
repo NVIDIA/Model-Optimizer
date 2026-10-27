@@ -33,7 +33,7 @@ from ..utils.graph_utils import (
 )
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _RANK_AGNOSTIC_OPS, _subgraph_captures
-from .dla_indexing import _insert_support_nodes, _known_rank, _operator_nodes
+from .dla_indexing import _insert_support_nodes, _known_rank, _operator_nodes, _prepared_index_data
 from .dla_model_boundaries import (
     _REDUCTION_OPS,
     _has_native_symbolic_data,
@@ -52,7 +52,44 @@ def _runtime_input_names(model):
     return names
 
 
-def _promoted_input_shape(cache, name, local_functions, native_sources):
+def _rank_preparation_proofs(model, cache, prepared_data_ops):
+    """Reuse the cached leading-layout proof for rank and axis stages."""
+    if prepared_data_ops is None:
+        prepared_data_ops = (
+            _RANK_AGNOSTIC_OPS
+            | _REDUCTION_OPS
+            | {
+                "Non4dInitializers",
+                "Reshape",
+                "Expand",
+                "Tile",
+                "Transpose",
+                "Slice",
+                "Flatten",
+                "LpNormalization",
+                "ArgMax",
+                "TopK",
+                "Concat",
+                "Split",
+                "QuantizeLinear",
+                "DequantizeLinear",
+                "Gather",
+                "GatherElements",
+                "MatMulToTransposeConvTranspose",
+                "RemoveIntermediarySqueezeAndUnsqueeze",
+            }
+        )
+    return _prepared_index_data(
+        model,
+        cache,
+        prepared_data_ops,
+        [node.input[0] for node in model.graph.node if node.input]
+        + [value.name for value in model.graph.output],
+        before_boundary=True,
+    )
+
+
+def _promoted_input_shape(cache, name, local_functions, native_sources, prepared):
     """Distinguish native symbolic paths from inputs prepared for four-dimensional data."""
     shape = _shape_before_boundary_promotion(cache, name)
     snapshot = cache._initializer_vi_map.get(name)
@@ -82,21 +119,25 @@ def _promoted_input_shape(cache, name, local_functions, native_sources):
     native = (
         rank is not None
         and rank < 4
-        and _has_native_symbolic_data(cache, name, local_functions, native_sources)
+        and (
+            not prepared[name]
+            or _has_native_symbolic_data(cache, name, local_functions, native_sources)
+        )
     )
     return shape, rank, native
 
 
-def _apply_non4d_slice_axis(model):
+def _apply_non4d_slice_axis(model, *, prepared_data_ops=None):
     """Remap fixed Slice axes before their data rank is promoted."""
     cache = GraphCache(model.graph)
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     native_sources = {}
+    prepared = _rank_preparation_proofs(model, cache, prepared_data_ops)
     runtime_inputs = _runtime_input_names(model)
     plans = []
     for node in _operator_nodes(model, {"Slice"}):
         shape, rank, native = _promoted_input_shape(
-            cache, node.input[0], local_functions, native_sources
+            cache, node.input[0], local_functions, native_sources, prepared
         )
         if native:
             continue
@@ -383,11 +424,12 @@ def _rank_one_path_widened(cache, name, rank_preserving, reshapes):
     return False
 
 
-def _pad_shape_inputs(model, op_type, suffix):
+def _pad_shape_inputs(model, op_type, suffix, *, prepared_data_ops=None):
     """Preserve native rank-four layouts and plan fixed control padding otherwise."""
     cache = GraphCache(model.graph)
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     native_sources = {}
+    prepared = _rank_preparation_proofs(model, cache, prepared_data_ops)
     runtime_inputs = _runtime_input_names(model)
     rank_preserving = {id(node) for node in _operator_nodes(model, _RANK_AGNOSTIC_OPS)}
     reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
@@ -403,6 +445,8 @@ def _pad_shape_inputs(model, op_type, suffix):
         if op_type == "Tile" and rank == 1:
             if not _rank_one_path_widened(cache, node.input[0], rank_preserving, reshapes):
                 continue
+        if op_type == "Tile" and rank < 4 and not prepared[node.input[0]]:
+            continue
         if rank < 4 and _has_native_symbolic_data(
             cache, node.input[0], local_functions, native_sources
         ):
@@ -454,17 +498,18 @@ def _collapsed_reshape_axes(cache, name, shape, reshapes):
     ]
 
 
-def _apply_non4d_transpose(model):
+def _apply_non4d_transpose(model, *, prepared_data_ops=None):
     """Remap transpose permutations around added or removed unary axes."""
     cache = GraphCache(model.graph)
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     native_sources = {}
+    prepared = _rank_preparation_proofs(model, cache, prepared_data_ops)
     plans = []
     reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
     for node in _operator_nodes(model, {"Transpose"}):
         perm = _attribute(node, "perm")
         shape, rank, native = _promoted_input_shape(
-            cache, node.input[0], local_functions, native_sources
+            cache, node.input[0], local_functions, native_sources, prepared
         )
         if native:
             continue
@@ -509,17 +554,18 @@ def _specialized_collapsed_axis(cache, node, shape, value, reshapes):
     return native - int(native > removed[0]) - (4 if value < 0 else 0)
 
 
-def _apply_non4d_lpnorm(model):
+def _apply_non4d_lpnorm(model, *, prepared_data_ops=None):
     """Preserve normalization axes across leading-dimension promotion."""
     cache = GraphCache(model.graph)
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     native_sources = {}
+    prepared = _rank_preparation_proofs(model, cache, prepared_data_ops)
     reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
     plans = []
     for node in _operator_nodes(model, {"LpNormalization"}):
         axis = _attribute(node, "axis")
         shape, rank, native = _promoted_input_shape(
-            cache, node.input[0], local_functions, native_sources
+            cache, node.input[0], local_functions, native_sources, prepared
         )
         if native:
             continue
@@ -579,16 +625,17 @@ def _apply_flatten(model):
     return model
 
 
-def _apply_argmax(model):
+def _apply_argmax(model, *, prepared_data_ops=None):
     """Plan native ArgMax layouts before preparing private output restoration views."""
     cache = GraphCache(model.graph)
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     native_sources = {}
+    prepared = _rank_preparation_proofs(model, cache, prepared_data_ops)
     plans = {}
     reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
     for node in _operator_nodes(model, {"ArgMax"}):
         shape, rank, native = _promoted_input_shape(
-            cache, node.input[0], local_functions, native_sources
+            cache, node.input[0], local_functions, native_sources, prepared
         )
         if native:
             continue
@@ -646,7 +693,7 @@ def _apply_argmax(model):
     return model
 
 
-def _apply_update_axis(model):
+def _apply_update_axis(model, *, prepared_data_ops=None):
     """Remap supported operation axes from their native input ranks."""
     quantizers = {"QuantizeLinear", "DequantizeLinear"}
     update = {"LogSoftmax", "Softmax", "TopK", "Concat", "Split"} | quantizers
@@ -655,6 +702,7 @@ def _apply_update_axis(model):
     cache = GraphCache(model.graph)
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     native_sources = {}
+    prepared = _rank_preparation_proofs(model, cache, prepared_data_ops)
     plans = []
     reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
     selected = _operator_nodes(model, {node.op_type for node in model.graph.node})
@@ -664,7 +712,7 @@ def _apply_update_axis(model):
     for node in selected:
         axis = _attribute(node, "axis")
         shape, rank, native = (
-            _promoted_input_shape(cache, node.input[0], local_functions, native_sources)
+            _promoted_input_shape(cache, node.input[0], local_functions, native_sources, prepared)
             if node.input
             else (None, None, False)
         )

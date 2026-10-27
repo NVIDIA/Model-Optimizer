@@ -203,6 +203,8 @@ def _prepared_index_data(model, cache, prepared_ops, data_names, *, before_bound
         ):
             return True
         tensor = cache.get_init(name)
+        if tensor is not None and len(tensor.dims) == 4:
+            return True
         if name in cache.graph_input_names and (model.ir_version > 3 or tensor is None):
             return False
         if tensor is not None:
@@ -237,6 +239,15 @@ def _prepared_index_data(model, cache, prepared_ops, data_names, *, before_bound
                 and target is not None
                 and len(target) == 1
                 and target[0] in (1, 2, 3, 5)
+                and not _has_native_symbolic_data(cache, node.input[0], local_functions)
+            )
+        if node.op_type == "Expand":
+            target = cache.get_shape(node.input[1])
+            return target == [4] or (
+                "Expand" in prepared_ops
+                and target is not None
+                and len(target) == 1
+                and 0 < target[0] < 4
                 and not _has_native_symbolic_data(cache, node.input[0], local_functions)
             )
         if node.op_type == "Flatten":

@@ -157,9 +157,19 @@ def _boundary_stage_options(name, quant_types, verbose, prepared_input_ops, prep
     if name == "Non4dModelInputs":
         return {"prepared_input_ops": prepared_input_ops}
     if name == "Non4dModelOutputs":
-        return {"prepared_output_ops": prepared_output_ops}
+        return {"prepared_output_ops": prepared_output_ops, "prepared_data_ops": prepared_input_ops}
     if name == "RemoveIntermediarySqueezeAndUnsqueeze":
         return {"prepared_consumer_ops": prepared_input_ops}
+    if name in {
+        "Non4dSliceAxis",
+        "Non4DTranspose",
+        "Non4DLpNorm",
+        "ArgMax",
+        "UpdateAxis",
+        "Non4DExpand",
+        "Non4DTile",
+    }:
+        return {"prepared_data_ops": prepared_input_ops}
     if name == "FixInstanceNormChannelMismatch":
         return {"prepared_consumer_ops": prepared_input_ops}
     return {}
@@ -200,6 +210,7 @@ def _validate_boundary_contract(
         model,
         defer_rank_conversion=True,
         prepared_output_ops=prepared_output_ops,
+        prepared_data_ops=prepared_input_ops,
         validate_only=True,
     )
     if "RemoveIntermediarySqueezeAndUnsqueeze" in prepared_input_ops:
