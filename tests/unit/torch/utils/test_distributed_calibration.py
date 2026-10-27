@@ -34,6 +34,7 @@ from torch.utils.data import (
     BatchSampler,
     DataLoader,
     IterableDataset,
+    RandomSampler,
     SequentialSampler,
     SubsetRandomSampler,
 )
@@ -159,12 +160,16 @@ def test_a_stream_loaded_with_workers_is_refused():
         {"sampler": SubsetRandomSampler(range(4)), "batch_size": None},
         {"batch_sampler": [[0, 1], [2, 3]]},
         {"batch_sampler": BatchSampler(SubsetRandomSampler(range(4)), 2, drop_last=False)},
+        {"sampler": RandomSampler(range(8), num_samples=4), "batch_size": 2},
+        {"sampler": RandomSampler(range(8), replacement=True), "batch_size": 2},
     ],
     ids=[
         "subset-sampler",
         "subset-sampler-unbatched",
         "batch-sampler",
         "subset-in-a-plain-batch-sampler",
+        "random-sampler-drawing-fewer",
+        "random-sampler-with-replacement",
     ],
 )
 def test_a_loader_that_picks_its_own_samples_is_refused(picker):
@@ -188,13 +193,14 @@ def test_a_loader_that_picks_its_own_samples_is_refused(picker):
         ),
         ("map-style", {"batch_size": None}, [[1], [3], [5], [7], [9]]),
         ("iterable", {"batch_size": None}, [[1], [3], [5], [7], [9]]),
+        ("map-style", {"batch_size": 2, "shuffle": True}, [[1, 3], [5, 7], [9]]),
     ],
-    ids=["plain-batch-sampler", "auto-batching-off", "auto-batching-off-stream"],
+    ids=["plain-batch-sampler", "auto-batching-off", "auto-batching-off-stream", "shuffled"],
 )
 def test_the_shard_batches_as_the_loader_does(kind, batching, batches):
     """A loader given a plain BatchSampler reports ``batch_size=None``; its shard still batches by the
     sampler's size and drop_last. A loader with auto-batching off reads one item per step, and so
-    does its shard."""
+    does its shard. A loader shuffling the whole dataset gives the rank its unshuffled share."""
     loader = DataLoader(_dataset(kind, 10), collate_fn=_collate, **batching)
 
     assert _batches(shard_dataloader(loader, 1, 2)) == batches
