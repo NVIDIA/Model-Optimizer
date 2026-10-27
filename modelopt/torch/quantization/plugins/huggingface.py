@@ -778,14 +778,40 @@ def _get_fused_expert_intermediate_dim(module):
     return module.gate_up_proj.shape[1] // 2
 
 
+def _is_plain_nvfp4_fake_quant(q: nn.Module) -> bool:
+    """Whether ``q(x)`` is exactly the block-16 dynamic NVFP4 fake quant the stacked kernel does.
+
+    Each group rules out something ``TensorQuantizer.forward`` would do that the kernel does not.
+    """
+    return (
+        # Subclasses (e.g. static NVFP4, sequential) quantize differently.
+        type(q) is TensorQuantizer
+        # Fake-quantizing with its calibrated amax, not calibrating.
+        and q.is_enabled
+        and q._if_quant
+        and q._fake_quant
+        and not q._if_calib
+        and not q._use_constant_amax
+        # The format the kernel implements.
+        and q.is_nvfp4_dynamic
+        and q.block_sizes.get(-1) == 16
+        # Nothing applied around the quantization itself.
+        and q.backend is None
+        and q.pre_quant_scale is None
+        and not q.rotate_is_enabled
+        and not q.rotate_back_is_enabled
+        # Hooks expect their own quantizer's forward to run.
+        and not (q._forward_hooks or q._forward_pre_hooks)
+    )
+
+
 def _stacked_nvfp4_amax(weight: torch.Tensor, quantizers: nn.ModuleList) -> torch.Tensor | None:
     """The experts' weight amaxes as one ``(num_experts,)`` tensor, or ``None``.
 
-    Only when one stacked NVFP4 kernel reproduces every expert's own quantizer exactly: each is a
-    calibrated dynamic-NVFP4 fake quantizer with a per-tensor amax, all with the same backward, and
-    none is calibrating, adds a pre-quant scale, rotation or custom backend, or has hooks that
-    expect its own forward to run.
+    ``None`` unless one stacked NVFP4 kernel launch reproduces every expert's own weight quantizer
+    exactly; the caller then quantizes expert by expert.
     """
+    # The kernel must be available, and the weight one local CUDA tensor holding every expert.
     if (
         tensor_quant.DISABLE_TRITON_KERNEL
         or not IS_TRITON_AVAILABLE
@@ -795,31 +821,19 @@ def _stacked_nvfp4_amax(weight: torch.Tensor, quantizers: nn.ModuleList) -> torc
         or weight.shape[0] != len(quantizers)
     ):
         return None
+    if not all(_is_plain_nvfp4_fake_quant(q) for q in quantizers):
+        return None
+    # One autograd function quantizes all experts, so they must share its backward.
     pass_through_bwd = quantizers[0]._pass_through_bwd
+    if any(q._pass_through_bwd != pass_through_bwd for q in quantizers):
+        return None
     amaxes = []
     for q in quantizers:
         amax = getattr(q, "_amax", None)
-        if not (
-            type(q) is TensorQuantizer
-            and q.is_enabled
-            and q._if_quant
-            and q._fake_quant
-            and not q._if_calib
-            and q.is_nvfp4_dynamic
-            and q.block_sizes.get(-1) == 16
-            and q.backend is None
-            and q.pre_quant_scale is None
-            and not q.rotate_is_enabled
-            and not q.rotate_back_is_enabled
-            and not q._use_constant_amax
-            and q._pass_through_bwd == pass_through_bwd
-            and not (q._forward_hooks or q._forward_pre_hooks)
-            and amax is not None
-            and amax.numel() == 1
-            # A clipped backward compares weight and amax: in one dtype, type promotion cannot
-            # change the result.
-            and (pass_through_bwd or amax.dtype == weight.dtype)
-        ):
+        if amax is None or amax.numel() != 1:  # the kernel takes one per-tensor amax per expert
+            return None
+        # A clipped backward compares weight and amax: in one dtype, type promotion cannot change it.
+        if not pass_through_bwd and amax.dtype != weight.dtype:
             return None
         amaxes.append(amax.reshape(1))
     return torch.cat(amaxes).to(weight.device)
