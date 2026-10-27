@@ -904,6 +904,45 @@ def test_leading_runtime_indices_keep_legacy_initializer_declarations():
 
 
 @pytest.mark.timeout(2)
+@pytest.mark.parametrize("shape", [[5, 4], [2, 5, 4]])
+def test_multidimensional_identity_gather_indices_refuse_before_mutation(shape):
+    """Reject intermediate index layouts that leading data padding cannot preserve."""
+    axis = len(shape) - 2
+    output = [*shape[:axis], 2, 3, *shape[axis + 1 :]]
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Gather", ["x", "first_indices"], ["first"], axis=axis),
+                helper.make_node("Identity", ["source"], ["indices"]),
+                helper.make_node("Gather", ["x", "indices"], ["y"], axis=axis),
+            ],
+            "native_intermediate_indices",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, shape),
+                helper.make_tensor_value_info("source", TensorProto.INT64, [2, 3]),
+            ],
+            [
+                helper.make_tensor_value_info("first", TensorProto.FLOAT, [*shape[:axis], 1, 4]),
+                helper.make_tensor_value_info("y", TensorProto.FLOAT, output),
+            ],
+            [numpy_helper.from_array(np.asarray([1], np.int64), "first_indices")],
+            value_info=[helper.make_tensor_value_info("indices", TensorProto.INT64, [2, 3])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {
+        "x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape),
+        "source": np.arange(6, dtype=np.int64).reshape(2, 3) % 5,
+    }
+    _execute(model, feeds)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match=r"Gather indices.*rank"):
+        _apply_gather(model)
+    assert model.SerializeToString() == before
+
+
 def test_cyclic_index_layout_ancestry_refuses_before_mutation():
     """Bound malformed producer walks instead of hanging during index view planning."""
     model = helper.make_model(

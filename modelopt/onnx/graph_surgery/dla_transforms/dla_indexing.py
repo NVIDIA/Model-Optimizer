@@ -128,7 +128,8 @@ def _apply_gather(model):
     index_views = {}
     captured = _subgraph_captures(graph)
     for candidate in selected:
-        if cache.get_shape(candidate.input[0]) is None:
+        data_shape = cache.get_shape(candidate.input[0])
+        if data_shape is None:
             raise ValueError(f"{candidate.name!r}: Gather requires a static data shape")
         original = candidate.input[1]
         index_shape = cache.get_shape(original)
@@ -147,6 +148,7 @@ def _apply_gather(model):
             or (producer is not None and id(producer) in casts)
             or index_shape is None
             or 1 in index_shape
+            or len(data_shape) in (2, 3)
         ):
             count = _gather_flatten_count(cache, candidate, index_shape)
             if count is None:
