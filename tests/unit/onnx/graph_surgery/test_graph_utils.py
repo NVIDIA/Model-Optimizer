@@ -18,7 +18,6 @@
 import copy
 import io
 import os
-from pathlib import Path
 
 import numpy as np
 import onnx
@@ -790,8 +789,9 @@ def test_inline_save_failure_preserves_existing_model(
 
 @pytest.mark.parametrize("external_metadata", [False, True])
 @pytest.mark.parametrize("failure_stage", ["write", "close"])
+@pytest.mark.parametrize("failure_tensor", [1, 2])
 def test_external_save_preserves_payloads_when_buffered_writes_fail(
-    tmp_path, monkeypatch, external_metadata, failure_stage
+    tmp_path, monkeypatch, external_metadata, failure_stage, failure_tensor
 ):
     """Keep loaded payloads and prior files intact when a buffered sidecar write fails."""
     path = tmp_path / "model.onnx"
@@ -821,7 +821,8 @@ def test_external_save_preserves_payloads_when_buffered_writes_fail(
         )
     before = candidate.SerializeToString()
     failure = OSError("Injected buffered sidecar failure")
-    open_path = Path.open
+    fdopen = os.fdopen
+    opened_tensors = 0
 
     class FailingFile(io.FileIO):
         """Leave a real partial sidecar when the buffered writer flushes."""
@@ -831,15 +832,18 @@ def test_external_save_preserves_payloads_when_buffered_writes_fail(
             super().write(data[:1])
             raise failure
 
-    def open_sidecar(file_path, mode="r", *args, **kwargs):
-        """Fail a real buffer flush during the second write or during close."""
-        if mode == "wb" and file_path.name == "data.bin":
-            buffer_size = 48 if failure_stage == "write" else 128
-            return io.BufferedWriter(FailingFile(file_path, "w"), buffer_size=buffer_size)
-        return open_path(file_path, mode, *args, **kwargs)
+    def open_sidecar(fd, mode="r", *args, **kwargs):
+        """Fail a real buffer flush when ONNX writes or closes its sidecar."""
+        nonlocal opened_tensors
+        if mode == "r+b":
+            opened_tensors += 1
+        if mode == "r+b" and opened_tensors == failure_tensor:
+            buffer_size = 16 if failure_stage == "write" else 128
+            return io.BufferedWriter(FailingFile(fd, "w"), buffer_size=buffer_size)
+        return fdopen(fd, mode, *args, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(Path, "open", open_sidecar)
+        patch.setattr(os, "fdopen", open_sidecar)
         with pytest.raises(OSError) as error:
             save_onnx_model(
                 candidate,

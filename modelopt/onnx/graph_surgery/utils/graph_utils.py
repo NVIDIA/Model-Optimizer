@@ -238,7 +238,6 @@ def _validate_external_data_destination(
         raise ValueError("External data destination must not have multiple hard links")
 
 
-# TODO: Once ONNX >= 1.22.0 is required, use its external writer instead (onnx/onnx#7790).
 @contextmanager
 def _save_external_weights(model, model_path, weights_path, location, size_threshold, destination):
     """Stage external weights and restore caller tensors if the replacement context fails.
@@ -256,17 +255,15 @@ def _save_external_weights(model, model_path, weights_path, location, size_thres
             tensor for tensor, _ in states if onnx.external_data_helper.uses_external_data(tensor)
         ]
         if tensors:
-            # ONNX 1.21 reopens sidecars in Windows text mode, truncating trailing 0x1A.
             staged_payloads = []
-            with weights_path.open("wb") as stream:
-                for tensor in tensors:
-                    data, offset = tensor.raw_data, stream.tell()
-                    stream.write(data)
-                    onnx.external_data_helper.set_external_data(
-                        tensor, location, offset=offset, length=len(data)
-                    )
-                    staged_payloads.append((tensor, offset, len(data)))
-                    del data
+            for tensor in tensors:
+                onnx.external_data_helper.set_external_data(tensor, weights_path.name)
+                onnx.external_data_helper.save_external_data(tensor, str(weights_path.parent))
+                info = onnx.external_data_helper.ExternalDataInfo(tensor)
+                onnx.external_data_helper.set_external_data(
+                    tensor, location, offset=info.offset, length=info.length
+                )
+                staged_payloads.append((tensor, info.offset, info.length))
             # A buffered close may fail; retain caller payloads until it succeeds.
             payloads = staged_payloads
             for tensor, _, _ in payloads:
