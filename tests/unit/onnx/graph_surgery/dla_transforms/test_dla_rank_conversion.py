@@ -1421,12 +1421,14 @@ def test_symbolic_input_output_remains_native(batch):
 
 
 @pytest.mark.parametrize("operation", ["ArgMin", "Hardmax", "LayerNormalization"])
-def test_axis_update_preserves_native_four_dimensional_operators(operation):
+@pytest.mark.parametrize("symbolic", [False, True])
+def test_axis_update_preserves_native_four_dimensional_operators(operation, symbolic):
     """Allow axis-bearing operators that already consume their final rank."""
     shape = [2, 3, 4, 5]
+    declared_shape = ["N", *shape[1:]] if symbolic else shape
     inputs = ["x"]
     initializers = []
-    output_shape = [2, 1, 4, 5] if operation == "ArgMin" else shape
+    output_shape = [declared_shape[0], 1, 4, 5] if operation == "ArgMin" else declared_shape
     if operation == "LayerNormalization":
         inputs.append("scale")
         initializers.append(numpy_helper.from_array(np.ones(shape[1:], np.float32), "scale"))
@@ -1434,7 +1436,7 @@ def test_axis_update_preserves_native_four_dimensional_operators(operation):
         helper.make_graph(
             [helper.make_node(operation, inputs, ["y"], axis=1)],
             "native_four_dimensional",
-            [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, declared_shape)],
             [
                 helper.make_tensor_value_info(
                     "y",
@@ -1452,6 +1454,28 @@ def test_axis_update_preserves_native_four_dimensional_operators(operation):
     transformed = _apply_update_axis(copy.deepcopy(model))
     assert transformed == model
     np.testing.assert_array_equal(_execute(transformed, feeds)[0], expected[0])
+
+
+@pytest.mark.parametrize("keepdims", [None, 1])
+@pytest.mark.parametrize("batch", [1, 2])
+def test_registered_argmax_keeps_symbolic_four_dimensional_layout(keepdims, batch):
+    """Leave rank-four ArgMax native when its symbolic dimensions need no restoration."""
+    attributes = {} if keepdims is None else {"keepdims": keepdims}
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("ArgMax", ["x"], ["y"], axis=1, **attributes)],
+            "native_argmax",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, ["N", 3, 4, 5])],
+            [helper.make_tensor_value_info("y", TensorProto.INT64, ["N", 1, 4, 5])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    feeds = {"x": np.arange(batch * 60, dtype=np.float32).reshape(batch, 3, 4, 5)}
+    expected = _execute(model, feeds)[0]
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    assert converted.graph.node[0] == model.graph.node[0]
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
 
 
 @pytest.mark.parametrize("operation", ["Reshape", "Expand", "Tile", "Slice", "Add"])

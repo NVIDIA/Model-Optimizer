@@ -520,6 +520,9 @@ def _apply_argmax(model):
         )
         if native:
             continue
+        keepdims = _attribute(node, "keepdims")
+        if rank == 4 and (keepdims is None or keepdims.i != 0):
+            continue
         if not shape or any(dim <= 0 for dim in shape):
             raise ValueError(f"{node.name!r}: ArgMax requires a static input shape")
         axis = _attribute(node, "axis")
@@ -622,7 +625,7 @@ def _apply_update_axis(model):
         else:
             value = axis.i
         if node.op_type not in update:
-            if shape is not None and len(shape) not in (2, 3, 5):
+            if rank is not None and rank not in (2, 3, 5):
                 continue
             raise ValueError(f"{node.op_type} is unsupported for DLA axis transformation")
         original = value
