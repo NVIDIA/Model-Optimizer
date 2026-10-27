@@ -1,0 +1,23 @@
+schema_version: 1
+path_id: 4
+snapshot_date: '2026-10-26'
+common_training_config: ../../dpo.yaml
+container: qad_container
+nemo_rl: Release source added through PYTHONPATH
+python_executable: /opt/venv/bin/python
+system_worker_environment: true
+stack_mode: qad-container
+modelopt: Actual round-3 QAD source overlay
+quantized: true
+steps: 13
+max_te_optimizer_group_tensors: 512
+status: full_training_reload_export_scicode_passed
+reload_validation_loss: 0.00014002833511441256
+workspace_runner: nemo_rl_on_nemo/run_full.sh
+workspace_results: nemo_rl_on_nemo/results
+export: exports/phase3_dpo
+evaluation_targets: 550
+next:
+- Broader fresh-seed evaluation
+- Compare validated paths before selecting workflow
+checkpoint_format: megatron_lm after architecture parity check

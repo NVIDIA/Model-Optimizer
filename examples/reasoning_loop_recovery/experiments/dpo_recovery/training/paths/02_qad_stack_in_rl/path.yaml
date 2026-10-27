@@ -1,0 +1,18 @@
+schema_version: 1
+path_id: 2
+snapshot_date: '2026-10-26'
+common_training_config: ../../dpo.yaml
+container: release_container
+bridge_core: QAD source overlay
+modelopt: Actual round-3 QAD source overlay
+stack_mode: qad-bridge-core-modelopt
+checkpoint_format: megatron_lm after architecture parity check
+quantized: true
+steps: 13
+status: full_training_and_reload_passed
+reload_validation_loss: 0.00017418462911337598
+workspace_runner: route12/run_full.sh
+workspace_results: route12/qad-bridge-core-modelopt
+next:
+- NVFP4 export
+- Matched SciCode evaluation

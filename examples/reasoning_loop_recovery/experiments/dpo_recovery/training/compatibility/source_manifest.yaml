@@ -1,0 +1,82 @@
+schema_version: 1
+snapshot_date: '2026-10-26'
+implementations_included: false
+source_root: ${DPO_WORKSPACE}
+meaning: Filenames relative to the external experiment workspace. Hashes identify captured source, not a public
+  download or a runnable script in this directory.
+sources:
+- file: route1/run_full.sh
+  sha256: 973e92332facc68b2341b316a5859a9368a7da624306e97c00be1b1a6f921ac0
+  bytes: 698
+- file: route12/run_full.sh
+  sha256: f2f8875d48926aa17c5a9a90cfa370ed9a8024ec2cdd46734b1bf8f1a09eeafb
+  bytes: 1379
+- file: nemo_rl_on_nemo/run_full.sh
+  sha256: d04f99eb4082652e72a51158a88465078d98ddc31ad315a576520d0471f8c9de
+  bytes: 957
+- file: prepare_inventory.py
+  sha256: f37edda6a2b3506dd9635342a15b809dd3a540f87e03d814d7445a4d83e5f0f4
+  bytes: 6210
+- file: generate_positives.py
+  sha256: 8e803c086a2b2eb715b5a798d6632bb21d6ee557ea13558995c1cbff47cdc448
+  bytes: 6186
+- file: finalize_data.py
+  sha256: 7751628de5908b65d8ff1af8c5620e36932b9f56711c22243651cd358a4ea612
+  bytes: 4473
+- file: preference_processor.py
+  sha256: 04ac9538f9484e55d2e4d5e8f7ac991e6e5fe37780581bb32e87c137d7e6c06e
+  bytes: 1199
+- file: checkpoint_compat.py
+  sha256: 4e04d74e62defcdcab5953db832cceeba2d81158fb37491d48912379ce38425e
+  bytes: 5248
+- file: route1_key_compat.py
+  sha256: ca3ae74bdb49e296eaf16d003e974c9bd807cac4bdeedd489128ad2689c30bff
+  bytes: 3705
+- file: dpo_runtime.py
+  sha256: 36aabaffbd3458535c3bd659aa1408813401e2e502a89775b64e52e4d189d89e
+  bytes: 4984
+- file: te_optimizer_groups.py
+  sha256: df5dbf1ee495841b31c7d885a28fb64adbecd73aa6ecf7ec82d9880235672f62
+  bytes: 1097
+- file: aligned_stack/run_dpo.py
+  sha256: f4bb52a624f0154ebf096359b5208df0481e0bccc91b257a7d668b0927839e70
+  bytes: 4695
+- file: aligned_stack/hooks/sitecustomize.py
+  sha256: 47cd51546f7856a8499c6e49e92ea6b6fd17a96544112e4b0fcda39d81ca0b9f
+  bytes: 3608
+- file: nemo_rl_on_nemo/hooks/sitecustomize.py
+  sha256: 3e4283167d3ad910607787aee246b52634ac8cc5a7a3ebfc75356da2c327edfa
+  bytes: 2925
+- file: qad_then_dpo/run_inside.sh
+  sha256: 0794c423a51c3c51504d0dfb2ec0469c30f11cbb72d21dfeaf2933b052665241
+  bytes: 1043
+- file: qad_then_dpo/run_qad.py
+  sha256: 6bc8aa8cc7685c6eaa15fbdcb8d96c5a4c51ddbfce225ecc77f90b3e1b9b87c0
+  bytes: 1362
+- file: vanilla_hf_full/prepare_and_run.py
+  sha256: 6684c7e9c3a8e0a373d7f3ecf75259785fe619e500f3734fbf256b46a22fe434
+  bytes: 3959
+- file: vanilla_hf_full/vl_chunked_adapter.py
+  sha256: 8ff7ce458ab6c4883211bb16862f3188b8921379d7d1cff501c9b05e7bb01008
+  bytes: 3308
+- file: current_main_20261025/run_inside.sh
+  sha256: 870287ab9324cb98a6c1c5d7cc583c0be9536b5da366adc62f034a9919df273f
+  bytes: 1433
+- file: current_main_20261025/prepare_and_run.py
+  sha256: 012ced01d87e99ba00b561477aae1d681941e1872bda15778ebf307bac2cf678
+  bytes: 3685
+- file: current_main_20261025/modelopt_state_compat.py
+  sha256: 078385841ff6256fa525b3ee38cc989523c0f667e4101646dffc967b79f22f6e
+  bytes: 950
+- file: current_main_20261025/legacy_output_state_compat.py
+  sha256: bd8fc79da5e8d1aa807298a01c35f50c6b91dea3c45662fe6e81e0bef61e7ded
+  bytes: 1055
+- file: current_main_20261025/hooks/sitecustomize.py
+  sha256: 56e870cfb229e50552c4193b30b3a56fba7eac6f6c547bc0ea98ccd597eab165
+  bytes: 1225
+- file: export/run_export.py
+  sha256: 10574c72be0fbdce55df7c46b187b2cdb53d6baa371cb4aad66430670f8c3839
+  bytes: 1650
+- file: aggregate_evaluation.py
+  sha256: 746ea5fcc39c0340d5e3c16d1985e4d0c077014995402e05e3894eca2f55290e
+  bytes: 1411

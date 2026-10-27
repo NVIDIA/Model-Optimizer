@@ -1,0 +1,67 @@
+schema_version: 1
+model: Qwen3.6-35B-A3B language model
+source: Saved round-3 QAD configuration compared to finalized HF-derived native provider
+fields:
+  num_layers: 40
+  hidden_size: 2048
+  ffn_hidden_size: 8192
+  num_attention_heads: 16
+  num_query_groups: 2
+  kv_channels: 256
+  num_moe_experts: 256
+  moe_ffn_hidden_size: 512
+  moe_shared_expert_intermediate_size: 512
+  moe_router_topk: 8
+  linear_num_key_heads: 16
+  linear_num_value_heads: 32
+  linear_key_head_dim: 128
+  linear_value_head_dim: 128
+  linear_conv_kernel_dim: 4
+  linear_attention_freq:
+  - 1
+  - 1
+  - 1
+  - 0
+  - 1
+  - 1
+  - 1
+  - 0
+  - 1
+  - 1
+  - 1
+  - 0
+  - 1
+  - 1
+  - 1
+  - 0
+  - 1
+  - 1
+  - 1
+  - 0
+  - 1
+  - 1
+  - 1
+  - 0
+  - 1
+  - 1
+  - 1
+  - 0
+  - 1
+  - 1
+  - 1
+  - 0
+  - 1
+  - 1
+  - 1
+  - 0
+  - 1
+  - 1
+  - 1
+  - 0
+  experimental_attention_variant: gated_delta_net
+  vocab_size: 248320
+  share_embeddings_and_output_weights: false
+  position_embedding_type: mrope
+  rotary_base: 10000000
+  rotary_percent: 0.25
+match_required: true

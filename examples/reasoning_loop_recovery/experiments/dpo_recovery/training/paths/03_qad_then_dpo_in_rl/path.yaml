@@ -1,0 +1,25 @@
+schema_version: 1
+path_id: 3
+snapshot_date: '2026-10-26'
+common_training_config: ../../dpo.yaml
+container: release_container
+stack_mode: qad-bridge-core-modelopt
+quantized: true
+qad_start: ${ROUND2_NATIVE_CHECKPOINT}
+qad_teacher: ${TEACHER_HF_PATH}
+qad_smoke_examples: 8
+qad_smoke_steps: 1
+qad_kl_top_k: 4096
+full_qad_examples: 954
+full_qad_steps: 120
+full_qad_dataset_sha256: 251e6d176b70dab5781ac46302027a00e7d39ee341f3211f49a7360c70e83dc3
+dpo_start: New one-step QAD native checkpoint
+dpo_smoke_steps: 1
+status: qad_then_dpo_smoke_passed
+workspace_runner: qad_then_dpo/run_inside.sh
+workspace_results: qad_then_dpo/dpo_smoke
+next:
+- Full QAD reproduction
+- Full DPO and reload
+- Export and evaluation
+checkpoint_format: megatron_lm after architecture parity check

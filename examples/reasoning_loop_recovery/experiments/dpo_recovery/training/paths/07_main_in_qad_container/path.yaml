@@ -1,0 +1,17 @@
+schema_version: 1
+path_id: 7
+snapshot_date: '2026-10-27'
+common_training_config: ../../dpo.yaml
+container: nvcr.io/nvidia/nemo:26.08.00
+nemo_rl_commit: 89d8f0c5d217e0270a5718880d811e51f3951e39
+bridge_core: Original QAD container stack
+modelopt: Actual QAD training source
+python_in_qad_image: '3.12'
+main_declared_python_requirement: '>=3.13.14,<3.14'
+initial_mode: Experimental source integration preserving the QAD stack
+checkpoint_reader_patched: false
+common_state_read: passed
+status: 'Import dependency repair: missing nemo.lens; no successful DPO step'
+planned_training_pairs: 104
+planned_dpo_steps: 13
+baseline_path: 4

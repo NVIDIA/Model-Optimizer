@@ -1,0 +1,24 @@
+schema_version: 1
+path_id: 6
+snapshot_date: '2026-10-26'
+common_training_config: ../../dpo.yaml
+container: release_container plus isolated pinned-main environment
+versions_file: ../../versions.yaml
+quantized_modes:
+- vanilla_hf
+- phase3_qad
+training_pairs_per_mode: 8
+pair_validation_pairs_per_mode: 4
+max_sequence_tokens: 8192
+global_batch_size: 4
+steps_per_mode: 1
+status: both_smoke_modes_failed_no_dpo_step
+schema_null_export_dir_migration: passed
+latest_quantized_blocker: Core output-layer extra-state assertion during sharded ModelOpt restoration
+latest_vanilla_blocker: Worker environment startup; earlier uv exit 141
+workspace_runner: current_main_20261025/run_inside.sh
+workspace_results: current_main_20261025/{vanilla_hf,phase3_qad}
+next:
+- Diagnose output-head extra-state contract without losing quantization state
+- Repair vanilla worker environment startup
+- Smoke then full training/reload/export/evaluation

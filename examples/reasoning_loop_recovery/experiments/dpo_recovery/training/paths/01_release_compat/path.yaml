@@ -1,0 +1,20 @@
+schema_version: 1
+path_id: 1
+snapshot_date: '2026-10-26'
+common_training_config: ../../dpo.yaml
+container: release_container
+bridge_core: Release bundled
+modelopt: Actual round-3 QAD source overlay
+quantized: true
+steps: 13
+training_pairs: 104
+pair_validation_pairs: 11
+status: full_training_and_reload_passed
+reload_validation_loss: 0.0002726738578419743
+workspace_runner: route1/run_full.sh
+workspace_results: route1/results
+next:
+- NVFP4 export
+- Matched SciCode evaluation
+checkpoint_format: megatron_lm after architecture parity check
+stack_mode: stock-hf-qad-modelopt

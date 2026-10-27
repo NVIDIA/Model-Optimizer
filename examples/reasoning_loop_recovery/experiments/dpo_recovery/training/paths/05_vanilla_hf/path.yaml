@@ -1,0 +1,29 @@
+schema_version: 1
+path_id: 5
+snapshot_date: '2026-10-26'
+common_training_config: ../../dpo.yaml
+container: release_container
+bridge_core: Release bundled
+model: ${TEACHER_HF_PATH}
+quantized: false
+pretrained_native_checkpoint: null
+initial_smoke:
+  training_pairs: 8
+  pair_validation_pairs: 4
+  max_sequence_tokens: 8192
+  steps: 1
+  passed: true
+full_run:
+  training_pairs: 104
+  pair_validation_pairs: 11
+  max_sequence_tokens: 32768
+  steps: 13
+status: full_training_and_reload_passed
+reload_validation_loss: 7.148674870879127e-05
+chunked_oracle_max_abs_error: 1.65e-06
+chunked_oracle_tolerance: 0.002
+workspace_runner: vanilla_hf_full/run_inside.sh
+workspace_results: vanilla_hf_full
+next:
+- Optional BF16 control evaluation
+- Do not substitute for quantized checkpoint test
