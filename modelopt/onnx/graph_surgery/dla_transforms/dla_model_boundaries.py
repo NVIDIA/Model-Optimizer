@@ -125,10 +125,10 @@ def _has_native_symbolic_data(cache, name, local_functions):
             if info is not None and info.type.tensor_type.HasField("shape")
             else None
         )
-        if cache.get_shape(name) is not None or (rank is not None and rank >= 4):
+        if rank is not None and rank >= 4:
             return False
         if name in cache.graph_input_names:
-            return rank is not None and rank < 4
+            return cache.get_shape(name) is None and rank is not None and rank < 4
         node = cache.get_producer(name)
         if (
             node is None

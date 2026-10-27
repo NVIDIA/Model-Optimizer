@@ -112,12 +112,11 @@ def _apply_non4d_reshape(model):
         native_input = _shape_before_boundary_promotion(cache, node.input[0])
         if target_shape == [4] and native_input is not None and len(native_input) == 4:
             continue
-        if native_input is None:
-            rank = _known_rank(cache, node.input[0])
-            if rank is None:
-                raise ValueError(f"{node.name!r}: Reshape input rank must be known")
-            if rank < 4 and _has_native_symbolic_data(cache, node.input[0], local_functions):
-                continue
+        rank = len(native_input) if native_input is not None else _known_rank(cache, node.input[0])
+        if rank is None:
+            raise ValueError(f"{node.name!r}: Reshape input rank must be known")
+        if rank < 4 and _has_native_symbolic_data(cache, node.input[0], local_functions):
+            continue
         if tensor is None or tensor.name in runtime_inputs:
             raise ValueError(f"{node.name!r}: Reshape target must be fixed")
         values = numpy_helper.to_array(tensor).reshape(-1).tolist()
@@ -281,11 +280,10 @@ def _pad_shape_inputs(model, op_type, suffix):
         rank = len(native) if native is not None else _known_rank(cache, node.input[0])
         if rank == 4 and cache.get_shape(node.input[1]) == [4]:
             continue
-        if native is None:
-            if rank is None:
-                raise ValueError(f"{node.name!r}: {op_type} input rank must be known")
-            if rank < 4 and _has_native_symbolic_data(cache, node.input[0], local_functions):
-                continue
+        if rank is None:
+            raise ValueError(f"{node.name!r}: {op_type} input rank must be known")
+        if rank < 4 and _has_native_symbolic_data(cache, node.input[0], local_functions):
+            continue
         if tensor is None or tensor.name in runtime_inputs:
             raise ValueError(f"{node.name!r}: {op_type} target must be fixed")
         values = numpy_helper.to_array(tensor).reshape(-1).tolist()

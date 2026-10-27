@@ -1122,6 +1122,37 @@ def test_symbolic_structural_controls_keep_native_data_rank(operation, batch, st
     assert converted.graph.initializer[0].SerializeToString() == original_control
 
 
+@pytest.mark.parametrize("operation", ["Tile", "Expand", "Reshape"])
+def test_symbolic_native_control_chain_preserves_concrete_intermediate_rank(operation):
+    """Keep native controls after a symbolic input acquires concrete intermediate metadata."""
+    control = {"Tile": [1, 2], "Expand": [2, 3], "Reshape": [3, 2]}[operation]
+    output = {"Tile": [2, 6], "Expand": [2, 3], "Reshape": [3, 2]}[operation]
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Reshape", ["x", "first_shape"], ["middle"]),
+                helper.make_node(operation, ["middle", "control"], ["y"]),
+            ],
+            "native_control_chain",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, ["N", 3])],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, output)],
+            [
+                numpy_helper.from_array(np.array([2, 3], np.int64), "first_shape"),
+                numpy_helper.from_array(np.array(control, np.int64), "control"),
+            ],
+            value_info=[helper.make_tensor_value_info("middle", TensorProto.FLOAT, [2, 3])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    expected = _execute(model, feeds)[0]
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+    for actual, original in zip(converted.graph.initializer, model.graph.initializer):
+        assert actual.SerializeToString() == original.SerializeToString()
+
+
 @pytest.mark.parametrize("operation", ["Tile", "Reshape"])
 def test_runtime_slice_extents_retain_promoted_control_layouts(operation):
     """Follow already-promoted data through unknown Slice extents before adapting controls."""
