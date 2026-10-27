@@ -42,6 +42,8 @@ from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 pytest.importorskip("transformers")
 pytest.importorskip("safetensors")
 from safetensors.torch import load_file, save_file
+from transformers import NemotronHConfig
+from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHExperts
 
 import modelopt.torch.export.hf_export_handlers as handlers
 import modelopt.torch.quantization as mtq
@@ -94,25 +96,24 @@ class _KeepFusedGatedExperts(nn.Module):
         return out
 
 
-class _KeepFusedUngatedExperts(nn.Module):
-    """Ungated fused experts (NemotronH): a single ``up_proj`` and ``down_proj``."""
+class _KeepFusedUngatedExperts(NemotronHExperts):
+    """Nemotron-H's ungated fused experts: a single ``up_proj`` and ``down_proj``.
+
+    The real class, on its eager forward, so that whichever wrapper ModelOpt quantizes Nemotron-H's
+    experts with converts it.
+    """
 
     def __init__(self, num_experts=NUM_EXPERTS):
-        super().__init__()
-        self.num_experts = num_experts
-        self.up_proj = nn.Parameter(torch.randn(num_experts, INTERMEDIATE_DIM, HIDDEN_DIM) * 0.02)
-        self.down_proj = nn.Parameter(torch.randn(num_experts, HIDDEN_DIM, INTERMEDIATE_DIM) * 0.02)
-        self.act_fn = nn.SiLU()
-
-    def forward(self, hidden_states, top_k_index, top_k_weights):
-        out = torch.zeros_like(hidden_states)
-        mask = F.one_hot(top_k_index, num_classes=self.num_experts).permute(2, 1, 0)
-        for expert_idx in torch.greater(mask.sum(dim=(-1, -2)), 0).nonzero()[:, 0]:
-            top_k_pos, token_idx = torch.where(mask[expert_idx])
-            up = self.act_fn(F.linear(hidden_states[token_idx], self.up_proj[expert_idx]))
-            current = F.linear(up, self.down_proj[expert_idx])
-            out.index_add_(0, token_idx, current * top_k_weights[token_idx, top_k_pos, None])
-        return out
+        config = NemotronHConfig(
+            n_routed_experts=num_experts,
+            hidden_size=HIDDEN_DIM,
+            moe_intermediate_size=INTERMEDIATE_DIM,
+        )
+        config._experts_implementation = "eager"
+        super().__init__(config)
+        with torch.no_grad():
+            self.up_proj.normal_(std=0.02)
+            self.down_proj.normal_(std=0.02)
 
 
 LAYOUTS = pytest.mark.parametrize(
@@ -124,9 +125,17 @@ LAYOUTS = pytest.mark.parametrize(
 
 @pytest.fixture(autouse=True)
 def _unregister_synthetic_experts():
-    """``mtq.quantize`` registers the synthetic classes on the fly; keep the registry clean."""
+    """``mtq.quantize`` registers the synthetic classes on the fly; keep the registry clean.
+
+    A class the registry already covers, through its base class's registration, stays as it is.
+    """
+    on_the_fly = [
+        cls
+        for cls in (_KeepFusedGatedExperts, _KeepFusedUngatedExperts)
+        if cls not in QuantModuleRegistry
+    ]
     yield
-    for cls in (_KeepFusedGatedExperts, _KeepFusedUngatedExperts):
+    for cls in on_the_fly:
         if QuantModuleRegistry.get(cls) is not None:
             QuantModuleRegistry.unregister(cls)
 
