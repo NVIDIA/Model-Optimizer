@@ -1509,6 +1509,163 @@ def test_rank_preparation_preserves_unconverted_batched_matrix_consumers(operati
         np.testing.assert_array_equal(actual, reference)
 
 
+@pytest.mark.parametrize("operation", ["Add", "Sub", "Mul", "Div", "Max"])
+@pytest.mark.parametrize("bias_shape", [[4], [3, 4], [1, 3, 4]])
+def test_symbolic_elementwise_initializers_keep_native_rank(operation, bias_shape):
+    """Reuse one converted model for multiple batches without widening native symbolic data."""
+    nodes = []
+    source = "x"
+    if len(bias_shape) == 2:
+        nodes.append(helper.make_node("Relu", [source], ["native"]))
+        source = "native"
+    operands = [source, "bias"] if len(bias_shape) != 3 else ["bias", source]
+    nodes.append(helper.make_node(operation, operands, ["y"]))
+    bias = np.arange(np.prod(bias_shape), dtype=np.float32).reshape(bias_shape) + 1
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "symbolic_bias",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, ["N", 3, 4])],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, ["N", 3, 4])],
+            [numpy_helper.from_array(bias, "bias")],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    payload = model.graph.initializer[0].SerializeToString()
+    cases = [
+        {"x": np.arange(batch * 12, dtype=np.float32).reshape(batch, 3, 4) + 1} for batch in [1, 2]
+    ]
+    expected = [_execute(model, feeds)[0] for feeds in cases]
+    changed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    assert (
+        next(t for t in changed.graph.initializer if t.name == "bias").SerializeToString()
+        == payload
+    )
+    for feeds, reference in zip(cases, expected):
+        np.testing.assert_array_equal(_execute(changed, feeds)[0], reference)
+
+
+@pytest.mark.parametrize("public", [False, True])
+@pytest.mark.parametrize("source", ["constant", "default", "runtime"])
+def test_symbolic_bias_can_stay_native_for_a_shared_static_broadcast(public, source):
+    """Retain shared constant bytes and both native and already-4D broadcast outputs."""
+    outputs = [
+        helper.make_tensor_value_info("y", TensorProto.FLOAT, ["N", 3, 4]),
+        helper.make_tensor_value_info("static_y", TensorProto.FLOAT, [1, 2, 3, 4]),
+    ]
+    if public:
+        outputs.append(helper.make_tensor_value_info("bias", TensorProto.FLOAT, [1, 3, 4]))
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Add", ["x", "bias"], ["y"]),
+                helper.make_node("Add", ["static_x", "bias"], ["static_y"]),
+            ],
+            "shared_symbolic_bias",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, ["N", 3, 4]),
+                helper.make_tensor_value_info("static_x", TensorProto.FLOAT, [1, 2, 3, 4]),
+            ],
+            outputs,
+            [numpy_helper.from_array(np.ones([1, 3, 4], np.float32), "bias")],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    if source != "constant":
+        model.graph.input.append(
+            helper.make_tensor_value_info("bias", TensorProto.FLOAT, [1, 3, 4])
+        )
+        # Make the boundary planner inspect the bias as the data operand.
+        model.graph.node[0].input[:] = ["bias", "x"]
+        if source == "default":
+            model.ir_version = 3
+        else:
+            del model.graph.initializer[:]
+    cases = [
+        {
+            "x": np.arange(batch * 12, dtype=np.float32).reshape(batch, 3, 4),
+            "static_x": np.arange(24, dtype=np.float32).reshape(1, 2, 3, 4),
+            **({"bias": np.ones([1, 3, 4], np.float32)} if source == "runtime" else {}),
+        }
+        for batch in [1, 2]
+    ]
+    expected = [_execute(model, feeds) for feeds in cases]
+    changed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    for feeds, references in zip(cases, expected):
+        for actual, reference in zip(_execute(changed, feeds), references):
+            np.testing.assert_array_equal(actual, reference)
+
+
+def test_symbolic_bias_preserves_a_shared_quantization_control():
+    """Keep a bias native when another consumer requires its original per-axis scale layout."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Add", ["x", "scale"], ["y"]),
+                helper.make_node(
+                    "QuantizeLinear", ["static_x", "scale", "zero"], ["quantized"], axis=3
+                ),
+            ],
+            "shared_symbolic_scale",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, ["N", 3, 4]),
+                helper.make_tensor_value_info("static_x", TensorProto.FLOAT, [1, 1, 3, 4]),
+            ],
+            [
+                helper.make_tensor_value_info("y", TensorProto.FLOAT, ["N", 3, 4]),
+                helper.make_tensor_value_info("quantized", TensorProto.UINT8, [1, 1, 3, 4]),
+            ],
+            [
+                numpy_helper.from_array(np.array([1, 2, 3, 4], np.float32), "scale"),
+                numpy_helper.from_array(np.zeros(4, np.uint8), "zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    feeds = {
+        "x": np.arange(24, dtype=np.float32).reshape(2, 3, 4),
+        "static_x": np.arange(12, dtype=np.float32).reshape(1, 1, 3, 4),
+    }
+    expected = _execute(model, feeds)
+    changed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    for actual, reference in zip(_execute(changed, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
+def test_symbolic_bias_refuses_conflicting_rank_preparation_before_mutation():
+    """Refuse a shared native/forced-rank initializer instead of leaving one consumer invalid."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Add", ["x", "bias"], ["y"]),
+                helper.make_node("Concat", ["static_x", "bias"], ["joined"], axis=0),
+            ],
+            "mixed_symbolic_rank",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, ["N", 3, 4]),
+                helper.make_tensor_value_info("static_x", TensorProto.FLOAT, [1, 3, 4]),
+            ],
+            [
+                helper.make_tensor_value_info("y", TensorProto.FLOAT, ["N", 3, 4]),
+                helper.make_tensor_value_info("joined", TensorProto.FLOAT, [2, 3, 4]),
+            ],
+            [numpy_helper.from_array(np.ones([1, 3, 4], np.float32), "bias")],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    _execute(
+        model, {"x": np.ones([2, 3, 4], np.float32), "static_x": np.ones([1, 3, 4], np.float32)}
+    )
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match=r"native symbolic.*rank-prepared"):
+        _apply_non4d_initializers(model)
+    assert model.SerializeToString() == before
+
+
 @pytest.mark.parametrize("operation", ["Tile", "Expand", "Reshape"])
 def test_unknown_structural_data_rank_refuses_before_mutation(operation):
     """Refuse unresolved intermediate ranks before allocating any control view."""

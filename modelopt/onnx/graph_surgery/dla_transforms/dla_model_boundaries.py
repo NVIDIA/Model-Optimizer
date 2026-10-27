@@ -219,6 +219,7 @@ def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=Fal
     unsqueezed_shapes = {}
     normalization_axes = {}
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    native_sources = {}
     contrib_ops = _boundary_contrib_ops(model)
     opset = next(
         (entry.version for entry in model.opset_import if entry.domain in {"", "ai.onnx"}), 1
@@ -239,6 +240,16 @@ def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=Fal
             )
             and node.op_type not in {"InstanceNormalization", "Gemm"}
             and not _native_conv1d(node, cache)
+            and not (
+                node.op_type in _RANK_AGNOSTIC_OPS - {"Clip"}
+                and len(node.input) > 1
+                and any(
+                    name != value.name
+                    and _has_native_symbolic_data(cache, name, local_functions, native_sources)
+                    for name in node.input
+                    if name
+                )
+            )
         ]
         if not consumers:
             continue

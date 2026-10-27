@@ -275,6 +275,44 @@ def _apply_non4d_initializers(model):
             avoid.update(node.input)
     updates = []
     avoid.update(_runtime_input_names(model))
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    native_sources = {}
+    broadcasts = _RANK_AGNOSTIC_OPS - {"Clip"}
+    native_initializers = {
+        name
+        for node in supported
+        if node.op_type in broadcasts
+        and len(node.input) > 1
+        and any(
+            value not in cache.init_names
+            and _has_native_symbolic_data(cache, value, local_functions, native_sources)
+            for value in node.input
+            if value
+        )
+        for name in node.input
+        if name in cache.init_names
+    }
+    for name in native_initializers:
+        tensor = cache.get_init(name)
+        assert tensor is not None
+        if not 0 < len(tensor.dims) < 4:
+            continue
+        for user, port in cache.get_consumers(name):
+            if (
+                id(user) in selected
+                and (port == 0 or user.op_type in {"Concat", "MatMul"})
+                and user.op_type not in {"Gemm", "Unsqueeze", "GroupQueryAttention", "Shape"}
+                and not _native_conv1d(user, cache)
+                and not (user.op_type in broadcasts and len(user.input) > 1)
+                and not (
+                    user.op_type == "Identity"
+                    and all(output in protected for output in user.output)
+                )
+            ):
+                raise ValueError(
+                    f"Initializer {name!r} has incompatible native symbolic and rank-prepared usage"
+                )
+    avoid.update(native_initializers)
     expand_or_front = expand | front
     for tensor in model.graph.initializer:
         if tensor.name in avoid:
