@@ -1360,6 +1360,71 @@ def test_gather_elements_fixed_index_storage_is_preserved(tmp_path, storage):
     np.testing.assert_array_equal(actual, expected)
 
 
+@pytest.mark.parametrize("operation", ["Gather", "Reshape", "Slice", "ReduceSum", "Expand", "Tile"])
+@pytest.mark.parametrize("decoy", [False, True])
+def test_unloaded_external_controls_preserve_model_directory(
+    tmp_path, monkeypatch, operation, decoy
+):
+    """Never resolve unloaded control payloads against the process working directory."""
+    specifications = {
+        "Gather": (["indices"], {"indices": [2, 0]}, [2, 2], {"axis": 1}),
+        "Reshape": (["shape"], {"shape": [3, 2]}, [3, 2], {}),
+        "Slice": (
+            ["starts", "ends", "axes"],
+            {"starts": [0], "ends": [2], "axes": [1]},
+            [2, 2],
+            {},
+        ),
+        "ReduceSum": (["axes"], {"axes": [1]}, [2, 1], {"keepdims": 1}),
+        "Expand": (["shape"], {"shape": [2, 3]}, [2, 3], {}),
+        "Tile": (["repeats"], {"repeats": [1, 2]}, [2, 6], {}),
+    }
+    inputs, controls, output, attributes = specifications[operation]
+    model = _make_model(
+        [helper.make_node(operation, ["x", *inputs], ["y"], **attributes)],
+        "external_controls",
+        [_vi("x", TensorProto.FLOAT, [2, 3])],
+        [_vi("y", TensorProto.FLOAT, output)],
+        [_init(name, np.asarray(values, np.int64)) for name, values in controls.items()],
+    )
+    native = tmp_path / "native.onnx"
+    onnx.save_model(
+        model,
+        str(native),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="controls.bin",
+        size_threshold=0,
+    )
+    payload = (tmp_path / "controls.bin").read_bytes()
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    expected = _run_ort(onnx.load(str(native)), feeds)["y"]
+    unloaded = onnx.load(str(native), load_external_data=False)
+    originals = {tensor.name: tensor.SerializeToString() for tensor in unloaded.graph.initializer}
+    working = tmp_path / "unrelated"
+    working.mkdir()
+    if decoy:
+        (working / "controls.bin").write_bytes(bytes(len(payload)))
+    monkeypatch.chdir(working)
+    converted = _apply_convert_ops_to_4d(unloaded)
+    assert {
+        tensor.name: tensor.SerializeToString()
+        for tensor in converted.graph.initializer
+        if tensor.name in originals
+    } == originals
+    if operation == "Gather":
+        assert any(node.op_type == "Cast" for node in converted.graph.node)
+    else:
+        assert len(converted.graph.node) == 1
+    target = tmp_path / "converted.onnx"
+    onnx.save_model(converted, str(target))
+    loaded = onnx.load(str(target))
+    onnx.checker.check_model(loaded, full_check=True)
+    actual = _run_ort(loaded, feeds)["y"]
+    np.testing.assert_array_equal(actual, expected)
+    assert (tmp_path / "controls.bin").read_bytes() == payload
+
+
 def test_external_weight_promotion_preserves_sidecar_bytes_and_relative_metadata(tmp_path):
     """Promote unloaded external weights without reading or rewriting their payload sidecar."""
     weight = np.arange(6, dtype=np.float32).reshape(2, 3)

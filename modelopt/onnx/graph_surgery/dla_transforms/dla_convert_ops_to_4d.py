@@ -706,7 +706,11 @@ def _handle_gather(node, graph, shape_map, init_names, unique_init, inits_to_add
     cnt_ref[0] += 1
 
     pre: list = []
-    is_init = idx_name in init_names and idx_name not in shape_map._runtime_inputs
+    is_init = (
+        idx_name in init_names
+        and idx_name not in shape_map._runtime_inputs
+        and not _has_unloaded_external(shape_map._cache, [idx_name])
+    )
 
     # ── 1. Cast indices to INT32 and flatten to 1-D ───────────────────────────
     if is_init:
@@ -1654,6 +1658,17 @@ def _split_graph_output_squeezes(model: onnx.ModelProto) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _has_unloaded_external(cache, names):
+    """Identify controls whose payload cannot be read without the caller's model directory."""
+    return any(
+        (tensor := cache.get_init(name)) is not None
+        and onnx.external_data_helper.uses_external_data(tensor)
+        and not tensor.HasField("raw_data")
+        for name in names
+        if name
+    )
+
+
 def _apply_convert_ops_to_4d(model: onnx.ModelProto) -> onnx.ModelProto:
     """Wrap eligible non-4D operations while restoring their native output contracts."""
     if next((op.version for op in model.opset_import if op.domain in {"", "ai.onnx"}), 1) < 13:
@@ -1676,6 +1691,11 @@ def _apply_convert_ops_to_4d(model: onnx.ModelProto) -> onnx.ModelProto:
     # ── Process each node ─────────────────────────────────────────────────────
     for node in standard_nodes:
         if node.op_type in _OP_SKIP:
+            continue
+        if (
+            node.op_type in {"Reshape", "Slice", "Expand", "Tile"}
+            or node.op_type.startswith("Reduce")
+        ) and _has_unloaded_external(cache, node.input[1:]):
             continue
         if (
             any(
