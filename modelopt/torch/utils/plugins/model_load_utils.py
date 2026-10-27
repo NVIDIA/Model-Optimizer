@@ -646,6 +646,18 @@ def load_pretrained(
             f"{os.environ['WORLD_SIZE']}-rank launch has not set up; load inside distributed_run(), "
             "which sets it up."
         )
+    if alone and distribution is None:
+        # The knobs ask to shard over the launch, rather than leave each process the whole model.
+        ep, world = env.ep_degree(), int(os.environ["WORLD_SIZE"])
+        asked = [f"MODELOPT_EP_DEGREE={ep}"] if ep.isdigit() and int(ep) > 1 else []
+        if _dense_from_env(world) == "fsdp":
+            asked.append(f"MODELOPT_FSDP_SIZE={env.fsdp_size()}")
+        if asked:
+            raise RuntimeError(
+                f"{' and '.join(asked)} ask to shard the model over this "
+                f"{os.environ['WORLD_SIZE']}-rank launch, whose process group is not set up; load "
+                "inside distributed_run(), which sets it up."
+            )
     config = kwargs.get("config")
     config = config if isinstance(config, PretrainedConfig) else None
     if config is not None and "hf_config" in kwargs:
