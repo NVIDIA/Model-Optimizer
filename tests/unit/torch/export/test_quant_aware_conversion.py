@@ -23,6 +23,7 @@ across platforms) — only shapes and the scalar-vs-blocked distinction matter.
 """
 
 import json
+import sys
 import types
 import warnings
 from fnmatch import fnmatchcase
@@ -1366,6 +1367,24 @@ def test_experts_revert_through_converters_loading_rewrote(siblings):
         assert f"{base}.w1.weight_scale_2" in out
     assert out[f"{p}.self_attn.q_proj.weight"].dtype == torch.bfloat16
     assert not any(".mlp.experts." in k or k.endswith("weight_scale_inv") for k in out)
+
+
+def test_the_identity_decode_is_known_without_the_fp8_integration(monkeypatch):
+    """transformers 5.5 imports triton atop its FP8 integration, so without triton that import
+    fails. The identity op 5.5 and 5.6 reverse ``Fp8Dequantize`` into is ``core_model_loading``'s,
+    and must still read as a decode in place, or the whole reverse of a dequantizing load aborts."""
+    core = pytest.importorskip("transformers.core_model_loading")
+    if not hasattr(core, "_IdentityOp"):
+        pytest.skip("transformers build has no _IdentityOp")
+    integrations = pytest.importorskip("transformers.integrations")
+    monkeypatch.delattr(integrations, "finegrained_fp8", raising=False)
+    monkeypatch.setitem(sys.modules, "transformers.integrations.finegrained_fp8", None)
+    quant_aware_conversion._quantization_codec_ops.cache_clear()
+    try:
+        rev = types.SimpleNamespace(source_patterns=["weight$"], target_patterns="weight")
+        assert quant_aware_conversion._decodes_in_place(rev, [core._IdentityOp()])
+    finally:
+        quant_aware_conversion._quantization_codec_ops.cache_clear()
 
 
 def test_dense_split_names_each_part_once_through_load_siblings():
