@@ -1114,8 +1114,9 @@ def _process_hf_model_for_export(
     writer splits them after consolidation.
     """
     dtype, _, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
-    keep_fused_experts = any(_hf_shard_flags(model))
-    pack_quantized_weights(model, dtype, is_modelopt_qlora, keep_fused_experts=keep_fused_experts)
+    # Only the no-gather writer calls this, and only for a sharded model, so the experts stay fused
+    # without reading the plan a second time.
+    pack_quantized_weights(model, dtype, is_modelopt_qlora, keep_fused_experts=True)
     return quant_config
 
 
