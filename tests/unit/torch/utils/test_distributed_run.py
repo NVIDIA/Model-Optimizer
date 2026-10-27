@@ -291,6 +291,10 @@ def _broadcast_from_job(rank, size):
             assert "rank 0 failed to compute x: TypeError" in str(error), error
         # Serialized once, where the sending rank catches a failure, not again by the broadcast.
         assert broadcast_from("x", lambda: _Protocol2Only(7)).n == 7
+        # Every rank gets the value loaded from the bytes sent, the sending rank too.
+        built: list = []
+        got = broadcast_from("x", lambda: built)
+        assert got == [] and got is not built
         # Loaded back there too: a value the other ranks could not load fails on the sending rank.
         _, error = _outcome(lambda: broadcast_from("x", _Unloadable))
         assert isinstance(error, RuntimeError), error
@@ -310,8 +314,8 @@ def test_broadcast_from_gives_every_rank_the_sending_ranks_value(cpu_dist_worker
     refused, the sending rank's failure stops every rank and its exit exits every rank with its
     code, so that distributed_run tears every rank down alike. A value that does not serialize
     fails as fn raising does, rather than in the broadcast, and so does one the other ranks could
-    not load back; one only torch.save's pickle protocol takes crosses, serialized once; and ranks
-    out of step fail."""
+    not load back; one only torch.save's pickle protocol takes crosses, serialized once; every rank,
+    the sending one too, gets a copy loaded from the bytes; and ranks out of step fail."""
     cpu_dist_workers.run(_broadcast_from_job)
 
 

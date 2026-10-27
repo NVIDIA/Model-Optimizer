@@ -474,6 +474,8 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
     returns a value that does not serialize and load back (:func:`_encoded`), every rank raises
     instead of waiting in a broadcast ``rank`` never sends: ``rank`` its own error, the others a
     SystemExit with its code if that is what it was, so that every rank exits, else a RuntimeError.
+    Every rank, ``rank`` too, gets the value loaded from the bytes sent, so the result shares nothing
+    with what ``fn`` returned, on any rank, as with :func:`all_reduce`.
     A rank broadcasting another label than ``rank`` at the same point fails; ``rank`` sees no other
     rank's label, and returns. Collective: every rank calls it at the same point, with the same
     ``rank``. In a single process ``fn`` runs alone; a rank of a launch whose process group is not
@@ -485,17 +487,15 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
     if not is_distributed_run():
         return fn()
     sending = torch.distributed.get_rank() == rank
-    value: Any = None
     payload: Any = None
     error = None
     if sending:
         try:
-            value = fn()
-            payload = _encoded(value)
+            payload = _encoded(fn())
         except BaseException as e:
             # Still send: the other ranks would otherwise wait in the broadcast for this one. A
             # SystemExit or KeyboardInterrupt too, which argparse-style checks raise.
-            value, payload, error = None, None, e
+            payload, error = None, e
     # One message from the sending rank: its label, so a rank broadcasting another learns the two
     # are out of step, and its serialized value or its error.
     message = [(label, payload, _sendable(error))]
@@ -510,7 +510,7 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
             f"Ranks broadcast out of step: this rank broadcast {label!r} while rank {rank} sent "
             f"{sent_label!r}. Every rank must broadcast them in the same order."
         )
-    return value if sending else _decoded(payload)
+    return _decoded(payload)
 
 
 def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _V]) -> _V:
