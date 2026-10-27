@@ -23,6 +23,7 @@ import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
+from modelopt.onnx.graph_surgery.dla_transforms.dla_graph_cleanup import _remove_unused_initializers
 from modelopt.onnx.graph_surgery.dla_transforms.dla_remove_reshapes import _apply_remove_reshapes
 
 
@@ -48,11 +49,13 @@ def test_fixed_chain_controls_respect_legacy_initializer_declarations(ir_version
                 helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 1, 2, 3]),
                 helper.make_tensor_value_info("first_shape", TensorProto.INT64, [2]),
                 helper.make_tensor_value_info("last_shape", TensorProto.INT64, [3]),
+                helper.make_tensor_value_info("unused_default", TensorProto.INT64, [1]),
             ],
             [helper.make_tensor_value_info("y", TensorProto.FLOAT, [3, 1, 2])],
             [
                 numpy_helper.from_array(np.array([2, 3], np.int64), "first_shape"),
                 numpy_helper.from_array(np.array([3, 1, 2], np.int64), "last_shape"),
+                numpy_helper.from_array(np.array([1], np.int64), "unused_default"),
             ],
             value_info=[helper.make_tensor_value_info("middle", TensorProto.FLOAT, [2, 3])],
         ),
@@ -63,6 +66,11 @@ def test_fixed_chain_controls_respect_legacy_initializer_declarations(ir_version
     expected = _execute(model, feeds)
     converted = _apply_remove_reshapes(copy.deepcopy(model))
     assert len(converted.graph.node) == (1 if ir_version == 3 else 2)
+    converted = _remove_unused_initializers(converted)
+    input_names = {value.name for value in converted.graph.input}
+    assert {"first_shape", "last_shape"}.isdisjoint(input_names) == (ir_version == 3)
+    assert ("unused_default" in input_names) == (ir_version >= 4)
+    assert {value.name for value in converted.graph.initializer} >= input_names - {"x"}
     for actual, reference in zip(_execute(converted, feeds), expected):
         np.testing.assert_array_equal(actual, reference)
 
