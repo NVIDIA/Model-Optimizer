@@ -2765,10 +2765,12 @@ def _encode_on_each_gpu(by_device, encode):
     # CUDA extension, happens once before the workers start.
     first, *by_device[gpus[0]] = by_device[gpus[0]]
     encode(*first)
+    inference = torch.is_inference_mode_enabled()
 
     def worker(device):
-        torch.cuda.set_device(device)  # per thread, like grad mode
-        with torch.no_grad():
+        # The device, grad mode and inference mode are per thread: take the caller's.
+        torch.cuda.set_device(device)
+        with torch.inference_mode() if inference else torch.no_grad():
             for item in by_device[device]:
                 encode(*item)
         torch.cuda.synchronize(device)

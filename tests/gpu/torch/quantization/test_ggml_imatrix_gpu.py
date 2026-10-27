@@ -15,9 +15,9 @@
 
 """GPU tests for imatrix calibration of the GGML formats."""
 
-import copy
 import time
 
+import pytest
 import torch
 from torch import nn
 
@@ -49,8 +49,10 @@ class _Layers(nn.Module):
         return x
 
 
-def test_imatrix_encodes_each_gpus_weights_at_once(need_2_gpus, monkeypatch):
-    """Weights on two GPUs are encoded concurrently, to the same codes as on one GPU."""
+@pytest.mark.parametrize("inference_mode", [False, True])
+def test_imatrix_encodes_each_gpus_weights_at_once(need_2_gpus, monkeypatch, inference_mode):
+    """Weights on two GPUs are encoded concurrently, to the same codes as on one GPU, also as
+    inference tensors under the caller's inference mode, which worker threads do not inherit."""
     spans = []
     encode = GGMLImatrixEncoder.encode
 
@@ -58,20 +60,23 @@ def test_imatrix_encodes_each_gpus_weights_at_once(need_2_gpus, monkeypatch):
         start = time.perf_counter()
         decoded = encode(self, weight, quantizer, second_moments)
         torch.cuda.synchronize(weight.device)
-        time.sleep(0.2)  # long enough that encodes on different GPUs must overlap to save time
+        # Stands in for a long encode: encodes on two GPUs overlap only if they run at once.
+        time.sleep(0.2)
         spans.append((weight.device.index, start, time.perf_counter()))
         return decoded
 
     monkeypatch.setattr(GGMLImatrixEncoder, "encode", timed_encode)
-    torch.manual_seed(0)
-    reference = _Layers().cuda()
-    model = copy.deepcopy(reference)
-    model.layers[2:].to("cuda:1")
-    inputs = torch.randn(8, 128, 512, device="cuda")
+    with torch.inference_mode(inference_mode):
+        torch.manual_seed(0)
+        reference = _Layers().cuda()
+        torch.manual_seed(0)
+        model = _Layers().cuda()
+        model.layers[2:].to("cuda:1")
+        inputs = torch.randn(8, 128, 512, device="cuda")
 
-    mtq.quantize(reference, IQ2_XXS_IMATRIX, forward_loop=lambda m: m(inputs))
-    spans.clear()
-    mtq.quantize(model, IQ2_XXS_IMATRIX, forward_loop=lambda m: m(inputs))
+        mtq.quantize(reference, IQ2_XXS_IMATRIX, forward_loop=lambda m: m(inputs))
+        spans.clear()
+        mtq.quantize(model, IQ2_XXS_IMATRIX, forward_loop=lambda m: m(inputs))
 
     for expected, layer in zip(reference.layers, model.layers):
         assert torch.equal(layer.weight.cuda(0), expected.weight)
