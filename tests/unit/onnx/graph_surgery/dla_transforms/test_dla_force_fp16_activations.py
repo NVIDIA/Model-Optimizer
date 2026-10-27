@@ -420,27 +420,72 @@ def test_fp16_malformed_late_weight_refuses_before_any_mutation():
     assert model.SerializeToString() == before
 
 
-def test_fp16_qdq_upgrade_keeps_legacy_reduce_axes_valid():
-    """Migrate schema-sensitive reduction axes when enabling FP16 quantizers."""
+@pytest.mark.parametrize(
+    ("opset", "split"),
+    [(opset, split) for opset in [13, 17, 18, 19] for split in ["none", "equal", "sizes", "nested"]]
+    + [(13, "empty"), (17, "empty")],
+)
+def test_fp16_qdq_upgrade_keeps_legacy_reduce_axes_valid(opset, split):
+    """Migrate reduction axes and live equal splits while retaining explicit Split configurations."""
+    initializers = [nh.from_array(np.float32(0.1), "scale"), nh.from_array(np.int8(0), "zero")]
+    mean_inputs, mean_attributes = ["x"], {"keepdims": 1}
+    if opset < 18:
+        mean_attributes["axes"] = [1]
+    else:
+        mean_inputs.append("axes")
+        initializers.append(nh.from_array(np.array([1], np.int64), "axes"))
+    nodes = [
+        h.make_node("ReduceMean", mean_inputs, ["mean"], **mean_attributes),
+        h.make_node("QuantizeLinear", ["mean", "scale", "zero"], ["q"]),
+        h.make_node(
+            "DequantizeLinear", ["q", "scale", "zero"], ["y" if split == "none" else "decoded"]
+        ),
+    ]
+    outputs = [_value("y", [4, 1])]
+    if split != "none":
+        split_inputs = ["x" if split == "nested" else "decoded"]
+        attrs = {"axis": 0}
+        if split == "sizes":
+            split_inputs.append("sizes")
+            initializers.append(nh.from_array(np.array([1, 3], np.int64), "sizes"))
+        else:
+            if split == "empty":
+                split_inputs.append("")
+            if opset >= 18:
+                attrs["num_outputs"] = 2
+        splitting = [
+            h.make_node("Split", split_inputs, ["left", "right"], **attrs),
+            h.make_node(
+                "Concat", ["left", "right"], ["y" if split != "nested" else "branch_y"], axis=0
+            ),
+        ]
+        if split == "nested":
+            branch = h.make_graph(splitting, "split_branch", [], [_value("branch_y", [4, 2])])
+            initializers.append(nh.from_array(np.asarray(True), "condition"))
+            nodes.append(
+                h.make_node("If", ["condition"], ["y"], then_branch=branch, else_branch=branch)
+            )
+            outputs = [_value("y", [4, 2]), _value("decoded", [4, 1])]
+        else:
+            nodes.extend(splitting)
     model = _model(
-        [
-            h.make_node("ReduceMean", ["x"], ["mean"], axes=[1], keepdims=1),
-            h.make_node("QuantizeLinear", ["mean", "scale", "zero"], ["q"]),
-            h.make_node("DequantizeLinear", ["q", "scale", "zero"], ["y"]),
-        ],
-        [_value("x", [2, 2])],
-        [_value("y", [2, 1])],
-        [nh.from_array(np.float32(0.1), "scale"), nh.from_array(np.int8(0), "zero")],
-        opset=17,
+        nodes,
+        [_value("x", [4, 2])],
+        outputs,
+        initializers,
+        opset=opset,
     )
     onnx.checker.check_model(model, full_check=True)
-    feeds = {"x": np.asarray([[0.2, 0.2], [0.4, 0.4]], np.float32)}
-    expected = _checked_cpu_outputs(model, feeds)[0]
+    feeds = {"x": np.repeat(np.asarray([0.2, 0.4, 0.6, 0.8], np.float32), 2).reshape(4, 2)}
+    expected = _checked_cpu_outputs(model, feeds)
     changed = _apply_force_fp16_activations(model)
     onnx.checker.check_model(changed, full_check=True)
-    np.testing.assert_allclose(
-        ReferenceEvaluator(changed).run(None, feeds)[0], expected, rtol=2e-3, atol=1e-4
-    )
+    for actuals in [
+        ReferenceEvaluator(changed).run(None, feeds),
+        _checked_cpu_outputs(changed, feeds),
+    ]:
+        for actual, reference in zip(actuals, expected):
+            np.testing.assert_allclose(actual, reference, rtol=2e-3, atol=1e-4)
 
 
 def test_fp16_lpnorm_keeps_opaque_function_native():

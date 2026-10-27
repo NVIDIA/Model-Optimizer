@@ -258,7 +258,7 @@ def _fp32_regions(model, cache):
 
 
 def _upgrade_fp16_quantizers(model, cache):
-    """Migrate inherited reduction schemas when FP16 quantizers require opset 19."""
+    """Migrate inherited reduction and Split schemas when FP16 quantizers require opset 19."""
     if not _operator_nodes(model, {"QuantizeLinear", "DequantizeLinear"}):
         return
     opset = next(op for op in model.opset_import if op.domain in {"", "ai.onnx"})
@@ -281,6 +281,15 @@ def _upgrade_fp16_quantizers(model, cache):
                 or node.overload
                 or (node.domain, node.op_type, node.overload) in functions
             ):
+                continue
+            if (
+                node.op_type == "Split"
+                and (len(node.input) < 2 or not node.input[1])
+                and _attribute(node, "num_outputs") is None
+            ):
+                # Split-18 requires an explicit choice; legacy equal splits were even.
+                del node.input[1:]
+                node.attribute.append(helper.make_attribute("num_outputs", len(node.output)))
                 continue
             axes = _attribute(node, "axes")
             if axes is None or not node.op_type.startswith("Reduce"):
