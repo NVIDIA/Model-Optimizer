@@ -144,8 +144,8 @@ def _gather_layout_reinterpreted(cache, name, supported, captured):
     return True
 
 
-def _gather_promoted_data(model, cache, prepared_ops):
-    """Prove later leading-4D data layouts from registered rank stages without mutation."""
+def _prepared_index_data(model, cache, prepared_ops, data_names, *, before_boundary=False):
+    """Prove leading-4D data from actual layouts and registered rank stages without mutation."""
     standard = {id(node) for node in _operator_nodes(model, {n.op_type for n in model.graph.node})}
     if any(op.domain == "com.microsoft" and op.version == 1 for op in model.opset_import):
         standard.update(
@@ -172,7 +172,12 @@ def _gather_promoted_data(model, cache, prepared_ops):
         shape = cache.get_shape(name)
         if name in matrices or (shape is not None and len(shape) == 4):
             return True
-        if name in cache.graph_input_names and shape is not None and len(shape) in (2, 3):
+        if (
+            before_boundary
+            and name in cache.graph_input_names
+            and shape is not None
+            and len(shape) in (2, 3)
+        ):
             return True
         tensor = cache.get_init(name)
         if name in cache.graph_input_names and (model.ir_version > 3 or tensor is None):
@@ -211,8 +216,10 @@ def _gather_promoted_data(model, cache, prepared_ops):
                 and target[0] in (1, 2, 3, 5)
                 and not _has_native_symbolic_data(cache, node.input[0], local_functions)
             )
-        if node.op_type in {"Flatten", "ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"}:
+        if node.op_type == "Flatten":
             return node.op_type in prepared_ops
+        if node.op_type in {"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"}:
+            return [node.input[0]] if node.op_type in prepared_ops else False
         if node.op_type == "InstanceNormalization":
             return "FixInstanceNormChannelMismatch" in prepared_ops
         if node.op_type == "GroupQueryAttention":
@@ -220,11 +227,24 @@ def _gather_promoted_data(model, cache, prepared_ops):
         if node.op_type == "Conv":
             kernel = cache.get_shape(node.input[1])
             return kernel is not None and len(kernel) == 4
+        if node.op_type == "Transpose":
+            perm = _attribute(node, "perm")
+            if perm is not None and sorted(perm.ints) == [0, 1, 2, 3]:
+                return True
         if node.op_type in {"Squeeze", "Unsqueeze"}:
+            if node.op_type == "Unsqueeze":
+                source_rank = _known_rank(cache, node.input[0])
+                axes = cache.get_init(node.input[1]) if len(node.input) > 1 else None
+                if (
+                    axes is not None
+                    and source_rank is not None
+                    and source_rank + math.prod(axes.dims) == 4
+                ):
+                    return True
             if "RemoveIntermediarySqueezeAndUnsqueeze" not in prepared_ops:
                 return False
             source = node.input[0]
-            if source in captured or name in captured - cache.graph_output_names:
+            if source in captured or name in captured | cache.graph_output_names:
                 return False
             if source in cache.graph_input_names:
                 original = cache.get_shape(source)
@@ -239,7 +259,9 @@ def _gather_promoted_data(model, cache, prepared_ops):
         if node.op_type in {"QuantizeLinear", "DequantizeLinear"}:
             return (
                 [node.input[0]]
-                if cache.get_shape(node.input[1]) == [] or node.op_type in prepared_ops
+                if not before_boundary
+                or cache.get_shape(node.input[1]) == []
+                or node.op_type in prepared_ops
                 else False
             )
         if node.op_type in {"Softmax", "LogSoftmax", "LayerNormalization"}:
@@ -250,7 +272,8 @@ def _gather_promoted_data(model, cache, prepared_ops):
             value = axis.i if axis is not None else (-1 if opset >= 13 else 1)
             return (
                 [node.input[0]]
-                if value < 0
+                if not before_boundary
+                or value < 0
                 or node.op_type in prepared_ops
                 or node.input[0] in cache.graph_input_names
                 else False
@@ -262,7 +285,7 @@ def _gather_promoted_data(model, cache, prepared_ops):
         return False
 
     resolved, dependencies, active = {}, {}, set()
-    pending = [(node.input[0], False) for node in _operator_nodes(model, {"Gather"})]
+    pending = [(name, False) for name in data_names]
     while pending:
         name, expanded = pending.pop()
         if name in resolved:
@@ -290,7 +313,13 @@ def _apply_gather(model, *, prepared_data_ops=()):
     cache = GraphCache(graph)
     nodes = []
     squeezed_indices = {}
-    promoted_data = _gather_promoted_data(model, cache, prepared_data_ops)
+    promoted_data = _prepared_index_data(
+        model,
+        cache,
+        prepared_data_ops,
+        [node.input[0] for node in _operator_nodes(model, {"Gather"})],
+        before_boundary=True,
+    )
     selected = [
         node
         for node in _operator_nodes(model, {"Gather"})
@@ -470,45 +499,25 @@ def _apply_gather(model, *, prepared_data_ops=()):
     return model
 
 
-def _native_reshape_data(cache, name, standard, checked):
-    """Prove that an internal Reshape path still has unprepared rank-two or rank-three data."""
-    current, seen = name, set()
-    while current not in checked:
-        if current in seen:
-            raise ValueError("Cyclic data path while checking prepared indexing rank")
-        seen.add(current)
-        producer = cache.get_producer(current)
-        if producer is None or id(producer) not in standard:
-            native = False
-            break
-        if producer.op_type == "Reshape":
-            target = cache.get_shape(producer.input[1])
-            native = target is not None and len(target) == 1 and target[0] in (2, 3)
-            break
-        if len(producer.input) != 1:
-            native = False
-            break
-        current = producer.input[0]
-    else:
-        native = checked[current]
-    checked.update(dict.fromkeys(seen, native))
-    return native
-
-
-def _apply_gather_elements(model):
+def _apply_gather_elements(model, *, prepared_data_ops=()):
     """Prepare matching index ranks and preserve native axis and runtime-value contracts."""
     graph = model.graph
     cache = GraphCache(graph)
     converted_indices = {}
     replacements = {}
     selected_ids = {id(node) for node in _operator_nodes(model, {"GatherElements"})}
-    standard = {id(node) for node in _operator_nodes(model, _RANK_AGNOSTIC_OPS | {"Reshape"})}
-    checked = {}
+    prepared = _prepared_index_data(
+        model,
+        cache,
+        prepared_data_ops,
+        [node.input[0] for node in graph.node if id(node) in selected_ids],
+    )
     for node in graph.node:
         if (
             id(node) in selected_ids
             and cache.get_shape(node.input[0]) is not None
-            and _native_reshape_data(cache, node.input[0], standard, checked)
+            and _known_rank(cache, node.input[0]) in (2, 3)
+            and not prepared[node.input[0]]
         ):
             raise ValueError(f"{node.name!r}: GatherElements data requires rank preparation")
     for index, node in enumerate(graph.node):
@@ -615,23 +624,25 @@ def _apply_gather_elements(model):
     return model
 
 
-def _apply_standalone_reduce_operations(model):
+def _apply_standalone_reduce_operations(model, *, prepared_data_ops=()):
     """Plan native reduction axes and preserve their output layouts during rank promotion."""
     graph = model.graph
     cache = GraphCache(graph)
     nodes = []
     count = 0
     plans = {}
-    standard = {id(node) for node in _operator_nodes(model, _RANK_AGNOSTIC_OPS | {"Reshape"})}
-    checked = {}
-    for node in _operator_nodes(model, {"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"}):
+    selected = _operator_nodes(model, {"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"})
+    prepared = _prepared_index_data(
+        model, cache, prepared_data_ops, [node.input[0] for node in selected]
+    )
+    for node in selected:
         shape = _shape_before_boundary_promotion(cache, node.input[0])
         if not shape:
             keepdims = _attribute(node, "keepdims")
             if keepdims is not None and keepdims.i == 0:
                 raise ValueError(f"Missing static reduction input shape for {node.name!r}")
             continue  # Already rank-preserving, including generated 4D reduction branches.
-        if _native_reshape_data(cache, node.input[0], standard, checked):
+        if len(shape) in (2, 3) and not prepared[node.input[0]]:
             raise ValueError(f"{node.name!r}: reduction data requires rank preparation")
         tensor = cache.get_init(node.input[1]) if len(node.input) > 1 else None
         if len(node.input) > 1 and (tensor is None or tensor.name in cache.graph_input_names):

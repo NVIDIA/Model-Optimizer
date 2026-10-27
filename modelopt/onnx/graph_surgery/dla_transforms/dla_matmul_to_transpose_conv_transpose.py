@@ -283,8 +283,15 @@ def _apply_matmul_to_transpose_conv_transpose(
     if needs_adapters and opsets.get("", opsets.get("ai.onnx", 1)) < 13:
         raise ValueError("DLA matrix rank adapters require ONNX opset 13 or newer")
     if planned_outputs is not None:
-        planned_outputs.update(node.output[0] for node, _, _, _ in eligible_nodes)
-        planned_outputs.update(node.output[0] for node in active_fallback)
+        native_outputs = cache.graph_output_names | captured
+        planned_outputs.update(
+            node.output[0]
+            for node, _, _, _ in eligible_nodes
+            if node.output[0] not in native_outputs
+        )
+        planned_outputs.update(
+            node.output[0] for node in active_fallback if node.output[0] not in native_outputs
+        )
     if validate_only:
         return model
 

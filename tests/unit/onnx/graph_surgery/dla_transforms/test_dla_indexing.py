@@ -62,8 +62,12 @@ def test_index_dtype_and_rank_conversion_preserves_selected_values(operation):
         opset_imports=[helper.make_opsetid("", 17)],
     )
     model.ir_version = 9
-    candidate = transform(copy.deepcopy(model))
+    candidate = copy.deepcopy(model)
+    if operation == "Gather":
+        candidate = transform(candidate)
     candidate = _apply_non4d_model_inputs(candidate, prepared_input_ops={operation})
+    if operation == "GatherElements":
+        candidate = transform(candidate)
     candidate = _apply_non4d_model_outputs(candidate, defer_rank_conversion=True)
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
@@ -193,20 +197,62 @@ def _model(nodes, inputs, outputs, initializers=(), extra_opsets=()):
 @pytest.mark.parametrize(
     "operation", ["GatherElements", "ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"]
 )
-@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
+@pytest.mark.parametrize(
+    ("producer", "shape"),
+    [
+        (producer, shape)
+        for producer in ["Reshape", "Squeeze", "opaque"]
+        for shape in [[2, 3], [2, 3, 4]]
+    ]
+    + [("Gemm", [2, 3])],
+)
 @pytest.mark.parametrize("unary", [False, True])
 def test_internal_native_reshape_refuses_before_index_or_reduction_mutation(
-    operation, shape, unary
+    operation, producer, shape, unary
 ):
     """Refuse unprepared internal data before changing an earlier eligible operation."""
     source_shape = [1] * (4 - len(shape)) + shape
     axis = len(shape) - 1 if unary else -1
     keepdims = int(unary)
-    nodes = [helper.make_node("Reshape", ["x", "target"], ["reshaped"])]
+    nodes, extra_opsets, functions = [], [], []
+    if producer == "opaque":
+        domain = "opaque.indexing"
+        extra_opsets.append(helper.make_opsetid(domain, 1))
+        functions.append(
+            helper.make_function(
+                domain,
+                "NativeData",
+                ["a", "target"],
+                ["b"],
+                [helper.make_node("Reshape", ["a", "target"], ["b"])],
+                [helper.make_opsetid("", 21)],
+            )
+        )
+        nodes.append(helper.make_node("NativeData", ["x", "target"], ["reshaped"], domain=domain))
+    elif producer == "Squeeze":
+        nodes.append(helper.make_node("Squeeze", ["x", "target"], ["reshaped"]))
+    elif producer == "Gemm":
+        nodes.extend(
+            [
+                helper.make_node("Reshape", ["x", "target"], ["matrix"]),
+                helper.make_node("Gemm", ["matrix", "weight"], ["reshaped"], alpha=2.0),
+            ]
+        )
+    else:
+        nodes.append(helper.make_node("Reshape", ["x", "target"], ["reshaped"]))
     if unary:
         nodes.append(helper.make_node("Relu", ["reshaped"], ["native"]))
     data = "native" if unary else "reshaped"
-    initializers = [numpy_helper.from_array(np.asarray(shape, np.int64), "target")]
+    initializers = [
+        numpy_helper.from_array(
+            np.arange(4 - len(shape), dtype=np.int64)
+            if producer == "Squeeze"
+            else np.asarray(shape, np.int64),
+            "target",
+        )
+    ]
+    if producer == "Gemm":
+        initializers.append(numpy_helper.from_array(np.eye(shape[-1], dtype=np.float32), "weight"))
     outputs = []
     for name, input_name, input_shape, selected_axis in [
         ("ready", "x", source_shape, 3),
@@ -244,7 +290,9 @@ def test_internal_native_reshape_refuses_before_index_or_reduction_mutation(
         [helper.make_tensor_value_info("x", TensorProto.FLOAT, source_shape)],
         outputs,
         initializers,
+        extra_opsets,
     )
+    model.functions.extend(functions)
     model = onnx.shape_inference.infer_shapes(model)
     _execute(model, {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(source_shape)})
     before = model.SerializeToString()
@@ -497,6 +545,135 @@ def test_gather_accepts_registered_future_data_rank_preparation(producer, shape)
     onnx.checker.check_model(converted, full_check=True)
     for actual, reference in zip(_execute(converted, feeds), expected):
         np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.parametrize("operation", ["GatherElements", "ReduceSum"])
+@pytest.mark.parametrize(
+    ("producer", "shape"),
+    [
+        (producer, shape)
+        for producer in ["Relu", "Squeeze", "MatMul", "Reshape"]
+        for shape in [[5, 4], [2, 5, 4]]
+    ]
+    + [("Gemm", [5, 4])],
+)
+def test_internal_index_data_uses_registered_rank_preparation(operation, producer, shape):
+    """Execute prepared data paths through the real stage order, including later adapter cleanup."""
+    if producer == "Reshape" and not any(name == "Non4DReshape" for name, _ in DLA_TRANSFORMS):
+        pytest.skip("Reshape rank preparation is introduced by a later slice")
+    source_shape = [1] * (4 - len(shape)) + shape if producer in {"Squeeze", "Reshape"} else shape
+    nodes, initializers = [], []
+    if producer in {"Squeeze", "Reshape"}:
+        nodes.append(helper.make_node("Relu", ["x"], ["private"]))
+        control = (
+            np.arange(4 - len(shape), dtype=np.int64)
+            if producer == "Squeeze"
+            else np.asarray(shape, np.int64)
+        )
+        initializers.append(numpy_helper.from_array(control, "control"))
+        nodes.append(helper.make_node(producer, ["private", "control"], ["data"]))
+    elif producer in {"MatMul", "Gemm"}:
+        initializers.append(numpy_helper.from_array(np.eye(4, dtype=np.float32), "weight"))
+        nodes.append(helper.make_node(producer, ["x", "weight"], ["data"]))
+    else:
+        nodes.append(helper.make_node("Relu", ["x"], ["data"]))
+    axis = len(shape) - 2
+    output_shape = shape.copy()
+    if operation == "GatherElements":
+        initializers.append(
+            numpy_helper.from_array(
+                np.arange(np.prod(shape), dtype=np.int64).reshape(shape) % shape[axis], "indices"
+            )
+        )
+        nodes.append(helper.make_node(operation, ["data", "indices"], ["selected"], axis=axis))
+    else:
+        initializers.append(numpy_helper.from_array(np.asarray([axis], np.int64), "axes"))
+        nodes.append(helper.make_node(operation, ["data", "axes"], ["selected"], keepdims=0))
+        output_shape.pop(axis)
+    output_shape = [1] * (4 - len(output_shape)) + output_shape
+    initializers.append(numpy_helper.from_array(np.asarray(output_shape, np.int64), "target"))
+    nodes.append(helper.make_node("Reshape", ["selected", "target"], ["y"]))
+    model = _model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, source_shape)],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, output_shape)],
+        initializers,
+    )
+    feeds = {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(source_shape)}
+    expected = _execute(model, feeds)
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    for actual, reference in zip(_execute(converted, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.parametrize(
+    ("operation", "shape"), [("MatMul", [2, 3]), ("MatMul", [2, 2, 3]), ("Gemm", [2, 3])]
+)
+@pytest.mark.parametrize("owner", ["output", "capture"])
+@pytest.mark.parametrize("entrypoint", ["stage", "pipeline"])
+def test_gather_refuses_native_matrix_outputs_with_other_rank_owners(
+    operation, shape, owner, entrypoint
+):
+    """Do not promise promotion of matrix results whose native rank has a public or nested owner."""
+    native = [*shape[:-1], 4]
+    selected = [*shape[:-2], 1, 4]
+    target = [1] * (4 - len(selected)) + selected
+    nodes = [
+        helper.make_node(operation, ["x", "weight"], ["projection"]),
+        helper.make_node("Gather", ["projection", "indices"], ["selected"], axis=len(shape) - 2),
+        helper.make_node("Reshape", ["selected", "target"], ["y"]),
+    ]
+    initializers = [
+        numpy_helper.from_array(np.arange(12, dtype=np.float32).reshape(3, 4), "weight"),
+        numpy_helper.from_array(np.array([1], np.int64), "indices"),
+        numpy_helper.from_array(np.asarray(target, np.int64), "target"),
+    ]
+    outputs = [helper.make_tensor_value_info("y", TensorProto.FLOAT, target)]
+    if owner == "output":
+        outputs.append(helper.make_tensor_value_info("projection", TensorProto.FLOAT, native))
+    else:
+        branch = helper.make_graph(
+            [
+                helper.make_node("Shape", ["projection"], ["native_shape"]),
+                helper.make_node(
+                    "Constant",
+                    [],
+                    ["view_shape"],
+                    value=numpy_helper.from_array(np.array([1, 1, 1, len(native)], np.int64)),
+                ),
+                helper.make_node("Reshape", ["native_shape", "view_shape"], ["view"]),
+            ],
+            "shape_owner",
+            [],
+            [helper.make_tensor_value_info("view", TensorProto.INT64, [1, 1, 1, len(native)])],
+        )
+        initializers.append(numpy_helper.from_array(np.asarray(True), "condition"))
+        nodes.append(
+            helper.make_node(
+                "If", ["condition"], ["shape_view"], then_branch=branch, else_branch=branch
+            )
+        )
+        outputs.append(
+            helper.make_tensor_value_info("shape_view", TensorProto.INT64, [1, 1, 1, len(native)])
+        )
+    model = _model(
+        nodes, [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)], outputs, initializers
+    )
+    model = onnx.shape_inference.infer_shapes(model)
+    _execute(model, {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape)})
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="rank preparation"):
+        if entrypoint == "stage":
+            _apply_gather(
+                model,
+                prepared_data_ops={
+                    "MatMulToTransposeConvTranspose",
+                    "RemoveIntermediarySqueezeAndUnsqueeze",
+                },
+            )
+        else:
+            _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    assert model.SerializeToString() == before
 
 
 def _execute(model, feeds):
