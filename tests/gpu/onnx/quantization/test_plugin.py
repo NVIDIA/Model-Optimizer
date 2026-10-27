@@ -18,6 +18,7 @@ import os
 import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
+import pytest
 from _test_utils.import_helper import skip_if_no_libcudnn, skip_if_no_tensorrt
 from _test_utils.onnx.autocast.utils import _assert_tensors_are_fp16
 from _test_utils.onnx.quantization.utils import assert_nodes_are_quantized
@@ -184,8 +185,10 @@ def test_get_custom_layers_file_backed_matches_in_memory(tmp_path, monkeypatch):
     assert set(fb_tensors) == set(path_tensors)
 
 
-def test_trt_plugin_autocast(tmp_path):
+@pytest.mark.parametrize("node_name", ["custom_skip_ln_0", ""])
+def test_trt_plugin_autocast(tmp_path, node_name):
     model = _create_test_model_trt()
+    model.graph.node[1].name = node_name
     with open(os.path.join(tmp_path, "model_with_trt_plugin_autocast.onnx"), "w") as f:
         onnx.save_model(model, f.name)
 
@@ -193,9 +196,20 @@ def test_trt_plugin_autocast(tmp_path):
         graph_sanitizer = GraphSanitizer(model)
         graph_sanitizer.sanitize()
         assert graph_sanitizer.custom_ops == {"CustomSkipLayerNormPluginDynamic"}
+        assert graph_sanitizer.trt_plugin_ops == {"CustomSkipLayerNormPluginDynamic"}
+        assert (
+            next(
+                node.domain
+                for node in graph_sanitizer.model.graph.node
+                if node.op_type == "CustomSkipLayerNormPluginDynamic"
+            )
+            == "trt.plugins"
+        )
 
         # Convert model to FP16
-        model_fp16 = convert_to_mixed_precision(f.name, providers=["trt", "cpu"])
+        providers = ["cpu"]
+        model_fp16 = convert_to_mixed_precision(f.name, providers=providers)
+        assert providers == ["trt", "cpu"]
 
         # Check that the default conversion happened successfully: all tensors are FP16
         assert _assert_tensors_are_fp16(model_fp16)
