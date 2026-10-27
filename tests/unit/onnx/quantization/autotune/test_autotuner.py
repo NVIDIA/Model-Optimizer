@@ -35,7 +35,9 @@ from modelopt.onnx.quantization.autotune.autotuner_base import QDQAutotunerBase
 from modelopt.onnx.quantization.autotune.common import PatternCache, RegionType
 
 
-@pytest.mark.parametrize("mode", ["file", "small_bytes", "large_bytes"])
+@pytest.mark.parametrize(
+    "mode", ["file", "relative_file", "cwd_file", "small_bytes", "large_bytes"]
+)
 def test_export_external_data_without_serializing_weights(monkeypatch, tmp_path, mode):
     weight = np.arange(16 if mode == "small_bytes" else 2048, dtype=np.float16)
     model = onnx.helper.make_model(
@@ -69,9 +71,22 @@ def test_export_external_data_without_serializing_weights(monkeypatch, tmp_path,
         with pytest.raises(EncodeError):
             autotuner.export_onnx(insert_qdq=False)
         return
-    if mode == "file":
-        path = str(tmp_path / "model.onnx")
+    if mode in ("file", "relative_file", "cwd_file"):
+        working = tmp_path / "working"
+        working.mkdir()
+        output_dir = working if mode == "cwd_file" else tmp_path / "exports"
+        output_dir.mkdir(exist_ok=True)
+        monkeypatch.chdir(working)
+        unrelated = working / ("other.onnx_data" if mode == "cwd_file" else "model.onnx_data")
+        unrelated.write_bytes(b"unrelated model weights")
+        sidecar = output_dir / "model.onnx_data"
+        sidecar.write_bytes(b"stale output weights")
+        path = str(output_dir / "model.onnx")
+        if mode == "relative_file":
+            path = os.path.relpath(path, working)
         assert autotuner.export_onnx(path, insert_qdq=False) is None
+        assert unrelated.read_bytes() == b"unrelated model weights"
+        assert sidecar.stat().st_size == weight.nbytes
         external = onnx.load(path, load_external_data=False)
         assert external.graph.initializer[0].data_location == onnx.TensorProto.EXTERNAL
         onnx.checker.check_model(path)

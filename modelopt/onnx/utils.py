@@ -798,21 +798,19 @@ def save_onnx(model: onnx.ModelProto, onnx_path: str, save_as_external_data: boo
     # Set ir_version to 10, remove it once ORT supports ir_version 11
     model.ir_version = 10
     if save_as_external_data:
-        external_data_path = os.path.basename(onnx_path) + "_data"
+        external_data_name = os.path.basename(onnx_path) + "_data"
+        external_data_path = os.path.join(os.path.dirname(onnx_path), external_data_name)
         if os.path.exists(external_data_path):
             logger.warning(f"Removing existing external data file: {external_data_path}")
             os.remove(external_data_path)
 
         # Copy so the onnx.ModelProto object will not be modified
         model_copy = copy.deepcopy(model)
-        onnx.save_model(
-            model_copy,
-            onnx_path,
-            save_as_external_data=True,
-            all_tensors_to_one_file=True,
-            location=external_data_path,
-            size_threshold=1024,
-        )
+        # ONNX's converter checks location in cwd, even when the model is saved elsewhere.
+        for tensor in onnx.external_data_helper._get_initializer_tensors(model_copy):
+            if tensor.HasField("raw_data") and sys.getsizeof(tensor.raw_data) >= 1024:
+                onnx.external_data_helper.set_external_data(tensor, external_data_name)
+        onnx.save_model(model_copy, onnx_path)
     else:
         onnx.save(model, onnx_path)
 
