@@ -72,6 +72,11 @@ def _apply_gather(model):
     for candidate in selected:
         if cache.get_shape(candidate.input[0]) is None:
             raise ValueError(f"{candidate.name!r}: Gather requires a static data shape")
+        fixed = cache.get_init(candidate.input[1])
+        if fixed is not None and fixed.name not in cache.graph_input_names and len(fixed.dims) > 1:
+            raise ValueError(
+                f"{candidate.name!r}: fixed Gather indices with rank > 1 are unsupported"
+            )
         if cache.get_init(candidate.input[1]) is None and cache.get_dtype(
             candidate.input[1]
         ) not in (TensorProto.INT32, TensorProto.INT64):

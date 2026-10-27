@@ -588,3 +588,35 @@ def test_gather_preserves_existing_public_initializer_name():
     transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
     for actual, reference in zip(_execute(transformed, feeds), expected):
         np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.parametrize("index_shape", [(2, 3), (1, 2, 3)])
+def test_multidimensional_fixed_gather_indices_refuse_before_any_mutation(index_shape):
+    """Reject unsupported index layouts before changing an earlier valid Gather."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Gather", ["x", "first_indices"], ["first"], axis=0),
+                helper.make_node("Gather", ["x", "indices"], ["y"], axis=0),
+            ],
+            "fixed_index_ranks",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [5, 4])],
+            [
+                helper.make_tensor_value_info("first", TensorProto.FLOAT, [1, 4]),
+                helper.make_tensor_value_info("y", TensorProto.FLOAT, [*index_shape, 4]),
+            ],
+            [
+                numpy_helper.from_array(np.asarray([1], np.int64), "first_indices"),
+                numpy_helper.from_array(
+                    np.arange(6, dtype=np.int64).reshape(index_shape) % 5, "indices"
+                ),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    onnx.checker.check_model(model, full_check=True)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match=r"fixed Gather indices.*rank"):
+        _apply_gather(model)
+    assert model.SerializeToString() == before
