@@ -41,6 +41,7 @@ from transformers import (
     AutoModelForSeq2SeqLM,
     AutoModelForSpeechSeq2Seq,
     LlamaConfig,
+    Phi4MultimodalConfig,
     Qwen2_5_VLConfig,
     Qwen3MoeConfig,
     T5Config,
@@ -296,6 +297,7 @@ _REMOTE_IMAGE_TEXT_VLM = {
         (_vlm_config(auto_map=_REMOTE_VLM), False, AutoModel),
         (_vlm_config(auto_map=_REMOTE_IMAGE_TEXT_VLM), True, AutoModelForImageTextToText),
         (_tiny_qwen2_5_vl(), False, AutoModelForImageTextToText),
+        (Phi4MultimodalConfig(), False, AutoModelForCausalLM),
         (_vlm_config(), False, AutoModel),
         (T5Config(architectures=["T5ForConditionalGeneration"]), False, AutoModelForSeq2SeqLM),
         (
@@ -310,6 +312,7 @@ _REMOTE_IMAGE_TEXT_VLM = {
         "remote-vlm-untrusted",
         "remote-image-text-vlm",
         "native-vlm-with-head",
+        "native-multimodal-causal-lm",
         "unknown-vlm",
         "encoder-decoder",
         "speech-encoder-decoder",
