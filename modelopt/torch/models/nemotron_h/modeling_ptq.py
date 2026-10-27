@@ -16,11 +16,35 @@
 """Nemotron-H PTQ modeling (HF model type ``nemotron_h``)."""
 
 import torch.nn as nn
+from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHExperts
 
-from modelopt.torch.quantization.plugins.huggingface import _is_supported_hf_model
+from modelopt.torch.quantization.nn import QuantModuleRegistry
+from modelopt.torch.quantization.plugins.huggingface import (
+    _is_supported_hf_model,
+    _QuantFusedExperts,
+)
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 __all__: list[str] = []
+
+
+class _QuantNemotronHExperts(_QuantFusedExperts):
+    """Quantized ``NemotronHExperts``: non-gated fused experts, ``down_proj(act_fn(up_proj(x)))``.
+
+    The container holds 3-D ``up_proj`` and ``down_proj`` parameters instead of the gated
+    ``gate_up_proj``, and its forward runs ``up_proj`` then ``down_proj`` once per expert on the eager
+    path, or once per expert-sorted batch on ``grouped_mm``. So only the first projection's name
+    differs from :class:`_QuantFusedExperts`: its per-expert weight quantizers and shared input
+    quantizer live under ``up_proj_*``.
+    """
+
+    _first_proj_attr = "up_proj"
+    # Read by the export: a non-gated up_proj is exported whole, not split into gate|up halves.
+    _is_gated = False
+
+
+if NemotronHExperts not in QuantModuleRegistry:
+    QuantModuleRegistry.register({NemotronHExperts: "hf.NemotronHExperts"})(_QuantNemotronHExperts)
 
 
 def is_nemotron_h_model(model: nn.Module) -> bool:
