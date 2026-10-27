@@ -867,6 +867,7 @@ def _distributed_save_hf_checkpoint_impl(
     # The reverse must precede the shard layout, since it renames keys and splits tensors.
     _materialize_owned(local_sd, expert_key_set, rank, world)
     reverted = _revert_whole_sd(model, local_sd)
+
     # Tensors the model does not own -- whatever the caller hands in via extra_state_dict, e.g.
     # weights read straight off the source checkpoint that the FSDP2 loader drops. They are plain
     # CPU tensors, already whole and identical on every rank, so ONE rank adds them to its
