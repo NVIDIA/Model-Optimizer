@@ -1109,7 +1109,10 @@ def test_legacy_initializer_controls_remain_fixed(operation):
 @pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
 @pytest.mark.parametrize("per_channel", [False, True, "singleton"])
 def test_registered_implicit_quantizer_axis_preserves_channel_values(operation, shape, per_channel):
-    """Map surviving per-channel defaults while leaving scalar quantization attributes native."""
+    """Map every vector scale's channel axis, including a single-channel vector."""
+    shape = shape.copy()
+    if per_channel == "singleton":
+        shape[1] = 1
     scales = np.asarray(
         [0.25, 0.5, 1.0] if per_channel is True else [0.5] if per_channel else 0.5, np.float32
     )
@@ -1136,7 +1139,7 @@ def test_registered_implicit_quantizer_axis_preserves_channel_values(operation, 
     expected = _execute(model, feeds)[0]
     transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
     quantizer = next(node for node in transformed.graph.node if node.op_type == operation)
-    if per_channel is True:
+    if per_channel:
         assert next(attr.i for attr in quantizer.attribute if attr.name == "axis") == 5 - len(shape)
     else:
         assert all(attr.name != "axis" for attr in quantizer.attribute)

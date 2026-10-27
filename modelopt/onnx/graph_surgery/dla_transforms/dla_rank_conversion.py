@@ -485,10 +485,7 @@ def _apply_update_axis(model):
                 len(shape) == 5
                 or (
                     len(shape) in (2, 3)
-                    and (
-                        node.op_type not in quantizers
-                        or cache.get_shape(node.input[1]) not in ([], [1])
-                    )
+                    and (node.op_type not in quantizers or cache.get_shape(node.input[1]) != [])
                 )
             )
         ):
