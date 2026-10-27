@@ -20,7 +20,6 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from transformers import LlamaConfig
 
 from modelopt.torch.export.plugins.hf_spec_export import (
     DFlashExporter,
@@ -148,7 +147,9 @@ def test_dflash_torch_dtype_inherits_base_or_defaults(base_dtype, expected):
     """An unset base config dtype is None, not absent, so it must fall back to bfloat16."""
     exporter = _make_dflash_exporter()
     # A real config, unlike SimpleNamespace, keeps the deprecated `torch_dtype` alias that returns None.
-    exporter.model.config = LlamaConfig(num_hidden_layers=8, dtype=base_dtype)
+    # transformers is optional, so only this test needs it.
+    transformers = pytest.importorskip("transformers")
+    exporter.model.config = transformers.LlamaConfig(num_hidden_layers=8, dtype=base_dtype)
     assert exporter._export_config()["torch_dtype"] == expected
 
 
