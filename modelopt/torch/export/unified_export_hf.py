@@ -2381,7 +2381,11 @@ def _agree_on_fused_expert_quantization(model: nn.Module) -> None:
         for name, module in model.named_modules():
             if _hf_export_handlers._has_fused_experts_quantizers(module):
                 for proj in (getattr(module, "_first_proj_attr", "gate_up_proj"), "down_proj"):
-                    enabled = [q.is_enabled for q in getattr(module, f"{proj}_weight_quantizers")]
+                    # As iter_weights_for_calibration does: a layout may register only the first.
+                    quantizers = getattr(module, f"{proj}_weight_quantizers", None)
+                    if quantizers is None:
+                        continue
+                    enabled = [q.is_enabled for q in quantizers]
                     found[f"{name}.{proj}"] = (
                         "quantized" if all(enabled) else "mixed" if any(enabled) else "unquantized"
                     )

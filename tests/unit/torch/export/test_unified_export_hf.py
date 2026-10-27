@@ -1227,7 +1227,8 @@ class _FusedExpertsQuantizers(torch.nn.Module):
         super().__init__()
         down_enabled = enabled if down_enabled is None else down_enabled
         self.gate_up_proj_weight_quantizers = [SimpleNamespace(is_enabled=e) for e in enabled]
-        self.down_proj_weight_quantizers = [SimpleNamespace(is_enabled=e) for e in down_enabled]
+        if down_enabled != "absent":  # a layout may register only the first projection's
+            self.down_proj_weight_quantizers = [SimpleNamespace(is_enabled=e) for e in down_enabled]
 
 
 def _expert_quantization_job(rank, size, tmp_dir, enabled_per_rank, down_enabled_per_rank, refused):
@@ -1265,6 +1266,7 @@ def _expert_quantization_job(rank, size, tmp_dir, enabled_per_rank, down_enabled
         (((False, False), (True, True)), None, "experts.gate_up_proj"),
         (((True, False), (False, True)), None, "experts.gate_up_proj"),
         (((True, True), (True, True)), ((False, False), (True, True)), "experts.down_proj"),
+        (((True, True), (True, True)), ("absent", "absent"), None),
         (((True, True), (True, True)), None, None),
         (((False, False), (False, False)), None, None),
     ],
@@ -1272,6 +1274,7 @@ def _expert_quantization_job(rank, size, tmp_dir, enabled_per_rank, down_enabled
         "ranks-disagree",
         "every-rank-mixed",
         "down-proj-disagrees",
+        "no-down-proj-quantizers",
         "all-quantized",
         "all-unquantized",
     ],
