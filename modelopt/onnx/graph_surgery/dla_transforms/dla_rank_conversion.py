@@ -481,7 +481,16 @@ def _apply_update_axis(model):
             and node.op_type in update
             and node.domain in {"", "ai.onnx"}
             and shape
-            and (len(shape) == 5 or (len(shape) in (2, 3) and node.op_type not in quantizers))
+            and (
+                len(shape) == 5
+                or (
+                    len(shape) in (2, 3)
+                    and (
+                        node.op_type not in quantizers
+                        or cache.get_shape(node.input[1]) not in ([], [1])
+                    )
+                )
+            )
         ):
             schema = defs.get_schema(
                 node.op_type, versions.get(node.domain, versions.get("", 1)), node.domain

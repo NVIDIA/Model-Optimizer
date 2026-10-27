@@ -1103,3 +1103,71 @@ def test_legacy_initializer_controls_remain_fixed(operation):
     if operation == "Add":
         assert list(transformed.graph.initializer[0].dims) == [1, 1, 2, 3]
     np.testing.assert_array_equal(_execute(transformed, feeds)[0], expected[0])
+
+
+@pytest.mark.parametrize("operation", ["QuantizeLinear", "DequantizeLinear"])
+@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
+@pytest.mark.parametrize("per_channel", [False, True, "singleton"])
+def test_registered_implicit_quantizer_axis_preserves_channel_values(operation, shape, per_channel):
+    """Map surviving per-channel defaults while leaving scalar quantization attributes native."""
+    scales = np.asarray(
+        [0.25, 0.5, 1.0] if per_channel is True else [0.5] if per_channel else 0.5, np.float32
+    )
+    zeros = np.asarray([0, 1, 2] if per_channel is True else [0] if per_channel else 0, np.uint8)
+    input_type = TensorProto.FLOAT if operation == "QuantizeLinear" else TensorProto.UINT8
+    output_type = TensorProto.UINT8 if operation == "QuantizeLinear" else TensorProto.FLOAT
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node(operation, ["x", "scale", "zero"], ["y"])],
+            "implicit_quantizer",
+            [helper.make_tensor_value_info("x", input_type, shape)],
+            [helper.make_tensor_value_info("y", output_type, shape)],
+            [numpy_helper.from_array(scales, "scale"), numpy_helper.from_array(zeros, "zero")],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    data = (
+        np.arange(np.prod(shape))
+        .reshape(shape)
+        .astype(np.float32 if input_type == TensorProto.FLOAT else np.uint8)
+    )
+    feeds = {"x": data}
+    expected = _execute(model, feeds)[0]
+    transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    quantizer = next(node for node in transformed.graph.node if node.op_type == operation)
+    if per_channel is True:
+        assert next(attr.i for attr in quantizer.attribute if attr.name == "axis") == 5 - len(shape)
+    else:
+        assert all(attr.name != "axis" for attr in quantizer.attribute)
+    np.testing.assert_array_equal(_execute(transformed, feeds)[0], expected)
+
+
+@pytest.mark.parametrize("operation", ["QuantizeLinear", "DequantizeLinear"])
+def test_legacy_quantizer_schema_keeps_implicit_scalar_axis(operation):
+    """Keep pre-axis quantizer schemas byte-identical during axis preparation."""
+    input_type = TensorProto.FLOAT if operation == "QuantizeLinear" else TensorProto.UINT8
+    output_type = TensorProto.UINT8 if operation == "QuantizeLinear" else TensorProto.FLOAT
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node(operation, ["x", "scale", "zero"], ["y"])],
+            "legacy_quantizer",
+            [helper.make_tensor_value_info("x", input_type, [2, 3])],
+            [helper.make_tensor_value_info("y", output_type, [2, 3])],
+            [
+                numpy_helper.from_array(np.asarray(0.5, np.float32), "scale"),
+                numpy_helper.from_array(np.asarray(0, np.uint8), "zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 10)],
+    )
+    model.ir_version = 9
+    original = model.SerializeToString()
+    _apply_update_axis(model)
+    assert model.SerializeToString() == original
+    feeds = {
+        "x": np.arange(6)
+        .reshape(2, 3)
+        .astype(np.float32 if input_type == TensorProto.FLOAT else np.uint8)
+    }
+    _execute(model, feeds)
