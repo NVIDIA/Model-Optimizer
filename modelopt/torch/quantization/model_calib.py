@@ -1252,6 +1252,7 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
                     enabled = {i for i, q in enumerate(quantizers) if q.is_enabled}
                     if not enabled:
                         continue
+                    module._weight_input_capture = True
                     # grouped_mm and torch_a2a feed one expert-sorted batch per projection; eager
                     # feeds one call per expert keyed by _current_expert_idx.
                     make_hook = (
@@ -2680,6 +2681,7 @@ def gptq(
                     if q.is_enabled
                 }
                 if per_expert:
+                    module._weight_input_capture = True
                     expert_handles.update((id(quantizers[i]), h) for i, h in per_expert.items())
                     hooks.append(
                         input_quantizer.register_forward_hook(_make_expert_hook(module, per_expert))

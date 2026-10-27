@@ -2987,6 +2987,44 @@ class TestFusedExpertsInterceptionCheck:
         finally:
             TestFusedExpertsCalibration._cleanup_registry(_BypassingExperts)
 
+    @pytest.mark.parametrize("algorithm", ["max", "local_hessian", "gptq"])
+    def test_weight_only_experts_need_interception_when_their_weights_read_inputs(self, algorithm):
+        """Under max a weight quantizer calibrates on its weight alone, so weight-only experts whose
+        forward ran past both hooks (a dense activation quantizer runs the forward) are calibrated;
+        local Hessian and GPTQ calibrate their weights from their inputs, which they never saw."""
+        model = _MixedPrecisionModel()
+        model.moe.experts = _BypassingExperts()
+        cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*proj_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+                {"quantizer_name": "*dense.input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            ],
+            "algorithm": algorithm,
+        }
+
+        def forward_loop(m):
+            m(torch.randn(2, 4, HIDDEN_DIM))
+
+        try:
+            if algorithm == "max":
+                mtq.quantize(model, cfg, forward_loop)
+            else:
+                with pytest.raises(RuntimeError, match="collected nothing"):
+                    mtq.quantize(model, cfg, forward_loop)
+        finally:
+            TestFusedExpertsCalibration._cleanup_registry(_BypassingExperts)
+        if algorithm == "max":
+            experts = model.moe.experts
+            for quantizers, weight in (
+                (experts.gate_up_proj_weight_quantizers, experts.gate_up_proj),
+                (experts.down_proj_weight_quantizers, experts.down_proj),
+            ):
+                for idx, quantizer in enumerate(quantizers):
+                    torch.testing.assert_close(
+                        quantizer.amax.flatten(), weight[idx].abs().amax(dim=1)
+                    )
+
 
 # ---------------------------------------------------------------------------
 # Fused experts under expert parallelism

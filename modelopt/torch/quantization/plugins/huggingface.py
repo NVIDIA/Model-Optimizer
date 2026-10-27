@@ -915,6 +915,9 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         # How many times this module's forward ran: an experts module that no calibration token
         # reached (e.g. vision experts under text-only calibration) has nothing to intercept.
         self._register_temp_attribute("_forward_count", 0)
+        # Whether this calibration captures the experts' inputs to calibrate their weights (GPTQ,
+        # local Hessian, imatrix), so that the weight quantizers need the interception too.
+        self._register_temp_attribute("_weight_input_capture", False)
 
     @property
     def _running_grouped_mm(self) -> bool:
@@ -1773,10 +1776,13 @@ def assert_fused_experts_intercepted(model):
     ``config._experts_implementation`` entirely, so no config change can rescue it. Checking
     the hit count is a direct test of the thing actually depended on.
 
-    Only modules whose forward ran and that have at least one enabled quantizer are reported:
-    an experts module no calibration token reached (vision experts under text-only calibration)
-    falls back to weight-derived scales as before, and one the recipe leaves unquantized loses
-    nothing by not being intercepted.
+    Only modules whose forward ran and that have a quantizer needing it are reported: an enabled
+    input quantizer, or an enabled weight quantizer when the calibration captured the experts'
+    inputs to calibrate their weights (GPTQ, local Hessian, imatrix). Otherwise a weight quantizer
+    calibrates on its weight alone (:func:`weight_only_quantize`), so weight-only experts lose
+    nothing by not being intercepted, and neither do experts the recipe leaves unquantized. An
+    experts module no calibration token reached (vision experts under text-only calibration) falls
+    back to weight-derived scales as before.
     """
     missed = []
     for name, module in model.named_modules():
@@ -1789,13 +1795,11 @@ def assert_fused_experts_intercepted(model):
             continue
 
         first = module._first_proj_attr
-        quantizers = []
-        for attr in (f"{first}_weight_quantizers", "down_proj_weight_quantizers"):
-            quantizers.extend(getattr(module, attr, None) or [])
-        for attr in (f"{first}_input_quantizer", "down_proj_input_quantizer"):
-            quantizer = getattr(module, attr, None)
-            if quantizer is not None:
-                quantizers.append(quantizer)
+        quantizers = [getattr(module, f"{first}_input_quantizer", None)]
+        quantizers.append(getattr(module, "down_proj_input_quantizer", None))
+        if getattr(module, "_weight_input_capture", False):
+            for attr in (f"{first}_weight_quantizers", "down_proj_weight_quantizers"):
+                quantizers.extend(getattr(module, attr, None) or [])
         if not any(getattr(q, "is_enabled", False) for q in quantizers):
             continue
 
@@ -1807,8 +1811,9 @@ def assert_fused_experts_intercepted(model):
 
     raise RuntimeError(
         "Fused-experts calibration collected nothing: the forward of the module(s) below reached "
-        "neither `F.linear` nor `_grouped_linear`, so not one of their quantizers was invoked and "
-        "every expert would be exported with a weight-derived fallback scale.\n"
+        "neither `F.linear` nor `_grouped_linear`, so no calibration batch reached their quantizers: "
+        "their input scales would fall back to weight-derived values, and a weight calibration that "
+        "reads the experts' inputs got none.\n"
         + "\n".join(missed)
         + "\n\nTheir forward ran, but the active experts backend bypasses both hooks -- "
         "`batched_mm`, `sonicmoe`, or a hand-written `bmm`/`matmul` forward on a class without "

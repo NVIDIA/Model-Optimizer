@@ -160,6 +160,7 @@ def calibrate(
         for module in model.modules():
             if hasattr(module, "_intercept_count"):
                 module._intercept_count = module._forward_count = 0
+                module._weight_input_capture = False
 
     # move the model to eval mode, remembering each module's mode; quantizers, and plain containers of them,
     # follow the module they quantize instead
