@@ -685,12 +685,13 @@ def load_pretrained(
     # so one it refuses raises on every rank instead of leaving them in the broadcast, and before
     # the checkpoint is fetched.
     plan = handed() if alone else dist.broadcast_from("distribution", handed)
-    if plan is None and "hf_config" in kwargs:
-        # The load builds from hf_config as given, so the plan must be the one it came with, not
-        # one decided here from another config.
+    if "hf_config" in kwargs and (plan is None or _route(plan) is None):
+        # Only a sharded load builds from hf_config, as given, so the plan must be the one it came
+        # with, not one decided here from another config nor one that loads the model whole.
         raise TypeError(
-            "hf_config is the config resolve_distribution_plan returned with a plan: pass that "
-            "plan as distribution=, or pass config= to have the plan decided from your config."
+            "hf_config is the config resolve_distribution_plan returned with a plan that shards "
+            "the model: pass that plan as distribution=, or pass config= to have the plan decided "
+            "from your config."
         )
     hub_options = {
         k: kwargs.pop(k) for k in ("token", "cache_dir", "local_files_only") if k in kwargs
@@ -750,8 +751,6 @@ def load_pretrained(
         # A sharded load finds the unplaced keys while it places the weights.
         keys = model._modelopt_unplaced_source_keys
     else:
-        if "hf_config" in kwargs:
-            raise TypeError("hf_config applies to a sharded load only.")
         if plan.world_size > 1:
             # Each rank takes the whole model onto its own GPU. Left to "auto", every rank's
             # accelerate could pick the same idle GPU.

@@ -252,7 +252,7 @@ def test_hf_config_is_refused_without_the_plan_it_came_with(
     run_as(2, rank=1)
     serve(LlamaConfig(**_TINY))
 
-    with pytest.raises(TypeError, match="returned with a plan: pass that plan"):
+    with pytest.raises(TypeError, match="returned with a plan that shards the model: pass that"):
         load_pretrained(str(tmp_path), hf_config=LlamaConfig(**{**_TINY, "num_hidden_layers": 2}))
     assert loaders == {}
 
@@ -394,7 +394,7 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
             "causal-lm",
             True,
             TypeError,
-            "hf_config applies to a sharded load only",
+            "returned with a plan that shards the model",
         ),
     ],
     ids=[
@@ -449,15 +449,26 @@ def test_an_automatic_layout_says_so_when_it_refuses_a_placement(
     assert loaders == {}
 
 
-def test_a_handed_plan_is_checked_before_the_checkpoint_is_fetched(run_as, monkeypatch, tmp_path):
-    """Making the checkpoint local can mean downloading it: a plan the load refuses fails first."""
+@pytest.mark.parametrize(
+    ("distribution", "options", "error", "match"),
+    [
+        (DistributionPlan(4), {}, ValueError, "is for 4 ranks"),
+        (DistributionPlan(2), {"hf_config": LlamaConfig(**_TINY)}, TypeError, "plan that shards"),
+    ],
+    ids=["another-world", "hf-config-on-a-whole-load"],
+)
+def test_a_handed_plan_is_checked_before_the_checkpoint_is_fetched(
+    run_as, monkeypatch, tmp_path, distribution, options, error, match
+):
+    """Making the checkpoint local can mean downloading it: a plan the load refuses fails first, as
+    does hf_config with a plan that loads the model whole."""
     run_as(2)
     monkeypatch.setattr(
         model_load_utils, "ensure_local_checkpoint", lambda *a, **k: pytest.fail("fetched it")
     )
 
-    with pytest.raises(ValueError, match="is for 4 ranks"):
-        load_pretrained(str(tmp_path), distribution=DistributionPlan(4))
+    with pytest.raises(error, match=match):
+        load_pretrained(str(tmp_path), distribution=distribution, **options)
 
 
 @pytest.mark.parametrize("quantized", [False, True])
