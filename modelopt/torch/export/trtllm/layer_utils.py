@@ -42,10 +42,12 @@ from ..quant_utils import (
     get_kv_cache_scaling_factor,
     get_prequant_scaling_factor,
     get_quantization_format,
+    get_weight_amax_for_export,
     get_weight_block_size,
     get_weight_scaling_factor,
     get_weight_scaling_factor_2,
     preprocess_linear_fusion,
+    set_weight_amax_for_export,
 )
 from .hf_config_map import HF_CONFIG_MAP
 from .mcore_config_map import MCORE_CONFIG_MAP
@@ -743,13 +745,22 @@ def build_mlp_config(
             weights = (weights[1], weights[0])
             fc_linear.weight.data = torch.cat(weights, dim=0)
 
+            export_amax = (
+                get_weight_amax_for_export(weight_quantizer)
+                if weight_quantizer is not None
+                else None
+            )
             if (
                 weight_quantizer is not None
                 and weight_quantizer.is_enabled
-                and weight_quantizer.amax.numel() != 1
+                and export_amax is not None
+                and export_amax.numel() != 1
             ):
-                amax_chunks = torch.chunk(weight_quantizer.amax, 2, dim=0)
-                weight_quantizer.amax = torch.cat([amax_chunks[1], amax_chunks[0]], dim=0)
+                amax_chunks = torch.chunk(export_amax, 2, dim=0)
+                set_weight_amax_for_export(
+                    weight_quantizer,
+                    torch.cat([amax_chunks[1], amax_chunks[0]], dim=0),
+                )
 
         split_gate = _split_gate_from_fc(decoder_type, module, name, fc_linear)
         if split_gate:

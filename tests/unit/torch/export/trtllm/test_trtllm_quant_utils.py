@@ -32,12 +32,14 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.export as mte
+from modelopt.torch.export.quant_utils import get_weight_amax_for_export, set_weight_amax_for_export
 from modelopt.torch.export.trtllm import (
     export_tensorrt_llm_checkpoint,
     model_config_export,
     torch_to_tensorrt_llm_checkpoint,
 )
 from modelopt.torch.export.trtllm.quant_utils import get_scaling_factor_from_weight
+from modelopt.torch.quantization.nn import StaticBlockScaleQuantizer, TensorQuantizer
 
 
 @pytest.mark.parametrize(
@@ -126,3 +128,21 @@ def test_export_tensorrt_llm_checkpoint_warns_exactly_once(tmp_path, monkeypatch
     deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
     assert len(deprecations) == 1, f"expected 1 DeprecationWarning, got {len(deprecations)}"
     assert "export_tensorrt_llm_checkpoint" in str(deprecations[0].message)
+
+
+def test_export_amax_reorder_updates_lsq_post_amax():
+    quantizer = TensorQuantizer()
+    quantizer._num_bits = (2, 1)
+    quantizer._block_sizes = {-1: 32, "type": "static", "scale_bits": (8, 0)}
+    quantizer.register_buffer("_amax", torch.arange(4, dtype=torch.float32))
+    StaticBlockScaleQuantizer.from_tensor_quantizer(quantizer)
+    quantizer.enable_lsq(
+        learnable_amax=["pre", "post"],
+        tied_amax=True,
+    )
+
+    expected = torch.tensor([2.0, 3.0, 0.0, 1.0])
+    set_weight_amax_for_export(quantizer, expected)
+
+    assert torch.equal(get_weight_amax_for_export(quantizer), expected)
+    assert not hasattr(quantizer, "_amax")
