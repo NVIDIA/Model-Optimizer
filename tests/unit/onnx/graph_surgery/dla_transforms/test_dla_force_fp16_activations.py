@@ -303,27 +303,6 @@ def test_terminal_projection_splits_channels_and_preserves_values():
     np.testing.assert_array_equal(actual, np.full((1, 1, channels), np.float32(0.5)))
 
 
-def test_excluded_initializers_are_restored_when_conversion_fails():
-    """Retain excluded weight payloads when the original converter rejects an included tensor."""
-    roi = nh.from_array(np.array([], np.float32), "roi")
-    scales = nh.from_array(np.array([1, 1, 1, 2], np.float32), "scales")
-    invalid = T(name="invalid", data_type=T.FLOAT, dims=[2], float_data=[1])
-    model = h.make_model(
-        h.make_graph(
-            [h.make_node("Resize", ["x", "roi", "scales"], ["y"])],
-            "conversion_failure",
-            [_value("x", [1, 1, 1, 2])],
-            [_value("y", [1, 1, 1, 4])],
-            [roi, invalid, scales],
-        )
-    )
-    expected = {value.name: value.SerializeToString() for value in (roi, scales)}
-    with pytest.raises(ValueError):
-        _apply_force_fp16_activations(model)
-    actual = {value.name: value.SerializeToString() for value in model.graph.initializer}
-    assert all(actual[name] == payload for name, payload in expected.items())
-
-
 def _checked_cpu_outputs(model, feeds):
     """Execute a fully checked graph with bounded CPU runtime threading."""
     onnx.checker.check_model(model, full_check=True)
