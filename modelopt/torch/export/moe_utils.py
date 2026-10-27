@@ -18,6 +18,7 @@
 import copy
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -117,6 +118,16 @@ def _rewrap_expert_rows(local: torch.Tensor, mesh, placements, num_experts: int)
     shape = torch.Size((num_experts, *local.shape[1:]))
     stride = torch.empty(shape, device="meta").stride()
     return DTensor.from_local(local, mesh, placements, run_check=False, shape=shape, stride=stride)
+
+
+def _local_expert_weight(module: nn.Module, proj: str, local: torch.Tensor, idx: int, dtype):
+    """``module.get_expert_weight(proj, idx, dtype)``, read from ``local`` rather than the module.
+
+    The per-expert export packs each expert as that accessor returns it, which casts unpacked native
+    FP8 experts, held at the default dtype, to the export dtype. The accessor indexes the fused
+    parameter itself, a sharded DTensor here, so it is handed this rank's rows instead.
+    """
+    return type(module).get_expert_weight(SimpleNamespace(**{proj: local}), proj, idx, dtype)
 
 
 def _refuse_unfoldable_shards(module: nn.Module, proj: str, weight, num_quantizers: int) -> None:
@@ -267,7 +278,7 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
         input_scale: torch.Tensor | None = None
         for local_idx, global_idx in enumerate(local_indices):
             w_quantizer = weight_quantizers[global_idx if quantizers_are_global else local_idx]
-            w_slice = local_w[local_idx]
+            w_slice = _local_expert_weight(module, proj, local_w, local_idx, dtype)
             # Uncalibrated-expert fallback: derive amax from this expert's local weight slice
             # (matches _export_fused_experts), so a never-routed expert still exports sane scales.
             # Per stage, in the shape each expects (W4A8's SequentialQuantizer, block-wise INT4).
@@ -313,6 +324,20 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
             module.register_buffer(f"{proj}_weight_scale_2", local_ws2)
         if input_scale is not None:
             module.register_buffer(f"{proj}_input_scale", input_scale)
+
+    # A projection left as it is goes out in the weight domain the per-expert export writes it in.
+    for proj in (first, "down_proj"):
+        if proj in folded:
+            continue
+        wdata = getattr(module, proj).data
+        is_dt = DTensor is not None and isinstance(wdata, DTensor)
+        local = wdata.to_local() if is_dt else wdata
+        domain = _local_expert_weight(module, proj, local, 0, dtype).dtype
+        if domain != local.dtype:
+            local = local.to(domain)
+            if is_dt:
+                local = _rewrap_expert_rows(local, wdata.device_mesh, wdata.placements, wdata.shape[0])
+            setattr(module, proj, nn.Parameter(local, requires_grad=False))
 
     # Drop the quantizer modules -- their info now lives in the fused weight + scale buffers -- and
     # the source checkpoint's scales, which described the weights the fold replaced, as the

@@ -277,6 +277,44 @@ def test_keep_fused_then_split_writes_exactly_the_per_expert_export(
     _assert_byte_identical(got, want)
 
 
+@pytest.mark.parametrize("unquantized", [(), ("down_proj",)], ids=["quantized", "down-unquantized"])
+def test_keep_fused_then_split_writes_unpacked_native_fp8_experts_as_the_per_expert_export(
+    unquantized,
+):
+    """Native FP8 experts unpack at the default dtype, and the per-expert export reads each expert in
+    the export dtype (``get_expert_weight``): the fold reads them alike, for the scales it derives
+    and for a projection it leaves unquantized."""
+    from transformers import PretrainedConfig
+    from transformers.integrations.finegrained_fp8 import FP8Experts
+
+    torch.manual_seed(0)
+    config = PretrainedConfig(
+        hidden_size=HIDDEN_DIM,
+        intermediate_size=INTERMEDIATE_DIM,
+        num_experts=NUM_EXPERTS,
+        hidden_act="silu",
+    )
+    experts = FP8Experts(config, block_size=None)
+    for name in ("gate_up_proj", "down_proj"):
+        weight = getattr(experts, name)
+        with torch.no_grad():
+            weight.copy_((torch.randn(weight.shape) * 4).to(weight.dtype))
+            getattr(experts, f"{name}_scale_inv").fill_(0.01)
+    hidden = torch.randn(NUM_EXPERTS, HIDDEN_DIM)
+    route = (torch.arange(NUM_EXPERTS).unsqueeze(1), torch.ones(NUM_EXPERTS, 1))
+    registered_before = QuantModuleRegistry.get(FP8Experts)
+    try:
+        mtq.quantize(experts, mtq.NVFP4_DEFAULT_CFG, lambda m: m(hidden, *route))
+        experts.unpack_weight()
+        _unquantized(experts, unquantized)
+        want = _per_expert_export(experts)
+        got = split_fused_experts_state_dict(_keep_fused_export(experts))
+    finally:
+        if registered_before is None and QuantModuleRegistry.get(FP8Experts) is not None:
+            QuantModuleRegistry.unregister(FP8Experts)
+    _assert_byte_identical(got, want)
+
+
 @pytest.mark.parametrize(
     "quant_cfg",
     [
