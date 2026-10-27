@@ -1031,6 +1031,19 @@ def _decide_distribution(
     ep_plan = getattr(_ep_config(hf_config), "base_model_ep_plan", None) or {}
     experts = _routed_expert_modules(model, ep_plan)
     num_experts = _num_experts_from_config(_ep_config(hf_config)) if experts else 0
+    if ep_plan and not experts and ep_size != 1 and _num_experts_from_config(_ep_config(hf_config)):
+        # The plan names routed experts the built model has none of under those names: deciding
+        # without them would replicate every expert on every rank, and the expert-parallel load
+        # finds them the same way.
+        from modelopt.torch.utils.moe import _routed_expert_keys
+
+        containers = ", ".join(sorted(_routed_expert_keys(ep_plan))) or "none"
+        raise ValueError(
+            f"{hf_config.model_type} has routed experts and a base_model_ep_plan, but none of the "
+            f"plan's expert containers ({containers}) names a module of the built model, so they "
+            f"can be neither counted nor sharded. Set {knob}=1 to load it without expert "
+            "parallelism."
+        )
     if ep_size == "auto":
         ep_size = _choose_ep_degree(world_size, num_experts)
     elif ep_size > 1 and (num_experts == 0 or num_experts % ep_size):

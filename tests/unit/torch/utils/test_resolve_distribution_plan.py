@@ -391,6 +391,26 @@ def test_an_moe_without_an_ep_plan_is_not_expert_parallel(run_as, serve, tmp_pat
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4)
 
 
+@pytest.mark.parametrize("degree", [None, "1"], ids=["auto", "set-to-1"])
+def test_an_ep_plan_naming_no_module_of_the_model_is_refused(
+    run_as, serve, monkeypatch, tmp_path, degree
+):
+    """A plan whose expert containers match no module of the built model (a renamed submodule, a
+    hand-written plan) leaves no expert to count or shard: the automatic degree would replicate
+    every expert on every rank without a word. A degree set to 1 asks for exactly that."""
+    run_as(4)
+    config = _qwen3_moe(num_experts=8)
+    config.base_model_ep_plan = {"layers.*.mlp.renamed_experts": "moe_tp_experts"}
+    serve(config)
+
+    if degree is None:
+        with pytest.raises(ValueError, match=r"renamed_experts\) names .* MODELOPT_EP_DEGREE=1"):
+            resolve_distribution_plan(str(tmp_path))
+    else:
+        monkeypatch.setenv("MODELOPT_EP_DEGREE", degree)
+        assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4)
+
+
 @pytest.mark.parametrize(
     ("world_size", "source"),
     [(4, "MODELOPT_EP_DEGREE"), (1, "ep_size")],
