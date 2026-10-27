@@ -55,6 +55,7 @@ from modelopt.torch.export.moe_utils import (
 )
 from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
@@ -416,6 +417,17 @@ def _fewer_experts_counted(experts):
     experts.num_experts = NUM_EXPERTS - 1
 
 
+def _ggml(experts):
+    for i in range(len(experts.down_proj_weight_quantizers)):
+        experts.down_proj_weight_quantizers[i] = TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits="q8_0",
+                block_sizes={-1: GGML_FORMAT_REGISTRY["q8_0"].block_size},
+                backend="ggml",
+            )
+        )
+
+
 @LAYOUTS
 @pytest.mark.parametrize(
     ("change", "match"),
@@ -424,14 +436,15 @@ def _fewer_experts_counted(experts):
         (_native_fp8, "native FP8"),
         (_native_fp8_unquantized, "native FP8"),
         (_fewer_experts_counted, "num_experts is 3, but the unsharded weight holds 4 experts"),
+        (_ggml, "GGML formats"),
     ],
-    ids=["mixed", "native-fp8", "native-fp8-unquantized", "num-experts-short"],
+    ids=["mixed", "native-fp8", "native-fp8-unquantized", "num-experts-short", "ggml"],
 )
 def test_a_projection_the_fold_cannot_write_is_refused_untouched(experts_cls, change, match):
     """One fused tensor cannot mix quantized and unquantized experts, and native FP8 weights need the
     scale_inv the fold drops, also where a recipe leaves them unquantized. A ``num_experts`` short of
-    the weight's rows would fold only the first experts. The refusal comes before the other
-    projection folds."""
+    the weight's rows would fold only the first experts, and a GGML format packs each expert's weight
+    with no scale to stack. The refusal comes before the other projection folds."""
     experts = _quantized_experts(experts_cls, mtq.FP8_DEFAULT_CFG)
     change(experts)
     before = {k: v.clone() for k, v in experts.state_dict().items()}

@@ -218,6 +218,7 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
     ``module.<P>`` (quantized fused weight), ``module.<P>_weight_scale`` (stacked per-expert scales),
     ``module.<P>_weight_scale_2`` (NVFP4 per-expert scalar), ``module.<P>_input_scale`` (shared).
     """
+    from modelopt.torch.export.quant_format import GGML_FORMATS
     from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 
     try:
@@ -259,6 +260,17 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
                     group=wdata.device_mesh.get_group(mdim),
                 )
                 enabled = [e for _, shard in sorted(gathered) for e in shard]
+        if any(enabled) and any(
+            getattr(q, "num_bits", None) in GGML_FORMATS for q in weight_quantizers
+        ):
+            # A GGML format packs each expert's weight into its blocks and registers no weight_scale
+            # for the fold to stack. Decided on the gathered states and the recipe's format, so every
+            # rank refuses alike.
+            raise NotImplementedError(
+                f"{type(module).__name__}.{proj}: GGML formats pack each expert's weight with no "
+                "weight_scale, which the keep-fused fold cannot stack; only the per-expert export "
+                "writes them."
+            )
         if all(enabled):
             if not is_dt and not len(weight_quantizers) == wdata.shape[0] == n:
                 raise NotImplementedError(
