@@ -121,7 +121,7 @@ def _require_adapter_opset(model):
         raise ValueError("DLA boundary rank adapters require ONNX opset 13 or newer")
 
 
-def _apply_non4d_model_inputs(model):
+def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=False):
     """Promote selected boundary uses while preserving explicit adapter results."""
     graph = model.graph
     cache = GraphCache(graph)
@@ -150,12 +150,26 @@ def _apply_non4d_model_inputs(model):
             and not (
                 _is_standard_node(node, local_functions, {"Squeeze"}) and "Gather" in node.name
             )
-            and node.op_type != "InstanceNormalization"
+            and node.op_type not in {"InstanceNormalization", "Gemm"}
         ]
         if not consumers:
             continue
         _require_adapter_opset(model)
         for consumer in consumers:
+            safe = _RANK_AGNOSTIC_OPS | {"Unsqueeze", "Concat", "Softmax", "LogSoftmax", "Gelu"}
+            if consumer.op_type == "MatMul":
+                other = cache.get_shape(consumer.input[1])
+                if other is not None and len(other) >= 2:
+                    safe |= {"MatMul"}
+            elif consumer.op_type == "Conv":
+                kernel = cache.get_shape(consumer.input[1])
+                if kernel is not None and len(kernel) == 4:
+                    safe |= {"Conv"}
+            elif consumer.op_type in {"QuantizeLinear", "DequantizeLinear"}:
+                if cache.get_shape(consumer.input[1]) == []:
+                    safe |= {consumer.op_type}
+            if consumer.op_type not in safe and consumer.op_type not in prepared_input_ops:
+                raise ValueError(f"Input rank conversion is unavailable for {consumer.op_type}")
             if _is_standard_node(consumer, local_functions, {"Softmax", "LogSoftmax"}):
                 axis = _attribute(consumer, "axis")
                 axis_value = (
@@ -199,6 +213,8 @@ def _apply_non4d_model_inputs(model):
             or len({len(promoted_shapes[name]) for name in node.input}) != 1
         ):
             raise ValueError(f"Cannot promote mixed-layout Concat {node.name!r}")
+    if validate_only:
+        return model
     for node in concats.values():
         for attribute in node.attribute:
             if attribute.name == "axis" and attribute.i >= 0:
@@ -296,6 +312,8 @@ def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False, prepared_o
         producer = cache.get_producer(value.name)
         source = _output_rank_source(cache, producer, local_functions, rank_sources)
         if source is not None:
+            if _is_standard_node(source, local_functions, {"Gemm"}):
+                continue
             if defer_rank_conversion:
                 _require_output_rank_conversion(source, local_functions, prepared_output_ops)
             if not _is_standard_node(

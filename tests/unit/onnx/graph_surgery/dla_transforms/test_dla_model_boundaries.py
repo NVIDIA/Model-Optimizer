@@ -298,7 +298,10 @@ def test_normalization_binary_branch_preserves_broadcast_layout(batch, operation
 @pytest.mark.parametrize("width", [8, 12])
 @pytest.mark.parametrize("axis", [-1, 4])
 @pytest.mark.parametrize("quantized", [False, True])
-def test_early_registered_reshape_reduction_is_not_rejected(width, axis, quantized, monkeypatch):
+@pytest.mark.parametrize("preparation", ["direct", "intermediate", "constant"])
+def test_early_registered_reshape_reduction_is_not_rejected(
+    width, axis, quantized, preparation, monkeypatch
+):
     """Allow reductions consumed by actual earlier reshape-pattern stages without a native reducer stage."""
     pipeline = import_module(_transform_make_dla_compatible.__module__)
     monkeypatch.setattr(
@@ -328,6 +331,14 @@ def test_early_registered_reshape_reduction_is_not_rejected(width, axis, quantiz
         ]
         current = "dq"
     nodes.append(helper.make_node("ReduceSum", [current, "axes"], ["y"], keepdims=0))
+    if preparation == "intermediate":
+        nodes[0].input[0] = "hidden"
+        nodes.insert(0, helper.make_node("Identity", ["x"], ["hidden"]))
+    elif preparation == "constant":
+        nodes = [
+            helper.make_node("Constant", [], [tensor.name], value=tensor) for tensor in controls
+        ] + nodes
+        controls = []
     model = _make_model(
         nodes,
         [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
@@ -338,6 +349,80 @@ def test_early_registered_reshape_reduction_is_not_rejected(width, axis, quantiz
     expected = _checked_run(model, feeds)[0]
     converted = _transform_make_dla_compatible(model, verbose=False, qdq_quantized_dtypes=[])
     np.testing.assert_array_equal(_checked_run(converted, feeds)[0], expected)
+
+
+@pytest.mark.parametrize(
+    "operation", ["ReduceSum", "Gather", "Slice", "Split", "ArgMax", "Transpose"]
+)
+def test_input_promotion_requires_registered_axis_conversion(operation, monkeypatch):
+    """Reject valid native operators before boundary mutation when their rank stage is absent."""
+    pipeline = import_module(_transform_make_dla_compatible.__module__)
+    monkeypatch.setattr(
+        pipeline,
+        "DLA_TRANSFORMS",
+        (
+            ("ConstantsToInitializers", pipeline._apply_constants_to_initializers),
+            ("ShapeInference", pipeline.infer_shapes),
+            ("Non4dModelInputs", _apply_non4d_model_inputs),
+            ("Non4dModelOutputs", _apply_non4d_model_outputs),
+        ),
+    )
+    inputs, attributes, output_shape = ["x"], {}, [2, 1]
+    controls = []
+    dtype = TensorProto.FLOAT
+    if operation == "Transpose":
+        attributes, output_shape = {"perm": [1, 0]}, [3, 2]
+    elif operation == "ArgMax":
+        attributes, dtype = {"axis": 1, "keepdims": 1}, TensorProto.INT64
+    else:
+        values = {"ReduceSum": [1], "Gather": [0], "Split": [3], "Slice": [0]}[operation]
+        controls.append(numpy_helper.from_array(np.asarray(values, np.int64), "control"))
+        inputs.append("control")
+        if operation == "ReduceSum":
+            attributes = {"keepdims": 1}
+        elif operation == "Gather":
+            attributes, output_shape = {"axis": 0}, [1, 3]
+        elif operation == "Split":
+            attributes, output_shape = {"axis": 1}, [2, 3]
+        else:
+            controls += [
+                numpy_helper.from_array(np.asarray([1], np.int64), "end"),
+                numpy_helper.from_array(np.asarray([1], np.int64), "axes"),
+            ]
+            inputs += ["end", "axes"]
+    model = _make_model(
+        [helper.make_node(operation, inputs, ["y"], **attributes)],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("y", dtype, output_shape)],
+        controls,
+    )
+    _checked_run(model, {"x": np.arange(6, dtype=np.float32).reshape(2, 3)})
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="Input rank conversion"):
+        _transform_make_dla_compatible(model, verbose=False)
+    assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("tail", [False, True])
+def test_ineligible_gemm_keeps_native_boundary_and_weights(tail):
+    """Retain native matrix Gemm semantics when convolution lowering declines its coefficients."""
+    nodes = [helper.make_node("Gemm", ["x", "w", "b"], ["hidden" if tail else "y"], alpha=0.5)]
+    if tail:
+        nodes.append(helper.make_node("Relu", ["hidden"], ["y"]))
+    model = _make_model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 4])],
+        [
+            numpy_helper.from_array(np.arange(12, dtype=np.float32).reshape(3, 4), "w"),
+            numpy_helper.from_array(np.ones(4, np.float32), "b"),
+        ],
+    )
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    expected = _checked_run(model, feeds)[0]
+    converted = _transform_make_dla_compatible(model, verbose=False)
+    np.testing.assert_array_equal(_checked_run(converted, feeds)[0], expected)
+    assert [list(tensor.dims) for tensor in converted.graph.initializer] == [[3, 4], [4]]
 
 
 def test_early_pattern_does_not_allow_an_unmatched_native_reduction(monkeypatch):

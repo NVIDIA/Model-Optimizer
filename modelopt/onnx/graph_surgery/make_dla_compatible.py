@@ -23,6 +23,7 @@ to adjust axes.
 
 from __future__ import annotations
 
+import copy
 import time
 from functools import partial
 from typing import TYPE_CHECKING
@@ -52,7 +53,6 @@ from .dla_transforms.dla_reshape_patterns import (
     _apply_reshape_qdq_reduce_sum,
     _apply_reshape_reduce_sum,
     _apply_reshape_transpose_reshape,
-    _reshape_reduce_sum,
 )
 from .utils.graph_utils import (
     DEFAULT_QDQ_REMOVE_QUANT_TYPES,
@@ -108,6 +108,40 @@ DLA_TRANSFORMS = (
 )
 
 
+def _boundary_stage_options(name, quant_types, verbose, prepared_input_ops, prepared_output_ops):
+    """Share stage options between the prerequisite probe and the actual ordered pipeline."""
+    if name == "RemoveQDQ":
+        return {
+            "keep_clip_after_inputs": False,
+            "max_chained_qdq_pairs": 5,
+            "quant_types_to_remove": quant_types,
+        }
+    if name == "ConstantsToInitializers":
+        return {"verbose": verbose}
+    if name == "Non4dModelInputs":
+        return {"prepared_input_ops": prepared_input_ops}
+    if name == "Non4dModelOutputs":
+        return {"prepared_output_ops": prepared_output_ops}
+    return {}
+
+
+def _validate_boundary_contract(model, prepared_input_ops, prepared_output_ops):
+    """Refuse unsupported native layouts before adapting any public boundary."""
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    for node in model.graph.node:
+        if (
+            node.op_type in _REDUCTION_OPS
+            and node.op_type not in prepared_output_ops
+            and node.domain in {"", "ai.onnx"}
+            and not node.overload
+            and (node.domain, node.op_type, node.overload) not in local_functions
+            and any(attr.name == "keepdims" and attr.i == 0 for attr in node.attribute)
+        ):
+            raise NotImplementedError("Standalone reductions are not available in this pipeline")
+        _require_output_rank_conversion(node, local_functions, prepared_output_ops)
+    _apply_non4d_model_inputs(model, prepared_input_ops=prepared_input_ops, validate_only=True)
+
+
 def _transform_make_dla_compatible(
     model: onnx.ModelProto,
     *,
@@ -124,34 +158,22 @@ def _transform_make_dla_compatible(
     ):
         raise NotImplementedError("QDQ removal is not available in this pipeline")
     stages = frozenset(stage for stage, _ in DLA_TRANSFORMS)
-    planned_reduction_outputs: set[str] = set()
-    if "StandaloneReduceOperations" not in stages:
-        if any(node.op_type == "ReduceSum" for node in model.graph.node):
-            for stage, quantized in (("ReshapeReduceSum", False), ("ReshapeQDQReduceSum", True)):
-                if stage in stages:
-                    planned_reduction_outputs.update(
-                        _reshape_reduce_sum(model, quantized=quantized, validate_only=True)
-                    )
-        local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
-        for node in model.graph.node:
-            if (
-                node.op_type in _REDUCTION_OPS
-                and node.domain in {"", "ai.onnx"}
-                and not node.overload
-                and (node.domain, node.op_type, node.overload) not in local_functions
-                and any(attr.name == "keepdims" and attr.i == 0 for attr in node.attribute)
-                and not planned_reduction_outputs.intersection(node.output)
-            ):
-                raise NotImplementedError(
-                    "Standalone reductions are not available in this pipeline"
-                )
     prepared_output_ops = stages | (
         _REDUCTION_OPS if "StandaloneReduceOperations" in stages else frozenset()
     )
-    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
-    for node in model.graph.node:
-        if not planned_reduction_outputs.intersection(node.output):
-            _require_output_rank_conversion(node, local_functions, prepared_output_ops)
+    prepared_input_ops = set(prepared_output_ops)
+    for stage, operations in {
+        "Non4DReshape": {"Reshape"},
+        "Non4DExpand": {"Expand"},
+        "Non4DTile": {"Tile"},
+        "Non4DTranspose": {"Transpose"},
+        "Non4dSliceAxis": {"Slice"},
+        "Non4DLpNorm": {"LpNormalization"},
+        "RemoveIntermediarySqueezeAndUnsqueeze": {"Squeeze"},
+        "UpdateAxis": {"TopK", "Split", "QuantizeLinear", "DequantizeLinear"},
+    }.items():
+        if stage in stages:
+            prepared_input_ops.update(operations)
     quant_types = (
         DEFAULT_QDQ_REMOVE_QUANT_TYPES
         if qdq_quantized_dtypes is None
@@ -159,21 +181,28 @@ def _transform_make_dla_compatible(
     )
     if remove_all_qdq:
         quant_types = frozenset(onnx.TensorProto.DataType.values())
+    try:
+        _validate_boundary_contract(model, prepared_input_ops, prepared_output_ops)
+    except (ValueError, NotImplementedError):
+        # Earlier lowering may consume native operators that lack a later rank pass.
+        probe = infer_shapes(copy.deepcopy(model))
+        for name, transform in DLA_TRANSFORMS:
+            if name == "Non4dModelInputs":
+                break
+            options = _boundary_stage_options(
+                name, quant_types, False, prepared_input_ops, prepared_output_ops
+            )
+            result = transform(probe, **options)
+            if result is not None:
+                probe = result
+        _validate_boundary_contract(probe, prepared_input_ops, prepared_output_ops)
     model = infer_shapes(model)
     for name, transform in DLA_TRANSFORMS:
         if verbose:
             logger.info("[DLA pipeline] Applying %s", name)
-        options = {}
-        if name == "RemoveQDQ":
-            options = {
-                "keep_clip_after_inputs": False,
-                "max_chained_qdq_pairs": 5,
-                "quant_types_to_remove": quant_types,
-            }
-        elif name == "ConstantsToInitializers":
-            options = {"verbose": verbose}
-        elif name == "Non4dModelOutputs":
-            options = {"prepared_output_ops": prepared_output_ops}
+        options = _boundary_stage_options(
+            name, quant_types, verbose, prepared_input_ops, prepared_output_ops
+        )
         result = transform(model, **options)
         if result is not None:
             model = result

@@ -50,7 +50,7 @@ def _follower(cache, output, op_type):
     )
 
 
-def _replace(graph, replacements, *, validate_only=False):
+def _replace(graph, replacements):
     """Apply planned replacements without copying untouched payloads and order late controls."""
     if not replacements:
         return
@@ -70,8 +70,6 @@ def _replace(graph, replacements, *, validate_only=False):
         for added in replacements.get(id(node), [])
         for name in added.input
     )
-    if validate_only:
-        return
     batch_replace_nodes(
         graph,
         {
@@ -97,7 +95,7 @@ def _apply_reshape_qdq_reduce_sum(model):
     return _reshape_reduce_sum(model, quantized=True)
 
 
-def _reshape_reduce_sum(model, *, quantized, validate_only=False):
+def _reshape_reduce_sum(model, *, quantized):
     """Plan disjoint reductions while preserving controls and restoring initializers on refusal."""
     graph = model.graph
     cache = GraphCache(graph)
@@ -215,16 +213,7 @@ def _reshape_reduce_sum(model, *, quantized, validate_only=False):
                 replacements[id(original)] = []
             replacements[id(reshape)] = nodes
             count += 1
-        _replace(graph, replacements, validate_only=validate_only)
-        if validate_only:
-            outputs = {
-                name
-                for node in graph.node
-                if node.op_type == "ReduceSum" and id(node) in replacements
-                for name in node.output
-            }
-            del graph.initializer[initializer_count:]
-            return outputs
+        _replace(graph, replacements)
     except Exception:
         del graph.initializer[initializer_count:]
         raise
