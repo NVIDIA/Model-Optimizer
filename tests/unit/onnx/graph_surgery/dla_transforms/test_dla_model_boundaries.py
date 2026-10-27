@@ -32,6 +32,97 @@ from modelopt.onnx.graph_surgery.dla_transforms.dla_model_boundaries import (
 from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
 
 
+@pytest.mark.parametrize("identity", ["custom", "local", "overload"])
+@pytest.mark.parametrize(
+    ("operation", "entrypoint"),
+    [
+        ("Squeeze", "pipeline"),
+        ("Unsqueeze", "pipeline"),
+        ("Concat", "pipeline"),
+        ("Squeeze", "cleanup"),
+        ("Unsqueeze", "cleanup"),
+    ],
+)
+def test_operator_lookalikes_keep_function_semantics(identity, operation, entrypoint):
+    """Execute opaque lookalikes without rewriting their builtin-named calls or controls."""
+    domain = "opaque.boundary" if identity == "custom" else ""
+    overload = "custom" if identity == "overload" else ""
+    inputs = ["x"] if operation == "Concat" else ["x", "axes"]
+    function = helper.make_function(
+        domain,
+        operation,
+        inputs,
+        ["y"],
+        [helper.make_node("Neg", ["x"], ["y"])],
+        [helper.make_opsetid("", 21)],
+        attributes=["axis"] if operation == "Concat" else [],
+    )
+    function.overload = overload
+    opaque = helper.make_node(
+        operation,
+        ["middle" if entrypoint == "cleanup" else "x", *inputs[1:]],
+        ["hidden" if entrypoint == "cleanup" else "y"],
+        name="opaque",
+        domain=domain,
+        **({"axis": 1} if operation == "Concat" else {}),
+    )
+    opaque.overload = overload
+    nodes = (
+        [
+            helper.make_node("Identity", ["x"], ["middle"]),
+            opaque,
+            helper.make_node("Identity", ["hidden"], ["y"]),
+        ]
+        if entrypoint == "cleanup"
+        else [opaque]
+    )
+    model = _make_model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 3])],
+        [] if operation == "Concat" else [numpy_helper.from_array(np.array([], np.int64), "axes")],
+    )
+    model.functions.append(function)
+    if domain:
+        model.opset_import.append(helper.make_opsetid(domain, 1))
+    if entrypoint == "cleanup":
+        model.graph.value_info.extend(
+            helper.make_tensor_value_info(name, TensorProto.FLOAT, [2, 3])
+            for name in ("middle", "hidden")
+        )
+    before = next(n for n in model.graph.node if n.name == "opaque").SerializeToString()
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    expected = _checked_run(model, feeds)[0]
+    converted = (
+        _transform_make_dla_compatible(model, verbose=False)
+        if entrypoint == "pipeline"
+        else _apply_remove_intermediary_squeeze_unsqueeze(model, rank_converted=True)
+    )
+    assert next(n for n in converted.graph.node if n.name == "opaque").SerializeToString() == before
+    np.testing.assert_array_equal(_checked_run(converted, feeds)[0], expected)
+
+
+@pytest.mark.parametrize("operation", ["Reshape", "Expand", "Tile"])
+@pytest.mark.parametrize("tail", [False, True])
+def test_symbolic_native_controls_do_not_gain_output_adapters(operation, tail):
+    """Keep static native outputs when symbolic data was not promoted, including unary tails."""
+    target = {"Reshape": [3, 2], "Expand": [2, 3], "Tile": [0, 1]}[operation]
+    output_shape = {"Reshape": [3, 2], "Expand": [2, 3], "Tile": [0, 3]}[operation]
+    nodes = [helper.make_node(operation, ["x", "control"], ["middle" if tail else "y"])]
+    if tail:
+        nodes.append(helper.make_node("Identity", ["middle"], ["y"]))
+    model = _make_model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, ["N", 3])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, output_shape)],
+        [numpy_helper.from_array(np.array(target, np.int64), "control")],
+    )
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    expected = _checked_run(model, feeds)[0]
+    converted = _transform_make_dla_compatible(model, verbose=False)
+    np.testing.assert_array_equal(_checked_run(converted, feeds)[0], expected)
+
+
 def test_input_promotion_refusal_leaves_graph_unchanged():
     """Refuse removing a public input adapter before altering any earlier consumer."""
     model = helper.make_model(

@@ -25,6 +25,59 @@ from .dla_reorder_nodes import priority_topological_order
 
 __all__ = []
 
+_RANK_FLOW_OPS = _RANK_AGNOSTIC_OPS | {"Slice", "Transpose", "Reshape", "Expand", "Tile"}
+
+
+def _is_standard_node(node, local_functions, op_types):
+    """Match builtin operations without interpreting opaque overloads or local definitions."""
+    return (
+        node.op_type in op_types
+        and node.domain in {"", "ai.onnx"}
+        and not node.overload
+        and (node.domain, node.op_type, node.overload) not in local_functions
+    )
+
+
+def _output_rank_source(cache, node, local_functions):
+    """Follow native rank-preserving unary paths before planning public restoration."""
+    seen = set()
+    while (
+        node is not None
+        and _is_standard_node(node, local_functions, _RANK_AGNOSTIC_OPS)
+        and len(node.input) == 1
+    ):
+        if id(node) in seen:
+            raise ValueError("Cyclic unary path while planning output restoration")
+        seen.add(id(node))
+        node = cache.get_producer(node.input[0])
+    return node
+
+
+def _has_native_symbolic_data(cache, name, local_functions):
+    """Prove a low-rank symbolic data path was left native by boundary promotion."""
+    seen = set()
+    while name not in seen:
+        seen.add(name)
+        info = cache.vi_map.get(name)
+        rank = (
+            len(info.type.tensor_type.shape.dim)
+            if info is not None and info.type.tensor_type.HasField("shape")
+            else None
+        )
+        if cache.get_shape(name) is not None or (rank is not None and rank >= 4):
+            return False
+        if name in cache.graph_input_names:
+            return rank is not None and rank < 4
+        node = cache.get_producer(name)
+        if (
+            node is None
+            or not _is_standard_node(node, local_functions, _RANK_FLOW_OPS)
+            or not node.input
+        ):
+            return False
+        name = node.input[0]
+    raise ValueError("Cyclic data path while planning native symbolic controls")
+
 
 def _require_adapter_opset(model):
     """Refuse input-form axes adapters before changing a legacy graph."""
@@ -44,6 +97,8 @@ def _apply_non4d_model_inputs(model):
     prepend = []
     promotions = []
     unsqueezed_shapes = {}
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    adapters = {"Squeeze", "Unsqueeze", "Concat"}
     for value in graph.input:
         shape = cache.get_shape(value.name)
         if shape is None or len(shape) not in (2, 3):
@@ -51,15 +106,20 @@ def _apply_non4d_model_inputs(model):
         consumers = [
             node
             for node, _ in cache.get_consumers(value.name)
-            if (node.input[0] == value.name or node.op_type == "Concat")
-            and not (node.op_type == "Squeeze" and "Gather" in node.name)
+            if (node.op_type not in adapters or _is_standard_node(node, local_functions, adapters))
+            and (
+                node.input[0] == value.name or _is_standard_node(node, local_functions, {"Concat"})
+            )
+            and not (
+                _is_standard_node(node, local_functions, {"Squeeze"}) and "Gather" in node.name
+            )
             and node.op_type != "InstanceNormalization"
         ]
         if not consumers:
             continue
         _require_adapter_opset(model)
         for consumer in consumers:
-            if consumer.op_type != "Unsqueeze":
+            if not _is_standard_node(consumer, local_functions, {"Unsqueeze"}):
                 continue
             tensor = cache.get_init(consumer.input[1])
             if tensor is None or tensor.name in cache.graph_input_names:
@@ -83,7 +143,7 @@ def _apply_non4d_model_inputs(model):
         id(node): node
         for _, _, consumers in promotions
         for node in consumers
-        if node.op_type == "Concat"
+        if _is_standard_node(node, local_functions, {"Concat"})
     }
     for node in concats.values():
         if (
@@ -120,7 +180,7 @@ def _apply_non4d_model_inputs(model):
             helper.make_tensor_value_info(output, value.type.tensor_type.elem_type, promoted_shape)
         )
         for consumer in consumers:
-            if consumer.op_type == "Unsqueeze":
+            if _is_standard_node(consumer, local_functions, {"Unsqueeze"}):
                 output_shape = unsqueezed_shapes[id(consumer)]
                 if promoted_shape[-len(output_shape) :] == output_shape:
                     old_output = consumer.output[0]
@@ -172,21 +232,35 @@ def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False):
     boundary_names = cache.graph_input_names | cache.init_names
     append = []
     plans = []
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     for value in graph.output:
         shape = cache.get_shape(value.name)
         if shape is None or len(shape) >= 4 or value.name in boundary_names:
             continue
         producer = cache.get_producer(value.name)
+        source = _output_rank_source(cache, producer, local_functions)
+        if source is not None:
+            if source.op_type in {"Squeeze", "Unsqueeze", "Concat"} and not _is_standard_node(
+                source, local_functions, {"Squeeze", "Unsqueeze", "Concat"}
+            ):
+                continue
+            if _is_standard_node(source, local_functions, {"Reshape", "Expand", "Tile"}):
+                if _has_native_symbolic_data(cache, source.input[0], local_functions):
+                    continue
         if (
             producer is not None
-            and producer.op_type == "Identity"
+            and _is_standard_node(producer, local_functions, {"Identity"})
             and producer.input[0] in boundary_names
         ):
             continue
         if len(shape) == 0:
             raise ValueError(f"Unsupported scalar model output {value.name!r}")
         axes = []
-        existing = producer if producer is not None and producer.op_type == "Squeeze" else None
+        existing = (
+            producer
+            if producer is not None and _is_standard_node(producer, local_functions, {"Squeeze"})
+            else None
+        )
         if existing is not None:
             if len(existing.input) > 1 and existing.input[1]:
                 initializer = cache.get_init(existing.input[1])
@@ -257,8 +331,9 @@ def _apply_remove_intermediary_squeeze_unsqueeze(model, *, rank_converted=False)
     cache = GraphCache(graph)
     captured = _subgraph_captures(graph)
     removed = set()
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     for node in list(graph.node):
-        if node.op_type not in {"Squeeze", "Unsqueeze"}:
+        if not _is_standard_node(node, local_functions, {"Squeeze", "Unsqueeze"}):
             continue
         if (
             node.input[0] in cache.graph_input_names | cache.init_names | cache.graph_output_names
@@ -328,11 +403,8 @@ def _apply_fix_instancenorm_channels(model):
                 continue
             visited.add(tensor)
             for consumer, input_index in cache.get_consumers(tensor):
-                if (
-                    input_index != 0
-                    or consumer.domain not in {"", "ai.onnx"}
-                    or consumer.overload
-                    or (consumer.domain, consumer.op_type, consumer.overload) in local_functions
+                if input_index != 0 or not _is_standard_node(
+                    consumer, local_functions, {consumer.op_type}
                 ):
                     continue
                 if consumer.op_type == "Squeeze" and consumer.output[0] in cache.graph_output_names:
@@ -345,12 +417,7 @@ def _apply_fix_instancenorm_channels(model):
                     pending.append(consumer.output[0])
 
     for index, node in enumerate(graph.node):
-        if (
-            node.op_type == "InstanceNormalization"
-            and node.domain in {"", "ai.onnx"}
-            and not node.overload
-            and (node.domain, node.op_type, node.overload) not in local_functions
-        ):
+        if _is_standard_node(node, local_functions, {"InstanceNormalization"}):
             shape = cache.get_shape(node.input[0])
             if shape is not None and len(shape) == 3:
                 target = add_initializer(
