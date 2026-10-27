@@ -603,6 +603,8 @@ def _apply_flatten(model):
     cache = GraphCache(graph)
     plans = []
     for node in _operator_nodes(model, {"Flatten"}):
+        if any(reader.op_type == "Gemm" for reader, _ in cache.get_consumers(node.output[0])):
+            raise ValueError(f"{node.name!r}: Flatten output still feeds an unconverted Gemm")
         shape = _shape_before_boundary_promotion(cache, node.input[0])
         axis = _attribute(node, "axis")
         axis = axis.i if axis is not None else 1

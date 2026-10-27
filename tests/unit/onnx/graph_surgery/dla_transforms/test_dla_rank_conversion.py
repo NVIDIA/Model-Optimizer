@@ -2138,3 +2138,34 @@ def test_registered_slice_without_input_promotion_retains_native_axes(monkeypatc
     )
     changed = dla_pipeline._transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
     np.testing.assert_array_equal(_execute(changed, feeds)[0], expected)
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+def test_flatten_refuses_native_gemm_before_mutating_other_branches(bad_first):
+    """Keep every branch unchanged when a native Gemm still needs a matrix input."""
+    flatten = helper.make_node("Flatten", ["x"], ["flat"], name="gemm_flatten")
+    peer = helper.make_node("Flatten", ["x"], ["peer"], name="peer_flatten")
+    nodes = [flatten, peer] if bad_first else [peer, flatten]
+    nodes.append(helper.make_node("Gemm", ["flat", "weight"], ["y"]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "native_gemm",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3, 4]),
+                helper.make_tensor_value_info("weight", TensorProto.FLOAT, [12, 5]),
+            ],
+            [
+                helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 5]),
+                helper.make_tensor_value_info("peer", TensorProto.FLOAT, [2, 12]),
+            ],
+            value_info=[helper.make_tensor_value_info("flat", TensorProto.FLOAT, [2, 12])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    onnx.checker.check_model(model, full_check=True)
+    original = model.SerializeToString()
+    with pytest.raises(ValueError, match="Gemm"):
+        _apply_flatten(model)
+    assert model.SerializeToString() == original
