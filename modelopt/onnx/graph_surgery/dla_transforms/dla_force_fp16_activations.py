@@ -87,7 +87,7 @@ def _apply_fp16_lpnorm(model):
         mapped_axes[id(node)] = (
             _specialized_collapsed_axis(cache, node, shape, axis, reshapes)
             if shape and len(shape) == 5
-            else axis
+            else -1
         )
     nodes = []
     for node in graph.node:

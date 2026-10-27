@@ -173,6 +173,36 @@ def test_scaled_l2_normalization_keeps_zero_slices_finite():
     np.testing.assert_allclose(actual, [[[[0, 0], [0.6, 0.8]]]], atol=3e-4)
 
 
+@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
+@pytest.mark.parametrize("positive_axis", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("unary", [False, True])
+def test_scaled_low_rank_lpnorm_preserves_last_axis(shape, positive_axis, enabled, unary):
+    """Normalize the last runtime dimension after promoting a native positive axis."""
+    axis = len(shape) - 1 if positive_axis else -1
+    nodes = [h.make_node("Relu", ["x"], ["native"])] if unary else []
+    nodes.extend(
+        [
+            h.make_node("LpNormalization", ["native" if unary else "x"], ["norm"], axis=axis, p=2),
+            h.make_node("Mul", ["norm", "gamma"], ["y"]),
+        ]
+    )
+    model = _model(
+        nodes,
+        [_value("x", shape)],
+        [_value("y", shape)],
+        [nh.from_array(np.linspace(0.5, 1.5, shape[-1], dtype=np.float32), "gamma")],
+        opset=17,
+    )
+    feeds = {"x": np.linspace(0.25, 2, np.prod(shape), dtype=np.float32).reshape(shape)}
+    onnx.checker.check_model(model, full_check=True)
+    expected = ReferenceEvaluator(model).run(None, feeds)[0]
+    converted = _transform_make_dla_compatible(model, verbose=False, force_fp16_activations=enabled)
+    onnx.checker.check_model(converted, full_check=True)
+    actual = ReferenceEvaluator(converted).run(None, feeds)[0]
+    np.testing.assert_allclose(actual, expected, rtol=2e-3, atol=3e-4)
+
+
 def _scaled_collapsed_lpnorm_model(shape, axis, prefix=False):
     """Build checked native normalization around a real singleton Reshape collapse."""
     collapsed = shape.copy()
