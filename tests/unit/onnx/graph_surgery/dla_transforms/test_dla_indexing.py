@@ -758,6 +758,39 @@ def test_fixed_scalar_gather_keeps_compatible_padded_layouts(shape, axis):
     np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
 
 
+@pytest.mark.parametrize("identity", [False, True])
+@pytest.mark.parametrize("copied_dimension", [False, True])
+def test_fixed_scalar_gather_recognizes_layout_independent_reshape(identity, copied_dimension):
+    """Keep fixed reshape repair paths while refusing targets that copy native axis positions."""
+    nodes = [helper.make_node("Gather", ["x", "indices"], ["selected"], axis=1)]
+    current = "selected"
+    if identity:
+        nodes.append(helper.make_node("Identity", [current], ["alias"]))
+        current = "alias"
+    target = [0, 1, 1, 4] if copied_dimension else [1, 1, 3, 4]
+    output = [3, 1, 1, 4] if copied_dimension else target
+    nodes.append(helper.make_node("Reshape", [current, "target"], ["y"]))
+    model = _model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [3, 5, 4])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, output)],
+        [
+            numpy_helper.from_array(np.array(1, np.int64), "indices"),
+            numpy_helper.from_array(np.array(target, np.int64), "target"),
+        ],
+    )
+    feeds = {"x": np.arange(60, dtype=np.float32).reshape(3, 5, 4)}
+    expected = _execute(model, feeds)[0]
+    if copied_dimension:
+        before = model.SerializeToString()
+        with pytest.raises(ValueError, match=r"scalar Gather.*layout"):
+            _apply_gather(model)
+        assert model.SerializeToString() == before
+    else:
+        converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+        np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+
+
 @pytest.mark.parametrize(
     ("producer", "shape", "refuse"),
     [

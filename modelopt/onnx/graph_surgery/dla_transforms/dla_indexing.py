@@ -29,7 +29,7 @@ from ..utils.graph_utils import (
     pad4d,
 )
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
-from .dla_graph_cleanup import _subgraph_captures
+from .dla_graph_cleanup import _RANK_AGNOSTIC_OPS, _subgraph_captures
 
 __all__ = []
 
@@ -114,6 +114,34 @@ def _gather_index_needs_view(cache, name, layout_nodes):
     return producer is not None and id(producer) in layout_nodes
 
 
+def _gather_layout_reinterpreted(cache, name, supported, captured):
+    """Prove that fixed four-dimensional reshapes erase a private Gather layout difference."""
+    pending, seen = [name], set()
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        if current in cache.graph_output_names | captured:
+            return False
+        for consumer, port in cache.get_consumers(current):
+            if id(consumer) not in supported or port != 0:
+                return False
+            if consumer.op_type in _RANK_AGNOSTIC_OPS and len(consumer.input) == 1:
+                pending.extend(consumer.output)
+                continue
+            if (
+                consumer.op_type != "Reshape"
+                or consumer.input[1] in cache.graph_input_names
+                or cache.get_shape(consumer.input[1]) != [4]
+            ):
+                return False
+            target = cache.get_init_array(consumer.input[1])
+            if target is None or np.any((target <= 0) & (target != -1)):
+                return False
+    return True
+
+
 def _apply_gather(model):
     """Prepare Gather indices for the subsequent ordered data-rank promotion."""
     graph = model.graph
@@ -127,6 +155,8 @@ def _apply_gather(model):
     flattened = set()
     index_views = {}
     captured = _subgraph_captures(graph)
+    shape_readers = _operator_nodes(model, _RANK_AGNOSTIC_OPS | {"Reshape"})
+    shape_reader_ids = {id(node) for node in shape_readers}
     for candidate in selected:
         data_shape = cache.get_shape(candidate.input[0])
         if data_shape is None:
@@ -166,6 +196,9 @@ def _apply_gather(model):
             and fixed is not None
             and original not in cache.graph_input_names
             and _gather_flatten_count(cache, candidate, []) is None
+            and not _gather_layout_reinterpreted(
+                cache, candidate.output[0], shape_reader_ids, captured
+            )
         ):
             raise ValueError(
                 f"{candidate.name!r}: fixed scalar Gather indices change the padded output layout"
