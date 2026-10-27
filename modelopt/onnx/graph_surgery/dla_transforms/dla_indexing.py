@@ -148,7 +148,11 @@ def _apply_gather(model):
     cache = GraphCache(graph)
     nodes = []
     squeezed_indices = {}
-    selected = _operator_nodes(model, {"Gather"})
+    selected = [
+        node
+        for node in _operator_nodes(model, {"Gather"})
+        if (shape := cache.get_shape(node.input[0])) is None or len(shape) >= 2
+    ]
     layout = _operator_nodes(model, {"Cast", "Identity", "Reshape", "Squeeze", "Unsqueeze"})
     layout_nodes = {id(node) for node in layout}
     casts = {id(node) for node in layout if node.op_type == "Cast"}

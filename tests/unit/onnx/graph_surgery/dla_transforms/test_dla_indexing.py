@@ -294,6 +294,52 @@ def test_symbolic_internal_reshape_retains_native_index_and_reduction_layout(ope
     np.testing.assert_array_equal(_execute(converted, feeds)[0], expected[0])
 
 
+@pytest.mark.parametrize("source", ["input", "initializer", "shape"])
+@pytest.mark.parametrize("scalar", [False, True])
+@pytest.mark.parametrize("entrypoint", ["stage", "pipeline"])
+def test_rank_one_gather_control_paths_remain_native(source, scalar, entrypoint):
+    """Preserve scalar/vector selection on native vectors, including Shape control paths."""
+    dtype = TensorProto.INT64 if source == "shape" else TensorProto.FLOAT
+    nodes = [helper.make_node("Shape", ["x"], ["data"])] if source == "shape" else []
+    inputs, feeds, initializers = [], {}, []
+    if source == "shape":
+        inputs.append(helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 2, 3, 4]))
+        feeds["x"] = np.arange(24, dtype=np.float32).reshape(1, 2, 3, 4)
+    elif source == "input":
+        inputs.append(helper.make_tensor_value_info("data", dtype, [4]))
+        feeds["data"] = np.arange(4, dtype=np.float32)
+    else:
+        initializers.append(numpy_helper.from_array(np.arange(4, dtype=np.float32), "data"))
+    initializers.extend(
+        [
+            numpy_helper.from_array(np.array(1 if scalar else [1], np.int64), "indices"),
+            numpy_helper.from_array(np.array([0], np.int64), "axes"),
+            numpy_helper.from_array(np.array([1, 1, 1, -1], np.int64), "output_shape"),
+        ]
+    )
+    nodes.extend(
+        [
+            helper.make_node("Gather", ["data", "indices"], ["selected"], axis=0),
+            helper.make_node("Unsqueeze", ["selected", "axes"], ["vector"]),
+            helper.make_node("Reshape", ["vector", "output_shape"], ["y"]),
+        ]
+    )
+    model = _model(
+        nodes, inputs, [helper.make_tensor_value_info("y", dtype, [1, 1, 1, 1])], initializers
+    )
+    model = onnx.shape_inference.infer_shapes(model)
+    expected = _execute(model, feeds)
+    before = model.SerializeToString()
+    converted = (
+        _apply_gather(model)
+        if entrypoint == "stage"
+        else _transform_make_dla_compatible(model, verbose=False)
+    )
+    if entrypoint == "stage":
+        assert converted.SerializeToString() == before
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected[0])
+
+
 def _execute(model, feeds):
     """Run CPU graph semantics without backend fusion changing the comparison."""
     onnx.checker.check_model(model, full_check=True)
