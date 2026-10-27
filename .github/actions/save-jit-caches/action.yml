@@ -1,0 +1,39 @@
+name: Save JIT caches
+description: Save the JIT caches restored by ./.github/actions/restore-jit-caches. Run it with `always()` so a failing or timed-out job still populates
+  the cache (actions/cache itself only saves when the job succeeds).
+
+inputs:
+  torch-ext-key:
+    description: The `torch-ext-key` output of ./.github/actions/restore-jit-caches.
+    required: true
+  torch-ext-hit:
+    description: The `torch-ext-hit` output of ./.github/actions/restore-jit-caches.
+    required: true
+  triton-key:
+    description: The `triton-key` output of ./.github/actions/restore-jit-caches.
+    required: true
+  triton-hit:
+    description: The `triton-hit` output of ./.github/actions/restore-jit-caches.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # A job cancelled before building anything must not claim the key with an empty cache:
+    # later runs would restore it as an exact hit and never save again.
+    - id: built
+      shell: bash
+      run: find /root/.cache/torch_extensions -name '*.so' 2>/dev/null | grep -q . && echo "any=true" >> "$GITHUB_OUTPUT" || true
+    - if: inputs.torch-ext-hit != 'true' && steps.built.outputs.any == 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: /root/.cache/torch_extensions
+        key: ${{ inputs.torch-ext-key }}
+    - id: triton
+      shell: bash
+      run: test -n "$(ls -A /root/.cache/triton 2>/dev/null)" && echo "any=true" >> "$GITHUB_OUTPUT" || true
+    - if: inputs.triton-hit != 'true' && steps.triton.outputs.any == 'true' && inputs.triton-key != ''
+      uses: actions/cache/save@v6
+      with:
+        path: /root/.cache/triton
+        key: ${{ inputs.triton-key }}

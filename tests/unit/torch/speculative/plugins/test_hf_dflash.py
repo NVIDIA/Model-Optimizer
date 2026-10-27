@@ -31,14 +31,17 @@ from _test_utils.torch.transformers_models import (
     get_tiny_llama,
     tf_modelopt_state_and_output_tester,
 )
+from torch.nn.attention.flex_attention import create_mask
 from transformers import AutoModelForCausalLM
 from transformers.modeling_layers import GradientCheckpointingLayer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
+import modelopt.torch.speculative.plugins.dflash_flex_attention as dflash_flex_attention
 import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
 from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
+    DFlashBaseModelOutput,
     DFlashModule,
     HFDFlashModel,
     _dpace_position_weights,
@@ -265,27 +268,35 @@ class TestDPaceLossIntegration:
 
     def test_compute_loss_dpace_branch(self):
         """Default dpace objective produces a finite loss and valid accuracy."""
-        model = self._converted_model("dpace")
+        model = self._converted_model("dpace", dflash_self_logit_distillation=False)
         loss, acc = model._compute_loss(*self._make_inputs())
         assert torch.isfinite(loss).item() and loss.item() > 0
         assert 0.0 <= acc <= 1.0
 
     def test_compute_loss_decay_branch(self):
         """The static-decay objective path also produces a finite loss."""
-        model = self._converted_model("decay", dflash_loss_decay_factor=4.0)
+        model = self._converted_model(
+            "decay", dflash_loss_decay_factor=4.0, dflash_self_logit_distillation=False
+        )
         loss, acc = model._compute_loss(*self._make_inputs())
         assert torch.isfinite(loss).item() and loss.item() > 0
         assert 0.0 <= acc <= 1.0
 
     def test_compute_loss_dpace_kd_branch(self):
-        """dpace + KD (base_logits given): confidences use a dedicated no_grad CE pass."""
+        """dpace + KD: confidences use a dedicated no_grad CE pass."""
         vocab = 32
         model = self._converted_model("dpace")
         inputs = self._make_inputs(vocab=vocab)
-        base_logits = torch.randn(1, SEQ_LEN, vocab)
-        loss, acc = model._compute_loss(*inputs, base_logits=base_logits)
+        teacher = DFlashBaseModelOutput(None, logits=torch.randn(1, SEQ_LEN, vocab))
+        loss, acc = model._compute_loss(*inputs, base_outputs=teacher)
         assert torch.isfinite(loss).item()
         assert 0.0 <= acc <= 1.0
+
+    def test_kd_without_base_outputs_raises(self):
+        """KD is decided by the config, so a missing teacher cannot fall back to CE."""
+        model = self._converted_model("dpace")
+        with pytest.raises(ValueError, match="base_outputs"):
+            model._compute_loss(*self._make_inputs())
 
 
 class TestDFlashSaveRestore:
@@ -304,6 +315,70 @@ class TestDFlashSaveRestore:
         model_test = AutoModelForCausalLM.from_pretrained(tmp_path / "modelopt_model")
         assert isinstance(model_test, HFDFlashModel)
         tf_modelopt_state_and_output_tester(model_ref, model_test)
+
+
+class TestFlexAttentionConflicts:
+    """FlexAttention's conflicts are rejected when the model is built, resume included."""
+
+    @staticmethod
+    def _config(**overrides):
+        config = get_dflash_config()
+        config.update(overrides)
+        return config
+
+    def test_attention_sink_is_rejected_at_convert(self):
+        config = self._config(dflash_use_flex_attention=True, dflash_attention_sink=True)
+        with pytest.raises(ValueError, match="dflash_attention_sink"):
+            mtsp.convert(get_tiny_llama(num_hidden_layers=4), [("dflash", config)])
+
+    def test_attention_dropout_is_rejected_at_convert(self):
+        config = self._config(dflash_use_flex_attention=True)
+        config["dflash_architecture_config"] = {
+            **config["dflash_architecture_config"],
+            "attention_dropout": 0.1,
+        }
+        with pytest.raises(ValueError, match="attention_dropout"):
+            mtsp.convert(get_tiny_llama(num_hidden_layers=4), [("dflash", config)])
+
+    def test_flex_and_compile_survive_a_from_pretrained_resume(self, tmp_path):
+        """Resume re-runs modify() with the base on meta; the checks and the compile hold."""
+        mto.enable_huggingface_checkpointing()
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = self._config(dflash_use_flex_attention=True, dflash_use_torch_compile=True)
+        mtsp.convert(model, [("dflash", config)])
+        model.save_pretrained(tmp_path / "ckpt")
+
+        restored = AutoModelForCausalLM.from_pretrained(tmp_path / "ckpt")
+        restored.restore_draft_precision()
+        assert restored.dflash_use_flex_attention
+        restored.train()
+        assert restored.dflash_module._body() != restored.dflash_module._forward_body
+
+
+class TestFlexTiles:
+    """One BlockMask serves every layer, whatever each layer's head_dim."""
+
+    @staticmethod
+    def _block_size(monkeypatch, head_dims):
+        seen = {}
+
+        def create_block_mask(*_args, BLOCK_SIZE, **_kwargs):  # noqa: N803
+            seen["block"] = BLOCK_SIZE
+
+        monkeypatch.setattr(dflash_flex_attention, "_flex_ops", lambda: (None, create_block_mask))
+        dflash_flex_attention.build_draft_block_mask(None, 1, 64, 128, "cpu", head_dims)
+        return seen["block"]
+
+    @pytest.mark.parametrize("head_dims", [{256}, {512}, {256, 512}])
+    def test_every_layer_tile_divides_the_mask_block(self, monkeypatch, head_dims):
+        block = self._block_size(monkeypatch, head_dims)
+        for head_dim in head_dims:
+            _, options = dflash_flex_attention._tiles(head_dim)
+            largest_tile = 128 if options is None else max(options["BLOCK_M"], options["BLOCK_N"])
+            assert block % largest_tile == 0, (head_dims, block)
+
+    def test_large_head_dims_alone_keep_the_finer_block(self, monkeypatch):
+        assert self._block_size(monkeypatch, {512}) == 64
 
 
 class TestDFlashLazyRotaryEmb:
@@ -413,6 +488,78 @@ class TestDFlashSlidingWindow:
         )
         attn = DFlashAttention(config, layer_idx=0)
         assert attn.sliding_window is None
+
+
+class TestDraftMaskRule:
+    """The dense mask and the FlexAttention BlockMask evaluate one rule, ``_draft_mask_mod``."""
+
+    SEQ_LEN, BLOCK_SIZE = 16, 4
+
+    def _model(self, attention="bidirectional"):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config(block_size=self.BLOCK_SIZE)
+        config["dflash_draft_attention"] = attention
+        mtsp.convert(model, [("dflash", config)])
+        return model
+
+    def _visible(self, model, anchors, keep, window=None):
+        mask = model._build_draft_attention_mask(
+            self.SEQ_LEN, anchors, keep, anchors.shape[1], torch.float32, "cpu", window=window
+        )
+        return mask > torch.finfo(torch.float32).min / 2
+
+    @pytest.mark.parametrize("attention", ["bidirectional", "causal"])
+    def test_matches_a_hand_written_mask(self, attention):
+        """Context strictly before each anchor, then the query's own block, nothing else."""
+        anchors = (6, 9)
+        visible = self._visible(
+            self._model(attention), torch.tensor([anchors]), torch.tensor([[True, True]])
+        )
+        n_q = len(anchors) * self.BLOCK_SIZE
+        expected = torch.zeros(n_q, self.SEQ_LEN + n_q, dtype=torch.bool)
+        for block, anchor in enumerate(anchors):
+            for i in range(self.BLOCK_SIZE):
+                row = block * self.BLOCK_SIZE + i
+                expected[row, :anchor] = True
+                start = self.SEQ_LEN + block * self.BLOCK_SIZE
+                expected[
+                    row, start : start + (i + 1 if attention == "causal" else self.BLOCK_SIZE)
+                ] = True
+        assert torch.equal(visible[0, 0], expected)
+
+    def test_dropped_block_sees_nothing(self):
+        visible = self._visible(
+            self._model(), torch.tensor([[6, 9]]), torch.tensor([[True, False]])
+        )
+        assert visible[0, 0, : self.BLOCK_SIZE].any(dim=-1).all()
+        assert not visible[0, 0, self.BLOCK_SIZE :].any()
+
+    @pytest.mark.parametrize("attention", ["bidirectional", "causal"])
+    @pytest.mark.parametrize("window", [None, 6])
+    def test_dense_mask_matches_the_vmapped_rule(self, attention, window):
+        """Broadcast evaluation (dense) and vmap evaluation (flex) of the rule agree."""
+        anchors = torch.tensor([[2, 7, 11], [5, 0, 9]])
+        keep = torch.tensor([[True, True, False], [True, False, True]])
+        mask_mod = hf_dflash._draft_mask_mod(
+            self.SEQ_LEN, anchors, keep, self.BLOCK_SIZE, window, causal=attention == "causal"
+        )
+        q_len = anchors.shape[1] * self.BLOCK_SIZE
+        vmapped = create_mask(mask_mod, 2, 1, q_len, self.SEQ_LEN + q_len, device="cpu")
+        dense = self._visible(self._model(attention), anchors, keep, window)
+        assert torch.equal(dense, vmapped)
+
+    def test_padded_query_rows_index_in_bounds(self):
+        """torch 2.8's flex backward also evaluates the rule on padded rows, q_idx >= Q_LEN."""
+        anchors = torch.tensor([[2, 7, 11]])
+        keep = torch.ones_like(anchors, dtype=torch.bool)
+        mask_mod = hf_dflash._draft_mask_mod(
+            self.SEQ_LEN, anchors, keep, self.BLOCK_SIZE, None, causal=False
+        )
+        q_len = anchors.shape[1] * self.BLOCK_SIZE
+        padded_q = torch.arange(q_len, q_len + 2 * self.BLOCK_SIZE).view(-1, 1)
+        kv = torch.arange(self.SEQ_LEN + q_len).view(1, -1)
+        visible = mask_mod(torch.tensor(0), None, padded_q, kv)
+        assert visible.shape == (padded_q.numel(), kv.numel())
 
 
 class TestDFlashSwaMask:
@@ -1142,3 +1289,275 @@ class TestDFlashDraftActivationCheckpointing:
         assert grads[False] and grads[False].keys() == grads[True].keys()
         for name, grad in grads[False].items():
             assert torch.equal(grad, grads[True][name]), name
+
+
+def _legacy_sample_anchor_positions(model, seq_len, loss_mask, device):
+    """Verbatim copy of the pre-static implementation, kept as the semantic reference."""
+    bs = model.dflash_block_size
+    bsz = loss_mask.shape[0]
+    max_anchor = max(seq_len - bs, 0)
+    num_anchors = getattr(model, "_num_anchors", 512)
+
+    valid = loss_mask[:, : max_anchor + 1] > 0.5
+    valid_counts = valid.sum(dim=1)
+    max_n = min(num_anchors, int(valid_counts.max().item()) - 1)
+
+    if max_n <= 0:
+        return (
+            torch.zeros(bsz, 1, dtype=torch.long, device=device),
+            torch.zeros(bsz, 1, dtype=torch.bool, device=device),
+        )
+
+    indices = torch.arange(max_anchor + 1, device=device).unsqueeze(0).expand(bsz, -1)
+    masked_indices = torch.where(valid, indices, torch.tensor(seq_len + 1, device=device))
+    random_vals = torch.rand(bsz, max_anchor + 1, device=device)
+    random_vals = torch.where(valid, random_vals, torch.tensor(2.0, device=device))
+    _, sorted_idx = random_vals.sort(dim=1)
+    gathered = torch.gather(masked_indices, 1, sorted_idx)
+    anchors = gathered[:, :max_n].sort(dim=1).values
+    keep = torch.arange(max_n, device=device).unsqueeze(0) < valid_counts.unsqueeze(1).clamp(
+        max=max_n
+    )
+    anchors = torch.where(keep, anchors, torch.tensor(0, dtype=torch.long, device=device))
+    return anchors, keep
+
+
+class TestAnchorSamplingStaticShape:
+    """With static shapes, n_blocks is fixed by the config; the anchors are the legacy ones."""
+
+    DEVICE = torch.device("cpu")
+
+    @staticmethod
+    def _model(num_anchors, static=False):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config(block_size=BLOCK_SIZE)
+        config["dflash_num_anchors"] = num_anchors
+        config["dflash_self_logit_distillation"] = False  # the padding test calls the CE loss
+        mtsp.convert(model, [("dflash", config)])
+        # After conversion only the sampler reads it, so nothing gets compiled.
+        model.dflash_use_torch_compile = static
+        return model
+
+    @staticmethod
+    def _loss_mask(lengths, seq_len=SEQ_LEN):
+        mask = torch.zeros(len(lengths), seq_len)
+        for row, n in enumerate(lengths):
+            mask[row, :n] = 1.0
+        return mask
+
+    # Each case puts the legacy bound somewhere different: under the cap, ragged across
+    # rows, at 1, and in the two degenerate cases the old code special-cased.
+    @pytest.mark.parametrize("static", [False, True], ids=["eager", "static"])
+    @pytest.mark.parametrize(
+        "lengths",
+        [(13, 13), (13, 5), (9, 9), (5, 3), (2, 1), (1, 1), (0, 0), (13, 0)],
+    )
+    def test_matches_legacy_sampling(self, lengths, static):
+        """Same seed in, same anchors and same keep mask out -- bitwise."""
+        model = self._model(num_anchors=8, static=static)
+        loss_mask = self._loss_mask(lengths)
+
+        torch.manual_seed(1234)
+        legacy_anchors, legacy_keep = _legacy_sample_anchor_positions(
+            model, SEQ_LEN, loss_mask, self.DEVICE
+        )
+        torch.manual_seed(1234)
+        anchors, keep = model._sample_anchor_positions(SEQ_LEN, loss_mask, self.DEVICE)
+
+        n_old = legacy_keep.shape[1]
+        assert keep.shape[1] >= n_old if static else keep.shape[1] == n_old
+        assert torch.equal(keep[:, :n_old], legacy_keep)
+        assert torch.equal(anchors[:, :n_old], legacy_anchors)
+        # Everything past the legacy bound is inert padding.
+        assert not keep[:, n_old:].any()
+        assert not anchors[:, n_old:].any()
+
+    def test_sort_is_truncated_before_it_widens(self):
+        """The surplus columns must not pull unsampled anchors in among the kept ones."""
+        model = self._model(num_anchors=8, static=True)
+        # One long row, so the legacy bound (valid_counts.max() - 1) sits below the static
+        # width and there really are surplus columns to get wrong.
+        loss_mask = self._loss_mask((6, 6))
+        torch.manual_seed(7)
+        legacy_anchors, legacy_keep = _legacy_sample_anchor_positions(
+            model, SEQ_LEN, loss_mask, self.DEVICE
+        )
+        torch.manual_seed(7)
+        anchors, keep = model._sample_anchor_positions(SEQ_LEN, loss_mask, self.DEVICE)
+        assert legacy_keep.shape[1] < keep.shape[1], "fixture no longer exercises truncation"
+        kept = anchors[keep]
+        assert torch.equal(kept, legacy_anchors[legacy_keep])
+
+    def test_shape_is_independent_of_batch_contents(self):
+        """The whole point: one shape, therefore one compile."""
+        model = self._model(num_anchors=8, static=True)
+        shapes = {
+            model._sample_anchor_positions(SEQ_LEN, self._loss_mask(lengths), self.DEVICE)[0].shape
+            for lengths in [(13, 13), (13, 5), (9, 9), (5, 3), (2, 1), (1, 1), (0, 0)]
+        }
+        assert len(shapes) == 1, f"n_blocks still varies with the batch: {shapes}"
+
+    def test_shape_is_min_of_num_anchors_and_sequence(self):
+        anchors, _ = self._model(num_anchors=4, static=True)._sample_anchor_positions(
+            SEQ_LEN, self._loss_mask((13, 13)), self.DEVICE
+        )
+        assert anchors.shape[1] == 4, "num_anchors should bind here"
+        anchors, _ = self._model(num_anchors=512, static=True)._sample_anchor_positions(
+            SEQ_LEN, self._loss_mask((13, 13)), self.DEVICE
+        )
+        assert anchors.shape[1] == SEQ_LEN - BLOCK_SIZE + 1, "the sequence should bind here"
+
+    def test_static_sampling_does_not_sync_on_the_batch(self, monkeypatch):
+        """With static shapes, anchor sampling must not read the batch back to the host."""
+        model = self._model(num_anchors=8, static=True)
+
+        def host_read(*_args, **_kwargs):
+            raise AssertionError("anchor sampling read a tensor back to the host")
+
+        # Implicit reads too: int(t) and `if t:` sync as surely as t.item() does.
+        for name in ("item", "tolist", "__int__", "__float__", "__bool__", "__index__"):
+            monkeypatch.setattr(torch.Tensor, name, host_read)
+        model._sample_anchor_positions(SEQ_LEN, self._loss_mask((13, 5)), self.DEVICE)
+
+    def test_trailing_padding_blocks_do_not_change_the_loss(self):
+        """The padding the static shape introduces is weightless in the loss and accuracy.
+
+        Exact in math, but the reduction runs over more elements, so compare to tolerance.
+        """
+        model = self._model(num_anchors=8)
+        vocab, bsz, n_blocks, pad = 32, 1, 2, 3
+        torch.manual_seed(0)
+        input_ids = torch.randint(0, vocab, (bsz, SEQ_LEN))
+        loss_mask = torch.ones(bsz, SEQ_LEN)
+        logits = torch.randn(bsz, n_blocks * BLOCK_SIZE, vocab)
+        anchors = torch.tensor([[0, BLOCK_SIZE]])[:, :n_blocks]
+        keep = torch.ones(bsz, n_blocks)
+
+        base_loss, base_acc = model._compute_loss(logits, input_ids, anchors, keep, loss_mask)
+        padded_loss, padded_acc = model._compute_loss(
+            torch.cat([logits, torch.randn(bsz, pad * BLOCK_SIZE, vocab)], dim=1),
+            input_ids,
+            torch.cat([anchors, torch.zeros(bsz, pad, dtype=anchors.dtype)], dim=1),
+            torch.cat([keep, torch.zeros(bsz, pad)], dim=1),
+            loss_mask,
+        )
+        torch.testing.assert_close(padded_loss, base_loss)
+        assert padded_acc == pytest.approx(base_acc)
+
+
+class TestTeacherLogits:
+    """The base distribution is projected only at the rows, and vocab entries, asked for."""
+
+    @staticmethod
+    def _model():
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", get_dflash_config())])
+        return model
+
+    @staticmethod
+    def _positions(bsz=2):
+        torch.manual_seed(0)
+        return torch.randint(0, SEQ_LEN, (bsz, 3, BLOCK_SIZE))
+
+    @staticmethod
+    def _rows(full, positions):
+        return full[torch.arange(positions.shape[0]).view(-1, 1, 1), positions]
+
+    @staticmethod
+    def _hidden(model, bsz=2):
+        dtype = model._base_model_lm_head.weight.dtype
+        return torch.randn(bsz, SEQ_LEN, model.config.hidden_size, dtype=dtype)
+
+    def test_matches_the_full_sequence_projection(self):
+        model = self._model()
+        hidden = self._hidden(model)
+        positions = self._positions()
+        got = model._teacher_logits(DFlashBaseModelOutput(None, base_hidden=hidden), positions)
+        want = self._rows(model._base_model_lm_head(hidden), positions)
+        torch.testing.assert_close(got, want)
+
+    def test_prenorm_hidden_gets_the_base_final_norm(self):
+        model = self._model()
+        hidden = self._hidden(model)
+        positions = self._positions()
+        outputs = DFlashBaseModelOutput(None, base_hidden=hidden, base_hidden_prenorm=True)
+        want = self._rows(model._base_model_lm_head(model._base_model_norm(hidden)), positions)
+        torch.testing.assert_close(model._teacher_logits(outputs, positions), want)
+
+    def test_token_ids_pick_entries_of_the_full_rows(self):
+        model = self._model()
+        outputs = DFlashBaseModelOutput(None, base_hidden=self._hidden(model))
+        positions = self._positions()
+        token_ids = torch.randint(0, model.config.vocab_size, (*positions.shape, 5))
+        rows = model._teacher_logits(outputs, positions)
+        torch.testing.assert_close(
+            model._teacher_logits(outputs, positions, token_ids), rows.gather(-1, token_ids)
+        )
+
+    def test_handed_over_logits_are_gathered_not_recomputed(self):
+        model = self._model()
+        logits = torch.randn(2, SEQ_LEN, model.config.vocab_size)
+        outputs = DFlashBaseModelOutput(None, logits=logits)
+        positions = self._positions()
+        token_ids = torch.randint(0, model.config.vocab_size, (*positions.shape, 5))
+        want = self._rows(logits, positions)
+        assert torch.equal(model._teacher_logits(outputs, positions), want)
+        assert torch.equal(
+            model._teacher_logits(outputs, positions, token_ids), want.gather(-1, token_ids)
+        )
+
+    def test_missing_base_distribution_raises(self):
+        model = self._model()
+        with pytest.raises(ValueError, match="base_model_hidden_states"):
+            model._teacher_logits(DFlashBaseModelOutput(None), self._positions())
+
+    def test_offline_dict_keeps_the_hidden_unprojected(self):
+        d = {
+            "aux_hidden_states": torch.randn(1, SEQ_LEN, 8),
+            "base_model_hidden_states": torch.randn(1, SEQ_LEN, 4),
+            "base_hidden_prenorm": True,
+        }
+        outputs = DFlashBaseModelOutput.from_offline_dict(d)
+        assert outputs.logits is None
+        assert outputs.base_hidden is d["base_model_hidden_states"]
+        assert outputs.base_hidden_prenorm
+
+    def test_kd_loss_matches_full_logits(self):
+        """KD read from the base hidden equals KD from the same logits built in full."""
+        model = self._model()
+        hidden = self._hidden(model, bsz=1)
+        inputs = TestDPaceLossIntegration._make_inputs(vocab=model.config.vocab_size)
+        full = DFlashBaseModelOutput(None, logits=model._base_model_lm_head(hidden))
+        loss_full, _ = model._compute_loss(*inputs, base_outputs=full)
+        loss, _ = model._compute_loss(
+            *inputs, base_outputs=DFlashBaseModelOutput(None, base_hidden=hidden)
+        )
+        torch.testing.assert_close(loss, loss_full)
+
+    def test_offline_step_never_projects_the_full_sequence(self):
+        """Offline/streaming with KD on, lm_head only ever sees draft rows and teacher rows."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        model.config.num_orig_hidden_layers = 4
+        mtsp.convert(model, [("dflash", get_dflash_config(offline=True))])
+        assert model.dflash_self_logit_distillation
+        model.train()
+        seen = []
+        model._base_model_lm_head.register_forward_hook(
+            lambda _module, args, _out: seen.append(tuple(args[0].shape))
+        )
+        bsz, hidden = 2, model.config.hidden_size
+        dtype = next(model.dflash_module.parameters()).dtype
+        base_model_outputs = {
+            "aux_hidden_states": torch.randn(
+                bsz, SEQ_LEN, len(model.target_layer_ids) * hidden, dtype=dtype
+            ),
+            "base_model_hidden_states": torch.randn(bsz, SEQ_LEN, hidden, dtype=dtype),
+        }
+        input_ids = torch.randint(1, model.config.vocab_size, (bsz, SEQ_LEN))
+        model(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            base_model_outputs=base_model_outputs,
+        ).loss.backward()
+        assert len(seen) == 2, seen  # the draft's logits, then the KD teacher rows
+        assert (bsz, SEQ_LEN, hidden) not in seen, seen

@@ -351,7 +351,7 @@ def hf_model_type(model) -> str | None:
 
 
 def match_moe_block(module: "nn.Module", model_type: str | None = None) -> "MoESpec | None":
-    """Return the MoE layout layout for ``module``, resolved by model type.
+    """Return the MoE layout for ``module``, resolved by model type.
 
     ``model_type`` (the root ``model.config.model_type``) is a strict filter: only
     that model's own spec is consulted, and an unregistered model type resolves to

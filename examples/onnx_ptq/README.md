@@ -24,7 +24,7 @@ Model Optimizer enables highly performant quantization formats including NVFP4, 
 
 Please use the TensorRT docker image (e.g., `nvcr.io/nvidia/tensorrt:26.02-py3`) or visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
 
-> **Note:** If you are using `onnxruntime-gpu`, we recommend using `nvcr.io/nvidia/tensorrt:25.06-py3` as it is built with CUDA 12, which is required by the stable `onnxruntime-gpu` package.
+> **Note:** On Linux x86-64 with Python 3.11 and later, the default `nvidia-modelopt[onnx]` install uses ONNX Runtime 1.30.x with CUDA 13. Use a CUDA 13 container such as `nvcr.io/nvidia/tensorrt:26.02-py3` for GPU calibration.
 
 #### PETR and FAR3D containers
 

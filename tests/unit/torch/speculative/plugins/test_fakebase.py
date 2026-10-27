@@ -24,7 +24,11 @@ import torch
 pytest.importorskip("transformers")
 import transformers
 
-from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseConfig, FakeBaseModel
+from modelopt.torch.speculative.plugins.modeling_fakebase import (
+    FakeBaseConfig,
+    FakeBaseModel,
+    find_final_norm_path,
+)
 from modelopt.torch.speculative.utils import load_vlm_or_llm
 
 _HIDDEN_SIZE = 16
@@ -241,3 +245,36 @@ class TestFakeBaseRopeTheta:
         config = FakeBaseConfig(num_hidden_layers=2, hidden_size=32, rope_theta=None)
         assert config.rope_theta is None
         assert not getattr(config, "rope_parameters", None)
+
+
+def test_find_final_norm_path_resolves_a_shared_norm_instance():
+    """A norm instance also registered under an earlier path must still be found.
+
+    ``named_modules()`` de-duplicates by default and yields a shared module only under
+    the first name it reaches, so a dict built from it can be missing ``model.norm``
+    entirely. The failure is silent: callers read ``None``, skip the norm, and feed an
+    un-normed residual to lm_head -- a plausible loss curve against a garbage teacher.
+    """
+    shared = torch.nn.LayerNorm(8)
+
+    class _Aliased(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            # "aaa" sorts before "model", so traversal reaches the alias first.
+            self.aaa = torch.nn.Module()
+            self.aaa.norm = shared
+            self.model = torch.nn.Module()
+            self.model.norm = shared
+
+    model = _Aliased()
+    assert "model.norm" not in dict(model.named_modules()), "alias no longer shadows"
+    assert find_final_norm_path(model) == "model.norm"
+
+
+def test_find_final_norm_path_returns_none_without_a_norm():
+    class _NoNorm(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Linear(4, 4)
+
+    assert find_final_norm_path(_NoNorm()) is None

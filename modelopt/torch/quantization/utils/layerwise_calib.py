@@ -35,7 +35,13 @@ import torch
 import torch.nn as nn
 
 from modelopt.torch.utils import distributed as dist
-from modelopt.torch.utils import print_rank_0, warn_rank_0
+from modelopt.torch.utils import (
+    get_available_gpu_memory,
+    get_process_gpus,
+    print_rank_0,
+    warn_rank_0,
+)
+from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.network import (
     bind_forward_method,
     get_module_device,
@@ -348,11 +354,28 @@ class LayerActivationCollector:
                 )
                 bind_forward_method(layer, _patched_forward, "_original_forward")
 
+            # A VLM wrapper and its language model are both patched, and the wrapper's forward calls the
+            # language model's. Only the outermost call may turn the stop into ``None``: if the inner one
+            # did, the wrapper would go on running its own code on a ``None`` output.
+            depth = [0]
+
             def _early_stop_forward(module_self, *args, **kwargs):
+                depth[0] += 1
                 try:
                     return module_self._original_forward(*args, **kwargs)
                 except _EarlyStopForwardError:
+                    if depth[0] > 1:
+                        raise
                     return None
+                except torch.cuda.OutOfMemoryError as e:
+                    # The forward loop would split the data batch and retry, but the layer in 'run'
+                    # mode replays the batch it cached at full size, one cached batch per call: a
+                    # retry cannot shrink it and would replay the next batch's inputs instead.
+                    raise RuntimeError(
+                        "Layerwise calibration ran out of GPU memory. Splitting the batch now "
+                        "cannot help, since each decoder layer replays its cached inputs at the "
+                        "size they were cached with; rerun with a smaller calibration batch size."
+                    ) from e
                 except RuntimeError as e:
                     if "meta" not in str(e).lower():
                         raise
@@ -363,13 +386,31 @@ class LayerActivationCollector:
                         "decoder blocks. Use non-layerwise calibration for this "
                         "architecture."
                     ) from e
+                finally:
+                    depth[0] -= 1
 
-            bind_forward_method(self.model, _early_stop_forward, "_original_forward")
+            for root in self._early_stop_roots():
+                bind_forward_method(root, _early_stop_forward, "_original_forward")
         except Exception:
             self._cleanup_layers()
             raise
 
         self._patched = True
+
+    def _early_stop_roots(self) -> list[nn.Module]:
+        """Modules whose forward ends the pass early.
+
+        The model, plus the language model of a VLM wrapper, which text calibration drives directly.
+        """
+        roots = [self.model]
+        lm = getattr(self.model, "language_model", None)
+        if (
+            isinstance(lm, nn.Module)
+            and self._decoder_layers
+            and any(m is self._decoder_layers[0] for m in lm.modules())
+        ):
+            roots.append(lm)
+        return roots
 
     def _cleanup_layers(self):
         """Best-effort cleanup of any patched layers and model forward."""
@@ -378,8 +419,9 @@ class LayerActivationCollector:
                 if isinstance(layer, _SkipLayer):
                     self._decoder_layers[idx] = layer._original
 
-        if hasattr(self.model, "_original_forward"):
-            unpatch_forward_method(self.model, "_original_forward")
+        for root in self._early_stop_roots():
+            if hasattr(root, "_original_forward"):
+                unpatch_forward_method(root, "_original_forward")
 
         if self._decoder_layers is not None:
             for layer in self._decoder_layers:
@@ -548,6 +590,162 @@ class LayerActivationCollector:
 
         next_layer = self._decoder_layers[next_idx]
         return self.get_input_activations(next_layer, forward_loop)
+
+
+def _cuda_bytes_per_gpu(obj: Any, out: dict[int, int] | None = None) -> dict[int, int]:
+    """Bytes of the CUDA tensors in a nested args/kwargs structure, per GPU."""
+    out = {} if out is None else out
+    if isinstance(obj, torch.Tensor):
+        if obj.is_cuda:
+            out[obj.device.index] = out.get(obj.device.index, 0) + obj.nbytes
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            _cuda_bytes_per_gpu(value, out)
+    elif isinstance(obj, (list, tuple)):
+        for value in obj:
+            _cuda_bytes_per_gpu(value, out)
+    return out
+
+
+def _capture_layer_inputs(
+    model: nn.Module, layer: nn.Module, batch_size: int, seq_len: int, device: torch.device
+):
+    """Run *model* on a dummy batch until *layer* and return the ``(args, kwargs)`` it receives."""
+    input_ids = torch.zeros(batch_size, seq_len, dtype=torch.long, device=device)
+    # One left-pad position, like padded calibration rows, so the model builds the explicit
+    # attention mask that calibration batches get instead of a cheaper causal-only path.
+    attention_mask = torch.ones_like(input_ids)
+    attention_mask[:, 0] = 0
+    info = layer._layerwise_calib
+    info.mode = "capture"
+    try:
+        with _disable_use_cache(model):
+            model(input_ids, attention_mask=attention_mask)
+    finally:
+        info.mode = "original"
+    (inputs,) = info.collected_inputs
+    info.collected_inputs = []
+    return inputs
+
+
+def _forward_peak_per_gpu(layer: nn.Module, args: tuple, kwargs: dict) -> dict[int, int]:
+    """Peak memory one forward of *layer* adds on each GPU."""
+    base = {}
+    for gpu in get_process_gpus():
+        torch.cuda.reset_peak_memory_stats(gpu)
+        base[gpu] = torch.cuda.memory_allocated(gpu)
+    layer(*args, **kwargs)
+    return {
+        gpu: torch.cuda.max_memory_allocated(gpu) - base.get(gpu, 0) for gpu in get_process_gpus()
+    }
+
+
+def _gpu_index(device: torch.device) -> int | None:
+    """CUDA device index of *device*; ``None`` if it is not a GPU."""
+    if device.type != "cuda":
+        return None
+    return torch.cuda.current_device() if device.index is None else device.index
+
+
+def _layer_batch_fit(
+    model: nn.Module,
+    layer: nn.Module,
+    gpus: set[int],
+    seq_len: int,
+    num_samples: int,
+    memory_fraction: float,
+    device: torch.device,
+) -> int | None:
+    """Largest batch whose forward through *layer* fits; ``None`` if no GPU memory grows with it.
+
+    Layers of the same kind on other *gpus* cost what *layer* costs on its own GPU, so those GPUs'
+    memory limits the batch too.
+    """
+    # The first forward only warms up: it also allocates one-off buffers like cuBLAS's workspace.
+    for _ in range(2):
+        args, kwargs = _capture_layer_inputs(model, layer, 1, seq_len, device)
+        cached_per_sample = _cuda_bytes_per_gpu((args, kwargs))
+        one = _forward_peak_per_gpu(layer, args, kwargs)
+        del args, kwargs
+    try:
+        args, kwargs = _capture_layer_inputs(model, layer, 2, seq_len, device)
+        two = _forward_peak_per_gpu(layer, args, kwargs)
+    except RuntimeError as e:
+        # Capturing inputs reports running out of memory as a RuntimeError raised from it.
+        if not any(isinstance(x, torch.cuda.OutOfMemoryError) for x in (e, e.__cause__)):
+            raise
+        two = None
+    finally:
+        args = kwargs = None
+    if two is None:
+        # One sample fits but two do not: release what the failed forward left cached.
+        torch.cuda.empty_cache()
+        return 1
+
+    costs = {}
+    for gpu, peak in two.items():
+        per_sample = peak - one.get(gpu, 0)
+        if per_sample > 0:
+            costs[gpu] = (per_sample, one.get(gpu, 0) - per_sample, cached_per_sample.get(gpu, 0))
+    home = _gpu_index(get_module_device(layer))
+    if home in costs:
+        for gpu in gpus:
+            costs.setdefault(gpu, costs[home])
+    fits = []
+    for gpu, (per_sample, fixed, cached) in costs.items():
+        # Layerwise calibration caches every sample's inputs for this layer and the next.
+        available = get_available_gpu_memory(gpu) - 2 * num_samples * cached
+        fits.append(int((memory_fraction * available - fixed) // per_sample))
+    return min(fits, default=None)
+
+
+@torch.no_grad()
+def get_max_layerwise_batch_size(
+    model: nn.Module,
+    seq_len: int,
+    max_batch_size: int,
+    num_samples: int,
+    memory_fraction: float = 0.5,
+    device: torch.device | None = None,
+) -> int:
+    """Largest calibration batch, up to *max_batch_size*, whose decoder-layer forwards fit.
+
+    Layerwise calibration runs one decoder layer at a time, so a full-model batch probe such as
+    :func:`get_max_batch_size <modelopt.torch.utils.dataset_utils.get_max_batch_size>` both
+    overstates the memory a batch needs and risks running out of it. Instead, the first layer
+    of each kind (by module classes and parameter shapes: dense or MoE, full or linear attention,
+    and per-layer widths such as Nemotron-NAS's) runs on one and two samples of *seq_len* tokens,
+    and the growth of its peak memory on each GPU is that GPU's cost per sample; every other GPU
+    that runs a layer of that kind is charged the same. A batch fits
+    when the layer's forward stays within *memory_fraction* of the GPU's available memory, after
+    the inputs layerwise calibration caches for all *num_samples*; the rest is left for
+    quantizers and Hessians. A layer that fits one sample but not two gives a batch of one. The
+    dummy token ids go to *device*, by default the model's. All ranks return the same, smallest
+    batch.
+    """
+    batch_size = max_batch_size
+    layers = LayerActivationCollector.get_decoder_layers(model)
+    if layers and torch.cuda.is_available() and max_batch_size > 1:
+        kinds: dict[tuple, list[nn.Module]] = {}
+        for layer in layers:
+            classes = tuple(sorted({type(m).__name__ for m in layer.modules()}))
+            shapes = tuple(tuple(p.shape) for p in layer.parameters())
+            kinds.setdefault((classes, shapes), []).append(layer)
+        device = device or get_module_device(model)
+        collector = LayerActivationCollector(model)
+        collector._patch_all_layers(layers)
+        try:
+            for same_kind in kinds.values():
+                indexes = (_gpu_index(get_module_device(layer)) for layer in same_kind)
+                gpus = {gpu for gpu in indexes if gpu is not None}
+                fit = _layer_batch_fit(
+                    model, same_kind[0], gpus, seq_len, num_samples, memory_fraction, device
+                )
+                if fit is not None:
+                    batch_size = min(batch_size, fit)
+        finally:
+            collector._unpatch_all_layers()
+    return max(1, min(dist.allgather(batch_size)))
 
 
 def _move_to_device(obj: Any, device: torch.device) -> Any:

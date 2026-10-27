@@ -476,7 +476,7 @@ class RandomSearcher(IterativeSearcher):
     """An iterative searcher that samples subnets randomly."""
 
     def sample(self) -> dict[str, Any]:
-        """Random sample new subset during each steo."""
+        """Random sample new subnet during each step."""
         return self._sample()
 
 

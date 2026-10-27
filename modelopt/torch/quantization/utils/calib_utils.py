@@ -38,13 +38,73 @@
 
 """GPTQ helper and Hessian utilities for calibration."""
 
-import math
+from contextlib import contextmanager
 
 import torch
+import torch.distributed as dist
 
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import get_available_gpu_memory, get_process_gpus, print_rank_0
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
-from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
+
+# A GPU takes a new Hessian only if enough memory stays available after it for the calibration
+# forward that follows. Until GPTQ has measured that forward on the GPU, keep this share free.
+_HESSIAN_UNMEASURED_RESERVE = 0.35
+# Once measured, keep this multiple of the most a calibration forward added on the GPU, and at
+# least this share of the GPU.
+_HESSIAN_RESERVE_MARGIN = 1.5
+_HESSIAN_MIN_RESERVE = 0.1
+# The most memory a GPTQ calibration forward has added on each GPU, by device index.
+_calib_forward_peak: dict[int, int] = {}
+
+
+def _gpu_has_room(gpu: int, nbytes: int) -> bool:
+    """Whether ``nbytes`` more on ``gpu`` leaves the calibration forward the memory it needs."""
+    total = torch.cuda.get_device_properties(gpu).total_memory
+    peak = _calib_forward_peak.get(gpu)
+    if peak is None:
+        reserve = _HESSIAN_UNMEASURED_RESERVE * total
+    else:
+        reserve = max(_HESSIAN_MIN_RESERVE * total, _HESSIAN_RESERVE_MARGIN * peak)
+    return get_available_gpu_memory(gpu) - nbytes >= reserve
+
+
+def reset_calib_forward_memory():
+    """Forget measured calibration forwards; a new run, maybe of another model, measures afresh."""
+    _calib_forward_peak.clear()
+
+
+@contextmanager
+def track_calib_forward_memory():
+    """Record the memory the enclosed calibration forward adds on each GPU, for Hessian placement.
+
+    PyTorch's peak counters are reset first: otherwise an earlier peak, such as the previous
+    layer's Hessians and GPTQ updates, would count as forward memory and send Hessians to the CPU
+    for nothing.
+    """
+    gpus = get_process_gpus() if torch.cuda.is_available() else []
+    allocated = {}
+    for gpu in gpus:
+        torch.cuda.reset_peak_memory_stats(gpu)
+        allocated[gpu] = torch.cuda.memory_allocated(gpu)
+    yield
+    for gpu in gpus:
+        added = torch.cuda.max_memory_allocated(gpu) - allocated[gpu]
+        _calib_forward_peak[gpu] = max(_calib_forward_peak.get(gpu, 0), added)
+
+
+def _hessian_offload_device(nbytes: int) -> torch.device:
+    """Where a Hessian goes when its weight's GPU lacks room: the emptiest GPU with room, else CPU.
+
+    A model sharded over several GPUs leaves the ones not holding the current layer idle, and a
+    Hessian there costs a device-to-device copy per update instead of a host copy and a CPU
+    rescale of the whole matrix. Only GPUs this process already holds memory on are candidates,
+    and only outside distributed runs, so no other job's or rank's GPU is touched.
+    """
+    if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
+        for gpu in sorted(get_process_gpus(), key=get_available_gpu_memory, reverse=True):
+            if _gpu_has_room(gpu, nbytes):
+                return torch.device("cuda", gpu)
+    return torch.device("cpu")
 
 
 def update_hessian(input, hessian, n_samples):
@@ -60,19 +120,22 @@ def update_hessian(input, hessian, n_samples):
     Note: input must be non-empty (batch_size > 0); a zero-sized input causes division by zero.
     """
     # Flatten to 2D (total_tokens, features) first, so batch_size counts tokens
-    input_flat = input.reshape(-1, input.shape[-1]).t().float()
-    batch_size = input_flat.shape[1]
+    input_flat = input.reshape(-1, input.shape[-1]).float()
+    batch_size = input_flat.shape[0]
 
     if batch_size == 0:  # in MOEs some experts receive no tokens
         return hessian, n_samples
 
-    # Incremental averaging: scale down old hessian
-    hessian *= n_samples / (n_samples + batch_size)
+    # Incremental averaging, H = H * n / (n + b) + (2 / (n + b)) * X^T X, in one GEMM: this runs
+    # once per expert per forward, and separate scale and add passes each rewrite all of H.
+    scale = n_samples / (n_samples + batch_size)
     n_samples += batch_size
-
-    # Compute outer product: H += (2/n_samples) * X @ X^T
-    scaled_input = math.sqrt(2 / n_samples) * input_flat
-    hessian.add_((scaled_input @ scaled_input.t()).to(hessian.device))
+    if hessian.device == input_flat.device:
+        hessian.addmm_(input_flat.t(), input_flat, beta=scale, alpha=2 / n_samples)
+    else:
+        hessian.mul_(scale).add_(
+            (input_flat.t() @ input_flat).to(hessian.device), alpha=2 / n_samples
+        )
 
     return hessian, n_samples
 
@@ -129,23 +192,51 @@ class GPTQHelper:
 
     CACHE_NAME = "_forward_no_gptq_hessian"
 
-    def __init__(self, module, name, offload_to_cpu=False, fused=False, importance_weighted=False):
-        """Initialize GPTQHelper with module state and Hessian storage."""
+    def __init__(
+        self,
+        module,
+        name,
+        offload_to_cpu=False,
+        fused=False,
+        importance_weighted=False,
+        weight_quantizer=None,
+        weight=None,
+        log_mse=True,
+    ):
+        """Initialize GPTQHelper with module state and Hessian storage.
+
+        ``weight_quantizer`` and ``weight`` select one of several weights a module holds, such as
+        one expert's slice of an HF fused-MoE parameter; by default the helper owns
+        ``module.weight`` and ``module.weight_quantizer``. ``log_mse=False`` skips the logged
+        Hessian-weighted error, which costs two weight-by-Hessian matmuls.
+        """
         self.module = module
         self.name = name
         self.fused = fused
         self.importance_weighted = importance_weighted
-        in_features = module.weight.shape[-1]
-        device = module.weight.device
-        if device.type == "meta" or (
-            offload_to_cpu and device.type == "cuda" and get_used_gpu_mem_fraction(device) > 0.65
-        ):
-            device = "cpu"
+        self._weight_quantizer = weight_quantizer
+        self.log_mse = log_mse
+        weight = module.weight if weight is None else weight
+        in_features = weight.shape[-1]
+        device = weight.device
+        if device.type == "meta":
+            device = torch.device("cpu")
+        elif offload_to_cpu and device.type == "cuda":
+            index = torch.cuda.current_device() if device.index is None else device.index
+            if not _gpu_has_room(index, 4 * in_features**2):
+                device = _hessian_offload_device(4 * in_features**2)
         self.hessian = torch.zeros(in_features, in_features, dtype=torch.float32, device=device)
         self.n_samples = 0
         # Set by update_weights(); listed here for documentation.
         self.weight: torch.Tensor | None = None
         self.h_inv: torch.Tensor | None = None
+
+    @property
+    def weight_quantizer(self):
+        """The quantizer GPTQ quantizes this helper's weight with."""
+        if self._weight_quantizer is not None:
+            return self._weight_quantizer
+        return self.module.weight_quantizer
 
     def setup(self):
         """Patch the module's forward to accumulate Hessian during the collection pass."""
@@ -157,9 +248,7 @@ class GPTQHelper:
                 hessian_input = self.input_quantizer(inp)
             else:
                 hessian_input = inp
-            gptq_helper.hessian, gptq_helper.n_samples = update_hessian(
-                hessian_input, gptq_helper.hessian, gptq_helper.n_samples
-            )
+            gptq_helper.accumulate(hessian_input)
 
             out = self._forward_no_gptq_hessian(input, *args, **kwargs)
 
@@ -167,9 +256,33 @@ class GPTQHelper:
 
         bind_forward_method(self.module, hessian_forward, self.CACHE_NAME)
 
+    def accumulate(self, inputs):
+        """Add a batch of this weight's inputs, after input quantization, to the Hessian."""
+        inputs = inputs.to_local() if hasattr(inputs, "to_local") else inputs
+        self.hessian, self.n_samples = update_hessian(inputs, self.hessian, self.n_samples)
+
     def cleanup(self):
         """Unpatch the module's forward method."""
         unpatch_forward_method(self.module, self.CACHE_NAME)
+
+    def sync_hessian_across_dp(self):
+        """Merge the Hessians of this module's data-parallel replicas, which saw different data."""
+        parallel_state = getattr(self.module, "parallel_state", None)
+        group = parallel_state.data_parallel_group if parallel_state is not None else None
+        if group is None or not group.is_initialized() or group.world_size() == 1:
+            return
+        on_cuda = "nccl" in dist.get_backend(group.group)
+        device = (
+            torch.device("cuda", torch.cuda.current_device()) if on_cuda else torch.device("cpu")
+        )
+        n_samples = torch.tensor(self.n_samples, dtype=torch.float64, device=device)
+        hessian = self.hessian.to(device).mul_(self.n_samples)
+        dist.all_reduce(n_samples, group=group.group)
+        dist.all_reduce(hessian, group=group.group)
+        self.n_samples = int(n_samples.item())
+        if self.n_samples:
+            hessian /= self.n_samples
+        self.hessian = hessian.to(self.hessian.device)
 
     def free(self):
         """Release Hessian and working tensors to reclaim memory."""
@@ -177,23 +290,24 @@ class GPTQHelper:
         self.weight = None
         self.h_inv = None
 
-    def update_weights(self, block_size, perc_damp):
-        """Run GPTQ blockwise weight update on this module.
+    def update_weights(self, block_size, perc_damp, weight=None):
+        """Run GPTQ blockwise weight update on this helper's weight.
 
-        Populates ``self.weight`` and ``self.h_inv``, runs the blockwise update,
-        logs MSE, and writes the result back to the module.
+        Populates ``self.weight`` and ``self.h_inv``, runs the blockwise update, logs MSE, and
+        overwrites ``weight`` (default ``module.weight``) in place, so an expert's slice of a
+        fused 3-D parameter is written back into that parameter.
         """
-        hessian = self.hessian.to(self.module.weight.device)
-        self.weight = self.module.weight.data.float().clone()
+        weight = self.module.weight if weight is None else weight
+        hessian = self.hessian.to(weight.device)
+        self.weight = weight.data.float().clone()
         self._prepare_hessian_inverse(hessian, perc_damp)
         self._blockwise_update(block_size)
-        self._print_mse_error(hessian)
-        self.module.weight.data = self.weight.reshape(self.module.weight.shape).to(
-            self.module.weight.data.dtype
-        )
+        if self.log_mse:
+            self._print_mse_error(hessian, weight)
+        weight.data.copy_(self.weight.reshape(weight.shape))
 
     # ------------------------------------------------------------------
-    # Quantize helpers — all read from self.module, self.weight, self.h_inv
+    # Quantize helpers — all read from self.weight_quantizer, self.weight, self.h_inv
     # ------------------------------------------------------------------
 
     def _prepare_hessian_inverse(self, hessian, perc_damp):
@@ -212,7 +326,7 @@ class GPTQHelper:
         assert self.weight is not None and self.h_inv is not None, (
             "_blockwise_update called before _prepare_hessian_inverse()"
         )
-        quantizer = self.module.weight_quantizer
+        quantizer = self.weight_quantizer
 
         if self.fused and getattr(quantizer, "_is_nvfp4_static_quantizer", False):
             block_sizes = quantizer.block_sizes
@@ -232,9 +346,9 @@ class GPTQHelper:
         else:
             gptq_blockwise_update(self.weight, self.h_inv, block_size, quantizer)
 
-    def _print_mse_error(self, hessian):
-        """Log Hessian-weighted relative MSE between ``self.weight`` and original weights."""
-        w_orig = self.module.weight.float()
+    def _print_mse_error(self, hessian, weight):
+        """Log Hessian-weighted relative MSE between ``self.weight`` and original ``weight``."""
+        w_orig = weight.float()
         delta = self.weight - w_orig
         mse = (delta).mm(hessian).mul(delta).mean() / (w_orig.mm(hessian).mul(w_orig).mean() + 1e-6)
         suffix = f", n_hessian_samples: {self.n_samples}" if self.n_samples else ""

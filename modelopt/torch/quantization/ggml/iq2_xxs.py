@@ -43,6 +43,7 @@ from .common import (
     GGML_BLOCK_SIZE,
     GGMLFormat,
     chunk_importance,
+    dequantize_blocks,
     importance_blocks,
     iq2_tile_terms,
     narrow_to_float32,
@@ -69,6 +70,7 @@ _IQ2_XXS_LOCAL_SCALES = 16
 _IQ2_XXS_GROUPS = 32
 _IQ2_XXS_GROUPS_PER_SUBBLOCK = 4
 _IQ2_XXS_SUBBLOCKS = _IQ2_XXS_GROUPS // _IQ2_XXS_GROUPS_PER_SUBBLOCK
+_IQ2_XXS_INT8_GROUP_SIZE = IQ2_XXS_BLOCK_SIZE // _IQ2_XXS_SUBBLOCKS
 # Largest representable magnitude: grid entry 43 at local scale 15 -> (0.5 + 15) * 0.25.
 _IQ2_XXS_NATIVE_MAX = 43 * 31 / 8
 _IQ2_XXS_SCALE_ANCHOR_MIN = 0.65
@@ -258,32 +260,37 @@ def dequantize_iq2_xxs(
         if extension is not None:
             grid = iq2_xxs_grid(blocks.device)
             return extension.iq2_xxs_unpack(blocks, grid, dtype).reshape(shape)
+    return dequantize_blocks(
+        blocks,
+        _unpack_int8,
+        block_size=IQ2_XXS_BLOCK_SIZE,
+        group_size=_IQ2_XXS_INT8_GROUP_SIZE,
+        dtype=dtype,
+        block_chunk_size=block_chunk_size,
+    ).reshape(shape)
+
+
+def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Signed grid levels (±8, ±25, ±43) and the step of each 32-value sub-block."""
+    count = blocks.shape[0]
     bit_positions = torch.arange(8, dtype=torch.int64, device=blocks.device)
     sign_shifts = 7 * torch.arange(
         _IQ2_XXS_GROUPS_PER_SUBBLOCK, dtype=torch.int64, device=blocks.device
     )
-    grid = iq2_xxs_grid(blocks.device)
-    decoded = torch.empty((blocks.shape[0], IQ2_XXS_BLOCK_SIZE), dtype=dtype, device=blocks.device)
-    for start in range(0, blocks.shape[0], block_chunk_size):
-        stop = min(start + block_chunk_size, blocks.shape[0])
-        block_chunk = blocks[start:stop]
-        count = block_chunk.shape[0]
-        d = block_chunk[:, :2].contiguous().view(torch.float16).reshape(-1).float()
-        body = block_chunk[:, 2:].reshape(count, _IQ2_XXS_SUBBLOCKS, 8).to(torch.int64)
-        entries = body[:, :, 0:4]
-        aux = body[:, :, 4] | (body[:, :, 5] << 8) | (body[:, :, 6] << 16) | (body[:, :, 7] << 24)
-        # Top nibble is the sub-block scale; the low 28 bits are four 7-bit sign indices.
-        scales = d.unsqueeze(-1) * (0.5 + ((aux >> 28) & 0xF).float()) * 0.25
-        sign_index = (aux.unsqueeze(-1) >> sign_shifts) & 0x7F
-        folded = sign_index ^ (sign_index >> 4)
-        folded ^= folded >> 2
-        folded ^= folded >> 1
-        sign_mask = sign_index | ((folded & 1) << 7)
-        signs = 1.0 - 2.0 * ((sign_mask.unsqueeze(-1) >> bit_positions) & 1).float()
-        values = grid[entries] * signs
-        chunk_decoded = values * scales.unsqueeze(-1).unsqueeze(-1)
-        decoded[start:stop] = chunk_decoded.reshape(-1, IQ2_XXS_BLOCK_SIZE)
-    return decoded.reshape(shape)
+    d = blocks[:, :2].contiguous().view(torch.float16).reshape(-1).float()
+    body = blocks[:, 2:].reshape(count, _IQ2_XXS_SUBBLOCKS, 8).to(torch.int64)
+    entries = body[:, :, 0:4]
+    aux = body[:, :, 4] | (body[:, :, 5] << 8) | (body[:, :, 6] << 16) | (body[:, :, 7] << 24)
+    # Top nibble is the sub-block scale; the low 28 bits are four 7-bit sign indices.
+    steps = d.unsqueeze(-1) * (0.5 + ((aux >> 28) & 0xF).float()) * 0.25
+    sign_index = (aux.unsqueeze(-1) >> sign_shifts) & 0x7F
+    folded = sign_index ^ (sign_index >> 4)
+    folded ^= folded >> 2
+    folded ^= folded >> 1
+    sign_mask = sign_index | ((folded & 1) << 7)
+    signs = 1.0 - 2.0 * ((sign_mask.unsqueeze(-1) >> bit_positions) & 1).float()
+    levels = iq2_xxs_grid(blocks.device)[entries] * signs
+    return levels.reshape(count, IQ2_XXS_BLOCK_SIZE), steps
 
 
 IQ2_XXS_FORMAT = GGMLFormat(
@@ -294,6 +301,8 @@ IQ2_XXS_FORMAT = GGMLFormat(
     dequantize=dequantize_iq2_xxs,
     block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
     decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+    int8_group_size=_IQ2_XXS_INT8_GROUP_SIZE,
+    unpack_int8=_unpack_int8,
     weighted=True,
 )
 
