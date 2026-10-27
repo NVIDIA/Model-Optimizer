@@ -15,6 +15,8 @@
 
 """Collapse reshape chains at the final, inferred stage of the DLA pipeline."""
 
+from itertools import pairwise
+
 import numpy as np
 from onnx import TensorProto, helper
 
@@ -34,6 +36,7 @@ def _apply_remove_reshapes(model):
     runtime_inputs = _runtime_input_names(model)
     reshapes = _operator_nodes(model, {"Reshape"})
     captured = _subgraph_captures(graph)
+    positions = {id(node): index for index, node in enumerate(reshapes)}
     chains, tails = [], {}
     for node in reshapes:
         producer = cache.get_producer(node.input[0])
@@ -80,6 +83,14 @@ def _apply_remove_reshapes(model):
                 )
             ]
         elif len(chain) > 1:
+            if all(cache.get_shape(node.output[0]) == input_shape for node in chain[:-1]) and any(
+                positions[id(right)] != positions[id(left)] + 1 for left, right in pairwise(chain)
+            ):
+                # Interleaved identity prefixes need only bypassing; retain the existing target and attributes.
+                last.input[0] = first.input[0]
+                for node in chain[:-1]:
+                    replacements[id(node)] = []
+                continue
             target = add_initializer(
                 graph,
                 cache.unique_name(last.name + "_reshape_shape"),

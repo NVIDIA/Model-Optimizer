@@ -249,21 +249,24 @@ def test_padding_view_before_public_unary_output_keeps_its_rank():
 
 @pytest.mark.parametrize("identity", [False, True])
 @pytest.mark.parametrize("public_middle", [False, True])
-def test_interleaved_reshape_chains_follow_data_producers(identity, public_middle):
+@pytest.mark.parametrize("identity_prefix", [False, True])
+def test_interleaved_reshape_chains_follow_data_producers(identity, public_middle, identity_prefix):
     """Collapse independent interleaved branches without crossing a public intermediate."""
     final_shape = [2, 3] if identity else [6]
+    a_shape = [2, 3] if identity_prefix else [3, 2]
+    b_shape = [2, 3] if identity_prefix else [1, 6]
     outputs = [
         helper.make_tensor_value_info(name, TensorProto.FLOAT, final_shape) for name in ["y", "w"]
     ]
     if public_middle:
-        outputs.append(helper.make_tensor_value_info("a", TensorProto.FLOAT, [3, 2]))
+        outputs.append(helper.make_tensor_value_info("a", TensorProto.FLOAT, a_shape))
     model = helper.make_model(
         helper.make_graph(
             [
                 helper.make_node("Reshape", ["x", "a_shape"], ["a"]),
                 helper.make_node("Reshape", ["z", "b_shape"], ["b"]),
-                helper.make_node("Reshape", ["a", "final_shape"], ["y"]),
-                helper.make_node("Reshape", ["b", "final_shape"], ["w"]),
+                helper.make_node("Reshape", ["a", "final_shape"], ["y"], allowzero=0),
+                helper.make_node("Reshape", ["b", "final_shape"], ["w"], allowzero=0),
             ],
             "interleaved_chains",
             [helper.make_tensor_value_info(name, TensorProto.FLOAT, [2, 3]) for name in ["x", "z"]],
@@ -271,9 +274,9 @@ def test_interleaved_reshape_chains_follow_data_producers(identity, public_middl
             [
                 numpy_helper.from_array(np.array(values, np.int64), name)
                 for name, values in [
-                    ("a_shape", [3, 2]),
-                    ("b_shape", [1, 6]),
-                    ("final_shape", final_shape),
+                    ("a_shape", a_shape),
+                    ("b_shape", b_shape),
+                    ("final_shape", final_shape if identity else [-1]),
                 ]
             ],
         ),
@@ -288,5 +291,10 @@ def test_interleaved_reshape_chains_follow_data_producers(identity, public_middl
     expected = _execute(model, feeds)
     changed = _apply_remove_reshapes(copy.deepcopy(model))
     assert len(changed.graph.node) == (3 if public_middle else 2)
+    if identity_prefix and not identity:
+        for node in changed.graph.node:
+            if node.output[0] in {"y", "w"}:
+                assert node.input[1] == "final_shape"
+                assert next(attr.i for attr in node.attribute if attr.name == "allowzero") == 0
     for actual, reference in zip(_execute(changed, feeds), expected):
         np.testing.assert_array_equal(actual, reference)
