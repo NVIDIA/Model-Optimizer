@@ -25,11 +25,9 @@ import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
 from autoquant_utils import (
-    _FSDP2_KV_AUTOQUANT_ERROR,
     _get_autoquant_memory_probe,
     _quantize_config_explicitly_enables_kv,
     _recipe_is_auto_quantize,
-    _recipe_is_kv_auto_quantize,
     auto_quantize,
 )
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
@@ -89,6 +87,7 @@ from modelopt.torch.models.hf import prepare_model_for_calibration
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
+from modelopt.torch.quantization.utils.layerwise_calib import get_max_layerwise_batch_size
 from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
@@ -114,12 +113,12 @@ from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloa
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
-# Tokens per calibration batch when layerwise calibration picks the batch size (16 x 512).
-LAYERWISE_CALIB_TOKENS = 8192
+# Most tokens per calibration batch when layerwise calibration picks the batch size (64 x 512).
+LAYERWISE_CALIB_TOKENS = 32768
 
 
 def _layerwise_calib_batch_size(calib_seq: int, num_samples: int) -> int:
-    """Default layerwise batch size: LAYERWISE_CALIB_TOKENS tokens, but 1 to all of the samples."""
+    """Largest default layerwise batch: LAYERWISE_CALIB_TOKENS tokens, but 1 to all of the samples."""
     return max(1, min(LAYERWISE_CALIB_TOKENS // calib_seq, num_samples))
 
 
@@ -320,8 +319,6 @@ def _validate_recipe_calibration(args: argparse.Namespace, recipe) -> None:
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
-    if args.use_fsdp2 and _recipe_is_kv_auto_quantize(args.recipe):
-        raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
     if args.use_fsdp2:
         hf_config = AutoConfig.from_pretrained(
             args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
@@ -1020,7 +1017,12 @@ def quantize_main(
     if args.batch_size == 0:
         # For VL models with image-text calibration, skip automatic batch size detection
         # since get_max_batch_size can't handle multimodal inputs
-        if args.calib_with_images:
+        if args.use_fsdp2 and aq_config is not None:
+            print_rank_0(
+                "FSDP2 AutoQuant uses batch_size=1 by default; set --batch_size to override."
+            )
+            args.batch_size = 1
+        elif args.calib_with_images:
             print("Image-text calibration enabled. Using default batch_size=1 for calibration.")
             args.batch_size = 1
         # Speculative decoding offline model dost not support get_max_batch_size() because of
@@ -1032,13 +1034,17 @@ def quantize_main(
             args.batch_size = 1
         # Layerwise calibration processes one layer at a time; auto batch-size probing runs a
         # full-model forward which defeats the point and can OOM on very large models. A batch
-        # then only holds one layer's activations, so size it by tokens: batch 1 makes an MoE
-        # layer run its per-expert loop once per sample.
+        # then only holds one layer's activations, so probe one decoder layer of each kind, up
+        # to a token budget: batch 1 makes an MoE layer run its per-expert loop once per sample.
         elif is_layerwise:
-            args.batch_size = _layerwise_calib_batch_size(args.calib_seq, sum(args.calib_size))
+            max_batch_size = _layerwise_calib_batch_size(args.calib_seq, sum(args.calib_size))
+            args.batch_size = get_max_layerwise_batch_size(
+                language_model, args.calib_seq, max_batch_size, sum(args.calib_size), device=device
+            )
             print(
-                f"Layerwise calibration enabled. Using default batch_size={args.batch_size} "
-                f"({LAYERWISE_CALIB_TOKENS} tokens per batch) for calibration."
+                f"Layerwise calibration enabled. Using batch_size={args.batch_size}, the most "
+                f"that fits a decoder layer's forward, up to {max_batch_size} "
+                f"({LAYERWISE_CALIB_TOKENS} tokens)."
             )
         else:
             # Calibration/sparsification will actually take much more memory than regular inference
@@ -1333,8 +1339,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Run calibration under PyTorch FSDP2 (requires torchrun); takes precedence over "
-            "--use_seq_device_map. v1: standard causal-LM only (no VILA / pack-quantized / "
-            "speculative / auto-quantize / sparsity / VLM / MTP)."
+            "--use_seq_device_map. Includes experimental weight and KV-cache AutoQuantize. "
+            "v1: standard causal-LM only (no VILA / pack-quantized / speculative / sparsity / VLM / MTP)."
         ),
     )
     parser.add_argument(

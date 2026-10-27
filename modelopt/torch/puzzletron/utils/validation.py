@@ -23,6 +23,7 @@ and similarity losses for knowledge distillation.
 import functools
 import math
 from enum import Enum
+from typing import Self
 
 import numpy as np
 import torch
@@ -31,7 +32,6 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.generation.logits_process import TopKLogitsWarper, TopPLogitsWarper
-from typing_extensions import Self
 
 from ..tools import kd_model
 
