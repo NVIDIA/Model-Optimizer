@@ -196,6 +196,7 @@ def _transform_make_dla_compatible(
             if result is not None:
                 probe = result
         _validate_boundary_contract(probe, prepared_input_ops, prepared_output_ops)
+        del probe
     model = infer_shapes(model)
     for name, transform in DLA_TRANSFORMS:
         if verbose:
