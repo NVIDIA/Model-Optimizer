@@ -591,7 +591,8 @@ def test_gather_preserves_existing_public_initializer_name():
 
 
 @pytest.mark.parametrize("index_shape", [(2, 3), (1, 2, 3)])
-def test_multidimensional_fixed_gather_indices_refuse_before_any_mutation(index_shape):
+@pytest.mark.parametrize("kind", ["fixed", "input", "default"])
+def test_multidimensional_gather_indices_refuse_before_any_mutation(index_shape, kind):
     """Reject unsupported index layouts before changing an earlier valid Gather."""
     model = helper.make_model(
         helper.make_graph(
@@ -616,7 +617,14 @@ def test_multidimensional_fixed_gather_indices_refuse_before_any_mutation(index_
     )
     model.ir_version = 9
     onnx.checker.check_model(model, full_check=True)
+    if kind != "fixed":
+        model.graph.input.append(
+            helper.make_tensor_value_info("indices", TensorProto.INT64, index_shape)
+        )
+    if kind == "input":
+        model.graph.initializer.remove(model.graph.initializer[1])
+    onnx.checker.check_model(model, full_check=True)
     before = model.SerializeToString()
-    with pytest.raises(ValueError, match=r"fixed Gather indices.*rank"):
+    with pytest.raises(ValueError, match=r"Gather indices.*rank"):
         _apply_gather(model)
     assert model.SerializeToString() == before
