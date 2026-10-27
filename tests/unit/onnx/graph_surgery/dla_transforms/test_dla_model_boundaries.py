@@ -140,6 +140,45 @@ def test_ordered_pipeline_preserves_matrix_squeeze_axes(axes):
     np.testing.assert_array_equal(_checked_run(transformed, feeds)[0], expected)
 
 
+@pytest.mark.parametrize("axis", [0, 1, -1])
+def test_registered_concat_preserves_promoted_input_axes(axis):
+    """Shift Concat axes once after consistently promoting every native operand."""
+    shape = [2, 3]
+    result_shape = shape.copy()
+    result_shape[axis] *= 2
+    model = _make_model(
+        [helper.make_node("Concat", ["a", "b"], ["y"], axis=axis)],
+        [helper.make_tensor_value_info(name, TensorProto.FLOAT, shape) for name in ("a", "b")],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, result_shape)],
+    )
+    feeds = {"a": np.arange(6, dtype=np.float32).reshape(shape), "b": np.ones(shape, np.float32)}
+    expected = _checked_run(model, feeds)[0]
+    changed = _transform_make_dla_compatible(model, verbose=False)
+    np.testing.assert_array_equal(_checked_run(changed, feeds)[0], expected)
+
+
+@pytest.mark.parametrize("axis", [0, -3])
+def test_normalization_public_squeeze_keeps_original_axes(axis):
+    """Retarget original batch squeezing together with the generated spatial singleton."""
+    model = _make_model(
+        [
+            helper.make_node("InstanceNormalization", ["x", "scale", "bias"], ["normalized"]),
+            helper.make_node("Squeeze", ["normalized", "axes"], ["y"]),
+        ],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 3, 4])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [3, 4])],
+        [
+            numpy_helper.from_array(np.ones(3, np.float32), "scale"),
+            numpy_helper.from_array(np.zeros(3, np.float32), "bias"),
+            numpy_helper.from_array(np.array([axis], np.int64), "axes"),
+        ],
+    )
+    feeds = {"x": np.arange(12, dtype=np.float32).reshape(1, 3, 4)}
+    expected = _checked_run(model, feeds)[0]
+    changed = _transform_make_dla_compatible(model, verbose=False)
+    np.testing.assert_allclose(_checked_run(changed, feeds)[0], expected, rtol=1e-6, atol=1e-7)
+
+
 def test_standalone_intermediary_rank_change_preserves_concat_inputs():
     """Retain an internal rank-changing squeeze whose downstream consumer expects rank three."""
     model = _make_model(
@@ -163,6 +202,10 @@ def test_standalone_intermediary_rank_change_preserves_concat_inputs():
     expected = _checked_run(model, feeds)[0]
     _apply_remove_intermediary_squeeze_unsqueeze(model)
     np.testing.assert_array_equal(_checked_run(model, feeds)[0], expected)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="Concat"):
+        _apply_non4d_model_inputs(model)
+    assert model.SerializeToString() == before
 
 
 def test_standalone_empty_axes_adapter_can_be_removed():

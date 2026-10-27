@@ -78,6 +78,24 @@ def _apply_non4d_model_inputs(model):
                 )
             unsqueezed_shapes[id(consumer)] = output_shape
         promotions.append((value, shape, consumers))
+    promoted_shapes = {value.name: shape for value, shape, _ in promotions}
+    concats = {
+        id(node): node
+        for _, _, consumers in promotions
+        for node in consumers
+        if node.op_type == "Concat"
+    }
+    for node in concats.values():
+        if (
+            any(name not in promoted_shapes for name in node.input)
+            or len({len(promoted_shapes[name]) for name in node.input}) != 1
+        ):
+            raise ValueError(f"Cannot promote mixed-layout Concat {node.name!r}")
+    for node in concats.values():
+        for attribute in node.attribute:
+            if attribute.name == "axis" and attribute.i >= 0:
+                attribute.i += 4 - len(promoted_shapes[node.input[0]])
+        node.name = cache.unique_name((node.name or node.output[0]) + "_axis_updated")
     for value, shape, consumers in promotions:
         axes = list(range(4 - len(shape)))
         axes_name = add_initializer(
@@ -355,11 +373,17 @@ def _apply_fix_instancenorm_channels(model):
                     if len(consumer.input) < 2:
                         continue
                     axes = cache.get_init(consumer.input[1])
-                    if axes is not None and numpy_helper.to_array(axes).reshape(-1).tolist() == [0]:
+                    values = (
+                        None if axes is None else numpy_helper.to_array(axes).reshape(-1).tolist()
+                    )
+                    if axes is not None and values and values[0] == 0:
+                        native_axes = [
+                            value - 1 if value >= 1 else value + 3 for value in values[1:]
+                        ]
                         consumer.input[1] = add_initializer(
                             graph,
                             cache.unique_name(axes.name + "_trailing"),
-                            np.asarray([3], np.int64),
+                            np.asarray([*native_axes, 3], np.int64),
                             dtype=TensorProto.INT64,
                             with_value_info=False,
                         )
