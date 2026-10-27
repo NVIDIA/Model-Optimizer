@@ -266,8 +266,9 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
             getattr(q, "num_bits", None) in GGML_FORMATS for q in weight_quantizers
         ):
             # A GGML format packs each expert's weight into its blocks and registers no weight_scale
-            # for the fold to stack. Decided on the gathered states and the recipe's format, so every
-            # rank refuses alike.
+            # for the fold to stack. Decided on the gathered states and on the format, which a recipe
+            # sets by module name and so is the same for every expert on every rank: every rank
+            # refuses alike.
             raise NotImplementedError(
                 f"{type(module).__name__}.{proj}: GGML formats pack each expert's weight with no "
                 "weight_scale, which the keep-fused fold cannot stack; only the per-expert export "
