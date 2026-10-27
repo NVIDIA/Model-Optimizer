@@ -696,11 +696,12 @@ def _meta_dcp_load(
     saved_buffers = {n: b.detach().clone() for n, b in model.named_buffers() if not b.is_meta}
     # A module's ``to_empty`` re-empties every direct param, so a param already real beside a meta one
     # (a router's ``e_score_correction_bias`` next to its meta ``weight``) is kept here too: nothing
-    # outside ``load_names`` would refill it.
+    # outside ``load_names`` would refill it. Every name counts: ``to_empty`` gives a param the module
+    # registers twice a tensor under each name.
     saved_params: dict[str, torch.Tensor] = {}
     emptied: set[str] = set()
     for name, m in model.named_modules():
-        direct = dict(m.named_parameters(recurse=False))
+        direct = dict(m.named_parameters(recurse=False, remove_duplicate=False))
         if any(p.is_meta for p in direct.values()):
             prefix = f"{name}." if name else ""
             saved_params.update(

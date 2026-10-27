@@ -382,6 +382,30 @@ def test_an_untied_param_the_checkpoint_lacks_fails_the_load(tmp_path, named):
         _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu", load_names=load_names)
 
 
+class _Aliased(nn.Module):
+    """One param a module registers under two names."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(4, 4, device="meta"))
+        self.alias = self.weight
+
+
+def test_a_second_name_of_a_param_the_checkpoint_lacks_fails_the_load(tmp_path):
+    """``to_empty`` gives each name of a param the module registers twice a tensor of its own, so
+    with the checkpoint storing only the first, the second still holds empty memory: the load
+    fails naming it."""
+    model = _Aliased()
+
+    with pytest.raises(RuntimeError, match=r"\['alias'\]"):
+        _meta_dcp_load(
+            model,
+            _save(tmp_path, {"weight": torch.randn(4, 4)}),
+            "cpu",
+            load_names=_every_name(model),
+        )
+
+
 class _OneBigManySmall(nn.Module):
     """One param holding ~99% of the weight beside twelve tiny ones."""
 
