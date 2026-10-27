@@ -255,6 +255,17 @@ class _Unloadable:
         return _refuse_to_load, ()
 
 
+class _UnprintableError(Exception):
+    """An error whose text cannot be formatted."""
+
+    def __str__(self):
+        raise ValueError("no text")
+
+
+def _raise_unprintable():
+    raise _UnprintableError
+
+
 def _broadcast_from_job(rank, size):
     ran = []
 
@@ -296,6 +307,14 @@ def _broadcast_from_job(rank, size):
         built: list = []
         got = broadcast_from("x", lambda: built)
         assert got == [] and got is not built
+        # An error whose text cannot be formatted still reaches the broadcast.
+        _, error = _outcome(lambda: broadcast_from("x", _raise_unprintable))
+        if rank == 0:
+            assert isinstance(error, _UnprintableError), type(error)
+        else:
+            assert "rank 0 failed to compute x: _UnprintableError: <unprintable" in str(error), (
+                error
+            )
         # Loaded back there too: a value the other ranks could not load fails on the sending rank.
         _, error = _outcome(lambda: broadcast_from("x", _Unloadable))
         assert isinstance(error, RuntimeError), error
@@ -352,6 +371,13 @@ def _all_reduce_job(rank, size):
 
     with bounded_collectives():
         assert all_reduce("smallest", lambda: [8, 2][rank], min) == 2
+        _, error = _outcome(
+            lambda: all_reduce("smallest", _raise_unprintable if rank == 1 else lambda: 4, min)
+        )
+        if rank == 1:
+            assert isinstance(error, _UnprintableError), type(error)
+        else:
+            assert "rank 1 failed to compute smallest: _UnprintableError" in str(error), error
         for fail in (fail_on_rank_1, exit_on_rank_0_fail_on_rank_1):
             _, error = _outcome(lambda: all_reduce("smallest", fail, min))
             if rank == 1:

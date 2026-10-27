@@ -414,8 +414,19 @@ def _sendable(error: BaseException | None) -> tuple[bool, Any] | None:
         return None
     if isinstance(error, SystemExit):
         code = error.code
-        return True, code if code is None or isinstance(code, int) else str(code)
-    return False, f"{type(error).__name__}: {error}"
+        return True, code if code is None or isinstance(code, int) else _text(code)
+    return False, f"{type(error).__name__}: {_text(error)}"
+
+
+def _text(value: Any) -> str:
+    """``str(value)``, or a stand-in if that raises.
+
+    Formatting a failure must not keep its rank from the collective that tells the others.
+    """
+    try:
+        return str(value)
+    except Exception:
+        return f"<unprintable {type(value).__name__}>"
 
 
 def _refuse_a_launch_without_its_group(label: str) -> None:
