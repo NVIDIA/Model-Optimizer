@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   check-file-changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       any_changed: ${{ steps.changed.outputs.any_modified || steps.non-pr.outputs.any_changed }}
     steps:
@@ -36,13 +36,13 @@ jobs:
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: echo "any_changed=true" >> $GITHUB_OUTPUT
       - if: github.event_name == 'pull_request'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - if: github.event_name == 'pull_request'
         name: Check for changes in test-relevant paths
         id: changed
-        uses: step-security/changed-files@v47.0.5
+        uses: step-security/changed-files@2e07db73e5ccdb319b9a6c7766bd46d39d304bad # v47.0.5
         with:
           files: |
             .github/workflows/unit_tests.yml
@@ -58,17 +58,17 @@ jobs:
             .agents/skills/**
             plugins/modelopt/skills/**
   linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/ubuntu-setup
       - name: Run unit tests
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
-          # Everything but PRs also runs the slow tests marked ``manual`` (e.g. AutoNAS).
-          PYTEST_EXTRA: ${{ github.event_name != 'pull_request' && '--run-manual' || '' }}
+          # Everything but PRs also runs the slow tests marked ``manual`` (e.g. AutoNAS) and ``nightly``.
+          PYTEST_EXTRA: ${{ github.event_name != 'pull_request' && '--run-manual --run-nightly' || '' }}
           # sys.monitoring records the same lines as the default C tracer at a fraction of the overhead
           COVERAGE_CORE: sysmon
           # One single-threaded xdist worker per vCPU (`-n auto` counts physical cores); torch's
@@ -77,7 +77,7 @@ jobs:
           OMP_NUM_THREADS: "1"
         run: pip install nox uv && nox -s "unit-3.12(torch_214, tf_latest)" -- $PYTEST_EXTRA
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: unit
@@ -95,7 +95,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -126,14 +126,13 @@ jobs:
   multi-version:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
           # Default torch (2.14) across the other supported Python versions
-          - {nox_session: "unit-3.10(torch_214, tf_latest)", python_version: "3.10"}
           - {nox_session: "unit-3.11(torch_214, tf_latest)", python_version: "3.11"}
           - {nox_session: "unit-3.13(torch_214, tf_latest)", python_version: "3.13"}
           - {nox_session: "unit-3.14(torch_214, tf_latest)", python_version: "3.14"}
@@ -147,7 +146,7 @@ jobs:
           # Minimum supported transformers on the default torch.
           - {nox_session: "unit-3.12(torch_214, tf_min)", python_version: "3.12"}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/ubuntu-setup
         with:
           python-version: ${{ matrix.python_version }}
@@ -159,24 +158,24 @@ jobs:
   partial-install:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         test-env: [onnx, torch]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/ubuntu-setup
       - name: Run unit tests
         run: pip install nox uv && nox -s "partial_unit(subset='${{ matrix.test-env }}')"
   launcher:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - name: Run launcher tests
@@ -184,16 +183,15 @@ jobs:
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
-          uv venv .venv
-          uv pip install -e . pytest
+          # No explicit install: `uv run` must install modelopt_launcher itself.
           uv run python3 -m pytest -v
   mcp:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - name: Run modelopt-mcp tests
@@ -213,10 +211,10 @@ jobs:
   skills:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -225,13 +223,13 @@ jobs:
         # so they run in their own lightweight job rather than the main unit lane.
         # Override addopts to drop the repo's coverage/instafail plugins (not installed here).
         run: |
-          pip install pytest "tomli; python_version < '3.11'"
+          pip install pytest
           python -m pytest plugins/modelopt/skills/ -o addopts="" -p no:cacheprovider -v
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}
     needs: [check-file-changes, linux, windows, multi-version, partial-install, launcher, mcp, skills]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Required unit tests did not succeed
         # windows is deliberately absent from this condition. It still runs and is still visible,

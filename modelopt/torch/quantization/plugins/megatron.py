@@ -372,8 +372,12 @@ def _output_layer_untied(config) -> bool:
         return False
 
 
-# Statement kinds of the upstream GPTModel.sharded_state_dict body patched below.
-_GPT_SSD_STATEMENTS = ["Assign", "Assign", "Assign", "Assert", "Return"]
+# Statement kinds of the upstream GPTModel.sharded_state_dict bodies patched below. Newer
+# megatron-core also accepts an empty tensor placeholder (one more assignment).
+_GPT_SSD_STATEMENTS = (
+    ["Assign", "Assign", "Assign", "Assert", "Return"],
+    ["Assign", "Assign", "Assign", "Assign", "Assert", "Return"],
+)
 
 
 def _output_layer_extra_state_has_data(entry: Any) -> bool:
@@ -402,7 +406,7 @@ def keep_gpt_output_layer_extra_state() -> bool:
     body = func.body if isinstance(func, ast.FunctionDef) else []
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
         body = body[1:]  # docstring
-    if [type(stmt).__name__ for stmt in body] != _GPT_SSD_STATEMENTS:
+    if [type(stmt).__name__ for stmt in body] not in _GPT_SSD_STATEMENTS:
         warn_rank_0(
             "GPTModel.sharded_state_dict is not the version ModelOpt patches; leaving it as is. "
             "If it does not keep a populated output_layer._extra_state, saving a quantized "

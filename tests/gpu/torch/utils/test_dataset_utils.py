@@ -19,13 +19,18 @@ These live under ``tests/gpu`` (networked infra) rather than ``tests/unit``,
 which is kept hermetic with toy local fixtures.
 """
 
+import importlib
 import json
+from pathlib import Path
 
 import pytest
+import torch
+from _test_utils.torch.transformers_models import get_tiny_llama
 from datasets import load_dataset
 from huggingface_hub import get_token
 from transformers import AutoTokenizer
 
+from modelopt.recipe import load_recipe
 from modelopt.torch.utils.dataset_utils import (
     DATASET_COMBOS,
     get_dataset_dataloader,
@@ -42,6 +47,9 @@ def qwen3_tokenizer():
     return tokenizer
 
 
+@pytest.mark.manual(
+    reason="Streams the 7 gated Nemotron v3 datasets; runs on the nightly schedule."
+)
 def test_get_dataset_dataloader_nemotron_v3_chat_template(qwen3_tokenizer):
     if not get_token():
         pytest.skip(
@@ -139,3 +147,25 @@ class TestHfTinyDataset:
         )
         batches = list(loader)
         assert sum(b["input_ids"].shape[0] for b in batches) == 5
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_kl_memory_probe_reserves_logit_working_memory(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[4] / "examples" / "hf_ptq"))
+    autoquant_utils = importlib.import_module("autoquant_utils")
+    recipe = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits")
+    model = get_tiny_llama(vocab_size=32768).to(device="cuda", dtype=torch.bfloat16).eval()
+    model.config.use_cache = False
+    tokens = torch.ones((2, 32), dtype=torch.long, device="cuda")
+    probe = autoquant_utils._get_autoquant_memory_probe(recipe)
+    peaks = []
+    with torch.no_grad():
+        model(tokens)
+        for workload in (lambda: model(tokens), lambda: probe(model, tokens)):
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            baseline = torch.cuda.memory_allocated()
+            workload()
+            torch.cuda.synchronize()
+            peaks.append(torch.cuda.max_memory_allocated() - baseline)
+    assert peaks[1] > peaks[0] + tokens.numel() * model.config.vocab_size * 4

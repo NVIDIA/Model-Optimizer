@@ -124,9 +124,11 @@ task_2 (`vllm_smoke_test.sh`, gate `MIN_ACCEPTANCE_LENGTH=1.2`); the online exam
 ships no such step, so benchmark its export separately on the serving stack
 (vLLM PR #52816) or via the offline acceptance-length harness.
 
-The training-regression gate from `dflash.md` (`MAX_FINAL_LOSS`, `MIN_FINAL_ACC` via
-`check_regression.py`) applies; the online example sets `MAX_FINAL_LOSS=5.0` and
-`MIN_FINAL_ACC=0.15` for its 2000-step convergence check.
+The training-regression gate from `dflash.md` applies. The online example sets
+`MAX_FINAL_LOSS=7.0` (DFlash2's loss runs higher than DFlash's, so 5.0 fails healthy
+runs) and `MIN_FINAL_ACC=0.15` for its 2000-step convergence check, and runs it strict
+(`REGRESSION_STRICT=1`): a missed threshold, or no metrics to check, fails the
+training task.
 
 ## Known failures
 
