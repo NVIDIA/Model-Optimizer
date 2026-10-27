@@ -548,7 +548,64 @@ class LiLiCorrExporter(DFlashExporter):
     ``lilicorr_logit_scale`` and ``lilicorr_vector_eps`` change the score without changing
     any tensor shape, so a default guessed in their absence loads cleanly and scores a
     different function.
+
+    The reranker's MLP parameters are renamed on export. ``LiLiCorrHead`` builds them as
+    ``nn.Sequential``, so their raw names are positional (``feature_mlp.1``), while both
+    serving stacks build the same arithmetic as named submodules and lift the feature
+    LayerNorm out to a sibling. Exporting the positional names produces a checkpoint
+    neither loader can resolve.
     """
+
+    # (pattern, replacement) over the post-``dflash_module.``-strip names. The arithmetic is
+    # identical on both sides -- Sequential(LayerNorm, Linear, SiLU, Linear) is exactly
+    # feature_norm + up_proj + silu + down_proj -- so this is a pure relabelling.
+    _SERVING_RENAMES = (
+        (re.compile(r"^lilicorr\.feature_mlp\.0\.(weight|bias)$"), r"lilicorr.feature_norm.\1"),
+        (
+            re.compile(r"^lilicorr\.feature_mlp\.1\.(weight|bias)$"),
+            r"lilicorr.feature_mlp.up_proj.\1",
+        ),
+        (
+            re.compile(r"^lilicorr\.feature_mlp\.3\.(weight|bias)$"),
+            r"lilicorr.feature_mlp.down_proj.\1",
+        ),
+        (
+            re.compile(r"^lilicorr\.layers\.(\d+)\.mlp\.0\.(weight|bias)$"),
+            r"lilicorr.layers.\1.mlp.up_proj.\2",
+        ),
+        (
+            re.compile(r"^lilicorr\.layers\.(\d+)\.mlp\.2\.(weight|bias)$"),
+            r"lilicorr.layers.\1.mlp.down_proj.\2",
+        ),
+    )
+
+    def _extract_state_dict(self, full_state_dict: dict):
+        """Extract the draft weights, then rename the reranker MLPs for the serving loaders."""
+        export_sd = super()._extract_state_dict(full_state_dict)
+
+        renamed: dict = {}
+        for key, value in export_sd.items():
+            new_key = key
+            for pattern, replacement in self._SERVING_RENAMES:
+                candidate = pattern.sub(replacement, key)
+                if candidate != key:
+                    new_key = candidate
+                    break
+            if new_key in renamed:
+                raise ValueError(f"rename collision: {key} and another key both map to {new_key}")
+            renamed[new_key] = value
+
+        # A relabelling may not change what is in the checkpoint. Both loaders fail loudly
+        # on a missing head parameter, but the base weight loaders silently drop names they
+        # cannot resolve, which would surface only as a lower acceptance length.
+        if len(renamed) != len(export_sd):
+            raise ValueError(
+                f"tensor count changed during rename: {len(export_sd)} -> {len(renamed)}"
+            )
+        leftover = sorted(k for k in renamed if re.search(r"\.(mlp|feature_mlp)\.\d+\.", k))
+        if leftover:
+            raise ValueError(f"positional MLP names survived the rename: {leftover}")
+        return renamed
 
     def _export_config(self):
         """Extend the DFlash config with the LiLiCorr head fields."""
