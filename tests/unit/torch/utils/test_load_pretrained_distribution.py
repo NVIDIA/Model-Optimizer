@@ -434,6 +434,21 @@ def test_a_load_refuses_what_it_cannot_load(
     assert auto_class.calls == []
 
 
+def test_an_automatic_layout_says_so_when_it_refuses_a_placement(
+    run_as, serve, loaders, monkeypatch, tmp_path
+):
+    """With neither a plan nor MODELOPT_FSDP_SIZE, rank 0's GPU memory decides to shard a model too
+    big for it, and the sharded load refuses options that place a whole model. The refusal says the
+    layout was decided rather than asked for, and how to keep the load whole."""
+    run_as(2)
+    serve(LlamaConfig(**_TINY))
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: 1)
+
+    with pytest.raises(TypeError, match=r"\['device_map'\] place a whole model, but no plan"):
+        load_pretrained(str(tmp_path), device_map="auto")
+    assert loaders == {}
+
+
 def test_a_handed_plan_is_checked_before_the_checkpoint_is_fetched(run_as, monkeypatch, tmp_path):
     """Making the checkpoint local can mean downloading it: a plan the load refuses fails first."""
     run_as(2)

@@ -447,6 +447,13 @@ _SHARDED_LOAD_OPTIONS = {
 }
 
 
+def _whole_load_options(kwargs) -> list[str]:
+    """The load ``kwargs`` that place a whole model, which the FSDP2 load refuses."""
+    names = set(kwargs) - _SHARDED_LOAD_OPTIONS[_FSDP2] - {"config", "dtype", "torch_dtype"}
+    dtypes = {name for name in ("dtype", "torch_dtype") if kwargs.get(name) not in (None, "auto")}
+    return sorted(names | dtypes)
+
+
 def _route(plan: DistributionPlan) -> str | None:
     """The sharded load ``plan`` takes, or ``None`` when every rank loads the whole model."""
     from modelopt.torch.utils import distributed as dist
@@ -585,10 +592,13 @@ def load_pretrained(
 
     A sharded load builds the model class and places it itself. Besides its own options it takes
     ``trust_remote_code``, ``attn_implementation`` and ``hf_config``, and refuses any other keyword
-    rather than ignore it. ``hf_config`` is the config :func:`resolve_distribution_plan` returned with
-    the plan handed in as ``distribution``: the load builds from it as given, so without that plan
-    it is refused. A ``config`` passed for the load is the one the plan is decided from, and a
-    sharded load takes it as its ``hf_config``.
+    rather than ignore it. With neither a plan nor ``MODELOPT_FSDP_SIZE``, rank 0's GPU memory
+    decides whether the dense part is sharded, so a call that places the model (``device_map``,
+    ``quantization_config``, a ``dtype``) loads only where it fits one GPU: pass ``distribution=``
+    or set ``MODELOPT_FSDP_SIZE=1`` to keep it whole. ``hf_config`` is the config
+    :func:`resolve_distribution_plan` returned with the plan handed in as ``distribution``: the load
+    builds from it as given, so without that plan it is refused. A ``config`` passed for the load is
+    the one the plan is decided from, and a sharded load takes it as its ``hf_config``.
 
     Whatever the placement:
 
@@ -672,6 +682,7 @@ def load_pretrained(
         ckpt_path = os.path.join(ckpt_path, subfolder)
     trust_remote_code = kwargs.get("trust_remote_code", False)
     hf_config = kwargs.get("hf_config")
+    decided = plan is None and not alone
     if plan is None and alone:
         plan = DistributionPlan()
     elif plan is None:
@@ -685,6 +696,16 @@ def load_pretrained(
         if _route(plan) is not None:
             kwargs.setdefault("hf_config", hf_config)
     route = _route(plan)
+    placed = _whole_load_options(kwargs)
+    if decided and route == _FSDP2 and env.fsdp_size().lower() == "auto" and placed:
+        # Rank 0's GPU memory chose to shard: say so, rather than refuse the options below as if
+        # the caller had asked for the sharded load.
+        raise TypeError(
+            f"{placed} place a whole model, but no plan or MODELOPT_FSDP_SIZE asked for a layout, "
+            f"and by rank 0's GPU memory the model does not fit one GPU, so {plan!r} shards it. "
+            "To load it whole on every rank and place it yourself, set MODELOPT_FSDP_SIZE=1 or "
+            f"pass distribution=DistributionPlan({plan.world_size}, dense='replicate')."
+        )
     if route is not None and config is not None:
         # The sharded load builds the model from hf_config: the plan's copy of this one, or a copy
         # of it, since building writes to the config.
