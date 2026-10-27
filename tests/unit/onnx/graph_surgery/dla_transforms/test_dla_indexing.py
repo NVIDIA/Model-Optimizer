@@ -249,6 +249,46 @@ def test_gather_elements_rank_two_preserves_selected_values(axis, dynamic):
     np.testing.assert_array_equal(_execute(transformed, feeds)[0], expected)
 
 
+@pytest.mark.parametrize("length", [1, 3])
+@pytest.mark.parametrize("symbolic_data", [False, True])
+@pytest.mark.parametrize("public_reader", [False, True])
+def test_symbolic_gather_elements_index_rank_preserves_runtime_lengths(
+    length, symbolic_data, public_reader
+):
+    """Promote known-rank symbolic indices and preserve unequal gather-axis lengths."""
+    model = _model(
+        [helper.make_node("GatherElements", ["x", "indices"], ["y"], axis=1)],
+        [
+            helper.make_tensor_value_info(
+                "x", TensorProto.FLOAT, [2, "width" if symbolic_data else 4, 3]
+            ),
+            helper.make_tensor_value_info("indices", TensorProto.INT64, [2, "count", 3]),
+        ],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, "count", 3])],
+    )
+    feeds = {
+        "x": np.arange(24, dtype=np.float32).reshape(2, 4, 3),
+        "indices": (np.arange(6 * length).reshape(2, length, 3) % 4).astype(np.int64),
+    }
+    if public_reader:
+        model.graph.node.append(
+            helper.make_node("GatherElements", ["y", "reader_indices"], ["read"], axis=1)
+        )
+        model.graph.input.append(
+            helper.make_tensor_value_info("reader_indices", TensorProto.INT64, [2, "count", 3])
+        )
+        model.graph.output.append(
+            helper.make_tensor_value_info("read", TensorProto.FLOAT, [2, "count", 3])
+        )
+        feeds["reader_indices"] = (np.arange(6 * length).reshape(2, length, 3) % length).astype(
+            np.int64
+        )
+    expected = _execute(model, feeds)
+    transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    for actual, reference in zip(_execute(transformed, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
 def test_shared_dynamic_gather_elements_indices_have_one_preparation():
     """Reuse a valid dynamic index view across two GatherElements consumers."""
     shape = [2, 3, 4]

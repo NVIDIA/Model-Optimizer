@@ -282,9 +282,12 @@ def _apply_gather_elements(model):
         if id(node) not in selected_ids:
             continue
         original = node.input[1]
-        shape = cache.get_shape(original)
         tensor = cache.get_init(original)
-        rank = len(tensor.dims) if tensor is not None else len(shape) if shape is not None else None
+        rank = len(tensor.dims) if tensor is not None else _known_rank(cache, original)
+        data_rank = _known_rank(cache, node.input[0])
+        if rank in (2, 3) and data_rank != 4 and cache.get_shape(node.input[0]) is None:
+            # Boundary promotion can leave symbolic data native; retain matching native indices.
+            continue
         added = []
         if original in converted_indices:
             prepared, rank = converted_indices[original]
@@ -341,7 +344,33 @@ def _apply_gather_elements(model):
             if axis.i >= 0:
                 axis.i += 4 - rank
             node.name = cache.unique_name((node.name or node.output[0]) + "_axis_updated")
-        replacements[index] = ([node], [*added, node])
+        restored = []
+        output = node.output[0]
+        if (
+            data_rank == 4
+            and output in cache.graph_output_names
+            and rank in (2, 3)
+            and _known_rank(cache, output) == rank
+        ):
+            # The earlier output stage cannot plan adapters from concrete shapes for symbolic outputs.
+            internal = cache.unique_name(output + "_gatherelements_4d")
+            node.output[0] = internal
+            axes = add_initializer(
+                graph,
+                cache.unique_name(output + "_gatherelements_squeeze_axes"),
+                np.arange(4 - rank, dtype=np.int64),
+                dtype=TensorProto.INT64,
+                with_value_info=False,
+            )
+            restored.append(
+                helper.make_node(
+                    "Squeeze",
+                    [internal, axes],
+                    [output],
+                    name=cache.unique_name(output + "_restore_rank"),
+                )
+            )
+        replacements[index] = ([node], [*added, node, *restored])
     batch_replace_nodes(graph, replacements)
     live = {name for node in graph.node for name in node.input}
     live.update(cache.graph_input_names | cache.graph_output_names | _subgraph_captures(graph))
