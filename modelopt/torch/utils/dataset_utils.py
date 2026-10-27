@@ -1012,13 +1012,15 @@ def get_max_batch_size(
     (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`) it is collective: every rank
     calls it, and every rank gets the smallest batch size any rank's GPU allows
     (:func:`~modelopt.torch.utils.distributed.all_reduce`), so that all run the same number of
-    calibration steps. Each rank then measures its own GPU only, from one forward of the
+    calibration steps. Each rank then measures the GPU it computes on, from one forward of the
     single-sample input, and does not probe the batch size it arrives at: retrying a smaller batch
     after an out-of-memory error would run a different number of forwards, and of the collectives
-    inside them, on each rank. A model with no plan recorded, such as a Megatron model, is measured
-    on every visible GPU, as in a single process.
+    inside them, on each rank. Probing in lockstep would not make it safe either: a rank that runs out
+    of memory partway through a forward has left its peers waiting in that forward's collectives. If
+    the estimate does not fit, pass an explicit batch size instead. A model with no plan recorded,
+    such as a Megatron model, is measured on every visible GPU, as in a single process.
     """
-    from .distributed import all_reduce, local_rank, recorded_distribution_plan
+    from .distributed import all_reduce, recorded_distribution_plan
 
     args = (
         model,
@@ -1030,7 +1032,9 @@ def get_max_batch_size(
     )
     plan = recorded_distribution_plan(model)
     if plan is not None and plan.world_size > 1:
-        device = torch.device("cuda", local_rank())
+        # The device this rank computes on, which LOCAL_RANK does not name under a launcher that
+        # shows each rank one GPU.
+        device = torch.device("cuda", torch.cuda.current_device())
         return all_reduce("calib_batch_size", lambda: _max_batch_size(*args, device=device), min)
     return _max_batch_size(*args)
 
@@ -1099,24 +1103,27 @@ def _max_batch_size(
         else:
             target_data_batch = max(int(free_mem_before / mem_diff_per_data_batch), 1)
 
-        def _expand_to(batch: int) -> torch.Tensor:
-            return sample_input_single_batch.expand(
-                [
-                    batch if index == 0 else dim
-                    for index, dim in enumerate(sample_input_single_batch.shape)
-                ]
-            )
-
         # For some models on multi GPU, we observe the memory per batch is not a constant.
-        # So we just test the target batch size and make sure we do not go OOM.
-        while device is None and target_data_batch > 1:
-            with torch.set_grad_enabled(enable_grad):
-                try:
-                    infer_method(_expand_to(target_data_batch))
-                    break
-                except torch.cuda.OutOfMemoryError:  # pragma: no cover - GPU OOM retry path
-                    target_data_batch = target_data_batch // 2  # pragma: no cover
-                    torch.cuda.empty_cache()  # pragma: no cover
+        # So we just test the target batch size and make sure we do not go OOM. A model distributed
+        # over several ranks is measured once, not probed (see get_max_batch_size).
+        if device is None:
+
+            def _expand_to(batch: int) -> torch.Tensor:
+                return sample_input_single_batch.expand(
+                    [
+                        batch if index == 0 else dim
+                        for index, dim in enumerate(sample_input_single_batch.shape)
+                    ]
+                )
+
+            while target_data_batch > 1:
+                with torch.set_grad_enabled(enable_grad):
+                    try:
+                        infer_method(_expand_to(target_data_batch))
+                        break
+                    except torch.cuda.OutOfMemoryError:  # pragma: no cover - GPU OOM retry path
+                        target_data_batch = target_data_batch // 2  # pragma: no cover
+                        torch.cuda.empty_cache()  # pragma: no cover
 
     # Regulate the data batch target to be 1, 2, 4, 8, 12, ..., capped at 64
     if target_data_batch < 2:

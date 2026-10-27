@@ -618,6 +618,8 @@ ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for 
 
 > *With `--use_fsdp2` on more than one GPU, calibration that keeps its statistics on each rank is refused when quantization starts: AWQ and SVDQuant (`--qformat int4_awq`, `w4a8_awq_beta`, `nvfp4_awq_lite`, `nvfp4_awq_clip`, `nvfp4_awq_full`, `nvfp4_svdquant`), local Hessian (`nvfp4_w4a4_weight_local_hessian`), imatrix (the `iq*` formats), the recipes that use them, and AutoQuantize recipes with such a candidate format. Each rank calibrates on its own share of the data, so the ranks would calibrate their shards of a weight differently. Run these without `--use_fsdp2`.*
 
+> *With `--use_fsdp2` on more than one GPU and `--batch_size 0`, each rank estimates the calibration batch size from one forward and the ranks use the smallest. That size is not probed for out-of-memory, since a rank that runs out of memory partway through a forward would leave the others waiting in its collectives: set `--batch_size` if calibration runs out of memory.*
+
 ### Usage
 
 #### Slurm (recommended)

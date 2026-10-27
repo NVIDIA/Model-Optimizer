@@ -477,6 +477,8 @@ def _batch_size_job(rank, world_size, planned):
                 return_value=SimpleNamespace(total_memory=10**12),
             ),
             patch("torch.cuda.device_count", return_value=4),
+            # A launcher that shows each rank one GPU: every rank computes on cuda:0.
+            patch("torch.cuda.current_device", return_value=0),
             patch("torch.cuda.mem_get_info", side_effect=mem_get_info),
             patch("torch.cuda.max_memory_allocated", return_value=0),
         ):
@@ -487,7 +489,7 @@ def _batch_size_job(rank, world_size, planned):
         torch.distributed.destroy_process_group(group)
 
     if planned:
-        assert measured == [torch.device("cuda", rank)] * 2  # its own GPU (LOCAL_RANK) only
+        assert measured == [torch.device("cuda", 0)] * 2  # the GPU it computes on, not LOCAL_RANK
         # One probe: an OOM retry would run more forwards on some ranks.
         assert model.batch_sizes == [1]
         assert batch_size == 4  # rank 0's
