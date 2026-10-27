@@ -42,21 +42,21 @@ from .dla_reorder_nodes import priority_topological_order
 _REDUCE_OPS = frozenset({"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"})
 
 
-def _known_non_scalar_control(cache: GraphCache, name: str) -> bool:
-    """Identify controls whose known shape is not a fixed single element."""
-    initializer = cache.get_init(name)
-    if initializer is not None and any(dim != 1 for dim in initializer.dims):
-        return True
-    if initializer is not None and name not in cache.graph_input_names:
+def _unproven_scalar_qdq_control(cache: GraphCache, name: str) -> bool:
+    """Refuse QDQ controls unless their rank is known to be zero."""
+    if not name:
         return False
+    initializer = cache.get_init(name)
+    if initializer is not None:
+        if initializer.dims:
+            return True
+        if name not in cache.graph_input_names:
+            return False
     info = cache.vi_map.get(name)
     return (
-        info is not None
-        and info.type.tensor_type.HasField("shape")
-        and any(
-            not dim.HasField("dim_value") or dim.dim_value != 1
-            for dim in info.type.tensor_type.shape.dim
-        )
+        info is None
+        or not info.type.tensor_type.HasField("shape")
+        or bool(info.type.tensor_type.shape.dim)
     )
 
 
@@ -116,7 +116,8 @@ def _parse_middleware_strict(
                 or n.output[0] in cache.graph_output_names
                 or any(a.name in {"axis", "block_size"} for a in dq.attribute)
                 or any(
-                    _known_non_scalar_control(cache, name) for name in {*n.input[1:], *dq.input[1:]}
+                    _unproven_scalar_qdq_control(cache, name)
+                    for name in {*n.input[1:], *dq.input[1:]}
                 )
             ):
                 raise ValueError(f"{path_context}: QDQ must be unshared and per-tensor")

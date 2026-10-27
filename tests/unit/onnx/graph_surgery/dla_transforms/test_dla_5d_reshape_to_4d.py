@@ -295,8 +295,9 @@ def test_overridable_structure_refuses_before_mutation(control, skip_inference):
 
 @pytest.mark.parametrize("branch", ["transpose", "reduce"])
 @pytest.mark.parametrize("runtime", ["reference", "ort"])
-def test_single_element_qdq_controls_survive_axis_length_change(branch, runtime):
-    """Execute single-element QDQ controls when lowering changes the default-axis length."""
+@pytest.mark.parametrize("control_shape", [[], [1]])
+def test_qdq_control_rank_when_lowering_changes_default_axis_length(branch, runtime, control_shape):
+    """Lower scalar QDQ controls and refuse per-axis singleton controls without mutation."""
     nodes = [
         helper.make_node("Reshape", ["X", "shape5"], ["reshaped"], name="reshape5"),
         helper.make_node(
@@ -308,8 +309,8 @@ def test_single_element_qdq_controls_survive_axis_length_change(branch, runtime)
     ]
     initializers = [
         _init("shape5", np.asarray([2, 1, 3, 4, 5], np.int64)),
-        _init("scale", np.asarray([0.25], np.float32)),
-        _init("zero", np.asarray([7], np.uint8)),
+        _init("scale", np.asarray(0.25, np.float32).reshape(control_shape)),
+        _init("zero", np.asarray(7, np.uint8).reshape(control_shape)),
     ]
     if branch == "transpose":
         nodes.extend(
@@ -344,6 +345,12 @@ def test_single_element_qdq_controls_survive_axis_length_change(branch, runtime)
     )
     onnx.checker.check_model(model, full_check=True)
     feeds = {"X": np.arange(120, dtype=np.float32).reshape(2, 1, 3, 20) / 16 - 2}
+    if control_shape:
+        before = model.SerializeToString()
+        with pytest.raises(ValueError, match="per-tensor"):
+            _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=True)
+        assert model.SerializeToString() == before
+        return
     transformed = _apply_5d_reshape_to_4d(copy.deepcopy(model), skip_symbolic_shape_inference=True)
     onnx.checker.check_model(transformed, full_check=True)
     assert sum(node.op_type == "Slice" for node in transformed.graph.node) == (
@@ -521,7 +528,7 @@ class TestDla5dReshapeTo4dTranspose:
     @pytest.mark.parametrize("middleware", ["Clip", "QDQ"])
     @pytest.mark.parametrize("skip_inference", [False, True])
     def test_late_dynamic_controls_preserve_values(self, path, middleware, skip_inference):
-        """Keep runtime controls before their duplicated consumers after rewriting."""
+        """Keep runtime controls ordered and refuse QDQ controls whose rank is unproven."""
         model = (
             _make_transpose_reshape_model()
             if path == "transpose"
@@ -559,6 +566,12 @@ class TestDla5dReshapeTo4dTranspose:
             "bound": bound,
         }
         expected = ReferenceEvaluator(model).run(None, feeds)
+        if middleware == "QDQ" and skip_inference:
+            before = model.SerializeToString()
+            with pytest.raises(ValueError, match="per-tensor"):
+                _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=True)
+            assert model.SerializeToString() == before
+            return
         rewritten = _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=skip_inference)
         onnx.checker.check_model(rewritten, full_check=True)
         for actual, reference in zip(ReferenceEvaluator(rewritten).run(None, feeds), expected):
@@ -603,15 +616,15 @@ class TestDla5dReshapeTo4dTranspose:
         )
         model.graph.initializer.extend(
             [
-                _init(scale_name, np.array([0.25] if transpose else 0.25, np.float32)),
-                _init(zero_name, np.array([0] if transpose else 0, np.uint8)),
+                _init(scale_name, np.array(0.25, np.float32)),
+                _init(zero_name, np.array(0, np.uint8)),
             ]
         )
         if transpose:
             model.graph.value_info.extend(
                 [
-                    helper.make_tensor_value_info(scale_name, TensorProto.FLOAT, ["scale_length"]),
-                    helper.make_tensor_value_info(zero_name, TensorProto.UINT8, ["zero_length"]),
+                    helper.make_tensor_value_info(scale_name, TensorProto.FLOAT, []),
+                    helper.make_tensor_value_info(zero_name, TensorProto.UINT8, []),
                 ]
             )
         renames = {
