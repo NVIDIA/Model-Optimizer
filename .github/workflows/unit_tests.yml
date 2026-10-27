@@ -89,7 +89,7 @@ jobs:
           verbose: true
   windows:
     if: needs.check-file-changes.outputs.any_changed == 'true'
-    needs: [linux, check-file-changes]
+    needs: [check-file-changes]
     runs-on: windows-latest
     timeout-minutes: 20
     permissions:
@@ -125,7 +125,7 @@ jobs:
         run: pip install nox uv && nox -s "unit-3.12(torch_214, tf_latest)"
   multi-version:
     if: needs.check-file-changes.outputs.any_changed == 'true'
-    needs: [linux, check-file-changes]
+    needs: [check-file-changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
@@ -157,7 +157,7 @@ jobs:
         run: pip install nox uv && nox -s "${{ matrix.nox_session }}"
   partial-install:
     if: needs.check-file-changes.outputs.any_changed == 'true'
-    needs: [linux, check-file-changes]
+    needs: [check-file-changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -171,7 +171,7 @@ jobs:
         run: pip install nox uv && nox -s "partial_unit(subset='${{ matrix.test-env }}')"
   launcher:
     if: needs.check-file-changes.outputs.any_changed == 'true'
-    needs: [linux, check-file-changes]
+    needs: [check-file-changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -187,7 +187,7 @@ jobs:
           uv run python3 -m pytest -v
   mcp:
     if: needs.check-file-changes.outputs.any_changed == 'true'
-    needs: [linux, check-file-changes]
+    needs: [check-file-changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -210,7 +210,7 @@ jobs:
           uv run python3 -m pytest -v
   skills:
     if: needs.check-file-changes.outputs.any_changed == 'true'
-    needs: [linux, check-file-changes]
+    needs: [check-file-changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
