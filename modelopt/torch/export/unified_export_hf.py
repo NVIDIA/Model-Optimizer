@@ -2098,6 +2098,13 @@ def export_hf_checkpoint(
     # because the carry-over gate needs it and runs ahead of them (the layerwise and diffusers paths
     # return before those are reached).
     _fsdp2_sharded, _ep_sharded = _hf_shard_flags(model)
+    # Under expert parallelism each rank holds only its own experts' ModelOpt state, so the
+    # rank-0 save would write an incomplete one. Refused before any collective, alike on every rank.
+    if _ep_sharded and save_modelopt_state:
+        raise NotImplementedError(
+            "save_modelopt_state=True is not supported for an expert-parallel export: each rank "
+            "holds only its own experts' ModelOpt state."
+        )
     if _fsdp2_sharded and _ep_sharded:
         plan = distribution_plan(model)
         # With fewer expert-parallel ranks than the world, FSDP2 shards the dense part within each
