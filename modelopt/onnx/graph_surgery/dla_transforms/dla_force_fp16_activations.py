@@ -563,7 +563,12 @@ def _rewrite_terminal_projections(model):
         if any(len(cache.get_consumers(n.output[0])) != 1 for n in chain[1:]):
             continue
         channels = weight.dims[0]
-        if cache.get_shape(output.name) != [1, 1, channels]:
+        if cache.get_shape(output.name) != [1, 1, channels] or cache.get_shape(conv.output[0]) != [
+            1,
+            channels,
+            1,
+            1,
+        ]:
             continue
         bytes_per_channel = math.prod(weight.dims[1:]) * (1 if dq is not None else 2)
         payload = weight.raw_data

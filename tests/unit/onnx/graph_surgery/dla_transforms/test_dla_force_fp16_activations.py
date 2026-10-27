@@ -489,7 +489,7 @@ def test_fp16_float_constant_keeps_valid_consumer_types():
     np.testing.assert_array_equal(_checked_cpu_outputs(changed, feeds)[0], expected)
 
 
-def _terminal_model(channels=8193, *, groups=1, quantized=False):
+def _terminal_model(channels=8193, *, groups=1, quantized=False, batch=1):
     """Build the exact terminal projection pattern with independently checkable values."""
     data_channels = groups
     weights = nh.from_array(
@@ -519,10 +519,21 @@ def _terminal_model(channels=8193, *, groups=1, quantized=False):
     )
     return _model(
         nodes,
-        [_value("x", [1, data_channels, 1, 1])],
+        [_value("x", [batch, data_channels, 1, 1])],
         [_value("y", [1, 1, channels])],
         initializers,
     )
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+def test_terminal_projection_preserves_nontrivial_batch_reduction(quantized):
+    """Retain batch summation instead of replacing it with singleton projection chunks."""
+    model = _terminal_model(batch=2, quantized=quantized)
+    feeds = {"x": np.asarray([2, 6], np.float32).reshape(2, 1, 1, 1)}
+    expected = _checked_cpu_outputs(model, feeds)[0]
+    converted = _apply_force_fp16_activations(model)
+    assert sum(node.op_type == "Conv" for node in converted.graph.node) == 1
+    np.testing.assert_array_equal(_checked_cpu_outputs(converted, feeds)[0], expected)
 
 
 @pytest.mark.parametrize(

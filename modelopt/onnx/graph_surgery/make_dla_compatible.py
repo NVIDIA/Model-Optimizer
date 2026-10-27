@@ -363,9 +363,9 @@ def dla_make_dla_compatible(
         qdq_quantized_dtypes: Zero-point dtypes whose QDQ pairs are removed.
             Defaults to UINT16 and INT16. Accepts ONNX dtype IDs or names.
         remove_all_qdq: Remove QDQ pairs for every dtype, matching the C++ flag.
+            Cannot be combined with qdq_quantized_dtypes.
         force_fp16_activations: Use FP16 where supported, keeping FP32 public
             boundaries and operations or controls that require FP32.
-            Cannot be combined with qdq_quantized_dtypes.
 
     Returns:
         The transformed model. Invalid models and failed transformations raise.
