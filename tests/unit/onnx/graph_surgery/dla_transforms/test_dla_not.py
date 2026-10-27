@@ -110,12 +110,12 @@ def test_not_cast_to_bool_transformed():
     """
     shape = [2, 3]
     cast_node = helper.make_node("Cast", ["X"], ["X_bool"], to=TensorProto.BOOL, name="cast")
-    not_node = helper.make_node("Not", ["X_bool"], ["Y"], name="not")
+    not_node = helper.make_node("Not", ["X_bool"], ["Y_bool"], name="not")
     graph = helper.make_graph(
-        [cast_node, not_node],
+        [cast_node, not_node, helper.make_node("Cast", ["Y_bool"], ["Y"], to=TensorProto.FLOAT)],
         "not_cast_bool",
         [_vi("X", TensorProto.BOOL, shape)],
-        [_vi("Y", TensorProto.BOOL, shape)],
+        [_vi("Y", TensorProto.FLOAT, shape)],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
@@ -136,7 +136,7 @@ def test_not_cast_to_bool_transformed():
 
     # Cast node must now produce FLOAT, Not node must be gone.
     cast_nodes = [n for n in tr.graph.node if n.op_type == "Cast"]
-    assert len(cast_nodes) == 1
+    assert len(cast_nodes) == 2
     for attr in cast_nodes[0].attribute:
         if attr.name == "to":
             assert attr.i == TensorProto.FLOAT, "Cast must target FLOAT after transform"
@@ -216,14 +216,16 @@ def test_not_multiple_not_nodes():
     """Two independent Cast(BOOL)→Not chains are both transformed with unique initializer names."""
     shape = [2]
     cast_a = helper.make_node("Cast", ["A"], ["A_bool"], to=TensorProto.BOOL, name="cast_a")
-    not_a = helper.make_node("Not", ["A_bool"], ["Y_A"], name="not_a")
+    not_a = helper.make_node("Not", ["A_bool"], ["Y_A_bool"], name="not_a")
+    output_a = helper.make_node("Cast", ["Y_A_bool"], ["Y_A"], to=TensorProto.FLOAT)
     cast_b = helper.make_node("Cast", ["B"], ["B_bool"], to=TensorProto.BOOL, name="cast_b")
-    not_b = helper.make_node("Not", ["B_bool"], ["Y_B"], name="not_b")
+    not_b = helper.make_node("Not", ["B_bool"], ["Y_B_bool"], name="not_b")
+    output_b = helper.make_node("Cast", ["Y_B_bool"], ["Y_B"], to=TensorProto.FLOAT)
     graph = helper.make_graph(
-        [cast_a, not_a, cast_b, not_b],
+        [cast_a, not_a, output_a, cast_b, not_b, output_b],
         "not_multi",
         [_vi("A", TensorProto.BOOL, shape), _vi("B", TensorProto.BOOL, shape)],
-        [_vi("Y_A", TensorProto.BOOL, shape), _vi("Y_B", TensorProto.BOOL, shape)],
+        [_vi("Y_A", TensorProto.FLOAT, shape), _vi("Y_B", TensorProto.FLOAT, shape)],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
@@ -411,11 +413,16 @@ def test_not_allocates_distinct_names_and_legacy_controls(legacy):
         nodes.extend(
             [
                 helper.make_node("Cast", ["x"], [f"cast_{index}"], to=TensorProto.BOOL),
-                helper.make_node("Not", [f"cast_{index}"], [output]),
+                helper.make_node("Not", [f"cast_{index}"], [output + "_bool"]),
+                helper.make_node("Cast", [output + "_bool"], [output], to=TensorProto.FLOAT),
             ]
         )
     nodes.append(helper.make_node("Identity", ["x"], ["spare"], name="_clip"))
-    outputs = [_vi(out, TensorProto.BOOL, [2]) for out in ("a", "b", "spare")]
+    outputs = [
+        _vi("a", TensorProto.FLOAT, [2]),
+        _vi("b", TensorProto.FLOAT, [2]),
+        _vi("spare", TensorProto.BOOL, [2]),
+    ]
     feeds = {"x": np.asarray([False, True])}
     if legacy:
         inputs.extend(_vi(t.name, t.data_type, list(t.dims)) for t in initializers)
@@ -430,3 +437,31 @@ def test_not_allocates_distinct_names_and_legacy_controls(legacy):
     assert len(names) == len(set(names))
     for name, actual in _run_ort(transformed, feeds).items():
         np.testing.assert_array_equal(actual, expected[name])
+
+
+@pytest.mark.parametrize("reader", [None, TensorProto.FLOAT, TensorProto.INT32])
+def test_public_not_result_retains_boolean_type_and_values(reader):
+    """Keep declared BOOL outputs native even when numeric Cast readers are eligible."""
+    nodes = [
+        helper.make_node("Cast", ["x"], ["boolean"], to=TensorProto.BOOL),
+        helper.make_node("Not", ["boolean"], ["public"]),
+    ]
+    outputs = [_vi("public", TensorProto.BOOL, [2])]
+    if reader is not None:
+        nodes.append(helper.make_node("Cast", ["public"], ["numeric"], to=reader))
+        outputs.append(_vi("numeric", reader, [2]))
+    model = helper.make_model(
+        helper.make_graph(nodes, "public_not", [_vi("x", TensorProto.BOOL, [2])], outputs),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    model = onnx.shape_inference.infer_shapes(model)
+    feeds = {"x": np.asarray([False, True])}
+    expected = _run_ort(model, feeds)
+    before = model.SerializeToString()
+    changed = _apply(copy.deepcopy(model))
+    assert changed.SerializeToString() == before
+    actual = _run_ort(changed, feeds)
+    assert actual["public"].dtype == np.bool_
+    for name in expected:
+        np.testing.assert_array_equal(actual[name], expected[name])

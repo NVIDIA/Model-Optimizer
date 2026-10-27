@@ -88,7 +88,7 @@ def _apply_not(model: onnx.ModelProto) -> onnx.ModelProto:
         if (
             len(cache.get_consumers(producer_node.output[0])) != 1
             or producer_node.output[0] in cache.graph_output_names | captured
-            or node.output[0] in captured
+            or node.output[0] in cache.graph_output_names | captured
         ):
             continue
         source = producer_node.input[0]
@@ -138,7 +138,6 @@ def _apply_not(model: onnx.ModelProto) -> onnx.ModelProto:
         if clip_shape is not None:
             add_value_info(graph, clip_out, TensorProto.FLOAT, clip_shape)
 
-        # Update Not output dtype to FLOAT (graph output or intermediate value_info)
         not_out_vi = cache.vi_map.get(node.output[0])
         if not_out_vi is not None:
             not_out_vi.type.tensor_type.elem_type = TensorProto.FLOAT
