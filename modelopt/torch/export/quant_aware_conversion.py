@@ -62,6 +62,7 @@ Reverse rules are derived from the model's conversion mapping via transformers'
 (in-memory-name) behavior rather than emit a silently-wrong checkpoint.
 """
 
+import functools
 import logging
 import re
 from collections.abc import Iterable
@@ -757,6 +758,7 @@ def _drop_shadowed_prefix_renames(model, rules: list[RenameRule]) -> list[Rename
     return kept
 
 
+@functools.cache
 def _quantization_codec_ops() -> tuple[type, ...]:
     """Transformers' ops that decode or encode a weight's on-disk quantization in place.
 
