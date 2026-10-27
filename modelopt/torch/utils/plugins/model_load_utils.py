@@ -533,10 +533,13 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
         # FSDP2 shards through a process group even on one rank; a plan for more ranks than one
         # was refused without a group. A run (distributed_run) destroys the group on exit.
         if dist.is_distributed_launch():
-            # One rank of a launch of several cannot set the group up for itself.
+            # One rank of a launch of several cannot set the group up for itself, and the one-rank
+            # plan that reaches here is no plan for the launch.
+            world = os.environ["WORLD_SIZE"]
             raise RuntimeError(
-                f"The {route} load shards through this {os.environ['WORLD_SIZE']}-rank launch's "
-                "process group, which is not set up; load inside distributed_run(), which sets it up."
+                f"The {route} load shards through this {world}-rank launch's process group, which "
+                "is not set up; load inside distributed_run(), which sets it up, with a plan for "
+                f"the launch: DistributionPlan({world}, dense='fsdp')."
             )
         if "RANK" not in os.environ:
             raise RuntimeError(
