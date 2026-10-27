@@ -26,6 +26,23 @@ from .dla_reorder_nodes import priority_topological_order
 __all__ = []
 
 _RANK_FLOW_OPS = _RANK_AGNOSTIC_OPS | {"Slice", "Transpose", "Reshape", "Expand", "Tile"}
+_REDUCTION_OPS = frozenset({"ReduceSum", "ReduceMean", "ReduceMin", "ReduceMax"})
+
+
+def _require_output_rank_conversion(node, local_functions, prepared_output_ops):
+    """Require an explicit later stage before deferring a native rank-reducing operation."""
+    if (
+        _is_standard_node(node, local_functions, {node.op_type})
+        and (
+            node.op_type == "Flatten"
+            or (
+                (node.op_type in {"ArgMax", "ArgMin"} or node.op_type.startswith("Reduce"))
+                and any(attr.name == "keepdims" and attr.i == 0 for attr in node.attribute)
+            )
+        )
+        and node.op_type not in prepared_output_ops
+    ):
+        raise ValueError(f"Output rank conversion is unavailable for {node.op_type}")
 
 
 def _is_standard_node(node, local_functions, op_types):
@@ -228,7 +245,7 @@ def _apply_non4d_model_inputs(model):
     return model
 
 
-def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False):
+def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False, prepared_output_ops=()):
     """Restore four-dimensional outputs, optionally deferring checks to later rank stages."""
     graph = model.graph
     cache = GraphCache(graph)
@@ -245,6 +262,8 @@ def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False):
         producer = cache.get_producer(value.name)
         source = _output_rank_source(cache, producer, local_functions, rank_sources)
         if source is not None:
+            if defer_rank_conversion:
+                _require_output_rank_conversion(source, local_functions, prepared_output_ops)
             if source.op_type in {"Squeeze", "Unsqueeze", "Concat"} and not _is_standard_node(
                 source, local_functions, {"Squeeze", "Unsqueeze", "Concat"}
             ):

@@ -38,10 +38,12 @@ from .dla_transforms.dla_matmul_to_transpose_conv_transpose import (
     _apply_matmul_to_transpose_conv_transpose,
 )
 from .dla_transforms.dla_model_boundaries import (
+    _REDUCTION_OPS,
     _apply_fix_instancenorm_channels,
     _apply_non4d_model_inputs,
     _apply_non4d_model_outputs,
     _apply_remove_intermediary_squeeze_unsqueeze,
+    _require_output_rank_conversion,
 )
 from .dla_transforms.dla_remove_deqlin import _apply_remove_deqlin
 from .dla_transforms.dla_remove_qdq import _remove_qdq_from_model
@@ -124,7 +126,7 @@ def _transform_make_dla_compatible(
         local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
         for node in model.graph.node:
             if (
-                node.op_type in {"ReduceSum", "ReduceMean", "ReduceMin", "ReduceMax"}
+                node.op_type in _REDUCTION_OPS
                 and node.domain in {"", "ai.onnx"}
                 and not node.overload
                 and (node.domain, node.op_type, node.overload) not in local_functions
@@ -133,6 +135,13 @@ def _transform_make_dla_compatible(
                 raise NotImplementedError(
                     "Standalone reductions are not available in this pipeline"
                 )
+    stages = frozenset(stage for stage, _ in DLA_TRANSFORMS)
+    prepared_output_ops = stages | (
+        _REDUCTION_OPS if "StandaloneReduceOperations" in stages else frozenset()
+    )
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    for node in model.graph.node:
+        _require_output_rank_conversion(node, local_functions, prepared_output_ops)
     quant_types = (
         DEFAULT_QDQ_REMOVE_QUANT_TYPES
         if qdq_quantized_dtypes is None
@@ -153,6 +162,8 @@ def _transform_make_dla_compatible(
             }
         elif name == "ConstantsToInitializers":
             options = {"verbose": verbose}
+        elif name == "Non4dModelOutputs":
+            options = {"prepared_output_ops": prepared_output_ops}
         result = transform(model, **options)
         if result is not None:
             model = result

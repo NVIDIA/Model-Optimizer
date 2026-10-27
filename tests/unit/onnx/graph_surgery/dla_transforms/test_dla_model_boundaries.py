@@ -646,3 +646,69 @@ def test_output_adapter_refuses_native_rank_five_squeeze_before_mutation(axes):
     with pytest.raises(ValueError, match="rank"):
         _apply_non4d_model_outputs(model, defer_rank_conversion=True)
     assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("operation", ["Flatten", "ArgMax", "ArgMin", "ReduceProd", "ReduceL2"])
+@pytest.mark.parametrize("tail", [False, True])
+@pytest.mark.parametrize("entrypoint", ["deferred", "pipeline"])
+def test_native_rank_reducing_outputs_require_registered_conversion(
+    operation, tail, entrypoint, monkeypatch
+):
+    """Refuse native rank reducers before adding planned adapters to earlier valid outputs."""
+    attributes = (
+        {"axis": 1}
+        if operation == "Flatten"
+        else (
+            {"axis": 1, "keepdims": 0}
+            if operation.startswith("Arg")
+            else {"axes": [2, 3], "keepdims": 0}
+        )
+    )
+    shape = (
+        [1, 48]
+        if operation == "Flatten"
+        else ([1, 4, 4] if operation.startswith("Arg") else [1, 3])
+    )
+    nodes = [
+        helper.make_node("Relu", ["x"], ["first"]),
+        helper.make_node(operation, ["z"], ["middle" if tail else "y"], **attributes),
+    ]
+    if tail:
+        nodes.append(helper.make_node("Identity", ["middle"], ["y"]))
+    model = _make_model(
+        nodes,
+        [
+            helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3]),
+            helper.make_tensor_value_info("z", TensorProto.FLOAT, [1, 3, 4, 4]),
+        ],
+        [
+            helper.make_tensor_value_info("first", TensorProto.FLOAT, [2, 3]),
+            helper.make_tensor_value_info(
+                "y", TensorProto.INT64 if operation.startswith("Arg") else TensorProto.FLOAT, shape
+            ),
+        ],
+    )
+    model.opset_import[0].version = 17
+    feeds = {
+        "x": np.arange(6, dtype=np.float32).reshape(2, 3),
+        "z": np.linspace(0.1, 0.9, 48, dtype=np.float32).reshape(1, 3, 4, 4),
+    }
+    _checked_run(model, feeds)
+    before = model.SerializeToString()
+    if entrypoint == "pipeline":
+        pipeline = import_module(_transform_make_dla_compatible.__module__)
+        monkeypatch.setattr(
+            pipeline,
+            "DLA_TRANSFORMS",
+            tuple(
+                (name, transform)
+                for name, transform in pipeline.DLA_TRANSFORMS
+                if name != operation
+            ),
+        )
+        with pytest.raises(ValueError, match=r"rank.*conversion"):
+            _transform_make_dla_compatible(model, verbose=False)
+    else:
+        with pytest.raises(ValueError, match=r"rank.*conversion"):
+            _apply_non4d_model_outputs(model, defer_rank_conversion=True)
+    assert model.SerializeToString() == before
