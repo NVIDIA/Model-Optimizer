@@ -31,7 +31,7 @@ the last stage, and fewer recomputed layers on later stages.
 The right values depend on the model, sequence length, and GPU memory, so
 measure on the target node count, with mock data and 4-5 iterations each:
 
-1. Run `scripts/profile_distill.py` (same CLI as `distill.py`, from
+1. Run `../day0-release/scripts/profile_distill.py` (same CLI as `distill.py`, from
    `examples/megatron_bridge`, with `PROFILE_OUT=<dir>`) twice with the default
    even split: once with `--recompute_granularity full --recompute_method
    uniform --recompute_num_layers 1`, once with `--recompute_granularity full
@@ -40,7 +40,7 @@ measure on the target node count, with mock data and 4-5 iterations each:
 2. Plan:
 
    ```bash
-   python "$SKILL_DIR/scripts/plan_layout.py" --full <dir1> --partial <dir2>
+   python "$SKILL_DIR/../day0-release/scripts/plan_layout.py" --full <dir1> --partial <dir2>
    ```
 
    It prints the fitted unit costs, the predicted iteration time, per-stage

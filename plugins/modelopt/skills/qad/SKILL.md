@@ -160,7 +160,7 @@ For Megatron Bridge, before constructing commands, read:
    the whole campaign. Then decide with:
 
    ```bash
-   python "$SKILL_DIR/scripts/gate_qad.py" --scores <qad-scores.json>
+   python "$SKILL_DIR/../day0-release/scripts/gate_qad.py" --scores <qad-scores.json>
    ```
 
    Gate only validated runs, giving every score the SE of its delta from the

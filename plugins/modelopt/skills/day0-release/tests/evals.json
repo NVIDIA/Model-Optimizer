@@ -90,7 +90,7 @@
       "Runs the normal chain first and enters Step 7 only after Step 5 returns REGRESSION",
       "Follows the qad skill's recipe loop: compress more after a pass, one QAD knob or compress less after a miss",
       "Evaluates every QAD checkpoint (every 50 iterations) on all four benchmarks with the baseline config",
-      "Stops each QAD run with gate_qad.py on PASS or after 2 consecutive worse checkpoints",
+      "Trains each QAD run to its horizon, decides with gate_qad.py, and accepts a PASS only after a confirmation run",
       "Runs the canary, compare and verbosity gates on the selected checkpoint before closeout and lists every loop"
     ]
   }

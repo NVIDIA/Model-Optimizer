@@ -274,9 +274,9 @@ the final path after any move.
 
 Follow the **qad** skill's recipe loop, starting from the Step 2 recipe:
 PTQ → QAD, evaluate every checkpoint (every 50 iterations) as in Step 4 (config
-parity with Step 3, `gate_run.py`), submitted in parallel with training, on the
-1-3 most representative benchmarks (largest PTQ drops), and decide each run
-with `qad/scripts/gate_qad.py`. Run the slow AA-LCR and Terminal-Bench on a
+parity with Step 3, `gate_run.py`), submitted in parallel with training, failing
+benchmarks first (largest PTQ drops), and decide each run with
+`scripts/gate_qad.py`. Run the slow AA-LCR and Terminal-Bench on a
 checkpoint only after it passes the rest. Train each run to its horizon; resubmit
 and pool on `NEEDS_REPEATS`, run the rest of the suite on `SCREEN_PASS`, and on
 `PASS` accept only after a fresh confirmation run passes. Independent runs may go
