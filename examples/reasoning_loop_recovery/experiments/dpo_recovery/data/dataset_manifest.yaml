@@ -13,7 +13,6 @@ files:
   pair_validation:
     file: datasets/pair_validation.jsonl
     pairs: 11
-generation_record: pair_generation.yaml
 split_file: subtask_split.yaml
 format: UTF-8 JSONL; serialized input/chosen/rejected strings plus ranked chat completions
 tokenized: false
@@ -39,6 +38,9 @@ pair_validation:
   size: max(5, floor(N / 10))
   may_share_inputs_with_training: true
   purpose: Diagnostic loss; not held-out SciCode evaluation
+  training_pairs: 104
+  validation_pairs: 11
+  all_pairs_from_training_subtasks: true
 audit:
   checks_passed: true
   pairs:
@@ -57,3 +59,10 @@ audit:
     loss only.
   - Positive correctness not required;18of115positives passed SciCode tests.
   - Truncated rejected prefixes contain the start of repetition, not complete responses.
+preparation_record: pair_preparation.yaml
+subtask_split:
+  file: subtask_split.yaml
+  training_subtasks: 44
+  held_out_subtasks: 11
+  pair_sources: Training subtasks only, for both pair training and diagnostic validation
+  purpose: Held-out SciCode evaluation; distinct from preference-pair validation
