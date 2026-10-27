@@ -377,6 +377,26 @@ def test_the_fold_derives_a_w4a8_experts_amax_per_quantizer_stage(monkeypatch, a
     assert any("was not calibrated" in str(w.message) for w in caught) == (amax_state == "zero")
 
 
+def test_the_fold_puts_its_scales_on_the_weights_device(monkeypatch):
+    """Per-tensor FP8 makes each expert's scale from a Python float, on the CPU wherever the weight
+    is, and a sharded fold rewraps the scales on the weight's mesh. The weights here sit on meta,
+    the one other device a CPU runner has, so a stand-in packs them, its scales on the CPU."""
+    experts = _quantized_experts(_KeepFusedGatedExperts, mtq.FP8_DEFAULT_CFG)
+    for proj in ("gate_up_proj", "down_proj"):
+        setattr(experts, proj, nn.Parameter(getattr(experts, proj).detach().to("meta")))
+
+    def pack(wrapper, dtype, **_kwargs):
+        wrapper.weight_scale = torch.tensor(1.0)
+        wrapper.weight_scale_2 = torch.tensor(1.0)
+
+    monkeypatch.setattr("modelopt.torch.export.unified_export_hf._export_quantized_weight", pack)
+    _export_fused_experts_keep_fused(experts, torch.bfloat16)
+
+    for proj in ("gate_up_proj", "down_proj"):
+        for scale in ("weight_scale", "weight_scale_2"):
+            assert getattr(experts, f"{proj}_{scale}").is_meta, (proj, scale)
+
+
 def _mixed(experts):
     experts.down_proj_weight_quantizers[1].disable()
 

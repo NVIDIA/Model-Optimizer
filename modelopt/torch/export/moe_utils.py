@@ -308,7 +308,9 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
             if hasattr(wrapper, "input_scale"):
                 input_scale = wrapper.input_scale
         local_fp8 = torch.stack(fp8_weights, dim=0)
-        local_ws = torch.stack(weight_scales, dim=0)
+        # On the weight's device: per-tensor FP8 builds each expert's scale from a Python float, on
+        # the CPU, and a DTensor rewrap would label a CPU shard with the weight's device mesh.
+        local_ws = torch.stack(weight_scales, dim=0).to(local_w.device)
         if is_dt:
             # Keep the global expert count: from_local would infer it as local x world, which is
             # wrong for an uneven shard (3 experts on 2 ranks) and misnumbers the experts.
@@ -318,7 +320,7 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
         module.register_buffer(f"{proj}_weight_scale", local_ws)
         if weight_scale_2s:
             # Per-expert scalar (E,) -- shards on the expert axis exactly like the weight scale.
-            local_ws2 = torch.stack(weight_scale_2s, dim=0)
+            local_ws2 = torch.stack(weight_scale_2s, dim=0).to(local_w.device)
             if is_dt:
                 local_ws2 = _rewrap_expert_rows(local_ws2, mesh, scale_placements, wdata.shape[0])
             module.register_buffer(f"{proj}_weight_scale_2", local_ws2)
