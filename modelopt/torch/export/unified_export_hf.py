@@ -1954,6 +1954,20 @@ def _write_base_config(model: nn.Module, export_dir: "Path | str") -> None:
             warnings.warn(f"Could not save generation_config: {gen_err}")
 
 
+def _no_gather_export_asked() -> bool:
+    """Whether ``MODELOPT_FSDP2_EXPORT`` picks the no-gather writer for an FSDP2-sharded export.
+
+    ``nogather`` picks it; unset, empty or ``streaming`` keeps the default streaming path. Any other
+    value raises: a misspelled one would otherwise quietly take the path it was set to avoid.
+    """
+    value = os.environ.get("MODELOPT_FSDP2_EXPORT") or "streaming"
+    if value not in ("nogather", "streaming"):
+        raise ValueError(
+            f"MODELOPT_FSDP2_EXPORT={value!r}: expected 'nogather', or 'streaming', the default."
+        )
+    return value == "nogather"
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -2055,7 +2069,7 @@ def export_hf_checkpoint(
     # Rank 0's choice: the two writers issue different collectives, so ranks that read their
     # environments differently would wait in collectives the others never join.
     use_no_gather_writer = is_fsdp2_sharded and broadcast_from(
-        "MODELOPT_FSDP2_EXPORT", lambda: os.environ.get("MODELOPT_FSDP2_EXPORT") == "nogather"
+        "MODELOPT_FSDP2_EXPORT", _no_gather_export_asked
     )
     # Not the global rank: a non-FSDP2 export writes the whole checkpoint from every process.
     rank = torch.distributed.get_rank() if is_fsdp2_sharded else 0

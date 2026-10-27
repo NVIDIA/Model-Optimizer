@@ -884,6 +884,15 @@ def test_nogather_export_saves_modelopt_state(gloo_world_of_one, tmp_path):
     assert (tmp_path / "export" / "modelopt_state.pth").is_file()
 
 
+def test_nogather_export_refuses_a_writer_it_does_not_know(gloo_world_of_one, tmp_path):
+    """A misspelled ``MODELOPT_FSDP2_EXPORT`` raises, rather than quietly taking the default writer,
+    the one it was set to avoid."""
+    model = _fsdp2_shard(_load(_save(_llama_config(), tmp_path / "src")), gloo_world_of_one)
+
+    with pytest.raises(ValueError, match="MODELOPT_FSDP2_EXPORT='no-gather'"):
+        _nogather_export(model, tmp_path / "export", knob="no-gather")
+
+
 def test_nogather_export_names_modules_in_the_quant_config_as_the_weights_do(
     gloo_world_of_one, tmp_path
 ):
