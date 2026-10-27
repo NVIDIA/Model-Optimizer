@@ -336,7 +336,9 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
         if domain != local.dtype:
             local = local.to(domain)
             if is_dt:
-                local = _rewrap_expert_rows(local, wdata.device_mesh, wdata.placements, wdata.shape[0])
+                local = _rewrap_expert_rows(
+                    local, wdata.device_mesh, wdata.placements, wdata.shape[0]
+                )
             setattr(module, proj, nn.Parameter(local, requires_grad=False))
 
     # Drop the quantizer modules -- their info now lives in the fused weight + scale buffers -- and

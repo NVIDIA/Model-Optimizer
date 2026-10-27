@@ -708,7 +708,6 @@ def test_fused_experts_handler_keeps_experts_fused_only_when_asked(keep_fused):
         assert "gate_up_proj" not in names
 
 
-
 def test_keep_fused_refuses_fused_experts_not_named_experts():
     """The split finds a fused weight by its ``experts.<proj>`` key, as the writer does: a container
     named otherwise is refused before anything is folded, not written fused to fail at load."""
@@ -772,7 +771,9 @@ def test_quant_linear_handlers_pack_an_fsdp2_unit_in_one_weight_window(
     mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(torch.randn(4, 32)))
     refs = copy.deepcopy(model)[0]
     for i, ref in enumerate(refs):
-        ExportModuleRegistry.match(ref)(f"0.{i}", ref, ExportContext(model=ref, dtype=torch.bfloat16))
+        ExportModuleRegistry.match(ref)(
+            f"0.{i}", ref, ExportContext(model=ref, dtype=torch.bfloat16)
+        )
     fully_shard(layer, mesh=gloo_world_of_one)
     if root_sharded:
         fully_shard(model, mesh=gloo_world_of_one)
@@ -796,7 +797,8 @@ def test_quant_linear_handlers_pack_an_fsdp2_unit_in_one_weight_window(
         assert packed.dtype == torch.uint8
         assert torch.equal(packed.full_tensor(), ref.weight)
         for name in ("weight_scale", "weight_scale_2", "input_scale"):
-            assert torch.equal(_raw_bytes(sd[f"0.{i}.{name}"]), _raw_bytes(getattr(ref, name))), name
+            want = _raw_bytes(getattr(ref, name))
+            assert torch.equal(_raw_bytes(sd[f"0.{i}.{name}"]), want), name
 
 
 def test_nvfp4_packs_a_sharded_weight_into_the_same_codes(gloo_world_of_one):
