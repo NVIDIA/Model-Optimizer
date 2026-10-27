@@ -81,8 +81,11 @@ def _test_matches_megatron_exporter(source, quant_cfg_name, tmp_path, rank, size
     weights, config = _load(export_dir)
     assert weights.keys() == ref_weights.keys()
     for name, weight in weights.items():
+        reference = ref_weights[name]
         # The Megatron exporter keeps per-tensor scales 1-d; both hold the same scalar.
-        reference = ref_weights[name].reshape(weight.shape)
+        if reference.numel() == weight.numel() == 1:
+            reference = reference.reshape(weight.shape)
+        assert weight.shape == reference.shape, name
         assert weight.dtype == reference.dtype, name
         assert torch.equal(_bits(weight), _bits(reference)), name
 
