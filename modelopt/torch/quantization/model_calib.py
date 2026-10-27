@@ -74,6 +74,7 @@ from .utils.calib_utils import (
     _GPTQ_HELPER_REGISTRY,
     _IMATRIX_ENCODER_REGISTRY,
     GPTQHelper,
+    bfloat16_hessian_gemm,
     track_calib_forward_memory,
 )
 
@@ -957,10 +958,13 @@ class _LocalHessianAccumulator:
     scale; the buffer is allocated lazily so never-routed experts cost nothing.
     """
 
-    def __init__(self, cout: int, cin: int, block_size: int):
+    def __init__(
+        self, cout: int, cin: int, block_size: int, input_dtype: torch.dtype = torch.float32
+    ):
         self.cout = cout
         self.cin = cin
         self.block_size = block_size
+        self.input_dtype = input_dtype
         self.num_blocks_per_cin = cin // block_size
         # Not block-divisible -> no Hessian (falls back to plain MSE).
         self.is_enabled = cin % block_size == 0
@@ -973,10 +977,15 @@ class _LocalHessianAccumulator:
         """Accumulate ``XᵀX`` per block from an activation of shape ``(..., cin)``."""
         if not self.is_enabled:
             return
-        # fp32 GEMM avoids bf16/fp16 precision loss; (cin, tokens) -> (n_blocks, bs, tokens).
-        x = input_tensor.reshape(-1, self.cin).to(torch.float32).T
+        # (cin, tokens) -> (n_blocks, bs, tokens). A float32 GEMM avoids bf16/fp16 precision loss;
+        # a bfloat16 one, accumulating in float32, is faster and needs no float32 copy.
+        bf16 = bfloat16_hessian_gemm(self.input_dtype, input_tensor)
+        x = input_tensor.reshape(-1, self.cin).to(torch.bfloat16 if bf16 else torch.float32).T
         x = x.reshape(self.num_blocks_per_cin, self.block_size, -1)
-        hessian_batch = x @ x.transpose(-1, -2)
+        if bf16:
+            hessian_batch = torch.bmm(x, x.transpose(-1, -2), out_dtype=torch.float32)
+        else:
+            hessian_batch = x @ x.transpose(-1, -2)
         if self.hessian_per_block is None:
             self.hessian_per_block = hessian_batch
         else:
@@ -1178,6 +1187,7 @@ def local_hessian_calibrate(
     block_size: int = 16,
     debug: bool = False,
     shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
+    hessian_input_dtype: str = "float32",
 ):
     """Calibrate weight quantizers by minimizing the Hessian-weighted error.
 
@@ -1206,6 +1216,8 @@ def local_hessian_calibrate(
         block_size: Block size for local Hessian computation (default: 16).
         debug: If True, retain the per-quantizer Hessian accumulators on the model
             (``model._local_hessian_accumulators``) for inspection.
+        hessian_input_dtype: ``"float32"`` or ``"bfloat16"``, the dtype the Hessian GEMM reads
+            the activations in.
 
     See :class:`LocalHessianCalibConfig <modelopt.torch.quantization.config.LocalHessianCalibConfig>`
     for details on the configuration options.
@@ -1227,7 +1239,9 @@ def local_hessian_calibrate(
         input_local = input_tensor.to_local() if hasattr(input_tensor, "to_local") else input_tensor
         acc = accumulators.get(id(weight_quantizer))
         if acc is None:
-            acc = _LocalHessianAccumulator(weight.shape[0], weight.shape[1], block_size)
+            acc = _LocalHessianAccumulator(
+                weight.shape[0], weight.shape[1], block_size, getattr(torch, hessian_input_dtype)
+            )
             accumulators[id(weight_quantizer)] = acc
         acc.accumulate(input_local)
 

@@ -140,14 +140,10 @@ def update_hessian(input, hessian, n_samples, input_dtype=torch.float32):
     scale = n_samples / (n_samples + batch_size)
     n_samples += batch_size
     alpha = 2 / n_samples
-    if (
-        input_dtype == torch.bfloat16
-        and input_flat.is_cuda
-        and _has_float32_out_gemm(input_flat.device)
-    ):
+    if bfloat16_hessian_gemm(input_dtype, input_flat):
         # BF16 products are exact in float32, so a tensor-core GEMM writing float32 differs from a
-        # float32 GEMM only in how it rounds the sums, by ~1e-5 of the Hessian's diagonal. It is
-        # 9-16x faster on GB300 and needs no float32 copy of the inputs.
+        # float32 GEMM only in how it rounds the sums: up to ~3e-5 of the Hessian's diagonal at 32K
+        # tokens per batch. It is 9-16x faster on GB300 and needs no float32 copy of the inputs.
         input_flat = input_flat.to(torch.bfloat16)
         if hessian.device == input_flat.device:
             torch.addmm(
@@ -163,8 +159,6 @@ def update_hessian(input, hessian, n_samples, input_dtype=torch.float32):
             gram = torch.mm(input_flat.t(), input_flat, out_dtype=torch.float32)
             hessian.mul_(scale).add_(gram.to(hessian.device), alpha=alpha)
         return hessian, n_samples
-    if input_dtype == torch.bfloat16:
-        _warn_bfloat16_hessian_unavailable(input_flat.device)
 
     input_flat = input_flat.float()
     if hessian.device == input_flat.device:
@@ -175,6 +169,20 @@ def update_hessian(input, hessian, n_samples, input_dtype=torch.float32):
     return hessian, n_samples
 
 
+def bfloat16_hessian_gemm(input_dtype: torch.dtype, inputs: torch.Tensor) -> bool:
+    """Whether a Hessian GEMM over ``inputs`` runs on bfloat16 with float32 output.
+
+    True when ``input_dtype`` asks for bfloat16 and the inputs' GPU has such GEMMs; when they are
+    missing, warns once per device and returns False, so the caller computes in float32.
+    """
+    if input_dtype != torch.bfloat16:
+        return False
+    if inputs.is_cuda and _has_float32_out_gemm(inputs.device):
+        return True
+    _warn_bfloat16_hessian_unavailable(inputs.device)
+    return False
+
+
 @functools.cache
 def _has_float32_out_gemm(device: torch.device) -> bool:
     """Whether GEMMs on CUDA ``device`` take bfloat16 inputs and write float32 (``out_dtype``)."""
@@ -182,6 +190,7 @@ def _has_float32_out_gemm(device: torch.device) -> bool:
         x = torch.zeros(1, 1, device=device, dtype=torch.bfloat16)
         h = torch.mm(x, x, out_dtype=torch.float32)
         torch.addmm(h, x, x, out_dtype=torch.float32, out=h)
+        torch.bmm(x[None], x[None], out_dtype=torch.float32)
     except (TypeError, RuntimeError):
         return False
     return True
@@ -190,8 +199,8 @@ def _has_float32_out_gemm(device: torch.device) -> bool:
 @functools.cache
 def _warn_bfloat16_hessian_unavailable(device: torch.device) -> None:
     warn_rank_0(
-        f"GPTQ hessian_input_dtype='bfloat16' needs CUDA GEMMs that take out_dtype, which {device} "
-        "lacks with this torch; computing its Hessians in float32."
+        f"hessian_input_dtype='bfloat16' needs CUDA GEMMs that take out_dtype, which {device} lacks "
+        "with this torch; computing its Hessians in float32."
     )
 
 
