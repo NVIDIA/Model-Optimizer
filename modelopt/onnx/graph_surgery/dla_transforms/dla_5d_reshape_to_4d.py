@@ -42,7 +42,7 @@ from .dla_reorder_nodes import priority_topological_order
 _REDUCE_OPS = frozenset({"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"})
 
 
-def _unproven_scalar_qdq_control(cache: GraphCache, name: str) -> bool:
+def _known_non_scalar_control(cache: GraphCache, name: str) -> bool:
     """Refuse QDQ controls unless their rank is known to be zero."""
     if not name:
         return False
@@ -116,8 +116,7 @@ def _parse_middleware_strict(
                 or n.output[0] in cache.graph_output_names
                 or any(a.name in {"axis", "block_size"} for a in dq.attribute)
                 or any(
-                    _unproven_scalar_qdq_control(cache, name)
-                    for name in {*n.input[1:], *dq.input[1:]}
+                    _known_non_scalar_control(cache, name) for name in {*n.input[1:], *dq.input[1:]}
                 )
             ):
                 raise ValueError(f"{path_context}: QDQ must be unshared and per-tensor")
