@@ -521,16 +521,26 @@ class _VerifiedSourceLoader(importlib.abc.InspectLoader):
         return self.source_to_code(self.source, self.path)
 
 
-def _import_module_from_path(module_path: str, module_name: str, package_name: str, sha256: str):
-    """Import a module from file path, refusing content that does not match ``sha256``."""
-    with open(module_path, "rb") as f:
+def _download_verified_kimi_k2_file(filename: str) -> tuple[str, bytes]:
+    """Download ``filename`` at the pinned revision and return its path and hash-checked content."""
+    # Not snapshot_download: for a commit revision it calls the Hub even with HF_HUB_OFFLINE set,
+    # so cached runs would fail offline.
+    path = hf_hub_download(KIMI_K2_REPO_ID, filename, revision=KIMI_K2_REVISION)
+    with open(path, "rb") as f:
         source = f.read()
     digest = hashlib.sha256(source).hexdigest()
-    if digest != sha256:
+    expected = KIMI_K2_FILE_SHA256[filename]
+    if digest != expected:
         raise RuntimeError(
-            f"sha256 of {module_path} is {digest}, expected {sha256}; refusing to execute it."
+            f"sha256 of {path} is {digest}, expected {expected}; refusing to execute it."
         )
+    return path, source
 
+
+def _import_module_from_source(
+    module_path: str, source: bytes, module_name: str, package_name: str
+):
+    """Import already-verified ``source`` as ``module_name``, with ``module_path`` as its file."""
     loader = _VerifiedSourceLoader(module_path, source)
     spec = importlib.util.spec_from_file_location(module_name, module_path, loader=loader)
     if spec is None:
@@ -539,34 +549,34 @@ def _import_module_from_path(module_path: str, module_name: str, package_name: s
     module = importlib.util.module_from_spec(spec)
     module.__package__ = package_name
     sys.modules[module_name] = module
-    loader.exec_module(module)
+    try:
+        loader.exec_module(module)
+    except BaseException:
+        # Like importlib, don't leave a half-initialized module registered
+        sys.modules.pop(module_name, None)
+        raise
     return module
 
 
 def _setup_kimi_k2_decoder():
     """Setup Kimi-K2 decoder with proper imports and patches."""
-    # Not snapshot_download: for a commit revision it calls the Hub even with HF_HUB_OFFLINE set,
-    # so cached runs would fail offline.
-    config_module_path = hf_hub_download(
-        KIMI_K2_REPO_ID, "configuration_deepseek.py", revision=KIMI_K2_REVISION
-    )
-    model_module_path = hf_hub_download(
-        KIMI_K2_REPO_ID, "modeling_deepseek.py", revision=KIMI_K2_REVISION
-    )
+    # Verify both files before executing either, so a refusal runs none of the downloaded code
+    config_module_path, config_source = _download_verified_kimi_k2_file("configuration_deepseek.py")
+    model_module_path, model_source = _download_verified_kimi_k2_file("modeling_deepseek.py")
 
     # Import required modules
-    _import_module_from_path(
+    _import_module_from_source(
         config_module_path,
+        config_source,
         f"{KIMI_K2_PACKAGE_NAME}.configuration_deepseek",
         KIMI_K2_PACKAGE_NAME,
-        KIMI_K2_FILE_SHA256["configuration_deepseek.py"],
     )
 
-    kimi_k2_module = _import_module_from_path(
+    kimi_k2_module = _import_module_from_source(
         model_module_path,
+        model_source,
         f"{KIMI_K2_PACKAGE_NAME}.modeling_deepseek",
         KIMI_K2_PACKAGE_NAME,
-        KIMI_K2_FILE_SHA256["modeling_deepseek.py"],
     )
 
     # Patch deprecated usage in Kimi implementation
