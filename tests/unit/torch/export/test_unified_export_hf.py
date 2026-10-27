@@ -646,6 +646,22 @@ def test_fuse_prequant_layernorm_skips_modules_without_pre_quant_scale():
     assert not hasattr(modules[1], "fused_with_prequant")
 
 
+def test_fuse_prequant_layernorm_fuses_and_removes_pre_quant_scale():
+    layernorm = torch.nn.LayerNorm(4)
+    modules = [_linear_with_input_quantizer(), _linear_with_input_quantizer()]
+    pre_quant_scale = torch.tensor([1.0, 2.0, 3.0, 4.0])
+    for module in modules:
+        module.input_quantizer._pre_quant_scale = pre_quant_scale
+
+    fuse_prequant_layernorm(layernorm, modules)
+
+    assert torch.allclose(layernorm.weight, pre_quant_scale)
+    assert torch.allclose(layernorm.bias, torch.zeros_like(pre_quant_scale))
+    for module in modules:
+        assert not hasattr(module.input_quantizer, "_pre_quant_scale")
+        assert module.fused_with_prequant
+
+
 # --- carrying over weights the loader could not place --------------------------------------------
 
 
