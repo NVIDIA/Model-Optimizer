@@ -82,7 +82,7 @@ def _gather_flatten_count(cache, node, index_shape):
     if (
         index_shape is None
         or shape is None
-        or len(shape) not in (2, 3)
+        or len(shape) not in (2, 3, 4)
         or output is None
         or len(output) > 4
     ):
@@ -160,6 +160,15 @@ def _apply_gather(model):
         if rank <= 1 and original not in index_views:
             index_views[original] = (
                 rank if _gather_index_needs_view(cache, original, layout_nodes) else None
+            )
+        if (
+            rank == 0
+            and fixed is not None
+            and original not in cache.graph_input_names
+            and _gather_flatten_count(cache, candidate, []) is None
+        ):
+            raise ValueError(
+                f"{candidate.name!r}: fixed scalar Gather indices change the padded output layout"
             )
         if fixed is None and cache.get_dtype(original) not in (
             TensorProto.INT32,

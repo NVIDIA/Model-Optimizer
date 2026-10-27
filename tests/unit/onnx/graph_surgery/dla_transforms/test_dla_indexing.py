@@ -712,6 +712,52 @@ def test_multidimensional_gather_indices_refuse_before_any_mutation(index_shape,
     assert model.SerializeToString() == before
 
 
+@pytest.mark.parametrize(("shape", "axis"), [([3, 5], 1), ([3, 5, 4], 1), ([3, 5, 4], 2)])
+@pytest.mark.parametrize("negative", [False, True])
+def test_fixed_scalar_gather_validates_padded_layout_before_mutation(shape, axis, negative):
+    """Refuse a layout-changing scalar flatten before changing an earlier eligible Gather."""
+    model = _model(
+        [
+            helper.make_node("Gather", ["first_data", "first_indices"], ["first"], axis=0),
+            helper.make_node(
+                "Gather", ["x", "indices"], ["y"], axis=axis - len(shape) if negative else axis
+            ),
+        ],
+        [
+            helper.make_tensor_value_info("first_data", TensorProto.FLOAT, [5, 4]),
+            helper.make_tensor_value_info("x", TensorProto.FLOAT, shape),
+        ],
+        [
+            helper.make_tensor_value_info("first", TensorProto.FLOAT, [1, 4]),
+            helper.make_tensor_value_info("y", TensorProto.FLOAT, shape[:axis] + shape[axis + 1 :]),
+        ],
+        [
+            numpy_helper.from_array(np.array([1], np.int64), "first_indices"),
+            numpy_helper.from_array(np.array(1, np.int64), "indices"),
+        ],
+    )
+    _execute(model, {"first_data": np.ones((5, 4), np.float32), "x": np.ones(shape, np.float32)})
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match=r"scalar Gather.*layout"):
+        _apply_gather(model)
+    assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize(("shape", "axis"), [([3, 4], 0), ([3, 5, 4], 0), ([1, 3, 4, 4], 1)])
+def test_fixed_scalar_gather_keeps_compatible_padded_layouts(shape, axis):
+    """Retain supported scalar selections for promoted and native four-dimensional data."""
+    model = _model(
+        [helper.make_node("Gather", ["x", "indices"], ["y"], axis=axis)],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape[:axis] + shape[axis + 1 :])],
+        [numpy_helper.from_array(np.array(1, np.int64), "indices")],
+    )
+    feeds = {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape)}
+    expected = _execute(model, feeds)[0]
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+
+
 @pytest.mark.parametrize(
     ("producer", "shape", "refuse"),
     [
