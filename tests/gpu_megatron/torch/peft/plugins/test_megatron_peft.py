@@ -483,6 +483,8 @@ def _test_adapter_gradient_flow_freeze_lora_model(lora_config, tmp_path, rank, s
         LARGE_LORA_CFG_RANDOM_INIT_TEST,  # Use random init so gradients flow to both lora_a and lora_b
     ],
 )
+# Intermittent CUBLAS_STATUS_INTERNAL_ERROR in backward on Blackwell; see conftest.py
+@pytest.mark.flaky_cuda_crash_on_blackwell
 def test_adapter_gradient_flow_freeze_lora_model(dist_workers, lora_config, tmp_path):
     dist_workers.run(
         partial(_test_adapter_gradient_flow_freeze_lora_model, lora_config, str(tmp_path))

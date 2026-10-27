@@ -119,14 +119,8 @@ except ImportError:
 
 SEED = 1234
 
-# TODO: re-enable the marked tests once fixed. Blackwell (sm_120, e.g. RTX PRO 6000) with the
-# nemo:26.06 / TE 2.16 / CUDA 13 stack hits a flaky, intermittent CUDA "illegal memory access" in
-# several tests: When fails, it poisons the process CUDA context and cascades hang across subsequent tests.
-# Passes locally on different GPUs. Likely an upstream TE/CUDA-13 kernel bug, not modelopt logic.
-skip_flaky_on_blackwell = pytest.mark.skipif(
-    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12,
-    reason="Flaky CUDA illegal memory access on Blackwell (nemo:26.06 / TE 2.16 / CUDA 13)",
-)
+# Marked tests intermittently hit a CUDA illegal memory access on Blackwell (sm_120); see conftest.py.
+flaky_on_blackwell = pytest.mark.flaky_cuda_crash_on_blackwell
 
 
 def test_convert_megatron_parallel_linear(distributed_setup_size_1):
@@ -497,7 +491,7 @@ FP8_GEMM_KV_CFG["quant_cfg"].extend(mtq.FP8_KV_CFG["quant_cfg"])
 )
 @pytest.mark.parametrize("meta_device", [False, True])
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
-@skip_flaky_on_blackwell
+@flaky_on_blackwell
 def test_homogeneous_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -523,9 +517,7 @@ def test_homogeneous_sharded_state_dict(
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
 @pytest.mark.timeout(240)
 # Compressed state dict takes longer due to real quant conversion & saving/loading
-# Its real mtq.compress() path exercises the same TE/CUDA-13 kernels that trip the flaky
-# Blackwell (sm_120) illegal-memory-access; #1901 skipped the fake-quant sibling but missed this one.
-@skip_flaky_on_blackwell
+@flaky_on_blackwell
 def test_homogeneous_compressed_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -607,7 +599,7 @@ def test_homogeneous_sharded_state_dict_hybrid(dist_workers, tmp_path, config):
         mixed_block_size_config,
     ],
 )
-@skip_flaky_on_blackwell
+@flaky_on_blackwell
 def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     dist_workers.run(
         partial(_test_sharded_state_dict, tmp_path, config, 256, None, False, False, {}),
@@ -618,7 +610,14 @@ def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     "hidden_size",
     [
         256,
-        pytest.param(320, marks=skip_flaky_on_blackwell),
+        # Runs in the pytest process, so a Blackwell CUDA crash here would break every later test
+        pytest.param(
+            320,
+            marks=pytest.mark.skipif(
+                torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12,
+                reason="Flaky CUDA illegal memory access on Blackwell",
+            ),
+        ),
     ],
 )
 def test_regular_state_dict(distributed_setup_size_1, hidden_size):
@@ -691,7 +690,7 @@ def _test_fp8_real_quantize_helper(rank, size):
     assert real_quant_mem < cur_mem
 
 
-@skip_flaky_on_blackwell
+@flaky_on_blackwell
 def test_fp8_real_quantize(dist_workers):
     dist_workers.run(_test_fp8_real_quantize_helper)
 
@@ -1726,7 +1725,7 @@ def _test_layerwise_calibrate_vlm_text_forward_loop(drive_wrapper, rank, size):
     assert all(m.input_quantizer.amax is not None for m in calibrated)
 
 
-@skip_flaky_on_blackwell
+@flaky_on_blackwell
 @pytest.mark.parametrize("drive_wrapper", [False, True])
 def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wrapper):
     dist_workers_size_1.run(partial(_test_layerwise_calibrate_vlm_text_forward_loop, drive_wrapper))
@@ -2306,8 +2305,7 @@ def _test_dsa_kv_cache_quant_helper(tmp_path, rank, size):
     assert all(m.k_bmm_quantizer.is_enabled and m.v_bmm_quantizer.is_enabled for m in restored)
 
 
-# Intermittent since 2026-10-27 (5 of ~45 CI runs), always in the DSA forward during calibration.
-@skip_flaky_on_blackwell
+@flaky_on_blackwell
 def test_dsa_kv_cache_quant(dist_workers_size_1, tmp_path):
     """DSAttention gets calibrated K/V KV-cache quantizers that survive a checkpoint round-trip."""
     pytest.importorskip("megatron.core.transformer.experimental_attention_variant.dsa")

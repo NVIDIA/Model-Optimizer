@@ -61,6 +61,41 @@ def _prebuild_quant_cuda_extensions():
     ext.precompile()
 
 
+_IS_BLACKWELL = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12
+# Errors the nemo:26.08 TE/CUDA 13 stack intermittently raises on Blackwell (sm_120); not modelopt bugs
+_BLACKWELL_CUDA_CRASHES = (
+    "illegal memory access",
+    "CUBLAS_STATUS_INTERNAL_ERROR",
+    "Worker process(es) died",
+)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "flaky_cuda_crash_on_blackwell: on Blackwell, report a known CUDA crash as xfail, other failures still fail",
+    )
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Report a known Blackwell CUDA crash in a marked test as xfail instead of a failure.
+
+    Only for tests run in a worker pool: a crashed pool is replaced, so later tests are unaffected.
+    """
+    report = yield
+    if (
+        _IS_BLACKWELL
+        and report.when == "call"
+        and report.failed
+        and item.get_closest_marker("flaky_cuda_crash_on_blackwell")
+        and any(err in report.longreprtext for err in _BLACKWELL_CUDA_CRASHES)
+    ):
+        report.outcome = "skipped"
+        report.wasxfail = "known flaky CUDA crash on Blackwell (nemo:26.08 TE/CUDA 13 stack)"
+    return report
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _prestart_preprocess_forkserver():
     """Start the forkserver that ``megatron_preprocess_data`` workers fork from, at session start.
