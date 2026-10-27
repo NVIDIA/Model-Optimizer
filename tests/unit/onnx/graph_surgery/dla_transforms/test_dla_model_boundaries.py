@@ -1274,14 +1274,14 @@ def test_rank_changing_adapter_preserves_safe_normalization_readers(operation, u
         reader.input.append("scale")
         model.graph.initializer.append(
             numpy_helper.from_array(
-                np.ones([4, 4], np.float32)
+                np.ones([4], np.float32)
                 if operation == "LayerNormalization"
                 else np.asarray(0.5, np.float32),
                 "scale",
             )
         )
         if operation == "LayerNormalization":
-            reader.attribute.append(helper.make_attribute("axis", -2))
+            reader.attribute.append(helper.make_attribute("axis", -1))
         else:
             model.graph.output[-1].type.tensor_type.elem_type = TensorProto.UINT8
 
