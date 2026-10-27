@@ -453,15 +453,7 @@ def _route(plan: DistributionPlan) -> str | None:
     from modelopt.torch.utils import distributed as dist
 
     if plan.world_size != dist.size():
-        unset = (
-            f" This process is one of a {os.environ['WORLD_SIZE']}-rank launch whose process "
-            "group is not set up: set it up first, with distributed_run()."
-            if dist.is_distributed_launch() and not dist.is_initialized()
-            else ""
-        )
-        raise ValueError(
-            f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}.{unset}"
-        )
+        raise ValueError(f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}.")
     if plan.is_expert_parallel:
         raise NotImplementedError(
             f"{plan!r} shards the routed experts, which load_pretrained has no load for. Plan "
@@ -537,12 +529,6 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
                 "process started without a launcher cannot set up; launch it with "
                 "`torchrun --nproc_per_node=1`."
             )
-        if dist.is_distributed_launch():
-            # Its group would be the launch's, over ranks this plan was not decided for.
-            raise RuntimeError(
-                f"The {route} load needs this {os.environ['WORLD_SIZE']}-rank launch's process "
-                "group, which is not set up yet; set it up first, with distributed_run()."
-            )
         dist.setup()
     return parallel_load_and_prepare_fsdp2(
         ckpt_path,
@@ -581,7 +567,9 @@ def load_pretrained(
       whole model, ``device_map`` defaulting to the rank's GPU.
 
     A plan with ``ep_size > 1`` raises: no load here shards the routed experts. On a distributed run
-    every rank loads the plan rank 0 was handed. The plan is recorded on the model
+    every rank loads the plan rank 0 was handed. A rank of a multi-rank launch whose process group
+    is not set up is refused on every route: set it up first, with
+    :func:`~modelopt.torch.utils.distributed.distributed_run`. The plan is recorded on the model
     (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), where calibration and export
     read it back.
 
@@ -628,6 +616,14 @@ def load_pretrained(
     from modelopt.torch.models.hf import prepare_model_for_loading
     from modelopt.torch.utils import distributed as dist
 
+    if dist.is_distributed_launch() and not dist.is_initialized():
+        # Without its group every collective below runs on this rank alone: each rank would plan
+        # and load the model as a single process's, and record a one-rank plan on a model the whole
+        # launch holds.
+        raise RuntimeError(
+            f"This process is one of a {os.environ['WORLD_SIZE']}-rank launch whose process group "
+            "is not set up; set it up first, with distributed_run()."
+        )
     hub_options = {
         k: kwargs.pop(k) for k in ("token", "cache_dir", "local_files_only") if k in kwargs
     }
