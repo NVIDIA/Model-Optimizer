@@ -52,6 +52,7 @@ from .dla_transforms.dla_reshape_patterns import (
     _apply_reshape_qdq_reduce_sum,
     _apply_reshape_reduce_sum,
     _apply_reshape_transpose_reshape,
+    _reshape_reduce_sum,
 )
 from .utils.graph_utils import (
     DEFAULT_QDQ_REMOVE_QUANT_TYPES,
@@ -122,7 +123,15 @@ def _transform_make_dla_compatible(
         name == "RemoveQDQ" for name, _ in DLA_TRANSFORMS
     ):
         raise NotImplementedError("QDQ removal is not available in this pipeline")
-    if not any(name == "StandaloneReduceOperations" for name, _ in DLA_TRANSFORMS):
+    stages = frozenset(stage for stage, _ in DLA_TRANSFORMS)
+    planned_reduction_outputs: set[str] = set()
+    if "StandaloneReduceOperations" not in stages:
+        if any(node.op_type == "ReduceSum" for node in model.graph.node):
+            for stage, quantized in (("ReshapeReduceSum", False), ("ReshapeQDQReduceSum", True)):
+                if stage in stages:
+                    planned_reduction_outputs.update(
+                        _reshape_reduce_sum(model, quantized=quantized, validate_only=True)
+                    )
         local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
         for node in model.graph.node:
             if (
@@ -131,17 +140,18 @@ def _transform_make_dla_compatible(
                 and not node.overload
                 and (node.domain, node.op_type, node.overload) not in local_functions
                 and any(attr.name == "keepdims" and attr.i == 0 for attr in node.attribute)
+                and not planned_reduction_outputs.intersection(node.output)
             ):
                 raise NotImplementedError(
                     "Standalone reductions are not available in this pipeline"
                 )
-    stages = frozenset(stage for stage, _ in DLA_TRANSFORMS)
     prepared_output_ops = stages | (
         _REDUCTION_OPS if "StandaloneReduceOperations" in stages else frozenset()
     )
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     for node in model.graph.node:
-        _require_output_rank_conversion(node, local_functions, prepared_output_ops)
+        if not planned_reduction_outputs.intersection(node.output):
+            _require_output_rank_conversion(node, local_functions, prepared_output_ops)
     quant_types = (
         DEFAULT_QDQ_REMOVE_QUANT_TYPES
         if qdq_quantized_dtypes is None

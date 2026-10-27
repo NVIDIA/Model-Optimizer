@@ -20,7 +20,7 @@ from importlib import import_module
 import numpy as np
 import onnx
 import pytest
-from onnx import TensorProto, helper, numpy_helper
+from onnx import TensorProto, helper, inliner, numpy_helper
 from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms.dla_model_boundaries import (
@@ -158,6 +158,59 @@ def _make_model(nodes, inputs, outputs, initializers=()):
     )
 
 
+@pytest.mark.parametrize("identity", ["custom", "local", "overload"])
+@pytest.mark.parametrize("tail", [False, True])
+def test_generic_opaque_transpose_keeps_native_shared_input(identity, tail):
+    """Preserve opaque function layouts while a separate standard branch promotes the same input."""
+    domain = "opaque.boundary" if identity == "custom" else ""
+    operation = "OpaqueTranspose" if identity == "custom" else "Abs"
+    overload = "transpose" if identity == "overload" else ""
+    function = helper.make_function(
+        domain,
+        operation,
+        ["data"],
+        ["result"],
+        [helper.make_node("Transpose", ["data"], ["result"], perm=[1, 0])],
+        [helper.make_opsetid("", 21)],
+        overload=overload,
+    )
+    opaque = helper.make_node(
+        operation, ["x"], ["middle" if tail else "y"], domain=domain, overload=overload
+    )
+    nodes = [helper.make_node("Relu", ["x"], ["first"]), opaque]
+    if tail:
+        nodes.append(helper.make_node("Relu", ["middle"], ["y"]))
+    model = _make_model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 2])],
+        [
+            helper.make_tensor_value_info("first", TensorProto.FLOAT, [2, 2]),
+            helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 2]),
+        ],
+    )
+    model.functions.append(function)
+    if domain:
+        model.opset_import.append(helper.make_opsetid(domain, 1))
+    feeds = {"x": np.arange(-1, 3, dtype=np.float32).reshape(2, 2)}
+    onnx.checker.check_model(model, full_check=True)
+    expected = _checked_run(inliner.inline_local_functions(model), feeds)
+    np.testing.assert_array_equal(
+        expected[1], np.maximum(feeds["x"].T, 0) if tail else feeds["x"].T
+    )
+    original = opaque.SerializeToString()
+    converted = _transform_make_dla_compatible(model, verbose=False)
+    call = next(
+        node
+        for node in converted.graph.node
+        if node.op_type == operation and node.domain == domain and node.overload == overload
+    )
+    assert call.SerializeToString() == original
+    for actual, reference in zip(
+        _checked_run(inliner.inline_local_functions(converted), feeds), expected
+    ):
+        np.testing.assert_array_equal(actual, reference)
+
+
 def test_unnamed_input_adapters_keep_distinct_targets():
     """Promote two unnamed trailing-axis adapters without reusing their different targets."""
     inputs = [
@@ -185,6 +238,142 @@ def test_unnamed_input_adapters_keep_distinct_targets():
     _apply_non4d_model_inputs(model)
     for actual, reference in zip(_checked_run(model, feeds), expected):
         np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.parametrize("operation", ["Softmax", "LogSoftmax"])
+@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
+@pytest.mark.parametrize("axis", [0, 1, -1, None])
+@pytest.mark.parametrize("opset", [13, 17])
+def test_boundary_softmax_preserves_native_axes(operation, shape, axis, opset):
+    """Preserve explicit and schema-default normalization axes across input promotion."""
+    model = _make_model(
+        [helper.make_node(operation, ["x"], ["y"], **({} if axis is None else {"axis": axis}))],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)],
+    )
+    model.opset_import[0].version = opset
+    feeds = {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape) / 10}
+    expected = _checked_run(model, feeds)[0]
+    converted = _transform_make_dla_compatible(model, verbose=False)
+    np.testing.assert_array_equal(_checked_run(converted, feeds)[0], expected)
+
+
+@pytest.mark.parametrize("batch", [1, 2, 3])
+@pytest.mark.parametrize("operation", ["Add", "Mul"])
+@pytest.mark.parametrize("tail", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_normalization_binary_branch_preserves_broadcast_layout(batch, operation, tail, reverse):
+    """Keep shared normalized public values and binary residual inputs in compatible layouts."""
+    shape = [batch, 3, 4]
+    normalized = "tail" if tail else "normalized"
+    nodes = [
+        helper.make_node(
+            "InstanceNormalization", ["x", "scale", "bias"], ["normalized"], epsilon=1e-4
+        )
+    ]
+    if tail:
+        nodes.append(helper.make_node("Tanh", ["normalized"], ["tail"]))
+    nodes.append(
+        helper.make_node(operation, [normalized, "x"] if reverse else ["x", normalized], ["y"])
+    )
+    model = _make_model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+        [
+            helper.make_tensor_value_info("y", TensorProto.FLOAT, shape),
+            helper.make_tensor_value_info(normalized, TensorProto.FLOAT, shape),
+        ],
+        [
+            numpy_helper.from_array(np.asarray([0.5, 1, 1.5], np.float32), "scale"),
+            numpy_helper.from_array(np.asarray([0.1, -0.2, 0.3], np.float32), "bias"),
+        ],
+    )
+    feeds = {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape) / 8}
+    expected = _checked_run(model, feeds)
+    converted = _transform_make_dla_compatible(model, verbose=False)
+    for actual, reference in zip(_checked_run(converted, feeds), expected):
+        np.testing.assert_allclose(actual, reference, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("width", [8, 12])
+@pytest.mark.parametrize("axis", [-1, 4])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_early_registered_reshape_reduction_is_not_rejected(width, axis, quantized, monkeypatch):
+    """Allow reductions consumed by actual earlier reshape-pattern stages without a native reducer stage."""
+    pipeline = import_module(_transform_make_dla_compatible.__module__)
+    monkeypatch.setattr(
+        pipeline,
+        "DLA_TRANSFORMS",
+        tuple(
+            (name, transform)
+            for name, transform in pipeline.DLA_TRANSFORMS
+            if name != "StandaloneReduceOperations"
+        ),
+    )
+    shape = [1, 1, 2, width]
+    controls = [
+        numpy_helper.from_array(np.asarray([1, 1, 2, width // 4, 4], np.int64), "target"),
+        numpy_helper.from_array(np.asarray([axis], np.int64), "axes"),
+    ]
+    nodes = [helper.make_node("Reshape", ["x", "target"], ["expanded"])]
+    current = "expanded"
+    if quantized:
+        controls += [
+            numpy_helper.from_array(np.float32(0.125), "scale"),
+            numpy_helper.from_array(np.int8(0), "zero"),
+        ]
+        nodes += [
+            helper.make_node("QuantizeLinear", [current, "scale", "zero"], ["q"]),
+            helper.make_node("DequantizeLinear", ["q", "scale", "zero"], ["dq"]),
+        ]
+        current = "dq"
+    nodes.append(helper.make_node("ReduceSum", [current, "axes"], ["y"], keepdims=0))
+    model = _make_model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 1, 2, width // 4])],
+        controls,
+    )
+    feeds = {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape) / 8}
+    expected = _checked_run(model, feeds)[0]
+    converted = _transform_make_dla_compatible(model, verbose=False, qdq_quantized_dtypes=[])
+    np.testing.assert_array_equal(_checked_run(converted, feeds)[0], expected)
+
+
+def test_early_pattern_does_not_allow_an_unmatched_native_reduction(monkeypatch):
+    """Refuse a native reducer before mutation even when another reducer has a valid early lowering."""
+    pipeline = import_module(_transform_make_dla_compatible.__module__)
+    monkeypatch.setattr(
+        pipeline,
+        "DLA_TRANSFORMS",
+        tuple(
+            (name, transform)
+            for name, transform in pipeline.DLA_TRANSFORMS
+            if name != "StandaloneReduceOperations"
+        ),
+    )
+    shape = [1, 1, 2, 12]
+    model = _make_model(
+        [
+            helper.make_node("Reshape", ["x", "target"], ["expanded"]),
+            helper.make_node("ReduceSum", ["expanded", "axes"], ["y"], keepdims=0),
+            helper.make_node("ReduceSum", ["x", "axes"], ["native"], keepdims=0),
+        ],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+        [
+            helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 1, 2, 3]),
+            helper.make_tensor_value_info("native", TensorProto.FLOAT, [1, 1, 2]),
+        ],
+        [
+            numpy_helper.from_array(np.asarray([1, 1, 2, 3, 4], np.int64), "target"),
+            numpy_helper.from_array(np.asarray([-1], np.int64), "axes"),
+        ],
+    )
+    _checked_run(model, {"x": np.ones(shape, np.float32)})
+    before = model.SerializeToString()
+    with pytest.raises(NotImplementedError, match="reductions"):
+        _transform_make_dla_compatible(model, verbose=False)
+    assert model.SerializeToString() == before
 
 
 @pytest.mark.parametrize("width", [1, 4])

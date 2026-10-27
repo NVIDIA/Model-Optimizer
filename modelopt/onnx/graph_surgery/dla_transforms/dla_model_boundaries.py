@@ -16,9 +16,9 @@
 """Promote model boundaries at their explicit positions in the DLA pipeline."""
 
 import numpy as np
-from onnx import TensorProto, helper, numpy_helper
+from onnx import TensorProto, defs, helper, numpy_helper
 
-from ..utils.graph_utils import GraphCache, add_initializer, batch_replace_nodes, pad4d
+from ..utils.graph_utils import GraphCache, _attribute, add_initializer, batch_replace_nodes, pad4d
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _RANK_AGNOSTIC_OPS, _subgraph_captures
 from .dla_reorder_nodes import priority_topological_order
@@ -45,13 +45,25 @@ def _require_output_rank_conversion(node, local_functions, prepared_output_ops):
         raise ValueError(f"Output rank conversion is unavailable for {node.op_type}")
 
 
-def _is_standard_node(node, local_functions, op_types):
+def _is_standard_node(node, local_functions, op_types, *, contrib_ops=()):
     """Match builtin operations without interpreting opaque overloads or local definitions."""
     return (
         node.op_type in op_types
-        and node.domain in {"", "ai.onnx"}
+        and (
+            node.domain in {"", "ai.onnx"}
+            or (node.domain == "com.microsoft" and node.op_type in contrib_ops)
+        )
         and not node.overload
         and (node.domain, node.op_type, node.overload) not in local_functions
+    )
+
+
+def _boundary_contrib_ops(model):
+    """Keep the explicit supported runtime schemas separate from opaque custom functions."""
+    return (
+        {"GroupQueryAttention", "QuantizeLinear", "DequantizeLinear", "Gelu"}
+        if any(op.domain == "com.microsoft" and op.version == 1 for op in model.opset_import)
+        else set()
     )
 
 
@@ -118,8 +130,12 @@ def _apply_non4d_model_inputs(model):
     prepend = []
     promotions = []
     unsqueezed_shapes = {}
+    normalization_axes = {}
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
-    adapters = {"Squeeze", "Unsqueeze", "Concat"}
+    contrib_ops = _boundary_contrib_ops(model)
+    opset = next(
+        (entry.version for entry in model.opset_import if entry.domain in {"", "ai.onnx"}), 1
+    )
     for value in graph.input:
         shape = cache.get_shape(value.name)
         if shape is None or len(shape) not in (2, 3):
@@ -127,7 +143,7 @@ def _apply_non4d_model_inputs(model):
         consumers = [
             node
             for node, _ in cache.get_consumers(value.name)
-            if (node.op_type not in adapters or _is_standard_node(node, local_functions, adapters))
+            if _is_standard_node(node, local_functions, {node.op_type}, contrib_ops=contrib_ops)
             and (
                 node.input[0] == value.name or _is_standard_node(node, local_functions, {"Concat"})
             )
@@ -140,6 +156,17 @@ def _apply_non4d_model_inputs(model):
             continue
         _require_adapter_opset(model)
         for consumer in consumers:
+            if _is_standard_node(consumer, local_functions, {"Softmax", "LogSoftmax"}):
+                axis = _attribute(consumer, "axis")
+                axis_value = (
+                    axis.i
+                    if axis is not None
+                    else defs.get_schema(consumer.op_type, opset).attributes["axis"].default_value.i
+                )
+                if not -len(shape) <= axis_value < len(shape):
+                    raise ValueError(f"Invalid native normalization axis for {consumer.name!r}")
+                if axis_value >= 0:
+                    normalization_axes[id(consumer)] = (consumer, axis, axis_value + 4 - len(shape))
             if not _is_standard_node(consumer, local_functions, {"Unsqueeze"}):
                 continue
             tensor = cache.get_init(consumer.input[1])
@@ -176,6 +203,12 @@ def _apply_non4d_model_inputs(model):
         for attribute in node.attribute:
             if attribute.name == "axis" and attribute.i >= 0:
                 attribute.i += 4 - len(promoted_shapes[node.input[0]])
+        node.name = cache.unique_name((node.name or node.output[0]) + "_axis_updated")
+    for node, axis, value in normalization_axes.values():
+        if axis is None:
+            node.attribute.append(helper.make_attribute("axis", value))
+        else:
+            axis.i = value
         node.name = cache.unique_name((node.name or node.output[0]) + "_axis_updated")
     for value, shape, consumers in promotions:
         axes = list(range(4 - len(shape)))
@@ -255,6 +288,7 @@ def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False, prepared_o
     plans = []
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     rank_sources = {}
+    contrib_ops = _boundary_contrib_ops(model)
     for value in graph.output:
         shape = cache.get_shape(value.name)
         if shape is None or len(shape) >= 4 or value.name in boundary_names:
@@ -264,8 +298,8 @@ def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False, prepared_o
         if source is not None:
             if defer_rank_conversion:
                 _require_output_rank_conversion(source, local_functions, prepared_output_ops)
-            if source.op_type in {"Squeeze", "Unsqueeze", "Concat"} and not _is_standard_node(
-                source, local_functions, {"Squeeze", "Unsqueeze", "Concat"}
+            if not _is_standard_node(
+                source, local_functions, {source.op_type}, contrib_ops=contrib_ops
             ):
                 continue
             if _is_standard_node(source, local_functions, {"Reshape", "Expand", "Tile"}):
@@ -418,8 +452,8 @@ def _apply_fix_instancenorm_channels(model):
     replacements = {}
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
 
-    def output_squeezes(name):
-        """Follow layout-preserving unary paths to public output restoration adapters."""
+    def output_consumers(name):
+        """Find public adapters and binary edges after layout-preserving unary paths."""
         pending, visited = [name], set()
         while pending:
             tensor = pending.pop()
@@ -427,57 +461,84 @@ def _apply_fix_instancenorm_channels(model):
                 continue
             visited.add(tensor)
             for consumer, input_index in cache.get_consumers(tensor):
-                if input_index != 0 or not _is_standard_node(
-                    consumer, local_functions, {consumer.op_type}
-                ):
+                if not _is_standard_node(consumer, local_functions, {consumer.op_type}):
                     continue
-                if consumer.op_type == "Squeeze" and consumer.output[0] in cache.graph_output_names:
-                    yield consumer
-                elif (
-                    consumer.op_type in _RANK_AGNOSTIC_OPS
-                    and len(consumer.input) == 1
-                    and len(consumer.output) == 1
+                if (
+                    input_index == 0
+                    and consumer.op_type == "Squeeze"
+                    and consumer.output[0] in cache.graph_output_names
                 ):
-                    pending.append(consumer.output[0])
+                    yield consumer, None, None
+                elif consumer.op_type in _RANK_AGNOSTIC_OPS and len(consumer.output) == 1:
+                    if len(consumer.input) == 1 and input_index == 0:
+                        pending.append(consumer.output[0])
+                    elif len(consumer.input) > 1:
+                        yield consumer, tensor, input_index
 
+    plans = []
     for index, node in enumerate(graph.node):
         if _is_standard_node(node, local_functions, {"InstanceNormalization"}):
             shape = cache.get_shape(node.input[0])
             if shape is not None and len(shape) == 3:
-                target = add_initializer(
+                plans.append((index, node, shape, list(output_consumers(node.output[0]))))
+    bridges = {}
+    for index, node, shape, consumers in plans:
+        target = add_initializer(
+            graph,
+            cache.unique_name((node.name or node.output[0]) + "_rotateleft_shape"),
+            np.asarray([*shape, 1], dtype=np.int64),
+            dtype=TensorProto.INT64,
+            with_value_info=False,
+        )
+        output = cache.unique_name(node.input[0] + "_rotateleft")
+        reshape = helper.make_node(
+            "Reshape",
+            [node.input[0], target],
+            [output],
+            name=cache.unique_name((node.name or node.output[0]) + "_rotateleft"),
+        )
+        node.input[0] = output
+        replacements[index] = ([node], [reshape, node])
+        for consumer, tensor, port in consumers:
+            if tensor is not None:
+                if tensor not in bridges:
+                    bridges[tensor] = (shape, [])
+                bridges[tensor][1].append((consumer, port))
+                continue
+            if len(consumer.input) < 2:
+                continue
+            axes = cache.get_init(consumer.input[1])
+            values = None if axes is None else numpy_helper.to_array(axes).reshape(-1).tolist()
+            if axes is not None and values and values[0] == 0:
+                native_axes = [value - 1 if value >= 1 else value + 3 for value in values[1:]]
+                consumer.input[1] = add_initializer(
                     graph,
-                    cache.unique_name((node.name or node.output[0]) + "_rotateleft_shape"),
-                    np.asarray([*shape, 1], dtype=np.int64),
+                    cache.unique_name(axes.name + "_trailing"),
+                    np.asarray([*native_axes, 3], np.int64),
                     dtype=TensorProto.INT64,
                     with_value_info=False,
                 )
-                output = cache.unique_name(node.input[0] + "_rotateleft")
-                reshape = helper.make_node(
-                    "Reshape",
-                    [node.input[0], target],
-                    [output],
-                    name=cache.unique_name((node.name or node.output[0]) + "_rotateleft"),
-                )
-                node.input[0] = output
-                replacements[index] = ([node], [reshape, node])
-                for consumer in output_squeezes(node.output[0]):
-                    if len(consumer.input) < 2:
-                        continue
-                    axes = cache.get_init(consumer.input[1])
-                    values = (
-                        None if axes is None else numpy_helper.to_array(axes).reshape(-1).tolist()
-                    )
-                    if axes is not None and values and values[0] == 0:
-                        native_axes = [
-                            value - 1 if value >= 1 else value + 3 for value in values[1:]
-                        ]
-                        consumer.input[1] = add_initializer(
-                            graph,
-                            cache.unique_name(axes.name + "_trailing"),
-                            np.asarray([*native_axes, 3], np.int64),
-                            dtype=TensorProto.INT64,
-                            with_value_info=False,
-                        )
+    positions = {id(node): index for index, node in enumerate(graph.node)}
+    prefixes = {}
+    for tensor, (shape, edges) in bridges.items():
+        target = add_initializer(
+            graph,
+            cache.unique_name(tensor + "_leading_shape"),
+            np.asarray(pad4d(shape), np.int64),
+            dtype=TensorProto.INT64,
+            with_value_info=False,
+        )
+        output = cache.unique_name(tensor + "_leading")
+        view = helper.make_node(
+            "Reshape", [tensor, target], [output], name=cache.unique_name(output + "_reshape")
+        )
+        first = min(positions[id(consumer)] for consumer, _ in edges)
+        prefixes.setdefault(first, []).append(view)
+        for consumer, port in edges:
+            consumer.input[port] = output
+    for index, nodes in prefixes.items():
+        removed, added = replacements.get(index, ([graph.node[index]], [graph.node[index]]))
+        replacements[index] = (removed, [*nodes, *added])
     batch_replace_nodes(graph, replacements)
     _add_legacy_initializer_inputs(model)
     return model

@@ -27,6 +27,7 @@ from modelopt.onnx.graph_surgery.dla_transforms.dla_reshape_patterns import (
     _apply_reshape_qdq_reduce_sum,
     _apply_reshape_reduce_sum,
     _apply_reshape_transpose_reshape,
+    _reshape_reduce_sum,
 )
 from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
 
@@ -399,3 +400,29 @@ def test_terminal_five_dimensional_target_is_not_an_overlap(chained):
         np.testing.assert_array_equal(
             ReferenceEvaluator(transformed).run(None, feeds)[0], expected[0]
         )
+
+
+@pytest.mark.parametrize("pattern", ["plain", "qdq", "fallback"])
+def test_reduction_preflight_preserves_native_model_bytes(pattern):
+    """Return matched output owners without retaining generated controls or changing the native graph."""
+    model, feeds = _make_model(pattern)
+    before = model.SerializeToString()
+    expected = _execute(model, feeds, "reference")
+    outputs = _reshape_reduce_sum(model, quantized=pattern == "qdq", validate_only=True)
+    assert outputs == {"Y"}
+    assert model.SerializeToString() == before
+    for actual, reference in zip(_execute(model, feeds, "reference"), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.parametrize("pattern", ["plain", "qdq"])
+def test_reduction_preflight_capture_refusal_preserves_model_bytes(pattern):
+    """Validate lexical ownership and roll back all temporary controls during preflight refusal."""
+    model, _ = _make_model(pattern)
+    shape = numpy_helper.to_array(model.graph.initializer[0]).tolist()
+    _attach_if_capture(model, "reshaped", shape)
+    onnx.checker.check_model(model, full_check=True)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="captured"):
+        _reshape_reduce_sum(model, quantized=pattern == "qdq", validate_only=True)
+    assert model.SerializeToString() == before
