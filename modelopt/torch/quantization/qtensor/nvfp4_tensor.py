@@ -165,9 +165,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
             per_block_scale = per_block_amax / E2M1_MAX
             # torch.where, not a boolean-mask assignment: the latter lowers to aten::index_put_,
             # which DTensor cannot dispatch, and this runs on DTensor weights during distributed export.
-            per_block_scale = torch.where(
-                per_block_scale == 0, torch.ones_like(per_block_scale), per_block_scale
-            )
+            per_block_scale = torch.where(per_block_scale == 0, 1.0, per_block_scale)
 
             # Reshape per_block_scale to match weight's block structure
             num_blocks_per_row = weight.shape[-1] // block_size
@@ -221,9 +219,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
         # the latter lowers to aten::index_put_, which DTensor cannot dispatch ("Cannot find device
         # mesh from args"), and on the distributed export path this weight IS a DTensor. torch.where is
         # pointwise, so DTensor handles it, and the result is identical for a plain tensor.
-        per_block_scale = torch.where(
-            per_block_scale == 0, torch.ones_like(per_block_scale), per_block_scale
-        )
+        per_block_scale = torch.where(per_block_scale == 0, 1.0, per_block_scale)
 
         if not keep_high_precision:
             per_block_scale = _cast_per_block_scale_to_fp8(per_block_scale)
