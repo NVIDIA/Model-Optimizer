@@ -5,6 +5,24 @@ pytest adapter. Example-specific code only prepares inputs and verifies results.
 The visible commands execute without command rewriting or mocked model operations.
 These are trusted repository tests with the same privileges as pytest.
 
+## Why a snippet runner
+
+Pytest provides collection, fixtures, assertions and manual/resource markers, while
+pytest-timeout provides an outer test deadline. The snippet layer adds Markdown
+extraction, complete ID accounting, source locations and a worker deadline covering
+setup, execution and verification, with process-group cleanup.
+
+`tests/_test_utils/examples/run_command.py` runs individual example commands and
+supports streaming output and Hub retries. It does not extract README fences or
+preserve one shell/Python namespace across selected snippets, and it imports
+Torch-specific distributed utilities. Keeping this small adapter separate lets
+CPU-only documentation checks run without importing the ML stack. Existing example
+helpers remain appropriate for tests that supply their own command arguments.
+
+Stdlib doctest checks Python prompt/output examples. These READMEs also contain
+shell pipelines, distributed training, background services and artifact assertions,
+which need the scenario/handler contract described below.
+
 ## Fixture scope
 
 The parser, runner and pytest adapter are generic. Helpers under `fixtures/`
@@ -112,7 +130,7 @@ Test-only setup, assertions, metadata, and exclusion reasons belong in Python.
 | README | Default smoke scenarios | Opt-in integration scenarios | Exclusions |
 | --- | --- | --- | --- |
 | `llm_qat` | Recipes; QAT/QAD/QLoRA; simple Llama demo; three Python APIs; FSDP2 layer override; config copy; CLI learning-rate override; dataset cache | Installation; vLLM adapter serving; MMLU/WikiText evaluation | None |
-| `megatron_bridge` | PTQ plus export; mock-data distillation; all-iteration export; manual pruning; distillation/pruning CLI help | Login; checkpoint import; MLflow PTQ; real-data distillation/QAD; three NAS targets; VLM pruning; vLLM generation | Interactive Docker launch; incomplete VLM/inline-export/single-iteration templates; illustrative output tree |
+| `megatron_bridge` | PTQ plus export; mock-data distillation; all-iteration export; manual pruning; distillation/pruning CLI help | Login; checkpoint import; MLflow PTQ; real-data distillation/QAD; three NAS targets; VLM pruning; vLLM generation | Interactive Docker launch; LoRA PTQ integration; incomplete VLM/inline-export/single-iteration templates; illustrative output tree |
 
 QAT fixtures copy real scripts/configs and generate two-layer Qwen3 or Llama
 models, with hidden/intermediate size 512 and 20 local text records. Training

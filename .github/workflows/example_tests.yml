@@ -99,7 +99,7 @@ jobs:
           TORCH: ${{ steps.changed.outputs.torch_any_modified == 'true' || steps.changed.outputs.torch_docs_any_modified == 'true' }}
           VLLM: ${{ steps.changed.outputs.vllm_any_modified }}
           TRTLLM: ${{ steps.changed.outputs.trtllm_any_modified }}
-          MEGATRON: ${{ steps.changed.outputs.megatron_any_modified == 'true' || steps.changed.outputs.torch_docs_any_modified == 'true' }}
+          MEGATRON: ${{ steps.changed.outputs.megatron_any_modified == 'true' || steps.changed.outputs.megatron_docs_any_modified == 'true' }}
           DIFFUSERS: ${{ steps.changed.outputs.diffusers_any_modified }}
           ONNX: ${{ steps.changed.outputs.onnx_any_modified }}
         run: |

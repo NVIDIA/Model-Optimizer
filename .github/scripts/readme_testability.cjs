@@ -1,5 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 const MARKER = '<!-- modelopt-readme-testability -->';
 
@@ -30,9 +42,8 @@ async function publishProposal({github, context, proposal, headSha}) {
                 `To implement, an authorized maintainer can comment:\n\n` +
                 `\`@claude implement the README testability proposal for commit ${headSha}\``
           : 'No additional README testability changes are suggested at this commit. The earlier proposal is superseded.';
-  const body =
-      `${MARKER}\n### README testability proposal\n\nReviewed commit: \`${headSha}\`\n\n` +
-      `${advice}`;
+  const body = `${MARKER}\n### README testability proposal\n\nReviewed commit: \`${headSha}\`\n\n` +
+               `${advice}`;
   if (existing) {
     if (existing.body !== body) {
       await github.rest.issues.updateComment({owner, repo, comment_id : existing.id, body});

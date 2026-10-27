@@ -364,6 +364,7 @@ The distilled checkpoint retains the ModelOpt quantization state, so it can be c
 
 Add `--lora_rank` to PTQ to train low-rank weight updates with the usual QAD flow:
 
+<!-- modelopt-snippet: bridge-lora-ptq -->
 ```bash
 torchrun --nproc_per_node 2 quantize.py \
     --hf_model_name_or_path Qwen/Qwen3-0.6B \

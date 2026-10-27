@@ -193,13 +193,19 @@ def llm_qat_copy_config(ctx):
 def llm_qat_cli_override(ctx):
     """Run and verify the llm-qat-cli-override scenario."""
     # Optional ML dependencies are imported only inside the scenario worker.
+    import torch
     from _test_utils.doc_tests.fixtures.llm_qat import prepare_llm_qat_quantized_input
 
     prepare_llm_qat_quantized_input(ctx)
     ctx.run()
-    state = json.loads((ctx.cwd / "qwen3-8b-qat-override/trainer_state.json").read_text())
+    output = ctx.cwd / "qwen3-8b-qat-override"
+    state = json.loads((output / "trainer_state.json").read_text())
     assert state["global_step"] == 2
-    assert any(entry.get("learning_rate") == 5e-05 for entry in state["log_history"])
+    scheduler = torch.load(
+        output / "checkpoint-2/scheduler.pt", map_location="cpu", weights_only=True
+    )
+    base_rates = scheduler["base_lrs"]
+    assert base_rates and all(math.isclose(rate, 5e-5) for rate in base_rates), base_rates
 
 
 def llm_qat_dataset(ctx):

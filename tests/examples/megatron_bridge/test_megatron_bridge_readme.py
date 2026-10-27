@@ -178,6 +178,7 @@ SCENARIOS = [
 ]
 
 EXCLUDED = {
+    "bridge-lora-ptq": "Separate LoRA PTQ integration; full-model adapter calibration is outside this pilot.",
     "bridge-docker": "Interactive container provisioning runs outside pytest; CI supplies the container.",
     "bridge-vlm-template": "Incomplete template; concrete training/export snippets are tested.",
     "bridge-inline-export-template": "Incomplete template; concrete training/export snippets are tested.",
