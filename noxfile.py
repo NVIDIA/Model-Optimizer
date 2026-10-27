@@ -233,7 +233,7 @@ def gpu_megatron(session):
     # Pre-installed nvidia-modelopt shadows the editable install
     session.run("pip", "uninstall", "-y", "nvidia-modelopt")
     session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test,dev-fla]")
-    session.run("python", "-m", "pytest", "tests/gpu_megatron", *_cov_args(), *session.posargs)
+    session.run("python", "-m", "pytest", "tests/gpu_megatron", *_cov_args())
 
 
 # Container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10 or later
