@@ -43,6 +43,15 @@ mx_format_map = {
 DISABLE_TRITON_KERNEL = False
 
 
+def _nvfp4_triton_kernel_enabled() -> bool:
+    """Whether dynamic NVFP4 fake quant runs on the Triton kernel (compute >= 8.9, not disabled)."""
+    return (
+        triton_kernel.IS_AVAILABLE
+        and hasattr(triton_kernel, "fp4_fake_quant_block")
+        and not DISABLE_TRITON_KERNEL
+    )
+
+
 def _fp8_eager(x, amax=None):
     dtype = x.dtype
     if amax is not None:
@@ -183,9 +192,7 @@ def _dynamic_block_quantize_impl(
         if (
             num_bits == (2, 1)  # type: ignore[comparison-overlap]
             and scale_bits == (4, 3)
-            and triton_kernel.IS_AVAILABLE
-            and hasattr(triton_kernel, "fp4_fake_quant_block")  # requires compute >= 8.9
-            and not DISABLE_TRITON_KERNEL
+            and _nvfp4_triton_kernel_enabled()
             and amax is not None
         ):
             return triton_kernel.fp4_fake_quant_block(inputs, amax)

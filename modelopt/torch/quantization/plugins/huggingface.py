@@ -31,7 +31,6 @@ from torch.nn.functional import linear
 from transformers.integrations.finegrained_fp8 import FP8Experts, FP8Linear
 from transformers.models.t5.modeling_t5 import T5Attention
 
-import modelopt.torch.kernels.quantization.gemm as triton_kernel
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_FA_AVAILABLE
 from modelopt.torch.kernels.common.attention import (
     triton_attention_forward,
@@ -41,11 +40,11 @@ from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_A
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils.distributed import ParallelState
 
-from .. import tensor_quant
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import register
 from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import _QuantLinear
+from ..nn.modules.tensor_quantizer import _try_stacked_fake_quant
 from ..utils import replace_function, sync_moe_expert_amax
 from ..utils.layerwise_calib import LayerActivationCollector
 from .attention import register_attention_for_kv_quant
@@ -778,67 +777,6 @@ def _get_fused_expert_intermediate_dim(module):
     return module.gate_up_proj.shape[1] // 2
 
 
-def _is_plain_nvfp4_fake_quant(q: nn.Module) -> bool:
-    """Whether ``q(x)`` is exactly the block-16 dynamic NVFP4 fake quant the stacked kernel does.
-
-    Each group rules out something ``TensorQuantizer.forward`` would do that the kernel does not.
-    """
-    return (
-        # Subclasses (e.g. static NVFP4, sequential) quantize differently.
-        type(q) is TensorQuantizer
-        # Fake-quantizing with its calibrated amax, not calibrating.
-        and q.is_enabled
-        and q._if_quant
-        and q._fake_quant
-        and not q._if_calib
-        and not q._use_constant_amax
-        # The format the kernel implements.
-        and q.is_nvfp4_dynamic
-        and q.block_sizes.get(-1) == 16
-        # Nothing applied around the quantization itself.
-        and q.backend is None
-        and q.pre_quant_scale is None
-        and not q.rotate_is_enabled
-        and not q.rotate_back_is_enabled
-        # Hooks expect their own quantizer's forward to run.
-        and not (q._forward_hooks or q._forward_pre_hooks)
-    )
-
-
-def _stacked_nvfp4_amax(weight: torch.Tensor, quantizers: nn.ModuleList) -> torch.Tensor | None:
-    """The experts' weight amaxes as one ``(num_experts,)`` tensor, or ``None``.
-
-    ``None`` unless one stacked NVFP4 kernel launch reproduces every expert's own weight quantizer
-    exactly; the caller then quantizes expert by expert.
-    """
-    # The kernel must be available, and the weight one local CUDA tensor holding every expert.
-    if (
-        tensor_quant.DISABLE_TRITON_KERNEL
-        or not IS_TRITON_AVAILABLE
-        or not hasattr(triton_kernel, "fp4_fake_quant_block")
-        or not weight.is_cuda
-        or isinstance(weight, torch.distributed.tensor.DTensor)
-        or weight.shape[0] != len(quantizers)
-    ):
-        return None
-    if not all(_is_plain_nvfp4_fake_quant(q) for q in quantizers):
-        return None
-    # One autograd function quantizes all experts, so they must share its backward.
-    pass_through_bwd = quantizers[0]._pass_through_bwd
-    if any(q._pass_through_bwd != pass_through_bwd for q in quantizers):
-        return None
-    amaxes = []
-    for q in quantizers:
-        amax = getattr(q, "_amax", None)
-        if amax is None or amax.numel() != 1:  # the kernel takes one per-tensor amax per expert
-            return None
-        # A clipped backward compares weight and amax: in one dtype, type promotion cannot change it.
-        if not pass_through_bwd and amax.dtype != weight.dtype:
-            return None
-        amaxes.append(amax.reshape(1))
-    return torch.cat(amaxes).to(weight.device)
-
-
 class _QuantFusedExperts(_QuantFunctionalMixin):
     """Generic quantized wrapper for HuggingFace fused MoE expert modules.
 
@@ -959,28 +897,22 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     def _quantized_weight(self, name, quantizers, idx, dtype):
         """Expert ``idx``'s ``name`` projection, fake-quantized by its own weight quantizer.
 
-        Calibrated NVFP4 experts are fake-quantized all at once, by one kernel launch on the
-        projection's first call of the forward, instead of one launch per expert.
+        When :func:`_try_stacked_fake_quant` supports the experts' quantizers, all experts are
+        fake-quantized at once, by one kernel launch on the projection's first call of the forward,
+        instead of one launch per expert.
         """
         if name not in self._stacked_weights:
-            weight = getattr(self, name)
             # Without autograd the per-expert path is cheaper: it quantizes only the routed experts,
             # one at a time. A subclass that rebuilds each expert's weight (FP8 dequant) keeps it too.
-            amax = (
-                _stacked_nvfp4_amax(weight, quantizers)
+            stacked = (
+                _try_stacked_fake_quant(getattr(self, name), quantizers)
                 if torch.is_grad_enabled()
                 and type(self).get_expert_weight is _QuantFusedExperts.get_expert_weight
                 else None
             )
             # unbind's backward writes one gradient for all experts; weight[idx] per expert would
             # write a full-size one each.
-            self._stacked_weights[name] = (
-                None
-                if amax is None
-                else tensor_quant.stacked_nvfp4_fake_quant(
-                    weight, amax, quantizers[0]._pass_through_bwd
-                ).unbind(0)
-            )
+            self._stacked_weights[name] = None if stacked is None else stacked.unbind(0)
         stacked = self._stacked_weights[name]
         if stacked is None:
             return quantizers[idx](self.get_expert_weight(name, idx, dtype))

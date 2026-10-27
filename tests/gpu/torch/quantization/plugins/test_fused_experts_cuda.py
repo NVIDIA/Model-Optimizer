@@ -68,7 +68,7 @@ def test_stacked_nvfp4_experts_match_per_expert_quantizers(monkeypatch, pass_thr
         # Checkpointing reruns the forward in backward.
         assert len(calls) == 2 * len(experts) * (1 + checkpointing)
 
-    monkeypatch.setattr(hf_plugin, "_stacked_nvfp4_amax", lambda *args: None)
+    monkeypatch.setattr(hf_plugin, "_try_stacked_fake_quant", lambda *args: None)
     ref_loss, ref_grads = loss_and_grads(checkpointing=False)
     for loss, grads in results:
         assert torch.equal(loss, ref_loss)
