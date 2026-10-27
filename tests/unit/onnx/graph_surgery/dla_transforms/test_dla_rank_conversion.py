@@ -1353,6 +1353,66 @@ def test_runtime_slice_extents_retain_promoted_axes(operation):
     np.testing.assert_allclose(_execute(converted, feeds)[0], expected, rtol=1e-6, atol=1e-7)
 
 
+@pytest.mark.parametrize("operation", ["Slice", "NonZero", "Range", "Reshape"])
+@pytest.mark.parametrize("tail", [False, True])
+def test_symbolic_outputs_restore_only_promoted_producer_paths(operation, tail):
+    """Reuse runtime-dependent native outputs while restoring a genuinely padded Reshape."""
+    output = "middle" if tail else "y"
+    inputs = [helper.make_tensor_value_info("x", TensorProto.FLOAT, [6])]
+    initializers = []
+    if operation in {"Slice", "Reshape"}:
+        inputs.append(helper.make_tensor_value_info("starts", TensorProto.INT64, [1]))
+        initializers.append(numpy_helper.from_array(np.array([6], np.int64), "ends"))
+        nodes = [
+            helper.make_node(
+                "Slice", ["x", "starts", "ends"], ["sliced" if operation == "Reshape" else output]
+            )
+        ]
+        if operation == "Reshape":
+            initializers.append(numpy_helper.from_array(np.array([-1], np.int64), "shape"))
+            nodes.append(helper.make_node("Reshape", ["sliced", "shape"], [output]))
+        cases = [
+            {"x": np.arange(6, dtype=np.float32), "starts": np.array([start], np.int64)}
+            for start in [0, 2]
+        ]
+    elif operation == "NonZero":
+        nodes = [helper.make_node("NonZero", ["x"], [output])]
+        cases = [
+            {"x": np.asarray(values, np.float32)}
+            for values in [[0, 0, 1, 0, 2, 0], [1, 2, 3, 4, 5, 0]]
+        ]
+    else:
+        inputs = [helper.make_tensor_value_info("stop", TensorProto.FLOAT, [])]
+        initializers = [
+            numpy_helper.from_array(np.float32(value), name)
+            for name, value in [("start", 0), ("step", 1)]
+        ]
+        nodes = [helper.make_node("Range", ["start", "stop", "step"], [output])]
+        cases = [{"stop": np.asarray(stop, np.float32)} for stop in [3, 5]]
+    if tail:
+        nodes.append(helper.make_node("Identity", [output], ["y"]))
+    dtype = TensorProto.INT64 if operation == "NonZero" else TensorProto.FLOAT
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "native_dynamic_output",
+            inputs,
+            [
+                helper.make_tensor_value_info(
+                    "y", dtype, [1, "N"] if operation == "NonZero" else ["N"]
+                )
+            ],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    expected = [_execute(model, feeds)[0] for feeds in cases]
+    changed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    for feeds, reference in zip(cases, expected):
+        np.testing.assert_array_equal(_execute(changed, feeds)[0], reference)
+
+
 @pytest.mark.parametrize(("initializer", "shared"), [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("tail", [False, True])
 def test_rank_one_tile_data_and_repeats_remain_native(initializer, shared, tail):

@@ -442,6 +442,7 @@ def _apply_non4d_model_outputs(
     )
     for value in graph.output:
         shape: list | None = cache.get_shape(value.name)
+        symbolic_output = shape is None
         if (
             shape is None
             and defer_rank_conversion
@@ -458,6 +459,25 @@ def _apply_non4d_model_outputs(
             continue
         producer = cache.get_producer(value.name)
         source = _output_rank_source(cache, producer, local_functions, rank_sources)
+        if symbolic_output:
+            if source is None or not _is_standard_node(source, local_functions, _RANK_FLOW_OPS):
+                continue
+            native_shape = _shape_before_boundary_promotion(cache, source.input[0])
+            info = cache.vi_map.get(source.input[0])
+            rank = (
+                len(native_shape)
+                if native_shape is not None
+                else (
+                    len(info.type.tensor_type.shape.dim)
+                    if info is not None and info.type.tensor_type.HasField("shape")
+                    else None
+                )
+            )
+            target = cache.get_init(source.input[1]) if source.op_type == "Reshape" else None
+            if rank not in (2, 3) and not (
+                target is not None and len(target.dims) == 1 and target.dims[0] < 4
+            ):
+                continue
         if source is None and len(shape) == 1:
             continue
         if source is not None:
