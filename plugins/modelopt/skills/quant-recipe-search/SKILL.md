@@ -135,6 +135,10 @@ Do not collapse the search to one dimension such as numeric format only. Read
 
 ## Iteration Loop
 
+When the user has authorized QAD, a candidate is a recipe plus its QAD
+settings, and the next candidate follows the `qad` skill's recipe loop:
+compress more after a pass, change one QAD knob or compress less after a miss.
+
 1. Run cheap screen evals for every candidate that passes the gates.
 2. Compare accuracy, verbosity/token usage, and active cost against baselines.
 3. Rerun noisy or near-threshold results before labeling a regression.

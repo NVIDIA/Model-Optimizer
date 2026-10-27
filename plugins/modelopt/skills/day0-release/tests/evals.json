@@ -80,5 +80,18 @@
       "Reports which tasks regressed and by how much",
       "Does NOT auto-select a new recipe and re-run in v1 (that loop is deferred)"
     ]
+  },
+  {
+    "name": "authorized-qad-after-regression",
+    "skills": ["day0-release", "qad"],
+    "query": "Release org/PLACEHOLDER-MODEL at day-0 in NVFP4 within 1 pp of BF16 on GPQA Diamond, IFBench, MMMU-Pro and SciCode. QAD is authorized if PTQ misses, budget 6 loops.",
+    "files": [],
+    "expected_behavior": [
+      "Runs the normal chain first and enters Step 7 only after Step 5 returns REGRESSION",
+      "Follows the qad skill's recipe loop: compress more after a pass, one QAD knob or compress less after a miss",
+      "Evaluates every QAD checkpoint (every 50 iterations) on all four benchmarks with the baseline config",
+      "Stops each QAD run with gate_qad.py on PASS or after 2 consecutive worse checkpoints",
+      "Runs the canary, compare and verbosity gates on the selected checkpoint before closeout and lists every loop"
+    ]
   }
 ]

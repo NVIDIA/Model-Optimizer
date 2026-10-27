@@ -1,6 +1,6 @@
 ---
 name: day0-release
-description: Deterministic end-to-end driver for day-0 quantized-checkpoint releases — chains PTQ → evaluation → comparison with enforced gates between stages (the evaluation stage deploys the checkpoint itself), and returns a publish decision (ACCEPT / REGRESSION / ANOMALOUS / INFEASIBLE). Use when the user asks to "release a model at day-0", "quantize and validate model X is within N% of baseline and tell me if it's publishable", or "run the full day-0 workflow". Do NOT use for single-stage requests — quantizing only (use ptq), serving only (use deployment), evaluating only (use evaluation), or comparing two existing runs (use compare-results).
+description: Deterministic end-to-end driver for day-0 quantized-checkpoint releases — chains PTQ → evaluation → comparison with enforced gates between stages (plus an optional, explicitly authorized QAD loop on regression) (the evaluation stage deploys the checkpoint itself), and returns a publish decision (ACCEPT / REGRESSION / ANOMALOUS / INFEASIBLE). Use when the user asks to "release a model at day-0", "quantize and validate model X is within N% of baseline and tell me if it's publishable", or "run the full day-0 workflow". Do NOT use for single-stage requests — quantizing only (use ptq), serving only (use deployment), evaluating only (use evaluation), or comparing two existing runs (use compare-results).
 license: Apache-2.0
 ---
 
@@ -32,6 +32,8 @@ Resolve these before starting (ask the user for anything missing):
 - **Eval set** — defaults to the evaluation skill's AA suite
   (`recipes/tasks/aa/`).
 - **Threshold** — max accuracy drop; default `0.01` (1%).
+- **QAD authorization** — default off. QAD runs only when the user explicitly
+  authorizes it, with a budget (loops or GPU-hours); see Step 7.
 
 ## The chain
 
@@ -66,6 +68,7 @@ progress:
 - [ ] Step 5: Compare (compare-results skill) → external sanity → gate_compare.py → decision
 - [ ] Step 5b: Verbosity gate → gate_verbosity.py
 - [ ] Step 6: Closeout — report + publish recommendation
+- [ ] Step 7 (only if QAD is authorized and Step 5 is REGRESSION): QAD loop → gate_qad.py → back to Step 5
 ```
 
 ### Step 1 — Setup gate
@@ -211,9 +214,8 @@ external baseline check. Combined decision:
   the candidate threshold → continue to **Step 5b**. This verdict covers accuracy
   alone; advance to Step 6 only once the verbosity gate also passes. A missing
   comparable external score is not a failure; report it as externally unverified.
-- **REGRESSION** — one or more tasks exceed threshold. **v1 stops here and
-  reports** which tasks regressed by how much. (Picking the next recipe and
-  re-running is deferred — see Scope.)
+- **REGRESSION** — one or more tasks exceed threshold. If QAD is authorized,
+  go to **Step 7**; otherwise stop and report which tasks regressed by how much.
 - **ANOMALOUS** — external baseline sanity failed, or scores are otherwise
   implausible (e.g. baseline lower than candidate by a large margin, or a task
   score is outside its valid range) → correct the baseline or surface it.
@@ -268,6 +270,21 @@ that differ by one calibration suffix — prefix rejected ones `REJECTED-` so th
 artifact cannot be picked by autocomplete, and re-run the Step 2b canary against
 the final path after any move.
 
+### Step 7 — QAD loop (only when QAD is authorized)
+
+Follow the **qad** skill's recipe loop, starting from the Step 2 recipe:
+PTQ → QAD, evaluate every checkpoint (every 50 iterations) as in Step 4 (config
+parity with Step 3, `gate_run.py`), submitted in parallel with training, on the
+1-3 most representative benchmarks (largest PTQ drops), and decide each run
+with `qad/scripts/gate_qad.py`. Run the slow AA-LCR and Terminal-Bench on a
+checkpoint only after it passes the rest. Train each run to its horizon; resubmit
+and pool on `NEEDS_REPEATS`, run the rest of the suite on `SCREEN_PASS`, and on
+`PASS` accept only after a fresh confirmation run passes. Independent runs may go
+in parallel. After a pass, compress more; after a `MISS`, change one QAD knob,
+and compress less only after clear misses. Run Steps
+2b, 4, 5 and 5b on the selected checkpoint before closeout, and list every loop
+in the report.
+
 ## Triage (gate failure → decision)
 
 For completed evaluations, apply
@@ -315,7 +332,7 @@ Return a decision, not a raw artifact:
 
 ## Scope (v1)
 
-In v1: the linear chain + gates + report. On `REGRESSION`, v1 reports and stops.
-Deferred to a follow-up: the evaluator-optimizer recipe loop (compare → pick the
-next recipe → re-run PTQ), which needs the bigpareto integration and a shared
-config/result schema.
+In v1: the linear chain + gates + report. On `REGRESSION`, v1 reports and stops
+unless QAD is authorized (Step 7). Deferred to a follow-up: the PTQ-only
+evaluator-optimizer recipe loop (compare → pick the next recipe → re-run PTQ),
+which needs the bigpareto integration and a shared config/result schema.

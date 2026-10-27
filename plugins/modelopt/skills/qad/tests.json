@@ -1,0 +1,40 @@
+{
+  "skill_name": "qad",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Run QAD on my NVFP4 PTQ checkpoint of org/PLACEHOLDER-27B; it is 2 pp below BF16 on SciCode. Get every benchmark within 1 pp.",
+      "expected_output": "One QAD run with a profiled pipeline layout, benchmarks evaluated every 50 iterations, and a gate_qad.py decision per checkpoint",
+      "files": [],
+      "expectations": [
+        "Reproduces PTQ with the same recipe and checks quantizer amax before training",
+        "Uses TP=1 for static NVFP4 and profiles the layout with profile_distill.py and plan_layout.py",
+        "Checkpoints and evaluates the full benchmark set every 50 iterations",
+        "Trains to the --train_iters horizon and runs gate_qad.py with per-task SEs after each evaluated checkpoint",
+        "Selects the checkpoint on benchmark scores, not validation loss"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "QAD of the default recipe passed within 1 pp on all benchmarks. What next?",
+      "expected_output": "Compresses more: one more module group at the target format, PTQ-evaluated before its QAD",
+      "files": [],
+      "expectations": [
+        "Changes exactly one thing: quantizes one more module group",
+        "Prefers middle layers first, keeping the first and last layers at the previous precision",
+        "Evaluates the new PTQ recipe before starting its QAD"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "QAD reached its 150-iteration horizon; the best checkpoint is still 1.8 pp below BF16 on SciCode (SE 0.3), a clear miss, and no QAD knob has been tried yet.",
+      "expected_output": "Changes one QAD knob on the same recipe, or compresses less",
+      "files": [],
+      "expectations": [
+        "Keeps the recipe and changes one QAD knob, such as the LR, data blend, or horizon, rather than compressing less",
+        "Keeps the 16K sequence length",
+        "Records the stopped loop with its best checkpoint and deltas"
+      ]
+    }
+  ]
+}
