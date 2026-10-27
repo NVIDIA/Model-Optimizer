@@ -882,3 +882,109 @@ def test_five_dimensional_axis_tracks_the_actually_removed_target_dimension(
     expected = _execute(model, feeds)[0]
     transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
     np.testing.assert_allclose(_execute(transformed, feeds)[0], expected, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
+def test_public_initializer_outputs_keep_their_native_dimensions(shape):
+    """Preserve fixed public values that have no internal layout-changing consumer."""
+    data = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+    model = helper.make_model(
+        helper.make_graph(
+            [],
+            "public_weight",
+            [],
+            [helper.make_tensor_value_info("weight", TensorProto.FLOAT, shape)],
+            [numpy_helper.from_array(data, "weight")],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    expected = _execute(model, {})[0]
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(converted, {})[0], expected)
+
+
+@pytest.mark.parametrize("target", [[0, 1, 1, -1], [1, 0, 1, -1]])
+def test_four_dimensional_reshape_targets_resolve_native_copied_dimensions(target):
+    """Resolve copied positions before input promotion shifts native dimensions."""
+    output_shape = [2, 1, 1, 3] if target[0] == 0 else [1, 3, 1, 2]
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Reshape", ["x", "target"], ["y"])],
+            "copied_four",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3])],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, output_shape)],
+            [numpy_helper.from_array(np.asarray(target, np.int64), "target")],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    expected = _execute(model, feeds)[0]
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+
+
+def test_runtime_four_dimensional_reshape_target_preserves_runtime_overrides():
+    """Leave runtime targets native when neither input nor output rank needs promotion."""
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Reshape", ["x", "target"], ["y"])],
+            "runtime_four",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 1, 2, 3]),
+                helper.make_tensor_value_info("target", TensorProto.INT64, [4]),
+            ],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [None, None, None, None])],
+            [numpy_helper.from_array(np.asarray([1, 1, 2, 3], np.int64), "target")],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    feeds = {
+        "x": np.arange(6, dtype=np.float32).reshape(1, 1, 2, 3),
+        "target": np.asarray([1, 2, 1, 3], np.int64),
+    }
+    expected = _execute(model, feeds)[0]
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+
+
+@pytest.mark.parametrize(
+    ("producer", "copied"),
+    [("Reshape", False), ("Reshape", True), ("Squeeze", False), ("Unsqueeze", False)],
+)
+def test_native_index_views_survive_rank_preparation(producer, copied):
+    """Retain scalar and vector control ranks after upstream structural nodes are promoted."""
+    source_shape = [] if producer == "Unsqueeze" else ([3, 1] if copied else [1, 3])
+    count = 1 if producer == "Unsqueeze" else 3
+    values = (
+        np.asarray(2, np.int64)
+        if not source_shape
+        else np.arange(3, dtype=np.int64).reshape(source_shape)
+    )
+    controls = np.asarray([0] if producer != "Reshape" or copied else [-1], np.int64)
+    nodes = [
+        helper.make_node(producer, ["source", "control"], ["indices"]),
+        helper.make_node("Gather", ["x", "indices"], ["y"], axis=0),
+    ]
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "native_index_views",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [5, 4]),
+                helper.make_tensor_value_info("source", TensorProto.INT64, source_shape),
+            ],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [count, 4])],
+            [numpy_helper.from_array(controls, "control")],
+            value_info=[helper.make_tensor_value_info("indices", TensorProto.INT64, [count])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"x": np.arange(20, dtype=np.float32).reshape(5, 4), "source": values}
+    expected = _execute(model, feeds)[0]
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)

@@ -84,13 +84,23 @@ def _apply_non4d_reshape(model):
     """Prepare fixed Reshape targets for the deferred four-dimensional layout."""
     cache = GraphCache(model.graph)
     reshapes = _operator_nodes(model, {"Reshape"})
+    gathers = {id(node) for node in _operator_nodes(model, {"Gather"})}
     reshape_ids = {id(node) for node in reshapes}
     squeezes = {id(node) for node in _operator_nodes(model, {"Squeeze"})}
     replacements = {}
     users = {}
     captured = _subgraph_captures(model.graph)
     for node in reshapes:
+        if any(
+            index == 1 and id(user) in gathers
+            for user, index in cache.get_consumers(node.output[0])
+        ):
+            continue
         tensor = cache.get_init(node.input[1])
+        target_shape = cache.get_shape(node.input[1])
+        native_input = _shape_before_boundary_promotion(cache, node.input[0])
+        if target_shape == [4] and native_input is not None and len(native_input) == 4:
+            continue
         if tensor is None or tensor.name in cache.graph_input_names:
             raise ValueError(f"{node.name!r}: Reshape target must be fixed")
         values = numpy_helper.to_array(tensor).reshape(-1).tolist()
@@ -129,6 +139,13 @@ def _apply_non4d_reshape(model):
             if 1 not in values:
                 raise ValueError(f"{node.name!r}: 5D Reshape shape has no unary dimension")
             values.remove(1)
+        elif len(values) == 4 and 0 in values:
+            output_shape = cache.get_shape(node.output[0])
+            if output_shape is None or len(output_shape) != 4:
+                raise ValueError(f"{node.name!r}: cannot resolve 0 in Reshape target")
+            values = [output_shape[i] if value == 0 else value for i, value in enumerate(values)]
+            if 0 in values:
+                raise ValueError(f"{node.name!r}: cannot resolve 0 in Reshape target")
         else:
             continue
         replacement = numpy_helper.from_array(np.asarray(values, dtype=np.int64), tensor.name)
@@ -167,11 +184,15 @@ def _apply_non4d_initializers(model):
             model, {"QuantizeLinear", "DequantizeLinear", "GroupQueryAttention"}, ("com.microsoft",)
         )
     selected = {id(node) for node in supported}
-    protected = _subgraph_captures(model.graph)
+    protected = _subgraph_captures(model.graph) | {value.name for value in model.graph.output}
     protected.update(
         name for node in model.graph.node if id(node) not in selected for name in node.input
     )
-    used = {name for node in supported for name in node.input} if protected else set()
+    used = (
+        {name for node in supported for name in node.input}
+        if any(tensor.name in protected for tensor in model.graph.initializer)
+        else set()
+    )
     for node in supported:
         if node.op_type in {"Div", "Sub", "Mul", "Add", "LSTM"}:
             expand.update(node.input)
@@ -188,17 +209,18 @@ def _apply_non4d_initializers(model):
         if tensor.name in avoid:
             continue
         rank = len(tensor.dims)
-        if tensor.name in protected:
-            if tensor.name in used and rank in (1, 2, 3):
-                raise ValueError(
-                    f"Initializer {tensor.name!r} has incompatible opaque or captured usage"
-                )
-            continue
-        if (
+        promote = (
             (rank == 1 and tensor.name in expand)
             or (rank == 2 and tensor.name in expand_or_front)
             or rank == 3
-        ):
+        )
+        if tensor.name in protected:
+            if tensor.name in used and promote:
+                raise ValueError(
+                    f"Initializer {tensor.name!r} has incompatible public, opaque or captured usage"
+                )
+            continue
+        if promote:
             shape = pad4d(list(tensor.dims))
             updates.append((tensor, shape))
         elif rank == 2 and tensor.name not in skip:
