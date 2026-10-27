@@ -399,7 +399,12 @@ def _apply_non4d_model_outputs(
     rank_sources = {}
     contrib_ops = _boundary_contrib_ops(model)
     for value in graph.output:
-        shape = cache.get_shape(value.name)
+        shape: list | None = cache.get_shape(value.name)
+        if shape is None and defer_rank_conversion and value.type.tensor_type.HasField("shape"):
+            shape = [
+                dim.dim_value if dim.HasField("dim_value") else dim.dim_param or None
+                for dim in value.type.tensor_type.shape.dim
+            ]
         if shape is None or len(shape) >= 4 or value.name in boundary_names:
             continue
         if value.name in native_broadcasts:
@@ -479,7 +484,7 @@ def _apply_non4d_model_outputs(
         return model
     for value, shape, existing, axes in plans:
         axes_name = None
-        if len(shape) > 1 or shape == [1]:
+        if len(shape) > 1 or shape == [1] or any(not isinstance(dim, int) for dim in shape):
             axes_name = add_initializer(
                 graph,
                 cache.unique_name(value.name + "_squeeze_axes"),

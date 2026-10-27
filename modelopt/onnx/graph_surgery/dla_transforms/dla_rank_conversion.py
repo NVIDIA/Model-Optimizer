@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Individual rank and axis passes in the logged DLA transform sequence.
+"""Ordered rank and axis passes sharing the preceding native shape snapshot.
 
-These passes share the shape snapshot produced by the preceding shape-inference
-stage. Running inference between passes would change how original axes are
-mapped after upstream tensors have been promoted to four dimensions.
+Do not infer shapes between stages: original axes precede upstream rank promotion.
 """
 
 import math
+from functools import partial
 
 import numpy as np
 from onnx import TensorProto, defs, helper, numpy_helper
@@ -44,12 +43,19 @@ def _apply_non4d_slice_axis(model):
     cache = GraphCache(model.graph)
     plans = []
     for node in _operator_nodes(model, {"Slice"}):
-        if len(node.input) < 4:
-            continue
         shape = _shape_before_boundary_promotion(cache, node.input[0])
-        axes = cache.get_init(node.input[3])
         if shape is None or len(shape) not in (2, 3):
             continue
+        if len(node.input) < 4 or not node.input[3]:
+            starts_shape = cache.get_shape(node.input[1])
+            if starts_shape is None:
+                raise ValueError(
+                    f"{node.name!r}: implicit Slice axes require a known starts length"
+                )
+            values = np.arange(math.prod(starts_shape), dtype=np.int64) + 4 - len(shape)
+            plans.append((node, node.input[1], values))
+            continue
+        axes = cache.get_init(node.input[3])
         if axes is None or axes.name in cache.graph_input_names:
             raise ValueError(f"{node.name!r}: Slice axes must be fixed")
         values = numpy_helper.to_array(axes).reshape(-1)
@@ -66,7 +72,10 @@ def _apply_non4d_slice_axis(model):
                 dtype=TensorProto.INT64,
                 with_value_info=False,
             )
-        node.input[3] = views[key]
+        if len(node.input) < 4:
+            node.input.append(views[key])
+        else:
+            node.input[3] = views[key]
     _add_legacy_initializer_inputs(model)
     return model
 
@@ -74,11 +83,13 @@ def _apply_non4d_slice_axis(model):
 def _apply_non4d_reshape(model):
     """Prepare fixed Reshape targets for the deferred four-dimensional layout."""
     cache = GraphCache(model.graph)
-    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    reshapes = _operator_nodes(model, {"Reshape"})
+    reshape_ids = {id(node) for node in reshapes}
+    squeezes = {id(node) for node in _operator_nodes(model, {"Squeeze"})}
     replacements = {}
     users = {}
     captured = _subgraph_captures(model.graph)
-    for node in _operator_nodes(model, {"Reshape"}):
+    for node in reshapes:
         tensor = cache.get_init(node.input[1])
         if tensor is None or tensor.name in cache.graph_input_names:
             raise ValueError(f"{node.name!r}: Reshape target must be fixed")
@@ -92,10 +103,7 @@ def _apply_non4d_reshape(model):
                     cache.get_shape(user.output[0])
                     for user, index in cache.get_consumers(node.output[0])
                     if index == 0
-                    and user.op_type == "Squeeze"
-                    and user.domain in {"", "ai.onnx"}
-                    and not user.overload
-                    and (user.domain, user.op_type, user.overload) not in local_functions
+                    and id(user) in squeezes
                     and user.output[0] in cache.graph_output_names
                 ]
                 aliases = [
@@ -111,6 +119,13 @@ def _apply_non4d_reshape(model):
             if 0 in values:
                 raise ValueError(f"{node.name!r}: cannot resolve 0 in Reshape target")
         elif len(values) == 5:
+            if 0 in values:
+                output_shape = cache.get_shape(node.output[0])
+                if output_shape is None or len(output_shape) != 5:
+                    raise ValueError(f"{node.name!r}: cannot resolve 0 in 5D Reshape target")
+                values = [
+                    output_shape[i] if value == 0 else value for i, value in enumerate(values)
+                ]
             if 1 not in values:
                 raise ValueError(f"{node.name!r}: 5D Reshape shape has no unary dimension")
             values.remove(1)
@@ -123,12 +138,7 @@ def _apply_non4d_reshape(model):
         users.setdefault(tensor.name, []).append(node)
     for name, replacement in replacements.items():
         private = name in cache.graph_output_names | captured or any(
-            index != 1
-            or user.op_type != "Reshape"
-            or user.domain not in {"", "ai.onnx"}
-            or user.overload
-            or (user.domain, user.op_type, user.overload) in local_functions
-            for user, index in cache.get_consumers(name)
+            index != 1 or id(user) not in reshape_ids for user, index in cache.get_consumers(name)
         )
         if private:
             target = add_initializer(
@@ -210,16 +220,6 @@ def _apply_non4d_initializers(model):
     return model
 
 
-def _apply_non4d_expand(model):
-    """Prepare fixed Expand targets for four-dimensional data."""
-    return _pad_shape_inputs(model, "Expand", "_expand_shape")
-
-
-def _apply_non4d_tile(model):
-    """Prepare fixed Tile repeats for four-dimensional data."""
-    return _pad_shape_inputs(model, "Tile", "_tile_shape")
-
-
 def _pad_shape_inputs(model, op_type, suffix):
     """Plan fixed structural views before changing nodes or allocating controls."""
     cache = GraphCache(model.graph)
@@ -248,10 +248,36 @@ def _pad_shape_inputs(model, op_type, suffix):
     return model
 
 
+_apply_non4d_expand = partial(_pad_shape_inputs, op_type="Expand", suffix="_expand_shape")
+_apply_non4d_tile = partial(_pad_shape_inputs, op_type="Tile", suffix="_tile_shape")
+
+
+def _collapsed_reshape_axes(cache, name, shape, reshapes):
+    """Identify singleton axes consistent with an actually collapsed native Reshape."""
+    producer = cache.get_producer(name)
+    target = (
+        cache.get_init_array(producer.input[1])
+        if producer is not None and id(producer) in reshapes
+        else None
+    )
+    if target is None or target.shape != (4,):
+        return []
+    values = target.tolist()
+    return [
+        axis
+        for axis, dim in enumerate(shape)
+        if dim == 1
+        and all(
+            value in (-1, native) for value, native in zip(values, shape[:axis] + shape[axis + 1 :])
+        )
+    ]
+
+
 def _apply_non4d_transpose(model):
     """Remap transpose permutations around added or removed unary axes."""
     cache = GraphCache(model.graph)
     plans = []
+    reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
     for node in _operator_nodes(model, {"Transpose"}):
         perm = _attribute(node, "perm")
         shape = _shape_before_boundary_promotion(cache, node.input[0])
@@ -264,7 +290,12 @@ def _apply_non4d_transpose(model):
         elif len(values) == 5:
             if shape is None or len(shape) != 5 or 1 not in shape:
                 raise ValueError(f"{node.name!r}: 5D Transpose requires a known unary dimension")
-            removed = shape.index(1)
+            removed_axes = _collapsed_reshape_axes(cache, node.input[0], shape, reshapes)
+            if not removed_axes:
+                continue
+            if len(removed_axes) != 1:
+                raise ValueError(f"{node.name!r}: ambiguous collapsed 5D Transpose layout")
+            removed = removed_axes[0]
             values = [v - int(v > removed) for v in values if v != removed]
         else:
             continue
@@ -389,34 +420,16 @@ def _apply_argmax(model):
 
 def _apply_update_axis(model):
     """Remap supported operation axes from their native input ranks."""
-    update = {
-        "LogSoftmax",
-        "Softmax",
-        "DequantizeLinear",
-        "TopK",
-        "Concat",
-        "Split",
-        "QuantizeLinear",
-    }
-    skip = {
-        "Gather",
-        "GatherElements",
-        "LpNormalization",
-        "ArgMax",
-        "ReduceMax",
-        "ReduceMin",
-        "ReduceSum",
-        "ReduceMean",
-        "Slice",
-        "Flatten",
-    }
+    quantizers = {"QuantizeLinear", "DequantizeLinear"}
+    update = {"LogSoftmax", "Softmax", "TopK", "Concat", "Split"} | quantizers
+    skip = {"Gather", "GatherElements", "LpNormalization", "ArgMax", "Slice", "Flatten"}
+    skip |= {"ReduceMax", "ReduceMin", "ReduceSum", "ReduceMean"}
     cache = GraphCache(model.graph)
     plans = []
+    reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
     selected = _operator_nodes(model, {node.op_type for node in model.graph.node})
     if any(op.domain == "com.microsoft" and op.version == 1 for op in model.opset_import):
-        selected += _operator_nodes(
-            model, {"QuantizeLinear", "DequantizeLinear"}, ("com.microsoft",)
-        )
+        selected += _operator_nodes(model, quantizers, ("com.microsoft",))
     versions = {op.domain: op.version for op in model.opset_import}
     for node in selected:
         axis = _attribute(node, "axis")
@@ -426,13 +439,7 @@ def _apply_update_axis(model):
             and node.op_type in update
             and node.domain in {"", "ai.onnx"}
             and shape
-            and (
-                len(shape) == 5
-                or (
-                    len(shape) in (2, 3)
-                    and node.op_type not in {"QuantizeLinear", "DequantizeLinear"}
-                )
-            )
+            and (len(shape) == 5 or (len(shape) in (2, 3) and node.op_type not in quantizers))
         ):
             schema = defs.get_schema(
                 node.op_type, versions.get(node.domain, versions.get("", 1)), node.domain
@@ -453,10 +460,13 @@ def _apply_update_axis(model):
         rank = len(shape) if shape else 0
         original = value
         if shape and rank == 5:
-            if not -5 <= value < 5 or 1 not in shape or value % 5 == shape.index(1):
-                raise ValueError(f"{node.name!r}: cannot map 5D axis {value}")
+            removed_axes = _collapsed_reshape_axes(cache, node.input[0], shape, reshapes)
+            if not -5 <= value < 5 or not removed_axes or value % 5 in removed_axes:
+                raise ValueError(
+                    f"{node.name!r}: cannot map 5D axis {value} without an unambiguous collapsed Reshape"
+                )
             native_axis = value % 5
-            value = native_axis - int(native_axis > shape.index(1))
+            value = native_axis - int(native_axis > removed_axes[0])
             if original < 0:
                 value -= 4
         elif value >= 0:

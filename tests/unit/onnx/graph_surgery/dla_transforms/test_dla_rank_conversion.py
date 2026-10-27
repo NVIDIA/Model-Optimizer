@@ -200,6 +200,43 @@ def test_registered_axis_update_reads_native_initializer_rank(axis, value_info):
     np.testing.assert_array_equal(_execute(transformed, {})[0], expected)
 
 
+def _collapsed_normalization_model(
+    shape, axis, operation="Softmax", opset=17, target=None, data_shape=None
+):
+    """Build a native 5D normalization between a rank-expanding and rank-restoring Reshape."""
+    collapsed = shape.copy()
+    collapsed.remove(1)
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Reshape", ["x", "native_shape"], ["native"]),
+                helper.make_node(
+                    operation,
+                    ["native"],
+                    ["normalized"],
+                    **({} if axis is None else {"axis": axis}),
+                ),
+                helper.make_node("Reshape", ["normalized", "output_shape"], ["y"]),
+            ],
+            "collapsed_normalization",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, data_shape or collapsed)],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, collapsed)],
+            [
+                numpy_helper.from_array(np.asarray(target or shape, np.int64), "native_shape"),
+                numpy_helper.from_array(np.asarray(collapsed, np.int64), "output_shape"),
+            ],
+            value_info=[
+                helper.make_tensor_value_info(n, TensorProto.FLOAT, shape)
+                for n in ["native", "normalized"]
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", opset)],
+    )
+    model.ir_version = 9
+    onnx.checker.check_model(model, full_check=True)
+    return model
+
+
 @pytest.mark.parametrize(
     ("shape", "axis"),
     [
@@ -212,34 +249,13 @@ def test_registered_axis_update_reads_native_initializer_rank(axis, value_info):
     ],
 )
 def test_five_dimensional_axis_tracks_the_removed_unary_position(shape, axis):
-    """Preserve Softmax values when a later rank stage drops the known unary axis."""
-    model = helper.make_model(
-        helper.make_graph(
-            [helper.make_node("Softmax", ["x"], ["y"], axis=axis)],
-            "unary_axis",
-            [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
-            [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)],
-        ),
-        opset_imports=[helper.make_opsetid("", 17)],
-    )
-    model.ir_version = 9
-    data = np.random.default_rng(20).standard_normal(shape).astype(np.float32)
-    expected = _execute(model, {"x": data})[0]
-    transformed = _apply_update_axis(copy.deepcopy(model))
-    collapsed = shape.copy()
-    collapsed.remove(1)
-    transformed.graph.input[0].CopyFrom(
-        helper.make_tensor_value_info("x", TensorProto.FLOAT, collapsed)
-    )
-    transformed.graph.output[0].CopyFrom(
-        helper.make_tensor_value_info("y", TensorProto.FLOAT, collapsed)
-    )
-    np.testing.assert_allclose(
-        _execute(transformed, {"x": data.reshape(collapsed)})[0],
-        expected.reshape(collapsed),
-        rtol=1e-6,
-        atol=1e-7,
-    )
+    """Execute the registered rank collapse and its downstream native axis mapping."""
+    model = _collapsed_normalization_model(shape, axis)
+    input_shape = [d.dim_value for d in model.graph.input[0].type.tensor_type.shape.dim]
+    feeds = {"x": np.random.default_rng(20).standard_normal(input_shape).astype(np.float32)}
+    expected = _execute(model, feeds)[0]
+    transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_allclose(_execute(transformed, feeds)[0], expected, rtol=1e-6, atol=1e-7)
 
 
 @pytest.mark.parametrize(
@@ -553,29 +569,12 @@ def test_late_invalid_layout_refuses_before_earlier_node_mutation(operation):
 
 @pytest.mark.parametrize("operation", ["Softmax", "LogSoftmax"])
 def test_implicit_legacy_axis_tracks_removed_leading_unary_dimension(operation):
-    """Read the imported standard schema when the native axis attribute is omitted."""
-    shape = [1, 2, 3, 4, 5]
-    model = helper.make_model(
-        helper.make_graph(
-            [helper.make_node(operation, ["x"], ["y"])],
-            "implicit_axis",
-            [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
-            [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)],
-        ),
-        opset_imports=[helper.make_opsetid("", 11)],
-    )
-    model.ir_version = 9
-    data = np.random.default_rng(25).standard_normal(shape).astype(np.float32)
-    expected = _execute(model, {"x": data})[0]
-    transformed = _apply_update_axis(copy.deepcopy(model))
-    for value in [transformed.graph.input[0], transformed.graph.output[0]]:
-        value.CopyFrom(helper.make_tensor_value_info(value.name, TensorProto.FLOAT, shape[1:]))
-    np.testing.assert_allclose(
-        _execute(transformed, {"x": data.reshape(shape[1:])})[0].reshape(shape),
-        expected,
-        rtol=1e-6,
-        atol=1e-7,
-    )
+    """Read the imported default axis after an actual registered Reshape collapse."""
+    model = _collapsed_normalization_model([1, 2, 3, 4, 5], None, operation, 11)
+    feeds = {"x": np.random.default_rng(25).standard_normal((2, 3, 4, 5)).astype(np.float32)}
+    expected = _execute(model, feeds)[0]
+    transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_allclose(_execute(transformed, feeds)[0], expected, rtol=1e-6, atol=1e-7)
 
 
 def test_implicit_axis_on_removed_dimension_refuses_without_mutation():
@@ -755,3 +754,131 @@ def test_implicit_split_axis_preserves_rank_three_values():
     transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
     for actual, reference in zip(_execute(transformed, feeds), expected):
         np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.parametrize(
+    ("rank", "empty", "runtime", "fixed_data"),
+    [
+        (2, False, False, False),
+        (3, True, False, False),
+        (3, False, True, False),
+        (3, True, True, False),
+        (3, False, False, True),
+    ],
+)
+def test_implicit_slice_axes_preserve_registered_data_layouts(rank, empty, runtime, fixed_data):
+    """Derive implicit axes from the fixed starts length before promoting data."""
+    shape = [2, 3] if rank == 2 else [2, 3, 4]
+    output_shape = [2, 2] if rank == 2 else [2, 2, 4]
+    names = ["x", "starts", "ends", ""] if empty else ["x", "starts", "ends"]
+    initializers = [numpy_helper.from_array(np.asarray([2, 3], np.int64), "ends")]
+    inputs = [] if fixed_data else [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)]
+    data = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+    feeds = {} if fixed_data else {"x": data}
+    if fixed_data:
+        initializers.append(numpy_helper.from_array(data, "x"))
+    if runtime:
+        inputs.append(helper.make_tensor_value_info("starts", TensorProto.INT64, [2]))
+        feeds["starts"] = np.asarray([0, 1], np.int64)
+    else:
+        initializers.append(numpy_helper.from_array(np.asarray([0, 1], np.int64), "starts"))
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Slice", names, ["y"])],
+            "implicit_slice",
+            inputs,
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, output_shape)],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    onnx.checker.check_model(model, full_check=True)
+    expected = _execute(model, feeds)[0]
+    transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(transformed, feeds)[0], expected)
+
+
+def test_unknown_implicit_slice_length_refuses_before_earlier_mutation():
+    """Reject an unknown runtime starts length before allocating an earlier fixed axis view."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Slice", ["x", "fixed", "ends"], ["first"]),
+                helper.make_node("Slice", ["x", "dynamic", "ends"], ["second"]),
+            ],
+            "unknown_starts",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3]),
+                helper.make_tensor_value_info("dynamic", TensorProto.INT64, [None]),
+            ],
+            [
+                helper.make_tensor_value_info(n, TensorProto.FLOAT, [None, None])
+                for n in ["first", "second"]
+            ],
+            [
+                numpy_helper.from_array(np.asarray([0, 0], np.int64), "fixed"),
+                numpy_helper.from_array(np.asarray([2, 3], np.int64), "ends"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="known starts length"):
+        _apply_non4d_slice_axis(model)
+    assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("producer", ["input", "Unsqueeze"])
+def test_native_five_dimensional_axes_refuse_without_a_collapsed_reshape(producer):
+    """Keep earlier axes unchanged when a later native input never lost a dimension."""
+    shape = [1, 2, 3, 4, 5]
+    nodes = [helper.make_node("Softmax", ["first"], ["first_out"], axis=1)]
+    inputs = [helper.make_tensor_value_info("first", TensorProto.FLOAT, [2, 3, 4])]
+    initializers = []
+    if producer == "input":
+        inputs.append(helper.make_tensor_value_info("native", TensorProto.FLOAT, shape))
+    else:
+        inputs.append(helper.make_tensor_value_info("x", TensorProto.FLOAT, shape[1:]))
+        initializers.append(numpy_helper.from_array(np.asarray([0], np.int64), "axes"))
+        nodes.append(helper.make_node("Unsqueeze", ["x", "axes"], ["native"]))
+    nodes.append(helper.make_node("Softmax", ["native"], ["y"], axis=2))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "native_five",
+            inputs,
+            [
+                helper.make_tensor_value_info("first_out", TensorProto.FLOAT, [2, 3, 4]),
+                helper.make_tensor_value_info("y", TensorProto.FLOAT, shape),
+            ],
+            initializers,
+            value_info=[helper.make_tensor_value_info("native", TensorProto.FLOAT, shape)],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    onnx.checker.check_model(model, full_check=True)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="collapsed Reshape"):
+        _apply_update_axis(model)
+    assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize(
+    ("shape", "target", "data_shape", "axis"),
+    [
+        ([1, 2, 1, 3, 4], [-1, 2, 1, 3, 4], [1, 2, 3, 4], 1),
+        ([1, 2, 4, 3, 5], [1, 2, 0, 3, 5], [2, 3, 4, 5], 2),
+    ],
+)
+def test_five_dimensional_axis_tracks_the_actually_removed_target_dimension(
+    shape, target, data_shape, axis
+):
+    """Respect inferred and copied dimensions when locating the singleton actually removed."""
+    model = _collapsed_normalization_model(shape, axis, target=target, data_shape=data_shape)
+    feeds = {"x": np.random.default_rng(29).standard_normal(data_shape).astype(np.float32)}
+    expected = _execute(model, feeds)[0]
+    transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_allclose(_execute(transformed, feeds)[0], expected, rtol=1e-6, atol=1e-7)
