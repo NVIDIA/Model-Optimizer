@@ -652,10 +652,12 @@ def load_pretrained(
             "which sets it up."
         )
     if alone and distribution is None:
-        # The knobs ask to shard over the launch, rather than leave each process the whole model.
-        # Read as the plan decision reads them, so a value that is not one raises here too.
-        ep, world = _ep_degree(None), int(os.environ["WORLD_SIZE"])
-        asked = [f"MODELOPT_EP_DEGREE={ep}"] if isinstance(ep, int) and ep > 1 else []
+        # The knobs ask to shard over the launch, rather than leave each process the whole model. A
+        # value that is not an EP degree is refused, as the plan decision refuses it.
+        ep, world = env.ep_degree().strip(), int(os.environ["WORLD_SIZE"])
+        if ep.lower() not in ("auto", "0") and not ep.isdigit():
+            raise ValueError(f"MODELOPT_EP_DEGREE={ep!r}: expected auto, 0 (auto) or an EP degree.")
+        asked = [f"MODELOPT_EP_DEGREE={ep}"] if ep.isdigit() and int(ep) > 1 else []
         if _dense_from_env(world) == "fsdp":
             asked.append(f"MODELOPT_FSDP_SIZE={env.fsdp_size()}")
         if asked:
