@@ -683,6 +683,20 @@ def _handle_gather(node, graph, shape_map, init_names, unique_init, inits_to_add
     idx_shape = shape_map.get(idx_name)
     if idx_shape is None or sum(dim != 1 for dim in idx_shape) > 1:
         return None
+    native_axis = _get_attr_i(node, "axis", 0) % rank
+    native_output = [*orig_shape[:native_axis], *idx_shape, *orig_shape[native_axis + 1 :]]
+    promoted = pad4d(orig_shape)
+    axis_4d = native_axis + _axis_delta(rank)
+    converted_output = [*promoted[:axis_4d], math.prod(idx_shape), *promoted[axis_4d + 1 :]]
+    if len(native_output) > 4:
+        return None
+    restore_axes = _find_squeeze_axes(converted_output, native_output)
+    if (
+        any(converted_output[axis] != 1 for axis in restore_axes)
+        or [dim for axis, dim in enumerate(converted_output) if axis not in restore_axes]
+        != native_output
+    ):
+        return None
 
     pfx = node.name or f"gather_{cnt_ref[0]}"
     c = cnt_ref[0]
@@ -801,7 +815,6 @@ def _handle_gather(node, graph, shape_map, init_names, unique_init, inits_to_add
 
     # ── 2. Unsqueeze data to 4D + adjust axis ────────────────────────────────
     adjusted_axis = _get_attr_i(node, "axis", 0)
-    data_4d_shape = list(orig_shape) if rank == 4 else None
     if rank != 4:
         delta = _axis_delta(rank)
         orig_axis = _get_attr_i(node, "axis", 0)  # ONNX Gather default: 0
@@ -810,7 +823,6 @@ def _handle_gather(node, graph, shape_map, init_names, unique_init, inits_to_add
         else:
             adjusted_axis = orig_axis  # negative axes don't shift
         _set_attr_i(node, "axis", adjusted_axis)
-        data_4d_shape = pad4d(orig_shape)
         out4d, unsq = _make_unsqueeze_to_4d(in_name, rank, pfx, unique_init, graph, c)
         node.input[0] = out4d
         if unsq:
@@ -823,24 +835,12 @@ def _handle_gather(node, graph, shape_map, init_names, unique_init, inits_to_add
     # _find_squeeze_axes with the actual 4D output shape rather than falling back
     # to leading-axis removal.
     orig_out = node.output[0]
-    orig_out_shape = shape_map.get(orig_out)
+    orig_out_shape = native_output
     post: list = []
-    if orig_out_shape is not None and len(orig_out_shape) < 4:
+    if len(orig_out_shape) < 4:
         c_sq = cnt_ref[0]
         cnt_ref[0] += 1
         temp_out = unique_init.unique_name(f"{pfx}_gather_4d_{c_sq}")
-
-        # Compute the 4D Gather output shape so _find_squeeze_axes gets the right axes.
-        gather_4d_shape = None
-        if data_4d_shape is not None and adjusted_axis is not None:
-            # Indices were flattened to 1D; length = product of original indices dims
-            idx_shape = shape_map.get(idx_name)
-            if idx_shape is not None:
-                indices_len = max(1, math.prod(idx_shape)) if idx_shape else 1
-            else:
-                indices_len = 1  # flattened scalar → length 1
-            ax = adjusted_axis % 4
-            gather_4d_shape = [*data_4d_shape[:ax], indices_len, *data_4d_shape[ax + 1 :]]
 
         sq = _make_squeeze_to_rank(
             temp_out,
@@ -850,7 +850,7 @@ def _handle_gather(node, graph, shape_map, init_names, unique_init, inits_to_add
             unique_init,
             graph,
             c_sq,
-            shape_4d=gather_4d_shape,
+            shape_4d=converted_output,
             orig_out_shape=list(orig_out_shape),
         )
         if sq:
@@ -1484,6 +1484,13 @@ def _handle_generic(node, graph, shape_map, init_names, unique_init, inits_to_ad
         return None
     if node.op_type in {"Conv", "ConvTranspose"} and orig_rank != 4:
         return None
+    broadcast_output = None
+    if node.op_type not in {"Conv", "ConvTranspose"}:
+        shapes = [shape_map.get(name) for name in node.input if name]
+        if any(shape is None for shape in shapes):
+            return None
+        broadcast_output = list(np.broadcast_shapes(*shapes))
+        orig_rank = len(broadcast_output)
 
     pfx = node.name or f"gen_{cnt_ref[0]}"
     c = cnt_ref[0]
@@ -1493,7 +1500,11 @@ def _handle_generic(node, graph, shape_map, init_names, unique_init, inits_to_ad
     # This is used by _make_squeeze_to_rank to find the correct squeeze axis even
     # when the unary dim is not at the leading position (e.g. [1,1,3,1] → [1,1,3]).
     first_in_shape = shape_map.get(first_inp_name) if first_inp_name else None
-    expected_4d_shape = pad4d(first_in_shape) if first_in_shape else None
+    expected_4d_shape = (
+        pad4d(broadcast_output if broadcast_output is not None else first_in_shape)
+        if first_in_shape
+        else None
+    )
 
     pre: list = []
     post: list = []
@@ -1533,7 +1544,7 @@ def _handle_generic(node, graph, shape_map, init_names, unique_init, inits_to_ad
     for oi, orig_out in enumerate(node.output):
         if not orig_out:
             continue
-        orig_out_shape = shape_map.get(orig_out)
+        orig_out_shape = shape_map.get(orig_out, broadcast_output)
         ci = cnt_ref[0]
         cnt_ref[0] += 1
         temp_out = unique_init.unique_name(f"{pfx}_gen_4d_{c}_o{oi}")

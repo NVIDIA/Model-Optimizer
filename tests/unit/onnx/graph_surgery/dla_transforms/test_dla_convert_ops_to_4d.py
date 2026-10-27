@@ -1716,3 +1716,85 @@ def test_legacy_opset_without_input_axes_adapters_stays_native(operation):
         model.SerializeToString(), options, providers=["CPUExecutionProvider"]
     ).run(None, {"x": data})[0]
     assert output.shape == data.shape
+
+
+@pytest.mark.parametrize("fixed", [False, True])
+@pytest.mark.parametrize(
+    ("shape", "index_shape", "axis", "supported"),
+    [
+        ([8, 16], [2, 1], 0, False),
+        ([5, 4, 3], [1, 2], 1, False),
+        ([2, 3, 4], [1, 1, 2], 1, False),
+        ([8, 16], [1, 2], 0, True),
+        ([2, 3], [0], 0, True),
+    ],
+)
+def test_gather_requires_exact_native_output_restoration(
+    fixed, shape, index_shape, axis, supported
+):
+    """Flatten only layouts whose public native output can be restored exactly."""
+    indices = np.arange(np.prod(index_shape), dtype=np.int64).reshape(index_shape) % shape[axis]
+    inputs = [_vi("x", TensorProto.FLOAT, shape)]
+    initializers = []
+    feeds = {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape)}
+    if fixed:
+        initializers.append(_init("indices", indices))
+    else:
+        inputs.append(_vi("indices", TensorProto.INT64, index_shape))
+        feeds["indices"] = indices
+    native = shape[:axis] + index_shape + shape[axis + 1 :]
+    model = _make_model(
+        [helper.make_node("Gather", ["x", "indices"], ["y"], axis=axis)],
+        "gather_layout",
+        inputs,
+        [_vi("y", TensorProto.FLOAT, native)],
+        initializers,
+    )
+    original = model.SerializeToString()
+    expected = _run_ort(copy.deepcopy(model), feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    if not supported:
+        assert converted.SerializeToString() == original
+    else:
+        assert any(node.op_type == "Unsqueeze" for node in converted.graph.node)
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))
+
+
+@pytest.mark.parametrize("operation", ["Add", "Mul", "Where"])
+@pytest.mark.parametrize("fixed", [False, True])
+def test_generic_broadcast_output_without_intermediate_metadata(operation, fixed):
+    """Restore the maximum broadcast rank including fixed data branches."""
+    inputs = [_vi("a", TensorProto.FLOAT, [3])]
+    initializers = []
+    feeds = {"a": np.asarray([1, 2, 3], np.float32)}
+    matrix = np.arange(6, dtype=np.float32).reshape(2, 3)
+    if fixed:
+        initializers.append(_init("b", matrix))
+    else:
+        inputs.append(_vi("b", TensorProto.FLOAT, [2, 3]))
+        feeds["b"] = matrix
+    operands = ["a", "b"]
+    if operation == "Where":
+        inputs.append(_vi("condition", TensorProto.BOOL, []))
+        feeds["condition"] = np.asarray(False)
+        operands.insert(0, "condition")
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(operation, operands, ["hidden"]),
+                helper.make_node("Relu", ["hidden"], ["y"]),
+            ],
+            "broadcast_without_metadata",
+            inputs,
+            [_vi("y", TensorProto.FLOAT, [2, 3])],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    _clamp_ir(model)
+    assert not model.graph.value_info
+    expected = _run_ort(copy.deepcopy(model), feeds)
+    converted = _apply_convert_ops_to_4d(copy.deepcopy(model))
+    onnx.checker.check_model(converted, full_check=True)
+    _assert_match(expected, _run_ort(converted, feeds))
