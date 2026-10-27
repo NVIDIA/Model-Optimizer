@@ -38,7 +38,7 @@ def _is_standard_node(node, local_functions, op_types):
     )
 
 
-def _output_rank_source(cache, node, local_functions):
+def _output_rank_source(cache, node, local_functions, sources):
     """Follow native rank-preserving unary paths before planning public restoration."""
     seen = set()
     while (
@@ -46,10 +46,14 @@ def _output_rank_source(cache, node, local_functions):
         and _is_standard_node(node, local_functions, _RANK_AGNOSTIC_OPS)
         and len(node.input) == 1
     ):
+        if id(node) in sources:
+            node = sources[id(node)]
+            break
         if id(node) in seen:
             raise ValueError("Cyclic unary path while planning output restoration")
         seen.add(id(node))
         node = cache.get_producer(node.input[0])
+    sources.update(dict.fromkeys(seen, node))
     return node
 
 
@@ -233,12 +237,13 @@ def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False):
     append = []
     plans = []
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    rank_sources = {}
     for value in graph.output:
         shape = cache.get_shape(value.name)
         if shape is None or len(shape) >= 4 or value.name in boundary_names:
             continue
         producer = cache.get_producer(value.name)
-        source = _output_rank_source(cache, producer, local_functions)
+        source = _output_rank_source(cache, producer, local_functions, rank_sources)
         if source is not None:
             if source.op_type in {"Squeeze", "Unsqueeze", "Concat"} and not _is_standard_node(
                 source, local_functions, {"Squeeze", "Unsqueeze", "Concat"}
