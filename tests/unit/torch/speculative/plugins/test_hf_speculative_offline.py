@@ -769,6 +769,7 @@ def test_collator_batches_multiple(tmp_path):
 
 @pytest.mark.parametrize("shift_labels", [True, False])
 def test_offline_data_module_preserves_label_alignment_and_eos(tmp_path, shift_labels):
+    """The data module preserves masks and EOS supervision for each label convention."""
     args = _make_data_args(sample_size=-1, tmp_path=tmp_path, n_files=0)
     p = tmp_path / "sample.pt"
     data = _make_offline_pt(p, seq_len=3)

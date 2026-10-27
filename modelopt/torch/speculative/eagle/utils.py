@@ -147,6 +147,7 @@ class OfflineSupervisedDataset(Dataset):
         return offline_data["hidden_states"].new_zeros((offline_data["hidden_states"].shape[0], 0))
 
     def __getitem__(self, i) -> dict[str, torch.Tensor]:
+        """Load one saved sample with labels aligned for the selected draft objective."""
         offline_data = torch.load(self.dumped_files[i], weights_only=True)
 
         labels = offline_data["input_ids"].clone()
