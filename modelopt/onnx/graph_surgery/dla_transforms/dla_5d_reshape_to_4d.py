@@ -418,6 +418,18 @@ def _build_transpose_replacement_or_raise(
         )
         nodes_to_add.extend(br_b)
         slice_outputs.append(t_b)
+        if inferred_value_info is not None:
+            assert tr_in_shape is not None
+            sliced_shape = list(tr_in_shape)
+            sliced_shape[slice_axis] = 1
+            transposed_shape = [int(reshape_4d_vals[index]) for index in new_transpose_perm]
+            dtype = cache.get_dtype(input_tensor) or TensorProto.FLOAT
+            for name, shape in (
+                (slice_out, sliced_shape),
+                (reshape_4d_out, reshape_4d_vals.tolist()),
+                (transpose_branch_out, transposed_shape),
+            ):
+                inferred_value_info.append(helper.make_tensor_value_info(name, dtype, shape))
 
     concat_out = cache.unique_name(f"u5d_tr_concat_{counter}")
     nodes_to_add.append(
