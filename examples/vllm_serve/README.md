@@ -30,8 +30,8 @@ building for a different tested release.
 
 The image runs as the `vllm` user, which owns `/workspace`. To run it as a different user, point
 `TORCH_EXTENSIONS_DIR` at a directory that user can write, for example a mounted volume. ModelOpt
-then builds its CUDA extensions there on first use instead of loading the precompiled ones from the
-image; without it, ModelOpt warns and falls back to slower eager fake quantization.
+then builds its CUDA extensions there on first use rather than under `/workspace`; without it,
+ModelOpt warns and falls back to slower eager fake quantization.
 
 ```bash
 mkdir -p ext_cache
