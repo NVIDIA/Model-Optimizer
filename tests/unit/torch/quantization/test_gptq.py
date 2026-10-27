@@ -22,6 +22,7 @@ import torch
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.utils import calib_utils
 from modelopt.torch.quantization.utils.calib_utils import GPTQHelper, update_hessian
 from modelopt.torch.utils.distributed import ParallelState
 
@@ -172,3 +173,11 @@ def test_gptq_hessian_dp_sync(skip_on_windows):
     spawn_multiprocess_job(
         2, partial(_gptq_hessian_dp_sync_helper, token_counts=(5, 0)), backend="gloo"
     )
+
+
+def test_a_calibration_run_forgets_earlier_forward_measurements(monkeypatch):
+    """Another run, maybe of another model, must not size its Hessian reserve from this one."""
+    monkeypatch.setattr(calib_utils, "_calib_forward_peak", {0: 2**60})
+    model = torch.nn.Linear(16, 16)
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop=lambda m: m(torch.randn(4, 16)))
+    assert 2**60 not in calib_utils._calib_forward_peak.values()

@@ -38,36 +38,71 @@
 
 """GPTQ helper and Hessian utilities for calibration."""
 
+from contextlib import contextmanager
+
 import torch
 import torch.distributed as dist
 
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import get_available_gpu_memory, get_process_gpus, print_rank_0
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
-from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
-# Used fraction of a GPU's memory above which GPTQ keeps new Hessians off it.
-_HESSIAN_GPU_MEM_LIMIT = 0.65
+# A GPU takes a new Hessian only if enough memory stays available after it for the calibration
+# forward that follows. Until GPTQ has measured that forward on the GPU, keep this share free.
+_HESSIAN_UNMEASURED_RESERVE = 0.35
+# Once measured, keep this multiple of the most a calibration forward added on the GPU, and at
+# least this share of the GPU.
+_HESSIAN_RESERVE_MARGIN = 1.5
+_HESSIAN_MIN_RESERVE = 0.1
+# The most memory a GPTQ calibration forward has added on each GPU, by device index.
+_calib_forward_peak: dict[int, int] = {}
 
 
-def _gpu_is_full(device) -> bool:
-    return get_used_gpu_mem_fraction(device) > _HESSIAN_GPU_MEM_LIMIT
+def _gpu_has_room(gpu: int, nbytes: int) -> bool:
+    """Whether ``nbytes`` more on ``gpu`` leaves the calibration forward the memory it needs."""
+    total = torch.cuda.get_device_properties(gpu).total_memory
+    peak = _calib_forward_peak.get(gpu)
+    if peak is None:
+        reserve = _HESSIAN_UNMEASURED_RESERVE * total
+    else:
+        reserve = max(_HESSIAN_MIN_RESERVE * total, _HESSIAN_RESERVE_MARGIN * peak)
+    return get_available_gpu_memory(gpu) - nbytes >= reserve
+
+
+def reset_calib_forward_memory():
+    """Forget measured calibration forwards; a new run, maybe of another model, measures afresh."""
+    _calib_forward_peak.clear()
+
+
+@contextmanager
+def track_calib_forward_memory():
+    """Record the memory the enclosed calibration forward adds on each GPU, for Hessian placement.
+
+    PyTorch's peak counters are reset first: otherwise an earlier peak, such as the previous
+    layer's Hessians and GPTQ updates, would count as forward memory and send Hessians to the CPU
+    for nothing.
+    """
+    gpus = get_process_gpus() if torch.cuda.is_available() else []
+    allocated = {}
+    for gpu in gpus:
+        torch.cuda.reset_peak_memory_stats(gpu)
+        allocated[gpu] = torch.cuda.memory_allocated(gpu)
+    yield
+    for gpu in gpus:
+        added = torch.cuda.max_memory_allocated(gpu) - allocated[gpu]
+        _calib_forward_peak[gpu] = max(_calib_forward_peak.get(gpu, 0), added)
 
 
 def _hessian_offload_device(nbytes: int) -> torch.device:
-    """Where a Hessian goes when its weight's GPU is full: the emptiest GPU with room, else CPU.
+    """Where a Hessian goes when its weight's GPU lacks room: the emptiest GPU with room, else CPU.
 
     A model sharded over several GPUs leaves the ones not holding the current layer idle, and a
     Hessian there costs a device-to-device copy per update instead of a host copy and a CPU
     rescale of the whole matrix. Only GPUs this process already holds memory on are candidates,
-    and only outside distributed runs, so no other job's or rank's GPU is touched. A candidate
-    must also have the Hessian's ``nbytes`` free.
+    and only outside distributed runs, so no other job's or rank's GPU is touched.
     """
     if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
-        gpus = [i for i in range(torch.cuda.device_count()) if torch.cuda.memory_reserved(i)]
-        for gpu in sorted(gpus, key=get_used_gpu_mem_fraction):
-            if _gpu_is_full(gpu):
-                break
-            if torch.cuda.mem_get_info(gpu)[0] > nbytes:
+        for gpu in sorted(get_process_gpus(), key=get_available_gpu_memory, reverse=True):
+            if _gpu_has_room(gpu, nbytes):
                 return torch.device("cuda", gpu)
     return torch.device("cpu")
 
@@ -186,8 +221,10 @@ class GPTQHelper:
         device = weight.device
         if device.type == "meta":
             device = torch.device("cpu")
-        elif offload_to_cpu and device.type == "cuda" and _gpu_is_full(device):
-            device = _hessian_offload_device(4 * in_features**2)
+        elif offload_to_cpu and device.type == "cuda":
+            index = torch.cuda.current_device() if device.index is None else device.index
+            if not _gpu_has_room(index, 4 * in_features**2):
+                device = _hessian_offload_device(4 * in_features**2)
         self.hessian = torch.zeros(in_features, in_features, dtype=torch.float32, device=device)
         self.n_samples = 0
         # Set by update_weights(); listed here for documentation.

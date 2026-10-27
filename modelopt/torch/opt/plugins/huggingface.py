@@ -20,6 +20,7 @@ import os
 import threading
 import warnings
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -117,6 +118,9 @@ def _new_save_pretrained(self, save_directory, *args, **kwargs):
         path = _get_modelopt_state_path(save_directory)
         torch.save(modelopt_state(self), path)
         print_rank_0(f"Saved ModelOpt state to {path}")
+    else:
+        # A checkpoint saved without ModelOpt state must not inherit an older sidecar.
+        Path(save_directory, _MODELOPT_STATE_SAVE_NAME).unlink(missing_ok=True)
 
     return outputs
 

@@ -315,10 +315,13 @@ def get_kv_cache_scaling_factor(
     ):
         return [None, None]
 
-    scaling_factors = [
-        get_scaling_factor(getattr(self_attention_module, quantizer))
-        for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer")
-    ]
+    # Both FP8 and NVFP4 cache scales are amax / 448, as the HF exporter writes them and
+    # vLLM / TensorRT-LLM read them.
+    scaling_factors = []
+    for quantizer_name in ("k_bmm_quantizer", "v_bmm_quantizer"):
+        quantizer = getattr(self_attention_module, quantizer_name)
+        amax = quantizer.export_amax() if quantizer.is_enabled else None
+        scaling_factors.append(None if amax is None else amax.float() / 448.0)
 
     # For FP8, we recommend default KV-cache scaling factor to be 1. The
     # asymmetric format applies this only to K; V remains NVFP4.
