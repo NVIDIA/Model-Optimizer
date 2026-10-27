@@ -529,19 +529,28 @@ def test_a_launch_that_sets_no_group_up_loads_whole_on_each_process(
 
 
 @pytest.mark.parametrize(
-    ("distribution", "match"),
+    ("distribution", "knobs", "match"),
     [
-        (DistributionPlan(8), "is for 8 ranks, whose process group this 8-rank launch has not"),
-        (DistributionPlan(dense="fsdp"), "shards through this 8-rank launch's process group"),
+        (DistributionPlan(8), {}, "is for 8 ranks, whose process group this 8-rank launch has not"),
+        (
+            DistributionPlan(dense="fsdp"),
+            {},
+            "shards through this 8-rank launch's process group",
+        ),
+        (None, {"MODELOPT_FSDP_SIZE": "world"}, "MODELOPT_FSDP_SIZE=world ask to shard"),
+        (None, {"MODELOPT_EP_DEGREE": "4"}, "MODELOPT_EP_DEGREE=4 ask to shard"),
     ],
-    ids=["several-ranks", "sharded"],
+    ids=["several-ranks", "sharded", "fsdp-knob", "ep-knob"],
 )
 def test_what_needs_the_group_is_refused_in_a_launch_that_sets_none_up(
-    launch_without_its_group, serve, loaders, tmp_path, distribution, match
+    launch_without_its_group, serve, loaders, monkeypatch, tmp_path, distribution, knobs, match
 ):
-    """A plan for several ranks and a sharded load need the launch's group, which one rank cannot
-    set up for itself: refused before anything loads."""
+    """A plan for several ranks, a sharded load, and knobs asking to shard over the launch need its
+    group, which one rank cannot set up for itself: refused before anything loads, rather than
+    leave each process the whole model the knobs did not ask for."""
     serve(LlamaConfig(**_TINY))
+    for name, value in knobs.items():
+        monkeypatch.setenv(name, value)
 
     with pytest.raises(RuntimeError, match=match):
         load_pretrained(str(tmp_path), distribution=distribution)
