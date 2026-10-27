@@ -164,7 +164,7 @@ class _SyntheticFusedExperts(nn.Module):
     def forward(self, hidden_states, top_k_index, top_k_weights):
         final_hidden_states = torch.zeros_like(hidden_states)
         with torch.no_grad():
-            expert_mask = F.one_hot(top_k_index, num_classes=self.num_experts).permute(2, 1, 0)
+            expert_mask = F.one_hot(top_k_index, num_classes=self.num_experts + 1).permute(2, 1, 0)
             expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
         for expert_idx in expert_hit:
             expert_idx = expert_idx[0]
@@ -2944,15 +2944,18 @@ class TestFusedExpertsInterceptionCheck:
         assert model.text_moe.experts.gate_up_proj_input_quantizer.amax is not None
         assert model.vision_moe.experts.gate_up_proj_input_quantizer.amax is None
 
-    def test_experts_called_with_no_rows_are_not_an_error(self):
-        """A forward handed no tokens makes no projection call on the eager path, which is not a
-        bypassed backend: a modality's experts called on its empty token subset, say."""
+    @pytest.mark.parametrize("rows", [0, 4], ids=["no-rows", "rows-routed-to-other-ranks"])
+    def test_experts_that_make_no_projection_call_are_not_an_error(self, rows):
+        """The eager path calls F.linear only for the experts some row was routed to, which is not a
+        bypassed backend: none for a forward handed no rows (a modality's experts on its empty token
+        subset), nor, under transformers' expert parallelism, for one whose rows were all routed to
+        other ranks' experts, which the router masks to num_experts."""
         model = _TinyMoEModel()
         TestFusedExpertsCalibration._cleanup_registry(_SyntheticFusedExperts)
 
         def forward_loop(m):
-            no_rows = torch.zeros(0, HIDDEN_DIM)
-            m.moe.experts(no_rows, torch.zeros(0, TOP_K, dtype=torch.long), torch.zeros(0, TOP_K))
+            other_ranks = torch.full((rows, TOP_K), NUM_EXPERTS)
+            m.moe.experts(torch.randn(rows, HIDDEN_DIM), other_ranks, torch.ones(rows, TOP_K))
 
         try:
             mtq.quantize(model, _INT8_EXPERTS_CFG, forward_loop)

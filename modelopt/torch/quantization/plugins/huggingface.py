@@ -1094,9 +1094,19 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     def forward(self, *args, **kwargs):
         self._down_proj_linear = False
         hidden_states = args[0] if args else kwargs.get("hidden_states")
-        # A forward with no rows makes no projection call (the eager path loops over the experts
-        # some token reached), so only one with rows is work the interception check expects.
-        if hidden_states is None or hidden_states.numel():
+        top_k_index = args[1] if len(args) > 1 else kwargs.get("top_k_index")
+        # Only a forward that makes a projection call is work the interception check expects. The
+        # eager path makes one per expert some row was routed to: none for a forward with no rows, nor
+        # for one whose rows transformers' expert parallelism routed to other ranks' experts (masked
+        # to num_experts). The grouped paths call _grouped_linear whatever rows they are handed.
+        if hidden_states is None or (
+            hidden_states.numel()
+            and (
+                self._running_grouped_mm
+                or not isinstance(top_k_index, torch.Tensor)
+                or bool((top_k_index < self.num_experts).any())
+            )
+        ):
             self._forward_count += 1
         self._stacked_weights = {}
         try:
