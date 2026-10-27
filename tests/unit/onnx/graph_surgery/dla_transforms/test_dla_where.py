@@ -34,7 +34,7 @@ BOOL init condition, true-branch zeros   → Mul(y, 1-cond_float), ORT parity
 BOOL init condition, false-branch zeros  → Mul(x, cond_float),   ORT parity
 Dynamic BOOL condition, true-branch zeros  → Cast+Sub+Mul,        ORT parity
 Dynamic BOOL condition, false-branch zeros → Cast+Mul,            ORT parity
-Non-BOOL float condition, false-branch zeros → Mul directly,      ORT parity
+Greater-produced BOOL condition, false-branch zeros: Cast+Mul, ORT parity
 Neither branch all-zeros                    → graph unchanged
 No Where nodes                              → noop, ORT parity
 """
@@ -263,31 +263,21 @@ def test_where_dynamic_bool_cond_y_zeros():
     np.testing.assert_allclose(ref["Z"], got["Z"], rtol=1e-5, atol=1e-6)
 
 
-# ── 5. Non-BOOL float condition (dynamic), false-branch zeros ─────────────────
+# 5. Greater-produced BOOL condition, false-branch zeros
 
 
-def test_where_float_cond_y_zeros():
-    """Where with a FLOAT dynamic condition and zeros false-branch → Mul directly (no Cast).
-
-    The float condition (0.0 / 1.0 values) acts directly as the mask.
-    """
+def test_where_greater_bool_cond_y_zeros():
+    """Lower a Greater-produced BOOL condition with a zero false branch."""
     zeros_arr = np.zeros(_SHAPE, dtype=np.float32)
     y_init = numpy_helper.from_array(zeros_arr, name="y_zeros_f")
 
-    # Sigmoid produces values in (0, 1); use a Cast(BOOL) then Cast(FLOAT) workaround
-    # is not needed here — instead, we make a simple graph where the condition is FLOAT.
-    # ORT does NOT accept a FLOAT condition for Where, so we model it differently:
-    # build a graph with Greater producing a BOOL mask, then use that as condition.
     greater = helper.make_node("Greater", ["X_in", "thresh"], ["cond_bool"], name="greater")
-    cast = helper.make_node(
-        "Cast", ["cond_bool"], ["cond_float"], to=TensorProto.FLOAT, name="cast"
-    )
     where = helper.make_node("Where", ["cond_bool", "X_in", "y_zeros_f"], ["Z"], name="where")
 
     thresh_init = numpy_helper.from_array(np.array(0.0, dtype=np.float32), name="thresh")
     graph = helper.make_graph(
-        [greater, cast, where],
-        "where_float_cond_y0",
+        [greater, where],
+        "where_greater_bool_cond_y0",
         [_vi("X_in", TensorProto.FLOAT, _SHAPE)],
         [_vi("Z", TensorProto.FLOAT, _SHAPE)],
         initializer=[y_init, thresh_init],
