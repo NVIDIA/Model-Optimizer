@@ -521,9 +521,7 @@ class ModelOptHFTrainer(Trainer):
         """
         enable_huggingface_checkpointing()
         super().__init__(*args, **kwargs)
-        _raw_dtype = getattr(getattr(self.model, "config", None), "dtype", None) or getattr(
-            getattr(self.model, "config", None), "torch_dtype", None
-        )
+        _raw_dtype = getattr(getattr(self.model, "config", None), "dtype", None)
         self._original_dtype = None if _raw_dtype is None else str(_raw_dtype).rsplit(".", 1)[-1]
         if trainer_args is None and isinstance(self.args, ModelOptTrainerArguments):
             trainer_args = self.args
