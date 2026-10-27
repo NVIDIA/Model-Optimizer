@@ -371,6 +371,9 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
                 local_ws2 = _rewrap_expert_rows(local_ws2, mesh, scale_placements, wdata.shape[0])
             module.register_buffer(f"{proj}_weight_scale_2", local_ws2)
         if input_scale is not None:
+            # Replicated, not sharded like the rest: calibration syncs the shared input quantizer's
+            # amax over the data-parallel ranks and, under expert parallelism, over the
+            # expert-parallel group (max_calibrate), so every rank registers the same value.
             module.register_buffer(f"{proj}_input_scale", input_scale)
 
     # A projection left as it is goes out in the weight domain the per-expert export writes it in.
