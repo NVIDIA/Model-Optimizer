@@ -54,7 +54,7 @@ from modelopt.onnx.graph_surgery.dla_transforms.dla_fix_instancenorm_channel_mis
     _apply_fix_instancenorm_channel_mismatch as _apply_fix_instancenorm,
 )
 
-pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
 _REPO_ROOT = Path(__file__).resolve().parents[5]
 _SAVED_MODELS_DIR = _REPO_ROOT / "scratch_space" / "instancenorm_channel_mismatch_test_models"
@@ -109,8 +109,6 @@ def _make_instancenorm_model(input_shape: list, epsilon: float = 1e-5) -> onnx.M
 
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
     """Execute all public outputs on the CPU runtime."""
-    import onnxruntime as ort  # type: ignore[import-not-found]
-
     _clamp_ir(model)
     sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
     return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
