@@ -463,14 +463,17 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
             value = fn()
             # Pickle it here, as the broadcast will: a value that does not pickle then fails as this
             # rank's error, which the broadcast sends, rather than in the broadcast, on this rank
-            # alone, leaving the others waiting.
+            # alone, leaving the others waiting. torch.save stands in for the broadcast's pickle,
+            # which bandit refuses under modelopt/, so the check is close rather than exact.
             torch.save(value, io.BytesIO())
         except BaseException as e:
             # Still send: the other ranks would otherwise wait in the broadcast for this one. A
             # SystemExit or KeyboardInterrupt too, which argparse-style checks raise.
             value, error = None, e
     # One message from the sending rank: its label, so a rank broadcasting another learns the two
-    # are out of step, and its value or its error.
+    # are out of step, and its value or its error. The object collectives unpickle with plain
+    # pickle, not _deserialize's weights_only load: the peers are this job's own ranks, and a
+    # DistributionPlan crosses without add_safe_globals.
     message = [(label, value, _sendable(error))]
     torch.distributed.broadcast_object_list(message, group_src=rank)
     sent_label, value, sent_error = message[0]
