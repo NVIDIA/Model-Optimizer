@@ -360,6 +360,15 @@ class _MoEModel(nn.Module):
         return hidden_states
 
 
+def _load_tp_wrappers(model, styles, mesh):
+    """Do what transformers' expert-parallel load does: wrap every planned module's forward."""
+    for name, module in model.named_modules():
+        if (style := _get_parameter_tp_plan(name, model.tp_plan, is_weight=False)) is not None:
+            styles[style].install_forward(module, mesh)
+    for style in styles.values():
+        style.installed.clear()
+
+
 def _drop_tp_wrapper(module):
     """Do what quantizer insertion does to the instance: rebind the class forward over the wrapper.
 
@@ -376,17 +385,24 @@ def test_reinstall_is_a_noop_without_an_ep_mesh(monkeypatch):
     assert not any(style.installed for style in styles.values())
 
 
-def test_reinstall_is_a_noop_where_tp_styles_are_pre_hooks(monkeypatch):
+@pytest.mark.parametrize(
+    ("experts_style", "planted"),
+    [(_PreHookStyle(), 0), (_WrapperStyle(inject_group=True), 2)],
+    ids=["all-pre-hooks", "only-the-experts-wrap"],
+)
+def test_reinstall_skips_styles_whose_transforms_are_pre_hooks(monkeypatch, experts_style, planted):
     """transformers < 5.16 has no ``install_forward``; its pre-hooks survive quantizer insertion.
 
-    Those releases keep the styles in ``transformers.integrations``: the fallback import.
+    Each style is checked for it, the one about to be called: a style without one is skipped even
+    where the other has one. Those releases keep the styles in ``transformers.integrations``: the
+    fallback import.
     """
     _install_fake_tp(
         monkeypatch,
-        styles={"torch_a2a_experts": _PreHookStyle(), "torch_a2a_router": _PreHookStyle()},
+        styles={"torch_a2a_experts": experts_style, "torch_a2a_router": _PreHookStyle()},
         where=_LEGACY_TP_MODULE,
     )
-    assert _reinstall_a2a_forwards(_MoEModel(), _FakeMesh()) == 0
+    assert _reinstall_a2a_forwards(_MoEModel(), _FakeMesh()) == planted
 
 
 # ------------------------------------------------------------------------- distributed_forward_loop
@@ -477,16 +493,19 @@ def test_forward_loop_frees_the_allocator_cache_around_the_forwards(monkeypatch,
 
 
 def test_forward_loop_replants_a2a_wrappers_dropped_after_it_was_built(monkeypatch):
-    """hf_ptq's order -- build the loop, insert quantizers, calibrate -- hands the experts the EP group.
+    """hf_ptq's order -- load, build the loop, insert quantizers, calibrate -- hands the experts the
+    EP group.
 
     It holds on every pass (multi-pass algorithms call the loop again), with one wrapper per module,
-    and again once another conversion drops the wrappers anew. Only the planned torch_a2a experts
-    and routers are re-wrapped: other TP styles keep their forward, and so do the quantizers under an
-    experts module, since the plan is looked up per module (``is_weight=False``) and children do not
-    inherit their parent's style.
+    and again once another conversion drops the wrappers anew. Only the wrappers conversion dropped
+    are planted again: a router quantization left alone keeps the one from the load, since wrapping
+    it again would run its transforms twice. Other TP styles keep their forward, and so do the
+    quantizers under an experts module, since the plan is looked up per module (``is_weight=False``)
+    and children do not inherit their parent's style.
     """
     styles = _install_fake_tp(monkeypatch)
     model, mesh = _MoEModel(), _FakeMesh()
+    _load_tp_wrappers(model, styles, mesh)
     set_distribution_plan(model, _EXPERT_PARALLEL)
     forward_loop = distributed_forward_loop(
         model, [{"input_ids": torch.ones(2, 4)}] * 3, ep_mesh=mesh
@@ -502,7 +521,7 @@ def test_forward_loop_replants_a2a_wrappers_dropped_after_it_was_built(monkeypat
 
     assert [layer.experts.groups for layer in model.layers] == [[mesh.group] * 9] * 2
     assert styles["torch_a2a_experts"].installed == [layer.experts for layer in model.layers] * 2
-    assert styles["torch_a2a_router"].installed == [layer.gate for layer in model.layers]
+    assert styles["torch_a2a_router"].installed == []
     assert styles["colwise"].installed == []
 
 
