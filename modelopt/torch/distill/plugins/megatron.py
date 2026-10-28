@@ -403,13 +403,81 @@ class LogitsKLLoss(BaseLoss):
         return logits_max + torch.log(denom)
 
 
+# fp32 elements per row chunk in the Top-K loss's full-vocab passes (1 GiB).
+_TOP_LOGITS_CHUNK_NUMEL = 1 << 28
+
+
+def _row_chunks(rows: Tensor) -> list[slice]:
+    step = max(1, _TOP_LOGITS_CHUNK_NUMEL // rows.size(-1))
+    return [slice(i, i + step) for i in range(0, rows.size(0), step)]
+
+
+def _scaled_logsumexp(
+    logits: Tensor, temperature: float, tp_group, top_k: int = 0
+) -> tuple[Tensor, Tensor, Tensor]:
+    """fp32 ``logsumexp(logits / temperature)`` over the TP-sharded vocab dim, by row chunks.
+
+    Also returns the local Top-K values and indices of ``logits / temperature`` (empty if ``top_k=0``).
+    """
+    rows = logits.detach().reshape(-1, logits.size(-1))
+    # Rounding is monotonic, so this is also the max of the scaled fp32 logits.
+    lse = rows.amax(dim=-1, keepdim=True).float() / temperature
+    if tp_group is not None:
+        torch.distributed.all_reduce(lse, op=torch.distributed.ReduceOp.MAX, group=tp_group)
+    sum_exp = torch.empty_like(lse)
+    top_vals = lse.new_empty(rows.size(0), top_k)
+    top_idx = torch.empty(rows.size(0), top_k, dtype=torch.long, device=rows.device)
+    for c in _row_chunks(rows):
+        scaled = rows[c].to(torch.float32, copy=True).div_(temperature)
+        if top_k:
+            top_vals[c], top_idx[c] = torch.topk(scaled, top_k, dim=-1)
+        sum_exp[c] = scaled.sub_(lse[c]).exp_().sum(dim=-1, keepdim=True)
+    if tp_group is not None:
+        torch.distributed.all_reduce(sum_exp, group=tp_group)
+    shape = (*logits.shape[:-1], -1)
+    return (lse + sum_exp.log()).view(shape), top_vals.view(shape), top_idx.view(shape)
+
+
+class _ScaledLogSumExpAndGather(torch.autograd.Function):
+    """``_scaled_logsumexp(logits)`` and ``(logits / temperature).gather(-1, index)`` in fp32.
+
+    Saves only ``logits`` and writes their gradient chunk by chunk, instead of keeping fp32 copies
+    of the full logits alive for backward.
+    """
+
+    @staticmethod
+    def forward(ctx, logits, index, temperature, tp_group):
+        lse, _, _ = _scaled_logsumexp(logits, temperature, tp_group)
+        ctx.save_for_backward(logits, index, lse)
+        ctx.temperature, ctx.tp_group = temperature, tp_group
+        return lse, logits.gather(-1, index).float() / temperature
+
+    @staticmethod
+    def backward(ctx, grad_lse, grad_vals):
+        logits, index, lse = ctx.saved_tensors
+        if ctx.tp_group is not None:
+            # As in the autograd all-reduce of the normalizer, every TP rank's loss reaches each shard.
+            grad_lse = grad_lse.clone()
+            torch.distributed.all_reduce(grad_lse, group=ctx.tp_group)
+        rows = logits.reshape(-1, logits.size(-1))
+        grad_lse, lse = grad_lse.reshape(-1, 1), lse.reshape(-1, 1)
+        index, grad_vals = index.reshape(-1, index.size(-1)), grad_vals.reshape(-1, index.size(-1))
+        grad = torch.empty_like(rows)
+        for c in _row_chunks(rows):
+            # softmax(x / T) * grad_lse, plus grad_vals scattered to the gathered entries, over T.
+            g = rows[c].to(torch.float32, copy=True).div_(ctx.temperature).sub_(lse[c]).exp_()
+            g.mul_(grad_lse[c]).scatter_add_(-1, index[c], grad_vals[c])
+            grad[c] = g.div_(ctx.temperature)
+        return grad.view(logits.shape), None, None, None
+
+
 class TopLogitsKLLoss(LogitsKLLoss):
     """Calculates KL-Divergence loss restricted to the Teacher's Top-K (and optionally Top-P) entries.
 
     Calculates using the global Top-K entries without gathering full logits.
     NOTE: Will gather Top-K logits per rank, so mind the value of K for communication. The full-vocab
-    normalizers still allocate fp32 copies of the local logit shards (the teacher's is freed right
-    away; the student's is retained for backward), and add two TP all-reduces per distribution.
+    normalizers run over fp32 row chunks of the local logit shards rather than fp32 copies of them,
+    and add two TP all-reduces per distribution.
 
     Both distributions are normalized over the *full* vocabulary (not re-normalized over the
     Top-K), matching the offline cached-logits KD loss in Megatron-LM. A "ghost" token holding the
@@ -471,21 +539,16 @@ class TopLogitsKLLoss(LogitsKLLoss):
         # We take K from each rank and then find the global Top-K of all those.
         local_top_k = min(self.top_k, targets.size(-1))
 
-        # Teacher: full-vocab normalizer and local Top-K, then free its fp32 copy before the student's.
-        output_teacher = targets.float() / self._temperature
-        teacher_lse = self._tp_logsumexp(output_teacher)
-        top_teacher_vals, top_idx = torch.topk(output_teacher, local_top_k, dim=-1)
-        del output_teacher
-
-        # Student: the full-vocab normalizer is inherent to the ghost-token formulation.
-        output_student = predictions.float() / self._temperature
-        student_lse = self._tp_logsumexp(output_student)
-        top_student_vals = torch.gather(output_student, dim=-1, index=top_idx)
-        del output_student
+        # Full-vocab normalizers (inherent to the ghost-token formulation) and the local Top-K.
+        tp_group = parallel_state.get_tensor_model_parallel_group() if tp_size > 1 else None
+        teacher_lse, top_teacher_vals, top_idx = _scaled_logsumexp(
+            targets, self._temperature, tp_group, local_top_k
+        )
+        student_lse, top_student_vals = _ScaledLogSumExpAndGather.apply(
+            predictions, top_idx, self._temperature, tp_group
+        )
 
         if tp_size > 1:
-            tp_group = parallel_state.get_tensor_model_parallel_group()
-
             # Gather all candidates into shape [N_rows, local_k * tp_size]
             # Use all_gather from torch.distributed.nn.functional to preserve gradients
             all_teacher_vals = dist_nn.functional.all_gather(

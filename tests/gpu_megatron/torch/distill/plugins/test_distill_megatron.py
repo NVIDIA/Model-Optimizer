@@ -17,6 +17,7 @@ import dataclasses
 import warnings
 from functools import partial
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -28,6 +29,7 @@ from _test_utils.torch.misc import set_seed
 from megatron.core import parallel_state
 
 import modelopt.torch.distill as mtd
+import modelopt.torch.distill.plugins.megatron as megatron_plugin
 from modelopt.torch.distill.plugins.megatron import (
     DistillationConfig,
     LogitsAndIntermediatesLossBalancer,
@@ -479,9 +481,13 @@ def _test_topk_logits_kl_loss_numerics_ghost_token_reference(
     student_shard = student.chunk(size, dim=-1)[rank].detach().contiguous().requires_grad_()
     teacher_shard = teacher.chunk(size, dim=-1)[rank].contiguous()
     k = 4
-    loss = TopLogitsKLLoss(cfg, top_k=k, top_p=top_p, reverse=reverse, temperature=temperature)(
-        student_shard, teacher_shard
-    )[0]
+    # Chunks of 2 rows, so the loss's chunked full-vocab passes take several chunks.
+    with patch.object(megatron_plugin, "_TOP_LOGITS_CHUNK_NUMEL", 2 * student_shard.size(-1)):
+        loss_fn = TopLogitsKLLoss(
+            cfg, top_k=k, top_p=top_p, reverse=reverse, temperature=temperature
+        )
+        loss = loss_fn(student_shard, teacher_shard)[0]
+        loss.mean().backward()
 
     q_full = F.log_softmax(teacher / temperature, dim=-1)
     p_full = F.log_softmax(student / temperature, dim=-1)
@@ -504,7 +510,6 @@ def _test_topk_logits_kl_loss_numerics_ghost_token_reference(
         p, q = q, p
     ref = (keep * q.exp() * (q - p)).sum(-1).transpose(0, 1)
     torch.testing.assert_close(loss, ref, atol=1e-6, rtol=1e-5)
-    loss.mean().backward()
     ref.mean().backward()
     torch.testing.assert_close(
         student_shard.grad, student.grad.chunk(size, dim=-1)[rank], atol=1e-6, rtol=1e-5
@@ -524,6 +529,19 @@ def test_topk_logits_kl_loss_numerics_ghost_token_reference(
             _test_topk_logits_kl_loss_numerics_ghost_token_reference, top_p, reverse, temperature
         )
     )
+
+
+def test_topk_logits_kl_loss_memory():
+    """Forward and backward add about one gradient the size of the logits, not fp32 copies of them."""
+    cfg = SimpleNamespace(tensor_model_parallel_size=1)
+    student = torch.randn(1024, 2, 32768, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    teacher = torch.randn_like(student, requires_grad=False)
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    with patch.object(megatron_plugin, "_TOP_LOGITS_CHUNK_NUMEL", 64 * student.size(-1)):
+        TopLogitsKLLoss(cfg, top_k=64)(student, teacher)[0].sum().backward()
+    assert torch.cuda.max_memory_allocated() - base < 1.5 * student.nbytes
 
 
 @pytest.mark.parametrize("temperature", [0.5, 2.0, 3.7])
