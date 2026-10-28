@@ -77,6 +77,7 @@ from modelopt.recipe.presets import (
     RecipeSupersededAction,
 )
 from modelopt.torch.export import ensure_local_checkpoint
+from modelopt.torch.quantization.linear_attention import get_linear_attention_layers
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
 from modelopt.torch.utils.mlflow import Tool, masked_args, resolved_recipe_texts
@@ -332,6 +333,14 @@ def get_quant_config(args: argparse.Namespace) -> dict:
 
 
 def main(args: argparse.Namespace):
+    mtq_config = get_quant_config(args)
+    if mtq_config.get("linear_attention") and mtq.need_calibration(mtq_config):
+        raise ValueError(
+            "This example supports linear_attention recipes only without calibration. "
+            "For calibrated projection quantization combined with state quantization, "
+            "use mtq.quantize with a calibration loop inside linear_attention_training_phase."
+        )
+
     # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
     # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local path.
     args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
@@ -396,8 +405,6 @@ def main(args: argparse.Namespace):
             "model's calibration statistics will not see vision tokens."
         )
     print_rank_0(f"Using calibration dataset: {args.calib_dataset_name}")
-
-    mtq_config = get_quant_config(args)
 
     # Quantize only the language model: disable quantizers on every top-level submodule that is not
     # the language model (vision tower + projector). Skip aliases of language-model submodules (e.g.
@@ -520,7 +527,20 @@ def main(args: argparse.Namespace):
         warn_rank_0(
             "Skipping the post-quantization generation sanity check because --compress is set."
         )
-    if not args.skip_generate and not args.compress:
+    state_quantized = torch.tensor(
+        bool(get_linear_attention_layers(language_model, enabled_only=True)),
+        dtype=torch.int32,
+        device="cuda",
+    )
+    if torch.distributed.is_initialized():
+        torch.distributed.all_reduce(state_quantized, op=torch.distributed.ReduceOp.MAX)
+    state_quantized = bool(state_quantized.item())
+    if state_quantized and not args.skip_generate:
+        warn_rank_0(
+            "Skipping generation sanity check for state quantization; "
+            "use an explicit prefix/suffix evaluation to measure state QDQ."
+        )
+    if not args.skip_generate and not args.compress and not state_quantized:
         print_rank_0("\nTesting quantized model with custom prompts...")
         # Sanity-check text generation on the quantized language model.
         language_model.eval()
