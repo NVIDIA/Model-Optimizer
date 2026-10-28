@@ -16,6 +16,7 @@
 """Tests for _QuantFusedExperts: generic fused MoE quantization and export."""
 
 import copy
+import sys
 import warnings
 import weakref
 from contextlib import nullcontext
@@ -3013,6 +3014,22 @@ class TestFusedExpertsInterceptionCheck:
             assert model.training
         finally:
             TestFusedExpertsCalibration._cleanup_registry(_BypassingExperts)
+
+    def test_a_plugin_that_failed_to_load_leaves_calibration_alone(self, monkeypatch):
+        """import_plugin only warns when the HF plugin's body raises, and such a plugin installed no
+        fused-experts wrappers: calibration has nothing to check, rather than raising its error."""
+        name = "modelopt.torch.quantization.plugins.huggingface"
+
+        class _BrokenPlugin:
+            @staticmethod
+            def find_spec(fullname, path=None, target=None):
+                if fullname == name:
+                    raise AttributeError("a transformers version skew")
+
+        monkeypatch.delitem(sys.modules, name)
+        monkeypatch.setattr(sys, "meta_path", [_BrokenPlugin(), *sys.meta_path])
+        model = nn.Sequential(nn.Linear(HIDDEN_DIM, HIDDEN_DIM))
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, HIDDEN_DIM)))
 
     @pytest.mark.parametrize("algorithm", ["max", "local_hessian", "gptq"])
     def test_weight_only_experts_need_interception_when_their_weights_read_inputs(self, algorithm):

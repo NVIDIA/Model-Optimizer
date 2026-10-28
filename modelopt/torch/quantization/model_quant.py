@@ -18,6 +18,7 @@
 import fnmatch
 import inspect
 import os
+import sys
 import warnings
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
@@ -192,13 +193,12 @@ def calibrate(
         # A fused-experts module whose forward ran past both interception hooks collected
         # nothing. Surface it here rather than let the export emit weight-derived fallback scales
         # under a warning that blames the size of the calibration set. Raised once the model is
-        # back in its mode, for a caller that catches it to calibrate again.
-        try:
-            from .plugins.huggingface import assert_fused_experts_intercepted
-        except ImportError:
-            pass  # no transformers -> no HF fused-experts modules to check
-        else:
-            assert_fused_experts_intercepted(model)
+        # back in its mode, for a caller that catches it to calibrate again. Only a loaded HF plugin
+        # installs fused-experts wrappers; importing it here would rerun one that failed to load,
+        # which import_plugin only warns about, and fail every calibration with its error.
+        huggingface = sys.modules.get("modelopt.torch.quantization.plugins.huggingface")
+        if huggingface is not None:
+            huggingface.assert_fused_experts_intercepted(model)
 
     return model
 
