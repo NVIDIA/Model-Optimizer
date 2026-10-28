@@ -77,7 +77,9 @@ def _choose_ep_degree(world_size: int, num_experts: int) -> int:
 
     EP must divide ``num_experts`` (whole experts per rank) and ``world_size`` (a valid mesh
     factorization). Each expert shard is then replicated over the remaining ranks
-    (``DistributionPlan.edp``). Heuristic -- callers may override.
+    (``DistributionPlan.edp``). The largest degree holds the fewest experts per rank, which leaves
+    the most memory for activations, i.e. for calibration batches; any degree above 1 pays the same
+    two all-to-alls per MoE layer. Heuristic -- callers may override.
     """
     if num_experts <= 0:
         return 1
