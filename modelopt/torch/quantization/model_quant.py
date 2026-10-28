@@ -20,7 +20,7 @@ import inspect
 import os
 import warnings
 from collections.abc import Callable, Iterable, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any, cast
 
 import torch
@@ -41,6 +41,8 @@ from modelopt.torch.quantization.conversion import (
 from modelopt.torch.utils import atomic_print
 
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
+from ._calibration_store import _collective_check
+from ._calibration_workers import _CalibrationSession
 from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
@@ -633,6 +635,7 @@ def auto_quantize(
     checkpoint: str | None = None,
     module_search_spaces: list[dict[str, Any]] | None = None,
     fixed_quantization_config: dict[str, Any] | str | None = None,
+    calibration: dict[str, Any] | None = None,
 ):
     r"""Perform optimal per-layer quantization by searching for the best quantization formats per-layer.
 
@@ -814,6 +817,17 @@ def auto_quantize(
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step.
+        calibration: Optional independent calibration workflow. Use ``{"directory": path,
+            "candidate": index}`` in each isolated worker, with the same complete search space.
+            Indices follow canonical recipe order and exclude BF16. Omit ``candidate`` in the
+            coordinator to validate all results, score and solve normally. Workers return without
+            scoring; only the coordinator may supply ``checkpoint`` (a new directory path).
+            Inputs are snapshotted with a configurable ``max_input_bytes`` limit (64 MiB).
+            Requires POSIX locks and materialized contiguous weights (including supported FSDP2
+            shards); disk-offloaded meta weights are rejected before conversion. Callback captures
+            must be serializable; tensors, modules and configuration namespaces are supported.
+            Full source weights and RNG state remain part of provenance. Only the coordinator
+            reads or replaces its checkpoint under a lock; candidate artifacts are immutable.
         module_search_spaces: Optional module-specific candidate overrides. Each entry contains
             ``module_name_patterns`` (one or more glob patterns), ``quantization_formats``, and
             optional ``allow_no_quant`` (default True). A matching entry replaces the global
@@ -888,6 +902,8 @@ def auto_quantize(
     method_name, method_config = _parse_auto_quantize_method(method)
     is_kv_search = constraints is not None and constraints.get("cost_model") == COST_MODEL_KV_CACHE
     if is_kv_search:
+        if calibration is not None:
+            raise ValueError("Independent calibration workers support weight search only")
         assert constraints is not None
         assert quantization_formats is not None
         if method_config:
@@ -1000,6 +1016,10 @@ def auto_quantize(
         algorithms = recipe.config.algorithm
         for algo in algorithms if isinstance(algorithms, list) else [algorithms]:
             algo_method = algo["method"] if isinstance(algo, dict) else algo
+            if calibration is not None and algo_method not in {"max", "mse", "gptq", "imatrix"}:
+                raise ValueError(
+                    "Calibration workers require source-preserving calibration algorithms"
+                )
             if algo_method not in _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
                 raise ValueError(
                     f"Algorithm '{algo_method}' in '{name}' is not supported by auto_quantize yet. "
@@ -1094,6 +1114,23 @@ def auto_quantize(
     search_constraints = cast("ConstraintsDict", constraints or {})
     searcher.validate_search_input(search_constraints, search_config)
 
+    session, error = None, None
+    if calibration is not None:
+        try:
+            if checkpoint is not None and calibration.get("candidate") is not None:
+                raise ValueError("Calibration workers cannot write the shared search checkpoint")
+            session = _CalibrationSession(
+                calibration,
+                model,
+                data_loader,
+                max(num_calib_steps, num_score_steps),
+                [forward_step, loss_func, forward_backward_step],
+            )
+        except Exception as exc:
+            error = str(exc)
+        _collective_check(error)
+        search_config.update(calibration=session, data_loader=session)
+
     model = apply_mode(
         model,
         mode="auto_quantize",
@@ -1105,7 +1142,8 @@ def auto_quantize(
         fixed_cfg, fixed_name = processed_fixed_quantization_config
         fixed_recipe = QuantRecipe(fixed_cfg, name=fixed_name)
         set_quantizer_by_cfg(model, fixed_recipe.config.quant_cfg)
-    searcher.search(model, search_constraints, config=search_config)
+    with session.exclusive(checkpoint) if session is not None else nullcontext():
+        searcher.search(model, search_constraints, config=search_config)
 
     return model, searcher.state_dict()
 

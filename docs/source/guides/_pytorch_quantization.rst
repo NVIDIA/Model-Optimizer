@@ -185,6 +185,70 @@ Here is how to perform ``auto_quantize``:
     mto.save(model, "auto_quantize_model.pt")
 
 
+Independent candidate calibration
+---------------------------------
+
+Pass ``calibration={"directory": shared_path, "candidate": index}`` to
+``mtq.auto_quantize`` in separate processes to calibrate candidates independently.
+Each process must load the same source checkpoint, complete search space, input
+batches, callbacks, seed and numerical settings. Within each candidate the usual
+layerwise algorithm and sequential GPTQ error correction are unchanged. BF16
+has no calibration worker. Candidate indices follow the canonical recipe order
+(sorted by compression and serialized configuration), excluding BF16; use every
+index in that order, including IQ2_XXS, IQ2_XS, IQ2_S, NVFP4 and FP8 when configured.
+
+.. code-block:: python
+
+    # Run once per candidate in an isolated, explicitly resourced process.
+    _, candidate_state = mtq.auto_quantize(
+        fresh_source_model(), **common_search_arguments,
+        calibration={"directory": shared_path, "candidate": candidate_index},
+    )
+
+    # Run only after all candidate workers finish.
+    model, search_state = mtq.auto_quantize(
+        fresh_source_model(), **common_search_arguments,
+        calibration={"directory": shared_path}, checkpoint=shared_checkpoint,
+    )
+
+A worker returns after calibration, without scoring or export. Restarting the same
+worker reuses its validated result. Retry only missing or failed candidates. The
+coordinator checks source/data/code/configuration provenance, candidate and group
+identities, buffer layouts and payload digests before publishing. Missing, corrupt,
+incompatible or conflicting results leave the shared checkpoint unchanged.
+Sensitivity scoring and budget solving then use the normal AutoQuant algorithms;
+subsequent budgets reuse the accepted statistics through the same checkpoint.
+
+This path requires a POSIX shared filesystem with advisory locks and atomic rename.
+Give the coordinator a new checkpoint path: it becomes a symlink to an immutable
+generation containing normal per-rank AutoQuant state files. Existing regular
+checkpoint paths are rejected. A successful publication removes its predecessor
+under the coordinator lock. Failures before pointer replacement preserve the
+previous generation; a reclamation failure leaves the newly published state valid.
+Candidate artifacts are immutable. External coordinator-checkpoint readers must
+share its lock. Abrupt process or machine failure may leave an unpublished directory;
+remove it only after verifying no writer or reader uses it. Each rank stores the
+full candidate payloads: budget space for worker artifacts and two coordinator
+generations during publication. FSDP does not shard these checkpoint payloads.
+Every rank must use the same process topology and shared paths. Independent workers must
+have disjoint GPU allocations, and their launcher must impose a concurrency limit.
+Only one coordinator may write a checkpoint, including across candidate directories.
+
+Supported algorithms are max, MSE, GPTQ and imatrix for weight search. Source tensors
+must be materialized and contiguous; disk/meta offload and KV-cache search are
+unsupported. Callback source and captured values must be inspectable and serializable.
+Use the same immutable runtime environment; arbitrary runtime patches and forward
+state outside registered tensors or ``model.config`` are unsupported. Provenance
+includes calibration-related ModelOpt Python/CUDA sources, dependency versions and
+GPU capability. Export and other unrelated package trees are excluded. Tensor
+weights and RNG state remain strict identities; mismatch diagnostics name the
+differing fields. Configuration namespaces and paths are supported callback values.
+Inputs are copied to a bounded CPU snapshot (64 MiB by default); set
+``max_input_bytes`` explicitly for larger batches. Source fingerprinting streams
+small tensor chunks, but reads all source weights once per worker and coordinator.
+Use the independent path only when measurements justify its startup, I/O, memory
+and additional allocated GPU costs.
+
 Advanced Topics
 ===============
 

@@ -17,6 +17,7 @@ import copy
 import io
 import warnings
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +28,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.model_quant as model_quant
 from modelopt.recipe import load_recipe
+from modelopt.torch.quantization import _calibration_workers
 from modelopt.torch.quantization._auto_quantize_cost import (
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
     _get_module_weight_numel,
@@ -47,6 +49,165 @@ from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.utils import safe_load, safe_save
 from modelopt.torch.utils.distributed import DistributedProcessGroup
+
+
+@pytest.mark.usefixtures("skip_on_windows")
+def test_candidate_workers_roundtrip_resume_and_coordinator(tmp_path, monkeypatch):
+    torch.manual_seed(13)
+    source = torch.nn.Sequential(torch.nn.Linear(32, 8, bias=False))
+    batch = torch.randn(2, 32)
+    options = {
+        "constraints": {"effective_bits": 16},
+        "quantization_formats": [mtq.FP8_DEFAULT_CFG, mtq.INT8_DEFAULT_CFG],
+        "data_loader": [batch],
+        "forward_step": lambda m, x: m(x),
+        "loss_func": lambda output, batch: output.square().mean(),
+        "num_calib_steps": 1,
+        "num_score_steps": 1,
+    }
+    monkeypatch.chdir(tmp_path)
+    directory, checkpoint = Path("candidates"), Path("search")
+    for index in (0, 1, 0):
+        model, state = mtq.auto_quantize(
+            copy.deepcopy(source),
+            **options,
+            calibration={"directory": directory, "candidate": index},
+        )
+        assert len(state["quantizer_states"]) == 1
+        assert not state["candidate_stats"]
+        torch.testing.assert_close(model[0].weight, source[0].weight, rtol=0, atol=0)
+    model, state = mtq.auto_quantize(
+        copy.deepcopy(source),
+        **options,
+        checkpoint=str(checkpoint),
+        calibration={"directory": directory},
+    )
+    assert checkpoint.is_dir() and (checkpoint / "rank0.pth").is_file()
+    # Calibration and scoring both publish, but only the current generation remains.
+    assert list(tmp_path.glob(".search-*")) == [checkpoint.resolve()]
+    assert (
+        len([path for path in directory.iterdir() if path.is_dir() and not path.is_symlink()]) == 2
+    )
+    serial, expected = mtq.auto_quantize(copy.deepcopy(source), **options)
+    torch.testing.assert_close(model(batch), serial(batch), rtol=0, atol=0)
+    for recipe, entry in state["quantizer_states"].items():
+        assert entry["metadata"] == expected["quantizer_states"][recipe]["metadata"]
+        torch.testing.assert_close(
+            entry["state_dict"], expected["quantizer_states"][recipe]["state_dict"], rtol=0, atol=0
+        )
+    assert state["candidate_stats"] == expected["candidate_stats"]
+    generation = checkpoint.resolve()
+    mtq.auto_quantize(
+        copy.deepcopy(source),
+        **options,
+        checkpoint=str(checkpoint),
+        calibration={"directory": directory},
+    )
+    assert checkpoint.resolve() == generation
+    invalid = copy.deepcopy(source)
+    with torch.no_grad():
+        invalid[0].weight.add_(1)
+    with pytest.raises(ValueError):
+        mtq.auto_quantize(
+            invalid, **options, checkpoint=str(checkpoint), calibration={"directory": directory}
+        )
+    assert checkpoint.resolve() == generation
+
+
+@pytest.mark.usefixtures("skip_on_windows")
+@pytest.mark.parametrize(
+    "failure",
+    ["missing", "payload", "inputs", "callback", "callback_defaults", "kernel_source", "write"],
+)
+def test_candidate_coordinator_refuses_partial_updates(tmp_path, monkeypatch, failure):
+    if failure == "kernel_source":
+        kernel = tmp_path / "source" / "kernels" / "encoder.cu"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_text("// original encoder\n")
+        monkeypatch.setattr(
+            _calibration_workers, "__file__", str(tmp_path / "source/quantization/workers.py")
+        )
+        # Separate worker processes compute their source identity independently.
+        monkeypatch.setattr(
+            _calibration_workers,
+            "_implementation_digest",
+            _calibration_workers._implementation_digest.__wrapped__,
+        )
+    torch.manual_seed(14)
+    source = torch.nn.Sequential(torch.nn.Linear(8, 2, bias=False))
+    batch = torch.randn(2, 8)
+    options = {
+        "constraints": {"effective_bits": 16},
+        "quantization_formats": [mtq.INT8_DEFAULT_CFG],
+        "data_loader": [batch],
+        "forward_step": lambda m, x: m(x),
+        "loss_func": lambda output, batch, *, scale=SimpleNamespace(value=1.0): (
+            scale.value * output.square().mean()
+        ),
+        "num_calib_steps": 1,
+        "num_score_steps": 1,
+        "verbose": False,
+    }
+    directory, checkpoint = tmp_path / "candidates", tmp_path / "search"
+    mtq.auto_quantize(
+        copy.deepcopy(source), **options, calibration={"directory": directory, "candidate": 0}
+    )
+    if failure == "write":
+
+        def interrupt_scoring(self):
+            raise RuntimeError("Injected interruption after accepted calibration")
+
+        with monkeypatch.context() as interrupted:
+            interrupted.setattr(
+                AutoQuantizeGradientSearcher, "estimate_sensitivity_scores", interrupt_scoring
+            )
+            with pytest.raises(RuntimeError):
+                mtq.auto_quantize(
+                    copy.deepcopy(source),
+                    **options,
+                    checkpoint=str(checkpoint),
+                    calibration={"directory": directory},
+                )
+    else:
+        mtq.auto_quantize(
+            copy.deepcopy(source),
+            **options,
+            checkpoint=str(checkpoint),
+            calibration={"directory": directory},
+        )
+    previous = checkpoint.resolve()
+    artifact = next(path for path in directory.iterdir() if path.is_symlink())
+    if failure == "missing":
+        artifact.unlink()
+    elif failure == "payload":
+        path = artifact.resolve() / "rank0.pth"
+        candidate = safe_load(path)
+        candidate["state"]["state_dict"].clear()
+        safe_save(candidate, path)
+    elif failure == "inputs":
+        options["data_loader"] = [batch + 1]
+    elif failure == "callback":
+        options["loss_func"] = lambda output, batch: output.square().sum()
+    elif failure == "callback_defaults":
+        options["loss_func"].__kwdefaults__["scale"].value = 2.0
+    elif failure == "kernel_source":
+        kernel.write_text("// changed encoder\n")
+    else:
+
+        def fail_write(*args, **kwargs):
+            raise OSError("Injected publication failure")
+
+        monkeypatch.setattr("modelopt.torch.quantization._calibration_store.os.replace", fail_write)
+    with pytest.raises(ValueError):
+        mtq.auto_quantize(
+            copy.deepcopy(source),
+            **options,
+            checkpoint=str(checkpoint),
+            calibration={"directory": directory},
+        )
+    assert checkpoint.resolve() == previous
+    assert (previous / "rank0.pth").is_file()
+    assert list(tmp_path.glob(".search-*")) == [previous]
 
 
 @pytest.mark.parametrize("ties", ["searched", "disabled", "fp8"])
@@ -1111,6 +1272,52 @@ def _test_data_parallel_auto_quantize(rank, size):
 
 def test_data_parallel_auto_quantize(cpu_dist_workers):
     cpu_dist_workers.run(_test_data_parallel_auto_quantize)
+
+
+@pytest.mark.timeout(60)
+def test_candidate_resume_rejects_rank_progress_disagreement(cpu_dist_workers, tmp_path):
+    cpu_dist_workers.run(_test_candidate_rank_progress, tmp_path)
+
+
+def _test_candidate_rank_progress(rank, size, tmp_path):
+    torch.manual_seed(25)
+    source = torch.nn.Sequential(torch.nn.Linear(8, 2, bias=False))
+    options = {
+        "constraints": {"effective_bits": 8},
+        "quantization_formats": [mtq.INT8_DEFAULT_CFG],
+        "data_loader": [torch.ones(2, 8) + rank],
+        "forward_step": lambda m, b: m(b),
+        "loss_func": lambda output, batch: output.square().mean(),
+        "num_calib_steps": 1,
+        "num_score_steps": 1,
+        "verbose": False,
+    }
+    directory, checkpoint = tmp_path / "candidates", tmp_path / "search"
+    mtq.auto_quantize(
+        copy.deepcopy(source), **options, calibration={"directory": directory, "candidate": 0}
+    )
+    mtq.auto_quantize(
+        copy.deepcopy(source),
+        **options,
+        calibration={"directory": directory},
+        checkpoint=str(checkpoint),
+    )
+    generation = checkpoint.resolve()
+    path = generation / f"rank{rank}.pth"
+    if rank == 0:
+        state = safe_load(path)
+        state["candidate_stats"] = {}
+        safe_save(state, path)
+    before = path.read_bytes()
+    torch.distributed.barrier()
+    with pytest.raises(ValueError):
+        mtq.auto_quantize(
+            copy.deepcopy(source),
+            **options,
+            calibration={"directory": directory},
+            checkpoint=str(checkpoint),
+        )
+    assert checkpoint.resolve() == generation and path.read_bytes() == before
 
 
 def _test_data_parallel_moe_score_module(rank, size):
