@@ -316,8 +316,8 @@ def get_args():
         "--fake_quant_weight_cache",
         action="store_true",
         help="QAD: fake-quantize each student weight once per training step and reuse it for every "
-        "micro-batch and activation recomputation. Faster when weight fake quant is expensive, at "
-        "the cost of one extra bf16 copy of the student's quantized weights per GPU.",
+        "micro-batch and activation recomputation. Can speed up training at the cost of slightly "
+        "more GPU memory (one extra bf16 copy of the student's quantized weights per GPU).",
     )
     parser.add_argument(
         "--no_async_save",
