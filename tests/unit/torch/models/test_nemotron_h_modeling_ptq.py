@@ -111,6 +111,39 @@ def test_registered_wrapper_quantizes_up_and_down_proj():
     assert set(weight_attr_names(converted)) == {"up_proj", "down_proj"}
 
 
+def test_expert_index_recovery():
+    """The eager forward names an up_proj slice's expert from its storage offset."""
+    experts = QuantModuleRegistry.convert(_ExpertsModel("eager").experts)
+    for idx in range(NUM_EXPERTS):
+        assert experts._get_expert_idx_from_first_proj(experts.up_proj[idx]) == idx
+
+
+def test_weight_quantizers_come_in_the_weight_iterators_order_without_indexing():
+    """The quantizer-only iterator yields the weight iterator's quantizers, in its order, and never
+    indexes the fused weight, which under FSDP2 is a collective per expert."""
+    experts = QuantModuleRegistry.convert(_ExpertsModel("eager").experts)
+    from_weights = [q for _, q in experts.iter_weights_for_calibration()]
+
+    class _NoIndexing(torch.Tensor):
+        @staticmethod
+        def __new__(cls, data):
+            return torch.Tensor._make_subclass(cls, data, False)
+
+        def __getitem__(self, item):
+            raise AssertionError("indexed the weight")
+
+    for name in ("up_proj", "down_proj"):
+        weight = getattr(experts, name)
+        setattr(experts, name, nn.Parameter(_NoIndexing(weight.data), requires_grad=False))
+
+    quantizers_only = list(experts.iter_weight_quantizers_for_calibration())
+    assert len(quantizers_only) == 2 * NUM_EXPERTS
+    assert [id(q) for q in quantizers_only] == [id(q) for q in from_weights]
+    # The weight iterator still slices, so the guard above is live.
+    with pytest.raises(AssertionError, match="indexed the weight"):
+        list(experts.iter_weights_for_calibration())
+
+
 @pytest.mark.parametrize("impl", ["eager", "grouped_mm"])
 def test_forward_passthrough_matches(impl):
     """With its quantizers disabled, the wrapper computes what the unconverted experts do."""
