@@ -21,7 +21,9 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+import tensorrt_llm
 import torch
+from packaging.version import parse as parse_version
 from tensorrt_llm import SamplingParams
 
 try:
@@ -139,6 +141,10 @@ class LLM(TRTLLM):
                 enable_padding=True,
             )
 
+        self._support_context_logits_and_stop_words = parse_version(
+            tensorrt_llm.__version__
+        ) >= parse_version("1.1.0rc2")
+
         super().__init__(
             backend="pytorch",
             model=checkpoint_dir,
@@ -166,7 +172,7 @@ class LLM(TRTLLM):
     @property
     def gather_context_logits(self):
         """Returns whether the context_logits can be returned from the LLM instance."""
-        return True
+        return self._support_context_logits_and_stop_words
 
     def _generate(
         self,
@@ -178,6 +184,8 @@ class LLM(TRTLLM):
     ):
         assert temperature >= 0.0, "Temperature must be greater than 0.0."
 
+        if not self._support_context_logits_and_stop_words:
+            stop_words = None
         beam_width = self.max_beam_width
         kwargs = _sanitize_temperature_and_top_p(temperature, top_p)
         sampling_config = SamplingParams(
@@ -277,6 +285,9 @@ class LLM(TRTLLM):
         Returns:
             a tensor list of the context_logits.
         """
+        assert self._support_context_logits_and_stop_words, (
+            "Context logits are not supported with the current tensorrt_llm version."
+        )
         assert not self._enable_kv_cache_reuse, (
             "Context logits require enable_kv_cache_reuse=False: with KV cache prefix reuse, "
             "shared-prefix requests only return logits for the recomputed suffix, producing "
