@@ -759,6 +759,7 @@ def adjust_distillation_model_for_mcore(
         mtp_process = getattr(lm, "mtp_process", False)
         config = lm.config
         mtp_num_layers = getattr(config, "mtp_num_layers", None)
+        # Non-last PP stages retain mtp_num_layers; entering the bypass there is harmless.
         if not distill_cfg.freeze_mtp or not (mtp_process or mtp_num_layers):
             yield
             return
