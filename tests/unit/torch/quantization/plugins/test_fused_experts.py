@@ -1817,23 +1817,25 @@ class TestGroupedMMExperts:
         ref = _SyntheticGroupedExperts(_ExpertsConfig("grouped_mm"))
         ref.load_state_dict(model.moe.experts.state_dict())
 
-        register_fused_experts_on_the_fly(model)
-        converted = QuantModuleRegistry.convert(model.moe.experts)
-        for q in converted.modules():
-            if isinstance(q, TensorQuantizer):
-                q.disable()
+        try:
+            register_fused_experts_on_the_fly(model)
+            converted = QuantModuleRegistry.convert(model.moe.experts)
+            for q in converted.modules():
+                if isinstance(q, TensorQuantizer):
+                    q.disable()
 
-        seq = 8
-        hidden = torch.randn(seq, HIDDEN_DIM)
-        top_k_index = torch.randint(0, NUM_EXPERTS, (seq, TOP_K))
-        top_k_weights = torch.softmax(torch.randn(seq, TOP_K), dim=1)
-        with torch.no_grad():
-            out_ref = ref(hidden, top_k_index, top_k_weights)
-            out_test = converted(hidden, top_k_index, top_k_weights)
-        assert torch.allclose(out_ref, out_test, atol=1e-6), (
-            f"Max diff: {(out_ref - out_test).abs().max().item()}"
-        )
-        self._cleanup_registry(_SyntheticGroupedExperts)
+            seq = 8
+            hidden = torch.randn(seq, HIDDEN_DIM)
+            top_k_index = torch.randint(0, NUM_EXPERTS, (seq, TOP_K))
+            top_k_weights = torch.softmax(torch.randn(seq, TOP_K), dim=1)
+            with torch.no_grad():
+                out_ref = ref(hidden, top_k_index, top_k_weights)
+                out_test = converted(hidden, top_k_index, top_k_weights)
+            assert torch.allclose(out_ref, out_test, atol=1e-6), (
+                f"Max diff: {(out_ref - out_test).abs().max().item()}"
+            )
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
 
     def test_calibration_matches_eager(self):
         """grouped_mm PTQ calibration yields the same quantizer state as eager PTQ.
@@ -1849,33 +1851,37 @@ class TestGroupedMMExperts:
         grouped_model = _GroupedMoEModel("grouped_mm")
         grouped_model.load_state_dict(eager_model.state_dict())
 
-        for model in (eager_model, grouped_model):
-            impl = model.config._experts_implementation
-            # quantize() calibrates every model on eager; calibrate on the backend under test.
-            mtq.quantize(model, self._quant_cfg())
-            model.config._experts_implementation = impl
-            mtq.calibrate(model, "max", self._forward_loop_all_experts)
+        try:
+            for model in (eager_model, grouped_model):
+                impl = model.config._experts_implementation
+                # quantize() calibrates every model on eager; calibrate on the backend under test.
+                mtq.quantize(model, self._quant_cfg())
+                model.config._experts_implementation = impl
+                mtq.calibrate(model, "max", self._forward_loop_all_experts)
 
-        e = eager_model.moe.experts
-        g = grouped_model.moe.experts
+            e = eager_model.moe.experts
+            g = grouped_model.moe.experts
 
-        # Shared input quantizers (down flows through a GEMM -> small tolerance).
-        for q_name in ("gate_up_proj_input_quantizer", "down_proj_input_quantizer"):
-            ea = getattr(e, q_name).amax
-            ga = getattr(g, q_name).amax
-            assert ea is not None and ga is not None, f"{q_name} not calibrated"
-            assert torch.allclose(ea, ga, atol=1e-3, rtol=1e-2), (
-                f"{q_name} amax mismatch: eager={ea} grouped={ga}"
-            )
+            # Shared input quantizers (down flows through a GEMM -> small tolerance).
+            for q_name in ("gate_up_proj_input_quantizer", "down_proj_input_quantizer"):
+                ea = getattr(e, q_name).amax
+                ga = getattr(g, q_name).amax
+                assert ea is not None and ga is not None, f"{q_name} not calibrated"
+                assert torch.allclose(ea, ga, atol=1e-3, rtol=1e-2), (
+                    f"{q_name} amax mismatch: eager={ea} grouped={ga}"
+                )
 
-        # Per-expert weight amax (weights identical -> tight match), all experts calibrated.
-        for idx in range(NUM_EXPERTS):
-            for q_list in ("gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"):
-                eq = getattr(e, q_list)[idx].amax
-                gq = getattr(g, q_list)[idx].amax
-                assert eq is not None and gq is not None, f"{q_list}[{idx}] not calibrated"
-                assert torch.allclose(eq, gq, atol=1e-5), f"{q_list}[{idx}] weight amax mismatch"
-        self._cleanup_registry(_SyntheticGroupedExperts)
+            # Per-expert weight amax (weights identical -> tight match), all experts calibrated.
+            for idx in range(NUM_EXPERTS):
+                for q_list in ("gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"):
+                    eq = getattr(e, q_list)[idx].amax
+                    gq = getattr(g, q_list)[idx].amax
+                    assert eq is not None and gq is not None, f"{q_list}[{idx}] not calibrated"
+                    assert torch.allclose(eq, gq, atol=1e-5), (
+                        f"{q_list}[{idx}] weight amax mismatch"
+                    )
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
 
     def test_fake_quantizing_a_projection_keeps_one_experts_slice_alive(self):
         """Without autograd each expert's fake-quantized slice goes into the output as it is made:
