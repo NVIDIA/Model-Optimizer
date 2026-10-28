@@ -53,8 +53,10 @@ from ._auto_quantize_cost import (
 )
 from .config import QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
 from .conversion import set_quantizer_by_cfg
+from .ggml.common import offload_packed_weights, preserve_source_weights
+from .ggml.registry import GGML_FORMAT_REGISTRY
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
-from .utils import is_quantized_linear
+from .utils import enable_weight_access_and_writeback, is_quantized_linear, module_name_maps
 
 
 def _is_hf_quant_fused_experts_module(module: nn.Module) -> bool:
@@ -510,6 +512,9 @@ class QuantRecipeHparam(Hparam):
     def _apply_quantizer_choice(self, recipe: QuantRecipe) -> None:
         for nn_module, quantizer_choices in self._all_quantizer_choices[recipe].items():
             for quantizer_attr_name, quantizer in quantizer_choices.items():
+                previous = getattr(nn_module, quantizer_attr_name)
+                if previous is not quantizer:
+                    offload_packed_weights(previous)
                 setattr(nn_module, quantizer_attr_name, quantizer)
 
     def set_calibration_recipe(self, recipe: QuantRecipe) -> None:
@@ -680,7 +685,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     method_config_keys: frozenset[str] = frozenset()
 
     quant_grouping_rules = [
-        r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
+        # QKV fusion also includes MLA's query/KV down projections.
+        r"^(.*?)\.(q_proj|k_proj|v_proj|q_a_proj|kv_a_proj_with_mqa)$",
         # gate_proj, up_proj, down_proj for Qwen3 like MoE models
         r"^(.*?\.mlp\.experts)\.\d+\.(gate_proj|up_proj|down_proj)$",
         r"^(.*?\.mixer\.experts)\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
@@ -1114,6 +1120,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 costs.append(cost)
                 prev_score = score
 
+            self.candidate_stats[name] = {}
             self.candidate_stats[name]["formats"] = formats
             self.candidate_stats[name]["scores"] = scores
             self.candidate_stats[name]["raw_scores"] = raw_scores
@@ -1293,7 +1300,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         QuantRecipe.disable_folding_pqs_to_weights()
 
         # Iterate over the search recipes and calibrate the quantizers for each recipe
-        calibrated_new = False
+        calibrated = False
         try:
             for recipe in search_recipes:
                 if recipe == QuantRecipe(quant_cfg=None):  # No-quant format
@@ -1327,15 +1334,21 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                         desc=f"Calibrating for {recipe}",
                     )
 
-                calibrate(
-                    self.model,
-                    algorithm=recipe.config.algorithm,
-                    forward_loop=forward_loop,
-                )
-                # Calibrate adds a new mode to the model. Since auto_quantize mixes the quantization recipes
-                # across layers, lets not save this new mode in the modelopt state.
-                # TODO: This is a hack. We need to create a mode for auto_quantize to handle this in a clean way.
-                ModeloptStateManager(self.model).state_dict().pop()
+                # A recipe's algorithm chain can append several calibration modes.
+                # The searched model retains its search mode, not those per-recipe modes.
+                modelopt_state = ModeloptStateManager(self.model).state_dict()
+                num_modes = len(modelopt_state)
+                try:
+                    with preserve_source_weights():
+                        calibrate(
+                            self.model,
+                            algorithm=recipe.config.algorithm,
+                            forward_loop=forward_loop,
+                        )
+                finally:
+                    del modelopt_state[num_modes:]
+                # Checkpoint tensors must share the parked CPU payloads, not retain GPU copies.
+                offload_packed_weights(self.model)
                 metadata: dict = {}
                 # config is unused by update_quantize_metadata
                 update_quantize_metadata(self.model, QuantizeConfig(), metadata)
@@ -1343,13 +1356,14 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     "metadata": metadata["quantizer_state"],
                     "state_dict": get_quantizer_state_dict(self.model),
                 }
-                calibrated_new = True
+                calibrated = True
         finally:
             for hparam in quant_recipe_hparams:
                 hparam.restore_active_quantizers()
-
-        if calibrated_new:
-            self.save_search_checkpoint(verbose=self.config["verbose"])
+            # Save completed candidates once, also on a handled calibration failure. Independent
+            # workers publish one immutable candidate; serial calibration avoids growing rewrites.
+            if calibrated:
+                self.save_search_checkpoint(verbose=self.config["verbose"])
 
         if self.candidate_stats:
             if self.config["verbose"]:
@@ -1511,6 +1525,23 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.best["recipe"] = best_recipe
         self.best["constraints"] = {"effective_bits": effective_bits_from_search}
         self.best["score"] = best_scores
+
+        names = module_name_maps(self.model)
+        for module in names.name_to_module.values():
+            if not isinstance(module, QuantModule):
+                continue
+            if not any(
+                q.is_enabled and getattr(q, "backend", None) == "ggml"
+                for q in module.iter_weight_quantizers_for_calibration()
+            ):
+                continue
+            with torch.no_grad(), enable_weight_access_and_writeback(module, self.model, names):
+                for weight, quantizer in module.iter_weights_for_calibration():
+                    if quantizer.is_enabled and getattr(quantizer, "backend", None) == "ggml":
+                        GGML_FORMAT_REGISTRY[quantizer.num_bits].materialize_search_weight(
+                            quantizer, weight
+                        )
+                    del weight
 
         QuantRecipe.fold_pqs_to_weights(self.model)
 

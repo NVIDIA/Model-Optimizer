@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
+imports:
+  search: models/zai-org/GLM-5.3-Flash-BF16/auto_quantize/iq2_gptq_nvfp4_fp8.search
+
+metadata:
+  description: GLM-5.3-Flash IQ2 GPTQ / NVFP4 / FP8 / BF16 search at 2.75 weight effective bits.
+auto_quantize:
+  $import: search
+  constraints:
+    effective_bits: 2.75
+    cost_model: weight
