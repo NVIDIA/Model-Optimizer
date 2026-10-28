@@ -76,7 +76,10 @@ def pytest_collection_modifyitems(config, items):
     if not is_blackwell():
         return
     for item in items:
-        if item.path.is_relative_to(Path(__file__).parent):
+        # Only pool tests: a crash in the pytest process would poison the rerun, which runs there too
+        if item.path.is_relative_to(Path(__file__).parent) and any(
+            name.startswith("dist_workers") for name in item.fixturenames
+        ):
             item.add_marker(pytest.mark.flaky(reruns=1, only_rerun=_BLACKWELL_CUDA_CRASHES))
 
 
