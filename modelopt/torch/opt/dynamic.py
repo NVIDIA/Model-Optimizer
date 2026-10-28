@@ -608,7 +608,7 @@ class DynamicModule(nn.Module):
         Patching is achieved by updating the ``__class__`` attribute of the module to its dynamic
         counterpart. The dynamic counterpart is a subclass of the original class, hence, we ensure
         the module is fully compatible with the original class. Simultaneously, we can inject the
-        corresponding dynamic behavior in a standardized and rigoruos fashion.
+        corresponding dynamic behavior in a standardized and rigorous fashion.
         """
 
         def bind_forward_method_if_needed(self):

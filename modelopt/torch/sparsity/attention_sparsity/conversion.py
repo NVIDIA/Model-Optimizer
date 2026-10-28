@@ -332,18 +332,7 @@ def restore_sparse_attention_state(model: nn.Module, state_dict: dict[str, Any])
     for name, module in get_named_sparse_attention_modules(model):
         module_name = get_unwrapped_name(name, model)
         if module_name in state_dict:
-            module_state = state_dict[module_name]
-
-            # Restore method and config
-            if "method" in module_state:
-                module._method = module_state["method"]
-            if "method_config" in module_state:
-                # Restore config attributes
-                for key, val in module_state["method_config"].items():
-                    setattr(module, f"_{key}", val)
-
-            # Re-setup with restored config
-            module._setup()
+            module.set_from_modelopt_state(state_dict[module_name])
 
 
 def update_sparse_attention_metadata(
@@ -356,21 +345,10 @@ def update_sparse_attention_metadata(
         config: Configuration used
         metadata: Metadata dict to update
     """
-    sparse_state = {}
-
-    for name, module in get_named_sparse_attention_modules(model):
-        module_name = get_unwrapped_name(name, model)
-
-        # Save the method configuration that was used
-        # _method_config already contains the validated config dict
-        module_state = {
-            "method": module._sparse_method_instance.name,
-            "method_config": module._method_config.copy(),
-        }
-
-        sparse_state[module_name] = module_state
-
-    metadata["sparse_attention_state"] = sparse_state
+    metadata["sparse_attention_state"] = {
+        get_unwrapped_name(name, model): module.get_modelopt_state()
+        for name, module in get_named_sparse_attention_modules(model)
+    }
     metadata["sparse_attention_config"] = (
         config.model_dump() if hasattr(config, "model_dump") else vars(config)
     )
@@ -394,7 +372,9 @@ def _get_sparse_softmax_export_config(module: SparseAttentionModule) -> dict[str
     return sparse_softmax_config
 
 
-def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
+def export_sparse_attention_config(
+    model: nn.Module, *, for_diffusion: bool = False
+) -> dict[str, Any] | None:
     """Extract sparse attention config for export to config.json.
 
     Extracts calibrated skip-softmax parameters and N:M sparse-softmax metadata
@@ -406,6 +386,10 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
 
     Args:
         model: Model with sparse attention applied
+        for_diffusion: Emit the single-phase schema read by the TRT-LLM VisualGen
+            runtime: one ``threshold_scale_factor.coefficients`` block and a scalar
+            ``target_sparsity``. The default is the LLM schema, with per-phase
+            (``prefill``/``decode``) blocks and a ``{phase: ratio}`` dict.
 
     Returns:
         Dictionary with sparse attention config for HuggingFace config.json export.
@@ -495,6 +479,21 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
         skip_group["threshold_scale_factor"] = export_threshold_scale_factor(calibration_params)
         if target_sparse_ratio is not None:
             skip_group["target_sparsity"] = target_sparse_ratio
+        if for_diffusion:
+            # Diffusion calibrates a single (prefill) phase; VisualGen rejects phase-keyed dicts.
+            tsf = skip_group["threshold_scale_factor"]
+            phases = {p: tsf.pop(p) for p in ("prefill", "decode") if p in tsf}
+            if phases:
+                tsf["coefficients"] = phases.get("prefill") or next(iter(phases.values()))
+            ratio = skip_group.get("target_sparsity")
+            if isinstance(ratio, dict):
+                scalar = (
+                    ratio["prefill"] if "prefill" in ratio else next(iter(ratio.values()), None)
+                )
+                if scalar is None:
+                    del skip_group["target_sparsity"]  # VisualGen needs a scalar
+                else:
+                    skip_group["target_sparsity"] = scalar
         config_groups[f"group_{group_idx}"] = skip_group
         group_idx += 1
 

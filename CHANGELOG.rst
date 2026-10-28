@@ -111,6 +111,7 @@ Changelog
 - ``get_te_hybrid_stack_spec`` was removed from ``modelopt.torch.nas.plugins.megatron``; it had no use outside tests. Use ``modelopt.torch.utils.plugins.megatron_layer_specs.te_hybrid_stack_spec_sequential_mlp`` for the SequentialMLP layout, or ``megatron.core.models.hybrid.hybrid_layer_specs.hybrid_stack_spec`` for grouped GEMM.
 - Unified HuggingFace export now fails with ``NotImplementedError`` when it meets an MoE block whose expert projection names it does not know, instead of assuming Mixtral's ``w1``/``w2``/``w3``. If you hit this, register a ``ModelSpec`` for the model under ``modelopt/torch/models/``. Every MoE architecture ModelOpt exported correctly before this change is registered, so no supported model regresses.
 - ``--recipe`` (and ``modelopt.recipe.load_recipe``) now resolve a recipe path **filesystem-first**: a recipe of the same relative path in the current working directory takes precedence over the shipped built-in of that name, matching how recipe ``$import`` paths already resolve. Previously the built-in won.
+- Diffusion HF exports now omit attention quantizer buffers by default, except for FLUX.1, which retains enabled Q/K/V ``_amax`` keys for runtime compatibility; other consumers of those keys can opt in with ``export_attention_quantizers=True`` (CLI: ``--extra-param export_attention_quantizers=true``). Disabled attention quantizers remain excluded, and diffusion components, including LTX-2, no longer emit KV-cache quantization metadata.
 
 **Deprecations**
 
@@ -132,12 +133,18 @@ Changelog
 
 **Bug Fixes**
 
+- Fix LTX-2 distillation full-mode checkpoints to use the safetensors format expected by their file extension and loaders.
+- Fix corrupted ONNX external tensor data when exporting models on Windows by upgrading ONNX. Regenerate affected models from clean weights.
+- Harden the default locations of the TensorRT deployment runtime's build artifacts and the ONNX AutoTune timing cache: they no longer sit at fixed paths under the shared system temp directory, where another local user could pre-create them to plant symlinks or swap a built engine. Both now live in a private temporary directory that is created once per process; pass ``timing_cache_path`` (runtime) or ``--timing_cache`` (AutoTune) to keep a timing cache across processes.
+- Fix ``import modelopt.torch`` failing with ``ModuleNotFoundError`` for ``requests`` or ``huggingface_hub`` when ``nvidia-modelopt`` is installed without the ``[hf]`` extra.
 - Harden the distributed object broadcast/allgather helpers and the Megatron expert-parallel export gather so a compromised peer rank can no longer execute code through a crafted pickle payload: payloads load with ``weights_only=True`` and the export gathers raw bytes instead of pickled objects.
+- Harden ``examples/vllm_serve/Dockerfile``: ``/workspace`` is no longer world-writable, so no other unprivileged user in the container can replace the CUDA extensions or the ModelOpt sources that the vLLM server loads. The directory is now owned by the ``vllm`` user; rebuild the image, and to run it as a different user point ``TORCH_EXTENSIONS_DIR`` at a directory that user can write, since ModelOpt otherwise cannot load its CUDA extensions and falls back to slower eager fake quantization.
 - Fix LSQ clamping small, representable FP8 block scales too aggressively, which could zero quantized values and suppress scale gradients.
 - Fix ONNX AutoTune benchmark initialization with TensorRT 11 while preserving strongly typed networks on TensorRT 10.
 - Keep vision-block Linears in high precision in the ``qwen3_vl`` and ``qwen3_5`` FP8 vision recipes so exported checkpoints avoid a vLLM vision-attention shape failure. The recipes still quantize primary and deepstack merger Linears; re-quantize affected checkpoints before deployment.
 - Fix unified HF export writing a weight name the source checkpoint does not use when a model declares a backwards-compatibility *load* rename as a reversible ``WeightRenaming``. Reversing such a rule rewrote the canonical name to a legacy spelling, and a deployment runtime keyed on the canonical name then failed to load the quantized checkpoint. Each exported name is now resolved against the names the source checkpoint actually carries, for both the exported tensors and the quantization config's module references.
 - Fix exports using the built-in Transformers NemotronH implementation retaining incompatible legacy remote-code config and model mappings. Re-export affected checkpoints before deployment.
+- Fix ``examples/hf_ptq`` failing with ``KeyError: 'mlp'`` on dense Nemotron-H checkpoints (Nano-9B/12B-v2, H-8B/47B/56B) with Transformers 5.5, whose built-in ``NemotronHForCausalLM`` supports only the MoE variant. ``get_model`` now uses the checkpoint's bundled code when ``--trust_remote_code`` is set and the built-in config can't be built.
 - Fix ``export_hf_checkpoint`` dropping Diffusers pipeline settings, such as Wan 2.2 ``boundary_ratio``, from ``model_index.json`` when ``components`` is given. Re-export affected checkpoints to a new directory, since component exports do not overwrite an existing ``model_index.json``.
 - Fix INT8 real quantization (``mtq.compress``) of FP16 weights zeroing or clipping channels with a small amax: their scales underflowed in FP16. Scales of newly compressed INT8 weights are now stored in FP32.
 - Fix Hugging Face exports classifying registered Qwen VLM parameters as unplaced source weights, which overwrote quantized tensors with original weights and incorrectly excluded their modules from quantization. Re-export affected checkpoints.
@@ -186,6 +193,19 @@ Changelog
 - Fix GPTQ with Megatron data parallelism: each data-parallel replica of a module now builds its Hessian from the whole calibration set instead of only its own shard, so all replicas reach the same quantized weights.
 - Fix ONNX quantization with the default ``concat_elimination`` pass crashing in calibration with ``KeyError: '<tensor>_ReduceMin'`` when a ``Concat`` input is a constant, such as the class token of a ViT.
 - Fix PTQ of native Transformers FP8 experts to apply source weight scales during calibration and export. Re-quantize affected checkpoints from the original FP8 source.
+- The default PTQ recipes now leave multi-token-prediction (MTP) layers unquantized in Megatron vision-language models too (``language_model.mtp.*``), as they already did at the model root.
+- Fix ``examples/llm_sparsity/weight_sparsity/finetune.py`` saving a sharded state dict under FSDP2, the default FSDP version in Transformers 5, which made ``export_hf_ckpt.py`` fail to restore it. Re-run finetuning to produce a loadable ``finetuned_modelopt_state.pth``.
+- Fix GPTQ with ``fused: true`` failing with a CUDA illegal memory access, or a Triton pointer error, on a model that ``device_map="auto"`` spreads over several GPUs once calibration reaches a layer outside the current GPU.
+- Diffusers ``export_hf_checkpoint`` now honors ``save_modelopt_state=False`` (the default) when HuggingFace checkpointing is enabled. Pass ``save_modelopt_state=True`` to retain the ModelOpt state file.
+- Fix ONNX INT4 quantization ending the Python process when the INT4 packing extension fails to build, for example without a C++ compiler. It now falls back to the Python implementation.
+- Fix Megatron Top-K/Top-P distillation gradients being multiplied by the tensor-parallel size when tensor parallelism is enabled; reported loss values are unchanged.
+- Fix ``fsdp2_aware_weight_update`` masking an error raised during its unshard (e.g. a CUDA OOM) with a spurious ``UnboundLocalError``.
+- Nested ``only_student_forward()`` and ``only_teacher_forward()`` contexts now preserve the enclosing execution mode, including when an inner context is disabled or raises an exception.
+- Fix an illegal memory access in static NVFP4 fake quantization for tensors with more than 2^31 elements, such as stacked MoE expert weights. The kernel is also about 14x faster.
+- Preserve accumulated histogram counts when computing an entropy calibration threshold with NumPy histograms.
+- Fix KV-cache quantization through ``register_attention_for_kv_quant``, the fallback for Hugging Face attention classes that do not use the attention interface, attaching the ``q``, ``k`` and ``v`` bmm quantizers to the wrong tensors for most attention layouts. Recalibrate and re-export models quantized through this fallback. Attention classes that compute their scores with ``torch.baddbmm`` (e.g. ``BloomAttention``, ``GPTNeoXJapaneseAttention``) are no longer patched, since their operands were always wired wrong (or raised ``IndexError``), and now get the existing warning to register a custom quantized attention class.
+- Fix the diffusers skip-softmax HF export to emit the schema TensorRT-LLM VisualGen loads (``threshold_scale_factor.coefficients`` and a scalar ``target_sparsity``). Re-export checkpoints that failed to load.
+- EAGLE training with ``eagle_decoder_type="kimik2"`` now downloads the Kimi-K2 modeling code from a pinned ``moonshotai/Kimi-K2-Thinking`` revision and verifies its SHA-256 hashes before importing it. Offline runs need that revision in the Hugging Face cache.
 
 0.47.0 (2026-09-23)
 ^^^^^^^^^^^^^^^^^^^

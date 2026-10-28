@@ -363,7 +363,7 @@ weight-only and weight & activation quantization) — the effective number of bi
 
 You may specify an `effective_bits` target such as 5.4 for mixed precision quantization using `NVFP4_DEFAULT_CFG` & `FP8_DEFAULT_CFG`.
 `AutoQuantize` will automatically quantize highly sensitive layers in `FP8_DEFAULT_CFG` while keeping less sensitive layers in `NVFP4_DEFAULT_CFG` (and even skip quantization for any extremely sensitive layers) so that
-the the final mixed precision quantized model has an effective quantized bits of 5.4. This model would give a better accuracy than the model quantized with vanilla `NVFP4_DEFAULT_CFG` configuration since the more aggressive `NVFP4_DEFAULT_CFG` quantization was not applied for the highly sensitive layers.
+the final mixed precision quantized model has an effective quantized bits of 5.4. This model would give a better accuracy than the model quantized with vanilla `NVFP4_DEFAULT_CFG` configuration since the more aggressive `NVFP4_DEFAULT_CFG` quantization was not applied for the highly sensitive layers.
 
 Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize) API for more details):
 
@@ -732,7 +732,7 @@ with torch.inference_mode():
 
 ### Build the TensorRT-LLM engines
 
-After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build command to build the engines from the exported checkpoints. Please check the [TensorRT-LLM Build API](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/architecture/workflow.md#build-apis) documentation for reference.
+After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build command to build the engines from the exported checkpoints. Please check the [TensorRT-LLM Build API](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/legacy/architecture/workflow.md#build-apis) documentation for reference.
 
 ## Pre-Quantized Checkpoints
 

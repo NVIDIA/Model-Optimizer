@@ -46,7 +46,7 @@
     enable: false
   - quantizer_name: '*router*'
     enable: false
-  - quantizer_name: 'mtp.*'
+  - quantizer_name: '*mtp.*'
     enable: false
   - quantizer_name: 'output.*'
     enable: false
