@@ -471,9 +471,8 @@ def _route(plan: DistributionPlan) -> str | None:
     return _FSDP2 if plan.is_fsdp_dense else None
 
 
-def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options) -> nn.Module:
-    """The sharded load ``route`` names, refusing what it cannot honor before it starts."""
-    from modelopt.torch.models.hf import checkpoint_has_mtp
+def _refuse_sharded_load_options(route, auto_class, kwargs) -> None:
+    """Refuse the arguments the sharded load ``route`` cannot honor: the arguments alone decide."""
     from modelopt.torch.utils import distributed as dist
 
     if auto_class not in (None, AutoModelForCausalLM):
@@ -481,17 +480,16 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
             f"The {route} load builds its model class itself; auto_class={auto_class.__name__} "
             "does not apply to it."
         )
-    kwargs = dict(kwargs)
     # torch_dtype is from_pretrained's older name for dtype, and None means "auto" to it.
     for name in ("dtype", "torch_dtype"):
-        value = kwargs.pop(name, None)
+        value = kwargs.get(name)
         if value not in (None, "auto"):  # A sharded load keeps the checkpoint's dtype.
             raise TypeError(
                 f"The {route} load reads the checkpoint's tensors as stored and keeps their dtype, "
                 f"so {name}={value!r} does not apply to it; FSDP2's mp_policy sets the dtype it "
                 "computes in."
             )
-    unknown = sorted(set(kwargs) - _SHARDED_LOAD_OPTIONS[route])
+    unknown = sorted(set(kwargs) - _SHARDED_LOAD_OPTIONS[route] - {"dtype", "torch_dtype"})
     if unknown:
         whole = (
             " To place the model yourself, have every rank load it whole: MODELOPT_FSDP_SIZE=1, or "
@@ -503,6 +501,15 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
             f"{unknown} do not apply to the {route} load, which places the model itself; it "
             f"takes {sorted(_SHARDED_LOAD_OPTIONS[route])}.{whole}"
         )
+
+
+def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options) -> nn.Module:
+    """The sharded load ``route`` names, refusing what it cannot honor before it starts."""
+    from modelopt.torch.models.hf import checkpoint_has_mtp
+    from modelopt.torch.utils import distributed as dist
+
+    _refuse_sharded_load_options(route, auto_class, kwargs)
+    kwargs = {k: v for k, v in kwargs.items() if k not in ("dtype", "torch_dtype")}
     if checkpoint_has_mtp(model_type, ckpt_path):
         # prepare_model_for_loading builds the head on a whole model only; carried over, the
         # head would be exported unquantized.
@@ -697,6 +704,19 @@ def load_pretrained(
         k: kwargs.pop(k) for k in ("token", "cache_dir", "local_files_only") if k in kwargs
     }
     revision = {"revision": kwargs.pop("revision")} if "revision" in kwargs else {}
+    if plan is not None and _route(plan) is not None:
+        # A handed plan names its load before anything is fetched, and the arguments alone decide
+        # what that load refuses. A config passed for it becomes its hf_config; subfolder is where
+        # the checkpoint is.
+        _refuse_sharded_load_options(
+            _route(plan),
+            auto_class,
+            {
+                k: v
+                for k, v in kwargs.items()
+                if k != "subfolder" and not (k == "config" and config is not None)
+            },
+        )
     _, ckpt_path = ensure_local_checkpoint(ckpt_path, **revision, **hub_options)
     subfolder = kwargs.pop("subfolder", None)
     if subfolder:
