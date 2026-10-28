@@ -8,6 +8,8 @@ Changelog
 
 *Quantization*
 
+- Add experimental NVFP4 recurrent-state fake quantization for linear-attention QAT,
+  with request- and head-local dynamic global scales and block16 E4M3 block scales.
 - Dynamic blockwise ``TensorQuantizer`` configurations now accept changing input shapes, including padding changes; static blockwise configurations still require a fixed shape.
 
 - Add vLLM 0.30 fake-quant serving for GDN/KDA recurrent-state checkpoints, applying

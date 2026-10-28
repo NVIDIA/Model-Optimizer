@@ -36,9 +36,18 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `gdn_state_fp8_dynamic.yaml` | FP8 E4M3 dynamic fake quantization of the GatedDeltaNet recurrent state (per sequence, head and 64-column tile) at serving cache boundaries; requires an explicit serving execution policy |
 | `linear_attention_state_int8_dynamic.yaml` | GDN/KDA INT8 state quantizer entries; the [complete recipe](../../../general/ptq/linear_attention_state_int8_dynamic.yaml) enables Hadamard during decode |
 | `linear_attention_state_int8_block32_dynamic.yaml` | Standard dynamic INT8 with one scale per key row and 32 value channels; the [complete training recipe](../../../general/ptq/linear_attention_state_int8_block32_dynamic.yaml) uses token QDQ and working-state readout |
+| `linear_attention_state_nvfp4_dynamic.yaml` | Dynamic NVFP4 GDN/KDA state QDQ with request- and head-local global scales and block16 E4M3 block scales; the [complete training recipe](../../../general/ptq/linear_attention_state_nvfp4_dynamic.yaml) uses working-state readout |
 | `indexer_k_nvfp4.yaml` | NVFP4 fake quantization of the sparse-attention indexer key cache (`*indexer_k_quantizer`), global scale fixed to 1; Blackwell+ GPUs |
 | `indexer_q_nvfp4.yaml` | NVFP4 fake quantization of the sparse-attention indexer query (`*indexer_q_quantizer`), global scale fixed to 1; Blackwell+ GPUs |
 | `moe_dispatch_nvfp4.yaml` | NVFP4 fake quantization of the MoE expert-parallel dispatch (`*dispatch_quantizer`, vLLM); Blackwell+ GPUs |
 | `moe_combine_nvfp4.yaml` | NVFP4 fake quantization of the MoE expert-parallel combine (`*combine_quantizer`, vLLM); Blackwell+ GPUs |
 
 Native ReplaySSM uses BF16 key/update vectors; they are not independently quantized.
+
+## Linear-attention NVFP4 state
+
+`linear_attention_state_nvfp4_dynamic.yaml` enables NVFP4 E2M1 state QDQ with
+16-value blocks, E4M3 block scales, a request- and head-local dynamic global scale,
+and identity backward.
+Use it with the serving phase policy in a state-QAT recipe. This is fake QDQ:
+state storage remains floating point, and vLLM engine support is separate.

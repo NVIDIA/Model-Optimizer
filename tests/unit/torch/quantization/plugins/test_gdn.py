@@ -324,11 +324,27 @@ def test_quant_cfg_refinement_and_policy_precedence():
     ],
 )
 @pytest.mark.parametrize("derived", [False, True])
-def test_state_recipe_rejects_unconverted_layers(class_name, quantizer_name, derived):
+@pytest.mark.parametrize("format_name", ["int8_block32", "nvfp4"])
+def test_state_recipe_rejects_unconverted_layers(class_name, quantizer_name, derived, format_name):
     # An unknown framework class has no registered state-quantization adapter.
     owner = type(class_name, (nn.Module,), {})
     model = type("InheritedLinearAttention", (owner,), {})() if derived else owner()
     model.proj = nn.Linear(4, 4)
-    config = load_recipe("general/ptq/linear_attention_state_int8_block32_dynamic").quantize
+    config = load_recipe(f"general/ptq/linear_attention_state_{format_name}_dynamic").quantize
     with pytest.raises(RuntimeError, match=quantizer_name):
         mtq.quantize(model, config)
+
+
+def test_nvfp4_state_recipe_restore():
+    config = load_recipe("general/ptq/linear_attention_state_nvfp4_dynamic").quantize
+    model = mtq.quantize(TinyGatedDeltaNet(), config)
+    restored = mto.restore_from_modelopt_state(TinyGatedDeltaNet(), mto.modelopt_state(model))
+    assert (
+        restored.gdn_state_quantizer.get_modelopt_state()
+        == model.gdn_state_quantizer.get_modelopt_state()
+    )
+    assert restored.gdn_state_quantizer.block_sizes == {
+        -1: 16,
+        "type": "dynamic",
+        "scale_bits": (4, 3),
+    }
