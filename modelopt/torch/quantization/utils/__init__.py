@@ -33,6 +33,7 @@ __all__ = [
     "is_quantized_column_parallel_linear",
     "is_quantized_linear",
     "is_quantized_row_parallel_linear",
+    "is_weight_quantizer",
     "iter_shared_quant_states",
     "promote_nvfp4_static_quantizers",
     "promote_static_block_weight_quantizers",

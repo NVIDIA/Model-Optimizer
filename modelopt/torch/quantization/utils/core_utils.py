@@ -321,6 +321,15 @@ def is_quantized(module):
     return any(isinstance(_module, TensorQuantizer) for _module in module.modules())
 
 
+def is_weight_quantizer(name: str) -> bool:
+    """Whether ``name`` is a weight-side quantizer, by the convention the module keys on.
+
+    Weight and input quantizers are distinguished by name throughout calibration; this keeps
+    that one convention in a single place rather than restating the substring test.
+    """
+    return "weight_quantizer" in name
+
+
 def is_quantized_linear(module):
     """Check if a module is a quantized linear module."""
     from ..nn import QuantModule, TensorQuantizer
