@@ -26,7 +26,7 @@ import torch
 import yaml
 from _test_utils.mlflow import clean_env  # noqa: F401
 from _test_utils.torch.transformers_models import get_tiny_qwen3
-from transformers import Qwen3MoeConfig
+from transformers import Qwen3_5MoeConfig, Qwen3MoeConfig
 
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import (
@@ -415,9 +415,18 @@ def test_fsdp2_kv_autoquant_reaches_distributed_model_load(monkeypatch, tmp_path
         hf_ptq.load_model(args)
 
 
-def test_fsdp2_load_builds_with_the_requested_experts_implementation(monkeypatch, tmp_path):
-    """--experts_implementation reaches the config the FSDP2 load builds its meta model from."""
-    Qwen3MoeConfig(architectures=["Qwen3MoeForCausalLM"]).save_pretrained(tmp_path)
+@pytest.mark.parametrize(
+    "config",
+    [
+        Qwen3MoeConfig(architectures=["Qwen3MoeForCausalLM"]),
+        Qwen3_5MoeConfig(architectures=["Qwen3_5MoeForConditionalGeneration"]),
+    ],
+    ids=["causal-lm", "vlm"],
+)
+def test_fsdp2_load_builds_with_the_requested_experts_implementation(monkeypatch, tmp_path, config):
+    """--experts_implementation reaches the config the FSDP2 load builds its meta model from, and
+    the text config a VLM's experts dispatch on."""
+    config.save_pretrained(tmp_path)
     monkeypatch.setenv("RANK", "0")
     hf_ptq, args = _parse_hf_ptq_args(
         monkeypatch,
@@ -432,6 +441,7 @@ def test_fsdp2_load_builds_with_the_requested_experts_implementation(monkeypatch
 
     def distributed_load(*_args, hf_config, **_kwargs):
         assert hf_config._experts_implementation == "eager"
+        assert hf_config.get_text_config()._experts_implementation == "eager"
         raise RuntimeError("distributed loader reached")
 
     monkeypatch.setattr(hf_ptq, "parallel_load_and_prepare_fsdp2", distributed_load)

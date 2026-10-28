@@ -325,7 +325,8 @@ def load_model(args: argparse.Namespace):
         )
         if args.experts_implementation is not None:
             # Set on the config, as build_meta_causal_lm sets a pre-fetched config's
-            # attn_implementation: the meta model is built from it, with no kwarg of its own.
+            # attn_implementation: the meta model is built from it, with no kwarg of its own. The
+            # setter carries it to the sub-configs, such as the text config a VLM's experts read.
             hf_config._experts_implementation = args.experts_implementation
         validate_fsdp2_supported(args, hf_config)
         full_model = parallel_load_and_prepare_fsdp2(
