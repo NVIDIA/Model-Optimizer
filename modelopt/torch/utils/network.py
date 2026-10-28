@@ -76,7 +76,7 @@ SUPPORTED_WRAPPERS: dict[type[nn.Module], str] = {
 
 try:
     from deepspeed.runtime.engine import DeepSpeedEngine
-except:  # noqa: E722
+except Exception:  # deepspeed can fail at import with non-ImportError errors
     DeepSpeedEngine = None
 
 if DeepSpeedEngine is not None:
