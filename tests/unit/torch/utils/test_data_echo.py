@@ -20,63 +20,60 @@ import torch
 from torch import nn
 from transformers import Trainer, TrainingArguments
 
-from modelopt.torch.utils import BatchEchoPlan, EchoLoader, ExampleEchoPlan
-
-
-def _check_plan(plan, n_batches, b, capacity=None):
-    """Every example used exactly ``uses`` times, b distinct per step, never before it arrives."""
-    steps = list(plan.steps(n_batches, b))
-    assert len(steps) == plan.num_steps(n_batches)
-    arrived = retired = 0
-    uses = Counter()
-    for n_pull, ords in steps:
-        arrived += n_pull * b
-        assert len(set(ords)) == b
-        assert max(ords) < arrived
-        if capacity is not None:
-            assert arrived - retired <= capacity
-        uses.update(ords)
-        retired += sum(uses[o] == plan.uses for o in ords)
-    assert arrived == n_batches * b
-    assert uses == Counter(dict.fromkeys(range(n_batches * b), plan.uses))
-    return steps
-
-
-@pytest.mark.parametrize("uses", [1, 3])
-def test_batch_echo_plan_repeats_each_batch_in_a_row(uses):
-    steps = _check_plan(BatchEchoPlan(uses), n_batches=5, b=2)
-    for t, (n_pull, ords) in enumerate(steps):
-        assert n_pull == (t % uses == 0)
-        assert ords == [2 * (t // uses), 2 * (t // uses) + 1]
+from modelopt.torch.utils import EchoLoader, LaneEchoPlan, replay_echo_plan
 
 
 @pytest.mark.parametrize(
-    ("uses", "b", "min_gap", "n_batches"), [(1, 2, 4, 3), (2, 4, 1, 2), (4, 2, 4, 97), (7, 1, 9, 5)]
+    ("uses", "b", "min_gap", "n_batches", "rank"),
+    [(1, 2, 4, 3, 0), (4, 2, 1, 5, 0), (4, 2, 32, 97, 3), (3, 3, 7, 25, 1), (4, 1, 9, 6, 2)],
 )
-def test_example_echo_plan_invariants(uses, b, min_gap, n_batches):
-    plan = ExampleEchoPlan(uses=uses, min_gap=min_gap, capacity=b * (min_gap + 3), seed=3)
-    _check_plan(plan, n_batches, b, capacity=plan.capacity)
+def test_lane_plan_keeps_the_contract(uses, b, min_gap, n_batches, rank):
+    stats = replay_echo_plan(LaneEchoPlan(uses, min_gap, rank=rank), n_batches, b)
+    assert stats["steps"] == uses * n_batches
 
 
-def test_example_echo_plan_keeps_the_gap_except_at_the_tail():
-    b, min_gap = 2, 32
-    plan = ExampleEchoPlan(uses=4, min_gap=min_gap, capacity=b * (min_gap + 2 + 1), seed=0)
-    last, early_at = {}, []
-    for t, (_, ords) in enumerate(plan.steps(2150, b)):
-        for o in ords:
-            if o in last and t - last[o] < min_gap:
-                early_at.append(t)
+def test_lane_plan_reuses_at_fixed_gaps_and_fetches_steadily():
+    """Away from the epoch ends, each lane reuses at its own gap and the rank fetches every 4 steps."""
+    uses, b = 4, 2
+    plan = LaneEchoPlan(uses, min_gap=32, rank=3)
+    gaps = plan.lane_gaps(b)
+    assert len(set(gaps)) == b and all(32 <= g < 40 and g % 2 for g in gaps)
+    steps = list(plan.steps(400, b))
+    edge = uses * max(gaps)
+    last = {}
+    for t, (_, ords) in enumerate(steps):
+        for lane, o in enumerate(ords):
+            if o in last and edge <= t < len(steps) - edge:
+                assert t - last[o] == gaps[lane]
             last[o] = t
-    assert early_at
-    assert min(early_at) >= plan.num_steps(2150) - plan.uses * min_gap
+    pulls = [n for n, _ in steps[edge:-edge]]
+    assert all(sum(pulls[t : t + uses]) == 1 for t in range(len(pulls) - uses))
 
 
-def test_example_echo_plan_is_seeded():
-    plan = ExampleEchoPlan(uses=4, min_gap=4, capacity=16, seed=11)
-    steps = list(plan.steps(60, 2, epoch=0))
-    assert steps == list(plan.steps(60, 2, epoch=0))
-    assert steps != list(plan.steps(60, 2, epoch=1))
-    assert steps != list(ExampleEchoPlan(uses=4, min_gap=4, capacity=16, seed=12).steps(60, 2))
+def test_lane_plan_meets_a_new_partner_at_each_use():
+    """The lanes of a rank drift apart, and ranks deal the gaps differently."""
+    plan = LaneEchoPlan(4, min_gap=32)
+    assert plan.lane_gaps(2) != LaneEchoPlan(4, min_gap=32, rank=1).lane_gaps(2)
+    steps = list(plan.steps(400, 2))
+    partner = {}
+    for t, (_, ords) in enumerate(steps[160:-160]):
+        for o, other in ((ords[0], ords[1]), (ords[1], ords[0])):
+            assert partner.get(o) != other
+            partner[o] = other
+
+
+def test_lane_plan_with_min_gap_1_repeats_each_batch_in_a_row():
+    steps = list(LaneEchoPlan(3, min_gap=1).steps(4, 2))
+    assert steps == [(t % 3 == 0, [2 * (t // 3), 2 * (t // 3) + 1]) for t in range(12)]
+
+
+def test_replay_rejects_plans_that_break_the_contract():
+    with pytest.raises(ValueError):  # trains on an example before its batch is pulled
+        replay_echo_plan(_FixedPlan([(0, [0, 1])]), 1, 2)
+    with pytest.raises(ValueError):  # the same example twice in one step
+        replay_echo_plan(_FixedPlan([(1, [0, 0])]), 1, 2)
+    with pytest.raises(ValueError):  # more uses than the plan declares
+        replay_echo_plan(_FixedPlan([(1, [0, 1]), (0, [0, 1])]), 1, 2)
 
 
 class _Loader:
@@ -111,7 +108,7 @@ class _Loader:
 
 @pytest.mark.parametrize("store", [None, "cpu"])
 @pytest.mark.parametrize(
-    "plan", [BatchEchoPlan(3), ExampleEchoPlan(3, min_gap=2, capacity=8, seed=5)]
+    "plan", [LaneEchoPlan(3, min_gap=1), LaneEchoPlan(3, min_gap=2, gap_spread=4, rank=1)]
 )
 def test_echo_loader_yields_every_example_uses_times(plan, store):
     base = _Loader(n_batches=9, b=2)
@@ -141,7 +138,7 @@ def test_echo_loader_yields_every_example_uses_times(plan, store):
 
 def test_echo_loader_batches_and_held_examples_are_copies():
     base = _Loader(n_batches=1, b=2)
-    it = iter(EchoLoader(base, BatchEchoPlan(3), batch_size=2))
+    it = iter(EchoLoader(base, LaneEchoPlan(3, min_gap=1), batch_size=2))
     next(it)["input_ids"].fill_(-1)  # a model editing its inputs in place
     base.batches[0]["input_ids"].add_(100)  # someone else editing the fetched batch
     assert next(it)["input_ids"][:, 0].tolist() == [0, 1]
@@ -149,9 +146,9 @@ def test_echo_loader_batches_and_held_examples_are_copies():
 
 def test_echo_loader_fails_loud_on_bad_loaders():
     with pytest.raises(RuntimeError):  # len() promised more batches than it yields
-        list(EchoLoader(_Loader(n_batches=2, b=2, length=3), BatchEchoPlan(2), batch_size=2))
+        list(EchoLoader(_Loader(n_batches=2, b=2, length=3), LaneEchoPlan(2, 1), batch_size=2))
     with pytest.raises(ValueError):  # batches are not batch_size long
-        list(EchoLoader(_Loader(n_batches=2, b=2), BatchEchoPlan(1), batch_size=3))
+        list(EchoLoader(_Loader(n_batches=2, b=2), LaneEchoPlan(1), batch_size=3))
     mixed = _Loader(n_batches=2, b=2)
     mixed.batches[1]["base_model_outputs"]["base_hidden_prenorm"] = False
     with pytest.raises(ValueError):  # restacking would mislabel a per-batch field
@@ -194,7 +191,7 @@ class _Model(nn.Module):
 
 class _EchoTrainer(Trainer):
     def get_train_dataloader(self):
-        plan = ExampleEchoPlan(4, min_gap=4, capacity=14, seed=1)
+        plan = LaneEchoPlan(4, min_gap=4)
         return EchoLoader(
             super().get_train_dataloader(), plan, self.args.per_device_train_batch_size
         )

@@ -20,10 +20,12 @@ large dumps on a slow filesystem), each example can serve ``uses`` steps instead
 (`Choi et al., 2019 <https://arxiv.org/abs/1907.05550>`_). Per-step randomness in the model,
 for example a fresh draw of training positions, makes every use a different example.
 
-The decision and its execution are kept apart, so the decision is testable without data:
+The echo rule and its execution are kept apart, so a rule can change without touching the data
+path, and is testable without data:
 
-* a plan (:class:`ExampleEchoPlan`, :class:`BatchEchoPlan`) decides from a seed alone which
-  examples each step trains on, naming examples by their arrival ordinal on this rank;
+* an :class:`EchoPlan` decides which examples each step trains on and when to fetch, naming
+  examples by their arrival ordinal on this rank; :class:`LaneEchoPlan` is the rule in use, and
+  :func:`replay_echo_plan` checks any plan against the contract;
 * :class:`EchoLoader` executes a plan over an iterable of collated batches: it pulls a fresh
   batch when the plan says so, holds each example until its last use, and stacks the examples a
   step needs.
@@ -33,73 +35,92 @@ Uses of one example stay on the rank that fetched it, so nothing is shared acros
 
 from __future__ import annotations
 
-import random
+import itertools
+import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import torch
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-__all__ = ["BatchEchoPlan", "EchoLoader", "ExampleEchoPlan"]
+__all__ = ["EchoLoader", "EchoPlan", "LaneEchoPlan", "replay_echo_plan"]
 
 
-@dataclass(frozen=True)
-class BatchEchoPlan:
-    """Train on each fresh batch ``uses`` times in a row ("batch echoing").
+class EchoPlan(Protocol):
+    """An echo rule: which held examples each step trains on, and when to fetch.
 
-    ``uses=1`` is the plain loader: one fresh batch per step.
+    Fresh batch ``j`` brings ordinals ``j * batch_size`` to ``(j + 1) * batch_size - 1``. A plan
+    trains on ``batch_size`` distinct ordinals per step, each only after the batch that brings it
+    was pulled, and on every ordinal exactly ``uses`` times over ``num_steps(n_batches)`` steps.
     """
 
-    uses: int = 1
-
-    def __post_init__(self):
-        if self.uses < 1:
-            raise ValueError(
-                f"uses={self.uses}: every fetched example must be trained on at least once."
-            )
+    @property
+    def uses(self) -> int:
+        """Steps each example is trained on."""
+        ...
 
     def num_steps(self, n_batches: int) -> int:
         """Steps in an epoch of ``n_batches`` fresh batches."""
-        return self.uses * n_batches
+        ...
 
     def steps(
         self, n_batches: int, batch_size: int, epoch: int = 0
     ) -> Iterator[tuple[int, list[int]]]:
         """Yield ``(fresh batches to pull before this step, ordinals this step trains on)``."""
-        for t in range(self.num_steps(n_batches)):
-            first = (t // self.uses) * batch_size
-            yield (1 if t % self.uses == 0 else 0), list(range(first, first + batch_size))
+        ...
 
 
 @dataclass(frozen=True)
-class ExampleEchoPlan:
-    """Train on each example ``uses`` times, spread over steps and mixed with other examples.
+class LaneEchoPlan:
+    """Train on each example ``uses`` times in a fixed order, at a fixed gap per batch slot.
 
-    Each step trains on ``batch_size`` distinct examples. An example's uses are at least
-    ``min_gap`` steps apart; a step picks at random among the ``pool`` + needed examples that
-    have waited longest, and a fresh batch is pulled whenever fewer than that many are ready.
-    At most ``capacity`` examples are held at once.
+    Slot ``i`` of every step (a lane) trains on example ``i`` of each fresh batch. In a lane with
+    gap ``g``, coprime with ``uses``, use ``k`` of the lane's ``j``-th example falls on lane time
+    ``uses * j + k * g``, so every lane time names exactly one (j, k); lane times that name no
+    example, the first and last few of an epoch, are skipped. A lane thus uses each example
+    exactly ``uses`` times, ``g`` steps apart away from the epoch ends, and needs one fresh
+    example every ``uses`` steps, so fetching is steady rather than bursty.
 
-    Every example gets exactly ``uses`` steps and the epoch has exactly ``uses * n_batches``
-    steps. Near the epoch end (or when ``capacity`` binds) an example may be reused sooner than
-    ``min_gap``; :meth:`stats` counts those reuses.
+    Lanes take different gaps from ``[min_gap, min_gap + gap_spread)``, dealt by rank and slot, so
+    they drift apart and an example meets different examples at each of its uses. ``min_gap=1``
+    repeats each fresh batch ``uses`` times in a row (batch echoing). A rank holds about
+    ``batch_size * (uses - 1) / uses * gap`` examples; :func:`replay_echo_plan` gives the peak.
     """
 
     uses: int
     min_gap: int = 32
-    capacity: int = 70
-    pool: int = 2
-    seed: int = 0
+    gap_spread: int | None = None  # None: min_gap // 4
+    rank: int = 0
 
     def __post_init__(self):
         if self.uses < 1:
             raise ValueError(
                 f"uses={self.uses}: every fetched example must be trained on at least once."
             )
-        if self.min_gap < 1 or self.pool < 0:
-            raise ValueError(f"min_gap={self.min_gap} must be >= 1 and pool={self.pool} >= 0.")
+        if (
+            self.min_gap < 1
+            or (self.gap_spread is not None and self.gap_spread < 0)
+            or self.rank < 0
+        ):
+            raise ValueError(
+                f"min_gap={self.min_gap} must be >= 1, gap_spread={self.gap_spread} and "
+                f"rank={self.rank} >= 0."
+            )
+
+    def lane_gaps(self, batch_size: int) -> list[int]:
+        """The gap of each lane on this rank."""
+        spread = self.min_gap // 4 if self.gap_spread is None else self.gap_spread
+        window = range(self.min_gap, self.min_gap + spread)
+        gaps = [g for g in window if math.gcd(g, self.uses) == 1] or [
+            next(g for g in itertools.count(self.min_gap) if math.gcd(g, self.uses) == 1)
+        ]
+        # A rank's lanes sit evenly across the window and each rank shifts them by one, so lanes
+        # differ within a rank and across ranks, which also staggers the steps on which ranks fetch.
+        return [
+            gaps[(self.rank + i * len(gaps) // batch_size) % len(gaps)] for i in range(batch_size)
+        ]
 
     def num_steps(self, n_batches: int) -> int:
         """Steps in an epoch of ``n_batches`` fresh batches."""
@@ -108,82 +129,61 @@ class ExampleEchoPlan:
     def steps(
         self, n_batches: int, batch_size: int, epoch: int = 0
     ) -> Iterator[tuple[int, list[int]]]:
-        """Yield ``(fresh batches to pull before this step, ordinals this step trains on)``."""
-        b = batch_size
-        if self.capacity < 2 * b:
-            # With fewer than 2 batches of room a step could need a fresh batch while the held
-            # examples cannot fill it, and the plan would stall mid-epoch.
-            raise ValueError(
-                f"capacity={self.capacity} must hold at least two batches ({2 * b} examples)."
-            )
-        rng = random.Random(self.seed * 1_000_003 + epoch)
-        left: dict[int, int] = {}  # ordinal -> uses left
-        ready_at: dict[int, int] = {}  # ordinal -> first step it may be used again
-        pulled = 0
-        total = self.num_steps(n_batches)
-        for t in range(total):
-            steps_left = total - t
-            n_pull = 0
-            while (
-                pulled < n_batches
-                and len(left) + b <= self.capacity
-                and sum(ready_at[o] <= t for o in left) < b + self.pool
-            ):
-                for o in range(pulled * b, (pulled + 1) * b):
-                    left[o], ready_at[o] = self.uses, t
-                pulled += 1
-                n_pull += 1
-            # An example with as many uses left as steps left must be used now, or the epoch
-            # cannot finish with distinct examples per step. Uses left always total b * steps_left,
-            # so at most b examples are ever in that state.
-            chosen = [o for o in left if left[o] == steps_left]
-            ready = sorted(
-                (o for o in left if ready_at[o] <= t and o not in chosen),
-                key=lambda o: (ready_at[o], o),
-            )
-            need = b - len(chosen)
-            if len(ready) >= need:
-                chosen += rng.sample(ready[: need + self.pool], need)
-            else:
-                waiting = sorted(
-                    (o for o in left if o not in chosen and o not in ready),
-                    key=lambda o: (ready_at[o], o),
-                )
-                chosen += ready + waiting[: need - len(ready)]
-            if len(set(chosen)) != b:
-                raise RuntimeError(
-                    f"step {t}: plan picked {len(set(chosen))} distinct examples, need {b}; the held "
-                    "uses cannot cover the remaining steps, so the epoch length would be wrong."
-                )
-            for o in chosen:
-                left[o] -= 1
-                ready_at[o] = t + self.min_gap
-                if left[o] == 0:
-                    del left[o], ready_at[o]
-            yield n_pull, chosen
+        """Yield ``(fresh batches to pull before this step, ordinals this step trains on)``.
 
-    def stats(self, n_batches: int, batch_size: int, epoch: int = 0) -> dict[str, float]:
-        """Replay the plan without data: examples held at once, gaps between uses, early reuses."""
-        used: dict[int, int] = {}
-        last: dict[int, int] = {}
-        gaps: list[int] = []
-        arrived = retired = max_held = 0
-        for t, (n_pull, ords) in enumerate(self.steps(n_batches, batch_size, epoch)):
-            arrived += n_pull * batch_size
-            max_held = max(max_held, arrived - retired)
-            for o in ords:
-                if o in last:
-                    gaps.append(t - last[o])
-                last[o] = t
-                used[o] = used.get(o, 0) + 1
-                retired += used[o] == self.uses
-        return {
-            "steps": self.num_steps(n_batches),
-            "max_held": max_held,
-            "mean_gap": sum(gaps) / len(gaps) if gaps else 0.0,
-            "min_gap": min(gaps) if gaps else 0,
-            "early_reuses": sum(g < self.min_gap for g in gaps),
-        }
+        The order is the same every epoch; the wrapped loader's shuffling varies the examples.
+        """
+        pulled = 0
+        lanes = (self._lane(gap, n_batches) for gap in self.lane_gaps(batch_size))
+        for batches in zip(*lanes):
+            n_pull = max(0, max(batches) + 1 - pulled)
+            pulled += n_pull
+            yield n_pull, [j * batch_size + i for i, j in enumerate(batches)]
+
+    def _lane(self, gap: int, n_batches: int) -> Iterator[int]:
+        """The fresh batch whose example one lane trains on, step by step."""
+        inverse = pow(gap, -1, self.uses)
+        for t in range(self.uses * (n_batches - 1) + (self.uses - 1) * gap + 1):
+            use = t * inverse % self.uses
+            j = (t - use * gap) // self.uses
+            if 0 <= j < n_batches:
+                yield j
+
+
+def replay_echo_plan(plan: EchoPlan, n_batches: int, batch_size: int) -> dict[str, float]:
+    """Replay ``plan`` without data, check it keeps the :class:`EchoPlan` contract, and summarize it.
+
+    Returns the epoch's steps, the most examples held at once, and the smallest and mean number
+    of steps between two uses of an example.
+    """
+    used: dict[int, int] = {}
+    last: dict[int, int] = {}
+    gaps: list[int] = []
+    arrived = retired = max_held = n_steps = 0
+    for t, (n_pull, ords) in enumerate(plan.steps(n_batches, batch_size)):
+        arrived += n_pull * batch_size
+        if len(set(ords)) != batch_size or max(ords) >= arrived:
+            raise ValueError(
+                f"step {t} trains on {ords}: not {batch_size} distinct arrived examples."
+            )
+        max_held = max(max_held, arrived - retired)
+        for o in ords:
+            if o in last:
+                gaps.append(t - last[o])
+            last[o] = t
+            used[o] = used.get(o, 0) + 1
+            retired += used[o] == plan.uses
+        n_steps = t + 1
+    if n_steps != plan.num_steps(n_batches) or arrived != n_batches * batch_size:
+        raise ValueError(f"the plan ran {n_steps} steps over {arrived // batch_size} batches.")
+    if any(u != plan.uses for u in used.values()) or len(used) != arrived:
+        raise ValueError(f"the plan does not train on every example exactly {plan.uses} times.")
+    return {
+        "steps": n_steps,
+        "max_held": max_held,
+        "min_gap": min(gaps, default=0),
+        "mean_gap": sum(gaps) / len(gaps) if gaps else 0.0,
+    }
 
 
 def _leaves(x: Any) -> Iterator[torch.Tensor]:
@@ -236,7 +236,7 @@ class EchoLoader:
     def __init__(
         self,
         loader,
-        plan: ExampleEchoPlan | BatchEchoPlan,
+        plan: EchoPlan,
         batch_size: int,
         *,
         store: str | None = None,
@@ -268,7 +268,7 @@ class EchoLoader:
         return self.plan.num_steps(len(self.loader))
 
     def set_epoch(self, epoch: int) -> None:
-        """Reseed the plan and forward the epoch to the wrapped loader."""
+        """Forward the epoch to the plan and the wrapped loader."""
         self.epoch = epoch
         if hasattr(self.loader, "set_epoch"):
             self.loader.set_epoch(epoch)

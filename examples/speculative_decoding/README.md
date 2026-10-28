@@ -138,21 +138,21 @@ For large base models, you can stream hidden states from a live `vllm serve` ins
 When producing base-model hidden states bounds training, as with a streaming serve or dumps on slow storage, the trainer can train on each fetched example for several steps instead of one ([data echoing](https://arxiv.org/abs/1907.05550)). It is off by default. Turn it on with the `data_echo_*` training arguments, for example:
 
 ```bash
-training.data_echo_uses=4 training.data_echo_min_gap=32 training.dataloader_drop_last=true \
+training.data_echo_uses=4 training.data_echo_min_gap=128 training.dataloader_drop_last=true \
     training.data_echo_disjoint_anchors=true
 ```
 
 | Argument | Default | Meaning |
 |---|---|---|
 | `data_echo_uses` | `1` (off) | Steps each fetched example is trained on. |
-| `data_echo_mode` | `example` | `example` spreads the uses of an example at least `data_echo_min_gap` steps apart, among other examples; `batch` repeats each fresh batch `data_echo_uses` times in a row. |
-| `data_echo_min_gap` | `32` | Minimum steps between two uses of an example. |
-| `data_echo_capacity` | sized to keep the gap | Examples held at once per rank, `batch * (min_gap + pool + 1)` unless set. |
-| `data_echo_pool` | `2` | Each step picks at random among the `pool` + needed examples that have waited longest. |
+| `data_echo_min_gap` | `32` | Minimum steps between two uses of an example; `1` repeats each fresh batch in a row. |
+| `data_echo_gap_spread` | `min_gap / 4` | Each slot of a rank's batch reuses its examples at its own gap from `[min_gap, min_gap + gap_spread)`; wider mixes examples more but holds more of them. |
 | `data_echo_store` | `device` | Where examples wait between uses; `cpu` keeps a long gap off the accelerator. |
 | `data_echo_disjoint_anchors` | `false` | DFlash-family drafts: the uses of an example take disjoint slices of one random order of its anchor positions, instead of independent draws. |
 
-Spreading the uses out matters: repeats close together cost more acceptance length than the same repeats an epoch apart, and DFlash drafts gain from disjoint anchors. Each held example keeps its hidden states, padded to `training_seq_len`, so memory per rank grows with the gap. With echoing on, an epoch has `data_echo_uses` times as many steps, and resuming from a checkpoint is not supported.
+The order is fixed, with no randomness: each slot of a rank's batch replays the examples it fetched at its own gap, and slots across ranks get different gaps, so an example meets different examples at each use. Every rank fetches one fresh batch every `data_echo_uses` steps, which keeps the load on a serving engine steady.
+
+Spreading the uses out matters: repeats close together cost more acceptance length than the same repeats an epoch apart, and DFlash drafts gain from disjoint anchors. Each held example keeps its hidden states, padded to `training_seq_len`, and a rank holds about `batch * (uses - 1) / uses * gap` examples, so memory per rank grows with the gap; the startup log reports the peak. With echoing on, an epoch has `data_echo_uses` times as many steps, and resuming from a checkpoint is not supported.
 
 ## Training a Standalone (External) Draft Model
 

@@ -35,7 +35,7 @@ from modelopt.torch.speculative.eagle.utils import (
 )
 from modelopt.torch.speculative.plugins.master_weight_adamw import MasterWeightAdamW
 from modelopt.torch.speculative.utils import get_ttt_msk_func
-from modelopt.torch.utils import BatchEchoPlan, EchoLoader, ExampleEchoPlan, print_rank_0
+from modelopt.torch.utils import EchoLoader, LaneEchoPlan, print_rank_0, replay_echo_plan
 from modelopt.torch.utils.distributed import is_master
 from modelopt.torch.utils.plugins.transformers_dataset import (
     LanguageDataCollator,
@@ -227,29 +227,17 @@ def make_speculative_data_module(
 def make_echo_loader(loader, args) -> EchoLoader:
     """Data echoing over the training ``loader``, as set by the ``data_echo_*`` training args."""
     b = args.per_device_train_batch_size
-    # Per rank, so ranks neither step through the same plan nor draw the same anchors.
-    seed = (args.data_seed if args.data_seed is not None else args.seed) * 1000 + args.process_index
-    stats = {}
-    if args.data_echo_mode == "batch":
-        plan = BatchEchoPlan(args.data_echo_uses)
-    else:
-        capacity = args.data_echo_capacity or b * (args.data_echo_min_gap + args.data_echo_pool + 1)
-        plan = ExampleEchoPlan(
-            args.data_echo_uses, args.data_echo_min_gap, capacity, args.data_echo_pool, seed
-        )
-        stats = plan.stats(len(loader), b)
-        # More early reuses than the pass's tail accounts for: capacity binds, not the tail.
-        if stats["early_reuses"] > b * plan.uses * plan.min_gap:
-            raise ValueError(
-                f"training.data_echo_capacity={capacity} cannot keep data_echo_min_gap="
-                f"{plan.min_gap} ({stats['early_reuses']} reuses come sooner); leave it unset or "
-                f"raise it to at least {b * (plan.min_gap + plan.pool + 1)}."
-            )
-    print_rank_0(
-        f"Data echoing: {plan}, store={args.data_echo_store}, disjoint anchors="
-        f"{args.data_echo_disjoint_anchors}; {len(loader)} fresh batches -> "
-        f"{plan.num_steps(len(loader))} steps per epoch per rank {stats}"
+    plan = LaneEchoPlan(
+        args.data_echo_uses, args.data_echo_min_gap, args.data_echo_gap_spread, args.process_index
     )
+    stats = replay_echo_plan(plan, len(loader), b)
+    print_rank_0(
+        f"Data echoing: {plan}, lane gaps {plan.lane_gaps(b)}, store={args.data_echo_store}, "
+        f"disjoint anchors={args.data_echo_disjoint_anchors}; {len(loader)} fresh batches -> "
+        f"{stats['steps']} steps per epoch per rank, up to {stats['max_held']} examples held"
+    )
+    # Per rank, so the ranks draw different anchors.
+    seed = (args.data_seed if args.data_seed is not None else args.seed) * 1000 + args.process_index
     return EchoLoader(
         loader,
         plan,

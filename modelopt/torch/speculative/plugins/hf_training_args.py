@@ -139,14 +139,11 @@ class TrainingArguments(BaseModel):
     # Data echoing: train on each fetched example for ``data_echo_uses`` steps instead of one, for
     # when fetching is the bottleneck (e.g. hidden states streamed from a serving engine). 1 is off.
     data_echo_uses: int = Field(1, ge=1)
-    # "example" spreads an example's uses at least ``data_echo_min_gap`` steps apart, among other
-    # examples; "batch" repeats each fresh batch ``data_echo_uses`` times in a row.
-    data_echo_mode: Literal["example", "batch"] = "example"
+    # Steps between two uses of an example: each slot of the per-rank batch replays its examples at
+    # its own fixed gap from [min_gap, min_gap + gap_spread). 1 repeats each fresh batch in a row.
     data_echo_min_gap: int = Field(32, ge=1)
-    # Examples held at once per rank; None sizes it to keep the gap, batch * (min_gap + pool + 1).
-    data_echo_capacity: int | None = Field(None, ge=1)
-    # Each step draws from the ``pool`` + needed examples that have waited longest.
-    data_echo_pool: int = Field(2, ge=0)
+    # Width of that window; None is min_gap // 4. Wider mixes examples more but holds more of them.
+    data_echo_gap_spread: int | None = Field(None, ge=0)
     # Where examples wait between uses: host memory frees the accelerator for long gaps.
     data_echo_store: Literal["device", "cpu"] = "device"
     # DFlash-family drafts: the uses of an example take disjoint slices of one random order of its
