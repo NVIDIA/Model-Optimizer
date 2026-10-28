@@ -814,6 +814,11 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     handled here. ``batched_mm`` (``torch.bmm``) and ``sonicmoe`` (opaque CUDA
     kernel) backends are not intercepted.
 
+    On ``grouped_mm`` the weight-input captures keyed on one expert (``local_hessian``,
+    ``imatrix``, ``gptq``) skip the batch, which holds every expert's rows, so those
+    algorithms calibrate the experts' weights without their inputs; max calibration
+    is unaffected.
+
     The non-gated variant (``up_proj`` instead of ``gate_up_proj``, used by
     NemotronH) is handled by :class:`_QuantNonGatedFusedExperts` via the
     ``_first_proj_attr`` / ``_is_gated`` hooks below; each layout names the
