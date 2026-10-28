@@ -923,11 +923,12 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         if torch.is_grad_enabled():
             # Slices written into one buffer would chain a full-size gradient copy per expert into
             # the backward (QAT), so stack them there.
-            return torch.stack([quantizers[idx](weight[idx]) for idx in range(self.num_experts)])
+            return torch.stack([q(w) for q, w in zip(quantizers, weight, strict=True)])
         # Each slice goes into the output as it is made: a stack would hold all of them beside it.
+        # Strict, so every row of the output is written or the call fails.
         out = torch.empty_like(weight)
-        for idx in range(self.num_experts):
-            out[idx] = quantizers[idx](weight[idx])
+        for idx, (q, w) in enumerate(zip(quantizers, weight, strict=True)):
+            out[idx] = q(w)
         return out
 
     @property
