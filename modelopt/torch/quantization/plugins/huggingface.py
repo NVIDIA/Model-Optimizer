@@ -1631,13 +1631,14 @@ def _fused_experts_wrapper(module):
 def _is_fused_experts_module(module):
     """Check if a module is a fused MoE expert container compatible with _QuantFusedExperts.
 
-    That is one :func:`_fused_experts_wrapper` detects, or one whose class registered a subclass of
-    it, as Nemotron-H's non-gated experts and transformers' FP8 experts do. Transposed containers
-    match too, though registration skips them: :func:`normalize_experts_impl_on_the_fly` must still
-    find them, to keep GPT-OSS's own wrapper on eager, the only forward on which it quantizes
-    ``down_proj``'s input (it intercepts the eager forward's ``bmm``/``matmul``).
+    That is one :func:`_fused_experts_wrapper` detects, one whose class registered a subclass of it,
+    as Nemotron-H's non-gated experts and transformers' FP8 experts do, or one already converted.
+    Transposed containers match too, though registration skips them:
+    :func:`normalize_experts_impl_on_the_fly` must still find them, to keep GPT-OSS's own wrapper on
+    eager, the only forward on which it quantizes ``down_proj``'s input (it intercepts the eager
+    forward's ``bmm``/``matmul``).
     """
-    if _fused_experts_wrapper(module) is not None:
+    if _fused_experts_wrapper(module) is not None or isinstance(module, _QuantFusedExperts):
         return True
     wrapper = QuantModuleRegistry.get(type(module)) if hasattr(module, "num_experts") else None
     return wrapper is not None and issubclass(wrapper, _QuantFusedExperts)
