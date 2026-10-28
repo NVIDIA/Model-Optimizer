@@ -251,12 +251,18 @@ class ReferenceRunner:
         return np.max(np.abs(data)), np.min(data), np.max(data)
 
     def _init_tensor_stats(self, batch_data: OrderedDict) -> OrderedDict:
-        """Seeds per-tensor statistics from the first batch."""
+        """Creates per-tensor statistics seeded from +/-inf sentinels.
+
+        Seeding from the sentinels and always folding the first batch through
+        _fold_tensor_stats (rather than taking its values directly) keeps a NaN in
+        the first batch from poisoning the running stat: max(-inf, nan) stays -inf,
+        the same way max(running_value, nan) already ignores NaN in every later
+        batch.
+        """
         stats = OrderedDict()
         for name, data in batch_data.items():
-            absmax, min_val, max_val = self._batch_stats(data)
             stats[name] = TensorStats(
-                absmax=absmax, min_val=min_val, max_val=max_val, shape=data.shape
+                absmax=-np.inf, min_val=np.inf, max_val=-np.inf, shape=data.shape
             )
         return stats
 
@@ -333,7 +339,9 @@ class ReferenceRunner:
                         # first batch's raw arrays are only safe to return while it is
                         # the only batch.
                         first_batch = None
-                        self._fold_tensor_stats(stats, batch_data)
+                    # Fold every batch, including the first, through the same sentinel
+                    # comparison so a NaN batch can never poison the running statistic.
+                    self._fold_tensor_stats(stats, batch_data)
             finally:
                 # Capture the output before restoring stdout
                 captured_output = string_buffer.getvalue()

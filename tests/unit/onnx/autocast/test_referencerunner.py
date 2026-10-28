@@ -498,3 +498,33 @@ def test_multi_batch_does_not_accumulate_batches(reference_runner, monkeypatch):
     assert results["Y2"].absmax == 20.0
     assert results["Y2"].min_val == 0.0
     assert results["Y2"].max_val == 20.0
+
+
+def test_multi_batch_nan_first_batch_does_not_poison_stats(reference_runner):
+    """A NaN in the first batch must not lock a tensor's running stats at NaN.
+
+    Seeding directly from the first batch (instead of sentinels folded through
+    _fold_tensor_stats) breaks this: max(nan, 10.0) is nan because Python's max
+    never replaces its first argument with a comparand that loses a NaN
+    comparison, so a later finite batch could never clear the contamination.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Batch 1: Y1 = X1 + X2 contains a NaN.
+        np.savez(
+            os.path.join(temp_dir, "batch_001.npz"),
+            X1=np.array([[np.nan, 0.0, 0.0]], dtype=np.float32),
+            X2=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+        )
+        # Batch 2: all finite, with a clear absmax/min/max to assert on.
+        np.savez(
+            os.path.join(temp_dir, "batch_002.npz"),
+            X1=np.array([[10.0, -3.0, 0.0]], dtype=np.float32),
+            X2=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+        )
+
+        results = reference_runner.run(temp_dir)
+
+        assert not np.isnan(results["Y1"].absmax)
+        assert results["Y1"].absmax == 10.0
+        assert results["Y1"].min_val == -3.0
+        assert results["Y1"].max_val == 10.0
