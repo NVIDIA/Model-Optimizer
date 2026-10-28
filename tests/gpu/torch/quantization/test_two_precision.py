@@ -15,6 +15,8 @@
 
 """Native two-precision GDN parity and an independent triangular-solve adjoint."""
 
+from functools import partial
+
 import pytest
 import torch
 from _test_utils.torch.quantization.linear_attention_reference import (
@@ -26,6 +28,7 @@ from _test_utils.torch.quantization.linear_attention_reference import (
 
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.linear_attention import LinearAttentionConfig, gdn_state_qat
+from modelopt.torch.quantization.linear_attention import _two_precision as two_precision
 from modelopt.torch.quantization.linear_attention._two_precision import (
     _native_replay,
     two_precision_decode,
@@ -52,8 +55,16 @@ def read_quantizer(request):
     ("length", "heads", "value_dim", "seed"), [(33, 2, 64, 41), (256, 12, 128, 20261030)]
 )
 def test_native_two_precision_forward_and_window_backward(
-    read_quantizer, length, heads, value_dim, seed
+    read_quantizer, monkeypatch, length, heads, value_dim, seed
 ):
+    replays = []
+    replay = torch.cuda.CUDAGraph.replay
+
+    def counted_replay(graph):
+        replays.append(True)
+        return replay(graph)
+
+    monkeypatch.setattr(torch.cuda.CUDAGraph, "replay", counted_replay)
     torch.manual_seed(seed)
     q, k = [
         torch.randn(length, heads, 128, device="cuda", dtype=torch.bfloat16)
@@ -122,11 +133,18 @@ def test_native_two_precision_forward_and_window_backward(
     torch.testing.assert_close(actual, reference, rtol=2e-3, atol=2e-6)
     upstream = torch.randn_like(actual)
     rng_state = torch.cuda.get_rng_state()
-    gradients = torch.autograd.grad(actual, params, upstream, retain_graph=True)
+    with monkeypatch.context() as eager:
+        eager.setattr(
+            two_precision,
+            "_graphed_window_forward",
+            lambda metadata, seed: partial(two_precision._window_forward, seed=seed),
+        )
+        gradients = torch.autograd.grad(actual, params, upstream, retain_graph=True)
     for _ in range(2):
         repeated = torch.autograd.grad(actual, params, upstream, retain_graph=True)
         for gradient, repeated_gradient in zip(gradients, repeated):
             torch.testing.assert_close(gradient, repeated_gradient, rtol=0, atol=0)
+    assert replays, "Window backward must execute CUDA graphs after capture warmup"
     torch.testing.assert_close(torch.cuda.get_rng_state(), rng_state)
     expected_gradients = torch.autograd.grad(reference, params, upstream)
     for gradient, expected_gradient in zip(gradients, expected_gradients):

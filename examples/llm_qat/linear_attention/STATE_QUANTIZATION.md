@@ -111,7 +111,8 @@ row and 32 value channels and encodes at handoff and every suffix token.
 
 | Stage | Forward | Backward |
 | --- | --- | --- |
-| Prefix | One native vLLM chunked prefill | Reconstruct intra-chunk factors, then upstream FLA backward |
+| GDN prefix with public vLLM and raw gates | One native vLLM chunked prefill | Reuse native prepared operands and triangular factor in FLA backward |
+| KDA prefix | One native vLLM chunked prefill | Reconstruct intra-chunk factors, then upstream FLA backward |
 | Suffix token | One native vLLM decode | Explicit recurrence adjoint |
 | State QDQ | ModelOpt TensorQuantizer | Identity STE |
 
@@ -119,6 +120,10 @@ Backward reconstruction avoids retaining a second full FLA forward graph. Decode
 also has no second Torch recurrence in forward. These first-order approximations
 propagate gradients through the prefix, handoff and recurrent writes; they are
 not exact derivatives of floating-point rounding or a discontinuous quantizer.
+GDN backward differentiates the raw gate projections consumed by vLLM and retains
+its cumulative gates and triangular factor, avoiding a separately rounded FLA
+inverse. FLA still reconstructs chunk states; this improves numerical consistency
+without establishing an exact derivative of native inference arithmetic.
 
 Matching the selected serving trajectory does not establish the best QAD training
 strategy. A controlled comparison with chunk-boundary QDQ training is deferred.
