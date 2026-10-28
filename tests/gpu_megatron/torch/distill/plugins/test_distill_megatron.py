@@ -544,6 +544,22 @@ def test_topk_logits_kl_loss_memory():
     assert torch.cuda.max_memory_allocated() - base < 1.5 * student.nbytes
 
 
+def test_topk_logits_kl_loss_offset_invariant():
+    """A common logit offset far larger than the logits changes neither the loss nor the gradient."""
+    cfg = SimpleNamespace(tensor_model_parallel_size=1)
+    torch.manual_seed(SEED)
+    # Multiples of 1/8 below 16 stay exact in fp32 after adding 2**20.
+    student = torch.randint(-64, 64, (4, 3, 16)) / 8
+    teacher = torch.randint(-64, 64, (4, 3, 16)) / 8
+    results = []
+    for offset in (0.0, 2.0**20):
+        shifted = (student + offset).requires_grad_()
+        loss = TopLogitsKLLoss(cfg, top_k=4)(shifted, teacher + offset)[0]
+        loss.sum().backward()
+        results.append((loss.detach(), shifted.grad))
+    torch.testing.assert_close(results[1], results[0])
+
+
 @pytest.mark.parametrize("temperature", [0.5, 2.0, 3.7])
 def test_logits_kl_losses_temperature_scaling(temperature):
     """Dense and Top-K losses match a plain ``log_softmax(x / T)`` reference at T != 1."""

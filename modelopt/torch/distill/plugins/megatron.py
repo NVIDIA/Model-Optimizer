@@ -414,59 +414,61 @@ def _row_chunks(rows: Tensor) -> list[slice]:
 
 def _scaled_logsumexp(
     logits: Tensor, temperature: float, tp_group, top_k: int = 0
-) -> tuple[Tensor, Tensor, Tensor]:
-    """fp32 ``logsumexp(logits / temperature)`` over the TP-sharded vocab dim, by row chunks.
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """fp32 row max ``m`` and ``logsumexp(x - m)`` of ``x = logits / temperature``, by row chunks.
 
-    Also returns the local Top-K values and indices of ``logits / temperature`` (empty if ``top_k=0``).
+    Both are over the TP-sharded vocab dim. Also returns the local Top-K values of ``x - m`` and their
+    indices (empty if ``top_k=0``). Working relative to ``m`` keeps the results exact for logits with
+    a large common offset.
     """
     rows = logits.detach().reshape(-1, logits.size(-1))
     # Rounding is monotonic, so this is also the max of the scaled fp32 logits.
-    lse = rows.amax(dim=-1, keepdim=True).float() / temperature
+    row_max = rows.amax(dim=-1, keepdim=True).float() / temperature
     if tp_group is not None:
-        torch.distributed.all_reduce(lse, op=torch.distributed.ReduceOp.MAX, group=tp_group)
-    sum_exp = torch.empty_like(lse)
-    top_vals = lse.new_empty(rows.size(0), top_k)
+        torch.distributed.all_reduce(row_max, op=torch.distributed.ReduceOp.MAX, group=tp_group)
+    sum_exp = torch.empty_like(row_max)
+    top_vals = row_max.new_empty(rows.size(0), top_k)
     top_idx = torch.empty(rows.size(0), top_k, dtype=torch.long, device=rows.device)
     for c in _row_chunks(rows):
-        scaled = rows[c].to(torch.float32, copy=True).div_(temperature)
+        shifted = rows[c].to(torch.float32, copy=True).div_(temperature).sub_(row_max[c])
         if top_k:
-            top_vals[c], top_idx[c] = torch.topk(scaled, top_k, dim=-1)
-        sum_exp[c] = scaled.sub_(lse[c]).exp_().sum(dim=-1, keepdim=True)
+            top_vals[c], top_idx[c] = torch.topk(shifted, top_k, dim=-1)
+        sum_exp[c] = shifted.exp_().sum(dim=-1, keepdim=True)
     if tp_group is not None:
         torch.distributed.all_reduce(sum_exp, group=tp_group)
     shape = (*logits.shape[:-1], -1)
-    return (lse + sum_exp.log()).view(shape), top_vals.view(shape), top_idx.view(shape)
+    return tuple(t.view(shape) for t in (row_max, sum_exp.log(), top_vals, top_idx))
 
 
 class _ScaledLogSumExpAndGather(torch.autograd.Function):
-    """``_scaled_logsumexp(logits)`` and ``(logits / temperature).gather(-1, index)`` in fp32.
+    """``logsumexp(x - m)`` and ``(x - m).gather(-1, index)`` of ``_scaled_logsumexp`` in fp32.
 
     Saves only ``logits`` and writes their gradient chunk by chunk, instead of keeping fp32 copies
-    of the full logits alive for backward.
+    of the full logits alive for backward. ``m`` cancels out of the log-probs, so it gets no gradient.
     """
 
     @staticmethod
     def forward(ctx, logits, index, temperature, tp_group):
-        lse, _, _ = _scaled_logsumexp(logits, temperature, tp_group)
-        ctx.save_for_backward(logits, index, lse)
+        row_max, lse, _, _ = _scaled_logsumexp(logits, temperature, tp_group)
+        ctx.save_for_backward(logits, index, row_max, lse)
         ctx.temperature, ctx.tp_group = temperature, tp_group
-        return lse, logits.gather(-1, index).float() / temperature
+        return lse, logits.gather(-1, index).float() / temperature - row_max
 
     @staticmethod
     def backward(ctx, grad_lse, grad_vals):
-        logits, index, lse = ctx.saved_tensors
+        logits, index, row_max, lse = ctx.saved_tensors
         if ctx.tp_group is not None:
             # As in the autograd all-reduce of the normalizer, every TP rank's loss reaches each shard.
             grad_lse = grad_lse.clone()
             torch.distributed.all_reduce(grad_lse, group=ctx.tp_group)
         rows = logits.reshape(-1, logits.size(-1))
-        grad_lse, lse = grad_lse.reshape(-1, 1), lse.reshape(-1, 1)
+        row_max, lse, grad_lse = row_max.reshape(-1, 1), lse.reshape(-1, 1), grad_lse.reshape(-1, 1)
         index, grad_vals = index.reshape(-1, index.size(-1)), grad_vals.reshape(-1, index.size(-1))
         grad = torch.empty_like(rows)
         for c in _row_chunks(rows):
-            # softmax(x / T) * grad_lse, plus grad_vals scattered to the gathered entries, over T.
-            g = rows[c].to(torch.float32, copy=True).div_(ctx.temperature).sub_(lse[c]).exp_()
-            g.mul_(grad_lse[c]).scatter_add_(-1, index[c], grad_vals[c])
+            # softmax(x) * grad_lse, plus grad_vals scattered to the gathered entries, over T.
+            g = rows[c].to(torch.float32, copy=True).div_(ctx.temperature).sub_(row_max[c])
+            g.sub_(lse[c]).exp_().mul_(grad_lse[c]).scatter_add_(-1, index[c], grad_vals[c])
             grad[c] = g.div_(ctx.temperature)
         return grad.view(logits.shape), None, None, None
 
@@ -539,9 +541,10 @@ class TopLogitsKLLoss(LogitsKLLoss):
         # We take K from each rank and then find the global Top-K of all those.
         local_top_k = min(self.top_k, targets.size(-1))
 
-        # Full-vocab normalizers (inherent to the ghost-token formulation) and the local Top-K.
+        # Full-vocab normalizers (inherent to the ghost-token formulation) and the local Top-K, both
+        # relative to each distribution's row max, which cancels out of the log-probs.
         tp_group = parallel_state.get_tensor_model_parallel_group() if tp_size > 1 else None
-        teacher_lse, top_teacher_vals, top_idx = _scaled_logsumexp(
+        _, teacher_lse, top_teacher_vals, top_idx = _scaled_logsumexp(
             targets, self._temperature, tp_group, local_top_k
         )
         student_lse, top_student_vals = _ScaledLogSumExpAndGather.apply(
