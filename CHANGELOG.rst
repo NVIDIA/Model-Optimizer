@@ -91,6 +91,7 @@ Changelog
 - EAGLE training with ``eagle_decoder_type="kimik2"`` now downloads the Kimi-K2 modeling code from a pinned ``moonshotai/Kimi-K2-Thinking`` revision and verifies its SHA-256 hashes before importing it. Offline runs need that revision in the Hugging Face cache.
 - Fix the column-major ``DequantizeLinear`` surgery leaving a negative or default ``axis`` attribute unchanged while transposing the weight it refers to, which changed the model's output. Re-run the surgery on affected models.
 - Fix QAT of Hugging Face fused MoE experts with non-reentrant activation checkpointing, as in the ``examples/llm_qat`` FSDP2 config: the experts' ``F.linear`` interception stayed installed after the recompute, and training crashed with ``aten.mm.default got mixed torch.Tensor and DTensor``.
+- Fix ``modelopt.torch.utils.random._get_generator`` computing ``is_manual`` after overwriting ``seed`` with the broadcast value, so it was always ``True`` and an unseeded generator was never re-synchronized across ranks once ``torch.distributed`` became available; an explicit ``seed=0`` is also now respected instead of being treated as unset.
 
 0.48.0 (2026-10-xx)
 ^^^^^^^^^^^^^^^^^^^
