@@ -1054,7 +1054,9 @@ def fsdp2_aware_weight_update(
     Args:
         root_model (nn.Module): The root model of the FSDPModule.
         modules_to_update (list): The list of modules to update which should be a list of modules that are
-            direct children of the FSDPModule.
+            direct children of the FSDPModule. A list is read again when the context exits, so a caller
+            may append modules of the same FSDP unit to it inside the context, and their weights are
+            re-registered with FSDP2 too (the export's held weight windows rely on this).
         reshard (bool): Whether to reshard the FSDP root module after the weight update.
 
     Returns:
