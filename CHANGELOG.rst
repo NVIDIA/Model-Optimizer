@@ -22,6 +22,7 @@ Changelog
 
 *Speculative Decoding*
 
+- Add data echoing to speculative-decoding training: with ``training.data_echo_uses`` above 1, each fetched example, such as hidden states streamed from a serving engine, is trained on for several steps, spread out among other examples, which cuts the serving cost when it bounds training. DFlash-family drafts can give the uses of an example disjoint anchor positions with ``training.data_echo_disjoint_anchors``; see `examples/speculative_decoding/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding#data-echoing>`_.
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
 
 *Megatron Framework (M-LM / M-Bridge)*

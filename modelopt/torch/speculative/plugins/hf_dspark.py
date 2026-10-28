@@ -374,7 +374,7 @@ class HFDSparkModel(HFDFlashModel):
 
         # 3. Random anchor sampling (inherited).
         anchor_positions, block_keep_mask = self._sample_anchor_positions(
-            seq_len, loss_mask, device
+            seq_len, loss_mask, device, anchor_key=kwargs.pop("anchor_key", None)
         )
         n_blocks = anchor_positions.shape[1]
 
