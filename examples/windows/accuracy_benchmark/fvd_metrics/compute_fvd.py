@@ -272,15 +272,22 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def resolve_weights(weights_arg: str | None) -> Path:
+def resolve_weights(weights_arg: str | None, expected_sha256: str | None = None) -> Path:
     """Return path to weights file, downloading and verifying if necessary."""
     if weights_arg:
         p = Path(weights_arg)
         if not p.exists():
             raise FileNotFoundError(f"Weights not found: {p}")
+        if expected_sha256 is not None and _sha256(p) != expected_sha256.lower():
+            raise RuntimeError("Supplied I3D weights failed SHA-256 verification.")
         return p
 
     if DEFAULT_CACHE.exists():
+        if _sha256(DEFAULT_CACHE) != WEIGHTS_SHA256:
+            raise RuntimeError(
+                "Cached I3D weights failed SHA-256 verification. "
+                "Remove the cached file and download verified weights again."
+            )
         return DEFAULT_CACHE
 
     log.info(f"Downloading I3D weights to {DEFAULT_CACHE} …")
@@ -303,8 +310,8 @@ def resolve_weights(weights_arg: str | None) -> Path:
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 
-def main():
-    """Parse arguments, load model, extract features, compute and report FVD."""
+def parse_args() -> argparse.Namespace:
+    """Parse and validate FVD command-line options."""
     parser = argparse.ArgumentParser(
         description="Compute FVD between two video sets (I3D, 1024-dim features).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -313,6 +320,11 @@ def main():
     parser.add_argument("--gen-dir", required=True, help="Generated videos directory")
     parser.add_argument(
         "--weights", default=None, help="Path to I3D weights (auto-downloaded if omitted)"
+    )
+    parser.add_argument(
+        "--weights-sha256",
+        default=None,
+        help="Trusted SHA-256 for --weights; required for custom TorchScript archives",
     )
     parser.add_argument("--device", default=None, help="torch device (auto-detected if omitted)")
     parser.add_argument(
@@ -341,13 +353,26 @@ def main():
     )
     parser.add_argument("--output", default=None, help="Path to save JSON results")
     args = parser.parse_args()
+    if args.weights_sha256 and not args.weights:
+        parser.error("--weights-sha256 requires --weights")
+
+    return args
+
+
+def main():
+    """Load the model, extract features, compute and report FVD."""
+    args = parse_args()
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     log.info(f"Device: {device}")
 
-    weights_path = resolve_weights(args.weights)
+    weights_path = resolve_weights(args.weights, args.weights_sha256)
     user_supplied_weights = args.weights is not None
-    model = load_i3d(str(weights_path), device, allow_unsafe_pickle=not user_supplied_weights)
+    model = load_i3d(
+        str(weights_path),
+        device,
+        allow_unsafe_pickle=not user_supplied_weights or bool(args.weights_sha256),
+    )
     log.info(f"I3D model loaded from {weights_path.name} (1024-dim features)")
 
     ref_paths = list_videos(args.ref_dir)

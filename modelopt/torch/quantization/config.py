@@ -426,7 +426,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         ):
             raise ValueError(
                 "Only blockwise dynamic quantization is supported with quantization "
-                "formats E{num_bis[0]}M{num_bits[1]}."
+                f"formats E{num_bits[0]}M{num_bits[1]}."
             )
         return self
 
