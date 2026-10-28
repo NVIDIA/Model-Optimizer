@@ -75,7 +75,7 @@ def setup_distributed_args(args):
     """Initialize and attach ``args.dist_state`` (single-process if FSDP2 off)."""
     if getattr(args, "use_fsdp2", False):
         # Raise the collective timeout above NCCL's 30-min default: rank 0's checkpoint write can
-        # exceed it, and PyTorch 2.8 has no per-call barrier() timeout (must be set at PG creation).
+        # exceed it, and barrier() has no per-call timeout (it must be set at PG creation).
         dist_utils.setup(timeout=timedelta(hours=2))
         rank = dist_utils.rank()
         args.dist_state = DistributedState(

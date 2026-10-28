@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed._composable_state import _get_module_state
 from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor import DTensor, Replicate
@@ -436,11 +437,6 @@ def is_pow2(n):
 
 def _get_fsdp2_mesh(module: nn.Module):
     """Get the mesh info of the model."""
-    try:
-        from torch.distributed._composable_state import _get_module_state
-    except ImportError:
-        return None
-
     fsdp_state = _get_module_state(module)
     pg = fsdp_state._fsdp_param_group
     if pg is None:

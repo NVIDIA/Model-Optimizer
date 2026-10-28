@@ -33,9 +33,8 @@ jobs:
           extra_args: --results=verified,unknown --exclude-detectors=lob
       - name: Run code quality checks
         run: |
-          # torch 2.14 breaks this env: torchvision::nms fails to register, which disables
-          # modelopt's transformers plugin and takes the ARGUMENTS.md hook down with it.
-          echo "torch<2.14" > /tmp/pip-constraints.txt
+          # Newest torch this env is validated with; bump after checking the next release.
+          echo "torch<2.15" > /tmp/pip-constraints.txt
           # Both: nox builds the session venv with uv, which reads UV_CONSTRAINT, not PIP_CONSTRAINT.
           export PIP_CONSTRAINT=/tmp/pip-constraints.txt UV_CONSTRAINT=/tmp/pip-constraints.txt
           pip install nox uv && nox -s pre_commit_all

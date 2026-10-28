@@ -27,6 +27,7 @@ import torch
 import torch.nn as nn
 import transformers
 from torch import Tensor
+from torch.distributed.tensor import Shard
 from torch.nn.functional import linear
 from transformers.integrations.finegrained_fp8 import FP8Experts, FP8Linear
 from transformers.models.t5.modeling_t5 import T5Attention
@@ -51,11 +52,6 @@ from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
 
 logger = logging.getLogger(__name__)
-
-try:
-    from torch.distributed.tensor import Shard
-except ImportError:
-    Shard = None
 
 try:
     import kitchen
@@ -525,12 +521,12 @@ class HFParallelLinear(torch.nn.Linear, DynamicModule):
 
 class HFColumnParallelLinear(HFParallelLinear):
     supported_hf_tp_plans = ["colwise", "colwise_rep"]
-    shard = (Shard(0),) if Shard is not None else None
+    shard = (Shard(0),)
 
 
 class HFRowParallelLinear(HFParallelLinear):
     supported_hf_tp_plans = ["rowwise", "rowwise_rep"]
-    shard = (Shard(1),) if Shard is not None else None
+    shard = (Shard(1),)
 
 
 class _QuantHFParallelLinear(_ParallelLinear):

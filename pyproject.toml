@@ -37,7 +37,7 @@ dependencies = [
     "nvidia-ml-py>=12",
     "packaging",
     "setuptools>=80",   # torch.utils.cpp_extension imports setuptools at load time
-    "torch>=2.8",
+    "torch>=2.10",
     "tqdm",
     # modelopt.torch
     "PyYAML>=6.0",

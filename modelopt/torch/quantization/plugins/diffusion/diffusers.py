@@ -49,10 +49,7 @@ from torch.nn import functional as F
 from torch.onnx import symbolic_helper
 
 if TYPE_CHECKING:
-    if hasattr(torch.onnx._internal, "jit_utils"):
-        from torch.onnx._internal.jit_utils import GraphContext
-    else:  # torch >= 2.9
-        from torch.onnx._internal.torchscript_exporter.jit_utils import GraphContext
+    from torch.onnx._internal.torchscript_exporter.jit_utils import GraphContext
 
 from ...export_onnx import export_fp8_mha
 from ...nn import (
