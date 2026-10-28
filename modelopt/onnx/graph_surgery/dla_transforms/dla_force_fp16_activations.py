@@ -454,25 +454,26 @@ def _apply_force_fp16_activations(model):
         if value.type.tensor_type.elem_type != fp32 or value.name in native_values:
             continue
         producer = cache.get_producer(value.name)
-        if producer is not None and producer.op_type == "Squeeze":
-            source = producer.input[0]
-            if source not in preserved:
-                output = cache.unique_name(source + "_to_fp32_fp16")
-                before.setdefault(id(producer), []).append(_cast(source, output, fp32, cache))
-                producer.input[0] = output
+        public_cast = _is_cast(producer, fp32)
+        if producer is not None and (producer.op_type == "Squeeze" or public_cast):
+            if not public_cast:
+                source = producer.input[0]
+                if source not in preserved:
+                    output = cache.unique_name(source + "_to_fp32_fp16")
+                    before.setdefault(id(producer), []).append(_cast(source, output, fp32, cache))
+                    producer.input[0] = output
             internal = [
                 (consumer, port)
                 for consumer, port in cache.get_consumers(value.name)
                 if not _fp32_control(consumer, port, native_nodes, fp32_inputs)
                 and not _is_cast(consumer, fp16)
+                and (not public_cast or consumer.op_type != "Cast")
             ]
             if internal:
                 view = cache.unique_name(value.name + "_fp16")
                 after.setdefault(id(producer), []).append(_cast(value.name, view, fp16, cache))
                 for consumer, port in internal:
                     consumer.input[port] = view
-            continue
-        if _is_cast(producer, fp32):
             continue
         tensor = cache.get_init(value.name) if producer is None else None
         if producer is None and (tensor is None or tensor.data_type != fp16):

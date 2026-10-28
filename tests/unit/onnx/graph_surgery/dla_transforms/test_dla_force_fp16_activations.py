@@ -1053,3 +1053,98 @@ def test_fp16_public_conversion_refuses_invalid_control_types_before_saving(
         )
     assert source.read_bytes() == original
     assert output.read_bytes() == previous if existing_output else not output.exists()
+
+
+@pytest.mark.parametrize("source_type", [T.INT32, T.INT64])
+@pytest.mark.parametrize("operation", ["Mul", "Add"])
+@pytest.mark.parametrize("control_reader", [False, True])
+def test_public_float_cast_keeps_boundaries_and_typed_internal_readers(
+    source_type, operation, control_reader
+):
+    """Share a half view for arithmetic while preserving public values and explicit Cast readers."""
+    nodes = [
+        h.make_node("Cast", ["x"], ["public"], to=T.FLOAT),
+        h.make_node(operation, ["public", "weight"], ["result"]),
+        h.make_node("Cast", ["public"], ["half"], to=T.FLOAT16),
+        h.make_node("Cast", ["public"], ["alias"], to=T.FLOAT),
+        h.make_node("Cast", ["public"], ["integer"], to=T.INT64),
+    ]
+    inputs = [_value("x", [2], source_type)]
+    outputs = [
+        _value("public", [2]),
+        _value("result", [2]),
+        _value("half", [2], T.FLOAT16),
+        _value("alias", [2]),
+        _value("integer", [2], T.INT64),
+    ]
+    dtype = np.int32 if source_type == T.INT32 else np.int64
+    feeds = {"x": np.array([1, 2] if control_reader else [2049, 2051], dtype)}
+    if control_reader:
+        nodes.append(h.make_node("Resize", ["image", "", "public"], ["resized"], mode="nearest"))
+        inputs.append(_value("image", [1, 2]))
+        outputs.append(_value("resized", [1, 4]))
+        feeds["image"] = np.array([[4, 5]], np.float32)
+    weight = np.array([2, 3], np.float32)
+    model = _model(nodes, inputs, outputs, [nh.from_array(weight, "weight")])
+    expected = ReferenceEvaluator(model).run(None, feeds)
+    expected[1] = (
+        (expected[2] * weight.astype(np.float16))
+        if operation == "Mul"
+        else (expected[2] + weight.astype(np.float16))
+    ).astype(np.float32)
+    changed = _apply_force_fp16_activations(model)
+    onnx.checker.check_model(changed, full_check=True)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    actual = ort.InferenceSession(
+        changed.SerializeToString(), options, providers=["CPUExecutionProvider"]
+    ).run(None, feeds)
+    for left, right in zip(actual, expected):
+        np.testing.assert_array_equal(left, right)
+    assert actual[0].dtype == np.float32
+    casts = {node.output[0]: node for node in changed.graph.node if node.op_type == "Cast"}
+    assert casts["half"].input[0] == "public"
+    if not control_reader:
+        assert casts["alias"].input[0] == "public"
+        assert casts["integer"].input[0] == "public"
+    else:
+        resize = next(node for node in changed.graph.node if node.op_type == "Resize")
+        assert resize.input[2] == "public"
+
+
+@pytest.mark.parametrize("source_type", [T.INT32, T.INT64])
+def test_public_fp16_conversion_supports_shared_float_cast_outputs(tmp_path, source_type):
+    """Convert and reload a valid shared integer-to-FLOAT graph through the real public API."""
+    shape = [1, 1, 1, 2]
+    model = _model(
+        [
+            h.make_node("Cast", ["x"], ["public"], to=T.FLOAT),
+            h.make_node("Mul", ["public", "weight"], ["result"]),
+        ],
+        [_value("x", shape, source_type)],
+        [_value("public", shape), _value("result", shape)],
+        [nh.from_array(np.array([2, 3], np.float32).reshape(shape), "weight")],
+    )
+    source, output = tmp_path / "source.onnx", tmp_path / "output.onnx"
+    onnx.save(model, source)
+    make_dla_compatible(
+        str(source),
+        str(output),
+        use_external_data=False,
+        verbose=False,
+        force_fp16_activations=True,
+    )
+    changed = onnx.load(output)
+    onnx.checker.check_model(changed, full_check=True)
+    dtype = np.int32 if source_type == T.INT32 else np.int64
+    values = np.array([2049, 2051], dtype).reshape(shape)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    actual = ort.InferenceSession(
+        changed.SerializeToString(), options, providers=["CPUExecutionProvider"]
+    ).run(None, {"x": values})
+    np.testing.assert_array_equal(actual[0], values.astype(np.float32))
+    expected = (values.astype(np.float16) * np.array([2, 3], np.float16).reshape(shape)).astype(
+        np.float32
+    )
+    np.testing.assert_array_equal(actual[1], expected)
