@@ -121,7 +121,7 @@ Changelog
 - ``mtq.compress`` now rejects W4A8 weights with ``NotImplementedError``: a compressed W4A8 model could neither run nor be reloaded.
 - The ``evaluation`` agent skill's NeMo Gym MRCR recipe no longer passes ``HF_TOKEN`` on the command line, where other users on the node could read it, and keeps its rollout script in a private temporary directory instead of a fixed ``/tmp`` path.
 - Fake quantization of an NVFP4 affine KV cache (``nvfp4_affine``) now applies its calibrated bias; it ignored the bias and saturated the simulated KV cache. Re-quantize and re-evaluate models quantized with it.
-- Fix learnable LSQ weight scales getting no gradient on Transformer Engine ``LayerNormLinear`` layers (Megatron ``TELayerNormColumnParallelLinear``), and a zero gradient on Megatron-Core and Transformer Engine ``Linear`` layers whose weight is frozen, so scale learning left those scales at their PTQ values.
+- Fix learnable LSQ weight scales getting no gradient on Transformer Engine ``LayerNormLinear`` layers (Megatron ``TELayerNormColumnParallelLinear``), and a zero gradient on Megatron-Core and Transformer Engine ``Linear`` layers whose weight is frozen, so scale learning left those scales at their PTQ values. The weight gradient of a quantized ``LayerNormLinear`` now also goes through the weight quantizer's backward, as for other linear layers, which changes it for weight quantizers whose backward is not a pass-through (e.g. ``pass_through_bwd=False``).
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^
