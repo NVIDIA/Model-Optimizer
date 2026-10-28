@@ -1906,6 +1906,33 @@ class TestGroupedMMExperts:
             expected = torch.stack([q(weight[idx]) for idx, q in enumerate(quantizers)])
         torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
+    def test_disabled_quantizers_keep_their_pre_quant_scale(self):
+        """A disabled weight quantizer still applies its pre-quant scale, as on the eager path, so the
+        grouped forward does not pass the stored weight through unscaled."""
+        self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.manual_seed(0)
+        models = [_GroupedMoEModel("eager"), _GroupedMoEModel("grouped_mm")]
+        models[1].load_state_dict(models[0].state_dict())
+        scale = torch.rand(HIDDEN_DIM) + 0.5
+        hidden = torch.randn(8, HIDDEN_DIM)
+        top_k_index = torch.randint(0, NUM_EXPERTS, (8, TOP_K))
+        top_k_weights = torch.softmax(torch.randn(8, TOP_K), dim=1)
+        outputs = []
+        try:
+            register_fused_experts_on_the_fly(models[0])
+            for model in models:
+                experts = QuantModuleRegistry.convert(model.moe.experts)
+                for q in experts.modules():
+                    if isinstance(q, TensorQuantizer):
+                        q.disable()
+                for q in experts.gate_up_proj_weight_quantizers:
+                    q.pre_quant_scale = scale
+                with torch.no_grad():
+                    outputs.append(experts(hidden, top_k_index, top_k_weights))
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.testing.assert_close(outputs[1], outputs[0], rtol=1e-4, atol=1e-6)
+
     def test_an_eager_only_wrapper_refuses_the_grouped_forward(self):
         """A wrapper whose weights are defined on the eager forward raises if the grouped one runs,
         rather than quantize the stored weight."""
