@@ -85,12 +85,15 @@ class MaxCalibrator(_Calibrator):
     def compute_amax(self):
         """Return the absolute max of all tensors collected."""
         amax = self._calib_amax
-        if amax is not None and amax.device.type != "meta":
+        # One host sync on the happy path; finish_stats_collection calls this twice per quantizer.
+        if (
+            amax is not None
+            and amax.device.type != "meta"
+            and not (torch.isfinite(amax) & (amax >= 0)).all()
+        ):
             assert not torch.isnan(amax).any(), "detected nan values in amax"
             assert not torch.isinf(amax).any(), "detected inf values in amax"
-            assert (amax >= 0).all(), (
-                "detected negative values after abs, could be torch or cuda bug"
-            )
+            raise AssertionError("detected negative values after abs, could be torch or cuda bug")
         return amax
 
     def __str__(self):

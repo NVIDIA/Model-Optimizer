@@ -1316,7 +1316,7 @@ def enable_stats_collection(model: nn.Module):
 
 def finish_stats_collection(model: nn.Module, method: str | None = None, **kwargs):
     """Finish stats collection for all quantizers in the model."""
-    for _, module in model.named_modules():
+    for name, module in model.named_modules():
         if not isinstance(module, TensorQuantizer) or module._disabled:
             continue
 
@@ -1327,11 +1327,15 @@ def finish_stats_collection(model: nn.Module, method: str | None = None, **kwarg
 
         cal = getattr(module, "_calibrator", None)
         if cal and not getattr(module, "_dynamic", False):
-            if method == "entropy":
-                if cal.compute_amax(method) is not None:
-                    module.load_calib_amax("entropy", **kwargs)
-            elif cal.compute_amax(**kwargs) is not None:
-                module.load_calib_amax(**kwargs)
+            # Calibrators validate amax only here, after the whole forward loop; name the culprit.
+            try:
+                if method == "entropy":
+                    if cal.compute_amax(method) is not None:
+                        module.load_calib_amax("entropy", **kwargs)
+                elif cal.compute_amax(**kwargs) is not None:
+                    module.load_calib_amax(**kwargs)
+            except AssertionError as e:
+                raise AssertionError(f"{name}: {e}") from e
 
         if module.bias_calibrator is not None and module.bias_type == "static":
             module.load_calib_bias()
