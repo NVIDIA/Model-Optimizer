@@ -1074,8 +1074,10 @@ def _fused_expert_projections(module: nn.Module):
     """Yield ``(weight_name, weight, weight_quantizers, input_quantizer)`` per fused-experts projection.
 
     ``weight`` is the 3-D ``(num_experts, out, in)`` parameter, ``weight_quantizers`` holds one
-    quantizer per expert, and ``input_quantizer`` is shared by the experts and runs once per expert
-    forward with ``module._current_expert_idx`` already set to that expert.
+    quantizer per expert, and ``input_quantizer`` is shared by the experts. Under eager it runs once
+    per expert forward with ``module._current_expert_idx`` set to that expert; under grouped_mm once
+    per projection, on every expert's rows, with the index cleared (``None``), so a capture keyed on
+    it skips that batch.
     """
     first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     for weight_name, quantizers_name, input_q_name in (

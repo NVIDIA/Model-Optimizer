@@ -1537,7 +1537,10 @@ def _is_fused_experts_module(module):
     """Check if a module is a fused MoE expert container compatible with _QuantFusedExperts.
 
     See :func:`_fused_experts_wrapper` for the recognized layouts (gated
-    ``gate_up_proj`` and non-gated ``up_proj``).
+    ``gate_up_proj`` and non-gated ``up_proj``). Transposed containers match too, though
+    registration skips them: :func:`force_eager_experts_impl_on_the_fly` must still put them on
+    eager, the only forward on which GPT-OSS's own wrapper quantizes ``down_proj``'s input (it
+    intercepts the eager forward's ``bmm``/``matmul``).
     """
     return _fused_experts_wrapper(module) is not None
 
@@ -1578,8 +1581,9 @@ def register_fused_experts_on_the_fly(model):
                 f"Fused MoE experts '{name}' ({mod_type.__name__}) store their weights transposed "
                 "(num_experts, in_dim, out_dim), which the generic _QuantFusedExperts export path "
                 "does not support: it splits gate/up along dim 1, which is the input dim for this "
-                "layout. Leaving them unquantized; such a class needs its own quantized wrapper, as "
-                "GptOssExperts and Llama4TextExperts have."
+                "layout. Leaving them unquantized, so export_hf_checkpoint will refuse their MoE "
+                "block; such a class needs its own quantized wrapper, as GptOssExperts and "
+                "Llama4TextExperts have."
             )
             continue
         if wrapper is not None:
