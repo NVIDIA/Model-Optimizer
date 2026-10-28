@@ -178,6 +178,15 @@ at a time, differentiating both the read path and the raw-input triangular solve
 It does not build a second Torch forward graph during the native forward.
 Quantization and BF16/FP16 rounding use identity straight-through gradients.
 
+Complete 16-token backward windows automatically use CUDA graphs through
+PyTorch's `make_graphed_callables`. It captures the original Torch forward and
+backward operators without compiler rewrites, preserving their rounding. Capture warms up on first
+use and is shared across layers with matching shapes. Partial windows remain
+eager, and packed-sequence boundaries can change between batches. If a surrounding
+training CUDA graph is capturing, it records the window operators directly.
+This captures the window adjoint, not the complete training iteration; MLP graph
+capture is configured separately through Megatron's training settings.
+
 Policy and named quantizers use ModelOpt's existing save/restore lifecycle.
 The native backend owns rounding and runtime rings; these per-batch tensors are
 not model checkpoint metadata. HF weights alone do not describe replay policy.

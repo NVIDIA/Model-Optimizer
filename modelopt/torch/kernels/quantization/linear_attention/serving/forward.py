@@ -51,7 +51,20 @@ def _state_layout(state):
     return state.transpose(-1, -2).contiguous()
 
 
-def prefill(q, k, v, g, beta, state, scale, normalize=False, gate_inputs=None, *, precision="vllm"):
+def prefill(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    state,
+    scale,
+    normalize=False,
+    gate_inputs=None,
+    *,
+    precision="vllm",
+    return_intermediates=False,
+):
     """Run native chunk prefill, including the selected profile's raw-gate preparation."""
     # Match BF16 projection outputs; A_log and bias retain their parameter precision.
     gdn, kda = _kernels(precision)
@@ -81,7 +94,16 @@ def prefill(q, k, v, g, beta, state, scale, normalize=False, gate_inputs=None, *
         "use_qk_l2norm_in_kernel": normalize,
         "cu_seqlens": _prefill_metadata(q.device, q.shape[1]),
     }
-    if channel and gate_inputs is not None:
+    intermediates = None
+    if return_intermediates and precision == "vllm" and not channel and gate_inputs is not None:
+        # Retain the native factor for training instead of rebuilding a different FLA inverse.
+        from vllm.third_party.flash_linear_attention.ops.chunk import chunk_gated_delta_rule_fwd
+
+        kwargs.pop("use_qk_l2norm_in_kernel")  # The fused preparation already normalized Q/K.
+        cumulative, out, factor, final, *_ = chunk_gated_delta_rule_fwd(q, k, v, g, beta, **kwargs)
+        intermediates = (q, k, g, beta, cumulative, factor)
+        out = out.to(q.dtype)
+    elif channel and gate_inputs is not None:
         raw_g, raw_beta, rate, bias = gate_inputs
         # Kimi fuses beta activation; standalone KDA takes already activated beta.
         beta_arg = (
@@ -101,7 +123,8 @@ def prefill(q, k, v, g, beta, state, scale, normalize=False, gate_inputs=None, *
         out, final = kda.chunk_kda(q, k, v, g, beta, **kwargs)
     else:
         out, final = gdn.chunk_gated_delta_rule(q, k, v, g, beta, **kwargs)
-    return out[0], _state_layout(final[0])
+    result = (out[0], _state_layout(final[0]))
+    return (*result, intermediates) if return_intermediates else result
 
 
 def step(q, k, v, g, beta, state, scale, normalize=False, gate_inputs=None, *, precision="vllm"):

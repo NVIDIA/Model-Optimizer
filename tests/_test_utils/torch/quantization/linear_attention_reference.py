@@ -38,7 +38,18 @@ def _reference_normalize(value):
 
 
 def _reference_prefill(
-    q, k, v, g, beta, state, scale, normalize=False, gate_inputs=None, *, precision="vllm"
+    q,
+    k,
+    v,
+    g,
+    beta,
+    state,
+    scale,
+    normalize=False,
+    gate_inputs=None,
+    *,
+    precision="vllm",
+    return_intermediates=False,
 ):
     """Independent Torch stand-in for Megatron adapter tests, not native-parity tests."""
     if normalize:
@@ -52,7 +63,8 @@ def _reference_prefill(
         scale=scale,
         initial_state=state[None].float(),
     )
-    return output[0].to(v.dtype), final[0]
+    result = output[0].to(v.dtype), final[0]
+    return (*result, None) if return_intermediates else result
 
 
 def _reference_step(

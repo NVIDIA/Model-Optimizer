@@ -15,11 +15,17 @@
 
 """Native two-precision GDN parity and an independent triangular-solve adjoint."""
 
+from functools import partial
+
 import pytest
 import torch
+from _test_utils.torch.quantization.linear_attention_reference import (
+    install_reference_serving_backend,
+)
 
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.linear_attention import LinearAttentionConfig, gdn_state_qat
+from modelopt.torch.quantization.linear_attention import _two_precision as two_precision
 from modelopt.torch.quantization.linear_attention._two_precision import (
     _native_replay,
     two_precision_decode,
@@ -102,7 +108,15 @@ def _oracle(q, k, v, g, beta, state, quantizer, reads=None):
     return torch.stack(outputs)
 
 
-def test_native_two_precision_forward_and_window_backward(read_quantizer):
+def test_native_two_precision_forward_and_window_backward(read_quantizer, monkeypatch):
+    replays = []
+    replay = torch.cuda.CUDAGraph.replay
+
+    def counted_replay(graph):
+        replays.append(True)
+        return replay(graph)
+
+    monkeypatch.setattr(torch.cuda.CUDAGraph, "replay", counted_replay)
     torch.manual_seed(41)
     q, k = [
         torch.randn(33, 2, 128, device="cuda", dtype=torch.bfloat16).float().requires_grad_()
@@ -144,7 +158,18 @@ def test_native_two_precision_forward_and_window_backward(read_quantizer):
     torch.testing.assert_close(actual, reference, rtol=2e-3, atol=2e-6)
     upstream = torch.randn_like(actual)
     rng_state = torch.cuda.get_rng_state()
-    gradients = torch.autograd.grad(actual, params, upstream)
+    with monkeypatch.context() as eager:
+        eager.setattr(
+            two_precision,
+            "_graphed_window_forward",
+            lambda metadata, seed: partial(two_precision._window_forward, seed=seed),
+        )
+        gradients = torch.autograd.grad(actual, params, upstream, retain_graph=True)
+    for _ in range(2):
+        repeated = torch.autograd.grad(actual, params, upstream, retain_graph=True)
+        for gradient, repeated_gradient in zip(gradients, repeated):
+            torch.testing.assert_close(gradient, repeated_gradient, rtol=0, atol=0)
+    assert replays, "Window backward must execute CUDA graphs after capture warmup"
     torch.testing.assert_close(torch.cuda.get_rng_state(), rng_state)
     expected_gradients = torch.autograd.grad(reference, params, upstream)
     for gradient, expected_gradient in zip(gradients, expected_gradients):
@@ -192,10 +217,9 @@ def test_two_precision_public_api_padding_and_baseline(read_quantizer):
 
 
 def test_two_precision_packed_matches_separate_sequences(read_quantizer):
-    # Only the nonempty prefix needs the optional serving framework.
-    vllm = pytest.importorskip("vllm")
-    if vllm.__version__ != "0.30.0":
-        pytest.skip("The chunked prefix requires vLLM 0.30.0")
+    # Native vLLM parity lives in tests/gpu_vllm. This lane uses the independent
+    # Torch prefix so packed two-precision coverage cannot silently skip.
+    install_reference_serving_backend()
     torch.manual_seed(42)
     inputs = [
         torch.randn(1, 160, 1, 128, device="cuda", dtype=torch.bfloat16).requires_grad_()
