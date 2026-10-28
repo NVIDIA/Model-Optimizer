@@ -39,6 +39,7 @@ from modelopt.torch.kernels.common.attention import (
 )
 from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_AVAILABLE
 from modelopt.torch.opt.dynamic import DynamicModule
+from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.distributed import ParallelState
 
 from ..algorithms import AutoQuantizeGradientSearcher
@@ -1768,8 +1769,9 @@ def normalize_experts_impl_on_the_fly(model):
         else "nothing intercepts that backend"
     )
     for was, now in moved:
-        # The caller may have asked for it (a load's experts_implementation, hf_ptq's flag).
-        warnings.warn(
+        # The caller may have asked for it (a load's experts_implementation, hf_ptq's flag). Every
+        # rank redirects alike, so one says so.
+        warn_rank_0(
             f"Quantizing the fused experts on {now!r} instead of experts_implementation={was!r}: "
             f"{reason}."
         )
