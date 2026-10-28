@@ -2971,6 +2971,24 @@ class TestFusedExpertsInterceptionCheck:
         finally:
             TestFusedExpertsCalibration._cleanup_registry(_SyntheticFusedExperts)
 
+    def test_forwards_after_a_hook_fired_are_not_counted(self):
+        """Once a hook has fired the check passes, so later forwards skip the routing test, which
+        syncs the host."""
+        model = _TinyMoEModel()
+        counts = []
+
+        def forward_loop(m):
+            for _ in range(2):
+                m(torch.randn(2, 4, HIDDEN_DIM))
+                counts.append(m.moe.experts._forward_count)
+
+        TestFusedExpertsCalibration._cleanup_registry(_SyntheticFusedExperts)
+        try:
+            mtq.quantize(model, _INT8_EXPERTS_CFG, forward_loop)
+        finally:
+            TestFusedExpertsCalibration._cleanup_registry(_SyntheticFusedExperts)
+        assert counts == [1, 1]
+
     @pytest.mark.parametrize("reached_before", [False, True], ids=["first-pass", "later-pass"])
     def test_experts_whose_forward_ran_past_both_hooks_still_fail_loudly(self, reached_before):
         """Also when an earlier calibration reached them: each judges its own forwards. The model
