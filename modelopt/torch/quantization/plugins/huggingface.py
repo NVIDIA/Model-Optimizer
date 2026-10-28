@@ -909,11 +909,13 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             for q in quantizers
         ):
             return weight
+        # One kernel launch for every expert where the format has one. Unlike the eager path, which
+        # without autograd quantizes only the routed experts, this one quantizes every expert either
+        # way, and the kernel's one output is the buffer the slice-by-slice path below fills.
+        stacked = _try_stacked_fake_quant(weight, quantizers)
+        if stacked is not None:
+            return stacked
         if torch.is_grad_enabled():
-            # One kernel launch for every expert where the format has one, as on the eager path.
-            stacked = _try_stacked_fake_quant(weight, quantizers)
-            if stacked is not None:
-                return stacked
             # Slices written into one buffer would chain a full-size gradient copy per expert into
             # the backward (QAT), so stack them there.
             return torch.stack([quantizers[idx](weight[idx]) for idx in range(self.num_experts)])
