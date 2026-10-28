@@ -1595,10 +1595,12 @@ def force_eager_experts_impl_on_the_fly(model):
 
     HF transformers 5.0+ decorates fused-experts forwards with
     ``@use_experts_implementation``, which may dispatch to ``torch._grouped_mm``
-    or ``torch.bmm`` backends. Those backends bypass ``F.linear`` and so bypass
-    ``_QuantFusedExperts``'s input/weight quantizer hooks — calibration silently
-    does nothing, no ``input_scale`` / ``amax`` is collected, and the exported
-    checkpoint produces garbage at inference.
+    or ``torch.bmm`` backends. ``batched_mm`` and ``sonicmoe`` bypass ``F.linear``
+    and so bypass ``_QuantFusedExperts``'s input/weight quantizer hooks — calibration
+    silently does nothing, no ``input_scale`` / ``amax`` is collected, and the
+    exported checkpoint produces garbage at inference. ``grouped_mm`` is intercepted
+    (see :class:`_QuantFusedExperts`), but calibration stays on eager until the
+    per-expert input captures follow it there.
 
     Sets ``config._experts_implementation = "eager"`` on the model config (and
     recursively on ``text_config`` / ``vision_config`` / ``audio_config`` /
