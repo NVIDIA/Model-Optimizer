@@ -430,8 +430,10 @@ def test_the_run_ends_the_group_it_set_up(
     monkeypatch, capsys, launch, body_raises, ends_by, in_except
 ):
     """The group the run set up ends with a barrier and destroy, or with abort() if a rank raised."""
+    # Under a launch, rank 2 of 4 on local rank 1: the device follows the local rank, not the global.
+    this_rank, world = (2, 4) if launch else (0, 1)
     if launch:
-        monkeypatch.setenv("WORLD_SIZE", "2")
+        monkeypatch.setenv("WORLD_SIZE", str(world))
     else:
         monkeypatch.delenv("WORLD_SIZE", raising=False)
     live, ended, timeouts = [], [], []
@@ -442,9 +444,9 @@ def test_the_run_ends_the_group_it_set_up(
 
     monkeypatch.setattr(dist, "setup", setup)
     monkeypatch.setattr(dist, "is_initialized", lambda: bool(live))
-    monkeypatch.setattr(dist, "rank", lambda group=None: 0)
-    monkeypatch.setattr(dist, "size", lambda group=None: 2 if launch else 1)
-    monkeypatch.setattr(dist, "local_rank", lambda: 0)
+    monkeypatch.setattr(dist, "rank", lambda group=None: this_rank)
+    monkeypatch.setattr(dist, "size", lambda group=None: world)
+    monkeypatch.setattr(dist, "local_rank", lambda: 1)
     monkeypatch.setattr(dist, "barrier", lambda group=None: ended.append("barrier"))
     monkeypatch.setattr(torch.distributed, "destroy_process_group", lambda: ended.append("destroy"))
 
@@ -456,6 +458,8 @@ def test_the_run_ends_the_group_it_set_up(
     escapes = _ExitedError if ends_by == ["abort"] else body_raises
     expected = pytest.raises(escapes) if escapes else nullcontext()
 
+    states = []
+
     def run():
         with (
             expected,
@@ -463,8 +467,7 @@ def test_the_run_ends_the_group_it_set_up(
                 timeout=timedelta(hours=1), device="cuda" if launch else "cpu"
             ) as state,
         ):
-            device = torch.device("cuda:0" if launch else "cpu")
-            assert state == DistributedState(rank=0, world_size=2 if launch else 1, device=device)
+            states.append(state)
             if not launch:
                 live.append("the body's group")
             if body_raises:
@@ -480,10 +483,13 @@ def test_the_run_ends_the_group_it_set_up(
 
     assert ended == ends_by
     assert timeouts == ([timedelta(hours=1)] if launch else [])
+    device = torch.device("cuda:1" if launch else "cpu")
+    assert states == [DistributedState(rank=this_rank, world_size=world, device=device)]
+    assert states[0].is_main is not launch
     # An intentional exit is not reported as an error. An error is reported once, under this rank's
     # place in the group; its traceback is abort()'s to print, or goes on with it to the caller.
     out, err = capsys.readouterr()
-    assert ("[distributed_run][rank 0] body raised" in out) == (
+    assert (f"[distributed_run][rank {this_rank}] body raised" in out) == (
         body_raises not in (None, SystemExit)
     )
     assert "Traceback" not in err
