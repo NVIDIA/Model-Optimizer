@@ -21,6 +21,7 @@ import warnings
 from dataclasses import dataclass
 
 import torch.nn as nn
+from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, module_name_maps
 from modelopt.torch.quantization.utils.core_utils import ModuleNames, _get_enclosing_fsdp_module
@@ -66,8 +67,6 @@ def _window_root(ctx: ExportContext, unit: nn.Module) -> tuple[nn.Module, Module
     codes next to correct scales). So there that unit is handed in as the root, with names relative
     to it, which the window resolves the modules' parameters against.
     """
-    from torch.distributed.fsdp import FSDPModule
-
     if isinstance(ctx.model, FSDPModule) or unit is ctx.model:
         # The model's own names, which _enclosing_unit has built.
         return ctx.model, ctx.module_names

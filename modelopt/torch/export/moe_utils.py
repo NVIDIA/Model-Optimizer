@@ -21,6 +21,9 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor, Replicate, Shard
+
+from modelopt.torch.export.quant_format import GGML_FORMATS
 
 
 def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
@@ -112,8 +115,6 @@ def _fallback_amax(weight: torch.Tensor, quantizer) -> torch.Tensor:
 
 def _rewrap_expert_rows(local: torch.Tensor, mesh, placements, num_experts: int):
     """Wrap this rank's experts as a DTensor spanning ``num_experts`` rows on the expert axis."""
-    from torch.distributed.tensor import DTensor
-
     shape = torch.Size((num_experts, *local.shape[1:]))
     stride = torch.empty(shape, device="meta").stride()
     return DTensor.from_local(local, mesh, placements, run_check=False, shape=shape, stride=stride)
@@ -166,8 +167,6 @@ def _refuse_unfoldable_shards(module: nn.Module, proj: str, weight, num_quantize
     and their quantizer counts differ only where each keeps its own experts' quantizers of an uneven
     shard, which the checks below refuse on every rank.
     """
-    from torch.distributed.tensor import Shard
-
     name = f"{type(module).__name__}.{proj}"
     sharded = [placement for placement in weight.placements if isinstance(placement, Shard)]
     if len(sharded) > 1 or any(placement.dim != 0 for placement in sharded):
@@ -220,13 +219,7 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
     ``module.<P>`` (quantized fused weight), ``module.<P>_weight_scale`` (stacked per-expert scales),
     ``module.<P>_weight_scale_2`` (NVFP4 per-expert scalar), ``module.<P>_input_scale`` (shared).
     """
-    from modelopt.torch.export.quant_format import GGML_FORMATS
     from modelopt.torch.export.unified_export_hf import _export_quantized_weight
-
-    try:
-        from torch.distributed.tensor import DTensor, Replicate, Shard
-    except Exception:  # pragma: no cover - non-distributed install
-        DTensor = None  # noqa: N806 (the optional-import fallback for a class)
 
     first = getattr(module, "_first_proj_attr", "gate_up_proj")
     n = module.num_experts
@@ -247,7 +240,7 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
                 "stored, since the fold drops their scale_inv; dequantize them first "
                 "(unpack_weight())."
             )
-        is_dt = DTensor is not None and isinstance(wdata, DTensor)
+        is_dt = isinstance(wdata, DTensor)
         if is_dt:
             _refuse_unfoldable_shards(module, proj, wdata, len(weight_quantizers))
             if len(weight_quantizers) != wdata.shape[0]:
@@ -299,7 +292,7 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
         # and OOMing the GPU at scale. A plain tensor (a single process, or FSDP2's unsharded weight
         # inside a weight window): all experts.
         wdata = weight.data
-        is_dt = DTensor is not None and isinstance(wdata, DTensor)
+        is_dt = isinstance(wdata, DTensor)
         quantizers_are_global = True
         if is_dt:
             mesh, placements = wdata.device_mesh, wdata.placements
@@ -381,7 +374,7 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
         if proj in folded:
             continue
         wdata = getattr(module, proj).data
-        is_dt = DTensor is not None and isinstance(wdata, DTensor)
+        is_dt = isinstance(wdata, DTensor)
         local = wdata.to_local() if is_dt else wdata
         domain = _local_expert_weight(module, proj, local, 0, dtype).dtype
         if domain != local.dtype:
@@ -791,8 +784,6 @@ def split_fused_experts_state_dict(state_dict: dict) -> dict:
 
 def _dtensor_dim0_offset(dt) -> int:
     """Global dim-0 start index of this rank's local shard of a ``Shard(0)`` DTensor."""
-    from torch.distributed.tensor import Shard
-
     mesh, placements = dt.device_mesh, dt.placements
     try:
         from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
@@ -832,8 +823,6 @@ def _split_local_fused_module(
     ``total_experts == 0``, a count the caller could not read off the model's config, takes the
     tensor for a per-EP-group slice.
     """
-    from torch.distributed.tensor import DTensor
-
     gated = f"{prefix}.gate_up_proj" in sharded_sd
     first = "gate_up_proj" if gated else "up_proj"
     fw = sharded_sd[f"{prefix}.{first}"]
