@@ -1667,9 +1667,8 @@ def register_fused_experts_on_the_fly(model):
         if wrapper is not None and (
             getattr(module, "is_transposed", False)
             # Stored `(num_experts, out_dim, in_dim)`, the first projection takes the dim down_proj
-            # puts out. That separates the layouts for a gated container, whose first projection is
-            # `2 * intermediate`, whether it says so or not; a non-gated one's two layouts have the
-            # same shapes, so only its own `is_transposed` gives it away.
+            # puts out. A gated container's first projection is `2 * intermediate`, so its shapes
+            # give a transposed layout away whether it says so or not.
             or getattr(module, wrapper._first_proj_attr).shape[-1] != module.down_proj.shape[1]
         ):
             # `_fused_experts_wrapper` matches on parameter SHAPE only, so it also claims a
@@ -1734,15 +1733,14 @@ def normalize_experts_impl_on_the_fly(model):
     fallback_impl = "grouped_mm" if _HAS_GROUPED_LINEAR else "eager"
     # A class with its own quantized wrapper -- GPT-OSS's quantizes down_proj's input by intercepting
     # the eager forward's bmm/matmul -- only works on the eager forward, and so does a fused-experts
-    # wrapper that says so (FP8's), so keep main's forced eager for such a model. The plugins run in
-    # no set order, so a class register_fused_experts_on_the_fly registers may not be registered yet:
-    # the wrapper it will get decides then.
+    # wrapper that says so (FP8's), so keep main's forced eager for such a model. Those register
+    # when their module is imported; register_fused_experts_on_the_fly, which may run after this,
+    # registers only the generic wrapper, which is not eager-only.
     eager_only = sorted(
         {
             type(module).__name__
             for module in fused_experts
-            if (wrapper := QuantModuleRegistry.get(type(module)) or _fused_experts_wrapper(module))
-            is not None
+            if (wrapper := QuantModuleRegistry.get(type(module))) is not None
             and (not issubclass(wrapper, _QuantFusedExperts) or wrapper._eager_only)
         }
     )
