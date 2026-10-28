@@ -114,6 +114,7 @@ Changelog
 - Diffusion HF exports now omit attention quantizer buffers by default, except for FLUX.1, which retains enabled Q/K/V ``_amax`` keys for runtime compatibility; other consumers of those keys can opt in with ``export_attention_quantizers=True`` (CLI: ``--extra-param export_attention_quantizers=true``). Disabled attention quantizers remain excluded, and diffusion components, including LTX-2, no longer emit KV-cache quantization metadata.
 - The Windows FVD example rejects I3D checkpoints requiring unrestricted pickle loading. Custom TorchScript archives now require ``--weights-sha256`` with a trusted checksum; tensor state dictionaries continue to load directly.
 - ``hf_quant_config.json`` of an INT4 or W4A8 AWQ checkpoint now sets ``pre_quant_scale`` per layer, only for layers that have the tensor. A model whose fused-MoE experts have none (AWQ never applies to them) is now exported as ``MIXED_PRECISION`` with per-layer entries instead of a uniform algorithm.
+- Layerwise-calibration resume (``checkpoint_dir``) now loads checkpoint files with ``weights_only=True``. A checkpoint directory written by an earlier release whose layer inputs hold objects other than tensors, plain containers or Hugging Face dynamic caches can no longer be resumed; recalibrate in a fresh directory, or disable checkpointing.
 
 **Deprecations**
 
@@ -212,6 +213,7 @@ Changelog
 - Fix the diffusers skip-softmax HF export to emit the schema TensorRT-LLM VisualGen loads (``threshold_scale_factor.coefficients`` and a scalar ``target_sparsity``). Re-export checkpoints that failed to load.
 - EAGLE training with ``eagle_decoder_type="kimik2"`` now downloads the Kimi-K2 modeling code from a pinned ``moonshotai/Kimi-K2-Thinking`` revision and verifies its SHA-256 hashes before importing it. Offline runs need that revision in the Hugging Face cache.
 - ``hf_quant_config.json`` now declares ``pre_quant_scale`` only for INT4 / W4A8 layers that have the tensor; loading INT4 / W4A8 fused-MoE checkpoints in TensorRT-LLM also needs a release whose MoE loader treats it as optional. AWQ, SmoothQuant and SVDQuant now warn when they skip quantized fused-MoE experts.
+- Layerwise-calibration resume (``checkpoint_dir``) no longer runs code from a modified checkpoint directory; an unusable file now fails with an error instead.
 
 0.47.0 (2026-09-23)
 ^^^^^^^^^^^^^^^^^^^
