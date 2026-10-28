@@ -21,6 +21,7 @@ import os
 import sys
 import tempfile
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -36,20 +37,31 @@ from modelopt.onnx.logging_config import logger
 # Base minimum opset for quantization (opset 19 is the first to support fp16 scales)
 BASE_MIN_OPSET = 19
 
+_GraphPath = tuple[tuple[int, str], ...]
 
-def _graph_paths(graph):
+
+def _graph_paths(graph: gs.Graph) -> Iterator[tuple[_GraphPath, gs.Graph]]:
+    """Yield graphs with root-relative (node position, graph attribute name) path steps.
+
+    The root path is empty. Copy/export must preserve node order; no sorting occurs here.
+    GraphSurgeon supports single-Graph attributes (If/Loop/Scan), not lists of Graphs.
+    """
     yield (), graph
     for node_index, node in enumerate(graph.nodes):
         for name, value in node.attrs.items():
-            children = enumerate(value) if isinstance(value, list) else [(None, value)]
-            for index, child in children:
-                if isinstance(child, gs.Graph):
-                    for path, subgraph in _graph_paths(child):
-                        yield ((node_index, name, index), *path), subgraph
+            if isinstance(value, gs.Graph):
+                for path, subgraph in _graph_paths(value):
+                    yield ((node_index, name), *path), subgraph
 
 
+# Upstream: https://github.com/NVIDIA/TensorRT/issues/4899
+# https://github.com/onnx/onnx/issues/8681
 def export_onnx(graph: gs.Graph, **kwargs) -> onnx.ModelProto:
-    """Export a GraphSurgeon graph without serializing oversized initializers during copying."""
+    """Export a GraphSurgeon graph without serializing oversized initializers during copying.
+
+    Remove this guard when minimum supported GraphSurgeon/ONNX versions pass the real
+    >2 GiB export regression without it, including nested graphs and external-data saving.
+    """
     originals = {path: subgraph.tensors() for path, subgraph in _graph_paths(graph)}
     large = {
         path: {
@@ -84,9 +96,9 @@ def export_onnx(graph: gs.Graph, **kwargs) -> onnx.ModelProto:
         if not tensors:
             continue
         exported_graph = model.graph
-        for node_index, name, index in path:
+        for node_index, name in path:
             attr = next(a for a in exported_graph.node[node_index].attribute if a.name == name)
-            exported_graph = attr.g if index is None else attr.graphs[index]
+            exported_graph = attr.g
         for name, tensor in tensors.items():
             # Captures still need placeholders above: Graph.copy may duplicate constants.
             if any(tensor is originals[path[:depth]].get(name) for depth in range(len(path))):

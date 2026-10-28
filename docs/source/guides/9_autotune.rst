@@ -272,6 +272,12 @@ For fine-grained control over the autotune process (e.g. driving it step-by-step
 Basic Workflow
 --------------
 
+``export_onnx(output_path=...)`` writes the model with external weight data and returns
+``None``. Omit ``output_path`` to receive serialized bytes. File export supports large
+initializers, but the candidate-profiling loop below uses bytes and remains subject
+to protobuf size limits. Callers that previously consumed bytes returned from a file
+export must switch to the bytes-only call or consume the saved model by path.
+
 .. code-block:: python
 
    import onnx

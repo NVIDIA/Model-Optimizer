@@ -49,7 +49,7 @@ from modelopt.onnx.utils import (
 from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 
 
-@pytest.mark.parametrize("layout", ["flat", "local", "capture"])
+@pytest.mark.parametrize("layout", ["flat", "local", "capture", "nested"])
 @pytest.mark.parametrize("value_type", ["sequence_type", "optional_type"])
 def test_export_onnx_large_initializer_metadata(monkeypatch, tmp_path, layout, value_type):
     monkeypatch.setattr(OnnxExporter, "export_tensor_proto", _export_tensor_proto)
@@ -82,6 +82,22 @@ def test_export_onnx_large_initializer_metadata(monkeypatch, tmp_path, layout, v
             outer = gs.Variable("outer", dtype=np.float16, shape=[2048])
             graph.nodes.insert(0, gs.Node("Identity", inputs=[weight], outputs=[outer]))
             graph.outputs.append(outer)
+        elif layout == "nested":
+            graph.inputs.clear()  # Both levels capture the enclosing condition.
+            nested_result = gs.Variable("nested_result", dtype=np.float16, shape=[2048])
+            graph = gs.Graph(
+                nodes=[
+                    gs.Node(
+                        "If",
+                        inputs=[condition],
+                        outputs=[nested_result],
+                        attrs={"then_branch": graph, "else_branch": graph.copy()},
+                    )
+                ],
+                inputs=[condition],
+                outputs=[nested_result],
+                opset=21,
+            )
 
     # Sequence value_info is lost by GraphSurgeon copying, even without quantization.
     value = gs.Variable("value", dtype=np.float32, shape=[1])
@@ -117,8 +133,18 @@ def test_export_onnx_large_initializer_metadata(monkeypatch, tmp_path, layout, v
         model = onnx_utils.export_onnx(graph)
     assert next(v.type for v in model.graph.value_info if v.name == "sequence") == expected_type
     branches = [a.g for n in model.graph.node for a in n.attribute if a.HasField("g")]
-    if layout == "local":
+    if layout in ("local", "nested"):
         assert not model.graph.initializer
+        if layout == "nested":
+            assert all(not branch.initializer for branch in branches)
+            branches = [
+                a.g
+                for branch in branches
+                for n in branch.node
+                for a in n.attribute
+                if a.HasField("g")
+            ]
+        assert len(branches) == (4 if layout == "nested" else 2)
         initializers = [b.initializer[0] for b in branches]
     else:
         assert all(not b.initializer for b in branches)
