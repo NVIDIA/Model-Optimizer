@@ -973,7 +973,8 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
                     # this wrapper's weights.
                     raise RuntimeError(
                         f"{type(self).__name__} quantizes on the eager experts forward only, but its "
-                        'grouped_mm forward ran. Load the model with experts_implementation="eager".'
+                        'grouped_mm forward ran. Load the model with experts_implementation="eager", '
+                        "and without expert parallelism, whose forward runs it too."
                     )
                 # The batch holds every expert's rows: no single expert for the eager loop's index to
                 # name, so a weight-input capture keyed on it skips the batch rather than credit
