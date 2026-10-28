@@ -2006,15 +2006,21 @@ class SequentialQuantizer(_QuantizerContainerBase, nn.Sequential):
 
     @staticmethod
     @contextlib.contextmanager
-    def convert_to_single_quantizer(model, indx: int = 0):
+    def convert_to_single_quantizer(model, indx: int = 0, should_process=None):
         """Replace instances of :class:`SequentialQuantizer` in the model with single `TensorQuantizer` quantizer.
 
         The quantizer indexed by ``indx`` from the sequential quantizer is used to replace it.
         This method is useful for individually calibrating the quantizers in a sequential quantizer.
+
+        ``should_process`` limits the replacement to the quantizers it admits; by default every
+        one is replaced. A caller calibrating part of a model passes its write-mask, since
+        replacing a container outside that part would drop a level an earlier stage calibrated.
         """
         original_sequential_quantizers: dict[nn.Module, list] = {}
         for name, module in list(model.named_modules()):
-            if isinstance(module, SequentialQuantizer):
+            if isinstance(module, SequentialQuantizer) and (
+                should_process is None or should_process(module)
+            ):
                 assert len(module) > indx
                 parent_module = model.get_submodule(name.rpartition(".")[0])
                 if parent_module not in original_sequential_quantizers:
