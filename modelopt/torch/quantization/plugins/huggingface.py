@@ -1122,7 +1122,9 @@ class _QuantFP8Experts(_QuantFusedExperts):
     """Scale-aware PTQ for native Transformers FP8 experts, dequantized per expert."""
 
     # The block scales apply in get_expert_weight, which only the eager forward reaches: transformers'
-    # FP8 grouped_mm forward runs its own kernels, which nothing here intercepts.
+    # FP8 grouped_mm forward runs its own kernels, which nothing here intercepts. So, unlike for the
+    # non-gated wrapper, the grouped interceptor's refusal never fires for these: what keeps them on
+    # eager is force_eager_experts_impl_on_the_fly, which runs on convert and on restore.
     _eager_only = True
 
     @property
