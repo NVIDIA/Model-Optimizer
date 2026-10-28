@@ -24,6 +24,7 @@ from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
 from modelopt.torch.quantization.utils import (
     convert_quantization_axis_to_reduce_axis,
+    core_utils,
     reduce_amax,
     reduce_block_amax,
 )
@@ -31,6 +32,7 @@ from modelopt.torch.quantization.utils.core_utils import (
     _disable_fsdp_unshard_reshard,
     _fsdp2_owned_params,
     _fsdp2_owns,
+    _fsdp2_param_groups,
     fsdp2_weight_access_and_writeback_context,
     persistent_materialization,
 )
@@ -415,11 +417,11 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size):
     finally:
         layer.reshard()
     # The set is kept for the unit: opening the window again costs the module's parameters only.
-    with mock.patch.object(fully_shard, "state", wraps=fully_shard.state) as state:
+    with mock.patch.object(core_utils, "_fsdp2_param_groups", wraps=_fsdp2_param_groups) as scans:
         for _ in range(3):
             with fsdp2_weight_access_and_writeback_context(model.dense, model):
                 pass
-    assert state.call_count == 0
+    assert scans.call_count == 0
 
 
 def test_fsdp2_owns_its_parameters_in_every_shard_state(cpu_dist_workers):
@@ -447,11 +449,11 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size):
             assert weight.to_local().shape[0] == 2
     # Every expert weight misses the kept set, and one scan of the unit answers them all.
     with (
-        mock.patch.object(fully_shard, "state", wraps=fully_shard.state) as state,
+        mock.patch.object(core_utils, "_fsdp2_param_groups", wraps=_fsdp2_param_groups) as scans,
         fsdp2_weight_access_and_writeback_context(layer, layer),
     ):
         pass
-    assert state.call_count == 1
+    assert scans.call_count == 1
     assert all(weight.to_local().shape[0] == 2 for weight in layer.experts.parameters())
 
 
