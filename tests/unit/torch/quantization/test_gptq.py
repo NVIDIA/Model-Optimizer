@@ -15,11 +15,11 @@
 
 """CPU unit tests for GPTQ utilities."""
 
-from functools import partial
+import copy
+import warnings
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.utils import calib_utils
@@ -153,6 +153,36 @@ def test_gptq_runs_a_max_calibration_forward_only_for_activation_amax(input_quan
     assert len(calls) == forwards
 
 
+def test_bf16_hessian_input_on_cpu_gives_the_float32_result_and_warns_once():
+    """CPU GEMMs take no ``out_dtype``, so ``hessian_input_dtype: bfloat16`` falls back to the
+    float32 Hessian, warning once however many batches it reads."""
+    calib_utils._warn_bfloat16_hessian_unavailable.cache_clear()
+    torch.manual_seed(0)
+    model = torch.nn.Linear(32, 8, bias=False)
+    batches = [torch.randn(4, 32) for _ in range(3)]
+    weights = {}
+    for hessian_input_dtype in ("float32", "bfloat16"):
+        quantized = copy.deepcopy(model)
+        config = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            ],
+            "algorithm": {
+                "method": "gptq",
+                "block_size": 16,
+                "hessian_input_dtype": hessian_input_dtype,
+            },
+        }
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            mtq.quantize(quantized, config, lambda m: [m(batch) for batch in batches])
+        fallbacks = [w for w in caught if "hessian_input_dtype" in str(w.message)]
+        assert len(fallbacks) == (hessian_input_dtype == "bfloat16")
+        weights[hessian_input_dtype] = quantized.weight
+    assert torch.equal(weights["float32"], weights["bfloat16"])
+
+
 def _gptq_hessian_dp_sync_helper(rank, size, token_counts):
     torch.manual_seed(0)
     inputs = [torch.randn(n, 8) for n in token_counts]
@@ -168,11 +198,9 @@ def _gptq_hessian_dp_sync_helper(rank, size, token_counts):
     torch.testing.assert_close(helper.hessian, ref)
 
 
-def test_gptq_hessian_dp_sync(skip_on_windows):
+def test_gptq_hessian_dp_sync(cpu_dist_workers):
     """Token-weighted merge over a gloo (CPU) group, with one rank that saw no tokens."""
-    spawn_multiprocess_job(
-        2, partial(_gptq_hessian_dp_sync_helper, token_counts=(5, 0)), backend="gloo"
-    )
+    cpu_dist_workers.run(_gptq_hessian_dp_sync_helper, token_counts=(5, 0))
 
 
 def test_a_calibration_run_forgets_earlier_forward_measurements(monkeypatch):

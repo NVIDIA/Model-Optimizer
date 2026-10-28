@@ -19,7 +19,7 @@ import contextlib
 import math
 import warnings
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeGuard
 
 import torch
 import torch.distributed as dist
@@ -40,7 +40,7 @@ from torch import nn
 from modelopt.torch.utils import same_device_as, standardize_constructor_args
 from modelopt.torch.utils.distributed import DistributedProcessGroup
 
-from ... import calib
+from ... import calib, tensor_quant
 from ... import utils as quant_utils
 from ...config import QuantizerAttributeConfig, RotateConfig
 from ...qtensor import (
@@ -64,6 +64,7 @@ from ...tensor_quant import (
 )
 from ...utils import is_torch_export_mode
 from ...utils.numeric_utils import E4M3_MAX, fp8_max_for_normalization
+from ...utils.weight_cache import cached_fake_quantize
 from ..functional import normalized_hadamard_transform
 
 # torch.finfo(...).tiny gives the smallest normal E4M3 value; scale clamping needs
@@ -1208,6 +1209,8 @@ class TensorQuantizer(nn.Module):
         # Early return if nothing is collected during the forward (e.g. MoE)
         if inputs.numel() == 0:
             return inputs
+        # The weight cache keys on this tensor, not on the fresh ones (scaled, padded) made from it below.
+        cache_source = inputs
 
         # Activation scaling for smoothquant
         if self.pre_quant_scale is not None:
@@ -1273,7 +1276,7 @@ class TensorQuantizer(nn.Module):
                 inputs = inputs.contiguous()
             if self.fake_quant:
                 with same_device_as(inputs):
-                    outputs = self._fake_quantize(inputs)
+                    outputs = cached_fake_quantize(self, inputs, cache_source)
             elif not self._dequantize:
                 outputs = self._real_quantize(inputs)
             else:
@@ -2070,3 +2073,72 @@ class GroupedQuantizer(_QuantizerContainerBase, nn.ModuleList):
 
     def _format_delegated_method_outputs(self, outputs: list[Any]) -> list[Any]:
         return outputs
+
+
+def _is_plain_fake_quant(q: nn.Module) -> TypeGuard[TensorQuantizer]:
+    """Whether ``q(x)`` only fake-quantizes ``x`` with its calibrated amax, in any format.
+
+    Each group rules out something ``TensorQuantizer.forward`` can do that a stacked kernel does not.
+    """
+    return (
+        # Subclasses (e.g. static NVFP4, sequential) quantize differently.
+        type(q) is TensorQuantizer
+        # Fake-quantizing with its calibrated amax, not calibrating.
+        and q.is_enabled
+        and q._if_quant
+        and q._fake_quant
+        and not q._if_calib
+        and not q._use_constant_amax
+        # Nothing applied around the quantization itself.
+        and q.backend is None
+        and q.pre_quant_scale is None
+        and not q.rotate_is_enabled
+        and not q.rotate_back_is_enabled
+        # Hooks expect the quantizer itself to run, forward and backward.
+        and not (
+            q._forward_hooks or q._forward_pre_hooks or q._backward_hooks or q._backward_pre_hooks
+        )
+    )
+
+
+def _try_stacked_fake_quant(weight: torch.Tensor, quantizers: nn.ModuleList) -> torch.Tensor | None:
+    """Fake-quantize a stacked weight, ``quantizers[i]`` on ``weight[i]``, in one kernel launch.
+
+    Returns what calling each quantizer on its own slice would, stacked, or ``None`` when no
+    stacked kernel reproduces them exactly; the caller then quantizes slice by slice. The checks
+    every format needs come first. Dynamic block-16 NVFP4 is the only format with a stacked kernel
+    so far; another format adds its own branch after it.
+    """
+    # One local CUDA tensor with a slice per quantizer.
+    if (
+        not quantizers
+        or not weight.is_cuda
+        or (DTensor is not None and isinstance(weight, DTensor))
+        or weight.shape[0] != len(quantizers)
+    ):
+        return None
+    plain = [q for q in quantizers if _is_plain_fake_quant(q)]
+    if len(plain) != len(quantizers):
+        return None
+    # One autograd function quantizes every slice, so they must share its backward.
+    pass_through_bwd = plain[0]._pass_through_bwd
+    if any(q._pass_through_bwd != pass_through_bwd for q in plain):
+        return None
+
+    if tensor_quant._nvfp4_triton_kernel_enabled() and all(
+        q.is_nvfp4_dynamic and q.block_sizes.get(-1) == 16 for q in plain
+    ):
+        amaxes = []
+        for q in plain:
+            amax = getattr(q, "_amax", None)
+            if amax is None or amax.numel() != 1:  # the kernel takes one per-tensor amax per slice
+                return None
+            # A clipped backward compares weight and amax: in one dtype, type promotion cannot
+            # change it.
+            if not pass_through_bwd and amax.dtype != weight.dtype:
+                return None
+            amaxes.append(amax.reshape(1))
+        return tensor_quant.stacked_nvfp4_fake_quant(
+            weight, torch.cat(amaxes).to(weight.device), pass_through_bwd
+        )
+    return None

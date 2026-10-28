@@ -105,7 +105,7 @@ def test_language_model_extraction_rejects_competing_roots_when_strict():
 def test_resolve_export_dtype(configured_dtype, dtype, expected_dtype, warning_count, recwarn):
     model = torch.nn.Linear(1, 1)
     model.config = (
-        SimpleNamespace(torch_dtype=configured_dtype) if configured_dtype is not None else object()
+        SimpleNamespace(dtype=configured_dtype) if configured_dtype is not None else object()
     )
 
     assert _resolve_export_dtype(model, dtype) == expected_dtype

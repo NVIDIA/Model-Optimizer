@@ -399,6 +399,28 @@ class Testfp4:
             scaled = triton_kernel.fp4_fake_quant_block(x * factor, x.float().abs().amax() * factor)
             assert torch.equal(scaled, reference * factor)
 
+    @pytest.mark.skipif(
+        not hasattr(triton_kernel, "fp4_fake_quant_block"),
+        reason="fp4_fake_quant_block requires compute >= 8.9",
+    )
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    def test_fp4_kernel_per_slice_global_amax(self, dtype):
+        """One global amax per index of dim 0 quantizes each slice as its own call would."""
+        torch.manual_seed(0)
+        # 10 rows per slice, so 16-row tiles span two slices.
+        scale = torch.logspace(-2, 2, 6, device="cuda")[:, None, None]
+        x = (torch.randn(6, 10, 64, device="cuda") * scale).to(dtype)
+        amax = x.float().abs().amax(dim=(1, 2))
+        amax[1] *= 0.5  # saturating block scales
+        amax[2] = 0.0  # invalid global amaxes use a unit scale
+        amax[3] = float("inf")
+        expected = torch.stack(
+            [triton_kernel.fp4_fake_quant_block(x[i], amax[i]) for i in range(6)]
+        )
+        assert torch.equal(triton_kernel.fp4_fake_quant_block(x, amax), expected)
+        with pytest.raises(ValueError, match="global_amax"):
+            triton_kernel.fp4_fake_quant_block(x, amax[:5])
+
     @pytest.mark.skipif(not triton_kernel.IS_AVAILABLE, reason="triton kernel is not available")
     @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
     def test_static_fp4_kernel_scales_with_small_inputs(self, dtype):
