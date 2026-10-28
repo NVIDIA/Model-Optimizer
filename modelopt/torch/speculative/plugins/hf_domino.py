@@ -207,8 +207,8 @@ class HFDominoModel(HFDFlashModel):
             targets.mask,
             "decay",
             _first_predicted_position(self._label_shift),
-            self.dflash_loss_decay_factor,
-            self.dflash_dpace_alpha,
+            decay_factor=self.dflash_loss_decay_factor,
+            dpace_alpha=self.dflash_dpace_alpha,
         )
 
         flat_final = final_logits.reshape(-1, final_logits.size(-1))

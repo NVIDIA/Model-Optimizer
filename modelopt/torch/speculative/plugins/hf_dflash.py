@@ -182,14 +182,20 @@ def _block_targets(input_ids, anchor_positions, block_keep_mask, loss_mask, bloc
     return _BlockTargets(_block_gather(input_ids, positions), positions, mask)
 
 
-def _block_position_weights(mask, scheme, first, decay_factor, dpace_alpha, target_ce=None):
+def _block_position_weights(mask, scheme, first, *, decay_factor, dpace_alpha, target_ce=None):
     """``mask`` weighted per block position, by D-PACE or by exponential decay.
 
     ``first`` is the first predicted block position. ``target_ce`` returns the draft's
-    cross-entropy on its labels ([B, N, bs]); only D-PACE calls it.
+    cross-entropy on its labels ([B, N, bs]); only D-PACE calls it. The two floats are
+    keyword-only because swapping them would still give a plausible weight curve.
     """
     block_size = mask.shape[-1]
     if scheme == "dpace" and block_size > 1:
+        if target_ce is None:
+            raise ValueError(
+                "D-PACE weighs each block position by the draft's confidence on its label, "
+                "so it needs target_ce."
+            )
         with torch.no_grad():
             # Draft confidence q_i = exp(-CE) on the label; detached, as in the paper (Eq. 9).
             confidences = torch.exp(-target_ce()[..., first:].float())
@@ -995,8 +1001,8 @@ class HFDFlashModel(DFlashModel):
             targets.mask,
             self.dflash_loss_objective,
             _first_predicted_position(self._label_shift),
-            self.dflash_loss_decay_factor,
-            self.dflash_dpace_alpha,
+            decay_factor=self.dflash_loss_decay_factor,
+            dpace_alpha=self.dflash_dpace_alpha,
             target_ce=lambda: (
                 loss_per_token.detach()
                 if loss_per_token is not None
