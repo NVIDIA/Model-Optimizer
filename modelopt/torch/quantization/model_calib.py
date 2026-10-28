@@ -1136,10 +1136,15 @@ def _expert_slices(offs: torch.Tensor, num_experts: int, rows: int):
     ``offs`` is the cumulative token count per expert (``_grouped_offs``): exclusive ends, one per
     expert, as transformers' grouped_mm forward and ``a2a_moe`` build them. An expert without rows is
     skipped, and rows beyond ``offs[-1]`` (expert-parallel sentinels) belong to no expert. Offsets of
-    another form raise: a leading zero, say, would credit each expert with the previous one's rows.
+    another form raise (a leading zero, say, or ends out of order), since they would credit experts
+    with other experts' rows.
     """
     ends = offs.tolist()
-    if len(ends) != num_experts or (ends and ends[-1] > rows):
+    if (
+        len(ends) != num_experts
+        or (ends and ends[-1] > rows)
+        or any(end < prev for prev, end in zip([0, *ends], ends))
+    ):
         raise RuntimeError(
             f"Grouped experts offsets {ends} do not split {rows} rows over {num_experts} experts."
         )
