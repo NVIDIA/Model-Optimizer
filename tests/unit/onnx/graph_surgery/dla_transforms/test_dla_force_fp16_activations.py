@@ -1094,11 +1094,14 @@ def test_public_float_cast_keeps_boundaries_and_typed_internal_readers(
     ).astype(np.float32)
     changed = _apply_force_fp16_activations(model)
     onnx.checker.check_model(changed, full_check=True)
-    options = ort.SessionOptions()
-    options.intra_op_num_threads = 1
-    actual = ort.InferenceSession(
-        changed.SerializeToString(), options, providers=["CPUExecutionProvider"]
-    ).run(None, feeds)
+    actual = ReferenceEvaluator(changed).run(None, feeds)
+    # ORT CPU promotes FP16 arithmetic; use exact values for the runtime smoke check.
+    cpu_feeds = dict(feeds, x=np.array([1, 2], dtype))
+    for left, right in zip(
+        _checked_cpu_outputs(changed, cpu_feeds),
+        ReferenceEvaluator(changed).run(None, cpu_feeds),
+    ):
+        np.testing.assert_array_equal(left, right)
     for left, right in zip(actual, expected):
         np.testing.assert_array_equal(left, right)
     assert actual[0].dtype == np.float32
@@ -1138,11 +1141,13 @@ def test_public_fp16_conversion_supports_shared_float_cast_outputs(tmp_path, sou
     onnx.checker.check_model(changed, full_check=True)
     dtype = np.int32 if source_type == T.INT32 else np.int64
     values = np.array([2049, 2051], dtype).reshape(shape)
-    options = ort.SessionOptions()
-    options.intra_op_num_threads = 1
-    actual = ort.InferenceSession(
-        changed.SerializeToString(), options, providers=["CPUExecutionProvider"]
-    ).run(None, {"x": values})
+    actual = ReferenceEvaluator(changed).run(None, {"x": values})
+    cpu_feeds = {"x": np.array([1, 2], dtype).reshape(shape)}
+    for left, right in zip(
+        _checked_cpu_outputs(changed, cpu_feeds),
+        ReferenceEvaluator(changed).run(None, cpu_feeds),
+    ):
+        np.testing.assert_array_equal(left, right)
     np.testing.assert_array_equal(actual[0], values.astype(np.float32))
     expected = (values.astype(np.float16) * np.array([2, 3], np.float16).reshape(shape)).astype(
         np.float32
