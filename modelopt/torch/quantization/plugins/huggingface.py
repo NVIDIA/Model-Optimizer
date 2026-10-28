@@ -1759,7 +1759,8 @@ def normalize_experts_impl_on_the_fly(model):
             cfg._experts_implementation = "eager"
         elif was not in supported_impls:
             cfg._experts_implementation = fallback_impl
-        if cfg._experts_implementation != was:
+        # None already dispatches to the eager F.linear forward: pinning it to eager moves nothing.
+        if cfg._experts_implementation != was and was is not None:
             moved[(was, cfg._experts_implementation)] = None
     reason = (
         f"{', '.join(eager_only)} quantize on the eager forward only"

@@ -1403,11 +1403,14 @@ class TestNormalizeExpertsImpl:
         normalize_experts_impl_on_the_fly(model)
         assert not hasattr(cfg, "_experts_implementation")
 
-    def test_forces_eager_for_experts_quantized_on_the_eager_forward_only(self):
+    @pytest.mark.parametrize("impl", ["grouped_mm", None])
+    def test_forces_eager_for_experts_quantized_on_the_eager_forward_only(self, impl, recwarn):
         """Native FP8 experts apply their block scales on the eager forward; transformers' FP8
         grouped_mm forward runs kernels nothing intercepts, so a model holding them calibrates on
-        eager, as main forced every MoE to."""
-        model = _NonMoEModelWithConfig(_StubConfig(impl="grouped_mm"))
+        eager, as main forced every MoE to. Moving it off grouped_mm warns; None is eager already."""
+        cfg = _StubConfig()
+        cfg._experts_implementation = impl
+        model = _NonMoEModelWithConfig(cfg)
         model.experts = FP8Experts(
             PretrainedConfig(
                 hidden_size=256, intermediate_size=256, num_experts=2, hidden_act="silu"
@@ -1416,6 +1419,8 @@ class TestNormalizeExpertsImpl:
         )
         normalize_experts_impl_on_the_fly(model)
         assert model.config._experts_implementation == "eager"
+        moved = [w for w in recwarn if "instead of experts_implementation" in str(w.message)]
+        assert len(moved) == (impl is not None)
 
     def test_forces_eager_for_eager_only_experts_not_registered_yet(self):
         """The plugins run in no set order, so normalization can come before the on-the-fly
