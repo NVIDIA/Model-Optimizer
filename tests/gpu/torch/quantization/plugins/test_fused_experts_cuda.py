@@ -18,6 +18,7 @@
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_qwen3_moe
+from transformers.integrations import moe as moe_integration
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.plugins.huggingface as hf_plugin
@@ -65,14 +66,29 @@ def test_stacked_nvfp4_experts_match_per_expert_quantizers(monkeypatch, pass_thr
         "stacked_nvfp4_fake_quant",
         lambda *args: calls.append(args) or stacked_fake_quant(*args),
     )
+    grouped_calls = []
+    grouped_linear = moe_integration._grouped_linear
+    monkeypatch.setattr(
+        moe_integration,
+        "_grouped_linear",
+        lambda *args, **kwargs: grouped_calls.append(1) or grouped_linear(*args, **kwargs),
+    )
     results = []
     for checkpointing in (False, True):
         calls.clear()
         results.append(loss_and_grads(checkpointing))
         # Checkpointing reruns the forward in backward.
         assert len(calls) == 2 * len(experts) * (1 + checkpointing)
+    assert bool(grouped_calls) == (impl == "grouped_mm"), "the backend under test did not run"
+    # Without autograd only the grouped forward, which quantizes every expert, takes the kernel.
+    calls.clear()
+    with torch.no_grad():
+        logits = model(input_ids).logits
+    assert len(calls) == (2 * len(experts) if impl == "grouped_mm" else 0)
 
     monkeypatch.setattr(hf_plugin, "_try_stacked_fake_quant", lambda *args: None)
+    with torch.no_grad():
+        assert torch.equal(model(input_ids).logits, logits)
     ref_loss, ref_grads = loss_and_grads(checkpointing=False)
     for loss, grads in results:
         assert torch.equal(loss, ref_loss)
