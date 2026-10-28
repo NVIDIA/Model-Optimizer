@@ -320,10 +320,13 @@ def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
     if args.use_fsdp2:
-        config_kwargs = {"trust_remote_code": args.trust_remote_code}
+        hf_config = AutoConfig.from_pretrained(
+            args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
+        )
         if args.experts_implementation is not None:
-            config_kwargs["experts_implementation"] = args.experts_implementation
-        hf_config = AutoConfig.from_pretrained(args.local_checkpoint_path, **config_kwargs)
+            # Set on the config, as build_meta_causal_lm sets a pre-fetched config's
+            # attn_implementation: the meta model is built from it, with no kwarg of its own.
+            hf_config._experts_implementation = args.experts_implementation
         validate_fsdp2_supported(args, hf_config)
         full_model = parallel_load_and_prepare_fsdp2(
             args.local_checkpoint_path,
