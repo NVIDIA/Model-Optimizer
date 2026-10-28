@@ -17,11 +17,9 @@
 
 import copy
 import warnings
-from functools import partial
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.utils import calib_utils
@@ -200,11 +198,9 @@ def _gptq_hessian_dp_sync_helper(rank, size, token_counts):
     torch.testing.assert_close(helper.hessian, ref)
 
 
-def test_gptq_hessian_dp_sync(skip_on_windows):
+def test_gptq_hessian_dp_sync(cpu_dist_workers):
     """Token-weighted merge over a gloo (CPU) group, with one rank that saw no tokens."""
-    spawn_multiprocess_job(
-        2, partial(_gptq_hessian_dp_sync_helper, token_counts=(5, 0)), backend="gloo"
-    )
+    cpu_dist_workers.run(_gptq_hessian_dp_sync_helper, token_counts=(5, 0))
 
 
 def test_a_calibration_run_forgets_earlier_forward_measurements(monkeypatch):

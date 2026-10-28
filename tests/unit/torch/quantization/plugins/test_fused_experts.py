@@ -34,7 +34,12 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.export.model_utils import _release_exported_tensors
 from modelopt.torch.export.moe_utils import _export_fused_experts, _fallback_amax
-from modelopt.torch.export.quant_utils import get_quant_config, get_quantization_format
+from modelopt.torch.export.quant_utils import (
+    _has_pre_quant_scale,
+    get_quant_config,
+    get_quantization_format,
+    process_layer_quant_config,
+)
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
 from modelopt.torch.quantization.model_calib import local_hessian_calibrate
@@ -394,6 +399,26 @@ class TestQuantFusedExperts:
             f"Max diff: {(out_ref - out_test).abs().max().item()}"
         )
         self._cleanup_registry(expert_type)
+
+    def test_checkpoint_recompute_restores_linear(self):
+        """Non-reentrant checkpointing stops its recompute by raising inside the experts forward.
+
+        The ``F.linear`` interception must not stay installed after that, or every later
+        ``F.linear`` call in the process runs this module's hook.
+        """
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+        register_fused_experts_on_the_fly(model)
+        model.moe.experts = QuantModuleRegistry.convert(model.moe.experts)
+        linear = F.linear
+        try:
+            x = torch.randn(1, 8, HIDDEN_DIM, requires_grad=True)
+            torch.utils.checkpoint.checkpoint(model, x, use_reentrant=False).sum().backward()
+            assert F.linear is linear
+        finally:
+            F.linear = linear
+            self._cleanup_registry(expert_type)
 
     def test_expert_index_recovery(self):
         """Storage-offset based expert index recovery should be correct."""
@@ -852,6 +877,79 @@ class TestExportFusedExperts:
             if QuantModuleRegistry.get(expert_type) is not None:
                 QuantModuleRegistry.unregister(expert_type)
 
+    @pytest.mark.parametrize("fmt", ["w4a8_awq", "int4_awq"])
+    def test_int4_experts_do_not_promise_a_pre_quant_scale(self, fmt):
+        """AWQ-family algorithms skip fused experts, so INT4 / W4A8 experts carry no
+        pre_quant_scale; the config must not promise one."""
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        if QuantModuleRegistry.get(expert_type) is not None:
+            QuantModuleRegistry.unregister(expert_type)
+        try:
+            mtq.quantize(
+                model, copy.deepcopy(mtq.FP8_DEFAULT_CFG), forward_loop=_route_once_to_each_expert
+            )
+            experts = model.moe.experts
+            for wq_list in (
+                experts.gate_up_proj_weight_quantizers,
+                experts.down_proj_weight_quantizers,
+            ):
+                for idx in range(NUM_EXPERTS):
+                    stage = TensorQuantizer(
+                        QuantizerAttributeConfig(num_bits=4, block_sizes={-1: 16, "type": "static"})
+                    )
+                    wq_list[idx] = (
+                        SequentialQuantizer(
+                            stage, TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3)))
+                        )
+                        if fmt == "w4a8_awq"
+                        else stage
+                    )
+            config = get_quant_config(model)["quantization"]
+            assert config["quant_algo"] == fmt.upper().replace("INT4", "W4A16")
+            assert config["pre_quant_scale"] is False
+
+            # The exporter does not write a scale for fused experts, even if an input quantizer
+            # held one, so the config still must not promise it.
+            for input_q, dim in (
+                (experts.gate_up_proj_input_quantizer, HIDDEN_DIM),
+                (experts.down_proj_input_quantizer, INTERMEDIATE_DIM),
+            ):
+                input_q.register_buffer("_pre_quant_scale", torch.ones(dim))
+            assert get_quant_config(model)["quantization"]["pre_quant_scale"] is False
+        finally:
+            if QuantModuleRegistry.get(expert_type) is not None:
+                QuantModuleRegistry.unregister(expert_type)
+
+    def test_pre_quant_scale_presence(self):
+        """A module has a pre_quant_scale when AWQ left a buffer or fused it into a sibling."""
+
+        def _linear(*, buffer=False, fused=False):
+            linear = nn.Linear(4, 4)
+            linear.input_quantizer = TensorQuantizer(QuantizerAttributeConfig(enable=False))
+            if buffer:
+                linear.input_quantizer.register_buffer("_pre_quant_scale", torch.ones(4))
+            linear.fused_with_prequant = fused
+            return linear
+
+        assert not _has_pre_quant_scale(_linear(), ["weight"])
+        assert _has_pre_quant_scale(_linear(buffer=True), ["weight"])
+        assert _has_pre_quant_scale(_linear(fused=True), ["weight"])
+
+    def test_per_layer_pre_quant_scale_flag(self):
+        config = process_layer_quant_config(
+            {
+                "dense.quantization": "int4_awq",
+                "dense.awq_block_size": 16,
+                "experts.quantization": "int4_awq",
+                "experts.awq_block_size": 16,
+                "experts.pre_quant_scale": False,
+            }
+        )
+        layers = config["quantized_layers"]
+        assert layers["dense"]["pre_quant_scale"] is True
+        assert layers["experts"]["pre_quant_scale"] is False
+
     @pytest.mark.parametrize(
         ("amax_layout", "expected_gate_shape", "expected_down_shape"),
         [
@@ -1103,6 +1201,46 @@ class TestFusedExpertsCalibration:
     def _cleanup_registry(mod_type):
         if QuantModuleRegistry.get(mod_type) is not None:
             QuantModuleRegistry.unregister(mod_type)
+
+    @pytest.mark.parametrize(
+        ("cfg_name", "warns"),
+        [
+            ("INT4_AWQ_CFG", True),
+            ("W4A8_AWQ_BETA_CFG", True),
+            ("INT8_SMOOTHQUANT_CFG", True),
+            ("FP8_DEFAULT_CFG", False),
+        ],
+    )
+    def test_linear_layer_algorithms_warn_when_skipping_fused_experts(self, cfg_name, warns):
+        """AWQ, SmoothQuant and SVDQuant only process 2-D linears, so on fused experts they are a
+        silent no-op (the experts keep max calibration): warn, except for FP8 experts."""
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+        try:
+            quant_cfg = copy.deepcopy(getattr(mtq, cfg_name))
+            for entry in quant_cfg["quant_cfg"]:
+                cfg = entry.get("cfg")
+                for c in cfg if isinstance(cfg, list) else [cfg]:
+                    if isinstance(c, dict) and (c.get("block_sizes") or {}).get(-1) == 128:
+                        c["block_sizes"] = {**c["block_sizes"], -1: 16}
+
+            def forward_loop(m):
+                torch.manual_seed(0)
+                _route_once_to_each_expert(m)
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
+            skipped = [w for w in caught if "does not apply to fused MoE experts" in str(w.message)]
+            assert bool(skipped) == warns
+            if warns:  # the message names the algorithm that ran
+                expected = "smoothquant" if "SMOOTHQUANT" in cfg_name else "awq"
+                assert expected in str(skipped[0].message)
+            # The experts still get their max-calibrated amax.
+            assert model.moe.experts.gate_up_proj_weight_quantizers[0].amax is not None
+        finally:
+            self._cleanup_registry(expert_type)
 
     def test_calibration_populates_all_expert_quantizers(self):
         """After PTQ, every input/weight quantizer on the fused-experts module has amax set."""
