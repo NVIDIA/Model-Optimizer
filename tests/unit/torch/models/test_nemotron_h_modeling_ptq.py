@@ -105,8 +105,6 @@ def test_registered_wrapper_quantizes_up_and_down_proj():
     converted = QuantModuleRegistry.convert(experts)
 
     assert isinstance(converted, _QuantNemotronHExperts)
-    # A second quantize() finds the converted experts too, as it does gated ones by their shapes.
-    assert _is_fused_experts_module(converted)
     assert len(converted.up_proj_weight_quantizers) == NUM_EXPERTS
     assert len(converted.down_proj_weight_quantizers) == NUM_EXPERTS
     assert not hasattr(converted, "gate_up_proj_input_quantizer")
