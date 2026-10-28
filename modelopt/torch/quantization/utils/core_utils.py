@@ -536,24 +536,26 @@ def _fsdp2_unshard_context(fsdp_module: FSDPModule):
             fsdp_module.reshard()
 
 
-# Per FSDP2 unit, the ids _fsdp2_owned_params found: the weight-access window opens once per quantized
-# module, and a scan walks the unit's whole parameter group. An id stays valid while FSDP2 holds its
-# parameter, which holds for a unit wrapped once; a rescan drops the ids of parameters it let go.
-_FSDP2_OWNED_PARAMS: "weakref.WeakKeyDictionary[nn.Module, set[int]]" = weakref.WeakKeyDictionary()
+# Per FSDP2 unit, the parameters _fsdp2_owned_params found: the weight-access window opens once per
+# quantized module, and a scan walks the unit's whole parameter group.
+_FSDP2_OWNED_PARAMS: "weakref.WeakKeyDictionary[nn.Module, dict[int, weakref.ref]]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
-def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> set[int]:
-    """The ids of the parameters FSDP2 manages in ``fsdp_module``'s unit and in the units inside it.
+def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> dict[int, weakref.ref]:
+    """The parameters FSDP2 manages in ``fsdp_module``'s unit and in the units inside it, by id.
 
     FSDP2 registers a different parameter object in each shard state -- sharded, resharded after the
     forward, unsharded -- so all of them count, whichever the unit is in. A DTensor parameter outside
     them is not FSDP2's to gather, whatever its mesh is named: an expert-parallel weight
-    ``fully_shard`` was told to ignore, say. The set is kept per unit; ``refresh`` scans again, for a
-    state's parameter FSDP2 has made since.
+    ``fully_shard`` was told to ignore, say. They are kept per unit; ``refresh`` scans again, for a
+    state's parameter FSDP2 has made since. Weak references, checked by :func:`_fsdp2_owns`, keep no
+    parameter alive and let an id a freed parameter left behind match nothing.
     """
     owned = None if refresh else _FSDP2_OWNED_PARAMS.get(fsdp_module)
     if owned is None:
-        owned = set()
+        owned = {}
         for unit in fsdp_module.modules():
             if not isinstance(unit, FSDPModule):
                 continue
@@ -568,9 +570,15 @@ def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> set[i
                     getattr(fsdp_param, "_unsharded_param", None),
                 ):
                     if state_param is not None:
-                        owned.add(id(state_param))
+                        owned[id(state_param)] = weakref.ref(state_param)
         _FSDP2_OWNED_PARAMS[fsdp_module] = owned
     return owned
+
+
+def _fsdp2_owns(owned: dict[int, weakref.ref], param: nn.Parameter) -> bool:
+    """Whether ``param`` itself, not just an object at its address, is among ``owned``."""
+    ref = owned.get(id(param))
+    return ref is not None and ref() is param
 
 
 @contextmanager
@@ -607,11 +615,11 @@ def fsdp2_weight_access_and_writeback_context(
     for name, param in module.named_parameters():
         if not isinstance(param, torch.distributed.tensor.DTensor):
             continue
-        if id(param) not in owned and not refreshed:
+        if not _fsdp2_owns(owned, param) and not refreshed:
             # Once per window: nothing here changes a unit's state, and a DTensor FSDP2 does not own
             # (every expert-parallel weight) misses each time.
             owned, refreshed = _fsdp2_owned_params(fsdp_module, refresh=True), True
-        if id(param) not in owned:
+        if not _fsdp2_owns(owned, param):
             # Not FSDP's shard: a DTensor FSDP2 does not manage, such as an expert-parallel weight
             # that fully_shard was told to ignore. Gathering it would hand every rank every expert,
             # which its module indexes by local expert.

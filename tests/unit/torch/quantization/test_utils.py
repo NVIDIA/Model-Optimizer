@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import weakref
 from unittest import mock
 
 import pytest
@@ -29,6 +30,7 @@ from modelopt.torch.quantization.utils import (
 from modelopt.torch.quantization.utils.core_utils import (
     _disable_fsdp_unshard_reshard,
     _fsdp2_owned_params,
+    _fsdp2_owns,
     fsdp2_weight_access_and_writeback_context,
     persistent_materialization,
 )
@@ -401,12 +403,15 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size):
     fully_shard(model, mesh=mesh)
     layer = model.layer
     sharded = layer.weight
-    assert {id(model.dense.weight), id(sharded)} <= _fsdp2_owned_params(model)
+    owned = _fsdp2_owned_params(model)
+    assert _fsdp2_owns(owned, model.dense.weight) and _fsdp2_owns(owned, sharded)
+    # An id kept for a parameter does not make another object at that address FSDP2's.
+    assert not _fsdp2_owns({id(sharded): weakref.ref(model.dense.weight)}, sharded)
     layer.unshard()
     unsharded = layer.weight
     try:
         assert unsharded is not sharded, "FSDP2 registered the same parameter when unsharded"
-        assert id(unsharded) in _fsdp2_owned_params(model, refresh=True)
+        assert _fsdp2_owns(_fsdp2_owned_params(model, refresh=True), unsharded)
     finally:
         layer.reshard()
     # The set is kept for the unit: opening the window again costs the module's parameters only.
