@@ -460,7 +460,7 @@ def _encoded(value: Any) -> bytes:
 
     The load-back makes a value that cannot round-trip fail inside the caller's guard, which tells
     every rank, rather than inside the collective on one rank alone. It loads on the producing rank
-    only: a load that depends on the loading rank (a tensor saved from another device) can still
+    only: a load that depends on the loading rank (a class only the producer can import) can still
     fail on a peer alone. torch.save stands in for pickle, which bandit refuses under modelopt/.
     """
     buffer = io.BytesIO()
@@ -475,10 +475,12 @@ def _decoded(payload: bytes) -> Any:
 
     A full load, not :func:`_deserialize`'s weights_only one: the values are whatever the callers
     compute, of any class, and the peers are this job's own ranks, whose payloads torch's object
-    collectives unpickle just as fully.
+    collectives unpickle just as fully. A tensor in the value loads on the CPU on every rank, the
+    producing one too: the device it was saved from is the producer's, not this rank's.
     """
     return torch.load(
         io.BytesIO(payload),
+        map_location="cpu",
         weights_only=False,  # this job's own ranks sent the bytes over its process group: no file
     )
 
