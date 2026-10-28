@@ -45,6 +45,7 @@ from transformers import (
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
 
+from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import env
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
@@ -1121,8 +1122,6 @@ def resolve_distribution_plan(
     :func:`ensure_local_checkpoint`, and passes the local directory: the plan is then decided for
     the snapshot the load reads.
     """
-    from modelopt.torch.utils import distributed as dist
-
     # Each rank reads the checkpoint for itself. One that cannot must fail every rank here, rather
     # than leave the others waiting in a broadcast below for a rank that already raised.
     read: list[tuple[str, PretrainedConfig]] = []
