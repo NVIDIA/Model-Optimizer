@@ -1785,6 +1785,9 @@ def assert_fused_experts_intercepted(model):
     nothing by not being intercepted, and neither do experts the recipe leaves unquantized. An
     experts module no calibration token reached (vision experts under text-only calibration) falls
     back to weight-derived scales as before.
+
+    The check is rank-local: under data parallelism it raises on the ranks whose experts saw rows,
+    and a rank whose experts saw none goes on to its next collective.
     """
     missed = []
     for name, module in model.named_modules():
