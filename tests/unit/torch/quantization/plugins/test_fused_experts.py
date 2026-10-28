@@ -50,7 +50,6 @@ from modelopt.torch.export.moe_utils import _export_fused_experts, _fallback_ama
 from modelopt.torch.export.quant_utils import (
     _has_pre_quant_scale,
     get_quant_config,
-    get_quantization_format,
     process_layer_quant_config,
 )
 from modelopt.torch.export.unified_export_hf import _prepare_moe_inputs
