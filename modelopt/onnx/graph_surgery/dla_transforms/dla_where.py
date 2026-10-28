@@ -17,6 +17,7 @@
 
 Fixed BOOL conditions get private FLOAT masks; runtime conditions use Cast nodes.
 Overridable zero branches remain native, and initializer owners are preserved.
+Masked multiplication does not preserve the sign of selected zero values.
 """
 
 from __future__ import annotations
