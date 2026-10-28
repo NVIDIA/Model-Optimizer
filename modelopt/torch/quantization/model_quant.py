@@ -279,7 +279,12 @@ _PLUGIN_QUANTIZERS = {
         _LINEAR_ATTENTION_UNITS,
     ),
     "kda_state_quantizer": (
-        ("*KimiDeltaAttention", "*KimiK3DeltaAttention", "*KimiLinearDeltaAttention"),
+        (
+            "*KimiDeltaAttention",
+            "*KimiK3DeltaAttention",
+            "*KimiLinearDeltaAttention",
+            "*KimiGatedDeltaNetAttention",
+        ),
         "KDA layer",
         _LINEAR_ATTENTION_UNITS,
     ),

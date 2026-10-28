@@ -119,3 +119,16 @@ def test_grouped_quantizer_preserves_nested_sequential_state_dict_layout():
     )
 
     assert list(grouped.state_dict()) == ["0.0._amax", "0.1._amax", "1._amax"]
+
+
+def test_dynamic_block_quantization_accepts_changing_shapes():
+    cfg = QuantizerAttributeConfig(
+        num_bits=8, type="dynamic", block_sizes={-1: 32}, pass_through_bwd=True
+    )
+    quantizer = TensorQuantizer(cfg)
+    for shape in ((2, 3, 17), (1, 2, 4, 64), (3, 2, 33)):
+        value = torch.randn(shape, requires_grad=True)
+        output = quantizer(value)
+        torch.testing.assert_close(output, TensorQuantizer(cfg)(value), rtol=0, atol=0)
+        output.sum().backward()
+        torch.testing.assert_close(value.grad, torch.ones_like(value), rtol=0, atol=0)
