@@ -15,10 +15,21 @@
 
 """Packing weights that are still sharded, as the no-gather export does (CPU, one gloo rank)."""
 
+import contextlib
+import copy
+
+import pytest
 import torch
+import torch.nn as nn
+from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
+from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
+import modelopt.torch.export.hf_export_handlers as handlers
+import modelopt.torch.quantization as mtq
+from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
 def _raw_bytes(tensor):
@@ -72,3 +83,55 @@ def test_nvfp4_cast_keeps_the_global_shape_of_an_uneven_shard(gloo_world_of_one)
     assert isinstance(packed, DTensor) and packed.placements == (Shard(0),)
     assert packed.shape == (3, 32)
     assert torch.equal(packed.to_local(), NVFP4QTensor._cast_fp4(local.clone()))
+
+
+@pytest.mark.parametrize("held", [True, False], ids=["held", "per-module"])
+@pytest.mark.parametrize("root_sharded", [True, False], ids=["fsdp2", "expert-parallel"])
+def test_quant_linear_handlers_pack_an_fsdp2_unit_in_one_weight_window(
+    monkeypatch, gloo_world_of_one, root_sharded, held
+):
+    """On the no-gather path the model is still sharded when a linear is packed.
+
+    Packing NVFP4 straight off the sharded weight is not possible (the in-place cast on the
+    DTensor's local view is refused under autograd), so the handlers pack inside a weight-update
+    window, on the layer's own unit where expert parallelism leaves the root unsharded. The window
+    gathers the whole unit, so within held windows it opens once for all of the unit's linears;
+    any other dispatch loop gets a window per linear, closed by its handler. Either way the unit is
+    sharded again afterwards, and the sharded state dict carries the packed weights, as an
+    unsharded pack has them.
+    """
+    torch.manual_seed(0)
+    layer = nn.Sequential(nn.Linear(32, 16, bias=False), nn.Linear(16, 8, bias=False))
+    model = nn.Sequential(layer)
+    mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(torch.randn(4, 32)))
+    refs = copy.deepcopy(model)[0]
+    for i, ref in enumerate(refs):
+        ExportModuleRegistry.match(ref)(
+            f"0.{i}", ref, ExportContext(model=ref, dtype=torch.bfloat16)
+        )
+    fully_shard(layer, mesh=gloo_world_of_one)
+    if root_sharded:
+        fully_shard(model, mesh=gloo_world_of_one)
+    set_distribution_plan(model, DistributionPlan(dense="fsdp"))
+    ctx = ExportContext(model=model, dtype=torch.bfloat16, keep_fused_experts=True)
+    unshards = []
+    unshard = FSDPModule.unshard
+    monkeypatch.setattr(
+        FSDPModule, "unshard", lambda unit, *a, **k: unshards.append(unit) or unshard(unit, *a, **k)
+    )
+
+    with handlers.held_fsdp2_weight_windows(ctx) if held else contextlib.nullcontext():
+        for i, linear in enumerate(layer):
+            ExportModuleRegistry.match(linear)(f"0.{i}", linear, ctx)
+
+    assert unshards == ([layer] if held else [layer, layer])
+    assert all(isinstance(linear.weight, DTensor) for linear in layer)
+    sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
+    for i, ref in enumerate(refs):
+        packed = sd[f"0.{i}.weight"]
+        assert isinstance(packed, DTensor)
+        assert packed.dtype == torch.uint8
+        assert torch.equal(packed.full_tensor(), ref.weight)
+        for name in ("weight_scale", "weight_scale_2", "input_scale"):
+            want = _raw_bytes(getattr(ref, name))
+            assert torch.equal(_raw_bytes(sd[f"0.{i}.{name}"]), want), name
