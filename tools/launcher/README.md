@@ -65,3 +65,46 @@ tools/launcher/
 | [Testing](docs/testing.md) | Running tests locally and in CI |
 | [Claude Code](docs/claude_code.md) | Submit, monitor, diagnose workflows |
 | [Contributing](docs/contributing.md) | Adding models, typed tasks, bug reporting |
+
+### Bounded concurrent calibration
+
+`SandboxPipeline.max_concurrent_tasks` defaults to 1. Set it explicitly to cap
+concurrent Slurm allocations. `SandboxTask.wait_for_all=True` joins the outstanding
+tasks and gates subsequent tasks. Each task retains its own `SlurmConfig`, including
+nodes, GPUs, host memory and wall-time limits. Local Docker execution stays serial.
+
+For AutoQuant, use five independent tasks with the same full recipe, source model,
+seed and calibration dataset, each with a different
+`--auto_quantize_calibration_candidate` index and a shared
+`--auto_quantize_calibration_dir`. Workers return after calibration. Append one
+coordinator with `wait_for_all=True`, the same calibration directory, and
+`--auto_quantize_checkpoint`; omit the candidate index. The coordinator validates
+all results before scoring and publishing the checkpoint. BF16 needs no task.
+Workers exit before KV calibration, casting and export; none remain running after
+the coordinator starts. Later tasks run only when explicitly listed in the pipeline.
+
+Use `hf_ptq.py --model <source> --recipe <recipe>
+--auto_quantize_list_calibration_candidates` to print the canonical index mapping
+without loading weights or requiring a GPU. Set
+`--auto_quantize_calibration_max_input_bytes` to bound each worker's CPU input
+snapshot (64 MiB by default). Disk-offloaded meta weights are currently unsupported.
+
+```python
+pipeline = SandboxPipeline(
+    max_concurrent_tasks=2,
+    allow_to_fail=True,  # let independent candidates finish even if another fails
+    tasks=[*candidate_tasks, coordinator_task],
+)
+coordinator_task.wait_for_all = True
+```
+
+Use the `tasks` list or YAML `task_configs` for this six-task workflow. Bound the
+resources of every worker: two concurrent four-GPU tasks reserve eight GPUs, plus
+their host memory and separate candidate output space. Do not point workers at the
+coordinator checkpoint. On failure, resubmit the same pipeline or only failed/missing
+workers; completed candidates are validated and reused. Keep source, inputs,
+configuration, process topology and numerical settings identical across retries.
+Completed candidates are immutable and reused; replacing the coordinator checkpoint
+reclaims its preceding generation under the same lock. Do not read that checkpoint
+outside the coordinator while it is being replaced.
+Measure both elapsed time and all allocated GPU-hours before increasing concurrency.

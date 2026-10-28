@@ -27,7 +27,9 @@ from torch.utils.data import DataLoader
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
+from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.kv_cache_auto_quant import _forward_kl
+from modelopt.torch.quantization.model_quant import _process_quantization_formats
 from modelopt.torch.utils.dataset_utils import create_forward_loop, model_type_is_enc_dec
 from modelopt.torch.utils.distributed import size as world_size
 
@@ -37,6 +39,27 @@ _FSDP2_AUTOQUANT_WARNING = (
     "AutoQuantize with --use_fsdp2 is experimental. "
     "Resume with the same world size, model, recipe, and calibration data."
 )
+
+
+def _calibration_candidates(args):
+    recipe = load_recipe(args.recipe)
+    inputs = _mtq_inputs_from_auto_quantize_config(recipe.auto_quantize, args, recipe.quantize)
+    formats = _process_quantization_formats(inputs["quantization_formats"], "CUSTOM")
+    for index, space in enumerate(inputs["module_search_spaces"]):
+        formats.extend(
+            _process_quantization_formats(space["quantization_formats"], f"CUSTOM_MODULE_{index}")
+        )
+    if inputs["fixed_quantization_config"] is not None:
+        formats.extend(
+            _process_quantization_formats([inputs["fixed_quantization_config"]], "FIXED")
+        )
+    candidates = [
+        r for r in _AutoQuantizeBaseSearcher._get_search_recipes(formats) if not r.is_no_quant
+    ]
+    return [
+        {"index": i, "name": str(r), "signature": r.checkpoint_signature}
+        for i, r in enumerate(candidates)
+    ]
 
 
 def _get_autoquant_memory_probe(recipe: ModelOptAutoQuantizeRecipe):
@@ -142,6 +165,8 @@ def auto_quantize(
         and not hasattr(language_model, "lm_head")
         and hasattr(full_model, "lm_head")
     )
+    lm_head = None
+    search_domain = inputs["search_domain"]
     if is_base_model:
         assert full_model is not None
         lm_head = full_model.lm_head
@@ -174,11 +199,11 @@ def auto_quantize(
             inputs_ = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
             output = model(**inputs_)
             if is_base_model:
-                assert full_model is not None
-                logits = full_model.lm_head(output.last_hidden_state)
+                assert lm_head is not None
+                logits = lm_head(output.last_hidden_state)
             else:
                 logits = output.logits
-            if inputs["search_domain"] == "kv_cache":
+            if search_domain == "kv_cache":
                 return _select_unpadded_logits(logits, batch)
             return logits
 
@@ -214,12 +239,23 @@ def auto_quantize(
                 "module_search_spaces": inputs["module_search_spaces"],
             }
         )
+    if inputs["search_domain"] == "weight" and getattr(args, "auto_quantize_calibration_dir", None):
+        auto_quantize_kwargs["calibration"] = {
+            "directory": args.auto_quantize_calibration_dir,
+            "candidate": args.auto_quantize_calibration_candidate,
+        }
+        limit = getattr(args, "auto_quantize_calibration_max_input_bytes", None)
+        if limit is not None:
+            auto_quantize_kwargs["calibration"]["max_input_bytes"] = limit
 
     language_model, _ = mtq.auto_quantize(
         language_model,
         **auto_quantize_kwargs,
     )
-    if inputs["search_domain"] == "kv_cache":
+    if (
+        inputs["search_domain"] == "kv_cache"
+        or getattr(args, "auto_quantize_calibration_candidate", None) is not None
+    ):
         return language_model
 
     # KV cache quantization is uniform; applied after the LP search.

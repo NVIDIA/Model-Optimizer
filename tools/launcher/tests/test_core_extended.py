@@ -42,6 +42,64 @@ from core import (
 from slurm_config import SlurmConfig
 
 
+@pytest.mark.parametrize("concurrency", [1, 2, 3])
+def test_bounded_task_dependencies(concurrency, tmp_path, monkeypatch):
+    """Check the real NeMo job graph without submitting allocations."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("nemo_run.config._NEMORUN_HOME", str(tmp_path))
+    monkeypatch.setattr(core.run.Experiment, "run", lambda self, **kwargs: None)
+    pipeline = SandboxPipeline(
+        max_concurrent_tasks=concurrency,
+        allow_to_fail=True,
+        tasks=[
+            SandboxTask(
+                inline="true",
+                slurm_config=SlurmConfig(host="localhost", account="test", gpus_per_node=4),
+                wait_for_all=i == 5,
+            )
+            for i in range(8)
+        ],
+    )
+    arguments = {
+        "job_table": {"job": pipeline},
+        "hf_local": None,
+        "user": "test",
+        "identity": None,
+        "job_dir": str(tmp_path),
+        "packager": core.run.Packager(),
+        "default_slurm_env": {},
+        "default_local_env": {},
+        "base_dir": str(tmp_path),
+    }
+    pipeline.max_concurrent_tasks = 0  # Configuration can change after construction.
+    with pytest.raises(ValueError):
+        run_jobs(**arguments)
+    assert getattr(pipeline, "experiment") is None
+    pipeline.max_concurrent_tasks = concurrency
+    run_jobs(**arguments)
+    jobs = list(pipeline.experiment.jobs)
+    dependencies = {job.id: set(job.dependencies) for job in jobs}
+    assert len(jobs) == 8
+    assert sum(not deps for deps in dependencies.values()) == concurrency
+    assert all(job.executor.gpus_per_node == 4 for job in jobs)
+    assert all(job.executor.dependency_type == "afterany" for job in jobs)
+    # Explore every reachable completion order, including failed predecessors with afterany.
+    pending, visited = [frozenset()], set()
+    while pending:
+        done = pending.pop()
+        if done in visited:
+            continue
+        visited.add(done)
+        ready = {name for name, deps in dependencies.items() if name not in done and deps <= done}
+        assert len(ready) <= concurrency
+        if jobs[5].id in ready:
+            assert all(job.id in done for job in jobs[:5])
+        if any(job.id in ready for job in jobs[6:]):
+            assert jobs[5].id in done
+        pending.extend(done | {name} for name in ready)
+    assert frozenset(dependencies) in visited
+
+
 class TestCreateTaskFromYamlErrors:
     """Error handling in create_task_from_yaml."""
 

@@ -146,6 +146,7 @@ class TestFactoryRegistry:
 
         yaml_content = """
 script: test.sh
+wait_for_all: true
 args:
   - --flag
 slurm_config:
@@ -155,6 +156,7 @@ slurm_config:
         path = tmp_yaml(yaml_content)
         task = create_task_from_yaml(path, factory_lookup={"test_factory": test_factory})
         assert task.script == "test.sh"
+        assert task.wait_for_all
         assert task.args == ["--flag"]
         assert task.slurm_config == {"nodes": 2}
 

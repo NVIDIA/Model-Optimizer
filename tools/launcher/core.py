@@ -129,6 +129,7 @@ class SandboxTask:
     environment: list[dict[str, str]] = None
     yaml_file: str = None
     skip: bool = False
+    wait_for_all: bool = False
 
 
 @dataclass
@@ -172,7 +173,13 @@ def create_task_from_yaml(yaml_file, factory_lookup):
     args = config_from_yaml.get("args", None)
     environment = config_from_yaml.get("environment", None)
 
-    return SandboxTask(script=script, slurm_config=slurm_config, args=args, environment=environment)
+    return SandboxTask(
+        script=script,
+        slurm_config=slurm_config,
+        args=args,
+        environment=environment,
+        wait_for_all=config_from_yaml.get("wait_for_all", False),
+    )
 
 
 def _yaml_path_from_argv(argv: list[str] | None = None) -> str | None:
@@ -255,8 +262,15 @@ class SandboxPipeline:
     # Set by caller — used by create_task_from_yaml
     _factory_lookup: dict = None
 
+    max_concurrent_tasks: int = 1
+
+    def _validate_concurrency(self):
+        if type(self.max_concurrent_tasks) is not int or self.max_concurrent_tasks < 1:
+            raise ValueError("max_concurrent_tasks must be a positive integer")
+
     def __post_init__(self):
         """Collect tasks from slots/configs and resolve <<global_vars.X>> references."""
+        self._validate_concurrency()
         if self.tasks is None:
             self.tasks = []
             for i in range(5):
@@ -774,7 +788,11 @@ def run_jobs(
         if job.skip:
             continue
 
-        dependency = None
+        job._validate_concurrency()
+        if hf_local is not None and job.max_concurrent_tasks != 1:
+            raise ValueError("Concurrent tasks require separate Slurm allocations")
+        frontier = []
+        barrier = None
         exp = run.Experiment(experiment_title, log_level="INFO")
         job.experiment = exp
 
@@ -871,18 +889,23 @@ def run_jobs(
                     task_instance = run.Script(task.script, args=task_args, env=task_env)
                 print(f"job {job_name} task {task_id} slurm_config: {task.slurm_config}")
 
-                if dependency is None:
-                    dependency = exp.add(
-                        task_instance, tail_logs=True, name=task_name, executor=executor
-                    )
+                if task.wait_for_all:
+                    dependencies, frontier = frontier, []
+                elif len(frontier) == job.max_concurrent_tasks:
+                    dependencies = [frontier.pop(0)]
                 else:
-                    dependency = exp.add(
+                    dependencies = [barrier] if barrier is not None else []
+                frontier.append(
+                    exp.add(
                         task_instance,
                         tail_logs=True,
                         name=task_name,
                         executor=executor,
-                        dependencies=[dependency],
+                        **({"dependencies": dependencies} if dependencies else {}),
                     )
+                )
+                if task.wait_for_all:
+                    barrier = frontier[-1]
 
             exp.run(detach=detach)
 
