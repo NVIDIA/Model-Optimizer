@@ -1130,23 +1130,6 @@ def _refuse_packed_fused_expert_weights(name, module, method, updates):
             )
 
 
-def _check_experts_path(experts, grouped: bool) -> None:
-    """Raise if ``experts`` ran on the other path than the one its capture hook was set up for.
-
-    A capture hook is chosen by the path ``config._experts_implementation`` names; the interceptors
-    record the path that ran (``_grouped_offs`` set on the grouped one, cleared on the eager one),
-    and a capture fed by the other path would attribute inputs to the wrong experts.
-    """
-    ran_grouped = getattr(experts, "_grouped_offs", None) is not None
-    if ran_grouped != grouped:
-        impl = getattr(getattr(experts, "config", None), "_experts_implementation", None)
-        raise RuntimeError(
-            f"{type(experts).__name__} ran its experts on the {'grouped' if ran_grouped else 'eager'} "
-            f"path while its config selects {impl!r}; the weight-input capture would attribute "
-            "its inputs to the wrong experts."
-        )
-
-
 def _expert_slices(offs: torch.Tensor):
     """``(expert, start, end)`` for the rows of each expert in a batch sorted by expert.
 
@@ -1183,40 +1166,31 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
     handles: list = []
 
     def _make_expert_hook(expert_module, weight_name, quantizers, enabled):
-        def _expert_hook(_input_quantizer, args):
-            if not args:
-                return
-            _check_experts_path(expert_module, grouped=False)
-            idx = expert_module._current_expert_idx
-            if idx in enabled:
-                # Read the weight fresh (valid under accelerate/FSDP re-materialization), indexed by
-                # this rank's own experts as the grouped hook below is (see ``_local_experts``).
-                weight = expert_module._local_experts(getattr(expert_module, weight_name))
-                capture(quantizers[idx], weight[idx], args[0])
+        """Per-expert capture for whichever forward ran.
 
-        return _expert_hook
-
-    def _make_grouped_expert_hook(expert_module, weight_name, quantizers, enabled):
-        """Per-expert capture for the grouped dispatchers (``grouped_mm``, ``torch_a2a``).
-
-        Both feed the input quantizer a single expert-sorted batch ``(S, cin)`` rather than
-        one call per expert, so we split it back into per-expert chunks using ``_grouped_offs``
-        (cumulative tokens-per-expert, stashed by the _QuantFusedExperts grouped interceptor).
-        Rows beyond ``offs[-1]`` (EP sentinels) belong to no expert and are skipped.
+        The eager forward feeds the input quantizer one call per expert (``_current_expert_idx``);
+        the grouped ones (``grouped_mm``, ``torch_a2a``) feed it one expert-sorted batch per
+        projection, which ``_grouped_offs`` (set by the grouped interceptor, cleared by the eager one)
+        splits back per expert. Rows beyond ``offs[-1]`` (EP sentinels) belong to no expert.
         """
 
         def _expert_hook(_input_quantizer, args):
             if not args:
                 return
-            _check_experts_path(expert_module, grouped=True)
+            # Read the weight fresh (valid under accelerate/FSDP re-materialization), indexed by this
+            # rank's own experts: an expert-parallel weight is a DTensor whose index names a global
+            # expert (see ``_local_experts``).
             offs = expert_module._grouped_offs
-            x = args[0]
-            # This rank's experts, in quantizer order: an expert-parallel weight is a DTensor whose
-            # index names a global expert (see ``_local_experts``).
+            if offs is None:
+                idx = expert_module._current_expert_idx
+                if idx in enabled:
+                    weight = expert_module._local_experts(getattr(expert_module, weight_name))
+                    capture(quantizers[idx], weight[idx], args[0])
+                return
             weight = expert_module._local_experts(getattr(expert_module, weight_name))
             for idx, start, end in _expert_slices(offs):
                 if idx in enabled:
-                    capture(quantizers[idx], weight[idx], x[start:end])
+                    capture(quantizers[idx], weight[idx], args[0][start:end])
 
         return _expert_hook
 
@@ -1253,16 +1227,11 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
                     if not enabled:
                         continue
                     module._weight_input_capture = True
-                    # grouped_mm and torch_a2a feed one expert-sorted batch per projection; eager
-                    # feeds one call per expert keyed by _current_expert_idx.
-                    make_hook = (
-                        _make_grouped_expert_hook
-                        if getattr(module, "_running_grouped_mm", False)
-                        else _make_expert_hook
-                    )
                     handles.append(
                         input_quantizer.register_forward_pre_hook(
-                            _WeightInputHook(make_hook(module, weight_name, quantizers, enabled))
+                            _WeightInputHook(
+                                _make_expert_hook(module, weight_name, quantizers, enabled)
+                            )
                         )
                     )
     return handles
@@ -2648,9 +2617,7 @@ def gptq(
 
     def _make_expert_hook(experts, per_expert):
         def _expert_hook(_input_quantizer, _args, output):
-            grouped = getattr(experts, "_running_grouped_mm", False)
-            _check_experts_path(experts, grouped)
-            if grouped:
+            if experts._grouped_offs is not None:
                 # grouped_mm and torch_a2a quantize one expert-sorted batch per projection: split
                 # it back per expert by the cumulative token counts, as the eager loop feeds it.
                 for idx, start, end in _expert_slices(experts._grouped_offs):
