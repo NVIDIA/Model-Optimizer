@@ -977,6 +977,10 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
                         f"{type(self).__name__} quantizes on the eager experts forward only, but its "
                         'grouped_mm forward ran. Load the model with experts_implementation="eager".'
                     )
+                # The batch holds every expert's rows: no single expert for the eager loop's index to
+                # name, so a weight-input capture keyed on it skips the batch rather than credit
+                # one expert with all of it.
+                self._current_expert_idx = None
                 quantizers = (
                     self.down_proj_weight_quantizers if self._down_proj_linear else first_weight_qs
                 )
