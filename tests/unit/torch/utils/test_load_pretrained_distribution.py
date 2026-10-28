@@ -454,14 +454,21 @@ def test_an_automatic_layout_says_so_when_it_refuses_a_placement(
     [
         (DistributionPlan(4), {}, ValueError, "is for 4 ranks"),
         (DistributionPlan(2), {"hf_config": LlamaConfig(**_TINY)}, TypeError, "plan that shards"),
+        (
+            DistributionPlan(2, dense="fsdp"),
+            {"device_map": "auto"},
+            TypeError,
+            r"\['device_map'\] do not apply to the FSDP2 load",
+        ),
     ],
-    ids=["another-world", "hf-config-on-a-whole-load"],
+    ids=["another-world", "hf-config-on-a-whole-load", "whole-load-option-on-a-sharded-plan"],
 )
 def test_a_handed_plan_is_checked_before_the_checkpoint_is_fetched(
     run_as, monkeypatch, tmp_path, distribution, options, error, match
 ):
     """Making the checkpoint local can mean downloading it: a plan the load refuses fails first, as
-    does hf_config with a plan that loads the model whole."""
+    do hf_config with a plan that loads the model whole and an option a sharded plan's load
+    refuses."""
     run_as(2)
     monkeypatch.setattr(
         model_load_utils, "ensure_local_checkpoint", lambda *a, **k: pytest.fail("fetched it")
