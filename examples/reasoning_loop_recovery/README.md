@@ -12,6 +12,7 @@ distillation (QAD). Each experiment keeps its own settings, data provenance, and
 ## Blog posts
 
 - [First recovery-QAD results](blog/2026-10-20-reducing-reasoning-loops-after-qad.md) — Daniel Korzekwa.
+- [QADPO follow-up](blog/2026-10-27-recovery-qad-to-dpo.md) — Daniel Korzekwa.
 
 Large datasets, generated responses, checkpoints, and containers are not included. Runtime paths
 are supplied separately; manifests use portable filenames and checksums. A missing public download
