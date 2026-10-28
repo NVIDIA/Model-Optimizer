@@ -376,3 +376,43 @@ def test_two_precision_recipe_and_checkpoint(tmp_path, read_format):
     assert not get_linear_attention_layers(model, enabled_only=True)
     with linear_attention_training_phase(model, [1]):
         assert model.linear_attention_is_enabled
+
+
+@pytest.mark.parametrize(
+    ("recipe", "num_bits"),
+    [
+        ("gdn_prefill_fp8_dynamic", (4, 3)),
+        ("gdn_prefill_nvfp4_dynamic", (2, 1)),
+    ],
+)
+def test_gdn_prefill_recipe_and_checkpoint(recipe, num_bits):
+    config = load_recipe(f"general/ptq/{recipe}").quantize
+    model = mtq.quantize(TinyGatedDeltaNet(), config)
+    assert model.linear_attention_config == LinearAttentionConfig(
+        backend="gdn_prefill", precision="gdn_prefill"
+    )
+    assert not model.gdn_state_quantizer.is_enabled
+    assert not model.gdn_read_quantizer.is_enabled
+    quantizers = [
+        quantizer for site in model.gdn_matmul_sites.values() for quantizer in site.children()
+    ]
+    assert len(quantizers) == 16
+    assert all(quantizer.is_enabled and quantizer.num_bits == num_bits for quantizer in quantizers)
+    assert get_linear_attention_layers(model, enabled_only=True) == (model,)
+
+    restored = mto.restore_from_modelopt_state(TinyGatedDeltaNet(), mto.modelopt_state(model))
+    assert restored.linear_attention_config == model.linear_attention_config
+    assert [
+        quantizer.get_modelopt_state()
+        for site in restored.gdn_matmul_sites.values()
+        for quantizer in site.children()
+    ] == [quantizer.get_modelopt_state() for quantizer in quantizers]
+
+
+def test_kda_rejects_gdn_prefill_policy():
+    model = KimiDeltaAttentionStateQuantMixin.convert(TinyGatedDeltaNet())
+    model.linear_attention_config = LinearAttentionConfig(
+        backend="gdn_prefill", precision="gdn_prefill"
+    )
+    with pytest.raises(ValueError, match="not GEMM operands"):
+        model.validate_linear_attention()

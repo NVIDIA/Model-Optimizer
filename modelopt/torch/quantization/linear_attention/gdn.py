@@ -16,6 +16,7 @@
 """GDN adapter for serving-aligned recurrent-state QAT."""
 
 from .config import LinearAttentionConfig
+from .prefill import gdn_prefill_qat
 from .training import _prefill_decode_forward, _prepare_prefill_inputs
 from .utils import _validate_gate_inputs
 
@@ -32,6 +33,7 @@ def gdn_state_qat(
     policy: LinearAttentionConfig,
     state_quantizer=None,
     read_quantizer=None,
+    matmul_sites=None,
     scale=None,
     initial_state=None,
     output_final_state=False,
@@ -70,6 +72,33 @@ def gdn_state_qat(
     if cp_context is not None:
         raise NotImplementedError("GDN state QAT does not support context parallelism")
     _validate_gate_inputs(g, beta, gate_inputs)
+    if policy.backend == "gdn_prefill":
+        if policy.precision != "gdn_prefill" or matmul_sites is None:
+            raise ValueError("GDN prefill operand QDQ requires its explicit policy and sites")
+        if (state_quantizer is not None and state_quantizer.is_enabled) or (
+            read_quantizer is not None and read_quantizer.is_enabled
+        ):
+            raise ValueError("GDN prefill operand QDQ cannot be combined with state/read QDQ")
+        if use_gate_in_kernel or use_beta_sigmoid_in_kernel or allow_neg_eigval:
+            raise ValueError("GDN prefill operand QDQ requires prepared gates and beta")
+        return gdn_prefill_qat(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            sites=matmul_sites,
+            scale=scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            state_v_first=state_v_first,
+            chunk_size=chunk_size,
+            prefill_lengths=prefill_lengths,
+            sequence_lengths=sequence_lengths,
+        )
     output_dtype = q.dtype
     beta_dtype = beta.dtype
     q, k, v, g, beta = _prepare_prefill_inputs(

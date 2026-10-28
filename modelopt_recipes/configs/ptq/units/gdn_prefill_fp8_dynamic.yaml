@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Dynamic per-row E4M3 QDQ on both operands of the eight real GDN prefill GEMMs.
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+  - quantizer_name: '*gdn_matmul_sites.*_quantizer'
+    cfg:
+      num_bits: [4, 3]
+      type: dynamic
+      axis: [0, 1, 2]
+      pass_through_bwd: true

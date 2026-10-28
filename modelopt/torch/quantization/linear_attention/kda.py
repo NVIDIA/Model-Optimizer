@@ -63,6 +63,11 @@ def kda_state_qat(
     a Torch recurrence supplies the suffix adjoint. ``state_quantizer`` owns state
     QDQ; passing None or a disabled quantizer retains the unquantized native path.
     """
+    if policy.backend == "gdn_prefill" or policy.precision == "gdn_prefill":
+        raise ValueError(
+            "GDN prefill operand QDQ does not apply to KDA: its gated pairwise "
+            "interactions are not GEMM operands"
+        )
     if cp_context is not None or disable_recompute or return_intermediate_states:
         raise NotImplementedError(
             "KDA state QAT does not support CP or FLA recompute/intermediate flags"

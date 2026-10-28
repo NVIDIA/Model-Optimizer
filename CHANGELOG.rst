@@ -8,6 +8,9 @@ Changelog
 
 *Quantization*
 
+- Add experimental GDN prefill operand QAT with dynamic per-row FP8 or block16
+  NVFP4 fake QDQ at the eight algorithmic GEMMs. NVFP4 global scales are isolated
+  per chunk and head; this is numerical training emulation, not a native kernel.
 - Add experimental GDN two-precision ReplaySSM QAT with an FP32 recurrence anchor,
   an independently rounded FP8 read copy, and a fixed 16-token replay window.
 - Add experimental NVFP4 recurrent-state fake quantization for linear-attention QAT,

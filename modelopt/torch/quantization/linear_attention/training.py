@@ -62,11 +62,13 @@ class _PackedBoundaries:
 
 
 def get_linear_attention_layers(model, *, enabled_only=False, unphased_only=False):
-    """Return serving-policy layers from a module or iterable of model chunks.
+    """Return explicit linear-attention layers from a module or iterable of model chunks.
 
     Disabled state quantizers are included by default so a baseline can use the
-    same serving arithmetic and phase as QAT. Use ``enabled_only`` for setup checks
-    and ``unphased_only`` to select layers needing adapter-provided defaults.
+    same serving arithmetic and phase as QAT. GDN prefill operand-QDQ layers are
+    included so packed boundaries and valid lengths reach their emulation path.
+    Use ``enabled_only`` for setup checks and ``unphased_only`` to select layers
+    needing adapter-provided defaults.
     """
     # The plugin imports this numerical package during quantization initialization.
     from ..plugins.linear_attention import _LinearAttentionQuantMixin
@@ -78,12 +80,16 @@ def get_linear_attention_layers(model, *, enabled_only=False, unphased_only=Fals
             for root in roots
             for module in root.modules()
             if isinstance(module, _LinearAttentionQuantMixin)
-            and module.linear_attention_config.backend == "serving"
+            and module.linear_attention_config.backend in ("serving", "gdn_prefill")
             and (
                 not enabled_only
                 or any(
                     getattr(module, name).is_enabled
                     for name in module.linear_attention_quantizer_names
+                )
+                or (
+                    getattr(module, "gdn_matmul_sites", None) is not None
+                    and module.gdn_matmul_sites.is_enabled
                 )
             )
             and (not unphased_only or module._linear_attention_prefill_lengths is None)
@@ -116,6 +122,8 @@ def linear_attention_training_phase(
     Megatron derives omitted valid lengths from unpadded ``cu_seqlens_q`` metadata;
     padded-only metadata requires explicit ``sequence_lengths``.
     Padding produces zero attention outputs and never updates the recurrent state.
+    A GDN prefill operand-QDQ policy must receive full valid lengths as its
+    ``prefill_lengths`` because it intentionally has no recurrent suffix.
     ``preserve_existing=True`` installs defaults only on layers without a phase.
     Empty pipeline stages participate as no-ops.
     """

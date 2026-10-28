@@ -36,6 +36,8 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `gdn_state_fp8_dynamic.yaml` | FP8 E4M3 dynamic fake quantization of the GatedDeltaNet recurrent state (per sequence, head and 64-column tile) at serving cache boundaries; requires an explicit serving execution policy |
 | `gdn_replayssm_fp8_read.yaml` | GDN two-precision replay: FP8 block128 read quantizer; recurrence anchor stays FP32 |
 | `gdn_replayssm_nvfp4_read.yaml` | GDN two-precision replay: NVFP4 block16 reads with E4M3 scales; recurrence anchor stays FP32 |
+| `gdn_prefill_fp8_dynamic.yaml` | Dynamic per-row FP8 operands at the eight real GDN prefill GEMMs; experimental training emulation |
+| `gdn_prefill_nvfp4_dynamic.yaml` | Dynamic NVFP4 operands at the eight real GDN prefill GEMMs, isolated per chunk/head; experimental training emulation |
 | `linear_attention_state_int8_dynamic.yaml` | GDN/KDA INT8 state quantizer entries; the [complete recipe](../../../general/ptq/linear_attention_state_int8_dynamic.yaml) enables Hadamard during decode |
 | `linear_attention_state_int8_block32_dynamic.yaml` | Standard dynamic INT8 with one scale per key row and 32 value channels; the [complete training recipe](../../../general/ptq/linear_attention_state_int8_block32_dynamic.yaml) uses token QDQ and working-state readout |
 | `linear_attention_state_nvfp4_dynamic.yaml` | Dynamic NVFP4 GDN/KDA state QDQ with request- and head-local global scales and block16 E4M3 block scales; the [complete training recipe](../../../general/ptq/linear_attention_state_nvfp4_dynamic.yaml) uses working-state readout |

@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 43 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 45 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -75,6 +75,8 @@ supported combinations.
 | `linear_attention_state_nvfp4_dynamic` | GDN/KDA state NVFP4, request/head-local global scale and block16 E4M3 scales; weights unchanged | none | none (dynamic scales; requires vLLM and a prefix/decode phase context) |
 | `gdn_replayssm_fp8_read` | GDN ReplaySSM FP32 recurrence and FP8 block128 reads; floating storage | none | none (ModelOpt replay backend) |
 | `gdn_replayssm_nvfp4_read` | GDN ReplaySSM FP32 recurrence and NVFP4 block16 reads; floating storage | none | none (ModelOpt replay backend) |
+| `gdn_prefill_fp8_dynamic` | Experimental GDN prefill per-row FP8 operand QDQ at eight real GEMMs | none | none (dynamic scales; training emulation only) |
+| `gdn_prefill_nvfp4_dynamic` | Experimental GDN prefill NVFP4 operand QDQ with chunk/head-local global scales | none | none (dynamic scales; training emulation only) |
 
 </details>
 
