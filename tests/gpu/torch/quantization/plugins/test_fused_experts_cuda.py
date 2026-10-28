@@ -30,7 +30,8 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("pass_through_bwd", [True, False])
-def test_stacked_nvfp4_experts_match_per_expert_quantizers(monkeypatch, pass_through_bwd):
+@pytest.mark.parametrize("rounding", ["nearest", "stochastic"])
+def test_stacked_nvfp4_experts_match_per_expert_quantizers(monkeypatch, pass_through_bwd, rounding):
     model = get_tiny_qwen3_moe().cuda().train()
     input_ids = torch.randint(0, model.config.vocab_size, (2, 16), device="cuda")
     mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(input_ids))
@@ -40,10 +41,12 @@ def test_stacked_nvfp4_experts_match_per_expert_quantizers(monkeypatch, pass_thr
         quantizers = [*module.gate_up_proj_weight_quantizers, *module.down_proj_weight_quantizers]
         for idx, quantizer in enumerate(quantizers):
             quantizer._pass_through_bwd = pass_through_bwd
+            quantizer._rounding = rounding
             if idx % 3 == 0:  # weights above amax: saturated block scales, clipped gradients
                 quantizer.amax = quantizer.amax * 0.5
 
     def loss_and_grads(checkpointing):
+        torch.manual_seed(123)
         if checkpointing:
             model.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs={"use_reentrant": False}
@@ -67,7 +70,8 @@ def test_stacked_nvfp4_experts_match_per_expert_quantizers(monkeypatch, pass_thr
         calls.clear()
         results.append(loss_and_grads(checkpointing))
         # Checkpointing reruns the forward in backward.
-        assert len(calls) == 2 * len(experts) * (1 + checkpointing)
+        expected_calls = 2 * len(experts) * (1 + checkpointing) if rounding == "nearest" else 0
+        assert len(calls) == expected_calls
 
     monkeypatch.setattr(hf_plugin, "_try_stacked_fake_quant", lambda *args: None)
     ref_loss, ref_grads = loss_and_grads(checkpointing=False)

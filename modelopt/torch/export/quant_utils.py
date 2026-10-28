@@ -580,6 +580,13 @@ def _get_quantization_from_quantizers(
 
 def get_quantization_format(module) -> str | None:
     """Return the first enabled weight quantization format in a module tree."""
+    if any(
+        isinstance(quantizer, TensorQuantizer)
+        and quantizer.is_enabled
+        and quantizer.rounding != "nearest"
+        for quantizer in module.modules()
+    ):
+        raise NotImplementedError("Inference export does not support stochastic rounding")
     for weight_name in weight_attr_names(module):
         attr_names = quantizer_attr_names(weight_name)
         quantization = _get_quantization_from_quantizers(
@@ -1839,6 +1846,12 @@ def get_quant_config(
         else {id(module) for module in language_model_lineage[-1].modules()}
     )
     for name, module in dict(model.named_modules()).items():
+        if (
+            isinstance(module, TensorQuantizer)
+            and module.is_enabled
+            and module.rounding != "nearest"
+        ):
+            raise NotImplementedError("Inference export does not support stochastic rounding")
         # Check for standard quantizers or any quantizers from weight attributes
         weight_names = list(weight_attr_names(module))
         has_quantizers = any(
