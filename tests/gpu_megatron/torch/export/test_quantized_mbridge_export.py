@@ -128,7 +128,7 @@ def test_matches_megatron_exporter(
             reference = reference.reshape(weight.shape)
         assert weight.shape == reference.shape, name
         assert weight.dtype == reference.dtype, name
-        if name.endswith("input_scale") and torch.cuda.device_count() > 1:
+        if name.endswith("input_scale") and bridge_workers.world_size > 1:
             # Activations reduced across TP ranks calibrate to slightly different amaxes.
             torch.testing.assert_close(weight, reference, rtol=2e-2, atol=0, msg=name)
         else:
