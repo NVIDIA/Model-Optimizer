@@ -19,6 +19,7 @@ import importlib
 import warnings as _warnings
 
 from packaging.version import Version as _Version
+from torch import __version__ as _torch_version
 
 # Pre-initialize torch._dynamo to prevent double-registration with peft's torch.compile() call
 importlib.import_module("torch._dynamo")
@@ -37,6 +38,12 @@ from . import (  # noqa: E402
     utils,
 )
 # isort: on
+
+if _Version(_torch_version) < _Version("2.11"):
+    _warnings.warn(
+        "nvidia-modelopt will drop torch<2.11 support in a future release.", DeprecationWarning
+    )
+
 
 try:
     from transformers import __version__ as _transformers_version

@@ -52,6 +52,7 @@ Changelog
 **Deprecations**
 
 - ``modelopt.torch.export.copy_non_safetensor_files_from_ckpt`` is deprecated; use ``copy_non_model_files``.
+- PyTorch 2.10 support is deprecated and will be dropped in a future release.
 
 **Bug Fixes**
 

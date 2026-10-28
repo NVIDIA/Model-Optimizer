@@ -26,7 +26,6 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
-from torch.onnx._internal.torchscript_exporter._globals import GLOBALS
 
 from modelopt.torch.utils import same_device_as, standardize_constructor_args
 from modelopt.torch.utils.distributed import DistributedProcessGroup
@@ -1228,9 +1227,8 @@ class TensorQuantizer(nn.Module):
         if (
             not is_torch_export_mode()
             and not torch.compiler.is_compiling()
-            and GLOBALS.in_onnx_export
+            and _in_torchscript_onnx_export()
         ):
-            # GLOBALS could break TorchDynamo for some Pytorch versions (i.e., 2.3.0)
             self._check_onnx_readiness(inputs)
 
         if self.block_sizes is not None and self._fake_quant:
@@ -1606,6 +1604,14 @@ def _amax_to_scale(
 ) -> torch.Tensor:
     """Convert amax to per-block scale, guarding against small/zero values."""
     return _clamp_scale(amax.float() / max_bound, min_value)
+
+
+def _in_torchscript_onnx_export() -> bool:
+    """Whether the TorchScript ONNX exporter is running."""
+    # Private torch module: imported lazily so a future move cannot break importing modelopt.
+    from torch.onnx._internal.torchscript_exporter._globals import GLOBALS
+
+    return GLOBALS.in_onnx_export
 
 
 def _to_local(t: torch.Tensor) -> torch.Tensor:
