@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
 import os
 from pathlib import Path
 
@@ -415,16 +414,10 @@ def custom_op_model_path(tmp_path):
     return str(path)
 
 
-def test_detected_custom_ops_do_not_leak_trt_into_a_later_conversion(
+def test_custom_ops_trt_does_not_leak_into_provider_lists(
     custom_op_model_path, temp_model_path, monkeypatch
 ):
-    """'trt' added for one model must not reach the next model converted in the process.
-
-    ``convert_to_mixed_precision`` adds 'trt' to the providers when the graph has custom
-    operators. Done in place on the signature's list literal, that addition outlives the
-    call: the next conversion runs its reference pass through the TensorRT execution
-    provider without being asked to, even for a graph with no custom operators at all.
-    """
+    """Adding 'trt' for custom ops must not mutate the default providers or a caller's list."""
     # Reading custom layers needs a TensorRT network, which the `onnx` extra does not install.
     monkeypatch.setattr(graphsanitizer, "get_custom_layers", lambda *args, **kwargs: ({}, {}))
     monkeypatch.setattr(
@@ -442,34 +435,11 @@ def test_detected_custom_ops_do_not_leak_trt_into_a_later_conversion(
 
     monkeypatch.setattr(convert, "ReferenceRunner", RecordingReferenceRunner)
 
-    default_providers = (
-        inspect.signature(convert_to_mixed_precision).parameters["providers"].default
-    )
-
     convert_to_mixed_precision(onnx_path=custom_op_model_path)
-    assert seen_providers[0] == ["trt", "cpu"]
-    assert default_providers == ["cpu"]
-
     convert_to_mixed_precision(onnx_path=temp_model_path)
-    assert seen_providers[1] == ["cpu"]
-
-
-def test_a_caller_provided_provider_list_is_not_edited(custom_op_model_path, monkeypatch):
-    """The list a caller hands in is the caller's; adding 'trt' must not reach back into it."""
-    monkeypatch.setattr(graphsanitizer, "get_custom_layers", lambda *args, **kwargs: ({}, {}))
-    monkeypatch.setattr(
-        graphsanitizer, "infer_types_shapes_tensorrt", lambda model, *args, **kwargs: model
-    )
-    monkeypatch.setattr(
-        convert, "ReferenceRunner", lambda model, providers, trt_plugins: _NoopRunner()
-    )
+    assert seen_providers == [["trt", "cpu"], ["cpu"]]
 
     mine = ["cpu"]
     convert_to_mixed_precision(onnx_path=custom_op_model_path, providers=mine)
-
+    assert seen_providers[-1] == ["trt", "cpu"]
     assert mine == ["cpu"]
-
-
-class _NoopRunner:
-    def run(self, calibration_data):
-        return {}
