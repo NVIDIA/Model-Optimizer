@@ -460,8 +460,26 @@ def test_an_automatic_layout_says_so_when_it_refuses_a_placement(
             TypeError,
             r"\['device_map'\] do not apply to the FSDP2 load",
         ),
+        (
+            DistributionPlan(2, dense="fsdp"),
+            {"auto_class": AutoModel},
+            NotImplementedError,
+            "auto_class=AutoModel does not apply",
+        ),
+        (
+            DistributionPlan(2, dense="fsdp"),
+            {"dtype": torch.float32},
+            TypeError,
+            "keeps their dtype",
+        ),
     ],
-    ids=["another-world", "hf-config-on-a-whole-load", "whole-load-option-on-a-sharded-plan"],
+    ids=[
+        "another-world",
+        "hf-config-on-a-whole-load",
+        "whole-load-option-on-a-sharded-plan",
+        "auto-class-on-a-sharded-plan",
+        "dtype-on-a-sharded-plan",
+    ],
 )
 def test_a_handed_plan_is_checked_before_the_checkpoint_is_fetched(
     run_as, monkeypatch, tmp_path, distribution, options, error, match
