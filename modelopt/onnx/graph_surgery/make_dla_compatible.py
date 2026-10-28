@@ -336,6 +336,8 @@ def dla_make_dla_compatible(
 
     Arithmetic lowering of zero-branch ``Where`` assumes finite FP32 branch tensors.
     NaN and infinity values at those nodes are outside the supported input contract.
+    Masked multiplication can change the sign of zero even for finite inputs; validate
+    sign-sensitive downstream operations before using this conversion.
 
     Args:
         model_path: Input file; external weights are loaded from its directory.

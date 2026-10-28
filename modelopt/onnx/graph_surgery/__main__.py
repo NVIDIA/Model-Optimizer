@@ -248,7 +248,10 @@ Examples:
     dla_parser = subparsers.add_parser(
         "make-dla-compatible",
         help="Make a model compatible with the NVIDIA DLA accelerator",
-        description="Apply the ordered DLA graph transforms and validate the resulting ONNX model.",
+        description=(
+            "Apply the ordered DLA graph transforms and validate the resulting ONNX model. "
+            "Where lowering assumes finite FP32 branches and may change the sign of zero."
+        ),
     )
     dla_parser.add_argument("-i", "--input", required=True, help="Input ONNX model path")
     dla_parser.add_argument("-o", "--output", required=True, help="Output ONNX model path")
