@@ -492,10 +492,10 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
     files). If ``fn`` raises or its value does not round-trip (:func:`_encoded`), every rank raises
     rather than wait for the broadcast: ``rank`` its own error, the others a SystemExit with its
     code if it exited, else a RuntimeError. Every rank, ``rank`` too, gets a copy loaded from the
-    bytes sent. Collective: every rank calls it at the same point with the same ``label`` and
-    ``rank``; a receiving rank whose ``label`` differs raises, but ``rank`` itself cannot tell and
-    returns its value. In a single process ``fn``'s value comes back as it is; a rank of a launch
-    whose process group is not set up raises.
+    bytes sent, with any tensor in it on the CPU. Collective: every rank calls it at the same point
+    with the same ``label`` and ``rank``; a receiving rank whose ``label`` differs raises, but
+    ``rank`` itself cannot tell and returns its value. In a single process ``fn``'s value comes back
+    as it is; a rank of a launch whose process group is not set up raises.
     """
     _refuse_a_launch_without_its_group(label)
     if not 0 <= rank < size():
@@ -536,9 +536,10 @@ def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _
     its value does not round-trip (:func:`_encoded`), every rank raises instead of waiting in the
     gather: if any rank's failure is not a SystemExit, a rank with such an error raises it and the
     others a RuntimeError naming the first; else each rank exits, with its own code or the first
-    one's. Collective, with the same ``label`` on every rank; ranks out of step raise. In a single
-    process ``combine`` gets ``fn()``'s value as it is; a rank of a launch whose process group is
-    not set up raises.
+    one's. Collective, with the same ``label`` on every rank; ranks out of step raise. ``combine``
+    gets copies loaded from the bytes the ranks sent, with any tensor in them on the CPU; in a
+    single process it gets ``fn()``'s value as it is. A rank of a launch whose process group is not
+    set up raises.
 
     Unlike :func:`allreduce`, it runs ``fn`` itself, so a rank whose ``fn`` fails still joins.
     """
