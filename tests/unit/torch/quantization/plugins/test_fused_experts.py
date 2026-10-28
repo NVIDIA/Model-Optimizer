@@ -70,6 +70,7 @@ from modelopt.torch.quantization.plugins.huggingface import (
 )
 from modelopt.torch.quantization.utils.calib_utils import GPTQHelper
 from modelopt.torch.quantization.utils.core_utils import module_name_maps, weight_attr_names
+from modelopt.torch.utils.moe import torch_a2a_experts_forward
 
 
 def test_native_fp8_experts_dequantized_before_nvfp4_export():
@@ -322,6 +323,7 @@ class _ExpertsConfig:
     def __init__(self, impl="grouped_mm"):
         self._experts_implementation = impl
         self.hidden_act = "silu"
+        self.ep_group = None  # the expert-parallel group a torch_a2a forward dispatches over
 
 
 class _SyntheticGroupedExperts(nn.Module):
@@ -380,6 +382,10 @@ class _SyntheticGroupedExperts(nn.Module):
         if self.config._experts_implementation == "grouped_mm":
             return _moe_integration.grouped_mm_experts_forward(
                 self, hidden_states, top_k_index, top_k_weights
+            )
+        if self.config._experts_implementation == "torch_a2a":
+            return torch_a2a_experts_forward(
+                self, hidden_states, top_k_index, top_k_weights, self.config.ep_group
             )
         return self._eager_forward(hidden_states, top_k_index, top_k_weights)
 
