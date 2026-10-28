@@ -89,6 +89,13 @@ def _export_with_bridge(source, quant_cfg_name, export_dir, rank, size):
     bridge.save_hf_pretrained_modelopt(model, str(export_dir))
 
 
+@pytest.fixture
+def bridge_workers(request):
+    # TP=2 on multi-GPU hosts, so the bridge also gathers sharded weights and scales. TP stays <= 2,
+    # the fewest KV heads of these models. A fixture starts the pool before the test timeout.
+    return request.getfixturevalue(f"dist_workers_size_{min(torch.cuda.device_count(), 2)}")
+
+
 @pytest.mark.parametrize(
     ("create_source", "quant_cfg_name"),
     [
@@ -101,15 +108,11 @@ def _export_with_bridge(source, quant_cfg_name, export_dir, rank, size):
     ids=["llama-nvfp4", "qwen3-fp8", "nemotron_h-nvfp4_mlp_only", "qwen3_5_moe_vl-nvfp4_mlp_only"],
 )
 def test_matches_megatron_exporter(
-    request, dist_workers_size_1, tmp_path, create_source, quant_cfg_name
+    dist_workers_size_1, bridge_workers, tmp_path, create_source, quant_cfg_name
 ):
     source = create_source(tmp_path)
     reference_dir, export_dir = tmp_path / "megatron_exporter", tmp_path / "bridge"
-    # The Megatron exporter needs TP=1. The bridge exports at TP=2 when two GPUs are available, so
-    # it also gathers sharded weights and scales. TP stays <= 2, the fewest KV heads of these models.
-    bridge_workers = request.getfixturevalue(
-        f"dist_workers_size_{min(torch.cuda.device_count(), 2)}"
-    )
+    # The Megatron exporter needs TP=1.
     dist_workers_size_1.run(
         partial(_export_with_megatron_exporter, source, quant_cfg_name, reference_dir)
     )
