@@ -22,11 +22,15 @@ import torch.nn as nn
 from _test_utils.torch.opt.utils import apply_mode_with_sampling
 from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
+    get_tiny_qwen3vl,
     tf_modelopt_state_and_output_tester,
 )
 from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModelForCausalLM, LlamaForCausalLM
 
+import modelopt.torch.opt as mto
+import modelopt.torch.quantization as mtq
+from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.opt.plugins.transformers import _legacy_tied_weights_keys_as_dict
 
 
@@ -42,6 +46,32 @@ def test_causal_lm_save_restore(tmp_path, model_cls):
 
     model_test = model_cls.from_pretrained(tiny_llama_dir / "modelopt_model")
     tf_modelopt_state_and_output_tester(model_ref, model_test)
+
+
+@pytest.mark.parametrize(
+    "quant_config", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG], ids=["fp8", "nvfp4"]
+)
+@torch.no_grad()
+def test_vlm_export_without_modelopt_state(tmp_path, quant_config):
+    """Export separately converted VLM components without requiring a single ModelOpt state."""
+    model = get_tiny_qwen3vl().eval()
+    disabled_config = {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": "max"}
+    mtq.quantize(model.model.visual, disabled_config)
+    mtq.quantize(model.lm_head, disabled_config)
+    mtq.quantize(
+        model.model.language_model,
+        quant_config,
+        lambda _: model(input_ids=torch.ones(1, 4, dtype=torch.long)),
+    )
+    state_path = tmp_path / "modelopt_state.pth"
+    torch.save(mto.modelopt_state(model.model.language_model), state_path)
+
+    export_hf_checkpoint(model, export_dir=tmp_path, save_modelopt_state=False)
+
+    assert not state_path.exists()
+    saved = load_file(tmp_path / "model.safetensors")
+    assert any(key.endswith(".weight_scale") for key in saved)
+    assert any("visual" in key for key in saved)
 
 
 @pytest.mark.parametrize("tie_word_embeddings", [False, True])

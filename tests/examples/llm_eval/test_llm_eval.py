@@ -32,9 +32,10 @@ def test_lm_eval_hf(tmp_path):
         ["python", "lm_eval_hf.py"],
         model="hf",
         model_args=f"pretrained={model_dir}",
-        tasks="mmlu",
+        # One subtask takes the same harness and gate path as the 57-subtask mmlu group, which
+        # spends minutes loading datasets on a model whose context is only 32 tokens
+        tasks="mmlu_abstract_algebra",
         num_fewshot=5,
-        limit=0.1,
         batch_size=8,
         # Exercise the accuracy gate: reads the results file and enforces the bound
         output_path=str(tmp_path / "results"),

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import re
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
@@ -26,6 +27,7 @@ import transformers
 from _test_utils.torch.export.unified_checkpoint import (
     assert_exported_checkpoint_matches,
     assert_per_expert_experts_complete,
+    load_safetensors_dir,
 )
 from _test_utils.torch.megatron.models import get_mcore_gpt_model, get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import get_forward
@@ -49,6 +51,11 @@ import modelopt.torch.speculative as mtsp
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
 from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
 from modelopt.torch.export.quant_format import GGML_FORMATS
+from modelopt.torch.export.quantized_weight_export import (
+    build_hf_quantization_config,
+    capture_kv_cache_export_state,
+    get_kv_cache_export_spec,
+)
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -81,9 +88,14 @@ def _verify_model_quant_config(
     if quant_config:
         quant_config_dict = hf_quant_config_dict["quantization"]
         quant_type = quant_config_dict["quant_algo"]
-        assert (
-            quant_type in quant_config
-        )  # quant config str is subset of quant config e.g. NVFP4 -> NVFP4_DEFAULT_CFG
+        if quant_config == "MXFP4_MLP_WEIGHT_ONLY_CFG":
+            assert quant_type == "W4A16_MXFP4"
+            group = config_dict["quantization_config"]["config_groups"]["group_0"]
+            assert group["weights"]["group_size"] == 32
+            assert "input_activations" not in group
+        else:
+            # quant config str is subset of quant config e.g. NVFP4 -> NVFP4_DEFAULT_CFG
+            assert quant_type in quant_config
         assert len(quant_config_dict["exclude_modules"]) > 1  # Dynamically added exclude modules
         if quant_type == "NVFP4":
             assert quant_config_dict["group_size"] == 16
@@ -349,12 +361,13 @@ def test_megatron_ggml_export_rejects_tensor_parallelism(qformat):
         exporter.save_pretrained("unused", "unused")
 
 
-def test_megatron_export_rejects_sequential_experts_at_ep():
-    """SequentialMLP experts are numbered by local position, so EP>1 export must refuse them."""
+def test_megatron_export_rejects_packed_local_experts_at_ep():
+    """Packed local-expert rules write a rank's experts as one tensor, so EP>1 export must refuse."""
     experts = torch.nn.Module()
     experts.local_experts = torch.nn.ModuleList()
     exporter = object.__new__(GPTModelExporter)
     exporter.model = torch.nn.Sequential(experts)
+    exporter.rules = {"use_packed_local_experts": True}
 
     with (
         patch.object(exporter, "_is_sidecar_writer_rank", return_value=False),
@@ -364,9 +377,58 @@ def test_megatron_export_rejects_sequential_experts_at_ep():
         patch.object(uem, "get_pipeline_model_parallel_rank", return_value=0),
         patch.object(uem, "get_pipeline_model_parallel_world_size", return_value=1),
         patch.object(uem, "get_tensor_model_parallel_rank", return_value=0),
-        pytest.raises(NotImplementedError, match="grouped-GEMM experts"),
+        pytest.raises(NotImplementedError, match="packed local experts"),
     ):
         exporter.save_pretrained("unused", "unused")
+
+
+def _test_sequential_experts_export_at_ep(model_dir, tmp_path, rank, size):
+    config = transformers.AutoConfig.from_pretrained(model_dir)
+    model = get_mcore_gpt_model(
+        expert_model_parallel_size=size,
+        initialize_megatron=True,
+        num_layers=config.num_hidden_layers,
+        hidden_size=config.hidden_size,
+        num_attention_heads=config.num_attention_heads,
+        num_query_groups=config.num_key_value_heads,
+        ffn_hidden_size=config.intermediate_size,
+        max_sequence_length=config.max_position_embeddings,
+        vocab_size=config.vocab_size,
+        normalization="RMSNorm",
+        kv_channels=config.hidden_size // config.num_attention_heads,
+        qk_layernorm=True,
+        num_moe_experts=config.num_experts,
+        moe_ffn_hidden_size=config.moe_intermediate_size,
+        moe_grouped_gemm=False,
+    ).cuda()
+    export_dir = tmp_path / "export"
+    stale = export_dir / "model-00001-of-00002-ep007.json"  # left by an export at a larger EP
+    if rank == 0:
+        export_dir.mkdir()
+        stale.write_text('{"metadata": {"total_size": 0}, "weight_map": {}}')
+    export_mcore_gpt_to_hf(model, model_dir, dtype=torch.bfloat16, export_dir=str(export_dir))
+    assert not stale.exists()
+
+    # Each rank's experts must land under their global ids, from whichever shard holds them.
+    weight_map = json.loads((export_dir / "model.safetensors.index.json").read_text())["weight_map"]
+    for layer_id, layer in enumerate(model.decoder.layers):
+        for expert_id, expert in zip(
+            layer.mlp.local_expert_indices, layer.mlp.experts.local_experts
+        ):
+            name = f"model.layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight"
+            with safe_open(str(export_dir / weight_map[name]), framework="pt") as f:
+                exported = f.get_tensor(name)
+            assert torch.equal(exported, expert.linear_fc2.weight.detach().bfloat16().cpu()), name
+    if rank == 0:
+        assert_exported_checkpoint_matches(
+            export_dir, model_dir, check_values=False, allow_unexpected=("mlp.gate.expert_bias",)
+        )
+
+
+def test_sequential_experts_export_at_ep(dist_workers_size_2, tmp_path):
+    """SequentialMLP experts exported at EP=2 keep every expert under its global id."""
+    model_dir = create_tiny_qwen3_moe_dir(tmp_path)
+    dist_workers_size_2.run(partial(_test_sequential_experts_export_at_ep, model_dir, tmp_path))
 
 
 def _test_mla_export_keeps_hf_head_dim(model_dir, rank, size):
@@ -444,6 +506,27 @@ def _verify_exported_metadata(export_dir: Path, model_type, quant_config, extra_
         # The source generation config (top_p without do_sample) is copied through as-is.
         generation_config = json.loads((export_dir / "generation_config.json").read_text())
         assert generation_config["top_p"] == 0.5
+
+
+def _verify_functional_kv_cache_export(model, export_dir: Path):
+    """The functional KV-cache export writes the same scales and config as this exporter."""
+    attentions = [m for m in model.modules() if hasattr(m, "k_bmm_quantizer")]
+    states = [capture_kv_cache_export_state(attention) for attention in attentions]
+    assert states and None not in states
+    exported = load_safetensors_dir(export_dir)
+    for kind in ("k_scale", "v_scale"):
+        names = sorted(
+            (name for name in exported if name.endswith(kind)),
+            key=lambda name: int(re.search(r"layers\.(\d+)\.", name).group(1)),
+        )
+        assert len(names) == len(states)
+        for name, state in zip(names, states):
+            torch.testing.assert_close(exported[name], getattr(state, kind).to(exported[name]))
+    config = build_hf_quantization_config({}, [get_kv_cache_export_spec(a) for a in attentions])
+    quantization_config = json.loads((export_dir / "config.json").read_text())[
+        "quantization_config"
+    ]
+    assert config["kv_cache_scheme"] == quantization_config["kv_cache_scheme"]
 
 
 def _test_unified_export_megatron(
@@ -606,6 +689,8 @@ def _test_unified_export_megatron(
 
     if quant_config:
         _verify_model_quant_config(tmp_export_dir, quant_config, kv_cache_quant_cfg)
+    if kv_cache_quant_cfg and rank == 0:
+        _verify_functional_kv_cache_export(model, tmp_export_dir)
 
     if rank == 0:
         _verify_exported_metadata(tmp_export_dir, model_type, quant_config, extra_module)
@@ -656,6 +741,7 @@ def _test_unified_export_megatron(
         ("llama", None, None, None),
         ("llama", None, "FP8_DEFAULT_CFG", None),
         ("llama", None, "FP8_DEFAULT_CFG", "FP8_KV_CFG"),
+        ("llama", None, "MXFP4_MLP_WEIGHT_ONLY_CFG", None),
         ("llama", "eagle", None, None),
         ("llama", "medusa", None, None),
         ("qwen3vl", None, None, None),

@@ -16,16 +16,16 @@ concurrency:
 
 jobs:
   code-quality:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # PRs: TruffleHog needs the base commit, else it errors, scans nothing, and passes.
           fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
       - uses: ./.github/actions/ubuntu-setup
       - name: Secret Scanning
-        uses: trufflesecurity/trufflehog@v3.90.5
+        uses: trufflesecurity/trufflehog@e63326d6545de8f425d93ce24078c6e68d83f70e # v3.99.3
         with:
           # Exclude lob: its `(live|test)_[a-zA-Z0-9_]{35}` pattern matches any pytest function
           # whose name happens to be exactly 35 characters after `test_`, and it reports them as

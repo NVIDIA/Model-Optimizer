@@ -25,6 +25,16 @@ data:
   mode:
   data_path:
   offline_data_path:
+  # Dumped top-k teacher deployment policy. Selects data.mode=sparse, which needs no
+  # base lm_head at train time and requires a TVD objective (tvd, tvd_deploy or tvd_ce).
+  #
+  # The first run over a dump builds a memmapped cache beside the shards, which takes
+  # hours on a large corpus. Build it once before torchrun: see
+  # examples/speculative_decoding/doc/external_draft.md#teacher-policy-data
+  sparse_data_path:
+  # Where that cache lives. Defaults to a .sparse_cache beside the shards, which fails
+  # on a read-only dump and makes concurrent runs over the same shards contend.
+  sparse_cache_dir:
   draft_vocab_cache:
   vlm_img_dir:
   vlm_processor:
@@ -53,6 +63,13 @@ training:
 external:
   # soft_ce matches the EAGLE offline objective. tvd is plain total-variation
   # distance; tvd_deploy filters both sides to the serving policy first and is the
-  # acceptance the deployed pair sees.
+  # acceptance the deployed pair sees. tvd_ce adds a cross-entropy term on the base's
+  # argmax, weighted by external_tvd_alpha / external_ce_alpha.
+  #
+  # How much of the base's distribution the loss can see depends on the data:
+  #   offline_data_path  hidden states -> base lm_head -> the FULL distribution,
+  #                      so tvd is untruncated total-variation distance
+  #   sparse_data_path   only the dumped top-k policy, so the base side is
+  #                      truncated by the dump no matter which objective is used
   external_loss: tvd
   external_report_acc: true

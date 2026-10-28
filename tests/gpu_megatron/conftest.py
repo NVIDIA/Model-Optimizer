@@ -13,11 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import contextlib
+import gc
+import queue
 
 import pytest
 import torch
 from _test_utils.fs_utils import assert_unmodified_tree
-from _test_utils.torch.distributed.utils import DistributedWorkerPool, get_live_pool
+from _test_utils.torch.distributed.utils import (
+    DistributedWorkerPool,
+    get_live_pool,
+    reset_worker_state,
+)
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from megatron.core.parallel_state import destroy_model_parallel
 
@@ -47,10 +53,10 @@ def _prebuild_quant_cuda_extensions():
     extensions during session setup and let tests fall back to on-demand JIT if needed.
 
     Doing it here in session setup (``pyproject`` sets ``timeout_func_only``) keeps the
-    build off the per-test clock and, unlike the ``_extensions/test_torch_extensions.py``
-    prebuild tests, runs regardless of test selection/ordering (e.g. ``-k`` filters) and
-    is not itself capped by a per-test timeout. Worker subprocesses then load the cached
-    .so from the shared ``TORCH_EXTENSIONS_DIR``.
+    build off the per-test clock, runs regardless of test selection/ordering (e.g. ``-k``
+    filters) and is not itself capped by a per-test timeout. Worker subprocesses then load
+    the cached .so from the shared ``TORCH_EXTENSIONS_DIR``. (The extension tests themselves
+    live in ``tests/gpu/_extensions``.)
     """
     ext.precompile()
 
@@ -68,6 +74,8 @@ def _prestart_preprocess_forkserver():
 
 def megatron_worker_teardown(rank, world_size):
     """Clean up model-parallel state between tests in persistent workers."""
+    # Surface asynchronous CUDA errors at the test that caused them, not at a later one
+    torch.cuda.synchronize()
     if dist.is_initialized():
         dist.barrier()
     try:
@@ -79,6 +87,15 @@ def megatron_worker_teardown(rank, world_size):
             apex_destroy()
         except Exception as e:
             print(f"Error destroying model parallel with Apex: {e}")
+    # destroy_model_parallel() only drops Megatron's references to its NCCL groups, so every test's
+    # communicators (and their GPU buffers) piled up in the persistent workers (~20 groups and
+    # ~0.4 GiB per test), slowing later tests until they timed out. Destroy all but the default.
+    for group in list(torch.distributed.distributed_c10d._world.pg_map):
+        if group is not torch.distributed.GroupMember.WORLD:
+            torch.distributed.destroy_process_group(group)
+    # The finished test's modules can still reference the destroyed groups. Collect them here, with
+    # no kernels in flight, rather than at an arbitrary point of the next job.
+    gc.collect()
     torch.cuda.empty_cache()
 
 
@@ -90,16 +107,20 @@ def _make_pool(world_size):
     )
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def _pool_cache():
-    """Module-scoped cache of worker pools keyed by world_size.
+    """Session-scoped cache of worker pools keyed by world_size.
 
     Spinning up a pool cold-imports the full torch/megatron/modelopt stack per worker
-    (~tens of seconds), so fixtures that request the same world_size share one pool
-    instead of spawning duplicates — e.g. on a 2-GPU runner ``dist_workers`` and
-    ``dist_workers_size_2`` are both size 2. The cache is module-scoped and torn down at
-    module end, so workers are never reused across modules (avoids cross-test
-    state contamination).
+    (75-100 s in CI), so every module that requests the same world_size shares one pool,
+    e.g. on a 2-GPU runner ``dist_workers`` and ``dist_workers_size_2`` are both size 2.
+    Isolation between tests comes from ``megatron_worker_teardown`` (model-parallel state and
+    process groups after every job), from ``_reset_shared_pools`` (process-global torch settings
+    at each module boundary) and from ``get_live_pool`` replacing a pool that a failed, hung,
+    timed-out or crashed job retired (a sticky CUDA error would otherwise fail every later
+    test). The ``dist_workers*`` fixtures are deliberately function-scoped so
+    ``get_live_pool`` can swap in a new pool after one was killed; they therefore cannot be
+    requested from a module- or session-scoped fixture.
     """
     pools: dict[int, DistributedWorkerPool] = {}
     yield pools
@@ -107,21 +128,32 @@ def _pool_cache():
         pool.shutdown()
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _reset_shared_pools(_pool_cache):
+    """Workers outlive test modules: undo what the previous module did to process-global torch state."""
+    for pool in _pool_cache.values():
+        if not pool.broken:
+            # A pool whose reset fails is retired by run(); the next test that needs one gets a new
+            # pool, and the module's tests, which may not use a pool at all, are not errored.
+            with contextlib.suppress(RuntimeError, queue.Empty):
+                pool.run(reset_worker_state)
+
+
 def _get_pool(cache, world_size):
     # A hung test kills its pool; a fresh one keeps a single hang from timing out every later
-    # test in the module (that cascade cost the nightly 20+ min).
+    # test (that cascade cost the nightly 20+ min).
     return get_live_pool(cache, world_size, lambda: _make_pool(world_size))
 
 
 @pytest.fixture
 def dist_workers(_pool_cache):
-    """Pool (cached per module) with world_size=torch.cuda.device_count()."""
+    """Shared pool with world_size=torch.cuda.device_count()."""
     return _get_pool(_pool_cache, torch.cuda.device_count())
 
 
 @pytest.fixture
 def dist_workers_size_1(_pool_cache):
-    """Pool (cached per module) with world_size=1 for tests that require a single process."""
+    """Shared pool with world_size=1 for tests that require a single process."""
     return _get_pool(_pool_cache, 1)
 
 

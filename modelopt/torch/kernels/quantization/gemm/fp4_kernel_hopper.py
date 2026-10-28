@@ -36,6 +36,7 @@ def fp4_fake_quant_kernel(
     M,
     N,
     global_scale_ptr,
+    ROWS_PER_SCALE,
     stride_xm,
     stride_xn,
     stride_ym,
@@ -46,7 +47,11 @@ def fp4_fake_quant_kernel(
     NUM_FP4_BLOCKS: tl.constexpr,
     OUT_DTYPE: tl.constexpr,
 ):
-    """Applies FP4 fake quantization using block pointers for memory addressing."""
+    """Applies FP4 fake quantization using block pointers for memory addressing.
+
+    Each run of ``ROWS_PER_SCALE`` rows uses its own global scale: all ``M`` rows share one for a
+    single tensor, and each slice of a stacked tensor (e.g. one expert) has its own.
+    """
     pid_m = tl.program_id(axis=0)
     pid_n = tl.program_id(axis=1)
 
@@ -70,7 +75,9 @@ def fp4_fake_quant_kernel(
         order=(1, 0),
     )
 
-    global_scale = tl.load(global_scale_ptr).to(tl.float32)
+    rows = tl.minimum(row_start + tl.arange(0, TILE_M), M - 1)  # padding rows reuse the last one
+    global_scale = tl.load(global_scale_ptr + rows // ROWS_PER_SCALE).to(tl.float32)
+    global_scale = tl.reshape(global_scale, (TILE_M, 1, 1))
     global_scale_valid = (global_scale > 0.0) & (global_scale < float("inf"))  # False for NaN
     global_scale_safe = tl.where(global_scale_valid, global_scale, 1.0)
 
@@ -102,7 +109,9 @@ def fp4_fake_quant_block(
 
     Args:
         x (torch.Tensor): Input tensor of shape ``(M, N)`` or higher.
-        global_amax (torch.Tensor): Global maximum value tensor for scaling.
+        global_amax (torch.Tensor): Global maximum value for scaling: one value, or one per index
+            of ``x``'s first dimension (e.g. per expert of a stacked ``(E, N, K)`` weight), which
+            quantizes each slice exactly as a separate call with its own amax would.
         block_size (int): Number of elements per FP4 block.
         tile_rows (int, optional): Row tile size. Defaults to 16.
         tile_cols (int, optional): Column tile size. Defaults to 64. Rounded up to
@@ -127,7 +136,16 @@ def fp4_fake_quant_block(
     tile_cols_aligned = ((tile_cols + block_size - 1) // block_size) * block_size
     num_fp4_blocks = tile_cols_aligned // block_size
 
-    global_scale = (global_amax.float() / (6.0 * 448.0)).to(x.device)
+    global_scale = (global_amax.float() / (6.0 * 448.0)).to(x.device).reshape(-1)
+    if global_scale.numel() == 1:
+        rows_per_scale = max(M, 1)
+    elif len(x_shape) > 1 and global_scale.numel() == x_shape[0]:
+        rows_per_scale = M // x_shape[0]
+    else:
+        raise ValueError(
+            f"global_amax must hold 1 value or one per index of dim 0 ({x_shape[0]}), "
+            f"got {global_scale.numel()}."
+        )
 
     grid = lambda *_: (triton.cdiv(M, tile_rows), triton.cdiv(N, tile_cols_aligned))
 
@@ -149,6 +167,7 @@ def fp4_fake_quant_block(
             M,
             N,
             global_scale,
+            rows_per_scale,
             stride_xm,
             stride_xn,
             stride_ym,

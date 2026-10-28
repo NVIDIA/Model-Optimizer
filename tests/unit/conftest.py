@@ -44,14 +44,23 @@ def cpu_dist_workers(_cpu_pools):
 
     A fresh spawn per test re-imports torch and transformers in each child (~10-20s on CI), so the
     workers start once (a killed pool is rebuilt). Jobs must leave the process group intact and
-    undo any global state they set.
+    undo any global state they set. The workers reseed after each job, so every job starts from
+    the seed a freshly spawned rank gets.
     """
     if platform.system() == "Windows":
         pytest.skip("Multi-rank tests are not run on Windows")
     # Lazy: the onnx-only partial-install job has no torch.
-    from _test_utils.torch.distributed.utils import DistributedWorkerPool, get_live_pool
+    from _test_utils.torch.distributed.utils import (
+        DistributedWorkerPool,
+        get_live_pool,
+        reseeding_worker_teardown,
+    )
 
     # Replaced if an earlier test hung and killed it, so one hang fails one test.
     return get_live_pool(
-        _cpu_pools, 2, lambda: DistributedWorkerPool(world_size=2, backend="gloo", teardown_fn=None)
+        _cpu_pools,
+        2,
+        lambda: DistributedWorkerPool(
+            world_size=2, backend="gloo", teardown_fn=reseeding_worker_teardown
+        ),
     )

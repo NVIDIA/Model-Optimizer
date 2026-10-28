@@ -12,7 +12,7 @@ Latest Model Optimizer (``nvidia-modelopt``) currently has the following system 
 +-------------------------+-----------------------------+
 | Architecture            |  x86_64, aarch64 (SBSA)     |
 +-------------------------+-----------------------------+
-| Python                  |  >=3.10,<3.15               |
+| Python                  |  >=3.11,<3.15               |
 +-------------------------+-----------------------------+
 | CUDA                    |  12.x, 13.x                 |
 +-------------------------+-----------------------------+
@@ -20,7 +20,7 @@ Latest Model Optimizer (``nvidia-modelopt``) currently has the following system 
 +-------------------------+-----------------------------+
 | TensorRT-LLM (Optional) |  >=1.0                      |
 +-------------------------+-----------------------------+
-| ONNX Runtime (Optional) |  1.24                       |
+| ONNX Runtime (Optional) | See CUDA notes below        |
 +-------------------------+-----------------------------+
 | TensorRT (Optional)     |  >=10.0                     |
 +-------------------------+-----------------------------+
@@ -133,7 +133,33 @@ Additionally, we support installing dependencies for following 3rd-party package
 
 **CUDA specific dependencies**
 
-* By default, ``cupy-cuda12x`` is installed for INT4 ONNX quantization. If you have CUDA 13, you need to run ``pip uninstall -y cupy-cuda12x`` and ``pip install cupy-cuda13x`` after installing ``nvidia-modelopt[onnx]``.
+* On Linux x86-64, ``nvidia-modelopt[onnx]`` installs ``cupy-cuda13x`` and ONNX Runtime GPU 1.30.x for CUDA 13. See the CUDA 12 alternative below if you need CUDA 12.
+
+On Linux aarch64, ModelOpt retains ONNX Runtime 1.24.x.
+
+**CUDA 12.8 alternative on Linux x86-64**
+
+The stable CUDA 12.8 ONNX Runtime Python wheel is currently 1.29.0. Start from a
+Python environment with CUDA 12-compatible PyTorch, then install the base
+ModelOpt package and its ONNX dependencies explicitly, because the default ``[onnx]``
+extra requires ``cupy-cuda13x``. Use the Microsoft CUDA 12 package feed for the ONNX
+Runtime wheel; the 1.29.0 wheel on PyPI uses CUDA 13.
+
+.. code-block:: bash
+
+    python -m pip install nvidia-modelopt
+    python -m pip install cppimport cupy-cuda12x flatbuffers lief ml_dtypes \
+        "onnx-graphsurgeon>=0.6.1" "onnx~=1.21.0" \
+        "onnxconverter-common~=1.16.0" onnxscript \
+        "onnxslim>=0.1.76" "polygraphy>=0.53.4"
+    python -m pip install --no-deps \
+        --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/ \
+        "onnxruntime-gpu==1.29.0"
+    python -m pip check
+
+This path needs CUDA 12.8 or later in the CUDA 12 series, cuDNN 9, and a compatible
+NVIDIA driver. The CUDA version is a requirement of the quantization host, not of the
+exported ONNX model.
 
 **Accelerated Quantization with Triton Kernels**
 

@@ -75,9 +75,9 @@ def convert_to_mixed_precision(
     calibration_data: str | None = None,
     custom_rule: NodeRuleBase | None = None,
     init_conversion_max_bytes: int | None = None,
-    providers: list[str] = ["cpu"],
-    trt_plugins: list[str] = [],
-    trt_plugins_precision: list[str] = [],
+    providers: list[str] | None = None,
+    trt_plugins: list[str] | None = None,
+    trt_plugins_precision: list[str] | None = None,
     max_depth_of_reduction: int | None = None,
     opset: int | None = None,
     use_standalone_type_inference: bool = False,
@@ -112,6 +112,9 @@ def convert_to_mixed_precision(
     Returns:
         onnx.ModelProto: The converted mixed precision model.
     """
+    providers = ["cpu"] if providers is None else list(providers)
+    trt_plugins = [] if trt_plugins is None else trt_plugins
+    trt_plugins_precision = [] if trt_plugins_precision is None else trt_plugins_precision
     # Load and process model
     model = onnx.load(onnx_path, load_external_data=False)
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"

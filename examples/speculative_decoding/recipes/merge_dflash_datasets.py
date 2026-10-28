@@ -16,8 +16,6 @@
 
 """Merge DFlash training sources with conservative, multimodal-safe deduplication."""
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -28,12 +26,9 @@ import subprocess
 import sys
 from array import array
 from collections import Counter, OrderedDict, defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 WORD_PATTERN = re.compile(
     r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]|[^\W_]+(?:['\u2019][^\W_]+)*",

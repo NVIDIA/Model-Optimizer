@@ -28,8 +28,6 @@ fraction of that scale so the threshold applies uniformly. The drop is an
 absolute (scale-normalized) delta unless ``--relative`` is passed.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import math

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,7 +15,9 @@
 
 """Tests for _QuantFusedExperts: generic fused MoE quantization and export."""
 
+import copy
 import warnings
+from contextlib import nullcontext
 
 import pytest
 import torch
@@ -25,12 +27,19 @@ import torch.nn.functional as F
 pytest.importorskip("transformers")
 
 from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_params
+from transformers import PretrainedConfig
+from transformers.integrations.finegrained_fp8 import FP8Experts
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.export.model_utils import _release_exported_tensors
 from modelopt.torch.export.moe_utils import _export_fused_experts, _fallback_amax
-from modelopt.torch.export.quant_utils import get_quant_config, get_quantization_format
+from modelopt.torch.export.quant_utils import (
+    _has_pre_quant_scale,
+    get_quant_config,
+    get_quantization_format,
+    process_layer_quant_config,
+)
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
 from modelopt.torch.quantization.model_calib import local_hessian_calibrate
@@ -46,6 +55,71 @@ from modelopt.torch.quantization.plugins.huggingface import (
     register_sparse_moe_on_the_fly,
 )
 from modelopt.torch.quantization.utils.core_utils import weight_attr_names
+
+
+def test_native_fp8_experts_dequantized_before_nvfp4_export():
+    """Calibrate and pack scaled FP8 gate/up and down weights, preserving their BF16 values."""
+    generator = torch.Generator().manual_seed(42)
+    experts = FP8Experts(
+        PretrainedConfig(hidden_size=256, intermediate_size=256, num_experts=2, hidden_act="silu"),
+        block_size=(128, 128),
+    )
+    reference = {}
+    for name, scale_range in (("gate_up_proj", (0.01, 0.08)), ("down_proj", (0.15, 0.3))):
+        weight = getattr(experts, name)
+        scales = getattr(experts, f"{name}_scale_inv")
+        assert weight.dtype == torch.float8_e4m3fn
+        with torch.no_grad():
+            weight.copy_(torch.randn(weight.shape, generator=generator).to(weight.dtype))
+            scales.copy_(torch.linspace(*scale_range, scales.numel()).reshape(scales.shape))
+        # Build only the reference here; ModelOpt must consume the untouched FP8 source.
+        blocks = weight.float().reshape(2, weight.shape[1] // 128, 128, 2, 128)
+        reference[name] = (blocks * scales[:, :, None, :, None]).reshape(weight.shape).bfloat16()
+
+    registered_before = QuantModuleRegistry.get(FP8Experts)
+    try:
+        mtq.quantize(experts, mtq.NVFP4_DEFAULT_CFG)
+        for name, expected in reference.items():
+            assert getattr(experts, name).dtype == torch.float8_e4m3fn
+            quantizers = getattr(experts, f"{name}_weight_quantizers")
+            for idx, quantizer in enumerate(quantizers):
+                assert quantizer.is_enabled and quantizer.num_bits == (2, 1)
+                torch.testing.assert_close(
+                    quantizer.amax.float(),
+                    expected[idx].float().abs().amax(),
+                    rtol=0.004,
+                    atol=0,
+                )
+
+        _export_fused_experts(experts, torch.bfloat16)
+        levels = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6])
+        for idx in range(2):
+            exported = getattr(experts, str(idx))
+            torch.testing.assert_close(
+                exported.gate_proj.weight_scale_2, exported.up_proj.weight_scale_2
+            )
+            for name, expected in (
+                ("gate_proj", reference["gate_up_proj"][idx, :256]),
+                ("up_proj", reference["gate_up_proj"][idx, 256:]),
+                ("down_proj", reference["down_proj"][idx]),
+            ):
+                projection = getattr(exported, name)
+                packed = projection.weight
+                assert packed.dtype == torch.uint8
+                codes = torch.stack((packed & 15, packed >> 4), dim=-1).reshape(expected.shape)
+                decoded = (
+                    levels[codes.long()]
+                    * projection.weight_scale.float().repeat_interleave(16, dim=-1)
+                    * projection.weight_scale_2.float()
+                )
+                relative_l2 = torch.linalg.vector_norm(
+                    decoded - expected.float()
+                ) / torch.linalg.vector_norm(expected.float())
+                assert relative_l2 < 0.15, f"Expert {idx} {name}: relative L2 {relative_l2}"
+    finally:
+        if registered_before is None and QuantModuleRegistry.get(FP8Experts) is not None:
+            QuantModuleRegistry.unregister(FP8Experts)
+
 
 # ---------------------------------------------------------------------------
 # Synthetic fused expert module matching the HF transformers 5.0+ pattern
@@ -325,6 +399,26 @@ class TestQuantFusedExperts:
             f"Max diff: {(out_ref - out_test).abs().max().item()}"
         )
         self._cleanup_registry(expert_type)
+
+    def test_checkpoint_recompute_restores_linear(self):
+        """Non-reentrant checkpointing stops its recompute by raising inside the experts forward.
+
+        The ``F.linear`` interception must not stay installed after that, or every later
+        ``F.linear`` call in the process runs this module's hook.
+        """
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+        register_fused_experts_on_the_fly(model)
+        model.moe.experts = QuantModuleRegistry.convert(model.moe.experts)
+        linear = F.linear
+        try:
+            x = torch.randn(1, 8, HIDDEN_DIM, requires_grad=True)
+            torch.utils.checkpoint.checkpoint(model, x, use_reentrant=False).sum().backward()
+            assert F.linear is linear
+        finally:
+            F.linear = linear
+            self._cleanup_registry(expert_type)
 
     def test_expert_index_recovery(self):
         """Storage-offset based expert index recovery should be correct."""
@@ -783,6 +877,79 @@ class TestExportFusedExperts:
             if QuantModuleRegistry.get(expert_type) is not None:
                 QuantModuleRegistry.unregister(expert_type)
 
+    @pytest.mark.parametrize("fmt", ["w4a8_awq", "int4_awq"])
+    def test_int4_experts_do_not_promise_a_pre_quant_scale(self, fmt):
+        """AWQ-family algorithms skip fused experts, so INT4 / W4A8 experts carry no
+        pre_quant_scale; the config must not promise one."""
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        if QuantModuleRegistry.get(expert_type) is not None:
+            QuantModuleRegistry.unregister(expert_type)
+        try:
+            mtq.quantize(
+                model, copy.deepcopy(mtq.FP8_DEFAULT_CFG), forward_loop=_route_once_to_each_expert
+            )
+            experts = model.moe.experts
+            for wq_list in (
+                experts.gate_up_proj_weight_quantizers,
+                experts.down_proj_weight_quantizers,
+            ):
+                for idx in range(NUM_EXPERTS):
+                    stage = TensorQuantizer(
+                        QuantizerAttributeConfig(num_bits=4, block_sizes={-1: 16, "type": "static"})
+                    )
+                    wq_list[idx] = (
+                        SequentialQuantizer(
+                            stage, TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3)))
+                        )
+                        if fmt == "w4a8_awq"
+                        else stage
+                    )
+            config = get_quant_config(model)["quantization"]
+            assert config["quant_algo"] == fmt.upper().replace("INT4", "W4A16")
+            assert config["pre_quant_scale"] is False
+
+            # The exporter does not write a scale for fused experts, even if an input quantizer
+            # held one, so the config still must not promise it.
+            for input_q, dim in (
+                (experts.gate_up_proj_input_quantizer, HIDDEN_DIM),
+                (experts.down_proj_input_quantizer, INTERMEDIATE_DIM),
+            ):
+                input_q.register_buffer("_pre_quant_scale", torch.ones(dim))
+            assert get_quant_config(model)["quantization"]["pre_quant_scale"] is False
+        finally:
+            if QuantModuleRegistry.get(expert_type) is not None:
+                QuantModuleRegistry.unregister(expert_type)
+
+    def test_pre_quant_scale_presence(self):
+        """A module has a pre_quant_scale when AWQ left a buffer or fused it into a sibling."""
+
+        def _linear(*, buffer=False, fused=False):
+            linear = nn.Linear(4, 4)
+            linear.input_quantizer = TensorQuantizer(QuantizerAttributeConfig(enable=False))
+            if buffer:
+                linear.input_quantizer.register_buffer("_pre_quant_scale", torch.ones(4))
+            linear.fused_with_prequant = fused
+            return linear
+
+        assert not _has_pre_quant_scale(_linear(), ["weight"])
+        assert _has_pre_quant_scale(_linear(buffer=True), ["weight"])
+        assert _has_pre_quant_scale(_linear(fused=True), ["weight"])
+
+    def test_per_layer_pre_quant_scale_flag(self):
+        config = process_layer_quant_config(
+            {
+                "dense.quantization": "int4_awq",
+                "dense.awq_block_size": 16,
+                "experts.quantization": "int4_awq",
+                "experts.awq_block_size": 16,
+                "experts.pre_quant_scale": False,
+            }
+        )
+        layers = config["quantized_layers"]
+        assert layers["dense"]["pre_quant_scale"] is True
+        assert layers["experts"]["pre_quant_scale"] is False
+
     @pytest.mark.parametrize(
         ("amax_layout", "expected_gate_shape", "expected_down_shape"),
         [
@@ -1034,6 +1201,46 @@ class TestFusedExpertsCalibration:
     def _cleanup_registry(mod_type):
         if QuantModuleRegistry.get(mod_type) is not None:
             QuantModuleRegistry.unregister(mod_type)
+
+    @pytest.mark.parametrize(
+        ("cfg_name", "warns"),
+        [
+            ("INT4_AWQ_CFG", True),
+            ("W4A8_AWQ_BETA_CFG", True),
+            ("INT8_SMOOTHQUANT_CFG", True),
+            ("FP8_DEFAULT_CFG", False),
+        ],
+    )
+    def test_linear_layer_algorithms_warn_when_skipping_fused_experts(self, cfg_name, warns):
+        """AWQ, SmoothQuant and SVDQuant only process 2-D linears, so on fused experts they are a
+        silent no-op (the experts keep max calibration): warn, except for FP8 experts."""
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+        try:
+            quant_cfg = copy.deepcopy(getattr(mtq, cfg_name))
+            for entry in quant_cfg["quant_cfg"]:
+                cfg = entry.get("cfg")
+                for c in cfg if isinstance(cfg, list) else [cfg]:
+                    if isinstance(c, dict) and (c.get("block_sizes") or {}).get(-1) == 128:
+                        c["block_sizes"] = {**c["block_sizes"], -1: 16}
+
+            def forward_loop(m):
+                torch.manual_seed(0)
+                _route_once_to_each_expert(m)
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
+            skipped = [w for w in caught if "does not apply to fused MoE experts" in str(w.message)]
+            assert bool(skipped) == warns
+            if warns:  # the message names the algorithm that ran
+                expected = "smoothquant" if "SMOOTHQUANT" in cfg_name else "awq"
+                assert expected in str(skipped[0].message)
+            # The experts still get their max-calibrated amax.
+            assert model.moe.experts.gate_up_proj_weight_quantizers[0].amax is not None
+        finally:
+            self._cleanup_registry(expert_type)
 
     def test_calibration_populates_all_expert_quantizers(self):
         """After PTQ, every input/weight quantizer on the fused-experts module has amax set."""
@@ -1726,3 +1933,241 @@ class TestQwen3VLMoeTextExperts:
         finally:
             if registered_before is None and QuantModuleRegistry.get(experts_type) is not None:
                 QuantModuleRegistry.unregister(experts_type)
+
+
+@pytest.mark.parametrize("activation_scheme", ["dynamic", "static"])
+@pytest.mark.parametrize("fold", [True, False])
+@pytest.mark.parametrize("has_gate", [True, False])
+@pytest.mark.parametrize("block_size", [(128, 128), (64, 128), None])
+def test_native_fp8_experts_scales(has_gate, block_size, fold, activation_scheme):
+    torch.manual_seed(42)
+    config = PretrainedConfig(
+        hidden_size=256, intermediate_size=256, num_experts=2, hidden_act="silu"
+    )
+    experts = FP8Experts(
+        config, block_size=block_size, has_gate=has_gate, activation_scheme=activation_scheme
+    )
+    first = "gate_up_proj" if has_gate else "up_proj"
+    expected = {}
+    for name in (first, "down_proj"):
+        weight = getattr(experts, name)
+        scales = getattr(experts, f"{name}_scale_inv")
+        with torch.no_grad():
+            weight.copy_(torch.randn(weight.shape).to(weight.dtype))
+            scales.copy_(torch.linspace(1e-8, 0.08, scales.numel()).reshape(scales.shape))
+        rows, cols = block_size or (weight.shape[1] // scales.shape[1], weight.shape[2])
+        expanded = scales.float().repeat_interleave(rows, 1).repeat_interleave(cols, 2)
+        expected[name] = weight.float() * expanded[:, : weight.shape[1], : weight.shape[2]]
+
+    reference = copy.deepcopy(experts)
+    for name, weight in expected.items():
+        setattr(reference, name, nn.Parameter(weight, requires_grad=False))
+    mtq.quantize(
+        experts, {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None}
+    )
+    for (weight, _), expected_weight in zip(
+        experts.iter_weights_for_calibration(),
+        [w for name in (first, "down_proj") for w in expected[name]],
+        strict=True,
+    ):
+        torch.testing.assert_close(weight.float(), expected_weight)
+
+    for name in (first, "down_proj"):
+        for idx in range(2):
+            for dtype in (torch.float16, torch.bfloat16):
+                torch.testing.assert_close(
+                    experts.get_expert_weight(name, idx, dtype),
+                    expected[name][idx].to(dtype),
+                    rtol=0,
+                    atol=0,
+                )
+
+    inputs = torch.randn(2, 256)
+    indices = torch.tensor([[0], [1]])
+    routing = torch.ones(2, 1)
+    torch.testing.assert_close(
+        experts(inputs, indices, routing), reference(inputs, indices, routing)
+    )
+    for _, quantizer in experts.iter_weights_for_calibration():
+        quantizer.enable()
+    mtq.calibrate(experts, algorithm="max", forward_loop=None)
+    for weight, quantizer in experts.iter_weights_for_calibration():
+        torch.testing.assert_close(quantizer.amax, weight.abs().amax())
+        quantizer.disable()
+    if fold:
+        experts.unpack_weight()
+        experts.fold_weight()
+        torch.testing.assert_close(
+            experts(inputs.bfloat16(), indices, routing),
+            copy.deepcopy(reference).bfloat16()(inputs.bfloat16(), indices, routing),
+        )
+    torch.testing.assert_close(
+        experts(inputs, indices, routing), reference(inputs, indices, routing)
+    )
+    _export_fused_experts(experts, torch.float32)
+    for idx in range(2):
+        exported = getattr(experts, str(idx))
+        if has_gate:
+            torch.testing.assert_close(exported.gate_proj.weight, expected[first][idx, :256])
+            torch.testing.assert_close(exported.up_proj.weight, expected[first][idx, 256:])
+        else:
+            torch.testing.assert_close(exported.up_proj.weight, expected[first][idx])
+        torch.testing.assert_close(exported.down_proj.weight, expected["down_proj"][idx])
+    assert not any("scale_inv" in key or "activation_scale" in key for key in experts.state_dict())
+
+
+@pytest.mark.parametrize("has_gate", [True, False])
+@pytest.mark.parametrize("unpacked_projection", [None, "first", "down_proj"])
+@pytest.mark.parametrize("fold_api", ["direct", "permanent", "temporary"])
+def test_native_fp8_experts_reject_packed_fold(has_gate, unpacked_projection, fold_api):
+    torch.manual_seed(42)
+    experts = FP8Experts(
+        PretrainedConfig(hidden_size=32, intermediate_size=32, num_experts=2, hidden_act="silu"),
+        block_size=None,
+        has_gate=has_gate,
+    )
+    first = "gate_up_proj" if has_gate else "up_proj"
+    for name in (first, "down_proj"):
+        weight = getattr(experts, name)
+        with torch.no_grad():
+            weight.copy_(torch.randn(weight.shape).to(weight.dtype))
+            getattr(experts, f"{name}_scale_inv").fill_(0.1)
+    # Put a foldable module first to check model-wide validation precedes all mutation.
+    model = nn.Sequential(nn.Linear(32, 32), experts)
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop=None)
+    if unpacked_projection is not None:
+        name = first if unpacked_projection == "first" else unpacked_projection
+        weight = torch.stack([experts.get_expert_weight(name, idx) for idx in range(2)])
+        setattr(experts, name, nn.Parameter(weight, requires_grad=False))
+    params = dict(model.named_parameters())
+    state = copy.deepcopy(model.state_dict())
+    quantizers = [q for q in model.modules() if isinstance(q, TensorQuantizer)]
+    enabled = [q.is_enabled for q in quantizers]
+    inputs = torch.randn(2, 32)
+    indices = torch.tensor([[0], [1]])
+    routing = torch.ones(2, 1)
+    expected = experts(inputs, indices, routing)
+
+    with pytest.raises(ValueError, match=r"Call unpack_weight\(\) before folding"):
+        if fold_api == "direct":
+            experts.fold_weight()
+        elif fold_api == "permanent":
+            mtq.fold_weight(model)
+        else:
+            with mtq.temporarily_fold_weights(model):
+                pytest.fail("Packed FP8 weights must be rejected before entering the context")
+
+    assert [q.is_enabled for q in quantizers] == enabled
+    for name, param in model.named_parameters():
+        assert param is params[name]
+        assert param.dtype == state[name].dtype
+    # Compare FP8 payloads in FP32 because CPU close/equality kernels do not support FP8.
+    torch.testing.assert_close(
+        {name: value.float() for name, value in model.state_dict().items()},
+        {name: value.float() for name, value in state.items()},
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(experts(inputs, indices, routing), expected)
+
+
+@pytest.mark.parametrize("has_gate", [True, False])
+@pytest.mark.parametrize("exception", [True, False])
+@pytest.mark.parametrize("snapshot_device", [None, "cpu"])
+def test_native_fp8_experts_unpacked_temporary_fold(has_gate, exception, snapshot_device):
+    torch.manual_seed(42)
+    config = PretrainedConfig(
+        hidden_size=32, intermediate_size=32, num_experts=2, hidden_act="silu"
+    )
+    experts = FP8Experts(config, block_size=None, has_gate=has_gate)
+    first = "gate_up_proj" if has_gate else "up_proj"
+    for name in (first, "down_proj"):
+        weight = getattr(experts, name)
+        scales = getattr(experts, f"{name}_scale_inv")
+        with torch.no_grad():
+            weight.copy_(torch.randn(weight.shape).to(weight.dtype))
+            scales.copy_(torch.linspace(0.01, 0.08, scales.numel()).reshape(scales.shape))
+    mtq.quantize(
+        experts,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": None}},
+            ],
+            "algorithm": "max",
+        },
+    )
+    experts.unpack_weight()
+    params = {name: getattr(experts, name) for name in (first, "down_proj")}
+    state = copy.deepcopy(experts.state_dict())
+    quantizers = [q for _, q in experts.iter_weights_for_calibration()]
+    inputs = torch.randn(2, 32)
+    indices = torch.tensor([[0], [1]])
+    routing = torch.ones(2, 1)
+    expected = experts(inputs, indices, routing)
+    expected_exit = pytest.raises(RuntimeError, match="fold exit") if exception else nullcontext()
+    with expected_exit, mtq.temporarily_fold_weights(experts, snapshot_device=snapshot_device):
+        assert all(not q.is_enabled for q in quantizers)
+        for name, param in params.items():
+            assert getattr(experts, name) is param
+            assert param.dtype == torch.get_default_dtype()
+            assert not torch.equal(param, state[name])
+        torch.testing.assert_close(experts(inputs, indices, routing), expected)
+        if exception:
+            raise RuntimeError("fold exit")
+    for name, param in params.items():
+        assert getattr(experts, name) is param
+        assert param.dtype == torch.get_default_dtype()
+    assert all(q.is_enabled for q in quantizers)
+    torch.testing.assert_close(experts.state_dict(), state, rtol=0, atol=0)
+    torch.testing.assert_close(experts(inputs, indices, routing), expected)
+
+
+@pytest.mark.parametrize(
+    ("cfg", "algorithm"),
+    [
+        ({"num_bits": 4, "block_sizes": {-1: 128}}, {"method": "gptq", "block_size": 128}),
+        ({"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"}, "imatrix"),
+    ],
+    ids=["gptq", "imatrix"],
+)
+def test_native_fp8_experts_reject_packed_weight_updates(cfg, algorithm):
+    # GPTQ and imatrix write the experts' weights in place; packed FP8 experts only hand them
+    # dequantized copies, so the update would be lost.
+    torch.manual_seed(42)
+    config = PretrainedConfig(
+        hidden_size=256, intermediate_size=256, num_experts=2, hidden_act="silu"
+    )
+    experts = FP8Experts(config, block_size=None, has_gate=True)
+    for name in ("gate_up_proj", "down_proj"):
+        weight = getattr(experts, name)
+        with torch.no_grad():
+            weight.copy_(torch.randn(weight.shape).to(weight.dtype))
+            getattr(experts, f"{name}_scale_inv").fill_(0.02)
+    quant_cfg = [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*weight_quantizer", "cfg": cfg},
+    ]
+    mtq.quantize(experts, {"quant_cfg": quant_cfg, "algorithm": "max"}, forward_loop=None)
+    inputs = torch.randn(64, 256)
+    indices = (torch.arange(64) % 2).unsqueeze(1)
+    routing = torch.ones(64, 1)
+    state = copy.deepcopy(experts.state_dict())
+
+    with pytest.raises(ValueError, match=r"Call unpack_weight\(\)"):
+        mtq.calibrate(experts, algorithm, forward_loop=lambda m: m(inputs, indices, routing))
+    # Compare FP8 payloads in FP32 because CPU close/equality kernels do not support FP8.
+    torch.testing.assert_close(
+        {name: value.float() for name, value in experts.state_dict().items()},
+        {name: value.float() for name, value in state.items()},
+        rtol=0,
+        atol=0,
+    )
+
+    experts.unpack_weight()
+    unpacked = {
+        name: getattr(experts, name).detach().clone() for name in ("gate_up_proj", "down_proj")
+    }
+    mtq.calibrate(experts, algorithm, forward_loop=lambda m: m(inputs, indices, routing))
+    for name, weight in unpacked.items():
+        assert not torch.equal(getattr(experts, name), weight)

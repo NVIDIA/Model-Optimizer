@@ -20,8 +20,6 @@ helpers in one place so individual test files can focus on assertions rather tha
 wiring.
 """
 
-from __future__ import annotations
-
 import copy
 
 import pytest

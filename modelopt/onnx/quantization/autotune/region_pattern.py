@@ -16,7 +16,7 @@
 """Region pattern signature generator for grouping structurally similar regions."""
 
 import hashlib
-from typing import overload
+from typing import Self, overload
 
 import onnx_graphsurgeon as gs
 
@@ -92,7 +92,7 @@ class RegionPattern:
         return self.signature[: max_length - 3] + "..."
 
     @classmethod
-    def from_region(cls, region: Region, graph: gs.Graph) -> "RegionPattern":
+    def from_region(cls, region: Region, graph: gs.Graph) -> Self:
         """Compute a structural pattern for a region.
 
         The pattern captures:

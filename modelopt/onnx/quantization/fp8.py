@@ -48,6 +48,7 @@ from modelopt.onnx.quantization.precision_utils import (
 from modelopt.onnx.quantization.qdq_graph import (
     get_concat_eliminated_tensors,
     remove_partial_input_qdq,
+    remove_scalar_input_qdq,
 )
 from modelopt.onnx.quantization.qdq_utils import has_qdq_nodes
 
@@ -150,7 +151,7 @@ def quantize(
     nodes_to_quantize: list[str] | None = None,
     nodes_to_exclude: list[str] | None = None,
     use_external_data_format: bool = False,
-    intermediate_generated_files: list[str] = [],
+    intermediate_generated_files: list[str] | None = None,
     trt_extra_plugin_lib_paths: list[str] | None = None,
     high_precision_dtype: str = "fp16",
     mha_accumulation_dtype: str = "fp16",
@@ -168,6 +169,8 @@ def quantize(
 
     Currently, ['Conv', 'Gemm', 'MatMul', 'Residual-Add'] quantization is supported.
     """
+    if intermediate_generated_files is None:
+        intermediate_generated_files = []
     configure_logging(level=log_level.upper())
     logger.info("Starting FP8 quantization process")
     t_start = time.time()
@@ -300,6 +303,7 @@ def quantize(
         onnx_model = onnx.load(tmp_onnx_path)
         graph = gs.import_onnx(onnx_model)
         remove_partial_input_qdq(graph, no_quantize_inputs)
+        remove_scalar_input_qdq(graph)
         onnx_model = gs.export_onnx(graph)
 
     onnx_model = _convert_to_runtime_precision(

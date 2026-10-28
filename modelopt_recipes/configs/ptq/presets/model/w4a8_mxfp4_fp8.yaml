@@ -22,7 +22,7 @@ imports:
   fp8: configs/numerics/fp8
   mxfp4: configs/numerics/mxfp4
 
-algorithm:
+algorithm: max
 quant_cfg:
   - $import: base_disable_all
   - quantizer_name: '*weight_quantizer'

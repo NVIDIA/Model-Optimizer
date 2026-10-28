@@ -15,8 +15,6 @@
 
 """CPU round-trip tests for NVFP4 static export with extreme per-block amax (underflow/overflow)."""
 
-from __future__ import annotations
-
 import pytest
 import torch
 
