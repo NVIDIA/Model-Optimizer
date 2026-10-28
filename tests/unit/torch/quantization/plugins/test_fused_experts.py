@@ -43,7 +43,10 @@ from modelopt.torch.export.quant_utils import (
 )
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
-from modelopt.torch.quantization.model_calib import local_hessian_calibrate
+from modelopt.torch.quantization.model_calib import (
+    _register_weight_input_hooks,
+    local_hessian_calibrate,
+)
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
     _fused_experts_wrapper,
@@ -55,7 +58,7 @@ from modelopt.torch.quantization.plugins.huggingface import (
     register_fused_experts_on_the_fly,
     register_sparse_moe_on_the_fly,
 )
-from modelopt.torch.quantization.utils.core_utils import weight_attr_names
+from modelopt.torch.quantization.utils.core_utils import module_name_maps, weight_attr_names
 
 
 def test_native_fp8_experts_dequantized_before_nvfp4_export():
@@ -1961,6 +1964,29 @@ class TestGroupedMMExperts:
             results.append((out, x.grad, experts.gate_up_proj.grad, experts.down_proj.grad))
         for grouped, eager in zip(results[1], results[0]):
             torch.testing.assert_close(grouped, eager, rtol=1e-4, atol=1e-6)
+
+    def test_weight_input_captures_skip_the_grouped_forward(self):
+        """The weight-input captures key on the eager loop's expert index, which names no expert in the
+        grouped forward's batch of every expert's rows: they skip it rather than credit one expert
+        with all of it."""
+        model = _GroupedMoEModel("eager")
+        rows = {}
+
+        def capture(quantizer, _weight, inputs):
+            rows[id(quantizer)] = rows.get(id(quantizer), 0) + inputs.shape[0]
+
+        try:
+            mtq.quantize(model, self._quant_cfg(), self._forward_loop_all_experts)
+            handles = _register_weight_input_hooks(model, module_name_maps(model), capture)
+            model.config._experts_implementation = "grouped_mm"
+            try:
+                self._forward_loop_all_experts(model)
+            finally:
+                for handle in handles:
+                    handle.remove()
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+        assert rows == {}
 
     def test_an_eager_only_wrapper_refuses_the_grouped_forward(self):
         """A wrapper whose weights are defined on the eager forward raises if the grouped one runs,
