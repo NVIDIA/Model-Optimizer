@@ -1114,6 +1114,8 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         finally:
             # Autograd keeps what backward needs; holding more would pin every expert's copy.
             self._stacked_weights = {}
+            # A capture reached outside a forward must not split its input by this forward's offsets.
+            self._grouped_offs = None
 
     def get_expert_weight(self, name, idx, dtype=None):
         """Return one expert's projection in the calibration/export weight domain.
