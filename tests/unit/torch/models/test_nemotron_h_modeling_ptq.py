@@ -134,7 +134,7 @@ def test_calibration_matches_eager():
 
     The same weights and routing give the shared input quantizers the same activations and each
     per-expert weight quantizer the same slice; only down_proj's input passes through a GEMM, hence
-    the tolerance on the input amax.
+    the tolerance on its amax.
     """
     eager, grouped = _eager_and_grouped()
     for model in (eager, grouped):
@@ -145,11 +145,12 @@ def test_calibration_matches_eager():
     # `F.linear` calls as eager does: the amaxes below are the grouped hook's.
     assert (e._intercept_count, g._intercept_count) == (2 * NUM_EXPERTS, 2)
 
-    for name in ("up_proj_input_quantizer", "down_proj_input_quantizer"):
-        assert getattr(e, name).amax is not None, name
-        torch.testing.assert_close(
-            getattr(g, name).amax, getattr(e, name).amax, atol=1e-3, rtol=1e-2
-        )
+    assert e.up_proj_input_quantizer.amax is not None
+    torch.testing.assert_close(g.up_proj_input_quantizer.amax, e.up_proj_input_quantizer.amax)
+    assert e.down_proj_input_quantizer.amax is not None
+    torch.testing.assert_close(
+        g.down_proj_input_quantizer.amax, e.down_proj_input_quantizer.amax, atol=1e-3, rtol=1e-2
+    )
     for name in ("up_proj_weight_quantizers", "down_proj_weight_quantizers"):
         for idx, (eq, gq) in enumerate(zip(getattr(e, name), getattr(g, name))):
             assert eq.amax is not None, f"{name}[{idx}]"
