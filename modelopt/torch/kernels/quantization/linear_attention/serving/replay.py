@@ -100,7 +100,11 @@ def step(q, k, v, gate, beta, carry, window, enabled, scale, normalize, gate_inp
         a, b, a_log, bias = gate.flatten()[None], beta[None], None, None
     else:
         raw_gate, raw_beta, a_log, bias = gate_inputs
-        a, b = raw_gate[None].contiguous(), raw_beta[None].contiguous()
+        # The serving kernel consumes FP32 gate buffers whose values were first
+        # rounded to BF16, matching the training ReplaySSM path.
+        a, b = (
+            value[None].to(torch.bfloat16).float().contiguous() for value in (raw_gate, raw_beta)
+        )
     output = torch.empty(1, heads, values, device=q.device, dtype=torch.bfloat16)
     cursor = len(carry.entries)
     _native.fused_recurrent_gated_delta_rule_replayssm(

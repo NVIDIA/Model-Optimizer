@@ -8,6 +8,8 @@ Changelog
 
 *Quantization*
 
+- Add experimental GDN two-precision ReplaySSM QAT with an FP32 recurrence anchor,
+  an independently rounded FP8 read copy, and a fixed 16-token replay window.
 - Add experimental NVFP4 recurrent-state fake quantization for linear-attention QAT,
   with request- and head-local dynamic global scales and block16 E4M3 block scales.
 - Add vLLM 0.30 fake-quant serving for GDN/KDA recurrent-state checkpoints, applying

@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 41 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 43 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -73,6 +73,8 @@ supported combinations.
 | `linear_attention_state_int8_block32_dynamic` | GDN/KDA state INT8, 32 value channels per key row; weights unchanged | none | none (dynamic scales; requires vLLM and a prefix/decode phase context) |
 | `linear_attention_state_int8_block32_dynamic_kimi_k3` | Kimi-K3/Kimi-Linear KDA state INT8, 32 value channels per key row | none | none (dynamic scales; explicit Triton Kimi profile) |
 | `linear_attention_state_nvfp4_dynamic` | GDN/KDA state NVFP4, request/head-local global scale and block16 E4M3 scales; weights unchanged | none | none (dynamic scales; requires vLLM and a prefix/decode phase context) |
+| `gdn_replayssm_fp8_read` | GDN ReplaySSM FP32 recurrence and FP8 block128 reads; floating storage | none | none (ModelOpt replay backend) |
+| `gdn_replayssm_nvfp4_read` | GDN ReplaySSM FP32 recurrence and NVFP4 block16 reads; floating storage | none | none (ModelOpt replay backend) |
 
 </details>
 
@@ -105,6 +107,12 @@ Kimi-K3 package dependencies (`gate_lower_bound=None` in the serving HF config).
 It never falls back to prepared-only arithmetic.
 The adapters use the fixed vLLM 0.30.0 value-first cache layout. Native-forward
 comparisons and independent recurrence checks validate it in GPU tests.
+
+The `gdn_replayssm_nvfp4_read` recipe can use `rounding: stochastic` for its
+read values after the independent TensorQuantizer rounding change is present;
+block scales remain nearest-rounded and the recurrence anchor remains FP32.
+See the [ReplaySSM example](../examples/llm_qat/linear_attention/REPLAYSSM.md#stochastic-nvfp4-reads)
+for the shared training and serving recipe.
 
 The `linear_attention_state_int8_dynamic` recipe uses an optional private
 quantized-ReplaySSM fork; public vLLM releases do not provide those kernels.

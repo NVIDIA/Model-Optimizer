@@ -24,7 +24,7 @@ import triton.language as tl
 
 
 @triton.jit
-def fp8_scalar_qdq(x, scale):
+def fp8_scalar_qdq(x, scale, EMULATE: tl.constexpr = False):
     """Per-tensor FP8 E4M3 fake quant-dequant: ``cast(x / scale) * scale``.
 
     Standard quantizer convention with ``scale = amax / 448``. Works with any
@@ -34,10 +34,17 @@ def fp8_scalar_qdq(x, scale):
     Args:
         x:     Tensor of values to fake-quantize.
         scale: Per-tensor scale (runtime scalar or broadcastable tensor).
+        EMULATE: Use FP32 arithmetic on GPUs without an E4M3 conversion instruction.
 
     Returns:
         Fake-quantized tensor of the same shape as ``x``, in float32.
     """
     FP8_E4M3_MAX: tl.constexpr = 448.0
     x_scaled = tl.clamp(x / scale, -FP8_E4M3_MAX, FP8_E4M3_MAX)
-    return x_scaled.to(tl.float8e4nv).to(tl.float32) * scale
+    if EMULATE:
+        # E4M3 has three mantissa bits and a minimum subnormal spacing of 2**-9.
+        exponent = ((tl.abs(x_scaled).to(tl.int32, bitcast=True) >> 23) & 255) - 127
+        spacing = tl.extra.cuda.libdevice.ldexp(1.0, tl.maximum(exponent - 3, -9))
+        return tl.extra.cuda.libdevice.rint(x_scaled / spacing) * spacing * scale
+    else:
+        return x_scaled.to(tl.float8e4nv).to(tl.float32) * scale
