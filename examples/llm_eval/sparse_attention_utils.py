@@ -15,7 +15,7 @@
 
 """Utilities for sparse attention integration with llm_eval."""
 
-import modelopt.torch.sparsity.attention_sparsity as mtsa
+import modelopt.torch.sparsity as mts
 
 
 def _extract_model(model_obj):
@@ -52,8 +52,8 @@ def sparsify_model(
 
     # Resolve config
     if isinstance(sparse_cfg, str):
-        # Get config from mtsa module (e.g., SKIP_SOFTMAX_CALIB, SKIP_SOFTMAX_DEFAULT)
-        mtsa_cfg = getattr(mtsa, sparse_cfg, None)
+        # Get config from mts module (e.g., SKIP_SOFTMAX_CALIB, SKIP_SOFTMAX_DEFAULT)
+        mtsa_cfg = getattr(mts, sparse_cfg, None)
         if mtsa_cfg is None:
             raise ValueError(f"Unknown sparse_cfg: {sparse_cfg}.")
     else:
@@ -72,7 +72,7 @@ def sparsify_model(
 
     # Apply sparsification
     print(f"\nApplying sparse attention with config: {sparse_cfg}")
-    mtsa.sparsify(net, mtsa_cfg)
+    mts.sparsify(net, mtsa_cfg)
     print("Sparse attention applied successfully!")
 
     return model

@@ -385,7 +385,7 @@ Skip-softmax sparse attention skips KV tiles whose attention scores are negligib
 ### Getting Started
 
 ```python
-import modelopt.torch.sparsity.attention_sparsity as mtsa
+import modelopt.torch.sparsity as mts
 
 # 1. Define config with calibration
 config = {
@@ -410,7 +410,7 @@ def forward_loop(model):
     pipeline(prompt="a cat", num_frames=81, num_inference_steps=40, ...)
 
 # 3. Sparsify + calibrate
-mtsa.sparsify(transformer, config, forward_loop=forward_loop)
+mts.sparsify(transformer, config, forward_loop=forward_loop)
 
 # 4. Generate as usual — sparsity is applied automatically
 output = pipeline(prompt="a dog on the beach", ...)

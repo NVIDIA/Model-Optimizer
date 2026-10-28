@@ -15,7 +15,7 @@ Two attention backends are available:
 ### Quick Example
 
 ```python
-import modelopt.torch.sparsity.attention_sparsity as mtsa
+import modelopt.torch.sparsity as mts
 from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_DEFAULT
 
 # Load your model
@@ -26,7 +26,7 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 
 # Apply sparse attention
-model = mtsa.sparsify(model, config=SKIP_SOFTMAX_DEFAULT)
+model = mts.sparsify(model, SKIP_SOFTMAX_DEFAULT)
 ```
 
 > [!Note]
@@ -43,7 +43,7 @@ Uses a fixed threshold value. Simple but may not be optimal for all sequence len
 ```python
 from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_DEFAULT
 
-model = mtsa.sparsify(model, config=SKIP_SOFTMAX_DEFAULT)
+model = mts.sparsify(model, SKIP_SOFTMAX_DEFAULT)
 ```
 
 #### 2. Calibrated Threshold (SKIP_SOFTMAX_CALIB)
@@ -53,7 +53,7 @@ Uses RULER-based calibration to determine an optimal dynamic threshold that adap
 ```python
 from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_CALIB
 
-model = mtsa.sparsify(model, config=SKIP_SOFTMAX_CALIB)
+model = mts.sparsify(model, SKIP_SOFTMAX_CALIB)
 ```
 
 ### N:M Sparse Softmax (SPARSE_SOFTMAX_DEFAULT)
@@ -69,7 +69,7 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="cuda",
 )
 
-model = mtsa.sparsify(model, config=SPARSE_SOFTMAX_DEFAULT)
+model = mts.sparsify(model, SPARSE_SOFTMAX_DEFAULT)
 ```
 
 Custom N:M configuration:
@@ -90,11 +90,11 @@ sparse_cfg = {
     },
 }
 
-model = mtsa.sparsify(model, config=sparse_cfg)
+model = mts.sparsify(model, sparse_cfg)
 ```
 
 > [!Note]
-> N:M sparse softmax requires the Triton backend (`backend="triton"`). The `attn_implementation` is automatically set to `"modelopt_triton"` by `mtsa.sparsify()`. N:M sparsity is applied during prefill only — decode tokens are not sparsified.
+> N:M sparse softmax requires the Triton backend (`backend="triton"`). The `attn_implementation` is automatically set to `"modelopt_triton"` by `mts.sparsify()`. N:M sparsity is applied during prefill only — decode tokens are not sparsified.
 
 ## Prerequisites
 
@@ -233,7 +233,7 @@ custom_config = {
     },
 }
 
-model = mtsa.sparsify(model, config=custom_config)
+model = mts.sparsify(model, custom_config)
 ```
 
 ## References

@@ -29,7 +29,7 @@ import torch
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from transformers import AutoModelForCausalLM
 
-import modelopt.torch.sparsity.attention_sparsity as mtsa
+import modelopt.torch.sparsity as mts
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 from modelopt.torch.kernels.common.attention.hf_triton_attention import triton_attention_forward
 from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_TRITON_CALIB
@@ -111,7 +111,7 @@ class TestTritonCalibrationHF:
         config["sparse_cfg"]["calibration"]["target_sparse_ratio"] = {"prefill": 0.5}
 
         forward_loop = _make_forward_loop(model.config.vocab_size)
-        sparse_model = mtsa.sparsify(model, config, forward_loop=forward_loop)
+        sparse_model = mts.sparsify(model, config, forward_loop=forward_loop)
         assert sparse_model.config._attn_implementation == "modelopt_triton"
 
         sparse_model.eval()
