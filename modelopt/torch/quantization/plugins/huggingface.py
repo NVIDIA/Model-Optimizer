@@ -1784,7 +1784,8 @@ def assert_fused_experts_intercepted(model):
     back to weight-derived scales as before.
 
     The check is rank-local: under data parallelism it raises on the ranks whose experts saw rows,
-    and a rank whose experts saw none goes on to its next collective.
+    and a rank whose experts saw none goes on to its next collective and waits there until the
+    launcher stops it or the collective times out, so the error is in another rank's log.
     """
     missed = []
     for name, module in model.named_modules():
