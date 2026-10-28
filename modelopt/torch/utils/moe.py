@@ -291,9 +291,8 @@ def register_torch_a2a():
 
     These two styles are functionally transformers' ``megamoe_router`` / ``megamoe_experts`` (added
     in 5.10.4 for DeepGEMM Mega-MoE), reimplemented here so the transport works below 5.10.4 too.
-    The base classes (``RouterParallel``, ``TensorParallelLayer``) are stock wherever the EP infra
-    exists (transformers >= 5.6, the framework floor enforced in ``load_and_prepare_ep``), so this
-    works on any such version; ``grouped_gemm`` (expert weight sharding) is stock too.
+    The base classes (``RouterParallel``, ``TensorParallelLayer``) are stock in every transformers
+    version ModelOpt supports; ``grouped_gemm`` (expert weight sharding) is stock too.
     """
     global _TORCH_A2A_REGISTERED
     if _TORCH_A2A_REGISTERED:

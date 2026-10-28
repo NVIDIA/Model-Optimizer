@@ -32,7 +32,6 @@ from datetime import timedelta
 import pytest
 import torch
 import torch.distributed as dist
-from packaging.version import Version
 
 import modelopt.torch.utils.moe as moe
 from modelopt.torch.utils.moe import a2a_moe
@@ -217,9 +216,7 @@ def test_the_router_style_registers_under_transformers_5_16_0s_name(monkeypatch)
 def test_experts_whose_biases_the_plan_left_whole_are_refused():
     """A plan that shards GPT-OSS's expert weights but not their biases leaves every rank all the
     experts' biases, which the forward indexes by local expert id; it refuses them instead."""
-    transformers = pytest.importorskip("transformers")
-    if Version(transformers.__version__) < Version("5.6"):
-        pytest.skip("expert parallelism needs transformers >= 5.6")
+    pytest.importorskip("transformers")
     from transformers import GptOssConfig
     from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts
 
@@ -254,9 +251,7 @@ def _no_tokens_for_rank1_job(rank, size):
 def test_experts_that_receive_no_tokens_run_on_an_empty_batch(cpu_dist_workers):
     """Every token routed to rank 0's experts: rank 1 runs transformers' fused experts on an empty
     batch, and the forward and gradients still match the whole module's on every rank."""
-    transformers = pytest.importorskip("transformers")
-    if Version(transformers.__version__) < Version("5.6"):
-        pytest.skip("expert parallelism needs transformers >= 5.6")
+    pytest.importorskip("transformers")
     cpu_dist_workers.run(_no_tokens_for_rank1_job)
 
 
@@ -372,9 +367,7 @@ def test_fused_experts_backward_through_torch_a2a_matches_the_whole_module(cpu_d
     """transformers' fused experts, split over two ranks, train through the torch_a2a forward exactly
     as the whole module does on one process: same output, and same gradients for the hidden states,
     the routing weights and each rank's experts."""
-    transformers = pytest.importorskip("transformers")
-    if Version(transformers.__version__) < Version("5.6"):
-        pytest.skip("expert parallelism needs transformers >= 5.6")
+    pytest.importorskip("transformers")
     cpu_dist_workers.run(_real_experts_backward_job)
 
 
@@ -397,7 +390,5 @@ def _fp32_routing_weights_job(rank, size):
 def test_fp32_routing_weights_give_grouped_mms_result_at_ep1(cpu_dist_workers):
     """A router may return fp32 weights for bf16 experts, as Mixtral's does. grouped_mm weights the
     experts' results in fp32 then; at EP=1 the torch_a2a forward must give its result bit for bit."""
-    transformers = pytest.importorskip("transformers")
-    if Version(transformers.__version__) < Version("5.6"):
-        pytest.skip("expert parallelism needs transformers >= 5.6")
+    pytest.importorskip("transformers")
     cpu_dist_workers.run(_fp32_routing_weights_job)
