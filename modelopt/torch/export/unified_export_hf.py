@@ -1355,7 +1355,7 @@ def _export_diffusers_checkpoint(
             # Image-conditioned Wan also requires a successful dummy forward for fusion.
             is_wan_i2v_component = (
                 HAS_DIFFUSERS
-                and isinstance(component, getattr(diffusers, "WanTransformer3DModel", ()))
+                and isinstance(component, diffusers.WanTransformer3DModel)
                 and getattr(getattr(component, "config", None), "image_dim", None) is not None
             )
             _fuse_qkv_linears_diffusion(component, strict=is_qwen_component or is_wan_i2v_component)
