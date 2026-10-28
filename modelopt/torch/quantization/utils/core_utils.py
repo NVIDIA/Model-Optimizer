@@ -535,6 +535,31 @@ def _fsdp2_unshard_context(fsdp_module: FSDPModule):
             fsdp_module.reshard()
 
 
+def _fsdp2_owned_params(module: nn.Module, fsdp_module: FSDPModule) -> set[int]:
+    """The ids of the parameters FSDP2 manages in ``fsdp_module``'s unit and in any unit in ``module``.
+
+    FSDP2 registers a different parameter object in each shard state -- sharded, resharded after the
+    forward, unsharded -- so all of them count, whichever the unit is in. A DTensor parameter outside
+    them is not FSDP2's to gather, whatever its mesh is named: an expert-parallel weight
+    ``fully_shard`` was told to ignore, say.
+    """
+    owned: set[int] = set()
+    for unit in (fsdp_module, *(m for m in module.modules() if isinstance(m, FSDPModule))):
+        group = fully_shard.state(unit)._fsdp_param_group
+        if group is None:
+            continue
+        for fsdp_param in group.fsdp_params:
+            # The last two exist once their state is first entered.
+            for state_param in (
+                fsdp_param.sharded_param,
+                getattr(fsdp_param, "_sharded_post_forward_param", None),
+                getattr(fsdp_param, "_unsharded_param", None),
+            ):
+                if state_param is not None:
+                    owned.add(id(state_param))
+    return owned
+
+
 @contextmanager
 def fsdp2_weight_access_and_writeback_context(
     module: nn.Module,
@@ -564,8 +589,14 @@ def fsdp2_weight_access_and_writeback_context(
 
     # Collect all DTensor parameters, replacing them with local replicated copies.
     originals: dict[str, tuple] = {}
+    owned = _fsdp2_owned_params(module, fsdp_module)
     for name, param in module.named_parameters():
         if not isinstance(param, torch.distributed.tensor.DTensor):
+            continue
+        if id(param) not in owned:
+            # Not FSDP's shard: a DTensor FSDP2 does not manage, such as an expert-parallel weight
+            # that fully_shard was told to ignore. Gathering it would hand every rank every expert,
+            # which its module indexes by local expert.
             continue
         original_placements = param.placements
         original_device_mesh = param.device_mesh

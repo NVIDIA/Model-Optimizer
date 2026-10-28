@@ -17,6 +17,7 @@ import pytest
 import torch
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
+from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
 from modelopt.torch.quantization.utils import (
     convert_quantization_axis_to_reduce_axis,
@@ -25,6 +26,8 @@ from modelopt.torch.quantization.utils import (
 )
 from modelopt.torch.quantization.utils.core_utils import (
     _disable_fsdp_unshard_reshard,
+    _fsdp2_owned_params,
+    fsdp2_weight_access_and_writeback_context,
     persistent_materialization,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -385,3 +388,54 @@ def _shared_group_override_restores_prior_attributes(rank, size):
 
 def test_disable_fsdp_unshard_reshard_shared_group_and_nesting(cpu_dist_workers):
     cpu_dist_workers.run(_shared_group_override_restores_prior_attributes)
+
+
+def _fsdp2_owns_its_params_in_every_state_job(rank, size):
+    mesh = init_device_mesh("cpu", (size,))
+    model = torch.nn.Module()
+    model.dense = torch.nn.Linear(8, 8)
+    model.layer = torch.nn.Linear(8, 8)
+    fully_shard(model.layer, mesh=mesh)  # a unit of its own, inside the model's
+    fully_shard(model, mesh=mesh)
+    layer = model.layer
+    sharded = layer.weight
+    assert {id(model.dense.weight), id(sharded)} <= _fsdp2_owned_params(model, model)
+    layer.unshard()
+    unsharded = layer.weight
+    try:
+        assert unsharded is not sharded, "FSDP2 registered the same parameter when unsharded"
+        assert id(unsharded) in _fsdp2_owned_params(model, model)
+    finally:
+        layer.reshard()
+
+
+def test_fsdp2_owns_its_parameters_in_every_shard_state(cpu_dist_workers):
+    """FSDP2 registers another parameter object once a unit is unsharded (or resharded after the
+    forward, under HSDP), and the weight-access window gathers by ownership: each counts as FSDP2's,
+    or a weight it does own would be left sharded in the window. So do the parameters of a unit
+    nested in the module the window opens on."""
+    cpu_dist_workers.run(_fsdp2_owns_its_params_in_every_state_job)
+
+
+def _window_leaves_what_fsdp2_does_not_own_job(rank, size):
+    ep_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("ep",))
+    dp_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("dp",))
+    layer = torch.nn.Module()
+    layer.dense = torch.nn.Linear(8, 8)
+    layer.experts = torch.nn.Module()
+    layer.experts.weight = torch.nn.Parameter(
+        distribute_tensor(torch.randn(2 * size, 8), ep_mesh, [Shard(0)])
+    )
+    fully_shard(layer, mesh=dp_mesh, ignored_params={layer.experts.weight})
+    with fsdp2_weight_access_and_writeback_context(layer, layer):
+        assert not isinstance(layer.dense.weight, DTensor)  # FSDP2's own: gathered
+        assert isinstance(layer.experts.weight, DTensor)
+        assert layer.experts.weight.to_local().shape[0] == 2
+    assert layer.experts.weight.to_local().shape[0] == 2
+
+
+def test_fsdp2_weight_access_leaves_parameters_fsdp2_does_not_own(cpu_dist_workers):
+    """An expert-parallel weight is a DTensor sharded over the experts that fully_shard was told to
+    ignore. The weight-access window gathers FSDP2's parameters only, so it stays sharded: gathering
+    it would hand every rank every expert."""
+    cpu_dist_workers.run(_window_leaves_what_fsdp2_does_not_own_job)
