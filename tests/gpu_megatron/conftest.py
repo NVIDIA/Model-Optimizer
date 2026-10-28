@@ -157,6 +157,16 @@ def dist_workers_size_1(_pool_cache):
     return _get_pool(_pool_cache, 1)
 
 
+@pytest.fixture(scope="module")
+def module_dist_workers_size_1(_pool_cache):
+    """One live single-rank pool for module-scoped kernel warmup fixtures.
+
+    Only fixtures that deliberately compile once for their whole module should use this. Normal
+    tests use the function-scoped fixture so a worker killed by a failure can be replaced.
+    """
+    return _get_pool(_pool_cache, 1)
+
+
 @pytest.fixture
 def dist_workers_size_2(_pool_cache):
     if torch.cuda.device_count() < 2:

@@ -137,7 +137,7 @@ dev-test = [
 ]
 dev-fla = [
     "apache-tvm-ffi==0.1.9",
-    "fla-core==0.5.1",
+    "fla-core==0.5.2",
     "tilelang==0.1.8",
 ]
 # Compound extras via self-references

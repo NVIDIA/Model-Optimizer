@@ -8,6 +8,7 @@ Changelog
 
 *Quantization*
 
+- Add experimental GDN/KDA recurrent-state QAT with native vLLM 0.30.0 Triton forwards and explicit prefill/decode phases through ``linear_attention_training_phase``, including dynamic blockwise INT8 state quantization. Megatron users need a Core build with native gate and packed-forward hooks; 0.19.2 does not support this workflow.
 - Add independent ``rounding="stochastic"`` TensorQuantizer support for integer, FP8 E4M3
   and dynamic block16 NVFP4 fake quantization.
   Nearest remains the default; calibration and weight folding force nearest deterministically,
@@ -46,6 +47,10 @@ Changelog
 
 **Backward Breaking Changes**
 
+- ModelOpt 0.48 Gated DeltaNet checkpoints with enabled ``gdn_state_quantizer`` or
+  ``gdn_w_quantizer`` use the retired FLA state/W execution format and do not restore as active
+  quantization in 0.49. Recreate state-QAT checkpoints with an explicit ``backend="serving"``
+  policy; WY operand quantization has no 0.49 replacement.
 - ``export_mcore_gpt_to_hf`` given a Hugging Face Hub model ID no longer writes the tokenizer, processor, generation config or remote-code files. Pass a local directory instead, e.g. from ``modelopt.torch.export.ensure_local_checkpoint``.
 - Drop support for Python 3.10, which has reached end-of-life. ModelOpt now requires Python 3.11 or later.
 - Diffusion HF exports now omit attention quantizer buffers by default, except for FLUX.1, which retains enabled Q/K/V ``_amax`` keys for runtime compatibility; other consumers of those keys can opt in with ``export_attention_quantizers=True`` (CLI: ``--extra-param export_attention_quantizers=true``). Disabled attention quantizers remain excluded, and diffusion components, including LTX-2, no longer emit KV-cache quantization metadata.

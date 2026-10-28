@@ -25,7 +25,76 @@ from itertools import pairwise
 
 import torch
 
-__all__ = ["chunk_gdn_reference", "recurrent_delta_rule_reference", "state_fp8_qdq_reference"]
+__all__ = [
+    "chunk_gdn_reference",
+    "install_reference_serving_backend",
+    "recurrent_delta_rule_reference",
+    "state_fp8_qdq_reference",
+]
+
+
+def _reference_normalize(value):
+    return value / (value.square().sum(-1, keepdim=True) + 1e-6).sqrt()
+
+
+def _reference_prefill(
+    q, k, v, g, beta, state, scale, normalize=False, gate_inputs=None, *, precision="vllm"
+):
+    """Independent Torch stand-in for Megatron adapter tests, not native-parity tests."""
+    if normalize:
+        q, k = _reference_normalize(q.float()), _reference_normalize(k.float())
+    output, final = recurrent_delta_rule_reference(
+        q[None].float(),
+        k[None].float(),
+        v[None].float(),
+        g[None].float(),
+        beta[None].float(),
+        scale=scale,
+        initial_state=state[None].float(),
+    )
+    return output[0].to(v.dtype), final[0]
+
+
+def _reference_step(
+    q, k, v, g, beta, state, scale, normalize=False, gate_inputs=None, *, precision="vllm"
+):
+    output, final = _reference_prefill(
+        q[None],
+        k[None],
+        v[None],
+        g[None],
+        beta[None],
+        state,
+        scale,
+        normalize,
+        gate_inputs,
+        precision=precision,
+    )
+    return output[0], final
+
+
+class _ReferenceKDAKernels:
+    @staticmethod
+    def fused_kda_gate(raw_gate, rate, head_dim, g_bias=None):
+        gate = raw_gate.float().reshape(*raw_gate.shape[:-1], -1, head_dim)
+        if g_bias is not None:
+            gate = gate + g_bias.float().reshape(gate.shape[-2:])
+        return -rate.float().exp().reshape(-1, 1) * torch.nn.functional.softplus(gate)
+
+
+def install_reference_serving_backend():
+    """Install the independent oracle in a persistent gpu_megatron worker.
+
+    Native vLLM forward parity remains covered in ``tests/gpu_vllm``. Keeping this
+    adapter test backend in-repo prevents the Megatron CI lane from silently skipping
+    all GDN/KDA tests merely because it intentionally does not install vLLM.
+    """
+    from modelopt.torch.kernels.quantization.linear_attention.serving import forward
+
+    forward._kernels = lambda precision: (None, _ReferenceKDAKernels)
+    forward.prefill = _reference_prefill
+    forward.step = _reference_step
+    forward.validate_profile = lambda gate_inputs, normalize, *, precision="vllm": None
 
 
 def state_fp8_qdq_reference(state: torch.Tensor, block_v: int = 64) -> torch.Tensor:
