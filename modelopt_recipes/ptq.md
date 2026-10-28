@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 39 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 41 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -72,6 +72,7 @@ supported combinations.
 | `linear_attention_state_int8_dynamic` | GDN/KDA decode state INT8 + Hadamard; requires a private ReplaySSM fork | none | none (dynamic scales; requires a prefix/decode phase context) |
 | `linear_attention_state_int8_block32_dynamic` | GDN/KDA state INT8, 32 value channels per key row; weights unchanged | none | none (dynamic scales; requires vLLM and a prefix/decode phase context) |
 | `linear_attention_state_int8_block32_dynamic_kimi_k3` | Kimi-K3/Kimi-Linear KDA state INT8, 32 value channels per key row | none | none (dynamic scales; explicit Triton Kimi profile) |
+| `linear_attention_state_nvfp4_dynamic` | GDN/KDA state NVFP4, request/head-local global scale and block16 E4M3 scales; weights unchanged | none | none (dynamic scales; requires vLLM and a prefix/decode phase context) |
 
 </details>
 
@@ -169,6 +170,10 @@ Packed boundaries must match the layer's actual (including padding) boundaries.
 Validation reads their values rather than trusting tensor versions, so it can synchronize
 CUDA metadata. Prefix backward still runs a separate FLA recurrence as an adjoint;
 this implementation is not an optimized fused training kernel.
+
+The NVFP4 state recipe uses E2M1 values, block16 E4M3 scales, and one dynamic
+global scale per sequence and head. It retains floating state storage and an
+identity STE; it does not configure a vLLM server or enable packed NVFP4 cache storage.
 
 ---
 

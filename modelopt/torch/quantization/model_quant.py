@@ -331,6 +331,12 @@ def _check_plugin_quantization_took_effect(model: nn.Module, config: QuantizeCon
             type(module).__name__
             for module in model.modules()
             if any(fnmatch.fnmatchcase(type(module).__name__, p) for p in owner_patterns)
+            # Kimi's class name overlaps the generic GDN suffix, but its adapter owns
+            # kda_state_quantizer. Keep broad non-Kimi matching for OLMo-style GDNs.
+            and not (
+                quantizer_name == "gdn_state_quantizer"
+                and fnmatch.fnmatchcase(type(module).__name__, "*Kimi*")
+            )
         }
         # (unconverted owner classes, has the quantizer, has an enabled one)
         local = (
