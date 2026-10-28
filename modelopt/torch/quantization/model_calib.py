@@ -1130,14 +1130,21 @@ def _refuse_packed_fused_expert_weights(name, module, method, updates):
             )
 
 
-def _expert_slices(offs: torch.Tensor):
+def _expert_slices(offs: torch.Tensor, num_experts: int, rows: int):
     """``(expert, start, end)`` for the rows of each expert in a batch sorted by expert.
 
-    ``offs`` is the cumulative token count per expert (``_grouped_offs``): an expert without rows is
-    skipped, and rows beyond ``offs[-1]`` (expert-parallel sentinels) belong to no expert.
+    ``offs`` is the cumulative token count per expert (``_grouped_offs``): exclusive ends, one per
+    expert, as transformers' grouped_mm forward and ``a2a_moe`` build them. An expert without rows is
+    skipped, and rows beyond ``offs[-1]`` (expert-parallel sentinels) belong to no expert. Offsets of
+    another form raise: a leading zero, say, would credit each expert with the previous one's rows.
     """
+    ends = offs.tolist()
+    if len(ends) != num_experts or (ends and ends[-1] > rows):
+        raise RuntimeError(
+            f"Grouped experts offsets {ends} do not split {rows} rows over {num_experts} experts."
+        )
     start = 0
-    for idx, end in enumerate(offs.tolist()):
+    for idx, end in enumerate(ends):
         if end > start:
             yield idx, start, end
         start = end
@@ -1188,7 +1195,9 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
                     capture(quantizers[idx], weight[idx], args[0])
                 return
             weight = expert_module._local_experts(getattr(expert_module, weight_name))
-            for idx, start, end in _expert_slices(offs):
+            for idx, start, end in _expert_slices(
+                offs, expert_module.num_experts, args[0].shape[0]
+            ):
                 if idx in enabled:
                     capture(quantizers[idx], weight[idx], args[0][start:end])
 
@@ -2620,7 +2629,9 @@ def gptq(
             if experts._grouped_offs is not None:
                 # grouped_mm and torch_a2a quantize one expert-sorted batch per projection: split
                 # it back per expert by the cumulative token counts, as the eager loop feeds it.
-                for idx, start, end in _expert_slices(experts._grouped_offs):
+                for idx, start, end in _expert_slices(
+                    experts._grouped_offs, experts.num_experts, output.shape[0]
+                ):
                     handle = per_expert.get(idx)
                     if handle is not None:
                         handle.accumulate(output[start:end])

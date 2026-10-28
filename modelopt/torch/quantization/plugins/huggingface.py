@@ -899,8 +899,10 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         self._register_temp_attribute("_current_expert_idx", 0)
         # Per forward: each projection's experts, fake-quantized together (see _quantized_weight).
         self._register_temp_attribute("_stacked_weights", {})
-        # Cumulative tokens-per-expert offsets of the current grouped_mm forward,
-        # stashed so local-Hessian capture can split the expert-sorted batch.
+        # Cumulative tokens-per-expert offsets of the grouped forward in flight (grouped_mm or
+        # torch_a2a), None on the eager path: tells a weight-input capture (local Hessian, imatrix,
+        # GPTQ) which forward ran and how to split the expert-sorted batch. Cleared when forward
+        # returns, so a capture reached outside one skips rather than splitting by stale offsets.
         self._register_temp_attribute("_grouped_offs", None)
         # How many times an interception hook fired for this module. Still zero after a
         # calibration forward means the active experts backend reached neither `F.linear` nor

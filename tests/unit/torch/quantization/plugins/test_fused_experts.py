@@ -56,6 +56,7 @@ from modelopt.torch.opt.conversion import ApplyModeError
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
 from modelopt.torch.quantization.model_calib import (
+    _expert_slices,
     _register_weight_input_hooks,
     local_hessian_calibrate,
 )
@@ -2293,6 +2294,16 @@ class TestGroupedMMExperts:
         # The loop routes 16 rows round-robin, two experts each: 8 rows per expert and projection.
         for q in [*experts.gate_up_proj_weight_quantizers, *experts.down_proj_weight_quantizers]:
             assert rows.get(id(q)) == 16 * TOP_K // NUM_EXPERTS
+
+    @pytest.mark.parametrize(
+        "offs", [[0, 2, 2, 5], [2, 5], [2, 2, 7]], ids=["leading-zero", "short", "past-the-rows"]
+    )
+    def test_grouped_offsets_of_another_form_are_refused(self, offs):
+        """The per-expert split reads the offsets as exclusive cumulative ends, one per expert: any
+        other form would credit experts with other experts' rows, so it raises instead."""
+        assert list(_expert_slices(torch.tensor([2, 2, 5]), 3, 6)) == [(0, 0, 2), (2, 2, 5)]
+        with pytest.raises(RuntimeError, match="do not split 6 rows over 3 experts"):
+            list(_expert_slices(torch.tensor(offs), 3, 6))
 
     @pytest.mark.parametrize("impl", ["grouped_mm", "torch_a2a"])
     def test_local_hessian_captures_per_expert_in_grouped_mode(self, cpu_dist_workers, impl):
