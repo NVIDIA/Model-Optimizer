@@ -410,14 +410,10 @@ _V = TypeVar("_V")
 
 
 def _sendable(error: BaseException | None) -> tuple[bool, Any] | None:
-    """``error`` as this rank sends it to the others, ``None`` for none; see :func:`_received`.
+    """``error`` as this rank sends it to the others (see :func:`_received`), ``None`` for none.
 
-    An error goes as its text: the other ranks only need to stop, and an exception is not
-    guaranteed to pickle. A SystemExit goes as its code, for every rank to exit with:
-    :func:`distributed_run` ends an exit with a barrier but an error with :func:`abort`, so a rank
-    exiting while its peers abort would wait in that barrier for ranks that are gone. A code other
-    than an int or ``None`` goes as its text, which the interpreter prints for it before exiting
-    with 1.
+    An error goes as its text, since an exception need not pickle; a SystemExit as its code, for
+    every rank to exit with.
     """
     if error is None:
         return None
@@ -460,17 +456,11 @@ def _received(sent: tuple[bool, Any], rank: int, label: str) -> BaseException:
 
 
 def _encoded(value: Any) -> bytes:
-    """``value`` as :func:`broadcast_from` and :func:`all_reduce` send it: serialized once, here.
+    """``value`` serialized for :func:`broadcast_from` and :func:`all_reduce`, and loaded back once.
 
-    It is also loaded back here: a value that does not serialize, or that every rank's load refuses
-    alike (a class a forced weights-only load rejects, say), then fails inside the caller's guard,
-    which sends the failure to every rank, rather than inside the collective, on one rank alone. A
-    load that depends on the loading rank can still fail on a peer alone, a tensor's, which lands on
-    the device it was saved from, say: these collectives carry small values, such as a plan, a flag
-    or a size. The check holds one more copy of the value while it runs, and loads it once more on
-    the sending rank: a value whose load has side effects has them twice there. The collective
-    carries the bytes, which always pickle. torch.save stands in for plain pickle, which bandit
-    refuses under modelopt/.
+    The load-back makes a value that cannot round-trip fail inside the caller's guard, which tells
+    every rank, rather than inside the collective on one rank alone. torch.save stands in for
+    pickle, which bandit refuses under modelopt/.
     """
     buffer = io.BytesIO()
     torch.save(value, buffer)
@@ -493,19 +483,15 @@ def _decoded(payload: bytes) -> Any:
 
 
 def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
-    """Return ``fn()`` run on ``rank`` only, on every rank.
+    """Return ``fn()``, run on ``rank`` only, on every rank.
 
-    For a value that depends on what each rank reads for itself -- the environment, its GPU, files
-    on its node -- so that ranks computing it for themselves could disagree. If ``fn`` raises, or
-    returns a value that does not serialize and load back (:func:`_encoded`), every rank raises
-    instead of waiting in a broadcast ``rank`` never sends: ``rank`` its own error, the others a
-    SystemExit with its code if that is what it was, so that every rank exits, else a RuntimeError.
-    On a distributed run every rank, ``rank`` too, gets the value loaded from the bytes sent, so the
-    result shares nothing with what ``fn`` returned, as with :func:`all_reduce`.
-    A rank broadcasting another label than ``rank`` at the same point fails; ``rank`` sees no other
-    rank's label, and returns. Collective: every rank calls it at the same point, with the same
-    ``rank``. In a single process ``fn`` runs alone, and its value comes back as it is, neither
-    serialized nor copied; a rank of a launch whose process group is not set up yet raises instead.
+    For a value ranks computing it for themselves could disagree on (their environment, GPU or
+    files). If ``fn`` raises or its value does not round-trip (:func:`_encoded`), every rank raises
+    rather than wait for the broadcast: ``rank`` its own error, the others a SystemExit with its
+    code if it exited, else a RuntimeError. Every rank, ``rank`` too, gets a copy loaded from the
+    bytes sent. Collective: every rank calls it at the same point with the same ``label`` and
+    ``rank``; a rank out of step raises. In a single process ``fn``'s value comes back as it is; a
+    rank of a launch whose process group is not set up raises.
     """
     _refuse_a_launch_without_its_group(label)
     if not 0 <= rank < size():
@@ -540,22 +526,17 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
 
 
 def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _V]) -> _V:
-    """Return ``combine`` of every rank's ``fn()``, on every rank.
+    """Return ``combine`` of every rank's ``fn()``, in rank order, on every rank.
 
-    ``combine`` takes the ranks' values in rank order and returns the one every rank gets, e.g.
-    ``min`` for a batch size each rank's memory bounds, where one rank's choice could run another
-    out of memory. If ``fn`` raises on any rank, or returns a value that does not serialize and load
-    back (:func:`_encoded`), every rank raises instead of waiting in a gather that rank never joins,
-    and every rank alike: if any rank's error is not a SystemExit, a rank with such an error raises
-    its own and the others a RuntimeError naming the first one; else every rank exits, a rank that
-    exited with its own SystemExit and the others with the first one's code. Ranks reducing
-    different labels at the same point fail. Collective. In a single process ``fn`` runs alone and
-    ``combine`` gets its value as it is, neither serialized nor copied; a rank of a launch whose
-    process group is not set up yet raises instead.
+    E.g. ``combine=min`` for a batch size each rank's memory bounds. If ``fn`` fails on any rank, or
+    its value does not round-trip (:func:`_encoded`), every rank raises instead of waiting in the
+    gather: if any rank's failure is not a SystemExit, a rank with such an error raises it and the
+    others a RuntimeError naming the first; else each rank exits, with its own code or the first
+    one's. Collective, with the same ``label`` on every rank; ranks out of step raise. In a single
+    process ``combine`` gets ``fn()``'s value as it is; a rank of a launch whose process group is
+    not set up raises.
 
-    It runs ``fn`` itself so that a rank whose ``fn`` fails still joins the gather, which
-    :func:`allreduce`, handed values the ranks already hold, cannot do; :func:`broadcast_from`
-    differs from :func:`broadcast` and :func:`master_only` in the same way.
+    Unlike :func:`allreduce`, it runs ``fn`` itself, so a rank whose ``fn`` fails still joins.
     """
     _refuse_a_launch_without_its_group(label)
     if not is_distributed_run():
@@ -572,11 +553,8 @@ def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _
     torch.distributed.all_gather_object(gathered, mine)
     failures = [(rank_, sent) for rank_, (_, _, sent) in enumerate(gathered) if sent is not None]
     if failures:
-        # Every rank raises by one rule, for distributed_run to end every rank alike. A rank whose
-        # error is not a SystemExit aborts, so if any rank's is not, every rank raises an error, an
-        # exiting rank too, rather than wait in the exit's barrier for the aborted one; else every
-        # rank exits. A failing rank raises its own exception when it is of that kind. Each sent is
-        # _sendable's (exited, detail).
+        # One rule on every rank: any error that is not an exit makes every rank raise one, for an
+        # exiting rank would wait in distributed_run's exit barrier for an aborted peer.
         errors = [(rank_, sent) for rank_, sent in failures if not sent[0]]
         failed_rank, sent = (errors or failures)[0]
         if error is not None and isinstance(error, SystemExit) == sent[0]:
