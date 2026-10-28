@@ -105,7 +105,7 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
     2. Score the pruning activations.
     3. Prune the model and save pruned checkpoints
 
-    The output of this step will be used by mnt.search() to perform the NAS search.
+    The output of this step will be used by mtn.search() to perform the NAS search.
     """
     # Required for mtn.search() to read NAS configuration
     model.hydra_config_dir = config.hydra_config_dir

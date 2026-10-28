@@ -1,6 +1,6 @@
 # Scripts for ONNX Whisper model
 
-This repository contains an example to demontrate 8-bit quantization of Whisper ONNX model.
+This repository contains an example to demonstrate 8-bit quantization of Whisper ONNX model.
 
 ## Table of Contents
 

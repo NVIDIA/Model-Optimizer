@@ -110,7 +110,7 @@ class MoESpec(SpecSection):
 
     expert_linear_names: tuple[str, ...] | None = None
     """Expert linear projection names, e.g. ``("gate_proj", "down_proj", "up_proj")``.
-    For layouts modelopt rewrites (e.g. quantized DBRX), these are the names on the
+    For layouts modelopt rewrites into per-expert modules, these are the names on the
     rewritten module."""
 
     fused_expert_names: bool = False
@@ -125,7 +125,7 @@ class MoESpec(SpecSection):
     """The (gate, up) pair among ``expert_linear_names`` that serving engines fuse
     into a single ``gate_up_proj``, e.g. ``("gate_proj", "up_proj")`` or
     ``("w1", "w3")``. ``None`` for non-gated experts (NemotronH) and already-fused
-    layouts (GptOss, DBRX)."""
+    layouts (GptOss)."""
 
     @property
     def gate_up_pairs(self) -> tuple[tuple[str, str], ...]:
@@ -351,7 +351,7 @@ def hf_model_type(model) -> str | None:
 
 
 def match_moe_block(module: "nn.Module", model_type: str | None = None) -> "MoESpec | None":
-    """Return the MoE layout layout for ``module``, resolved by model type.
+    """Return the MoE layout for ``module``, resolved by model type.
 
     ``model_type`` (the root ``model.config.model_type``) is a strict filter: only
     that model's own spec is consulted, and an unregistered model type resolves to

@@ -27,19 +27,54 @@ from torch.utils.data import DataLoader
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
-from modelopt.torch.utils.dataset_utils import create_forward_loop
+from modelopt.torch.quantization.kv_cache_auto_quant import _forward_kl
+from modelopt.torch.utils.dataset_utils import create_forward_loop, model_type_is_enc_dec
+from modelopt.torch.utils.distributed import size as world_size
 
 __all__ = ["auto_quantize"]
 
-_FSDP2_KV_AUTOQUANT_ERROR = (
-    "KV-cache AutoQuantize does not support --use_fsdp2 until distributed sensitivity scoring, "
-    "selection, and checkpoint writes are synchronized across ranks."
-)
 _FSDP2_AUTOQUANT_WARNING = (
-    "AutoQuantize with --use_fsdp2 has not been validated end-to-end yet "
-    "(distributed calibration, sensitivity scoring, and recipe/checkpoint "
-    "synchronization across ranks); use at your own risk."
+    "AutoQuantize with --use_fsdp2 is experimental. "
+    "Resume with the same world size, model, recipe, and calibration data."
 )
+
+
+def _get_autoquant_memory_probe(recipe: ModelOptAutoQuantizeRecipe):
+    """Include retained reference logits and KL intermediates in batch-size probing."""
+    stages = (recipe.auto_quantize, recipe.kv_auto_quantize)
+    if not any(stage is not None and stage.auto_quantize_method == "kl_div" for stage in stages):
+        return None
+    has_kv_kl = any(
+        stage is not None
+        and stage.auto_quantize_method == "kl_div"
+        and stage.constraints.cost_model == "kv_cache"
+        for stage in stages
+    )
+
+    def probe(model, inputs):
+        # Encoder-decoder forwards need decoder inputs; retain their generation-based probe.
+        if model_type_is_enc_dec(model):
+            model.generate(inputs)
+            return
+        # Composed searches must still budget for the gradient stage's activations.
+        if torch.is_grad_enabled():
+            model(inputs)
+
+        def get_logits():
+            logits = model(inputs).logits
+            if has_kv_kl:
+                return _select_unpadded_logits(logits, {"attention_mask": torch.ones_like(inputs)})
+            return logits
+
+        with torch.no_grad():
+            logits_ref = get_logits()
+            log_prob_ref = torch.log_softmax(logits_ref.float(), dim=-1)
+            # Keep the previous candidate alive during the next forward, as the scorer does.
+            for _ in range(2):
+                logits_quant = get_logits()
+                _forward_kl(logits_quant, log_prob_ref)
+
+    return probe
 
 
 # Presets safe to mix into an AutoQuantize search *and* write via the unified HF checkpoint
@@ -99,8 +134,6 @@ def auto_quantize(
         allow_uniform_kv=allow_uniform_kv,
     )
     if args.use_fsdp2:
-        if inputs["search_domain"] == "kv_cache":
-            raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
         warnings.warn(_FSDP2_AUTOQUANT_WARNING)
     # base-model lm_head handling (mirrors the CLI helper)
     is_base_model = (
@@ -126,13 +159,16 @@ def auto_quantize(
         def loss_func(output, data):
             return output.loss
 
-    if inputs["method"] == "gradient":
+    method_name = (
+        inputs["method"]["method"] if isinstance(inputs["method"], dict) else inputs["method"]
+    )
+    if method_name == "gradient":
 
         def forward_step(model, batch):
             inputs_ = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
             return model(**inputs_)
 
-    elif inputs["method"] == "kl_div":
+    elif method_name in ("kl_div", "aumann_shapley"):
 
         def forward_step(model, batch):
             inputs_ = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
@@ -146,11 +182,16 @@ def auto_quantize(
                 return _select_unpadded_logits(logits, batch)
             return logits
 
+        if method_name == "aumann_shapley":
+            loss_func = None
+
     else:
         raise ValueError(
-            f"Invalid auto_quantize method: {inputs['method']}. Must be 'gradient' or 'kl_div'"
+            f"Invalid auto_quantize method: {method_name}. Must be 'gradient', 'kl_div', "
+            "or 'aumann_shapley'"
         )
 
+    score_batch_size = args.batch_size * (world_size() if args.use_fsdp2 else 1)
     auto_quantize_kwargs: dict[str, Any] = {
         "constraints": inputs["constraints"],
         "data_loader": calib_dataloader,
@@ -158,7 +199,7 @@ def auto_quantize(
         "quantization_formats": inputs["quantization_formats"],
         "num_calib_steps": len(calib_dataloader),
         "num_score_steps": min(
-            len(calib_dataloader), max(inputs["score_size"] // args.batch_size, 1)
+            len(calib_dataloader), max(inputs["score_size"] // score_batch_size, 1)
         ),
         "verbose": True,
         "disabled_layers": inputs["disabled_layers"],
@@ -213,6 +254,11 @@ def _mtq_inputs_from_auto_quantize_config(
     to ``--kv_cache_qformat`` when the recipe omits it.
     """
     constraints = aq_config.constraints.model_dump(exclude_none=True)
+    method_options = aq_config.method_options or {}
+    if aq_config.uses_predicted_damage_target:
+        # The recipe validator rejects an explicit bit budget; remove only the schema default.
+        constraints.pop("effective_bits", None)
+
     is_kv_search = aq_config.constraints.cost_model == "kv_cache"
     if is_kv_search:
         return {
@@ -225,6 +271,10 @@ def _mtq_inputs_from_auto_quantize_config(
             "method": aq_config.auto_quantize_method,
             "score_size": aq_config.score_size,
         }
+
+    method = aq_config.auto_quantize_method
+    if method_options:
+        method = {"method": method, **method_options}
     # cost_excluded_layers (sibling of disabled_layers) maps to the mtq cost key: these layers are
     # kept out of the bit-budget denominator (cost_weight 0) — e.g. VL vision towers — distinct from
     # disabled_layers, which removes them from the search.
@@ -265,7 +315,7 @@ def _mtq_inputs_from_auto_quantize_config(
         "module_search_spaces": module_search_spaces,
         "disabled_layers": aq_config.disabled_layers,
         "kv_cache_quant_cfg": kv_cache_quant_cfg,
-        "method": aq_config.auto_quantize_method,
+        "method": method,
         "score_size": aq_config.score_size,
     }
 

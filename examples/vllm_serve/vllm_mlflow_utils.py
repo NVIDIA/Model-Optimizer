@@ -291,7 +291,18 @@ class FakeQuantMlflowTracker:
         texts = {}
         if command := os.environ.get(COMMAND_ENV):
             texts["command.txt"] = command
-        texts.update(resolved_recipe_texts(self._quant_config.get("recipe_path")))
+        recipe_path = self._quant_config.get("recipe_path")
+        if recipe_path and Path(recipe_path).is_file():
+            source = Path(recipe_path).read_text()
+            raw_recipe = yaml.safe_load(source)
+            if (
+                isinstance(raw_recipe, dict)
+                and raw_recipe
+                and all(isinstance(name, str) and "_quantizer" in name for name in raw_recipe)
+            ):
+                texts["recipe/quant_recipe.yaml"] = source
+                return texts
+        texts.update(resolved_recipe_texts(recipe_path))
         return texts
 
 

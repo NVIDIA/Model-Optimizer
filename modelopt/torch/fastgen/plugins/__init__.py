@@ -15,13 +15,14 @@
 
 """Optional plugins for the fastgen subpackage (gated via ``import_plugin``).
 
-``qwen_image`` holds the Qwen-Image pipeline plus the forward-hook helpers that expose
-intermediate teacher activations to the DMD2 GAN discriminator. The import is gated so
-environments that choose not to install the optional fastgen dependencies still see a
-clean package import.
+``qwen_image`` holds the shared Qwen latent helpers and DMD pipeline, while
+``qwen_image_pdd`` holds the explicit PDD conversion and adapter. Imports are
+gated so environments without optional fastgen dependencies retain a clean
+package import.
 """
 
 from modelopt.torch.utils import import_plugin
 
 with import_plugin("qwen_image"):
     from .qwen_image import *
+    from .qwen_image_pdd import *

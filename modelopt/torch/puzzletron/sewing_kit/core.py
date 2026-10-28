@@ -20,18 +20,12 @@ from __future__ import annotations
 from abc import ABC
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Literal, Optional, Sequence, Union
-
-from typing_extensions import override
-
-try:
-    from typing import Self
-except ImportError:
-    from typing_extensions import Self
+from typing import Any, Callable, Iterable, Literal, Optional, Self, Sequence, Union
 
 import torch
 import torch.distributed
 import torch.nn as nn
+from typing_extensions import override
 
 from .passage import (
     InputArgs,

@@ -13,18 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Self-implemented final (pre-lm_head) norms for the offline/streaming fake base model.
+"""Final (pre-lm_head) norms for the offline/streaming fake base model.
 
 FakeBaseModel reconstructs base logits from vLLM-captured final hidden states, which are
-*un-normed* — so it must re-apply the base model's final norm before lm_head. We reimplement a
-small, explicit set of norm variants here (rather than importing each base model's real module)
-to keep the fake base lightweight, and map base ``model_type`` → norm type so a norm is applied
-only when we know which one the model uses.
+*un-normed* — so it must re-apply the base model's final norm before lm_head. We construct only
+the normalization layers needed by the fake base, and map base ``model_type`` → norm type so a
+norm is applied only when we know which one the model uses.
 """
 
 from collections.abc import Callable
 
 import torch
+from transformers.models.gpt_oss.modeling_gpt_oss import GptOssRMSNorm
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 
@@ -68,12 +68,21 @@ class _FinalGemmaRMSNorm(torch.nn.Module):
         return f"{tuple(self.weight.shape)}, eps={self.eps}"
 
 
-# Registry of self-implemented final-norm variants. We deliberately reimplement these
-# (rather than importing the base model's actual module) to keep FakeBaseModel lightweight.
+class _FinalGptOssRMSNorm(GptOssRMSNorm):
+    """Transformers GPT-OSS RMSNorm with the teacher's loading dtype policy."""
+
+    def __init__(self, hidden_size, eps=1e-6, dtype=torch.bfloat16):
+        super().__init__(hidden_size, eps)
+        # Transformers keeps GPT-OSS norm weights in FP32 when loading an FP16 teacher.
+        self.to(dtype=torch.float32 if dtype == torch.float16 else dtype)
+
+
+# Registry of final-norm variants, without constructing the full target model.
 # Only a small, explicit set is supported; add a class here when a new type is needed.
 _FINAL_NORM_CLASSES: dict[str, Callable[..., torch.nn.Module]] = {
     "rmsnorm": _FinalRMSNorm,
     "gemma_rmsnorm": _FinalGemmaRMSNorm,
+    "gpt_oss_rmsnorm": _FinalGptOssRMSNorm,
 }
 
 # Base ``model_type`` → final-norm type. ONLY listed models get a norm — applying the wrong or
@@ -94,9 +103,7 @@ _FINAL_NORM_TYPE_BY_MODEL_TYPE: dict[str, str] = {
     # M3's final norm is always gemma-style; map it here too so a config that lost its
     # use_gemma_norm flag still gets the correct flavor instead of silently dropping the +1.
     "minimax_m3_vl_text": "gemma_rmsnorm",
-    # gpt_oss intentionally DISABLED: GptOssRMSNorm uses an fp32 weight + multiply-then-cast,
-    # unlike _FinalRMSNorm's bf16 weight, so reusing it would silently bias reconstructed logits.
-    # Re-enable once a gpt_oss-style class (fp32 weight, multiply-then-cast) is in _FINAL_NORM_CLASSES.
+    "gpt_oss": "gpt_oss_rmsnorm",
 }
 
 

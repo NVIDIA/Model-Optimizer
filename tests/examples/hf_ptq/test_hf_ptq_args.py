@@ -80,6 +80,37 @@ def test_recipe_help_distinguishes_weight_and_kv_autoquant(monkeypatch, capsys):
     assert "KV-cache AutoQuantize recipes select per-layer K/V formats" in help_text
 
 
+@pytest.mark.parametrize(
+    ("recipe", "batch_size", "expected"),
+    [
+        (None, 0, 4),
+        ("general/ptq/nvfp4_default-kv_fp8_cast", 0, 4),
+        ("general/auto_quantize/nvfp4_fp8_at_5p4bits", 0, 1),
+        ("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits", 0, 1),
+        ("general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits", 0, 1),
+        ("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits", 2, 2),
+    ],
+)
+def test_fsdp2_default_batch_size_is_limited_to_autoquant(
+    monkeypatch, recipe, batch_size, expected
+):
+    monkeypatch.setenv("RANK", "0")
+    cli = ["--pyt_ckpt_path", "/local/model", "--use_fsdp2", "--batch_size", str(batch_size)]
+    if recipe is not None:
+        cli += ["--recipe", recipe]
+    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, *cli)
+    # GPU memory probing and dataset loading are unavailable in this offline argument test.
+    monkeypatch.setattr(hf_ptq, "get_max_batch_size", lambda *_args, **_kwargs: 4)
+
+    def stop_before_dataset_loading(*_args, **_kwargs):
+        raise RuntimeError("batch size selected")
+
+    monkeypatch.setattr(hf_ptq, "make_calib_dataloader", stop_before_dataset_loading)
+    with pytest.raises(RuntimeError, match="batch size selected"):
+        hf_ptq.quantize_main(args, None, None, None, False, None, None, torch.device("cpu"))
+    assert args.batch_size == expected
+
+
 def test_hf_ptq_kv_autoquant_invokes_public_api(monkeypatch):
     """The HF entry point runs the real public KV AutoQuant path on an offline Qwen fixture."""
     hf_ptq = _import_hf_ptq(monkeypatch)
@@ -216,7 +247,8 @@ def test_hf_ptq_runs_fixed_ptq_before_kv_autoquantize(monkeypatch):
         batch_size=1,
         auto_quantize_checkpoint=None,
         kv_auto_quantize_checkpoint=None,
-        pyt_ckpt_path="dummy",
+        local_checkpoint_path="dummy",
+        hub_model_id=None,
         cast_mxfp4_to_nvfp4=False,
         layerwise_export=False,
         specdec_offline_dataset=None,
@@ -262,7 +294,8 @@ def test_fixed_ptq_then_kv_rejects_explicit_kv_before_calibration(monkeypatch):
     args = SimpleNamespace(
         auto_quantize_checkpoint=None,
         kv_auto_quantize_checkpoint=None,
-        pyt_ckpt_path="dummy",
+        local_checkpoint_path="dummy",
+        hub_model_id=None,
         cast_mxfp4_to_nvfp4=False,
         layerwise_export=False,
     )
@@ -350,17 +383,66 @@ def test_composed_kv_autoquant_rejects_enabled_actual_kv_quantizers(monkeypatch)
         hf_ptq.auto_quantize(args, model, [], aq, full_model=model)
 
 
-def test_fsdp2_kv_autoquant_rejected_before_model_load(monkeypatch):
-    hf_ptq = _import_hf_ptq(monkeypatch)
-    monkeypatch.setattr(hf_ptq, "_recipe_is_kv_auto_quantize", lambda _: True)
-    monkeypatch.setattr(
-        hf_ptq.AutoConfig,
-        "from_pretrained",
-        lambda *_args, **_kwargs: pytest.fail("The model config must not be loaded."),
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        "kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+        "nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+    ],
+)
+def test_fsdp2_kv_autoquant_reaches_distributed_model_load(monkeypatch, tmp_path, recipe):
+    get_tiny_qwen3(num_hidden_layers=1).save_pretrained(tmp_path)
+    monkeypatch.setenv("RANK", "0")
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        str(tmp_path),
+        "--use_fsdp2",
+        "--recipe",
+        "general/auto_quantize/" + recipe,
+    )
+    args.dist_state = SimpleNamespace(device="cpu", rank=0, world_size=1)
+    args.hub_model_id, args.local_checkpoint_path = None, str(tmp_path)
+
+    def distributed_load(checkpoint, *_args, **_kwargs):
+        assert checkpoint == str(tmp_path)
+        raise RuntimeError("distributed loader reached")
+
+    monkeypatch.setattr(hf_ptq, "parallel_load_and_prepare_fsdp2", distributed_load)
+
+    with pytest.raises(RuntimeError, match="distributed loader reached"):
+        hf_ptq.load_model(args)
+
+
+@pytest.mark.parametrize("has_mtp", [False, True])
+@pytest.mark.parametrize("declared", [False, True])
+def test_fsdp2_rejects_mtp_before_distributed_loading(monkeypatch, tmp_path, has_mtp, declared):
+    """MTP tensors cannot reach FSDP2's unquantized-tail passthrough, even without metadata."""
+    native = pytest.importorskip("transformers.models.nemotron_h.configuration_nemotron_h")
+    native.NemotronHConfig(
+        architectures=["NemotronHForCausalLM"],
+        num_nextn_predict_layers=int(declared),
+    ).save_pretrained(tmp_path)
+    monkeypatch.setenv("RANK", "0")
+    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", str(tmp_path), "--use_fsdp2")
+    args.dist_state = SimpleNamespace(device="cpu", rank=0, world_size=1)
+    args.hub_model_id, args.local_checkpoint_path = None, str(tmp_path)  # as main() sets them
+    keys = ["mtp.layers.0.eh_proj.weight", "mtp.layers.1.final_layernorm.weight"] if has_mtp else []
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": dict.fromkeys(keys, "model-00001.safetensors")})
     )
 
-    with pytest.raises(NotImplementedError, match="KV-cache AutoQuantize does not support"):
-        hf_ptq.load_model(SimpleNamespace(use_fsdp2=True, recipe="autoquant"))
+    def distributed_load(*args, **kwargs):
+        raise RuntimeError("distributed loader reached")
+
+    monkeypatch.setattr(hf_ptq, "parallel_load_and_prepare_fsdp2", distributed_load)
+    error, message = (
+        (NotImplementedError, "Nemotron-H MTP")
+        if has_mtp
+        else (RuntimeError, "distributed loader reached")
+    )
+    with pytest.raises(error, match=message):
+        hf_ptq.load_model(args)
 
 
 def test_mlflow_flag_defaults_the_experiment_name(monkeypatch):
@@ -400,6 +482,57 @@ def test_mlflow_is_off_by_default(monkeypatch):
 
     assert args.mlflow is None
     assert args.mlflow_experiment is None
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "memory_fit", "expected"),
+    [
+        ((), 1000, 64),  # 32,768 tokens at --calib_seq 512
+        ((), 5, 5),  # what fits a decoder layer's forward
+        (("--calib_size", "4"), 1000, 4),  # never more than the samples
+        (("--calib_seq", "65536"), 1000, 1),  # at least one sample
+        (("--batch_size", "1"), 1000, 1),  # an explicit value is kept
+    ],
+    ids=["token_budget", "memory", "sample_cap", "long_sequence", "explicit"],
+)
+def test_layerwise_calibration_batch_reaches_the_dataloader(
+    monkeypatch, extra_args, memory_fit, expected
+):
+    """A layerwise recipe sizes the default calibration batch by tokens and layer memory."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "/models/Qwen3-0.6B",
+        "--recipe",
+        "general/ptq/iq2_xxs",
+        "--calib_size",
+        "64",
+        *extra_args,
+    )
+
+    class _DataloaderReachedError(Exception):
+        pass
+
+    batch_sizes = []
+
+    def make_calib_dataloader(args, *_args, **_kwargs):
+        batch_sizes.append(args.batch_size)
+        raise _DataloaderReachedError
+
+    monkeypatch.setattr(hf_ptq, "make_calib_dataloader", make_calib_dataloader)
+    monkeypatch.setattr(
+        hf_ptq,
+        "get_max_layerwise_batch_size",
+        lambda model, seq_len, max_batch_size, num_samples, device: min(max_batch_size, memory_fit),
+    )
+    with pytest.raises(_DataloaderReachedError):
+        hf_ptq.quantize_main(args, None, None, None, False, None, None, torch.device("cpu"))
+    assert batch_sizes == [expected]
+
+
+def test_calib_seq_must_be_positive(monkeypatch):
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--calib_seq", "0")
 
 
 def test_mlflow_rejects_a_bad_tracking_uri(monkeypatch):
@@ -746,12 +879,6 @@ def test_only_the_main_rank_clears_an_inherited_pointer(monkeypatch, example_uti
     assert inherited.exists()
 
 
-def test_experiment_json_is_export_owned(example_utils):
-    """copy_custom_model_files copies source sidecars including dotfiles, so without this
-    the source checkpoint's pointer would follow it into every derived checkpoint."""
-    assert example_utils.EXPERIMENT_JSON in example_utils._HF_PTQ_EXPORT_OWNED_FILES
-
-
 def test_untracked_runs_write_no_experiment_json(monkeypatch, example_utils, tmp_path):
     _, args = _parse_hf_ptq_args(
         monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", str(tmp_path)
@@ -854,9 +981,68 @@ def test_post_quantize_export_survives_a_failed_sanity_generate(monkeypatch):
             generated_ids_before_ptq=torch.zeros(1, 4, dtype=torch.long),
             is_nemotron_vl_model=False,
             first_text_speech_dataset=None,
-            default_padding_side="right",
-            default_pad_token=None,
             calib_dataloader=None,
         )
 
     assert len(export_calls) == 1
+
+
+@pytest.mark.usefixtures("clean_env")
+def test_main_makes_a_hub_checkpoint_local_before_loading(monkeypatch, tmp_path):
+    """--pyt_ckpt_path keeps the Hub ID; the model loads from the local copy resolved first."""
+    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "org/model")
+    calls = []
+
+    def ensure_local_checkpoint(model_name_or_path):
+        calls.append(("ensure_local_checkpoint", model_name_or_path))
+        return "org/model", str(tmp_path)
+
+    class _LoadReachedError(Exception):
+        pass
+
+    def load_model(args):
+        calls.append(
+            ("load_model", args.pyt_ckpt_path, args.hub_model_id, args.local_checkpoint_path)
+        )
+        raise _LoadReachedError
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.compiler, "set_stance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_ptq, "launch_memory_monitor", lambda: None)
+    monkeypatch.setattr(hf_ptq, "ensure_local_checkpoint", ensure_local_checkpoint)
+    monkeypatch.setattr(hf_ptq, "load_model", load_model)
+
+    with pytest.raises(_LoadReachedError):
+        hf_ptq.main(args)
+
+    assert calls == [
+        ("ensure_local_checkpoint", "org/model"),
+        ("load_model", "org/model", "org/model", str(tmp_path)),
+    ]
+
+
+def test_tensorrt_llm_export_copies_non_model_files_from_the_local_copy(monkeypatch, tmp_path):
+    """The deprecated TensorRT-LLM exporter does not copy them itself; hf_ptq does, from disk."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "org/model",
+        "--export_path",
+        str(tmp_path / "export"),
+        "--sparsity_fmt",
+        "sparsegpt",
+    )
+    args.hub_model_id, args.local_checkpoint_path = "org/model", str(tmp_path / "local")
+    args.dist_state = SimpleNamespace(is_main=True)
+    copies = []
+    monkeypatch.setattr(hf_ptq, "has_spec_opt", lambda model: False)
+    monkeypatch.setattr(hf_ptq, "is_multimodal_model", lambda model: False)
+    monkeypatch.setattr(hf_ptq, "is_trtllm_enc_dec_export", lambda model_type: False)
+    monkeypatch.setattr(hf_ptq, "remove_hook_from_module", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_ptq, "export_tensorrt_llm_checkpoint", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_ptq, "copy_non_model_files", lambda *args: copies.append(args))
+
+    model = torch.nn.Linear(1, 1)
+    hf_ptq.export_quantized(args, model, model, "llama")
+
+    assert copies == [(str(tmp_path / "local"), str(tmp_path / "export"))]

@@ -39,6 +39,7 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     _QUANT_FUNCTIONAL_BACKENDS,
     register_quant_backend,
 )
+from modelopt.torch.quantization.utils import calib_utils
 
 # Weight-only INT8 per-channel; calibration is re-run explicitly per test.
 INT8_WEIGHT_CFG = {
@@ -131,6 +132,29 @@ class TestLocalHessianCalibrateDense:
         assert all(torch.isfinite(a).all() and (a > 0).all() for a in lh.values())
         assert any(not torch.allclose(lh[n], max_amax[n]) for n in lh)  # refined past max-cal
         assert any(not torch.allclose(lh[n], mse[n]) for n in lh)  # Hessian changed the choice
+
+    def test_bf16_hessian_input_on_cpu_gives_the_float32_result_and_warns_once(self):
+        """CPU GEMMs take no ``out_dtype``, so ``hessian_input_dtype="bfloat16"`` falls back to
+        the float32 Hessians, warning once however many batches they read."""
+        calib_utils._warn_bfloat16_hessian_unavailable.cache_clear()
+        amaxes = {}
+        for hessian_input_dtype in ("float32", "bfloat16"):
+            torch.manual_seed(0)
+            model = SimpleLinear()
+            mtq.quantize(model, INT8_WEIGHT_CFG, forward_loop=_make_forward_loop())
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                local_hessian_calibrate(
+                    model,
+                    _make_forward_loop(),
+                    fp8_scale_sweep=False,
+                    hessian_input_dtype=hessian_input_dtype,
+                )
+            fallbacks = [w for w in caught if "hessian_input_dtype" in str(w.message)]
+            assert len(fallbacks) == (hessian_input_dtype == "bfloat16")
+            amaxes[hessian_input_dtype] = _weight_amaxes(model)
+        for name, amax in amaxes["float32"].items():
+            assert torch.equal(amax, amaxes["bfloat16"][name])
 
     def test_warns_with_module_name_when_cin_not_divisible(self):
         class _OddModel(nn.Module):

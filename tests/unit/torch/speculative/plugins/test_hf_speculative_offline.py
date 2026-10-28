@@ -684,6 +684,30 @@ def test_offline_dataset_len_and_getitem(tmp_path):
     assert item["labels"].shape == (SEQ_LEN,)
 
 
+@pytest.mark.parametrize(
+    ("optional", "expect"),
+    [
+        # Modes that read the aux planes must fail loudly on a dump that omits them.
+        (False, "raise"),
+        # The external draft never reads them, so it may opt in to an empty plane.
+        (True, "empty"),
+    ],
+)
+def test_offline_dataset_handles_a_dump_without_aux_hidden_states(tmp_path, optional, expect):
+    """--no-aux-hidden-states dumps are readable only by modes that opt in."""
+    p = tmp_path / "sample.pt"
+    data = _make_offline_pt(p)
+    del data["aux_hidden_states"]
+    torch.save(data, p)
+
+    ds = OfflineSupervisedDataset([str(p)], aux_hidden_states_optional=optional)
+    if expect == "raise":
+        with pytest.raises(KeyError, match="aux_hidden_states missing"):
+            ds[0]
+    else:
+        assert ds[0]["aux_hidden_states"].shape == (SEQ_LEN, 0)
+
+
 def test_offline_dataset_labels_shift(tmp_path):
     """Labels should be input_ids shifted left by 1."""
     p = tmp_path / "sample.pt"

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import warnings
 from contextlib import nullcontext
 
 import numpy as np
@@ -137,7 +138,10 @@ def benchmark_backbone_standalone(
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Diffusion inference. The default ONNX/TensorRT path is deprecated in "
+        "0.48.0; removal no earlier than 0.49.0. PyTorch modes remain supported."
+    )
     parser.add_argument(
         "--model",
         type=str,
@@ -160,13 +164,21 @@ def main():
         help="Input text prompt for the model",
     )
     parser.add_argument(
-        "--onnx-load-path", type=str, default="", help="Path to load the ONNX model"
+        "--onnx-load-path",
+        type=str,
+        default="",
+        help="Path to load the ONNX model (deprecated; use HF checkpoint deployment)",
     )
     parser.add_argument(
-        "--trt-engine-load-path", type=str, default=None, help="Path to load the TensorRT engine"
+        "--trt-engine-load-path",
+        type=str,
+        default=None,
+        help="Path to load the TensorRT engine (deprecated; use HF checkpoint deployment)",
     )
     parser.add_argument(
-        "--dq-only", action="store_true", help="Converts the ONNX model to a dq_only model"
+        "--dq-only",
+        action="store_true",
+        help="Converts the ONNX model to a dq_only model (deprecated)",
     )
     parser.add_argument(
         "--torch",
@@ -193,6 +205,16 @@ def main():
         help="Number of denoising steps for image generation (lower is faster; tests use few).",
     )
     args = parser.parse_args()
+
+    if not args.torch:
+        warnings.warn(
+            "The Diffusers ONNX/TensorRT workflow is deprecated in ModelOpt 0.48.0 "
+            "and will be removed no earlier than 0.49.0. "
+            "Export a unified Hugging Face checkpoint with quantize.py --hf-ckpt-dir "
+            "and use a compatible diffusion deployment backend.",
+            FutureWarning,
+            stacklevel=2,
+        )
 
     image_name = args.save_image_as or f"{args.model}.png"
     model_dtype = DTYPE_MAP[args.model]

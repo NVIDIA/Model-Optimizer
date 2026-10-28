@@ -41,6 +41,12 @@ def pytest_addoption(parser):
         help="Run manual tests",
     )
     parser.addoption(
+        "--run-nightly",
+        action="store_true",
+        default=False,
+        help="Run nightly tests (skipped on pull requests)",
+    )
+    parser.addoption(
         "--run-release",
         action="store_true",
         default=False,
@@ -58,7 +64,10 @@ _DEFAULT_TIMEOUT = {
     "gpu_trtllm": 60,
     "gpu_vllm": 60,
     "regression": 180,
-    "unit": 120 if platform.system() == "Windows" else 60,
+    # Tests that spawn processes take 2-3x longer under pytest-xdist: 4 workers and their children
+    # share the 4 vCPUs of a CI runner (test_dist.py::test_data_parallel: 8-15 s serial, 25-35 s with
+    # xdist, over 60 s on a slow runner).
+    "unit": 120,
 }
 
 
@@ -66,6 +75,7 @@ def pytest_collection_modifyitems(config, items):
     """Skip flag-gated tests and apply a default per-test timeout based on the test directory."""
     skip_marks = [
         ("manual", "--run-manual"),
+        ("nightly", "--run-nightly"),
         ("release", "--run-release"),
     ]
 
