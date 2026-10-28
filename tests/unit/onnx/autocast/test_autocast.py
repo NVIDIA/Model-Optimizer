@@ -19,9 +19,11 @@ from pathlib import Path
 import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
+import onnxruntime as ort
 import pytest
 from _test_utils.onnx.lib_test_models import build_conv_isinf_model, build_conv_resize_model
 
+import modelopt.onnx.autocast.graphsanitizer as graphsanitizer
 import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast import convert_to_mixed_precision
@@ -89,6 +91,49 @@ def temp_output_path(tmp_path):
 def test_invalid_model_path():
     with pytest.raises(FileNotFoundError):
         convert_to_mixed_precision(onnx_path="nonexistent.onnx")
+
+
+def test_convert_contrib_op_without_tensorrt(tmp_path, monkeypatch):
+    x = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, [1, 4])
+    y = onnx.helper.make_tensor_value_info("Y", onnx.TensorProto.FLOAT, [1, 4])
+    bias = onnx.numpy_helper.from_array(np.ones(4, dtype=np.float32), name="bias")
+    node = onnx.helper.make_node("BiasGelu", ["X", "bias"], ["Y"], domain="com.microsoft")
+    graph = onnx.helper.make_graph([node], "contrib_graph", [x], [y], [bias])
+    model = onnx.helper.make_model(
+        graph,
+        opset_imports=[
+            onnx.helper.make_opsetid("", 21),
+            onnx.helper.make_opsetid("com.microsoft", 1),
+        ],
+        ir_version=10,
+    )
+    model_path = tmp_path / "contrib.onnx"
+    onnx.save(model, model_path)
+    providers = ["cpu"]
+    monkeypatch.setattr(graphsanitizer, "TRT_PYTHON_AVAILABLE", False)
+
+    converted = convert_to_mixed_precision(str(model_path), providers=providers, keep_io_types=True)
+
+    assert providers == ["cpu"]
+    assert (
+        next(n for n in converted.graph.node if n.op_type == "BiasGelu").domain == "com.microsoft"
+    )
+    assert all(opset.domain != "trt.plugins" for opset in converted.opset_import)
+    onnx.checker.check_model(converted)
+
+    inputs = {"X": np.array([[-2.0, -0.5, 0.5, 2.0]], dtype=np.float32)}
+    original_session = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    converted_session = ort.InferenceSession(
+        converted.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    np.testing.assert_allclose(
+        converted_session.run(None, inputs)[0],
+        original_session.run(None, inputs)[0],
+        rtol=2e-3,
+        atol=2e-3,
+    )
 
 
 def test_setup_mappings(simple_model):
