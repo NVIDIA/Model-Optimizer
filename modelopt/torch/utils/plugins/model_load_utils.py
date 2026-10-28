@@ -33,7 +33,15 @@ from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
-from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, PretrainedConfig
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoModelForSeq2SeqLM,
+    AutoModelForSpeechSeq2Seq,
+    PretrainedConfig,
+)
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
 
@@ -46,6 +54,13 @@ from modelopt.torch.utils.distributed import (
     is_initialized,
 )
 from modelopt.torch.utils.logging import print_rank_0, warn_rank_0
+from modelopt.torch.utils.moe import (
+    _choose_ep_degree,
+    _ep_config,
+    _num_experts_from_config,
+    _routed_expert_keys,
+    _routed_expert_modules,
+)
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     checkpoint_tensor_files,
     ensure_local_checkpoint,
@@ -938,12 +953,6 @@ def _auto_class(hf_config, trust_remote_code: bool = False) -> Any:
     )
     if remote_with_head and "AutoModelForImageTextToText" not in auto_map:
         return AutoModelForCausalLM
-    from transformers import (
-        AutoModelForImageTextToText,
-        AutoModelForSeq2SeqLM,
-        AutoModelForSpeechSeq2Seq,
-    )
-
     for seq2seq in (AutoModelForSeq2SeqLM, AutoModelForSpeechSeq2Seq):
         if type(hf_config) in seq2seq._model_mapping:
             return seq2seq
@@ -1000,13 +1009,6 @@ def _decide_distribution(
     ckpt_path: str, hf_config, world_size: int, ep_size, dense, trust_remote_code: bool
 ) -> DistributionPlan:
     """The plan :func:`resolve_distribution_plan` returns, decided by this rank alone."""
-    from modelopt.torch.utils.moe import (
-        _choose_ep_degree,
-        _ep_config,
-        _num_experts_from_config,
-        _routed_expert_modules,
-    )
-
     # What the caller set the EP degree with, for a refusal to name it.
     knob = "MODELOPT_EP_DEGREE" if ep_size is None else "ep_size"
     if world_size == 1:
@@ -1040,8 +1042,6 @@ def _decide_distribution(
         # The plan names routed experts the built model has none of under those names: deciding
         # without them would replicate every expert on every rank, and the expert-parallel load
         # finds them the same way.
-        from modelopt.torch.utils.moe import _routed_expert_keys
-
         containers = ", ".join(sorted(_routed_expert_keys(ep_plan))) or "none"
         raise ValueError(
             f"{hf_config.model_type} has routed experts and a base_model_ep_plan, but none of the "
