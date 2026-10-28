@@ -436,16 +436,6 @@ def update_trt_ep_support(
                     "See https://onnxruntime.ai/docs/execution-providers/TensorRT-ExecutionProvider.html#data-dependant-shape-dds-ops"
                 )
                 calibration_eps.remove("trt")
-            try:
-                assert Version(ort.__version__) >= Version("1.21.0")
-            except AssertionError:
-                logger.warning(
-                    "This model contains DDS ops, please upgrade your ORT version to 1.21.0+ for full support with "
-                    "TRT EP backend. The reason for that is because DDS ops require TRT 10.6+, and earlier versions "
-                    "of ORT were compiled with TRT 10.4 or lower. Disabling it for now. "
-                    "See https://onnxruntime.ai/docs/execution-providers/TensorRT-ExecutionProvider.html#data-dependant-shape-dds-ops"
-                )
-                calibration_eps.remove("trt")
         if has_custom_op:
             if "trt" in calibration_eps:
                 logger.warning(

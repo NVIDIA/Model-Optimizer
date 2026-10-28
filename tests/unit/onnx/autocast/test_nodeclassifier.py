@@ -20,8 +20,6 @@ from collections import OrderedDict
 import numpy as np
 import pytest
 from onnx import TensorProto, helper, numpy_helper
-from onnxruntime import __version__ as ort_version
-from packaging.version import Version
 
 from modelopt.onnx.autocast.logging_config import configure_logging
 from modelopt.onnx.autocast.nodeclassifier import (
@@ -233,9 +231,6 @@ def test_depth_of_reduction_rule():
     assert rule.check(reduce_init_node) is True
 
 
-@pytest.mark.skipif(
-    Version(ort_version) < Version("1.21.0"), reason="WAR: Requires onnxruntime>=1.21.0"
-)
 def test_node_classifier(test_model):
     node_to_init_map = {key: [] for key in ["add_node", "mul_node"]}
 
@@ -273,9 +268,6 @@ def test_node_classifier(test_model):
     assert not set(fp16_nodes).intersection(set(fp32_nodes))
 
 
-@pytest.mark.skipif(
-    Version(ort_version) < Version("1.21.0"), reason="WAR: Requires onnxruntime>=1.21.0"
-)
 def test_node_classifier_custom_rule(test_model):
     node_to_init_map = {
         "add_node": [numpy_helper.from_array(np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32))],
@@ -302,9 +294,6 @@ def test_node_classifier_custom_rule(test_model):
     assert not set(fp16_nodes).intersection(set(fp32_nodes))
 
 
-@pytest.mark.skipif(
-    Version(ort_version) < Version("1.21.0"), reason="WAR: Requires onnxruntime>=1.21.0"
-)
 def test_node_classifier_op_types_to_exclude(test_model):
     node_to_init_map = {
         "add_node": [numpy_helper.from_array(np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32))],
@@ -515,9 +504,6 @@ def test_depth_of_reduction_rule_with_tensor_stats():
     assert rule.check(small_conv_node) is False
 
 
-@pytest.mark.skipif(
-    Version(ort_version) < Version("1.21.0"), reason="WAR: Requires onnxruntime>=1.21.0"
-)
 def test_node_classifier_with_multi_batch_calibration(test_model):
     """Test NodeClassifier with multi-batch calibration data."""
     node_to_init_map = {key: [] for key in ["add_node", "mul_node"]}

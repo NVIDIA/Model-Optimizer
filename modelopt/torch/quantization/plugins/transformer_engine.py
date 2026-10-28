@@ -24,14 +24,11 @@ import transformer_engine as te
 import transformer_engine.pytorch.module.grouped_linear as te_grouped_linear
 import transformer_engine.pytorch.module.layernorm_linear as te_layernorm_linear
 import transformer_engine.pytorch.module.linear as te_linear
-from packaging.version import Version
 
 from modelopt.torch.quantization.utils import replace_function
 
 from ..nn import GroupedQuantizer, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from .custom import _ParallelLinear
-
-_TE_VERSION = Version(te.__version__)
 
 _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV = "MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP"
 
@@ -318,17 +315,11 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
 
     @staticmethod
     def _get_original_gemm():
-        if Version("2.0") <= _TE_VERSION:
-            return te_layernorm_linear.general_gemm
-        else:
-            return te_layernorm_linear.tex.gemm
+        return te_layernorm_linear.general_gemm
 
     @staticmethod
     def _gemm_replace_args():
-        if Version("2.0") <= _TE_VERSION:
-            return (te_layernorm_linear, "general_gemm")
-        else:
-            return (te_layernorm_linear.tex, "gemm")
+        return (te_layernorm_linear, "general_gemm")
 
     @staticmethod
     def forward(ctx, inp, ln_weight, ln_bias, weight, *args, **kwargs):
