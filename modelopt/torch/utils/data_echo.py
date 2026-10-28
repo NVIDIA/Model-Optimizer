@@ -90,7 +90,7 @@ class LaneEchoPlan:
     """
 
     uses: int
-    min_gap: int = 32
+    min_gap: int = 128
     gap_spread: int | None = None  # None: min_gap // 4
     rank: int = 0
 

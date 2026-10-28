@@ -335,7 +335,10 @@ def train():
 
     if not dry_run and recipe.data.mode in ("online", "streaming") and not recipe.data.data_path:
         raise ValueError(f"data.mode={recipe.data.mode!r} requires data.data_path.")
-    if training_args.data_echo_disjoint_anchors and not isinstance(recipe, ModelOptDFlashRecipe):
+    is_dflash_family = isinstance(recipe, ModelOptDFlashRecipe)
+    if training_args.data_echo_disjoint_anchors is None:
+        training_args.data_echo_disjoint_anchors = is_dflash_family
+    if training_args.data_echo_disjoint_anchors and not is_dflash_family:
         raise ValueError(
             "training.data_echo_disjoint_anchors needs a DFlash-family recipe, whose drafts "
             f"sample anchor positions; got {type(recipe).__name__}."

@@ -141,14 +141,14 @@ class TrainingArguments(BaseModel):
     data_echo_uses: int = Field(1, ge=1)
     # Steps between two uses of an example: each slot of the per-rank batch replays its examples at
     # its own fixed gap from [min_gap, min_gap + gap_spread). 1 repeats each fresh batch in a row.
-    data_echo_min_gap: int = Field(32, ge=1)
+    data_echo_min_gap: int = Field(128, ge=1)
     # Width of that window; None is min_gap // 4. Wider mixes examples more but holds more of them.
     data_echo_gap_spread: int | None = Field(None, ge=0)
     # Where examples wait between uses: host memory frees the accelerator for long gaps.
     data_echo_store: Literal["device", "cpu"] = "device"
     # DFlash-family drafts: the uses of an example take disjoint slices of one random order of its
-    # anchor positions, instead of independent draws.
-    data_echo_disjoint_anchors: bool = False
+    # anchor positions, instead of independent draws. None turns it on for DFlash-family recipes.
+    data_echo_disjoint_anchors: bool | None = None
 
     @model_validator(mode="after")
     def _check_data_echo(self) -> Self:
