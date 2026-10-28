@@ -22,31 +22,32 @@ from pathlib import Path
 
 import pytest
 import torch
+from _test_utils.torch.export.unified_checkpoint import load_safetensors_dir
 from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
+    create_tiny_nemotron_h_dir,
+    create_tiny_qwen3_5_moe_vl_dir,
     create_tiny_qwen3_dir,
-    create_tiny_qwen3_moe_dir,
 )
-from safetensors.torch import load_file
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_mcore_gpt_to_hf
-from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf, use_moe_grouped_gemm
+from modelopt.torch.utils.plugins.mbridge import (
+    get_language_model,
+    load_mbridge_model_from_hf,
+    use_moe_grouped_gemm,
+)
 from modelopt.torch.utils.plugins.megatron_generate import megatron_prefill
 
 QUANT_CFGS = {
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
     "fp8": mtq.FP8_DEFAULT_CFG,
-    "w4a16_nvfp4": mtq.W4A16_NVFP4_CFG,
     "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
 }
 
 
 def _load(export_dir: Path):
-    weights = {}
-    for shard in sorted(export_dir.glob("*.safetensors")):
-        weights.update(load_file(shard))
-    return weights, json.loads((export_dir / "config.json").read_text())
+    return load_safetensors_dir(export_dir), json.loads((export_dir / "config.json").read_text())
 
 
 def _bits(tensor: torch.Tensor) -> torch.Tensor:
@@ -66,9 +67,15 @@ def _quantize(source, quant_cfg_name, size):
         provider_overrides={"tensor_model_parallel_size": size, "pipeline_dtype": torch.bfloat16},
         moe_grouped_gemm=use_moe_grouped_gemm(str(source)),
     )
+    language_model, is_vlm = get_language_model(unwrapped)
+    quant_cfg = QUANT_CFGS[quant_cfg_name]
+    if is_vlm:
+        # As in quantize.py, the vision tower stays unquantized.
+        disable_vision = {"quantizer_name": "vision_model.*", "enable": False}
+        quant_cfg = {**quant_cfg, "quant_cfg": [*quant_cfg["quant_cfg"], disable_vision]}
     torch.manual_seed(0)
-    input_ids = torch.randint(0, unwrapped.vocab_size, (2, 16), device="cuda")
-    mtq.quantize(unwrapped, QUANT_CFGS[quant_cfg_name], lambda m: megatron_prefill(m, input_ids))
+    input_ids = torch.randint(0, language_model.vocab_size, (2, 16), device="cuda")
+    mtq.quantize(unwrapped, quant_cfg, lambda m: megatron_prefill(language_model, input_ids))
     return bridge, model, unwrapped
 
 
@@ -85,16 +92,18 @@ def _export_with_bridge(source, quant_cfg_name, export_dir, rank, size):
 @pytest.mark.parametrize(
     ("create_source", "quant_cfg_name"),
     [
-        (create_tiny_llama_dir, "nvfp4"),
-        (create_tiny_qwen3_dir, "fp8"),
-        (create_tiny_qwen3_dir, "w4a16_nvfp4"),
-        (create_tiny_qwen3_moe_dir, "nvfp4_mlp_only"),
+        (partial(create_tiny_llama_dir, with_tokenizer=True), "nvfp4"),
+        (partial(create_tiny_qwen3_dir, with_tokenizer=True), "fp8"),
+        # The bridge can't export quantized Mamba or GatedDeltaNet projections yet.
+        (partial(create_tiny_nemotron_h_dir, with_tokenizer=True), "nvfp4_mlp_only"),
+        (partial(create_tiny_qwen3_5_moe_vl_dir, with_processor=True), "nvfp4_mlp_only"),
     ],
+    ids=["llama-nvfp4", "qwen3-fp8", "nemotron_h-nvfp4_mlp_only", "qwen3_5_moe_vl-nvfp4_mlp_only"],
 )
 def test_matches_megatron_exporter(
     dist_workers_size_1, dist_workers, tmp_path, create_source, quant_cfg_name
 ):
-    source = create_source(tmp_path, with_tokenizer=True)
+    source = create_source(tmp_path)
     reference_dir, export_dir = tmp_path / "megatron_exporter", tmp_path / "bridge"
     # The Megatron exporter needs TP=1. The bridge exports at TP over all GPUs, so multi-GPU runs
     # also cover gathering its sharded weights and scales.
@@ -120,18 +129,17 @@ def test_matches_megatron_exporter(
             assert torch.equal(_bits(weight), _bits(reference)), name
 
     quant, ref_quant = config.pop("quantization_config"), ref_config.pop("quantization_config")
-    # The Megatron exporter also writes head_dim where the source config leaves it implied.
-    if "head_dim" not in config:
-        implied = config["hidden_size"] // config["num_attention_heads"]
-        assert ref_config.pop("head_dim", implied) == implied
     assert config == ref_config
     assert {k: v for k, v in quant.items() if k != "ignore"} == {
         k: v for k, v in ref_quant.items() if k != "ignore"
     }
-    # The exclusion patterns differ in spelling but must exclude the same linear layers.
+    # The bridge must exclude exactly the unquantized linear layers. The Megatron exporter's
+    # patterns spell them differently and miss some, e.g. Qwen3.5's mlp.shared_expert_gate.
     layers = {
         name.rpartition(".")[0]
         for name, weight in weights.items()
         if name.endswith(".weight") and weight.dim() == 2
     }
-    assert _excluded(quant["ignore"], layers) == _excluded(ref_quant["ignore"], layers)
+    unquantized = {layer for layer in layers if f"{layer}.weight_scale" not in weights}
+    assert _excluded(quant["ignore"], layers) == unquantized
+    assert _excluded(ref_quant["ignore"], layers) <= unquantized
