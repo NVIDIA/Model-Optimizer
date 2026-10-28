@@ -21,7 +21,33 @@ from pydantic import Field, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
-__all__ = ["LinearAttentionConfig", "LinearAttentionPolicyEntry"]
+__all__ = [
+    "LinearAttentionConfig",
+    "LinearAttentionPolicyEntry",
+    "LinearAttentionSolveConfig",
+]
+
+
+class LinearAttentionSolveConfig(ModeloptBaseConfig):
+    """Exact inverse or a guarded experimental Neumann polynomial.
+
+    ``max_tail_bound`` bounds truncation in the matrix infinity norm when
+    ``||L||_inf < 1``. It does not include floating-point roundoff. Matrices that
+    cannot satisfy the sufficient bound use the exact solve or are rejected.
+    """
+
+    method: Literal["exact", "guarded_neumann"] = ModeloptField(default="exact")
+    degree: Literal[3, 7, 15, 31] | None = ModeloptField(default=None)
+    max_tail_bound: float = Field(default=1e-3, gt=0, allow_inf_nan=False)
+    unsafe_action: Literal["exact", "error"] = ModeloptField(default="exact")
+
+    @model_validator(mode="after")
+    def _validate_method(self):
+        if self.method == "exact" and self.degree is not None:
+            raise ValueError("Exact solve does not accept a polynomial degree")
+        if self.method == "guarded_neumann" and self.degree is None:
+            raise ValueError("Guarded Neumann solve requires an explicit degree")
+        return self
 
 
 class LinearAttentionConfig(ModeloptBaseConfig):
@@ -65,6 +91,7 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     ] = ModeloptField(default="vllm")
     replay_window: int = Field(default=1, ge=1, le=64, strict=True)
     state_block_v: Literal[16, 32, 64, 128] = ModeloptField(default=64)
+    solve: LinearAttentionSolveConfig = ModeloptField(default=LinearAttentionSolveConfig())
 
     @property
     def state_codec(self):
@@ -80,6 +107,8 @@ class LinearAttentionConfig(ModeloptBaseConfig):
                 )
             if self.replay_window != 1:
                 raise ValueError("GDN prefill operand QDQ does not support replay")
+        elif self.solve.method != "exact":
+            raise ValueError("Approximate inverse research is restricted to backend='gdn_prefill'")
         elif self.precision == "replayssm":
             if self.backend != "serving":
                 raise ValueError("replayssm requires backend='serving'")

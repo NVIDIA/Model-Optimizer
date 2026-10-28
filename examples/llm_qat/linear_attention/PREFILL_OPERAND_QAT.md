@@ -8,8 +8,10 @@ kernel or a serving speedup.
 
 The supported sites are the key interaction, WY value and key solves, state
 read, output-state read, output scores, output values, and state update. Every
-site owns independent left- and right-operand quantizers. The solve remains an
-exact FP32 triangular solve; this path does not approximate the inverse.
+site owns independent left- and right-operand quantizers. The default solve
+remains exact FP32. A separate
+[guarded Neumann research policy](APPROXIMATE_INVERSE.md) retains the rejected
+approximation experiment without promoting it as a recipe.
 
 Two complete recipes are available:
 
