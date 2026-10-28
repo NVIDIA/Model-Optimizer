@@ -119,3 +119,28 @@ def test_grouped_quantizer_preserves_nested_sequential_state_dict_layout():
     )
 
     assert list(grouped.state_dict()) == ["0.0._amax", "0.1._amax", "1._amax"]
+
+
+@pytest.mark.parametrize("block_sizes", [{-1: 32}, {1: 3, -1: 16}])
+def test_dynamic_block_quantization_accepts_changing_shapes(block_sizes):
+    cfg = QuantizerAttributeConfig(
+        num_bits=8, type="dynamic", block_sizes=block_sizes, pass_through_bwd=True
+    )
+    quantizer = TensorQuantizer(cfg)
+    for shape in ((2, 3, 17), (2, 3, 17), (1, 2, 4, 64), (3, 2, 33), (2, 3, 17)):
+        value = torch.randn(shape, requires_grad=True)
+        output = quantizer(value)
+        torch.testing.assert_close(output, TensorQuantizer(cfg)(value), rtol=0, atol=0)
+        output.sum().backward()
+        torch.testing.assert_close(value.grad, torch.ones_like(value), rtol=0, atol=0)
+
+
+def test_block_quantization_reconfiguration_clears_cached_layout():
+    value = torch.randn(2, 3, 33)
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, block_sizes={-1: 32}))
+    quantizer(value)
+    with pytest.raises(ValueError, match="Input shape has changed"):
+        quantizer(torch.randn(4, 2, 17))
+    cfg = QuantizerAttributeConfig(num_bits=8, type="dynamic", block_sizes={-1: 16})
+    quantizer.set_from_attribute_config(cfg)
+    torch.testing.assert_close(quantizer(value), TensorQuantizer(cfg)(value), rtol=0, atol=0)

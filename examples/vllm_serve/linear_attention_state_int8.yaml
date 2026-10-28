@@ -1,0 +1,12 @@
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  state_int8: configs/ptq/units/linear_attention_state_int8_block32_dynamic
+
+metadata:
+  recipe_type: ptq
+  description: GDN/KDA INT8 block32 state QDQ before native vLLM prefill and decode.
+quantize:
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: state_int8
+  algorithm:

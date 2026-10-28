@@ -73,6 +73,7 @@ with import_plugin("vllm"):
     from .vllm import *
     from .vllm_indexer import *
     from .vllm_layer_scope import *
+    from .vllm_linear_attention import *
     from .vllm_mega_moe import *
 
 with import_plugin("trl"):

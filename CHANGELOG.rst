@@ -8,6 +8,10 @@ Changelog
 
 *Quantization*
 
+- Dynamic blockwise ``TensorQuantizer`` configurations now accept changing input shapes, including padding changes; static blockwise configurations still require a fixed shape.
+
+- Add vLLM 0.30 fake-quant serving for GDN/KDA recurrent-state checkpoints, applying
+  state QDQ at native prefill/decode cache boundaries and restoring the saved ModelOpt policy.
 - Add experimental GDN/KDA recurrent-state QAT with native vLLM 0.30.0 Triton forwards and explicit prefill/decode phases through ``linear_attention_training_phase``, including dynamic blockwise INT8 state quantization. Megatron GDN users need a Core build with native gate and packed-forward hooks; 0.19.2 does not support this workflow. The experimental Megatron KDA adapter additionally requires a Core build providing ``kda.py``; the CI-pinned Core does not provide it.
 - Add independent ``rounding="stochastic"`` TensorQuantizer support for integer, FP8 E4M3
   and dynamic block16 NVFP4 fake quantization.

@@ -188,6 +188,7 @@ class TensorQuantizer(nn.Module):
         "_calibrator",
         "_bias_calibrator",
         "_original_shape",
+        "_block_input_shape",
         "_block_reshape_size",
         "_padding",
         # Not saved: ranks restore one shared state, so they agree on the layout without it.
@@ -279,6 +280,9 @@ class TensorQuantizer(nn.Module):
             return val
 
         def _block_sizes_setter(val):
+            for name in ("_block_input_shape", "_block_reshape_size", "_padding", "_slices"):
+                if hasattr(self, name):
+                    delattr(self, name)
             if val is not None:
                 # block_sizes and axis are mutually exclusive; clear axis when block_sizes is set
                 setattr(self, "_axis", None)
@@ -1080,19 +1084,28 @@ class TensorQuantizer(nn.Module):
             self._axis = tuple(axis)
             if hasattr(self, "_calibrator"):
                 self._calibrator._axis = self._axis
+            self._block_input_shape = inputs.shape
             self._original_shape = inputs.shape
             self._block_reshape_size = torch.Size(block_reshape_size)
             if padding is not None:
                 self._padding = tuple(padding)
-                self._original_shape = F.pad(inputs, self._padding, "constant", 0).shape
+                padded_shape = list(inputs.shape)
+                for pad_axis, (left, right) in enumerate(zip(padding[::2], padding[1::2])):
+                    padded_shape[-pad_axis - 1] += left + right
+                self._original_shape = torch.Size(padded_shape)
             if slices is not None:
                 self._slices = slices
             if amax_shape:
                 self._amax_shape_for_export = amax_shape
 
-        # Reshape size have already been set
-        if hasattr(self, "_block_reshape_size"):
+        # Static scales require fixed groups; dynamic scales allow changing input shapes.
+        if hasattr(self, "_block_reshape_size") and (
+            not self._dynamic or getattr(self, "_block_input_shape", None) == inputs.shape
+        ):
             return
+        for attribute in ("_padding", "_slices"):
+            if hasattr(self, attribute):
+                delattr(self, attribute)
 
         reshape_size, quantize_axis, paddings, slices = [], [], [], []
 
@@ -1121,7 +1134,7 @@ class TensorQuantizer(nn.Module):
 
         quant_axis = [i for i in range(len(quantize_axis)) if quantize_axis[i]]
 
-        slices = None if all(s is None for s in slices) else [s or slice(None) for s in slices]
+        slices = None if all(s is None for s in slices) else tuple(s or slice(None) for s in slices)
 
         if all(p is None for p in paddings):
             paddings = None
