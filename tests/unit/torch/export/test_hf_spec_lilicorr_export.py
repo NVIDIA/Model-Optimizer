@@ -152,3 +152,67 @@ def test_unrelated_names_pass_through_untouched():
     assert "lilicorr.out_head.weight" in out
     assert "lilicorr.slot_embedding" in out
     assert "layers.0.self_attn.q_proj.weight" in out
+
+
+def test_quantized_scale_leaves_are_renamed_with_their_linear():
+    """A quantized linear's scale tensors must follow it through the rename.
+
+    ``_export_transformers_checkpoint`` registers ``weight_scale`` (and, depending on the
+    format, ``input_scale`` / ``weight_scale_2``) next to each packed ``weight``. These
+    hang off the same positional module path as the weight, so a rename anchored on
+    ``(weight|bias)$`` would leave them behind -- and the positional-name guard would then
+    reject the export of a model that used to export fine, only with the wrong names.
+    """
+    quant_leaves = ("weight_scale", "weight_scale_2", "input_scale")
+    raw = _raw_state_dict()
+    for leaf in quant_leaves:
+        raw[f"dflash_module.lilicorr.feature_mlp.1.{leaf}"] = torch.ones(1)
+        raw[f"dflash_module.lilicorr.feature_mlp.3.{leaf}"] = torch.ones(1)
+        raw[f"dflash_module.lilicorr.layers.0.mlp.0.{leaf}"] = torch.ones(1)
+        raw[f"dflash_module.lilicorr.layers.1.mlp.2.{leaf}"] = torch.ones(1)
+
+    out = _export(raw)  # must not raise
+
+    for leaf in quant_leaves:
+        assert f"lilicorr.feature_mlp.up_proj.{leaf}" in out
+        assert f"lilicorr.feature_mlp.down_proj.{leaf}" in out
+        assert f"lilicorr.layers.0.mlp.up_proj.{leaf}" in out
+        assert f"lilicorr.layers.1.mlp.down_proj.{leaf}" in out
+    assert len(out) == len(raw)
+    assert not [k for k in out if ".feature_mlp.1." in k or ".mlp.0." in k]
+
+
+def test_quant_config_module_references_use_the_export_names():
+    """The quantization config must name the tensors the checkpoint actually contains.
+
+    ``_map_export_name`` is handed to ``revert_quant_config_names`` on the export path, so
+    config references (exclusions, mixed-precision overrides) have to come back renamed the
+    same way the tensors did -- otherwise they point at modules no longer in the file.
+    """
+    exporter = object.__new__(LiLiCorrExporter)
+    cases = {
+        "dflash_module.lilicorr.feature_mlp.0": "lilicorr.feature_norm",
+        "dflash_module.lilicorr.feature_mlp.1": "lilicorr.feature_mlp.up_proj",
+        "dflash_module.lilicorr.feature_mlp.3": "lilicorr.feature_mlp.down_proj",
+        "dflash_module.lilicorr.layers.3.mlp.0": "lilicorr.layers.3.mlp.up_proj",
+        "dflash_module.lilicorr.layers.3.mlp.2": "lilicorr.layers.3.mlp.down_proj",
+        # A bare module path, no leaf -- what the config carries.
+        "dflash_module.lilicorr.layers.0.attn": "lilicorr.layers.0.attn",
+    }
+    for raw_name, expected in cases.items():
+        assert exporter._map_export_name(raw_name) == expected, raw_name
+
+    # Not a draft module: left entirely alone.
+    assert exporter._map_export_name("model.layers.0.mlp.0") == "model.layers.0.mlp.0"
+
+
+def test_similar_names_are_not_renamed_by_prefix_accident():
+    """The rename pins to a whole path component, so lookalikes are untouched."""
+    exporter = object.__new__(LiLiCorrExporter)
+    for name in (
+        "dflash_module.lilicorr.feature_mlp.10.weight",  # 10, not 1
+        "dflash_module.lilicorr.feature_mlp.2.weight",  # SiLU index, no params
+        "dflash_module.lilicorr_extra.feature_mlp.1.weight",  # different module
+    ):
+        mapped = exporter._map_export_name(name)
+        assert "up_proj" not in mapped and "down_proj" not in mapped, name
