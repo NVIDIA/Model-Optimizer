@@ -135,13 +135,13 @@ def _serialize(obj: Any) -> torch.Tensor:
     return tensor
 
 
-def _deserialize(tensor: torch.Tensor, size: int | None = None) -> Any:
+def _deserialize(tensor: torch.Tensor, size: int | None = None, map_location=None) -> Any:
     buffer = tensor.numpy().tobytes()
     if size is not None:
         buffer = buffer[:size]
     # Explicit so TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD cannot re-enable pickle for peer payloads. Custom
     # classes sent through broadcast/allgather must be registered with add_safe_globals.
-    return torch.load(io.BytesIO(buffer), weights_only=True)
+    return torch.load(io.BytesIO(buffer), map_location=map_location, weights_only=True)
 
 
 def _broadcast(tensor: torch.Tensor, src: int = 0, group=None) -> None:
@@ -450,61 +450,52 @@ def _refuse_a_launch_without_its_group(label: str) -> None:
         )
 
 
-def _received(sent: tuple[bool, Any], rank: int, label: str) -> BaseException:
-    """The exception to raise for what ``rank`` sent (:func:`_sendable`) on failing ``label``."""
+def _received(sent: tuple[bool, Any], src: int, label: str) -> BaseException:
+    """The exception to raise for what rank ``src`` sent (:func:`_sendable`) on failing ``label``."""
     exited, detail = sent
     if exited:
         return SystemExit(detail)
-    return RuntimeError(f"rank {rank} failed to compute {label}: {detail}")
+    return RuntimeError(f"rank {src} failed to compute {label}: {detail}")
 
 
-def _encoded(value: Any) -> bytes:
+def _encoded(value: Any) -> torch.Tensor:
     """``value`` serialized for :func:`broadcast_from` and :func:`all_reduce`, and loaded back once.
 
     The load-back makes a value that cannot round-trip fail inside the caller's guard, which tells
     every rank, rather than inside the collective on one rank alone. It loads on the producing rank
     only: a load that depends on the loading rank (a class only the producer can import) can still
-    fail on a peer alone. torch.save stands in for pickle, which bandit refuses under modelopt/.
+    fail on a peer alone.
     """
-    buffer = io.BytesIO()
-    torch.save(value, buffer)
-    payload = buffer.getvalue()
+    payload = _serialize(value)
     _decoded(payload)
     return payload
 
 
-def _decoded(payload: bytes) -> Any:
-    """The value :func:`_encoded` serialized into ``payload``.
-
-    A weights_only load, as :func:`_deserialize`'s: built-in types and tensors load as they are, and
-    a class a caller sends must be registered with ``torch.serialization.add_safe_globals``, as
-    :class:`DistributionPlan` is. A tensor in the value loads on the CPU on every rank, the producing
-    one too: the device it was saved from is the producer's, not this rank's.
-    """
-    # Explicit so TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD cannot re-enable pickle for peer payloads.
-    return torch.load(io.BytesIO(payload), map_location="cpu", weights_only=True)
+def _decoded(payload: torch.Tensor) -> Any:
+    # On the CPU on every rank, the producing one too: a tensor's saved device is the producer's.
+    return _deserialize(payload, map_location="cpu")
 
 
-def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
-    """Return ``fn()``, run on ``rank`` only, on every rank.
+def broadcast_from(label: str, fn: Callable[[], _V], src: int = 0) -> _V:
+    """Return ``fn()``, run on ``src`` only, on every rank.
 
     For a value ranks computing it for themselves could disagree on (their environment, GPU or
     files). If ``fn`` raises or its value does not round-trip (:func:`_encoded`), every rank raises
-    rather than wait for the broadcast: ``rank`` its own error, the others a SystemExit with its
-    code if it exited, else a RuntimeError. Every rank, ``rank`` too, gets a copy loaded from the
+    rather than wait for the broadcast: ``src`` its own error, the others a SystemExit with its
+    code if it exited, else a RuntimeError. Every rank, ``src`` too, gets a copy loaded from the
     bytes sent, with any tensor in it on the CPU; the value must load with ``weights_only``, so a
     class in it must be registered with ``torch.serialization.add_safe_globals``. Collective: every
-    rank calls it at the same point with the same ``label`` and ``rank``; a receiving rank whose
-    ``label`` differs raises, but ``rank`` itself cannot tell and returns its value. In a single
+    rank calls it at the same point with the same ``label`` and ``src``; a receiving rank whose
+    ``label`` differs raises, but ``src`` itself cannot tell and returns its value. In a single
     process ``fn``'s value comes back as it is; a rank of a launch whose process group is not set up
     raises.
     """
     _refuse_a_launch_without_its_group(label)
-    if not 0 <= rank < size():
-        raise ValueError(f"rank={rank} is not a rank of this {size()}-rank run.")
+    if not 0 <= src < size():
+        raise ValueError(f"src={src} is not a rank of this {size()}-rank run.")
     if not is_distributed_run():
         return fn()
-    sending = torch.distributed.get_rank() == rank
+    sending = rank() == src
     payload: Any = None
     error = None
     if sending:
@@ -517,15 +508,15 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
     # One message from the sending rank: its label, so a rank broadcasting another learns the two
     # are out of step, and its serialized value or its error.
     message = [(label, payload, _sendable(error))]
-    torch.distributed.broadcast_object_list(message, group_src=rank)
+    torch.distributed.broadcast_object_list(message, group_src=src)
     sent_label, payload, sent_error = message[0]
     if error is not None:
         raise error
     if sent_error is not None:
-        raise _received(sent_error, rank, label)
+        raise _received(sent_error, src, label)
     if sent_label != label:
         raise RuntimeError(
-            f"Ranks broadcast out of step: this rank broadcast {label!r} while rank {rank} sent "
+            f"Ranks broadcast out of step: this rank broadcast {label!r} while rank {src} sent "
             f"{sent_label!r}. Every rank must broadcast them in the same order."
         )
     return _decoded(payload)

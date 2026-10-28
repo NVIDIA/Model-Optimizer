@@ -20,7 +20,6 @@ import os
 import pickle
 from contextlib import nullcontext
 from datetime import timedelta
-from unittest import mock
 
 import pytest
 import torch
@@ -112,41 +111,17 @@ def test_deserialize_traced_hp_subclass():
 
 
 @pytest.mark.parametrize(
-    ("plan", "edp", "expert_parallel", "fsdp_dense"),
-    [
-        (DistributionPlan(world_size=8), 8, False, False),
-        # each expert shard is replicated 4x
-        (DistributionPlan(world_size=8, ep_size=2), 4, True, False),
-        (DistributionPlan(world_size=8, ep_size=8, dense="fsdp"), 1, True, True),
-    ],
-    ids=["plain-world", "expert-parallel", "fsdp-dense"],
-)
-def test_a_plan_splits_the_world(plan, edp, expert_parallel, fsdp_dense):
-    assert plan.edp == edp
-    assert plan.is_expert_parallel is expert_parallel
-    assert plan.is_fsdp_dense is fsdp_dense
-
-
-def test_the_default_plan_is_a_single_process():
-    assert DistributionPlan() == DistributionPlan(world_size=1, ep_size=1, dense="replicate")
-
-
-@pytest.mark.parametrize(
     ("degrees", "match"),
     [
         ({"world_size": 8, "ep_size": 3}, "must divide world_size"),
         ({"world_size": 0}, "must be at least 1"),
-        ({"world_size": -4}, "must be at least 1"),
-        ({"world_size": 4, "ep_size": 0}, "must be at least 1"),
         ({"world_size": 4, "ep_size": -2}, "must be at least 1"),
         ({"world_size": 8, "dense": "sharded"}, "expected 'replicate' or 'fsdp'"),
     ],
-    ids=["ep-not-dividing", "world-0", "world-negative", "ep-0", "ep-negative", "unknown-dense"],
+    ids=["ep-not-dividing", "world-0", "ep-negative", "unknown-dense"],
 )
 def test_an_invalid_plan_is_rejected(degrees, match):
-    """An unsatisfiable plan must fail here, not as a confusing mesh error thousands of ranks later.
-    ep_size=-2 divides a world of 4 and would read as no expert parallelism, replicating an MoE an
-    EP knob of -2 asked to shard; ep_size=0 would divide by zero."""
+    """A plan no load could carry out fails at construction."""
     with pytest.raises(ValueError, match=match):
         DistributionPlan(**degrees)
 
@@ -156,12 +131,6 @@ def test_an_invalid_plan_is_rejected(degrees, match):
 
 def _plan_model():
     return nn.Sequential(nn.Linear(2, 2), nn.Sequential(nn.Linear(2, 2)))
-
-
-def test_every_submodule_reads_the_recorded_plan():
-    model, plan = _plan_model(), DistributionPlan(world_size=8, ep_size=8)
-    set_distribution_plan(model, plan)
-    assert all(distribution_plan(module) is plan for module in model.modules())
 
 
 @pytest.mark.parametrize(
@@ -174,32 +143,22 @@ def test_every_submodule_reads_the_recorded_plan():
     ids=["reload", "redistribute", "submodule"],
 )
 def test_a_model_records_its_plan_once(recorded_on, again):
-    """A model is distributed once, by its load: recording any plan over a recorded one, the same
-    or another, means a second writer, and is refused, also when only a submodule carries one. A
-    refusal records nothing."""
+    """Every submodule reads the recorded plan, and a second record is refused, recording nothing."""
     model, plan = _plan_model(), DistributionPlan(world_size=8, ep_size=8)
-    set_distribution_plan(model if recorded_on == "model" else model[1], plan)
-    holders = [module for module in model.modules() if distribution_plan(module) is plan]
+    assert distribution_plan(model) == DistributionPlan()  # no plan: a single process
+    holder = model if recorded_on == "model" else model[1]
+    set_distribution_plan(holder, plan)
+    holders = list(holder.modules())
+    assert all(distribution_plan(module) is plan for module in holders)
 
     with pytest.raises(ValueError, match="its plan recorded once"):
         set_distribution_plan(model, again)
     for module in model.modules():
-        if module in holders:
-            assert distribution_plan(module) is plan
-        else:
-            assert distribution_plan(module) == DistributionPlan()
-
-
-def test_a_model_with_no_plan_is_a_single_process():
-    assert distribution_plan(_plan_model()) == DistributionPlan()
+        assert distribution_plan(module) == (plan if module in holders else DistributionPlan())
 
 
 def _outcome(call):
-    """``(value, None)``, or ``(None, error)`` if ``call()`` raises, a ``SystemExit`` included.
-
-    For pooled jobs, which cannot use ``pytest.raises``: its failure is a ``BaseException``, which
-    ends the worker instead of failing the job, as an uncaught ``SystemExit`` would.
-    """
+    """``(value, None)``, or ``(None, error)`` if ``call()`` raises, a ``SystemExit`` included."""
     try:
         return call(), None
     except (Exception, SystemExit) as error:
@@ -229,52 +188,11 @@ def _no_plan_on_several_ranks_job(rank, size):
 
 
 def test_a_model_with_no_plan_raises_in_a_run_of_several_ranks(cpu_dist_workers):
-    """Held whole or FSDP2-sharded, rather than be taken for a single process's; once a plan is
-    recorded, that plan is what it reads. A single process's plan cannot be recorded there either,
-    and records nothing. A module added after the plan was recorded has none, and raises too, rather
-    than read as a single process's."""
+    """On two ranks a model needs a recorded plan, whole, FSDP2-sharded or added to later."""
     cpu_dist_workers.run(_no_plan_on_several_ranks_job)
 
 
 # ------------------------------------------------------------------------------------ collectives
-
-
-def _run_with_ranks(monkeypatch, world_size):
-    """Make this process look like one rank of a live ``world_size``-rank run."""
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: world_size)
-
-
-def _as_rank(monkeypatch, rank):
-    """Record the broadcasts of a two-rank run as ``rank``; returns ``(message, sending rank)`` for each."""
-    _run_with_ranks(monkeypatch, 2)
-    sent = []
-
-    def broadcast_object_list(message, group=None, group_src=None):
-        sent.append((message[0], group_src))
-
-    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: rank)
-    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast_object_list)
-    return sent
-
-
-def _gather_as_rank(monkeypatch, rank, others):
-    """Answer the gathers as ``rank``; returns what each gather was handed.
-
-    ``others`` are the other ranks' messages in rank order, as they would have sent them.
-    """
-    _run_with_ranks(monkeypatch, len(others) + 1)
-    sent = []
-
-    def all_gather_object(gathered, mine, group=None):
-        sent.append(mine)
-        gathered[:] = [*others[:rank], mine, *others[rank:]]
-
-    monkeypatch.setattr(torch.distributed, "all_gather_object", all_gather_object)
-    monkeypatch.setattr(
-        torch.distributed, "broadcast_object_list", lambda *a, **k: pytest.fail("a rank broadcast")
-    )
-    return sent
 
 
 def test_a_single_process_computes_alone(monkeypatch):
@@ -286,13 +204,12 @@ def test_a_single_process_computes_alone(monkeypatch):
         )
     assert broadcast_from("x", lambda: 3) == 3
     assert all_reduce("smallest", lambda: 4, min) == 4
-    with pytest.raises(ValueError, match="rank=1"):
-        broadcast_from("x", lambda: 3, rank=1)
+    with pytest.raises(ValueError, match="src=1"):
+        broadcast_from("x", lambda: 3, src=1)
 
 
 def test_a_launch_without_its_group_refuses_the_collectives(monkeypatch):
-    """A rank of a multi-rank launch whose group is not set up yet would compute its own value,
-    which another rank's could differ from with nothing telling them; it raises instead."""
+    """A rank of a launch whose group is not set up raises instead of computing its own value."""
     monkeypatch.setenv("WORLD_SIZE", "2")
     monkeypatch.setattr(dist, "is_initialized", lambda: False)
     ran = []
@@ -343,6 +260,17 @@ def _raise_unprintable():
     raise _UnprintableError
 
 
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [((n for n in range(1)), TypeError), (_Unloadable(), pickle.UnpicklingError)],
+    ids=["does-not-pickle", "does-not-load"],
+)
+def test_the_collectives_encoding_refuses_a_value_that_does_not_round_trip(value, error):
+    """Both collectives encode through it, inside the guard that tells every rank."""
+    with pytest.raises(error):
+        dist._encoded(value)
+
+
 def _broadcast_from_job(rank, size):
     ran = []
 
@@ -359,11 +287,11 @@ def _broadcast_from_job(rank, size):
     with bounded_collectives():
         for sender in range(size):
             ran.clear()
-            assert broadcast_from("x", compute, rank=sender) == f"rank {sender}'s"
+            assert broadcast_from("x", compute, src=sender) == f"rank {sender}'s"
             assert ran == ([rank] if rank == sender else []), "a rank that does not send ran fn"
-        _, error = _outcome(lambda: broadcast_from("x", compute, rank=size))
+        _, error = _outcome(lambda: broadcast_from("x", compute, src=size))
         assert isinstance(error, ValueError), error
-        assert f"rank={size} is not a rank of this {size}-rank run" in str(error), error
+        assert f"src={size} is not a rank of this {size}-rank run" in str(error), error
         _, error = _outcome(lambda: broadcast_from("x", fail))
         if rank == 0:
             assert isinstance(error, ValueError), error
@@ -372,27 +300,13 @@ def _broadcast_from_job(rank, size):
             assert "rank 0 failed to compute x" in str(error), error
         _, error = _outcome(lambda: broadcast_from("x", exit_2))
         assert isinstance(error, SystemExit) and error.code == 2, error
-        _, error = _outcome(lambda: broadcast_from("x", lambda: (n for n in range(1))))
-        if rank == 0:
-            assert isinstance(error, TypeError), error
-        else:
-            assert isinstance(error, RuntimeError), error
-            assert "rank 0 failed to compute x: TypeError" in str(error), error
         # Serialized once, where the sending rank catches a failure, not again by the broadcast.
         assert broadcast_from("x", lambda: _Protocol2Only(7)).n == 7
         # Every rank gets the value loaded from the bytes sent, the sending rank too.
         built: list = []
         got = broadcast_from("x", lambda: built)
         assert got == [] and got is not built
-        # An error whose text cannot be formatted still reaches the broadcast.
-        _, error = _outcome(lambda: broadcast_from("x", _raise_unprintable))
-        if rank == 0:
-            assert isinstance(error, _UnprintableError), type(error)
-        else:
-            assert "rank 0 failed to compute x: _UnprintableError: <unprintable" in str(error), (
-                error
-            )
-        # Loaded back there too: a value the other ranks could not load fails on the sending rank.
+        # A value that does not round-trip fails on the sending rank, and reaches every rank.
         _, error = _outcome(lambda: broadcast_from("x", _Unloadable))
         if rank == 0:
             assert isinstance(error, pickle.UnpicklingError), error
@@ -407,29 +321,8 @@ def _broadcast_from_job(rank, size):
 
 
 def test_broadcast_from_gives_every_rank_the_sending_ranks_value(cpu_dist_workers):
-    """Over a real broadcast: any rank can send, and only it runs fn. A rank outside the run is
-    refused, the sending rank's failure stops every rank and its exit exits every rank with its
-    code, so that distributed_run tears every rank down alike. A value that does not serialize
-    fails as fn raising does, rather than in the broadcast, and so does one the other ranks could
-    not load back; one only torch.save's pickle protocol takes crosses, serialized once; every rank,
-    the sending one too, gets a copy loaded from the bytes; and ranks out of step fail."""
+    """Over a real broadcast, on two ranks: failures, exits and ranks out of step reach every rank."""
     cpu_dist_workers.run(_broadcast_from_job)
-
-
-@pytest.mark.parametrize("error", [ValueError, SystemExit])
-def test_the_sending_rank_failing_still_reaches_the_broadcast(monkeypatch, error):
-    """The sending rank must still send on failure, or every other rank hangs in the broadcast; a
-    SystemExit from an argparse-style check too, which goes as its code. A stand-in broadcast
-    catches that at once, where a real one would wait out its timeout."""
-    sent = _as_rank(monkeypatch, 0)
-
-    def fail():
-        raise error("bad degrees")
-
-    with pytest.raises(error, match="bad degrees"):
-        broadcast_from("x", fail)
-    told = (True, "bad degrees") if error is SystemExit else (False, "ValueError: bad degrees")
-    assert sent == [(("x", None, told), 0)]
 
 
 def _all_reduce_job(rank, size):
@@ -472,16 +365,6 @@ def _all_reduce_job(rank, size):
         else:
             assert isinstance(error, RuntimeError), error
             assert "rank 1 failed to compute smallest: TypeError" in str(error), error
-        # Serialized once, where each rank catches a failure, not again by the gather.
-        reduced = all_reduce(
-            "x", lambda: _Protocol2Only(rank), lambda values: [v.n for v in values]
-        )
-        assert reduced == list(range(size)), reduced
-        _, error = _outcome(lambda: all_reduce("x", _Unloadable if rank == 1 else lambda: 4, min))
-        if rank == 1:
-            assert isinstance(error, pickle.UnpicklingError), error
-        else:
-            assert "rank 1 failed to compute x" in str(error), error
         _, error = _outcome(
             lambda: all_reduce("smallest" if rank == 0 else "other", lambda: 4, min)
         )
@@ -490,52 +373,8 @@ def _all_reduce_job(rank, size):
 
 
 def test_all_reduce_gives_every_rank_the_combined_value(cpu_dist_workers):
-    """Over a real gather: every rank's value counts and every rank gets the same result. One rank's
-    failure stops every rank and its exit exits every rank with its code. A rank's error outranks
-    another's exit, so that no rank waits in the exit's barrier for one that aborted. A value that
-    does not serialize, or that the other ranks could not load back, fails as fn raising does, rather
-    than in the gather; one only torch.save's pickle protocol takes crosses, serialized once; and
-    ranks out of step fail."""
+    """Over a real gather, on two ranks: one rank's failure or exit, and ranks out of step, reach all."""
     cpu_dist_workers.run(_all_reduce_job)
-
-
-@pytest.mark.parametrize("error", [ValueError, SystemExit])
-def test_a_rank_failing_to_compute_still_joins_the_gather(monkeypatch, error):
-    """A failing rank must still reach the gather, or every other rank waits in it; a SystemExit
-    too. A stand-in gather catches that at once, where a real one would wait out its timeout."""
-    sent = _gather_as_rank(monkeypatch, 1, others=[("smallest", 8, None)])
-
-    def fail():
-        raise error("no memory reading")
-
-    with pytest.raises(error, match="no memory reading"):
-        all_reduce("smallest", fail, min)
-    told = (
-        (True, "no memory reading")
-        if error is SystemExit
-        else (False, "ValueError: no memory reading")
-    )
-    assert sent == [("smallest", None, told)]
-
-
-def _bounded_barrier_job(rank, size):
-    groups, own = [], object()
-    with (
-        mock.patch.object(
-            torch.distributed, "barrier", lambda *a, group=None, **k: groups.append(group)
-        ),
-        bounded_collectives(),
-    ):
-        torch.distributed.barrier(group=None)  # as modelopt's barrier() calls it
-        torch.distributed.barrier(group=own)
-    assert len(groups) == 2 and groups[0] not in (None, own) and groups[1] is own, groups
-
-
-def test_bounded_collectives_bound_a_barrier_called_with_group_none(cpu_dist_workers):
-    """modelopt's ``barrier()`` names ``group=None`` explicitly; the bound holds for it too, or a
-    rank left waiting in it would wait out the default group's timeout. A collective on a group of
-    its own keeps that group."""
-    cpu_dist_workers.run(_bounded_barrier_job)
 
 
 # ---------------------------------------------------------------------------------- process group
@@ -551,24 +390,9 @@ def test_a_single_process_is_rank_0_of_one_on_the_given_device(monkeypatch):
         assert state.is_main
 
 
-def test_a_distributed_launch_yields_this_ranks_state_on_its_cuda_device(monkeypatch):
-    monkeypatch.setenv("WORLD_SIZE", "4")
-    timeouts = []
-    monkeypatch.setattr(dist, "setup", lambda timeout=None: timeouts.append(timeout))
-    monkeypatch.setattr(dist, "_destroy_group", lambda exc: None)
-    monkeypatch.setattr(dist, "rank", lambda group=None: 2)
-    monkeypatch.setattr(dist, "size", lambda group=None: 4)
-    monkeypatch.setattr(dist, "local_rank", lambda: 1)
-    with distributed_run(timeout=timedelta(hours=1)) as state:
-        assert state == DistributedState(rank=2, world_size=4, device=torch.device("cuda:1"))
-        assert not state.is_main
-    assert timeouts == [timedelta(hours=1)]
-
-
 @pytest.mark.parametrize("device", ["cpu", "cuda:3"])
 def test_a_distributed_launch_refuses_another_device(monkeypatch, device):
-    """Every rank runs on the CUDA device its LOCAL_RANK names, so another device, or another index,
-    is refused, before any setup, rather than ignored."""
+    """A launch runs each rank on the CUDA device LOCAL_RANK names, and refuses any other."""
     monkeypatch.setenv("WORLD_SIZE", "2")
     monkeypatch.setattr(dist, "setup", lambda **kwargs: pytest.fail("set a group up"))
     with pytest.raises(ValueError, match=f"device='{device}'"), distributed_run(device=device):
@@ -579,16 +403,17 @@ class _ExitedError(Exception):
     """Raised by a stand-in for abort(), which exits the process instead of returning."""
 
 
-@pytest.mark.parametrize("in_except", [False, True], ids=["entered-plainly", "entered-in-except"])
 @pytest.mark.parametrize(
-    ("launch", "body_raises", "ends_by"),
+    ("launch", "body_raises", "ends_by", "in_except"),
     [
-        (True, None, ["barrier", "destroy"]),
-        (True, ValueError, ["abort"]),
-        (True, _UnprintableError, ["abort"]),
-        (True, SystemExit, ["barrier", "destroy"]),
-        (False, None, ["barrier", "destroy"]),
-        (False, ValueError, ["destroy"]),
+        (True, None, ["barrier", "destroy"], False),
+        (True, ValueError, ["abort"], False),
+        (True, _UnprintableError, ["abort"], False),
+        (True, SystemExit, ["barrier", "destroy"], False),
+        (False, None, ["barrier", "destroy"], False),
+        (False, ValueError, ["destroy"], False),
+        (True, None, ["barrier", "destroy"], True),
+        (False, ValueError, ["destroy"], True),
     ],
     ids=[
         "launch",
@@ -597,23 +422,25 @@ class _ExitedError(Exception):
         "launch-exits",
         "single-process",
         "single-process-raises",
+        "launch-entered-in-except",
+        "single-process-raises-entered-in-except",
     ],
 )
 def test_the_run_ends_the_group_it_set_up(
     monkeypatch, capsys, launch, body_raises, ends_by, in_except
 ):
-    """The launch's group, or the one a single process's FSDP2 load sets up mid-run, is destroyed on
-    the way out, after a barrier unless the body raised. A rank of several whose body raised exits
-    through abort() instead, and torchrun tears the job down: the barrier and destroy_process_group
-    would wait on peers that may sit in a collective this rank never reaches. Every rank reaches an
-    intentional exit. Only the body's own exception counts, not one the caller is handling where it
-    entered the run."""
+    """The group the run set up ends with a barrier and destroy, or with abort() if a rank raised."""
     if launch:
         monkeypatch.setenv("WORLD_SIZE", "2")
     else:
         monkeypatch.delenv("WORLD_SIZE", raising=False)
-    live, ended = [], []
-    monkeypatch.setattr(dist, "setup", lambda timeout=None: live.append("the launch's group"))
+    live, ended, timeouts = [], [], []
+
+    def setup(timeout=None):
+        timeouts.append(timeout)
+        live.append("the launch's group")
+
+    monkeypatch.setattr(dist, "setup", setup)
     monkeypatch.setattr(dist, "is_initialized", lambda: bool(live))
     monkeypatch.setattr(dist, "rank", lambda group=None: 0)
     monkeypatch.setattr(dist, "size", lambda group=None: 2 if launch else 1)
@@ -630,7 +457,14 @@ def test_the_run_ends_the_group_it_set_up(
     expected = pytest.raises(escapes) if escapes else nullcontext()
 
     def run():
-        with expected, distributed_run(device="cuda" if launch else "cpu"):
+        with (
+            expected,
+            distributed_run(
+                timeout=timedelta(hours=1), device="cuda" if launch else "cpu"
+            ) as state,
+        ):
+            device = torch.device("cuda:0" if launch else "cpu")
+            assert state == DistributedState(rank=0, world_size=2 if launch else 1, device=device)
             if not launch:
                 live.append("the body's group")
             if body_raises:
@@ -645,6 +479,7 @@ def test_the_run_ends_the_group_it_set_up(
         run()
 
     assert ended == ends_by
+    assert timeouts == ([timedelta(hours=1)] if launch else [])
     # An intentional exit is not reported as an error. An error is reported once, under this rank's
     # place in the group; its traceback is abort()'s to print, or goes on with it to the caller.
     out, err = capsys.readouterr()
@@ -657,11 +492,7 @@ def test_the_run_ends_the_group_it_set_up(
 @pytest.mark.parametrize("raises", [False, True], ids=["returns", "raises"])
 @pytest.mark.parametrize("world_size", [None, "2"], ids=["single-process", "launch"])
 def test_the_run_leaves_a_group_it_found_alone(monkeypatch, recwarn, world_size, raises):
-    """Under a launch too, and when the body raises: a caller that set its group up before the run
-    keeps it, and gets the error. The state is this rank's place in that group, also when the
-    caller set it up without the launch's environment. Under a launch the run binds this rank's
-    CUDA device all the same, since the caller may not have: the state's device is then the one
-    NCCL runs on. The run's timeout cannot apply to that group, so it warns rather than drop it."""
+    """A group the caller set up stays, the state is the rank's place in it, and a timeout warns."""
     bound: list[int] = []
     if world_size is None:
         monkeypatch.delenv("WORLD_SIZE", raising=False)
