@@ -15,6 +15,8 @@
 
 """GDN replay with an FP32 recurrence anchor and an independently rounded FP8/NVFP4 read copy."""
 
+from functools import lru_cache, partial
+
 import torch
 from torch.autograd.function import once_differentiable
 
@@ -91,9 +93,13 @@ class _TwoPrecision(torch.autograd.Function):
                 xs = [x[start:end].detach().requires_grad_() for x in inputs]
                 anchor = anchors[window].detach().requires_grad_()
                 read = forward_value(anchor, reads[window])
-                output, final = _window_forward(
-                    xs[0], xs[1], xs[2], xs[3], xs[4], anchor, read, seed=window == 0
-                )
+                args = (*xs, anchor, read)
+                # Keep partial windows eager; an outer graph captures the operators itself.
+                if end - start == 16 and not torch.cuda.is_current_stream_capturing():
+                    metadata = tuple((x.shape, x.dtype, x.device) for x in args)
+                    output, final = _graphed_window_forward(metadata, window == 0)(*args)
+                else:
+                    output, final = _window_forward(*args, seed=window == 0)
                 grads = torch.autograd.grad(
                     (output, final), (*xs, anchor), (grad_output[start:end], grad_anchor)
                 )
@@ -110,6 +116,19 @@ def two_precision_decode(q, k, v, g, beta, state, gate_inputs, read_mode, read_r
 
 def _rounded(x, dtype=torch.bfloat16):
     return forward_value(x, x.to(dtype))
+
+
+@lru_cache(maxsize=16)
+def _graphed_window_forward(metadata, seed):
+    # Capture the original forward/backward operators without compiler rewrites.
+    # Share capture across layers; sequence boundaries remain outside this fixed-size graph.
+    samples = tuple(
+        torch.zeros(shape, dtype=dtype, device=device, requires_grad=True)
+        for shape, dtype, device in metadata
+    )
+    return torch.cuda.make_graphed_callables(
+        partial(_window_forward, seed=seed), samples, allow_unused_input=True
+    )
 
 
 def _window_forward(q, k, v, g, beta, anchor, read, *, seed):

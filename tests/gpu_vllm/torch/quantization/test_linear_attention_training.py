@@ -237,6 +237,79 @@ def test_serving_state_qdq_and_handoff_gradient(compiled_serving_case):
             quantizer.enable()
 
 
+@pytest.mark.parametrize("compiled_serving_case", ["gdn"], indirect=True, scope="module")
+def test_gdn_prefix_native_operands_backward(compiled_serving_case, monkeypatch):
+    """Raw gates and a nonzero handoff state receive the recurrence gradients."""
+    import fla.ops.gated_delta_rule.chunk as fla_chunk
+    import vllm.third_party.flash_linear_attention.ops.chunk as native_chunk
+
+    from modelopt.torch.quantization.linear_attention._vllm_autograd import prefix
+
+    native_factors = []
+    native_forward, fla_backward = (
+        native_chunk.chunk_gated_delta_rule_fwd,
+        fla_chunk.chunk_gated_delta_rule_bwd,
+    )
+
+    def capture_factor(*args, **kwargs):
+        result = native_forward(*args, **kwargs)
+        native_factors.append(result[2])
+        return result
+
+    def check_factor(*args, **kwargs):
+        assert kwargs["A"].data_ptr() == native_factors[0].data_ptr()
+        return fla_backward(*args, **kwargs)
+
+    monkeypatch.setattr(native_chunk, "chunk_gated_delta_rule_fwd", capture_factor)
+    monkeypatch.setattr(fla_chunk, "chunk_gated_delta_rule_bwd", check_factor)
+    inputs = [x.detach().clone().requires_grad_() for x in compiled_serving_case[0]]
+    q, k, v, raw_g, raw_beta, rate, bias = [x[0, :65] if i < 5 else x for i, x in enumerate(inputs)]
+    initial = torch.randn(1, 32, 32, device="cuda", requires_grad=True) * 0.125
+    # Native GDN uses raw projections, so these independent prepared gates must be unused.
+    unused_g = torch.zeros_like(raw_g, dtype=torch.float32, requires_grad=True)
+    unused_beta = torch.ones_like(raw_beta, dtype=torch.float32, requires_grad=True)
+    actual = prefix(
+        q,
+        k,
+        v,
+        unused_g,
+        unused_beta,
+        initial,
+        scale=32**-0.5,
+        beta_dtype=torch.float32,
+        normalize=True,
+        gate_inputs=(raw_g, raw_beta, rate, bias),
+    )
+    q_ref, k_ref = [
+        (x.float() / (x.float().square().sum(-1, keepdim=True) + 1e-6).sqrt()).bfloat16().float()
+        for x in (q, k)
+    ]
+    gate = -rate.float().exp() * torch.nn.functional.softplus(raw_g.float() + bias.float())
+    expected = recurrent_delta_rule_reference(
+        q_ref[None],
+        k_ref[None],
+        v.float()[None],
+        gate[None],
+        raw_beta.float().sigmoid()[None],
+        initial_state=initial[None],
+    )
+    probes = [torch.randn_like(x) for x in actual]
+    actual_grads = torch.autograd.grad(
+        actual,
+        (*inputs, initial, unused_g, unused_beta),
+        probes,
+        allow_unused=True,
+        retain_graph=True,
+    )
+    assert actual_grads[-2:] == (None, None)
+    expected_grads = torch.autograd.grad(expected, (*inputs, initial), [x[None] for x in probes])
+    for value, reference in zip(actual_grads[:-2], expected_grads):
+        assert torch.isfinite(value).all()
+        # Dense FP32 recurrence ignores native chunk-factor and BF16 rounding.
+        torch.testing.assert_close(value, reference, rtol=0.05, atol=0.02)
+        assert (value.float() - reference.float()).norm() <= 0.03 * reference.float().norm() + 1e-5
+
+
 @pytest.fixture(scope="module")
 @torch.no_grad()
 def compiled_gdn_layout_case():
