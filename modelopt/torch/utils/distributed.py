@@ -608,6 +608,10 @@ def distributed_run(
     through :func:`abort` instead, and the launcher tears the job down: destroying the group would
     wait on peers that may sit in a collective this rank never reaches. In a run that found the
     caller's group, the error goes on to the caller, which owns the peers.
+
+    A ``SystemExit`` is not an error: the group is destroyed as on a normal exit, which waits on
+    every rank, so the exit has to be every rank's, as one raised inside :func:`broadcast_from` or
+    :func:`all_reduce` is. A rank that exits alone waits in that teardown until the group times out.
     """
     launched = is_distributed_launch()
     if launched and torch.device(device) != torch.device("cuda"):
