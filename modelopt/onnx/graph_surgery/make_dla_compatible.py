@@ -329,8 +329,8 @@ def _transform_make_dla_compatible(
             logger.info("[DLA pipeline] Applying ForceFp16Activations")
         model = _apply_force_fp16_activations(model)
         # Match C++: symbolic inference stays before precision conversion.
-        model = onnx.shape_inference.infer_shapes(model)
-        onnx.checker.check_model(model)
+        model = onnx.shape_inference.infer_shapes(model, check_type=True)
+        onnx.checker.check_model(model, full_check=True)
     if verbose:
         logger.info("[DLA pipeline] Done (%.1fs).", time.perf_counter() - started)
     return model

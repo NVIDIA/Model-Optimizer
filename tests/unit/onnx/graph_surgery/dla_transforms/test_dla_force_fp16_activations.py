@@ -1016,3 +1016,40 @@ def test_public_squeeze_has_private_fp16_readers_and_native_controls(operation, 
     if control_reader:
         resize = next(node for node in changed.graph.node if node.op_type == "Resize")
         assert resize.input[2] == "public"
+
+
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_fp16_public_conversion_refuses_invalid_control_types_before_saving(
+    tmp_path, existing_output
+):
+    """Reject half-precision Resize scales without creating or replacing an output file."""
+    model = h.make_model(
+        h.make_graph(
+            [h.make_node("Resize", ["x", "", "scales"], ["y"], mode="nearest")],
+            "invalid_resize_scales",
+            [_value("x", [1, 1, 1, 2])],
+            [_value("y", [1, 1, 1, 4])],
+            [nh.from_array(np.array([1, 1, 1, 2], np.float16), "scales")],
+        ),
+        opset_imports=[h.make_opsetid("", 19)],
+        ir_version=9,
+    )
+    onnx.checker.check_model(model)
+    with pytest.raises((onnx.shape_inference.InferenceError, onnx.checker.ValidationError)):
+        onnx.checker.check_model(model, full_check=True)
+    source, output = tmp_path / "source.onnx", tmp_path / "output.onnx"
+    onnx.save(model, source)
+    original = source.read_bytes()
+    previous = b"existing output must survive validation failure"
+    if existing_output:
+        output.write_bytes(previous)
+    with pytest.raises((onnx.shape_inference.InferenceError, onnx.checker.ValidationError)):
+        make_dla_compatible(
+            str(source),
+            str(output),
+            use_external_data=False,
+            verbose=False,
+            force_fp16_activations=True,
+        )
+    assert source.read_bytes() == original
+    assert output.read_bytes() == previous if existing_output else not output.exists()
