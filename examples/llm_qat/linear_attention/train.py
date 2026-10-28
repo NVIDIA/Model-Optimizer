@@ -58,6 +58,7 @@ from modelopt.torch.quantization.utils import is_quantized
 
 def run_training(config, quant_config, prefill_tokens=None, teacher_provider=None):
     """Run Bridge with fixed smoke-test splits or collator-provided prompt boundaries."""
+    operand_qat = any(entry.cfg.backend == "gdn_prefill" for entry in quant_config.linear_attention)
     data_lengths = prefill_tokens is None or isinstance(config.dataset, FinetuningDatasetConfig)
     if data_lengths and config.model.pipeline_model_parallel_size > 1:
         raise ValueError(
@@ -88,9 +89,10 @@ def run_training(config, quant_config, prefill_tokens=None, teacher_provider=Non
                 if not is_quantized(student):
                     mtq.quantize(student, quant_config)
                 if not data_lengths:
+                    phase = config.dataset.seq_length if operand_qat else prefill_tokens
                     phases.enter_context(
                         linear_attention_training_phase(
-                            student, [prefill_tokens] * config.train.micro_batch_size
+                            student, [phase] * config.train.micro_batch_size
                         )
                     )
             return models
@@ -109,7 +111,10 @@ def run_training(config, quant_config, prefill_tokens=None, teacher_provider=Non
                 if prefill_tokens is not None:
                     mask_prefix_labels(batch, prefix, boundaries)
                 with linear_attention_training_phase(
-                    unwrap_model(model), prefix, sequence_lengths=valid, cu_seqlens=boundaries
+                    unwrap_model(model),
+                    valid if operand_qat else prefix,
+                    sequence_lengths=valid,
+                    cu_seqlens=boundaries,
                 ):
                     return forward_step_modelopt(state, iter([batch]), model, return_schedule_plan)
             # Consume lazily: middle pipeline stages may not need any batch tensors.

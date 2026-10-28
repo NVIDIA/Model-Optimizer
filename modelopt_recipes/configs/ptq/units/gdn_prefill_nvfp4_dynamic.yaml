@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Dynamic NVFP4 QDQ on both operands of the eight real GDN prefill GEMMs.
+# The implementation invokes the quantizer independently per sequence/chunk and head.
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+  - quantizer_name: '*gdn_matmul_sites.*_quantizer'
+    cfg:
+      num_bits: [2, 1]
+      type: dynamic
+      block_sizes:
+        -1: 16
+        type: dynamic
+        scale_bits: [4, 3]
+      pass_through_bwd: true

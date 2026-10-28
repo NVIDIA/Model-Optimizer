@@ -25,6 +25,7 @@ from typing import Any
 import torch
 
 from ..linear_attention.gdn import gdn_state_qat
+from ..linear_attention.matmul import GDNMatmulSites
 from .linear_attention import _LinearAttentionQuantMixin
 
 __all__ = ["GatedDeltaNetStateQuantMixin"]
@@ -56,6 +57,19 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
         "gdn_read_quantizer",
     )
 
+    def _setup(self):
+        super()._setup()
+        self._register_temp_attribute("gdn_matmul_sites", GDNMatmulSites())
+
+    @property
+    def linear_attention_is_enabled(self):
+        """Return whether state/read or prefill operand emulation is selected."""
+        return (
+            super().linear_attention_is_enabled
+            or self.gdn_matmul_sites.is_enabled
+            or self.linear_attention_config.backend == "gdn_prefill"
+        )
+
     def validate_linear_attention(self):
         """Reject retired W QAT and validate the state quantizer."""
         if self.gdn_w_quantizer.is_enabled:
@@ -65,6 +79,12 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
                 "ModelOpt 0.49. Disable gdn_w_quantizer; "
                 "use gdn_state_quantizer with an explicit serving policy for state QAT."
             )
+        if self.linear_attention_config.backend == "gdn_prefill":
+            if self.gdn_state_quantizer.is_enabled or self.gdn_read_quantizer.is_enabled:
+                raise ValueError("GDN prefill operand QDQ cannot be combined with state/read QDQ")
+            self.gdn_matmul_sites.validate()
+        elif self.gdn_matmul_sites.is_enabled:
+            raise ValueError("GDN operand quantizers require backend='gdn_prefill'")
         if self.linear_attention_config.precision == "vllm_kimi_k3":
             raise ValueError("vllm_kimi_k3 is a KDA-only precision profile")
         if (
@@ -104,6 +124,7 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
             policy=self.linear_attention_config,
             state_quantizer=self.gdn_state_quantizer,
             read_quantizer=self.gdn_read_quantizer,
+            matmul_sites=self.gdn_matmul_sites,
             chunk_size=chunk_size,
             prefill_lengths=self._linear_attention_prefill_lengths,
             sequence_lengths=self._linear_attention_sequence_lengths,

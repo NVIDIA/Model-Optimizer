@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  operands: configs/ptq/units/gdn_prefill_fp8_dynamic
+
+metadata:
+  description: >-
+    Experimental GDN prefill QAT with dynamic per-row E4M3 QDQ on both operands
+    of the eight algorithmic GEMMs. KDA and decode are intentionally unsupported.
+quantize:
+  algorithm:
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: operands
+  linear_attention:
+    - module_name: '*'
+      cfg:
+        backend: gdn_prefill
+        precision: gdn_prefill

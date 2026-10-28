@@ -161,7 +161,7 @@ def _test_gdn_qat_helper(rank, size, checkpoint_path):
             setattr(layer.config, name, original)
 
 
-def _check_packed_forward(module):
+def _check_packed_forward(module, *, prefill_only=False):
     hidden = torch.randn(128, 1, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     packed = PackedSeqParams(
         qkv_format="thd",
@@ -191,7 +191,7 @@ def _check_packed_forward(module):
             with (
                 linear_attention_training_phase(
                     module,
-                    [56, 54],
+                    [60, 58] if prefill_only else [56, 54],
                     sequence_lengths=lengths,
                     cu_seqlens=packed.cu_seqlens_q_padded,
                 ),
@@ -292,3 +292,44 @@ def _test_missing_serving_hooks(rank, size):
 
 def test_gdn_missing_serving_hooks(compiled_gdn_workers):
     compiled_gdn_workers.run(_test_missing_serving_hooks)
+
+
+def _test_gdn_operand_qat(rank, size, format_name, solve_method="exact"):
+    initialize_for_megatron(
+        tensor_model_parallel_size=size, pipeline_model_parallel_size=1, seed=SEED
+    )
+    model = _make_model(size)
+    cfg = load_recipe(f"general/ptq/gdn_prefill_{format_name}_dynamic").quantize.model_dump()
+    if solve_method != "exact":
+        cfg["linear_attention"][0]["cfg"]["solve"] = {"method": solve_method, "degree": 7}
+    mtq.quantize(model, cfg)
+    layer = next(m for m in model.modules() if isinstance(m, _QuantGatedDeltaNet))
+    layer.train()
+    hidden = torch.randn(128, 2, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    changed = []
+    handles = [
+        q.register_forward_hook(
+            lambda module, args, output: changed.append(not torch.equal(args[0], output))
+        )
+        for site in layer.gdn_matmul_sites.values()
+        for q in site.children()
+        if q.is_enabled
+    ]
+    try:
+        with (
+            linear_attention_training_phase(layer, [128, 128]),
+            torch.autocast("cuda", dtype=torch.bfloat16),
+        ):
+            output = layer(hidden, attention_mask=None)[0]
+        output.float().square().sum().backward()
+    finally:
+        for handle in handles:
+            handle.remove()
+    assert changed and any(changed), "Operand QAT must execute enabled QDQ and change operands"
+    assert torch.isfinite(hidden.grad).all() and hidden.grad.abs().sum() > 0
+    _check_packed_forward(layer, prefill_only=True)
+
+
+@pytest.mark.parametrize("format_name", ["fp8", "nvfp4"])
+def test_gdn_operand_qat_executes_quantizers(compiled_gdn_workers, format_name):
+    compiled_gdn_workers.run(_test_gdn_operand_qat, format_name)

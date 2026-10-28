@@ -28,7 +28,10 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     """One execution policy shared by the chunked prefix and recurrent suffix.
 
     ``serving`` uses native forward arithmetic with a differentiable adjoint;
-    ``fla`` is the disabled/default path. ``vllm`` targets vLLM 0.30.0's
+    ``fla`` is the disabled/default path. ``gdn_prefill`` is an experimental,
+    GDN-only Torch implementation that exposes the eight real GEMM operand
+    boundaries for QAT. It does not model KDA's pairwise gated interactions.
+    ``vllm`` targets vLLM 0.30.0's
     Triton prefill and single-token, non-speculative decode with BF16 operands and
     FP32 recurrent storage. Deployment must explicitly select Triton prefill
     (``gdn_prefill_backend="triton"``) and enable packed recurrent decode
@@ -56,10 +59,10 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     ``state_block_v`` controls grouping only for legacy per-tile quantizers.
     """
 
-    backend: Literal["fla", "serving"] = ModeloptField(default="fla")
-    precision: Literal["vllm", "vllm_kimi_k3", "replayssm", "replayssm_two_precision"] = (
-        ModeloptField(default="vllm")
-    )
+    backend: Literal["fla", "serving", "gdn_prefill"] = ModeloptField(default="fla")
+    precision: Literal[
+        "vllm", "vllm_kimi_k3", "replayssm", "replayssm_two_precision", "gdn_prefill"
+    ] = ModeloptField(default="vllm")
     replay_window: int = Field(default=1, ge=1, le=64, strict=True)
     state_block_v: Literal[16, 32, 64, 128] = ModeloptField(default=64)
 
@@ -70,7 +73,14 @@ class LinearAttentionConfig(ModeloptBaseConfig):
 
     @model_validator(mode="after")
     def _validate_profile(self):
-        if self.precision == "replayssm":
+        if self.backend == "gdn_prefill" or self.precision == "gdn_prefill":
+            if self.backend != "gdn_prefill" or self.precision != "gdn_prefill":
+                raise ValueError(
+                    "The experimental GDN operand-QDQ path requires backend=precision='gdn_prefill'"
+                )
+            if self.replay_window != 1:
+                raise ValueError("GDN prefill operand QDQ does not support replay")
+        elif self.precision == "replayssm":
             if self.backend != "serving":
                 raise ValueError("replayssm requires backend='serving'")
             if self.state_block_v < 32:
