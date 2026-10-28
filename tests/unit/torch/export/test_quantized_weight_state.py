@@ -24,8 +24,10 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.quantized_weight_export import (
     build_hf_quantization_config,
+    capture_kv_cache_export_state,
     capture_quantized_weight_export_state,
     export_quantized_weight_tensors,
+    get_kv_cache_export_spec,
     get_quantized_weight_export_spec,
     merge_quantized_weight_export_states,
     restore_quantized_weight_export_state,
@@ -713,3 +715,77 @@ def test_mixed_config_groups_moe_experts_by_projection_family():
         "model.layers.0.mlp.experts.down_proj",
     }
     assert "lm_head" in config["ignore"]
+
+
+_FP8_KV = {"num_bits": (4, 3)}
+_NVFP4_KV = {"num_bits": (2, 1), "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)}}
+
+
+def _kv_attention(k_cfg, v_cfg, k_amax=896.0, v_amax=224.0) -> nn.Module:
+    attention = nn.Module()
+    for name, cfg, amax in (("k_bmm_quantizer", k_cfg, k_amax), ("v_bmm_quantizer", v_cfg, v_amax)):
+        quantizer = TensorQuantizer(QuantizerAttributeConfig(**cfg))
+        quantizer.amax = torch.tensor(amax)
+        setattr(attention, name, quantizer)
+    return attention
+
+
+@pytest.mark.parametrize(
+    ("k_cfg", "v_cfg", "quantization_format", "k_scale", "v_scale"),
+    [
+        # Scales are amax / 448; FP8 ones are raised to at least 1.0 like the other exporters do.
+        (_FP8_KV, _FP8_KV, "FP8", 2.0, 1.0),
+        (_NVFP4_KV, _NVFP4_KV, "NVFP4", 2.0, 0.5),
+        (_FP8_KV, _NVFP4_KV, "FP8_K_NVFP4_V", 2.0, 0.5),
+    ],
+)
+def test_kv_cache_capture(k_cfg, v_cfg, quantization_format, k_scale, v_scale):
+    attention = _kv_attention(k_cfg, v_cfg)
+
+    state = capture_kv_cache_export_state(attention)
+
+    assert get_kv_cache_export_spec(attention) == state.quantization_format == quantization_format
+    torch.testing.assert_close(state.k_scale.squeeze(), torch.tensor(k_scale))
+    torch.testing.assert_close(state.v_scale.squeeze(), torch.tensor(v_scale))
+    assert not state.k_scale.requires_grad and state.k_scale.device.type == "cpu"
+    if quantization_format == "FP8":
+        unclamped = capture_kv_cache_export_state(attention, clamp_fp8_scales=False)
+        assert unclamped.v_scale.item() == 0.5
+
+
+def test_kv_cache_spec_rejects_what_it_cannot_export():
+    attention = _kv_attention(_FP8_KV, _FP8_KV)
+    attention.k_bmm_quantizer.disable()
+    attention.v_bmm_quantizer.disable()
+    assert get_kv_cache_export_spec(attention) is None
+    assert capture_kv_cache_export_state(attention) is None
+    assert get_kv_cache_export_spec(nn.Linear(2, 2)) is None
+
+    attention.k_bmm_quantizer.enable()
+    with pytest.raises(NotImplementedError, match="both or neither"):
+        get_kv_cache_export_spec(attention)
+
+    attention = _kv_attention({"num_bits": 8}, {"num_bits": 8})
+    with pytest.raises(NotImplementedError, match="'INT8' KV cache"):
+        get_kv_cache_export_spec(attention)
+
+    affine_fp8 = {**_FP8_KV, "bias": {-2: None, -4: None, "type": "static"}}
+    attention = _kv_attention(affine_fp8, affine_fp8)
+    with pytest.raises(NotImplementedError, match="affine KV caches"):
+        get_kv_cache_export_spec(attention)
+
+
+@pytest.mark.parametrize(
+    "weight_spec", [None, weight_export._QuantizedWeightExportSpec("fp8", 0, True)]
+)
+def test_hf_config_carries_the_kv_cache_format(weight_spec):
+    named_specs = {"model.layers.0.proj.weight": weight_spec}
+
+    config = build_hf_quantization_config(named_specs, kv_cache_formats=["FP8", None, "FP8"])
+
+    assert config["kv_cache_scheme"] == {"dynamic": False, "num_bits": 8, "type": "float"}
+    assert "kv_cache_scheme" not in build_hf_quantization_config(named_specs)
+    config = build_hf_quantization_config(named_specs, kv_cache_formats=["FP8_K_NVFP4_V"])
+    assert config["kv_cache_quant_algo"] == "FP8_K_NVFP4_V"
+    with pytest.raises(NotImplementedError, match="mixed KV-cache formats"):
+        build_hf_quantization_config(named_specs, kv_cache_formats=["FP8", "NVFP4"])

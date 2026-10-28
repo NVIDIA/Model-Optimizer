@@ -37,6 +37,9 @@ from modelopt.torch.quantization.utils import quantizer_attr_names, representati
 from ..quantization.nn import SequentialQuantizer, TensorQuantizer
 from .convert_hf_config import convert_hf_quant_config_format
 from .quant_format import (
+    KV_CACHE_FP8,
+    KV_CACHE_FP8_K_NVFP4_V,
+    KV_CACHE_NVFP4,
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_WO,
     QUANTIZATION_FP8_PC_PT,
@@ -51,6 +54,8 @@ from .quant_format import (
 )
 from .quant_utils import (
     _get_quantization_from_quantizers,
+    get_kv_cache_dtype,
+    get_kv_cache_scaling_factor,
     get_scaling_factor,
     process_layer_quant_config,
     to_quantized_weight,
@@ -58,8 +63,10 @@ from .quant_utils import (
 
 __all__ = [
     "build_hf_quantization_config",
+    "capture_kv_cache_export_state",
     "capture_quantized_weight_export_state",
     "export_quantized_weight_tensors",
+    "get_kv_cache_export_spec",
     "get_quantized_weight_export_spec",
     "merge_quantized_weight_export_states",
     "restore_quantized_weight_export_state",
@@ -83,6 +90,7 @@ _FUNCTIONAL_WEIGHT_EXPORT_FORMATS = (
         QUANTIZATION_MXFP8,
     }
 )
+_KV_CACHE_EXPORT_FORMATS = {KV_CACHE_FP8, KV_CACHE_FP8_K_NVFP4_V, KV_CACHE_NVFP4}
 _STATIC_INPUT_SCALE_FORMATS = {
     QUANTIZATION_FP8,
     QUANTIZATION_NVFP4,
@@ -124,6 +132,15 @@ class _QuantizedWeightExportSpec:
     quantization_format: str
     block_size: int
     input_quantizer_enabled: bool
+
+
+@dataclass(frozen=True)
+class _KVCacheExportState:
+    """Detached K and V cache scales of one attention module."""
+
+    quantization_format: str
+    k_scale: torch.Tensor
+    v_scale: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -497,6 +514,56 @@ def get_quantized_weight_export_spec(
     )
 
 
+def get_kv_cache_export_spec(attention: nn.Module) -> str | None:
+    """Return the KV-cache format of one attention module, or ``None`` when it is not quantized."""
+    quantizers = [getattr(attention, name, None) for name in ("k_bmm_quantizer", "v_bmm_quantizer")]
+    enabled = [quantizer is not None and quantizer.is_enabled for quantizer in quantizers]
+    if not any(enabled):
+        return None
+    if not all(enabled):
+        raise _UnsupportedQuantizedWeightExportFormatError(
+            "Functional export requires both or neither of the K and V cache quantizers"
+        )
+    # The captured state carries no K/V biases.
+    if any(
+        getattr(quantizer, attr, None) is not None
+        for quantizer in quantizers
+        for attr in ("bias", "bias_value")
+    ):
+        raise _UnsupportedQuantizedWeightExportFormatError(
+            "Functional export does not support affine KV caches"
+        )
+    quantization_format = get_kv_cache_dtype(attention)
+    if quantization_format not in _KV_CACHE_EXPORT_FORMATS:
+        raise _UnsupportedQuantizedWeightExportFormatError(
+            f"Functional export does not support the {quantization_format!r} KV cache"
+        )
+    return quantization_format
+
+
+def capture_kv_cache_export_state(
+    attention: nn.Module,
+    *,
+    clamp_fp8_scales: bool = True,
+    cpu: bool = True,
+) -> _KVCacheExportState | None:
+    """Capture the ``k_scale`` / ``v_scale`` of one attention module, or ``None`` when not quantized.
+
+    ``clamp_fp8_scales`` raises FP8 cache scales to at least 1.0, as the other exporters do.
+    """
+    quantization_format = get_kv_cache_export_spec(attention)
+    if quantization_format is None:
+        return None
+    k_scale, v_scale = get_kv_cache_scaling_factor(attention, clamp_fp8_scales=clamp_fp8_scales)
+    if k_scale is None or v_scale is None:
+        raise RuntimeError("Missing calibrated KV-cache scales")
+    if cpu:
+        k_scale, v_scale = k_scale.cpu(), v_scale.cpu()
+    return _KVCacheExportState(
+        quantization_format, k_scale.detach().clone(), v_scale.detach().clone()
+    )
+
+
 def split_quantized_weight_export_state(
     state: _QuantizedWeightExportState,
 ) -> tuple[object, tuple[torch.Tensor, ...]]:
@@ -844,8 +911,19 @@ def _quantized_layer_name(weight_name: str) -> str:
 def build_hf_quantization_config(
     named_states: Mapping[str, _QuantizedWeightExportState | _QuantizedWeightExportSpec | None]
     | Iterable[tuple[str, _QuantizedWeightExportState | _QuantizedWeightExportSpec | None]],
+    kv_cache_formats: Iterable[str | None] = (),
 ) -> dict[str, Any]:
-    """Build canonical HF configuration, rejecting unrepresentable activation settings."""
+    """Build canonical HF configuration, rejecting unrepresentable activation settings.
+
+    ``kv_cache_formats`` holds :func:`get_kv_cache_export_spec` of the attention modules; they must
+    agree, and ``None`` (an unquantized cache) is allowed alongside one format.
+    """
+    kv_cache_format_set = {fmt for fmt in kv_cache_formats if fmt is not None}
+    if len(kv_cache_format_set) > 1:
+        raise NotImplementedError(
+            "Cannot build canonical HF configuration for mixed KV-cache formats "
+            f"{sorted(kv_cache_format_set)}"
+        )
     layers: dict[str, tuple[str, int] | None] = {}
     for weight_name, state in dict(named_states).items():
         if state is not None:
@@ -875,4 +953,6 @@ def build_hf_quantization_config(
         "producer": {"name": "modelopt", "version": __version__},
         "quantization": process_layer_quant_config(layer_config),
     }
+    if kv_cache_format_set:
+        config["quantization"]["kv_cache_quant_algo"] = kv_cache_format_set.pop()
     return convert_hf_quant_config_format(config)

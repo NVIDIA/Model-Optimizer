@@ -31,8 +31,6 @@ This module deliberately doesn't expose anything the MCP tools don't
 need — keeps the surface area auditable.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
 import os

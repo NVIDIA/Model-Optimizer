@@ -881,7 +881,7 @@ def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContex
 
 def _resolve_export_dtype(model: nn.Module, dtype: torch.dtype | None) -> torch.dtype:
     """Return the export dtype, defaulting to the model's own and warning on a mismatch."""
-    configured_dtype = getattr(model.config, "torch_dtype", None)
+    configured_dtype = getattr(model.config, "dtype", None)
     if dtype is None:
         if configured_dtype is not None:
             return configured_dtype
@@ -1415,7 +1415,7 @@ def _export_diffusers_checkpoint(
 
         # Update config.json with sparse attention info (both quantized and non-quantized)
         if export_sparse_attention_config is not None:
-            sparse_attn_config = export_sparse_attention_config(component)
+            sparse_attn_config = export_sparse_attention_config(component, for_diffusion=True)
             if sparse_attn_config is not None:
                 config_path = component_export_dir / "config.json"
                 if config_path.exists():

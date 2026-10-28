@@ -214,7 +214,7 @@ tensorrt-edgellm-export --help
 
 - x86-64 Linux (Ubuntu 22.04 or 24.04 recommended)
 - NVIDIA GPU with Compute Capability 8.0+ (Ampere or newer)
-- CUDA 12.x or 13.x, Python 3.10+
+- CUDA 12.x or 13.x, Python 3.11+
 - GPU VRAM: 16 GB for models up to 3B, 40 GB for models up to 4B, 80 GB for models up to 8B
 
 ### CLI Tools

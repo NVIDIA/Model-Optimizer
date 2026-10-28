@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dms"
 version = "0.1.0"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.11,<3.14"
 description = "Dynamic Memory Sparsification (DMS) for KV cache compression"
 # NOTE: Run `uv lock --upgrade` in this directory to update the dependencies for vulnerability scanning.
 dependencies = [

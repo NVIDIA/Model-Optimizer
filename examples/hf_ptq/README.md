@@ -175,6 +175,8 @@ scripts/huggingface_example.sh --model $HF_PATH --quant <QFORMAT> --tp [1|2|4|8]
 
 > *FP8 calibration over a large model with limited GPU memory is not recommended but possible with the [accelerate](https://huggingface.co/docs/accelerate/en/usage_guides/big_modeling) package. Please tune the device_map setting in [`example_utils.py`](./example_utils.py) if needed for model loading and the calibration process can be slow.*
 
+> *Models with linear-attention layers (Qwen3-Next, Qwen3.5, Qwen3.8, GLM-5.x Flash, Kimi Linear, OLMo Hybrid) run those layers through Transformers' slow PyTorch reference kernels unless the [flash-linear-attention](https://github.com/fla-org/flash-linear-attention) kernels are installed: `pip install "fla-core>=0.5.2"` (earlier versions compute packed Gated DeltaNet sequences wrongly). Install it only where these models run on GPU, since Transformers then uses the kernels for CPU tensors too, and they fail there. On GLM-5.3-Flash over 4x GB300 they more than halved layerwise GPTQ calibration, mostly because the fused kernels need far less memory per sample, so a larger calibration batch fits.*
+
 > *Huggingface models trained with `modelopt.torch.speculative` can be used as regular Huggingface models in PTQ. Note: there is a known issue with Huggingface models loaded across multiple GPUs for inference (i.e., "Expected all tensors to be on the same device, but found at least two devices..."). When encountered this error in PTQ of speculative decoding models, try reducing the number of GPUs used.*
 
 > *Calibration by default uses left padding_side for the Huggingface tokenizer as it usually leads to lower accuracy loss. The exported tokenizer files restores the default padding_side.*
@@ -608,7 +610,7 @@ mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
 
 ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for distributed model sharding and calibration, exposed via the `--use_fsdp2` flag on the standard `hf_ptq.py` entry point.
 
-> *KV-cache AutoQuantize recipes are not supported with `--use_fsdp2` and are rejected before model loading. Distributed KV sensitivity scoring, selection, and checkpoint writes must be synchronized before this combination can be enabled safely. Existing weight AutoQuantize recipes retain their previous experimental warning with FSDP2.*
+> *Weight and KV-cache AutoQuantize with `--use_fsdp2` are experimental.*
 
 > *Nemotron-H checkpoints containing MTP weights are not supported with `--use_fsdp2` and are rejected before distributed model loading. Remove `--use_fsdp2` to load and calibrate the MTP modules; the distributed loader does not construct them.*
 
@@ -641,6 +643,8 @@ torchrun \
 ```
 
 See [Recipe-based Quantization](#recipe-based-quantization) for the recipe format and built-in recipe names. The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For more details refer to the [deployment section](#deployment) of this document.
+
+[AutoQuantize recipes](#autoquantize) use the same `torchrun` launch. With FSDP2, `--batch_size` is per rank and defaults to 1; recipe `score_size` is global. Use shared checkpoint directories and restore all `rank<N>.pth` files together, with the same world size, model, recipe, and data.
 
 > *Performance Note: FSDP2 is designed for training workloads and may result in longer calibration and export times. For faster calibration, maximize the batch size based on available GPU memory and choose the right number of GPUs to avoid unnecessary communication.*
 
