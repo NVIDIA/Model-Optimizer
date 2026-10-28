@@ -31,6 +31,7 @@ from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_par
 from transformers import PretrainedConfig
 from transformers.integrations.finegrained_fp8 import FP8Experts
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.export.model_utils import _release_exported_tensors
@@ -41,6 +42,9 @@ from modelopt.torch.export.quant_utils import (
     get_quantization_format,
     process_layer_quant_config,
 )
+from modelopt.torch.export.unified_export_hf import _prepare_moe_inputs
+from modelopt.torch.models import is_moe
+from modelopt.torch.opt.conversion import ApplyModeError
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
 from modelopt.torch.quantization.model_calib import (
@@ -492,6 +496,54 @@ class TestQuantFusedExperts:
         with pytest.warns(UserWarning, match="store their weights transposed"):
             register_fused_experts_on_the_fly(model)
         assert QuantModuleRegistry.get(_TransposedExperts) is None
+
+    def test_a_transposed_containers_moe_block_is_refused_at_export(self):
+        """Left unquantized, a transposed container reaches the export inside an MoE block it
+        recognizes, with no handler for its experts, so the export refuses the block rather than
+        write it."""
+
+        class _TransposedExperts(_SyntheticFusedExperts):
+            pass
+
+        model = _TinyMoEModel()
+        model.moe.experts = _TransposedExperts()
+        model.moe.experts.is_transposed = True
+        with pytest.warns(UserWarning, match="store their weights transposed"):
+            register_fused_experts_on_the_fly(model)
+        assert is_moe(model.moe)
+
+        with pytest.raises(NotImplementedError):
+            _prepare_moe_inputs(model, torch.float16, is_modelopt_qlora=False)
+
+    def test_a_state_saved_with_transposed_experts_quantized_no_longer_restores(self):
+        """An earlier release quantized such a container, wrongly. Restoring that state now finds its
+        experts left unquantized and refuses the quantizers saved for them."""
+
+        class _TransposedExperts(_SyntheticFusedExperts):
+            pass
+
+        def build():
+            model = _TinyMoEModel()
+            model.moe.experts = _TransposedExperts()
+            model.moe.experts.is_transposed = True
+            return model
+
+        model = build()
+        # As an earlier release did: matched by shape, with the gated wrapper.
+        QuantModuleRegistry.register({_TransposedExperts: "test.TransposedExperts"})(
+            _QuantFusedExperts
+        )
+        try:
+            mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4, HIDDEN_DIM)))
+            state = mto.modelopt_state(model)
+        finally:
+            self._cleanup_registry(_TransposedExperts)
+
+        with (
+            pytest.warns(UserWarning, match="store their weights transposed"),
+            pytest.raises(ApplyModeError),
+        ):
+            mto.restore_from_modelopt_state(build(), state)
 
     def test_a_wrapper_that_defines_its_weights_in_get_expert_weight_is_eager_only(self):
         """The grouped_mm forward quantizes the stored weight without get_expert_weight, so a wrapper
