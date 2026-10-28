@@ -1496,6 +1496,81 @@ _QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None
 QuantizeAlgoCfgType = _QuantizeAlgoCfgType | list[_QuantizeAlgoCfgType] | None
 
 
+class AlgoCfgEntry(ModeloptBaseConfig):
+    """A single entry in an ``algo_cfg`` list — one scope, one ordered algorithm pipeline.
+
+    Deliberately shaped like :class:`QuantizerCfgEntry`: a selector plus a ``cfg``.  Where
+    ``quant_cfg`` entries carry quantizer *attributes*, ``algo_cfg`` entries carry the ordered
+    list of calibration *algorithms* to run on the matched targets.
+
+    Exactly one selector must be given:
+
+    - ``module_name`` — glob over quantized-linear module names.  Use for weight/module-level
+      algorithms (``gptq``, ``awq_lite``, ``smoothquant``), where the role is implied by the
+      algorithm itself.
+    - ``quantizer_name`` — glob over quantizer module names.  Use when the role must be picked
+      explicitly, e.g. ``max`` on ``*input_quantizer`` only.
+    """
+
+    module_name: str | None = ModeloptField(
+        default=None,
+        title="Module name pattern.",
+        description="Glob matched against quantized-linear module names.",
+    )
+    quantizer_name: str | None = ModeloptField(
+        default=None,
+        title="Quantizer name pattern.",
+        description="Glob matched against quantizer module names.",
+    )
+    cfg: list[_QuantizeAlgoCfgType] = ModeloptField(
+        default=...,
+        title="Ordered calibration pipeline for the matched targets.",
+        description="A list of algorithms run in order, each consuming the previous one's "
+        'mutated weights/scales. An element is an algorithm name (``"max"``), a dict keyed on '
+        '``method`` (``{"method": "gptq", "block_size": 64}``), or a '
+        ":class:`QuantizeAlgorithmConfig`.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_entry(cls, values):
+        """Accept a bare (non-list) ``cfg`` and enforce the exactly-one-selector rule.
+
+        Runs before the model is ever consulted, so a malformed entry fails at config
+        construction rather than part-way through calibration.
+        """
+        if not isinstance(values, dict):
+            return values
+        values = dict(values)
+        # Check emptiness *before* wrapping: `cfg: null` would otherwise become `[None]`, which
+        # is truthy, so the entry would claim its scope (suppressing the `algorithm` fallback)
+        # while contributing no stage -- leaving that scope silently uncalibrated.
+        if values.get("cfg") is None:
+            raise ValueError(
+                f"AlgoCfgEntry 'cfg' must list at least one algorithm. Got: {values!r}"
+            )
+        if not isinstance(values["cfg"], list):
+            values["cfg"] = [values["cfg"]]
+        selectors = [k for k in ("module_name", "quantizer_name") if values.get(k) is not None]
+        if len(selectors) != 1:
+            raise ValueError(
+                "AlgoCfgEntry needs exactly one of 'module_name' / 'quantizer_name'; got "
+                f"{selectors or 'neither'}. Entry: {values!r}"
+            )
+        if not values.get("cfg"):
+            raise ValueError(
+                f"AlgoCfgEntry 'cfg' must list at least one algorithm. Got: {values!r}"
+            )
+        return values
+
+    @property
+    def selector(self) -> tuple[str, str]:
+        """``(selector_kind, glob)`` for this entry."""
+        if self.module_name is not None:
+            return "module_name", self.module_name
+        return "quantizer_name", self.quantizer_name  # type: ignore[return-value]
+
+
 def normalize_quant_cfg_list(
     v: RawQuantizeQuantCfgType | DeprecatedQuantCfgType,
 ) -> list[QuantizerCfgEntry]:
@@ -1636,6 +1711,19 @@ class QuantizeConfig(ModeloptBaseConfig):
         title="Calibration algorithm, see :meth:`calibrate <modelopt.torch.quantization.model_quant.calibrate>` "
         "for more details.",
         validate_default=True,
+    )
+
+    algo_cfg: list[AlgoCfgEntry] | None = ModeloptField(
+        default=None,
+        title="Per-scope calibration pipelines.",
+        description=(
+            "Ordered list of :class:`AlgoCfgEntry` dicts assigning a calibration pipeline to a "
+            "scope, e.g. ``[{'module_name': '*self_attn*', 'cfg': ['awq_lite']}, "
+            "{'module_name': '*mlp*', 'cfg': ['mse', 'gptq']}]``. Each entry's ``cfg`` runs in "
+            "order, every stage consuming the previous one's mutated weights and scales. "
+            "``algorithm`` becomes the fallback for targets no entry matches. Not supported "
+            "together with expert parallelism."
+        ),
     )
 
     effective_bits: float | None = ModeloptField(

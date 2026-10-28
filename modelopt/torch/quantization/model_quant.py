@@ -71,6 +71,48 @@ __all__ = [
 
 
 # TODO: Descriptors for the supported algorithms
+def _apply_calibration_plan(model, algo_cfg, algorithm, forward_loop) -> None:
+    """Compile ``algo_cfg`` into ordered stages and apply each as its own calibration mode.
+
+    Compile first, so a bad plan fails before any expensive calibration. Each stage is then a
+    real mode application: it is recorded in the modelopt state under its own name, so the state
+    reads ``["quantize", "mse_calibrate", "gptq_calibrate"]`` rather than one opaque entry. The
+    values derived from the plan -- the write-mask, the hand-off -- travel through
+    ``mode_kwargs``, which reaches the convert entrypoint and is deliberately never saved: they
+    describe how this run was produced, not what the model is.
+    """
+    from modelopt.torch.utils import print_rank_0
+
+    from .algo_cfg import compile_algo_cfg, derive_handoff, stage_predicate, stage_targets
+    from .mode import BaseCalibrateModeDescriptor, CalibrateModeRegistry
+
+    plan = compile_algo_cfg({"algo_cfg": algo_cfg, "algorithm": algorithm}, model)
+    print_rank_0(f"calibration plan: {' -> '.join(str(stage) for stage in plan)}")
+    for i, stage in enumerate(plan):
+        if stage.algo is None:
+            continue
+        name = BaseCalibrateModeDescriptor._get_mode_name(stage.algo, check=True)
+        # The registry is typed as holding plain ModeDescriptors, but `register_mode` asserts
+        # every member of *this* registry subclasses BaseCalibrateModeDescriptor.
+        descriptor = cast("type[BaseCalibrateModeDescriptor]", type(CalibrateModeRegistry[name]))
+        _, quantizers = stage_targets(model, stage)
+        # A grid change invalidates the hand-off: the amax an earlier stage produced described
+        # the old grid, so this stage must re-initialize rather than skip.
+        changed = descriptor.prepare(model, quantizers, stage.cfg)
+        apply_mode(
+            model,
+            mode=[(name, stage.cfg)],
+            registry=CalibrateModeRegistry,
+            mode_kwargs=[
+                {
+                    "forward_loop": forward_loop,
+                    "should_process": stage_predicate(model, stage),
+                    "handoff": {} if changed else derive_handoff(model, plan, i),
+                }
+            ],
+        )
+
+
 def calibrate(
     model: nn.Module,
     algorithm: QuantizeAlgoCfgType = "max",
@@ -99,6 +141,21 @@ def calibrate(
 
     Returns: The calibrated pytorch model.
     """
+    return _calibrate(model, algorithm, forward_loop, algo_cfg=None)
+
+
+def _calibrate(
+    model: nn.Module,
+    algorithm: QuantizeAlgoCfgType,
+    forward_loop: ForwardLoop | None,
+    algo_cfg: list | None,
+) -> nn.Module:
+    """Shared body of :func:`calibrate` and the scoped-plan path.
+
+    ``algo_cfg`` is a config key rather than an argument of the public ``calibrate``, so this
+    private seam exists only to let :func:`quantize` route a plan through the same preamble
+    (forward-loop deprecation shim, eval mode, resharding) and the same post-checks.
+    """
     if forward_loop is not None:
         # get the number of arguments of forward_loop
         num_args = len(inspect.signature(forward_loop).parameters)
@@ -125,11 +182,16 @@ def calibrate(
     model.eval()
 
     with forward_with_reshard(model):
-        apply_mode(
-            model,
-            mode=get_modelike_from_algo_cfg(algorithm),
-            mode_kwargs={"forward_loop": forward_loop},
-        )
+        # A scoped plan runs stage by stage; without `algo_cfg` the legacy path is untouched and
+        # the recorded modelopt state stays byte-identical.
+        if algo_cfg:
+            _apply_calibration_plan(model, algo_cfg, algorithm, forward_loop)
+        else:
+            apply_mode(
+                model,
+                mode=get_modelike_from_algo_cfg(algorithm),
+                mode_kwargs={"forward_loop": forward_loop},
+            )
 
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer):
@@ -448,7 +510,9 @@ def quantize(
     # Fail before calibration rather than after exporting an unquantized checkpoint.
     _check_weight_quantization_took_effect(model, quantize_config)
     _check_plugin_quantization_took_effect(model, quantize_config)
-    return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
+    return _calibrate(
+        model, config.get("algorithm"), forward_loop, algo_cfg=quantize_config.algo_cfg
+    )
 
 
 # TODO: create a config interface for auto_quantize and expose setting

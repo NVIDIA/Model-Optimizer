@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Composed PTQ recipe for NVFP4 W4A4 with KV quantizers disabled, calibrated by an MSE range
+# search chained into GPTQ.
+#
+# This is the worked example of `algo_cfg`: an ordered pipeline on one scope, where each stage
+# consumes what the previous one left behind. GPTQ compensates rounding error against a specific
+# quantization grid, so running it after an MSE sweep only helps if it uses *that* grid rather
+# than re-deriving one from max -- which the executor arranges by handing GPTQ `skip_max_init`
+# once it has checked that MSE covered every target.
+#
+# The static weight unit is required, not cosmetic: `fp8_scale_sweep` searches stored per-block
+# scales, and there is nothing to search on a dynamic grid.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  nvfp4_static: configs/numerics/nvfp4_static
+  nvfp4: configs/numerics/nvfp4
+
+metadata:
+  description: >-
+    Applies NVFP4 W4A4 with static weight scales, dynamic inputs and KV quantizers disabled,
+    calibrated by an MSE FP8-scale sweep chained into GPTQ over the same weights.
+quantize:
+  # No separate `algorithm`: the algo_cfg entry below covers every weight quantizer, so a
+  # fallback would be redundant and the compiler drops it.
+  algorithm:
+  algo_cfg:
+    - module_name: '*'
+      cfg:
+        - method: mse
+          fp8_scale_sweep: true
+        - method: gptq
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*weight_quantizer'
+      cfg:
+        $import: nvfp4_static
+    - quantizer_name: '*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*[kv]_bmm_quantizer'
+      enable: false
+    - $import: default_disabled_quantizers
