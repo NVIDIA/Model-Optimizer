@@ -1752,11 +1752,26 @@ def normalize_experts_impl_on_the_fly(model):
             "its experts on `torch_a2a`, the expert-parallel forward, which cannot fall back to "
             "eager. Quantize the model without expert parallelism."
         )
+    moved = {}  # (was, now), once each: the root config and its sub-configs often agree
     for cfg in configs:
+        was = cfg._experts_implementation
         if eager_only:
             cfg._experts_implementation = "eager"
-        elif cfg._experts_implementation not in supported_impls:
+        elif was not in supported_impls:
             cfg._experts_implementation = fallback_impl
+        if cfg._experts_implementation != was:
+            moved[(was, cfg._experts_implementation)] = None
+    reason = (
+        f"{', '.join(eager_only)} quantize on the eager forward only"
+        if eager_only
+        else "nothing intercepts that backend"
+    )
+    for was, now in moved:
+        # The caller may have asked for it (a load's experts_implementation, hf_ptq's flag).
+        warnings.warn(
+            f"Quantizing the fused experts on {now!r} instead of experts_implementation={was!r}: "
+            f"{reason}."
+        )
 
 
 def assert_fused_experts_intercepted(model):

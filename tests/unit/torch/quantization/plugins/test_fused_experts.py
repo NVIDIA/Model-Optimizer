@@ -1355,7 +1355,10 @@ class TestNormalizeExpertsImpl:
         """An unsupported backend on an MoE model gets redirected to grouped_mm."""
         cfg = _StubConfig(impl="kernels")
         model = _TinyMoEModelWithConfig(cfg)
-        normalize_experts_impl_on_the_fly(model)
+        with pytest.warns(
+            UserWarning, match="on 'grouped_mm' instead of experts_implementation='kernels'"
+        ):
+            normalize_experts_impl_on_the_fly(model)
         assert cfg._experts_implementation == "grouped_mm"
 
     def test_falls_back_to_eager_without_the_grouped_forward(self, monkeypatch):
@@ -1462,14 +1465,15 @@ class TestNormalizeExpertsImpl:
                 _eager_only = False
 
     @pytest.mark.parametrize("impl", ["eager", "grouped_mm", None])
-    def test_leaves_a_supported_value_unchanged(self, impl):
+    def test_leaves_a_supported_value_unchanged(self, impl, recwarn):
         """``eager``, ``grouped_mm`` and an explicit None (the model's eager ``F.linear`` forward) are
-        supported, so they are left as they are."""
+        supported, so they are left as they are, without a word."""
         cfg = _StubConfig()
         cfg._experts_implementation = impl
         model = _TinyMoEModelWithConfig(cfg)
         normalize_experts_impl_on_the_fly(model)
         assert cfg._experts_implementation == impl
+        assert not [w for w in recwarn if "instead of experts_implementation" in str(w.message)]
 
 
 # ---------------------------------------------------------------------------
