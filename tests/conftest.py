@@ -76,6 +76,7 @@ _DEFAULT_TIMEOUT = {
 # On Blackwell (sm_120), nemo:26.08's cuBLAS intermittently fails a GEMM once a gpu_megatron worker
 # process has run about a dozen model-building jobs. A failed job replaces the worker, so the rerun
 # gets a fresh one.
+# TODO: Remove after the CI nemo container is updated (re-check on nemo:26.10).
 _BLACKWELL_CUDA_CRASHES = [
     "illegal memory access",
     "CUBLAS_STATUS_INTERNAL_ERROR",
