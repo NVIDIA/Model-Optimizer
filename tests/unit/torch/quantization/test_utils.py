@@ -431,19 +431,28 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size):
     layer = torch.nn.Module()
     layer.dense = torch.nn.Linear(8, 8)
     layer.experts = torch.nn.Module()
-    layer.experts.weight = torch.nn.Parameter(
-        distribute_tensor(torch.randn(2 * size, 8), ep_mesh, [Shard(0)])
-    )
-    fully_shard(layer, mesh=dp_mesh, ignored_params={layer.experts.weight})
+    for name in ("gate_up_proj", "down_proj"):
+        weight = distribute_tensor(torch.randn(2 * size, 8), ep_mesh, [Shard(0)])
+        layer.experts.register_parameter(name, torch.nn.Parameter(weight))
+    fully_shard(layer, mesh=dp_mesh, ignored_params=set(layer.experts.parameters()))
     with fsdp2_weight_access_and_writeback_context(layer, layer):
         assert not isinstance(layer.dense.weight, DTensor)  # FSDP2's own: gathered
-        assert isinstance(layer.experts.weight, DTensor)
-        assert layer.experts.weight.to_local().shape[0] == 2
-    assert layer.experts.weight.to_local().shape[0] == 2
+        for weight in layer.experts.parameters():
+            assert isinstance(weight, DTensor)
+            assert weight.to_local().shape[0] == 2
+    # Every expert weight misses the kept set, and one scan of the unit answers them all.
+    with (
+        mock.patch.object(fully_shard, "state", wraps=fully_shard.state) as state,
+        fsdp2_weight_access_and_writeback_context(layer, layer),
+    ):
+        pass
+    assert state.call_count == 1
+    assert all(weight.to_local().shape[0] == 2 for weight in layer.experts.parameters())
 
 
 def test_fsdp2_weight_access_leaves_parameters_fsdp2_does_not_own(cpu_dist_workers):
     """An expert-parallel weight is a DTensor sharded over the experts that fully_shard was told to
     ignore. The weight-access window gathers FSDP2's parameters only, so it stays sharded: gathering
-    it would hand every rank every expert."""
+    it would hand every rank every expert. Each such weight misses the window's kept set, which it
+    scans again once, not once per weight."""
     cpu_dist_workers.run(_window_leaves_what_fsdp2_does_not_own_job)

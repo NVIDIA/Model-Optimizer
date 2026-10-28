@@ -537,7 +537,8 @@ def _fsdp2_unshard_context(fsdp_module: FSDPModule):
 
 
 # Per FSDP2 unit, the ids _fsdp2_owned_params found: the weight-access window opens once per quantized
-# module, and a scan walks the unit's whole parameter group.
+# module, and a scan walks the unit's whole parameter group. An id stays valid while FSDP2 holds its
+# parameter, which holds for a unit wrapped once; a rescan drops the ids of parameters it let go.
 _FSDP2_OWNED_PARAMS: "weakref.WeakKeyDictionary[nn.Module, set[int]]" = weakref.WeakKeyDictionary()
 
 
@@ -602,11 +603,14 @@ def fsdp2_weight_access_and_writeback_context(
     # Collect all DTensor parameters, replacing them with local replicated copies.
     originals: dict[str, tuple] = {}
     owned = _fsdp2_owned_params(fsdp_module)
+    refreshed = False
     for name, param in module.named_parameters():
         if not isinstance(param, torch.distributed.tensor.DTensor):
             continue
-        if id(param) not in owned:
-            owned = _fsdp2_owned_params(fsdp_module, refresh=True)
+        if id(param) not in owned and not refreshed:
+            # Once per window: nothing here changes a unit's state, and a DTensor FSDP2 does not own
+            # (every expert-parallel weight) misses each time.
+            owned, refreshed = _fsdp2_owned_params(fsdp_module, refresh=True), True
         if id(param) not in owned:
             # Not FSDP's shard: a DTensor FSDP2 does not manage, such as an expert-parallel weight
             # that fully_shard was told to ignore. Gathering it would hand every rank every expert,
