@@ -344,6 +344,9 @@ class DistributionPlan:
         return self.dense == "fsdp"
 
 
+# A plan is a value the collectives carry, and they load what the ranks send with weights_only.
+torch.serialization.add_safe_globals([DistributionPlan])
+
 _PLAN_ATTR = "_modelopt_distribution_plan"
 
 
@@ -473,16 +476,13 @@ def _encoded(value: Any) -> bytes:
 def _decoded(payload: bytes) -> Any:
     """The value :func:`_encoded` serialized into ``payload``.
 
-    A full load, not :func:`_deserialize`'s weights_only one: the values are whatever the callers
-    compute, of any class, and the peers are this job's own ranks, whose payloads torch's object
-    collectives unpickle just as fully. A tensor in the value loads on the CPU on every rank, the
-    producing one too: the device it was saved from is the producer's, not this rank's.
+    A weights_only load, as :func:`_deserialize`'s: built-in types and tensors load as they are, and
+    a class a caller sends must be registered with ``torch.serialization.add_safe_globals``, as
+    :class:`DistributionPlan` is. A tensor in the value loads on the CPU on every rank, the producing
+    one too: the device it was saved from is the producer's, not this rank's.
     """
-    return torch.load(
-        io.BytesIO(payload),
-        map_location="cpu",
-        weights_only=False,  # this job's own ranks sent the bytes over its process group: no file
-    )
+    # Explicit so TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD cannot re-enable pickle for peer payloads.
+    return torch.load(io.BytesIO(payload), map_location="cpu", weights_only=True)
 
 
 def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
@@ -492,10 +492,12 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
     files). If ``fn`` raises or its value does not round-trip (:func:`_encoded`), every rank raises
     rather than wait for the broadcast: ``rank`` its own error, the others a SystemExit with its
     code if it exited, else a RuntimeError. Every rank, ``rank`` too, gets a copy loaded from the
-    bytes sent, with any tensor in it on the CPU. Collective: every rank calls it at the same point
-    with the same ``label`` and ``rank``; a receiving rank whose ``label`` differs raises, but
-    ``rank`` itself cannot tell and returns its value. In a single process ``fn``'s value comes back
-    as it is; a rank of a launch whose process group is not set up raises.
+    bytes sent, with any tensor in it on the CPU; the value must load with ``weights_only``, so a
+    class in it must be registered with ``torch.serialization.add_safe_globals``. Collective: every
+    rank calls it at the same point with the same ``label`` and ``rank``; a receiving rank whose
+    ``label`` differs raises, but ``rank`` itself cannot tell and returns its value. In a single
+    process ``fn``'s value comes back as it is; a rank of a launch whose process group is not set up
+    raises.
     """
     _refuse_a_launch_without_its_group(label)
     if not 0 <= rank < size():
@@ -538,8 +540,9 @@ def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _
     others a RuntimeError naming the first; else each rank exits, with its own code or the first
     one's. Collective, with the same ``label`` on every rank; ranks out of step raise. ``combine``
     gets copies loaded from the bytes the ranks sent, with any tensor in them on the CPU; in a
-    single process it gets ``fn()``'s value as it is. A rank of a launch whose process group is not
-    set up raises.
+    single process it gets ``fn()``'s value as it is. The values must load with ``weights_only``, so
+    a class in them must be registered with ``torch.serialization.add_safe_globals``. A rank of a
+    launch whose process group is not set up raises.
 
     Unlike :func:`allreduce`, it runs ``fn`` itself, so a rank whose ``fn`` fails still joins.
     """
@@ -585,7 +588,7 @@ class DistributedState:
 
     rank: int
     world_size: int
-    device: torch.device | str
+    device: torch.device
 
     @property
     def is_main(self) -> bool:
@@ -641,7 +644,9 @@ def distributed_run(
     exc: BaseException | None = None
     try:
         yield DistributedState(
-            rank(), size(), torch.device(f"cuda:{local_rank()}") if launched else device
+            rank(),
+            size(),
+            torch.device(f"cuda:{local_rank()}") if launched else torch.device(device),
         )
     except BaseException as e:
         exc = e

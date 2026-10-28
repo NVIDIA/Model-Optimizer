@@ -317,12 +317,16 @@ class _Protocol2Only:
         return _Protocol2Only, (self.n,)
 
 
+# The collectives load what the ranks send with weights_only.
+torch.serialization.add_safe_globals([_Protocol2Only])
+
+
 def _refuse_to_load():
     raise RuntimeError("this value cannot be loaded")
 
 
 class _Unloadable:
-    """Pickles, and raises when loaded back."""
+    """Pickles, and is refused when loaded back: weights_only runs no callable it was not given."""
 
     def __reduce__(self):
         return _refuse_to_load, ()
@@ -390,10 +394,10 @@ def _broadcast_from_job(rank, size):
             )
         # Loaded back there too: a value the other ranks could not load fails on the sending rank.
         _, error = _outcome(lambda: broadcast_from("x", _Unloadable))
-        assert isinstance(error, RuntimeError), error
-        assert ("cannot be loaded" if rank == 0 else "rank 0 failed to compute x") in str(error), (
-            error
-        )
+        if rank == 0:
+            assert isinstance(error, pickle.UnpicklingError), error
+        else:
+            assert "rank 0 failed to compute x" in str(error), error
         sent, error = _outcome(lambda: broadcast_from("plan" if rank == 0 else "other", lambda: 7))
         if rank == 0:
             assert (sent, error) == (7, None)
@@ -474,10 +478,10 @@ def _all_reduce_job(rank, size):
         )
         assert reduced == list(range(size)), reduced
         _, error = _outcome(lambda: all_reduce("x", _Unloadable if rank == 1 else lambda: 4, min))
-        assert isinstance(error, RuntimeError), error
-        assert ("cannot be loaded" if rank == 1 else "rank 1 failed to compute x") in str(error), (
-            error
-        )
+        if rank == 1:
+            assert isinstance(error, pickle.UnpicklingError), error
+        else:
+            assert "rank 1 failed to compute x" in str(error), error
         _, error = _outcome(
             lambda: all_reduce("smallest" if rank == 0 else "other", lambda: 4, min)
         )
@@ -543,7 +547,7 @@ def test_a_single_process_is_rank_0_of_one_on_the_given_device(monkeypatch):
     monkeypatch.setattr(dist, "setup", lambda **kwargs: pytest.fail("set a group up"))
     monkeypatch.setattr(dist, "_destroy_group", lambda exc: pytest.fail("tore a group down"))
     with distributed_run(device="cpu") as state:
-        assert state == DistributedState(rank=0, world_size=1, device="cpu")
+        assert state == DistributedState(rank=0, world_size=1, device=torch.device("cpu"))
         assert state.is_main
 
 
@@ -683,7 +687,7 @@ def test_the_run_leaves_a_group_it_found_alone(monkeypatch, recwarn, world_size,
         ) as state,
     ):
         assert (state.rank, state.world_size) == (1, 2)
-        assert torch.device(state.device) == torch.device("cpu" if world_size is None else "cuda:1")
+        assert state.device == torch.device("cpu" if world_size is None else "cuda:1")
         assert bound == ([] if world_size is None else [1])
         if raises:
             raise ValueError("calibration failed")
