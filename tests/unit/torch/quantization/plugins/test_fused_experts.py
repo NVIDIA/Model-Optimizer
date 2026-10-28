@@ -2038,8 +2038,12 @@ class TestGroupedMMExperts:
         grouped_model.load_state_dict(eager_model.state_dict())
 
         try:
-            mtq.quantize(eager_model, self._quant_cfg(), forward_loop=self._forward_loop_all_experts)
-            mtq.quantize(grouped_model, self._quant_cfg(), forward_loop=self._forward_loop_all_experts)
+            mtq.quantize(
+                eager_model, self._quant_cfg(), forward_loop=self._forward_loop_all_experts
+            )
+            mtq.quantize(
+                grouped_model, self._quant_cfg(), forward_loop=self._forward_loop_all_experts
+            )
 
             e = eager_model.moe.experts
             g = grouped_model.moe.experts
