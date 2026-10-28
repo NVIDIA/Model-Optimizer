@@ -19,6 +19,7 @@ import os
 import tempfile
 import time
 from collections.abc import Sequence
+from itertools import chain
 
 import onnx
 import onnx_graphsurgeon as gs
@@ -72,7 +73,9 @@ def _find_nodes_to_quantize(
 
     # partitioned_nodes keeps track of nodes that are already part of some partition.
     # Certain nodes of those partitions are quantizable. For example, heads.
-    partitioned_nodes = set(sum(non_quantizable_hard_coded_partitions, []) + nodes_to_exclude)  # noqa: RUF017
+    partitioned_nodes = set(chain.from_iterable(non_quantizable_hard_coded_partitions)) | set(
+        nodes_to_exclude or []
+    )
     cask_fusible_partitions, kgen_partitions = find_fusible_partitions(
         graph,
         partitioned_nodes,
@@ -132,7 +135,7 @@ def quantize(
     nodes_to_quantize: list[str] | None = None,
     nodes_to_exclude: list[str] | None = None,
     use_external_data_format: bool = False,
-    intermediate_generated_files: list[str] = [],
+    intermediate_generated_files: list[str] | None = None,
     trt_extra_plugin_lib_paths: list[str] | None = None,
     high_precision_dtype: str = "fp16",
     passes: list[str] = ["concat_elimination"],
@@ -150,6 +153,8 @@ def quantize(
     Quantization of ['Add', 'AveragePool', 'BatchNormalization', 'Clip', 'Conv', 'ConvTranspose',
     'Gemm', 'GlobalAveragePool', 'MatMul', 'MaxPool', 'Mul'] op types are supported.
     """
+    if intermediate_generated_files is None:
+        intermediate_generated_files = []
     configure_logging(level=log_level.upper())
     logger.info(f"Starting INT8 quantization with method: {calibration_method}")
     t_start = time.time()

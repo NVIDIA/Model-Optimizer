@@ -72,7 +72,7 @@ def test_iterative_channel_contribution_hook_bsi():
     _test_iterative_channel_contribution_hook_with_shape(dim1=8, dim2=32)
 
 
-def test_l2_norm_hook():
+def test_l2_norm_hook(tmp_path):
     """Test L2NormHook returns correct scores after accumulating activations."""
     torch.manual_seed(42)
 
@@ -98,3 +98,5 @@ def test_l2_norm_hook():
     assert torch.allclose(scores, expected_scores, atol=1e-4), (
         f"Expected scores {expected_scores}, got {scores}"
     )
+
+    assert L2NormHook.save_hook_states({"linear": hook}, tmp_path).is_file()
