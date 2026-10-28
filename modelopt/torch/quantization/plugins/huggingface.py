@@ -1638,7 +1638,7 @@ def _is_fused_experts_module(module):
     eager, the only forward on which it quantizes ``down_proj``'s input (it intercepts the eager
     forward's ``bmm``/``matmul``).
     """
-    if _fused_experts_wrapper(module) is not None or isinstance(module, _QuantFusedExperts):
+    if _fused_experts_wrapper(module) is not None or _is_quant_fused_experts_module(module):
         return True
     wrapper = QuantModuleRegistry.get(type(module)) if hasattr(module, "num_experts") else None
     return wrapper is not None and issubclass(wrapper, _QuantFusedExperts)
