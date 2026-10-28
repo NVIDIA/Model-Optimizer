@@ -31,6 +31,9 @@ from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms.dla_topk import _apply_topk
 
+# The package re-exports a function with the module name after public registration.
+pipeline = importlib.import_module("modelopt.onnx.graph_surgery.make_dla_compatible")
+
 ort = pytest.importorskip("onnxruntime")
 
 
@@ -342,7 +345,6 @@ def test_malformed_late_topk_refuses_before_any_mutation():
 )
 def test_registered_pipeline_preserves_integer_topk_casts_for_rewrite(dtype):
     """Keep integer candidates for TopK while floating Casts retain their FP32 conversion."""
-    pipeline = importlib.import_module("modelopt.onnx.graph_surgery.make_dla_compatible")
     model = _make_topk_chain_model(rank_converted=True)
     first = next(node for node in model.graph.node if node.name == "cast1")
     next(attr for attr in first.attribute if attr.name == "to").i = dtype
@@ -367,7 +369,6 @@ def test_registered_pipeline_preserves_integer_topk_casts_for_rewrite(dtype):
 @pytest.mark.parametrize("ineligible", [None, "values_output", "runtime_k"])
 def test_cast_protection_requires_registered_eligible_topk(topk_stage, ineligible, monkeypatch):
     """Keep FP32 Cast behavior when TopK cannot consume the complete private chain."""
-    pipeline = importlib.import_module("modelopt.onnx.graph_surgery.make_dla_compatible")
     model = _make_topk_chain_model(rank_converted=True)
     if ineligible == "values_output":
         model.graph.output.append(
