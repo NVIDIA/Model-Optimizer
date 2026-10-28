@@ -548,7 +548,7 @@ class PrecisionConverter:
             # Propagate tensor types to the children nodes (until another Cast or Q node is met)
             _propagate_cast_type_through_nodes(node, np_type)
 
-        return gs.export_onnx(graph)
+        return onnx_utils.export_onnx(graph)
 
     def _restore_original_io_metadata(self) -> None:
         """Preserve complete public I/O metadata when keep_io_types=True."""

@@ -20,6 +20,9 @@ import onnx
 import onnx_graphsurgeon as gs
 import pytest
 
+from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
+from modelopt.onnx.autocast.precisionconverter import PrecisionConverter
+from modelopt.onnx.export.fp8_exporter import FP8QuantExporter
 from modelopt.onnx.quantization.autotune.autotuner_base import QDQAutotunerBase
 from modelopt.onnx.quantization.gs_patching import patch_gs_modules
 from modelopt.onnx.quantization.int4 import quantize_rtn
@@ -31,7 +34,19 @@ from modelopt.onnx.utils import export_onnx, save_onnx
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize(
     "route",
-    ["load", "rtn", "subgraph", "capture", "plugin_domain", "plugin_shapes", "autotune_file"],
+    [
+        "load",
+        "rtn",
+        "subgraph",
+        "capture",
+        "plugin_domain",
+        "plugin_shapes",
+        "autotune_file",
+        "fp8_compress",
+        "fp8_post",
+        "sanitize",
+        "precision",
+    ],
 )
 def test_export_initializer_over_protobuf_limit(tmp_path, route):
     """Large unquantized weights must survive preprocessing and INT4 graph reconstruction."""
@@ -119,6 +134,19 @@ def test_export_initializer_over_protobuf_limit(tmp_path, route):
         elif route == "plugin_shapes":
             pytest.importorskip("tensorrt")
             model = infer_types_shapes(model, {})
+        elif route == "fp8_compress":
+            model = FP8QuantExporter.compress_weights(model)
+        elif route == "fp8_post":
+            model = FP8QuantExporter.post_process(model)
+        elif route == "sanitize":
+            sanitizer = GraphSanitizer(model)
+            sanitizer.cleanup_model()
+            model = sanitizer.model
+        elif route == "precision":
+            converter = PrecisionConverter(
+                model, {}, {}, {}, custom_ops=set(), sanitize_model=False
+            )
+            model = converter._propagate_types_shapes_custom_ops(converter.model)
         else:
             patch_gs_modules()
             model = quantize_rtn(model, block_size=2, dq_only=True)

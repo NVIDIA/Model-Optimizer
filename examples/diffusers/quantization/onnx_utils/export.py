@@ -48,6 +48,7 @@ from diffusers.models.unets import UNet2DConditionModel
 from torch.onnx import export as onnx_export
 
 from modelopt.onnx.export import NVFP4QuantExporter
+from modelopt.onnx.utils import export_onnx
 from modelopt.torch.quantization.export_onnx import configure_linear_module_onnx_quantizers
 from modelopt.torch.utils import torch_to
 
@@ -119,7 +120,7 @@ def flux_convert_rope_weight_type(onnx_graph):
     for node in graph.nodes:
         if node.op == "Einsum":
             node.inputs[1].dtype = "float32"
-    return gs.export_onnx(graph)
+    return export_onnx(graph)
 
 
 def _gen_dummy_inp_and_dyn_shapes_sdxl(backbone, min_bs=1, opt_bs=1):
