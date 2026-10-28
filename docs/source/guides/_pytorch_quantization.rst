@@ -82,6 +82,44 @@ Please see :doc:`TensorRT-LLM Deployment <../deployment/1_tensorrt_llm>` for mor
 .. note::
     To reduce the memory footprint of the quantized model, please refer to :doc:`Compress Quantized Models <./_compress_quantized_models>`.
 
+Parallel GGML expert updates
+---------------------------
+
+For fused MoE experts in an FSDP2 model, enable ``parallel_experts`` in the GPTQ
+algorithm configuration to assign independent expert/projection updates to different
+ranks. Each owner executes the existing sequential GPTQ error-correction algorithm;
+all ranks receive the owner's selected packed payload and preserve normal export.
+
+.. code-block:: python
+
+    mtq.calibrate(
+        fsdp2_model,
+        {"method": "gptq", "block_size": 256, "perc_damp": 0.3,
+         "importance_weighted": True, "parallel_experts": True},
+        forward_loop=calibration_forward_loop,
+    )
+
+Configure GGML weight quantizers before calibration. This opt-in path requires
+multiple CUDA/NCCL ranks in the default data-parallel group, one-dimensional FSDP2
+sharding, and contiguous materialized expert weights. FSDP2 CPU offload is supported.
+Tensor/expert parallelism, non-GGML expert quantizers, packed source weights, shared
+expert quantizers and aliased expert projections are rejected before calibration.
+Dense projections retain their normal update path. The default remains serial.
+
+Hessian collection and reduction retain their existing order and semantics.
+Collection still holds local statistics for all experts in the current layer;
+this option does not reduce that peak. Before updates, ranks release statistics
+owned by other ranks. Each rank processes one expert at a time and broadcasts
+payloads in a common order. The existing FSDP layer materialization is retained;
+there is no extra full-model weight or Hessian broadcast. Python update failures
+are reported to all ranks before payload broadcasts; restart failed calibration
+from the original source rather than exporting partially updated state.
+
+Measure complete calibration time and allocated GPU-hours, as well as the GPTQ
+update phase. Benefits depend on expert count, matrix dimensions, interconnect,
+activation collection, and checkpoint I/O; additional GPUs need not reduce total
+GPU cost.
+
 Quantization-aware Training (QAT)
 =================================
 

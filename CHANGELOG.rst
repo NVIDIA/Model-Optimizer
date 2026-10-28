@@ -8,11 +8,11 @@ Changelog
 
 *Quantization*
 
+- Per-tensor FP8 matrix and expert-stack exports now match calibrated fake-quantization arithmetic; exported scales can differ by a few float32 ulps and packed values near rounding boundaries can change.
+- GGML GPTQ can distribute independent fused-expert updates across FSDP2 data-parallel GPUs with ``parallel_experts: true``; serial updates remain the default.
 - The HF PTQ example exposes independent AutoQuant candidate workers, and the Slurm launcher can bound concurrent tasks and join them before coordination.
 - AutoQuantize supports opt-in independent candidate-calibration workers with validated, resumable artifacts and atomic coordinator checkpoints.
-- Per-tensor FP8 matrix and expert-stack exports now match calibrated fake-quantization arithmetic; exported scales can differ by a few float32 ulps and packed values near rounding boundaries can change.
 - AutoQuantize can search GGML IQ formats calibrated with GPTQ or imatrix alongside NVFP4, FP8, and BF16, keeping each candidate's calibrated weights isolated during search.
-
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
 - The functional quantized-weight export API now exports the KV cache: ``capture_kv_cache_export_state`` returns an attention module's ``k_scale`` / ``v_scale``, and ``build_hf_quantization_config`` takes the KV-cache formats from ``get_kv_cache_export_spec``.
 - Add experimental data-parallel/FSDP2 KV-cache AutoQuantize, including composed weight-then-KV searches in ``examples/hf_ptq`` with synchronized calibration, scoring, selection, and resumable per-rank checkpoints. FSDP2 recipe scoring uses a global sample budget and defaults to a calibration batch size of 1 per rank.

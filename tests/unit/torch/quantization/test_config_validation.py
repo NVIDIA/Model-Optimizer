@@ -15,6 +15,7 @@
 
 """Test of quantization config validations."""
 
+import io
 import warnings
 
 import pytest
@@ -42,6 +43,7 @@ from modelopt.torch.quantization.config import (
     need_calibration,
     normalize_quant_cfg_list,
 )
+from modelopt.torch.utils import safe_load, safe_save
 
 
 def test_need_calibration():
@@ -716,3 +718,24 @@ class TestFourOverSixBlockSizes:
 def test_gptq_block_size_must_be_positive(block_size):
     with pytest.raises(ValidationError):
         GPTQCalibConfig(block_size=block_size)
+
+
+@pytest.mark.parametrize("parallel", [None, False, True])
+def test_gptq_execution_setting_checkpoint_compatibility(parallel):
+    config = GPTQCalibConfig(perc_damp=0.3, block_size=256, parallel_experts=bool(parallel))
+    expected = dict(config)
+    if parallel is None:
+        # Reproduce the state stored by checkpoints from before this option existed.
+        del config.__dict__["parallel_experts"]
+    checkpoint = io.BytesIO()
+    safe_save(config, checkpoint)
+    checkpoint.seek(0)
+    restored = safe_load(checkpoint)
+    assert dict(restored) == expected
+    serialized = restored.model_dump()
+    if parallel:
+        assert serialized["parallel_experts"] is True
+    else:
+        # Serial recipes keep the JSON identity that predates this execution option.
+        assert "parallel_experts" not in serialized
+        assert "parallel_experts" not in QuantizeConfig(algorithm=restored).model_dump_json()
