@@ -29,11 +29,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.parametrize("impl", ["eager", "grouped_mm"])
 @pytest.mark.parametrize("pass_through_bwd", [True, False])
-def test_stacked_nvfp4_experts_match_per_expert_quantizers(monkeypatch, pass_through_bwd):
+def test_stacked_nvfp4_experts_match_per_expert_quantizers(monkeypatch, pass_through_bwd, impl):
     model = get_tiny_qwen3_moe().cuda().train()
     input_ids = torch.randint(0, model.config.vocab_size, (2, 16), device="cuda")
     mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(input_ids))
+    # Train on the backend under test; both fake-quantize each projection's experts in one launch.
+    model.config._experts_implementation = impl
     experts = [m for m in model.modules() if isinstance(m, hf_plugin._QuantFusedExperts)]
     assert experts
     for module in experts:
