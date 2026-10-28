@@ -1,0 +1,6 @@
+# Reasoning-loop recovery posts
+
+- [Reducing Reasoning Loops with QAD Driven by Anti-Repetition Prompts: First Promising Results](2026-10-20-reducing-reasoning-loops-after-qad.md) — Daniel Korzekwa, October 20, 2026.
+
+GitHub renders the Markdown post directly. No build or HTML generation is required.
+The title, author, date, and key takeaways are ordinary Markdown.

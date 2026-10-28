@@ -9,6 +9,10 @@ distillation (QAD). Each experiment keeps its own settings, data provenance, and
 - [DPO recovery](experiments/dpo_recovery/README.md): preference-pair preparation, six environment
   paths for training after iterative recovery QAD, and matched SciCode evaluation.
 
+## Blog posts
+
+- [First recovery-QAD results](blog/2026-10-20-reducing-reasoning-loops-after-qad.md) — Daniel Korzekwa.
+
 Large datasets, generated responses, checkpoints, and containers are not included. Runtime paths
 are supplied separately; manifests use portable filenames and checksums. A missing public download
 URL means that an artifact has not been published with this example.
