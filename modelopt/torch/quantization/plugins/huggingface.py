@@ -1160,11 +1160,6 @@ class _QuantFP8Experts(_QuantFusedExperts):
                 setattr(self, name, nn.Parameter(unpacked, requires_grad=False))
 
 
-def _is_quant_fused_experts_module(module):
-    """Return True for a converted HF fused-MoE-experts quantization wrapper."""
-    return isinstance(module, _QuantFusedExperts)
-
-
 def _get_fused_experts_quantizer_attr_names(module):
     """Return quantizer attribute names for a converted fused-experts module."""
     first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
@@ -1174,6 +1169,11 @@ def _get_fused_experts_quantizer_attr_names(module):
         "down_proj_input_quantizer",
         "down_proj_weight_quantizers",
     )
+
+
+def _is_quant_fused_experts_module(module):
+    """Return True for a converted HF fused-MoE-experts quantization wrapper."""
+    return isinstance(module, _QuantFusedExperts)
 
 
 @contextmanager
@@ -1505,12 +1505,6 @@ def _fused_experts_wrapper(module):
     calls, so modules with a custom gated activation (e.g. ``MiniMaxM3VLExperts``)
     are still supported.
     """
-    # ``act_fn`` is a common marker of the standard HF fused-experts pattern, but it is NOT required by
-    # _QuantFusedExperts: the wrapper only quantizes the two projections; the activation is applied by the
-    # module's OWN forward. Models with a custom activation applied inline -- e.g. MiniMax-M3's SwiGLU via
-    # ``_apply_gate`` (``swiglu_alpha``/``swiglu_limit``, no ``act_fn``) -- are otherwise standard fused
-    # experts, so gate on the STRUCTURAL signature (num_experts + two 3-D fused projections) and treat
-    # ``act_fn`` as optional.
     if not hasattr(module, "num_experts"):
         return None
     down = getattr(module, "down_proj", None)
