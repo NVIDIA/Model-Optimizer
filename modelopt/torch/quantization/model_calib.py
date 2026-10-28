@@ -941,6 +941,49 @@ def _is_quant_fused_experts(module: nn.Module) -> bool:
     )
 
 
+def _fused_expert_projections(module: nn.Module):
+    """Yield ``(weight_name, weight, weight_quantizers, input_quantizer)`` per fused-experts projection.
+
+    ``weight`` is the 3-D ``(num_experts, out, in)`` parameter, ``weight_quantizers`` holds one
+    quantizer per expert, and ``input_quantizer`` is shared by the experts and runs once per expert
+    forward with ``module._current_expert_idx`` already set to that expert.
+    """
+    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
+    for weight_name, quantizers_name, input_q_name in (
+        (
+            first_proj_attr,
+            f"{first_proj_attr}_weight_quantizers",
+            f"{first_proj_attr}_input_quantizer",
+        ),
+        ("down_proj", "down_proj_weight_quantizers", "down_proj_input_quantizer"),
+    ):
+        weight = getattr(module, weight_name, None)
+        quantizers = getattr(module, quantizers_name, None)
+        input_quantizer = getattr(module, input_q_name, None)
+        if weight is not None and quantizers is not None and input_quantizer is not None:
+            yield weight_name, weight, quantizers, input_quantizer
+
+
+def _warn_if_fused_experts_skipped(model: nn.Module, algorithm: str) -> None:
+    """Warn that a linear-layer algorithm (AWQ, SmoothQuant, SVDQuant) skips fused experts.
+
+    These algorithms only process 2-D quantized linears, so quantized experts keep max
+    calibration. FP8 experts need no such algorithm and are not reported.
+    """
+    for name, module in model.named_modules():
+        if not _is_quant_fused_experts(module):
+            continue
+        for _, _, quantizers, input_quantizer in _fused_expert_projections(module):
+            for q in (*quantizers, input_quantizer):
+                for stage in q if isinstance(q, SequentialQuantizer) else [q]:
+                    if stage.is_enabled and stage.num_bits != (4, 3):
+                        warn_rank_0(
+                            f"{algorithm} does not apply to fused MoE experts "
+                            f"(e.g. {name}); they keep max calibration."
+                        )
+                        return
+
+
 class _LocalHessianInputHook:
     """Identify active input collectors so auxiliary modules can request a calibration forward."""
 
@@ -1305,6 +1348,8 @@ def smoothquant(model: nn.Module, forward_loop: ForwardLoop | None = None, alpha
     See :class:`SmoothQuantCalibConfig <modelopt.torch.quantization.config.SmoothQuantCalibConfig>` for
     details on the remaining arguments.
     """
+    _warn_if_fused_experts_skipped(model, "smoothquant")
+
     # distributed synchronization
     # max_calibrate performs amax sync for data parallel
 
@@ -1398,6 +1443,7 @@ def awq(
     See :class:`AWQFullCalibConfig <modelopt.torch.quantization.config.AWQFullCalibConfig>` for
     details on the remaining arguments.
     """
+    _warn_if_fused_experts_skipped(model, algorithm)
     with SequentialQuantizer.convert_to_single_quantizer(model):
         if algorithm in ["awq_full", "awq_lite"]:
             awq_lite(model, forward_loop, **kwargs)

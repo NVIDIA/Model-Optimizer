@@ -113,6 +113,8 @@ Changelog
 - ``--recipe`` (and ``modelopt.recipe.load_recipe``) now resolve a recipe path **filesystem-first**: a recipe of the same relative path in the current working directory takes precedence over the shipped built-in of that name, matching how recipe ``$import`` paths already resolve. Previously the built-in won.
 - Diffusion HF exports now omit attention quantizer buffers by default, except for FLUX.1, which retains enabled Q/K/V ``_amax`` keys for runtime compatibility; other consumers of those keys can opt in with ``export_attention_quantizers=True`` (CLI: ``--extra-param export_attention_quantizers=true``). Disabled attention quantizers remain excluded, and diffusion components, including LTX-2, no longer emit KV-cache quantization metadata.
 - The Windows FVD example rejects I3D checkpoints requiring unrestricted pickle loading. Custom TorchScript archives now require ``--weights-sha256`` with a trusted checksum; tensor state dictionaries continue to load directly.
+- ``hf_quant_config.json`` of an INT4 or W4A8 AWQ checkpoint now sets ``pre_quant_scale`` per layer, only for layers that have the tensor. A model whose fused-MoE experts have none (AWQ never applies to them) is now exported as ``MIXED_PRECISION`` with per-layer entries instead of a uniform algorithm.
+- Layerwise-calibration resume (``checkpoint_dir``) now loads checkpoint files with ``weights_only=True``. A checkpoint directory written by an earlier release whose layer inputs hold objects other than tensors, plain containers or Hugging Face dynamic caches can no longer be resumed; recalibrate in a fresh directory, or disable checkpointing.
 
 **Deprecations**
 
@@ -134,6 +136,7 @@ Changelog
 
 **Bug Fixes**
 
+- ``export_hf_checkpoint`` now warns when layerwise export ignores ``save_modelopt_state=True`` because saving ModelOpt state is unsupported for this path. Leave the option at its default ``False`` to avoid the warning, including when warnings are treated as errors.
 - Fix LTX-2 distillation full-mode checkpoints to use the safetensors format expected by their file extension and loaders.
 - Fix corrupted ONNX external tensor data when exporting models on Windows by upgrading ONNX. Regenerate affected models from clean weights.
 - Harden the default locations of the TensorRT deployment runtime's build artifacts and the ONNX AutoTune timing cache: they no longer sit at fixed paths under the shared system temp directory, where another local user could pre-create them to plant symlinks or swap a built engine. Both now live in a private temporary directory that is created once per process; pass ``timing_cache_path`` (runtime) or ``--timing_cache`` (AutoTune) to keep a timing cache across processes.
@@ -191,6 +194,8 @@ Changelog
 - Fix YAML config I/O decoding with the locale codepage instead of UTF-8, which made a config containing any non-ASCII byte fail to load on a machine whose locale is not UTF-8 (notably Windows, where the default is cp1252). ``modelopt/recipe/loader.py``, the two ONNX autotune state files, the two transformers config readers, the distill config and the puzzletron profile now pass ``encoding="utf-8"`` explicitly. Only the YAML config paths are covered: these are the files most likely to carry non-ASCII text in comments, model names or paths, and the only ones read inside a user's process.
 - Hybrid (e.g. Nemotron-H) checkpoints saved by the ``examples/megatron_bridge`` scripts now record their layer spec in ``run_config.yaml`` in a form that reloads, so they can be converted to HuggingFace; a checkpoint saved by an earlier release still needs its ``model.hybrid_stack_spec`` block replaced by hand.
 - Fix ONNX preprocessing with custom TensorRT plugin libraries on TensorRT 11.
+- Fix building the custom TensorRT plugin example with TensorRT 11.
+- Fix TensorRT inference initialization on TensorRT 11 and retain shape validation for static, dynamic, and shape-tensor inputs.
 - Fix GPTQ with Megatron data parallelism: each data-parallel replica of a module now builds its Hessian from the whole calibration set instead of only its own shard, so all replicas reach the same quantized weights.
 - Fix ONNX quantization with the default ``concat_elimination`` pass crashing in calibration with ``KeyError: '<tensor>_ReduceMin'`` when a ``Concat`` input is a constant, such as the class token of a ViT.
 - Fix PTQ of native Transformers FP8 experts to apply source weight scales during calibration and export. Re-quantize affected checkpoints from the original FP8 source.
@@ -207,6 +212,8 @@ Changelog
 - Fix KV-cache quantization through ``register_attention_for_kv_quant``, the fallback for Hugging Face attention classes that do not use the attention interface, attaching the ``q``, ``k`` and ``v`` bmm quantizers to the wrong tensors for most attention layouts. Recalibrate and re-export models quantized through this fallback. Attention classes that compute their scores with ``torch.baddbmm`` (e.g. ``BloomAttention``, ``GPTNeoXJapaneseAttention``) are no longer patched, since their operands were always wired wrong (or raised ``IndexError``), and now get the existing warning to register a custom quantized attention class.
 - Fix the diffusers skip-softmax HF export to emit the schema TensorRT-LLM VisualGen loads (``threshold_scale_factor.coefficients`` and a scalar ``target_sparsity``). Re-export checkpoints that failed to load.
 - EAGLE training with ``eagle_decoder_type="kimik2"`` now downloads the Kimi-K2 modeling code from a pinned ``moonshotai/Kimi-K2-Thinking`` revision and verifies its SHA-256 hashes before importing it. Offline runs need that revision in the Hugging Face cache.
+- ``hf_quant_config.json`` now declares ``pre_quant_scale`` only for INT4 / W4A8 layers that have the tensor; loading INT4 / W4A8 fused-MoE checkpoints in TensorRT-LLM also needs a release whose MoE loader treats it as optional. AWQ, SmoothQuant and SVDQuant now warn when they skip quantized fused-MoE experts.
+- Layerwise-calibration resume (``checkpoint_dir``) no longer runs code from a modified checkpoint directory; an unusable file now fails with an error instead.
 
 0.47.0 (2026-09-23)
 ^^^^^^^^^^^^^^^^^^^
