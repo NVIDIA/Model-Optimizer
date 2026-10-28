@@ -8,6 +8,8 @@ Changelog
 
 *Quantization*
 
+- Add experimental NVFP4 recurrent-state fake quantization for linear-attention QAT,
+  with request- and head-local dynamic global scales and block16 E4M3 block scales.
 - Add vLLM 0.30 fake-quant serving for GDN/KDA recurrent-state checkpoints, applying
   state QDQ at native prefill/decode cache boundaries and restoring the saved ModelOpt policy.
 - Add experimental GDN/KDA recurrent-state QAT with native vLLM 0.30.0 Triton forwards and explicit prefill/decode phases through ``linear_attention_training_phase``, including dynamic blockwise INT8 state quantization. Megatron users need a Core build with native gate and packed-forward hooks; 0.19.2 does not support this workflow.

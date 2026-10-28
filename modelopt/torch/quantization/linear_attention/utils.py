@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 __all__ = []
 
-_STATE_FORMATS: dict[int | tuple[int, int], str] = {(4, 3): "fp8_e4m3", 8: "int8"}
+_STATE_FORMATS: dict[int | tuple[int, int], str] = {(4, 3): "fp8_e4m3", (2, 1): "nvfp4", 8: "int8"}
 
 
 class _ForwardValue(torch.autograd.Function):
@@ -83,7 +83,18 @@ def validate_gdn_quantizer(
 
     if not isinstance(quantizer, TensorQuantizer):
         raise ValueError(f"{name} requires a single TensorQuantizer")
-    if quantizer.block_sizes is not None and quantizer.block_sizes.get("type") == "dynamic":
+    nvfp4 = (
+        quantizer.is_nvfp4_dynamic
+        and quantizer.block_sizes.get(-1) == 16
+        and quantizer.block_sizes.keys() == {-1, "type", "scale_bits"}
+    )
+    if quantizer.num_bits == (2, 1) and not nvfp4:
+        raise ValueError("NVFP4 state QDQ requires block16 with dynamic E4M3 block scales")
+    if (
+        not nvfp4
+        and quantizer.block_sizes is not None
+        and quantizer.block_sizes.get("type") == "dynamic"
+    ):
         raise ValueError(
             f"{name} does not support block_sizes['type']='dynamic'. For INT8 state QDQ, "
             "use top-level type='dynamic' with block_sizes={-1: N}; "
@@ -94,10 +105,16 @@ def validate_gdn_quantizer(
         and quantizer.num_bits in num_bits
         and (quantizer.num_bits != 8 or (not quantizer.unsigned and quantizer.narrow_range))
         and (
-            quantizer.block_sizes is None
+            nvfp4
             or (
-                quantizer.num_bits == 8
-                and quantizer.block_sizes in ({-1: size} for size in block_sizes)
+                quantizer.num_bits != (2, 1)
+                and (
+                    quantizer.block_sizes is None
+                    or (
+                        quantizer.num_bits == 8
+                        and quantizer.block_sizes in ({-1: size} for size in block_sizes)
+                    )
+                )
             )
         )
         and quantizer.fake_quant
@@ -110,7 +127,8 @@ def validate_gdn_quantizer(
     ):
         raise ValueError(
             f"{name} supports only dynamic fake quantization with num_bits in {num_bits}, "
-            f"INT8 block_sizes in {block_sizes} (or no blocks), "
+            f"INT8 block_sizes in {block_sizes} (or no blocks), or NVFP4 block16 with "
+            "dynamic E4M3 block scales, "
             "pass_through_bwd=True, no rotation, pre-scaling, bias, constant "
             "amax, or custom backend. Other gradient rules and formats are not implemented."
         )
@@ -152,6 +170,11 @@ def _state_qdq(state: torch.Tensor, state_quantizer: TensorQuantizer | None, blo
     if state_quantizer is None:
         return state
     if state_quantizer.block_sizes is not None:
+        if state_quantizer.is_nvfp4_dynamic:
+            # TensorQuantizer's NVFP4 global amax is scalar per call. Quantize each
+            # [K, V] state independently so another request or head cannot change it.
+            matrices = state.reshape(-1, state.shape[-2], state.shape[-1])
+            return torch.stack([state_quantizer(matrix) for matrix in matrices]).reshape_as(state)
         return state_quantizer(state)
     rounded = []
     for part in state.split(block_v, dim=-1):
