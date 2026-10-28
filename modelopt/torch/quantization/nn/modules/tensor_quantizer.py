@@ -68,6 +68,30 @@ from ..functional import normalized_hadamard_transform
 
 # torch.finfo(...).tiny gives the smallest normal E4M3 value; scale clamping needs
 # the smallest positive subnormal value representable by the 3-bit mantissa.
+
+
+@contextlib.contextmanager
+def _force_nearest_rounding(quantizers):
+    """Temporarily make quantization deterministic for calibration and weight folding."""
+    saved = []
+    seen = set()
+    for quantizer in quantizers:
+        if id(quantizer) in seen:
+            continue
+        seen.add(id(quantizer))
+        had_rounding = hasattr(quantizer, "_rounding")
+        saved.append((quantizer, had_rounding, getattr(quantizer, "_rounding", "nearest")))
+        quantizer._rounding = "nearest"
+    try:
+        yield
+    finally:
+        for quantizer, had_rounding, rounding in saved:
+            if had_rounding:
+                quantizer._rounding = rounding
+            else:
+                delattr(quantizer, "_rounding")
+
+
 _FP8_E4M3_MIN_POSITIVE = torch.finfo(torch.float8_e4m3fn).smallest_normal / (2**3)
 
 __all__ = [
@@ -833,6 +857,8 @@ class TensorQuantizer(nn.Module):
         )
 
     def _real_quantize(self, inputs):
+        if self.rounding != "nearest":
+            raise NotImplementedError("Real quantization does not support stochastic rounding")
         assert self._is_real_quantize_support(), "Real quantization not supported for this format."
 
         buffer_to_register = {}
@@ -926,6 +952,31 @@ class TensorQuantizer(nn.Module):
         self._dequantize = True
         return outputs
 
+    @property
+    def rounding(self):
+        """Rounding policy; old checkpoints retain nearest rounding."""
+        return getattr(self, "_rounding", "nearest")
+
+    def _check_rounding_support(self):
+        nvfp4 = self.is_nvfp4_dynamic and self.block_sizes == {
+            -1: 16,
+            "type": "dynamic",
+            "scale_bits": (4, 3),
+        }
+        if self.rounding != "nearest" and (
+            not self.fake_quant
+            or self.backend is not None
+            or (
+                not nvfp4
+                and (
+                    not (isinstance(self.num_bits, int) or self.num_bits == (4, 3))
+                    or (self.block_sizes is not None and self.block_sizes.get("type") == "dynamic")
+                )
+            )
+            or getattr(self, "_lsq", False)
+        ):
+            raise NotImplementedError("This quantization path does not support stochastic rounding")
+
     def _fake_quantize(self, inputs):
         """Fake quantization."""
         if self.backend is not None:
@@ -956,6 +1007,7 @@ class TensorQuantizer(nn.Module):
                 getattr(self, "_trt_high_precision_dtype", None),
                 getattr(self, "_onnx_quantizer_type", None),
                 self._pass_through_bwd,
+                self.rounding,
             )
         elif isinstance(self._num_bits, tuple):
             # Float-point quantization, e.g., FP8
@@ -969,6 +1021,7 @@ class TensorQuantizer(nn.Module):
                 M,
                 self._trt_high_precision_dtype,
                 self._pass_through_bwd,
+                self.rounding,
             )
 
         else:
@@ -984,6 +1037,7 @@ class TensorQuantizer(nn.Module):
                 self._pass_through_bwd,
                 self.block_sizes.get(-1) if self.block_sizes else None,
                 self.axis[0] if isinstance(self.axis, tuple) else self.axis,
+                self.rounding,
             )
         return outputs
 
@@ -1231,6 +1285,15 @@ class TensorQuantizer(nn.Module):
                 inputs = self._rotate_inputs(inputs)
             return inputs
 
+        if self._if_quant and self.rounding != "nearest":
+            self._check_rounding_support()
+            if (
+                is_torch_export_mode()
+                or torch.compiler.is_exporting()
+                or torch.onnx.is_in_onnx_export()
+            ):
+                raise NotImplementedError("Inference export does not support stochastic rounding")
+
         if (
             not is_torch_export_mode()
             and not torch.compiler.is_compiling()
@@ -1338,6 +1401,8 @@ class TensorQuantizer(nn.Module):
         s = f"{'unsigned ' if self._unsigned else ''}{self._num_bits} bit"
         s += " narrow" if (self._narrow_range) else ""
         s += " fake" if (self._fake_quant) else ""
+        if self.rounding != "nearest":
+            s += f" rounding={self.rounding}"
         if self.block_sizes is not None:
             s += f" block_sizes={self._block_sizes},"
         else:
@@ -2086,6 +2151,7 @@ def _is_plain_fake_quant(q: nn.Module) -> TypeGuard[TensorQuantizer]:
         and q._fake_quant
         and not q._if_calib
         and not q._use_constant_amax
+        and q.rounding == "nearest"
         # Nothing applied around the quantization itself.
         and q.backend is None
         and q.pre_quant_scale is None

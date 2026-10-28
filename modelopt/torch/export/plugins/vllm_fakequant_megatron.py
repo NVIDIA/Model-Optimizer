@@ -67,6 +67,7 @@ def _quantizer_configs(module: torch.nn.Module) -> tuple[dict[str, dict], str]:
                 "pre_quant_scale": not is_weight_quantizer
                 and quantizer.pre_quant_scale is not None,
                 "fake_quant": is_quantizing and not quantizer.fake_quant,
+                "rounding": is_quantizing and quantizer.rounding != "nearest",
                 "unsigned": is_integer_quantizing and quantizer.unsigned,
                 "narrow_range": is_integer_quantizing and quantizer.narrow_range,
                 "dynamic_amax": is_activation_quantizing

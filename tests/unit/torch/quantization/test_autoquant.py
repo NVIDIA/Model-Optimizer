@@ -42,6 +42,7 @@ from modelopt.torch.quantization.algorithms import (
     estimate_quant_compression,
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils import safe_load, safe_save
 from modelopt.torch.utils.distributed import DistributedProcessGroup
 
@@ -1917,3 +1918,36 @@ def test_get_auto_quantize_config_emits_fused_expert_quantizer_names(with_persis
     assert f"{module_name}.gate_up_proj_weight_quantizer" in quantizer_names
     assert f"{module_name}.down_proj_weight_quantizer" in quantizer_names
     assert f"{module_name}.weight_quantizer" not in quantizer_names
+
+
+@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+def test_auto_quantize_stochastic_scoring_uses_nearest(method):
+    """Candidate scoring is deterministic while selected training quantizers retain SR."""
+    torch.manual_seed(42)
+    model = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8))
+    data = [torch.randn(2, 8)]
+    scores = []
+    for rounding, seed in [("nearest", 1), ("stochastic", 2), ("stochastic", 3)]:
+        config = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+        for entry in config["quant_cfg"]:
+            if entry.get("enable", True) and "cfg" in entry:
+                entry["cfg"]["rounding"] = rounding
+        torch.manual_seed(seed)
+        quantized, history = mtq.auto_quantize(
+            copy.deepcopy(model),
+            constraints={"effective_bits": 8.0},
+            quantization_formats=[(config, "test_int8")],
+            data_loader=data,
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.square().sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            method=method,
+        )
+        scores.append([stats["scores"] for stats in history["candidate_stats"].values()])
+        enabled = [
+            q for q in quantized.modules() if isinstance(q, TensorQuantizer) and q.is_enabled
+        ]
+        assert enabled
+        assert all(q.rounding == rounding for q in enabled)
+    assert scores[0] == scores[1] == scores[2]

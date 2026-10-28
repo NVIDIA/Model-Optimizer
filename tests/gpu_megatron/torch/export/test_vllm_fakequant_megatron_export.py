@@ -181,6 +181,9 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
         num_key_value_heads=model.config.num_query_groups,
         vocab_size=model.vocab_size,
     )
+    _assert_unsupported_settings(
+        model, source, tmp_path / "unsupported_rounding", rank, size, rounding_only=True
+    )
     stale_quantizer = "stale_source.input_quantizer"
     torch.save({stale_quantizer + "._amax": torch.tensor(42.0)}, source / "quantizer_state.pth")
     (source / "quant_recipe.yaml").write_text(
@@ -414,7 +417,7 @@ def test_mcore_vllm_export_mtp(request, tmp_path):
     workers.run(partial(_test_mcore_vllm_export_mtp, tmp_path))
 
 
-def _assert_unsupported_settings(model, source, export_dir, rank, size):
+def _assert_unsupported_settings(model, source, export_dir, rank, size, *, rounding_only=False):
     attribute_cfgs = [
         (
             "input_quantizer",
@@ -434,6 +437,11 @@ def _assert_unsupported_settings(model, source, export_dir, rank, size):
         ("input_quantizer", {"sequential": True}),
         ("input_quantizer", {"num_bits": 8, "axis": -1}),
     ]
+    if rounding_only:
+        attribute_cfgs = [
+            ("weight_quantizer", {"rounding": "stochastic"}),
+            ("input_quantizer", {"rounding": "stochastic"}),
+        ]
     if rank == size - 1:
         linear = next(
             module
@@ -477,6 +485,9 @@ def _assert_unsupported_settings(model, source, export_dir, rank, size):
         assert not (export_dir / "quant_recipe.yaml").exists()
         if rank == size - 1:
             setattr(linear, quantizer_name, original_quantizer)
+
+    if rounding_only:
+        return
 
     qkv = next(
         (

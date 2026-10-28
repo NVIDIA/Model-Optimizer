@@ -54,6 +54,7 @@ from ._auto_quantize_cost import (
 from .config import QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
 from .conversion import set_quantizer_by_cfg
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
+from .nn.modules.tensor_quantizer import _force_nearest_rounding
 from .utils import is_quantized_linear
 
 
@@ -144,6 +145,7 @@ def _tensor_quantizer_format_signature(quantizer: TensorQuantizer) -> tuple:
         repr(quantizer.block_sizes),
         getattr(quantizer, "_dynamic", False),
         quantizer.fake_quant,
+        quantizer.rounding,
         quantizer.backend,
         repr(quantizer.backend_extra_args),
     )
@@ -1356,7 +1358,21 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 print_rank_0("AutoQuantize: Restored from checkpoint, skipping scoring")
             return
 
-        self.estimate_sensitivity_scores()
+        # Scoring swaps recipes, so include inactive candidates as well as attached quantizers.
+        quantizers = [
+            module for module in self.model.modules() if isinstance(module, TensorQuantizer)
+        ]
+        for hparam in quant_recipe_hparams:
+            for candidates in hparam._all_quantizer_choices.values():
+                for attributes in candidates.values():
+                    for quantizer in attributes.values():
+                        quantizers.extend(
+                            module
+                            for module in quantizer.modules()
+                            if isinstance(module, TensorQuantizer)
+                        )
+        with _force_nearest_rounding(quantizers):
+            self.estimate_sensitivity_scores()
         self.initialize_candidate_stats()
         self.save_search_checkpoint(verbose=self.config["verbose"])
 

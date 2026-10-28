@@ -171,6 +171,8 @@ def _bmm_qdq_from_layer(layer, attr: str, default_amax: float | None):
     quantizer = getattr(layer, attr, None)
     if quantizer is None or not getattr(quantizer, "is_enabled", False):
         return None, default_amax
+    if getattr(quantizer, "rounding", "nearest") != "nearest":
+        raise NotImplementedError("Fused attention does not support stochastic rounding")
     if (
         getattr(quantizer, "is_nvfp4_dynamic", False)
         and (quantizer.block_sizes or {}).get(-1) == 16

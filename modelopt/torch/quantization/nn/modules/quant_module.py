@@ -28,7 +28,7 @@ from modelopt.torch.utils.distributed import ParallelState
 
 from ...tensor_quant import QUANT_DESC_8BIT_PER_TENSOR
 from ...utils import is_torch_export_mode
-from .tensor_quantizer import SequentialQuantizer, TensorQuantizer
+from .tensor_quantizer import SequentialQuantizer, TensorQuantizer, _force_nearest_rounding
 
 __all__ = [
     "QuantInputBase",
@@ -157,12 +157,13 @@ class QuantModule(DynamicModule):
             return
 
         members = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
-        for weight in weights:
-            folded = weight
-            # Each member's output is in the weight dtype, as in the forward pass.
-            for member in members:
-                folded = member(folded.float().contiguous()).to(weight.dtype)
-            weight.data.copy_(folded)
+        with _force_nearest_rounding(members):
+            for weight in weights:
+                folded = weight
+                # Each member's output is in the weight dtype, as in the forward pass.
+                for member in members:
+                    folded = member(folded.float().contiguous()).to(weight.dtype)
+                weight.data.copy_(folded)
         quantizer.disable()
         quantizer.disable_rotate()
         for member in members:
