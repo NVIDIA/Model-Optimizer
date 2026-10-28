@@ -15,8 +15,6 @@
 
 """Path resolution for a portable, contained FastGen dataset cache."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 __all__ = ["resolve_cache_root", "resolve_under_root"]

@@ -412,7 +412,8 @@ class DFlashExporter(SpeculativeDecodingExporter):
             # YaRN long-context scaling is injected below (see the rope_scaling block).
             "rope_scaling": None,
             "tie_word_embeddings": False,
-            "torch_dtype": str(getattr(base_config, "torch_dtype", torch.bfloat16)).replace(
+            # config.dtype is None, not absent, when unset, so a getattr default never applies.
+            "torch_dtype": str(getattr(base_config, "dtype", None) or torch.bfloat16).replace(
                 "torch.", ""
             ),
             "num_target_layers": base_config.num_hidden_layers,

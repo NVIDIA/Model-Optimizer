@@ -15,8 +15,6 @@
 
 """Checkpoint loading and calibration support for the Nemotron-H MTP tail."""
 
-from __future__ import annotations
-
 import copy
 import inspect
 import json

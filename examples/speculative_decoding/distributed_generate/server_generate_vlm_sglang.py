@@ -29,8 +29,6 @@ decides whether a given server can fetch the media at all; see
 ``_as_openai_media_value``.
 """
 
-from __future__ import annotations
-
 import argparse
 import base64
 import concurrent.futures

@@ -278,7 +278,7 @@ def cleanup():
     -- so error paths must call :func:`abort` before reaching this ``finally``.
     """
     if is_initialized():
-        exc = sys.exc_info()[1]
+        exc = sys.exception()
         if exc is None or isinstance(exc, SystemExit):
             with suppress(Exception):
                 barrier()
@@ -294,7 +294,7 @@ def abort(exit_code: int = 1) -> None:
     hung rather than failed. Exiting lets the launcher (e.g. torchrun) terminate the peers.
     ``SystemExit`` is re-raised instead, since every rank reaches an intentional exit.
     """
-    exc = sys.exc_info()[1]
+    exc = sys.exception()
     if isinstance(exc, SystemExit):
         raise exc
     traceback.print_exc()

@@ -394,9 +394,12 @@ def replace_function(package, name, new_func, og_func_cache_name=None):
     old_func = getattr(package, name)
     setattr(package, name, new_func)
     setattr(package, og_func_cache_name, old_func)
-    yield
-    setattr(package, name, old_func)
-    delattr(package, og_func_cache_name)
+    try:
+        yield
+    finally:
+        # Also when the body raises: a replacement left behind would stay patched process-wide.
+        setattr(package, name, old_func)
+        delattr(package, og_func_cache_name)
 
 
 @contextmanager

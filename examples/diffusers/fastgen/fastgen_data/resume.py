@@ -15,8 +15,6 @@
 
 """Public-API dataloader reconstruction for deterministic mid-epoch resume."""
 
-from __future__ import annotations
-
 from typing import Any
 
 from torchdata.stateful_dataloader import StatefulDataLoader

@@ -30,8 +30,6 @@ All tools return JSON-friendly dicts with explicit ``ok`` / ``reason`` /
 outcomes instead of free-form prose.
 """
 
-from __future__ import annotations
-
 import logging
 import os
 import sys

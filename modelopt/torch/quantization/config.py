@@ -999,7 +999,26 @@ class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     )
 
 
-class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
+class _HessianInputDtypeConfig(ModeloptBaseConfig):
+    """The ``hessian_input_dtype`` knob, shared by GPTQ and local-Hessian calibration."""
+
+    hessian_input_dtype: Literal["float32", "bfloat16"] = ModeloptField(
+        default="float32",
+        title="Dtype the Hessian GEMM reads the activations in.",
+        description="""The Hessian is accumulated and stored in float32 either way. ``float32``
+        copies each batch of activations to float32 for the GEMM. ``bfloat16`` feeds them to a
+        tensor-core GEMM in bfloat16 that accumulates in float32: for bfloat16 activations it
+        forms the same products and only rounds the sums differently. At 32K tokens per batch
+        that is up to about 3e-5 of the Hessian's diagonal for GPTQ's full Hessian and 1.5e-4
+        for local Hessian's 16-column blocks, and the GEMM is 6-16x faster. It needs CUDA GEMMs
+        that take ``out_dtype``; without them the Hessian falls back to float32 with a
+        warning.""",
+    )
+
+
+class LocalHessianCalibConfig(
+    _SharedStatesConfig, _HessianInputDtypeConfig, QuantizeAlgorithmConfig
+):
     """Configuration for local Hessian-weighted MSE calibration.
 
     This algorithm uses activation information to optimize per-block scales for weight
@@ -1107,6 +1126,15 @@ class AWQLiteCalibConfig(QuantizeAlgorithmConfig):
         description="The alpha will be searched from 0 to 1 with the step size specified.",
     )
 
+    use_weight_scale: bool = ModeloptField(
+        default=True,
+        title="Include weight statistics in AWQ scale search.",
+        description=(
+            "If True, search scales proportional to activation_scale**alpha / "
+            "weight_scale**(1-alpha). If False, use activation_scale**alpha as in the AWQ paper."
+        ),
+    )
+
     debug: bool | None = ModeloptField(
         default=False,
         title="Debug mode.",
@@ -1210,7 +1238,7 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
     )
 
 
-class GPTQCalibConfig(QuantizeAlgorithmConfig):
+class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):
     """The config for GPTQ quantization.
 
     GPTQ minimizes the layer-wise quantization error by using second-order (Hessian) information
