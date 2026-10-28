@@ -53,6 +53,7 @@ from .kv_cache_auto_quant import (
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
+from .nn.modules.tensor_quantizer import _force_nearest_rounding
 from .utils import is_quantized
 
 __all__ = [
@@ -124,7 +125,8 @@ def calibrate(
     }
     model.eval()
 
-    with forward_with_reshard(model):
+    quantizers = (module for module in model.modules() if isinstance(module, TensorQuantizer))
+    with _force_nearest_rounding(quantizers), forward_with_reshard(model):
         apply_mode(
             model,
             mode=get_modelike_from_algo_cfg(algorithm),

@@ -99,6 +99,7 @@ with the default attributes of
         "num_bits":                 8,       # 8-bit integer quantization
         "axis":                     None,    # per-tensor scale (no per-channel axis)
         "fake_quant":               True,    # simulate quantization in forward pass (PTQ / QAT)
+        "rounding":                 "nearest",  # or a supported stochastic fake-quant policy
         "unsigned":                 False,   # signed integer range, e.g. [-128, 127] for INT8
         "narrow_range":             False,   # full range; True would restrict to [-127, 127] for INT8
         "type":                     "static",  # static calibration (not dynamic per-inference)
@@ -116,6 +117,28 @@ with the default attributes of
 In practice this means an un-configured but enabled quantizer performs **INT8 per-tensor static
 fake-quantization** with a max-calibrated scale. This is rarely the intended behavior — every
 quantizer you want active should be explicitly configured with a ``cfg`` entry.
+
+----------
+
+Rounding Policies
+=================
+
+Rounding is independent of format and scale grouping. An INT8 or FP8 E4M3 entry can set
+``"rounding": "stochastic"`` while retaining its existing ``num_bits``, ``axis`` and
+``block_sizes``. The supported stochastic fake-quant formats are built-in integer and E4M3
+quantization with unquantized scales, and dynamic block16 NVFP4 (E2M1 values with E4M3 block
+scales). NVFP4 rounds values stochastically while its global and block scales keep nearest
+rounding. Real quantization, custom backends, MX formats, static NVFP4, learned scales, fused
+attention/GEMM kernels and inference export reject stochastic rounding.
+
+``"stochastic"`` is unbiased between adjacent representable values. Exact NVFP4 range endpoints
+remain exact.
+
+Stochastic rounding uses PyTorch's device RNG. Use ``torch.manual_seed`` for repeatable forwards
+with the same shapes and call order, and preserve RNG state when saving a training checkpoint.
+Calibration and weight folding temporarily force nearest rounding so that collected ranges,
+searches and folded weights are deterministic, then restore the configured training policy.
+Backward uses the selected straight-through estimator without drawing random numbers.
 
 ----------
 
