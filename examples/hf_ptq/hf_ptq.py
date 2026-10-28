@@ -320,9 +320,10 @@ def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
     if args.use_fsdp2:
-        hf_config = AutoConfig.from_pretrained(
-            args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
-        )
+        config_kwargs = {"trust_remote_code": args.trust_remote_code}
+        if args.experts_implementation is not None:
+            config_kwargs["experts_implementation"] = args.experts_implementation
+        hf_config = AutoConfig.from_pretrained(args.local_checkpoint_path, **config_kwargs)
         validate_fsdp2_supported(args, hf_config)
         full_model = parallel_load_and_prepare_fsdp2(
             args.local_checkpoint_path,
@@ -342,6 +343,7 @@ def load_model(args: argparse.Namespace):
             trust_remote_code=args.trust_remote_code,
             use_seq_device_map=args.use_seq_device_map,
             attn_implementation=args.attn_implementation,
+            experts_implementation=args.experts_implementation,
             offload_folder=args.offload_folder,
             max_cpu_memory_gb=args.max_cpu_memory_gb,
             max_gpu_memory_gb=args.max_gpu_memory_gb,
@@ -367,6 +369,8 @@ def load_model(args: argparse.Namespace):
             model_kwargs = {"trust_remote_code": args.trust_remote_code}
             if args.attn_implementation is not None:
                 model_kwargs["attn_implementation"] = args.attn_implementation
+            if args.experts_implementation is not None:
+                model_kwargs["experts_implementation"] = args.experts_implementation
             full_model = load_pretrained(
                 args.local_checkpoint_path,
                 AutoModelForCausalLM,
@@ -1342,6 +1346,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Specify the attention implementation to use. "
             "This arg will be passed to the HF model loading if specified."
+        ),
+        default=None,
+        type=str,
+    )
+    parser.add_argument(
+        "--experts_implementation",
+        help=(
+            "Fused MoE experts backend to load the model with, passed to the HF model loading as "
+            "experts_implementation. By default transformers picks grouped_mm where the model "
+            "supports it; eager calibrates exactly as earlier releases did."
         ),
         default=None,
         type=str,

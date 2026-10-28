@@ -28,7 +28,7 @@ from unittest.mock import patch
 import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
-from _test_utils.torch.transformers_models import get_tiny_nemotron_h
+from _test_utils.torch.transformers_models import create_tiny_qwen3_moe_dir, get_tiny_nemotron_h
 from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM, LlamaConfig
 
@@ -135,6 +135,14 @@ def test_mtp_preparation_matches_loader(tmp_path, loader, trust_remote_code):
     for name, value in source.state_dict().items():
         torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
     assert not any("MTP weights may remain unquantized" in str(w.message) for w in caught)
+
+
+def test_get_model_loads_with_the_requested_experts_implementation(tmp_path):
+    """hf_ptq's --experts_implementation reaches the fused experts: eager calibrates them as earlier
+    releases did, where transformers would pick grouped_mm for this model."""
+    path = create_tiny_qwen3_moe_dir(tmp_path)
+    model = example_utils.get_model(str(path), device="cpu", experts_implementation="eager")
+    assert model.config._experts_implementation == "eager"
 
 
 @pytest.mark.parametrize("failure_at", [1, 2])
