@@ -459,8 +459,9 @@ def _encoded(value: Any) -> bytes:
     """``value`` serialized for :func:`broadcast_from` and :func:`all_reduce`, and loaded back once.
 
     The load-back makes a value that cannot round-trip fail inside the caller's guard, which tells
-    every rank, rather than inside the collective on one rank alone. torch.save stands in for
-    pickle, which bandit refuses under modelopt/.
+    every rank, rather than inside the collective on one rank alone. It loads on the producing rank
+    only: a load that depends on the loading rank (a tensor saved from another device) can still
+    fail on a peer alone. torch.save stands in for pickle, which bandit refuses under modelopt/.
     """
     buffer = io.BytesIO()
     torch.save(value, buffer)
@@ -490,8 +491,9 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
     rather than wait for the broadcast: ``rank`` its own error, the others a SystemExit with its
     code if it exited, else a RuntimeError. Every rank, ``rank`` too, gets a copy loaded from the
     bytes sent. Collective: every rank calls it at the same point with the same ``label`` and
-    ``rank``; a rank out of step raises. In a single process ``fn``'s value comes back as it is; a
-    rank of a launch whose process group is not set up raises.
+    ``rank``; a receiving rank whose ``label`` differs raises, but ``rank`` itself cannot tell and
+    returns its value. In a single process ``fn``'s value comes back as it is; a rank of a launch
+    whose process group is not set up raises.
     """
     _refuse_a_launch_without_its_group(label)
     if not 0 <= rank < size():
