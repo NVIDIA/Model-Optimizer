@@ -512,11 +512,19 @@ class _ExitedError(Exception):
     [
         (True, None, ["barrier", "destroy"]),
         (True, ValueError, ["abort"]),
+        (True, _UnprintableError, ["abort"]),
         (True, SystemExit, ["barrier", "destroy"]),
         (False, None, ["barrier", "destroy"]),
         (False, ValueError, ["destroy"]),
     ],
-    ids=["launch", "launch-raises", "launch-exits", "single-process", "single-process-raises"],
+    ids=[
+        "launch",
+        "launch-raises",
+        "launch-raises-unprintable",
+        "launch-exits",
+        "single-process",
+        "single-process-raises",
+    ],
 )
 def test_the_run_ends_the_group_it_set_up(
     monkeypatch, capsys, launch, body_raises, ends_by, in_except
@@ -567,7 +575,9 @@ def test_the_run_ends_the_group_it_set_up(
     # An intentional exit is not reported as an error. An error is reported once, under this rank's
     # place in the group; its traceback is abort()'s to print, or goes on with it to the caller.
     out, err = capsys.readouterr()
-    assert ("[distributed_run][rank 0] body raised" in out) == (body_raises is ValueError)
+    assert ("[distributed_run][rank 0] body raised" in out) == (
+        body_raises not in (None, SystemExit)
+    )
     assert "Traceback" not in err
 
 

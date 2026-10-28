@@ -642,7 +642,7 @@ def distributed_run(
         # Every rank reaches a SystemExit, an intentional exit: it is not an error to report.
         if exc is not None and not isinstance(exc, SystemExit):
             print(
-                f"[distributed_run][rank {rank()}] body raised {type(exc).__name__}: {exc}",
+                f"[distributed_run][rank {rank()}] body raised {type(exc).__name__}: {_text(exc)}",
                 flush=True,
             )
             if owns_group and size() > 1:
