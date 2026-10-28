@@ -18,11 +18,18 @@
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_qwen3_moe
-from transformers.integrations import moe as moe_integration
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.plugins.huggingface as hf_plugin
 from modelopt.torch.quantization import tensor_quant
+
+# As the plugin and the unit tests treat it: grouped_mm is intercepted where transformers has it.
+try:
+    from transformers.integrations import moe as moe_integration
+
+    HAS_GROUPED_MM = hasattr(moe_integration, "_grouped_linear")
+except ImportError:
+    HAS_GROUPED_MM = False
 
 pytestmark = pytest.mark.skipif(
     not hasattr(tensor_quant.triton_kernel, "fp4_fake_quant_block"),
@@ -30,7 +37,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("impl", ["eager", "grouped_mm"])
+@pytest.mark.parametrize(
+    "impl",
+    [
+        "eager",
+        pytest.param(
+            "grouped_mm",
+            marks=pytest.mark.skipif(
+                not HAS_GROUPED_MM, reason="transformers grouped_mm backend unavailable"
+            ),
+        ),
+    ],
+)
 @pytest.mark.parametrize("pass_through_bwd", [True, False])
 def test_stacked_nvfp4_experts_match_per_expert_quantizers(monkeypatch, pass_through_bwd, impl):
     model = get_tiny_qwen3_moe().cuda().train()
@@ -67,12 +85,13 @@ def test_stacked_nvfp4_experts_match_per_expert_quantizers(monkeypatch, pass_thr
         lambda *args: calls.append(args) or stacked_fake_quant(*args),
     )
     grouped_calls = []
-    grouped_linear = moe_integration._grouped_linear
-    monkeypatch.setattr(
-        moe_integration,
-        "_grouped_linear",
-        lambda *args, **kwargs: grouped_calls.append(1) or grouped_linear(*args, **kwargs),
-    )
+    if HAS_GROUPED_MM:
+        grouped_linear = moe_integration._grouped_linear
+        monkeypatch.setattr(
+            moe_integration,
+            "_grouped_linear",
+            lambda *args, **kwargs: grouped_calls.append(1) or grouped_linear(*args, **kwargs),
+        )
     results = []
     for checkpointing in (False, True):
         calls.clear()
