@@ -599,9 +599,9 @@ def distributed_run(
     launch it sets nothing up, and the state is on ``device``. The state's rank and size are always
     the live group's, which the block's collectives run on: rank 0 of a run of one for a single
     process, and this rank's place in a group the caller set up without the launch's environment.
-    A ``timeout`` cannot apply to a group the caller set up, so passing one then warns. A single
-    process leaves it unused, without a warning: no rank there waits on a peer, so an entry point
-    may pass one for its launches only.
+    A ``timeout`` cannot apply to a group of several ranks the caller set up, so passing one then
+    warns. A single process leaves it unused, without a warning, also in a one-rank group of the
+    caller's: no rank there waits on a peer, so an entry point may pass one for its launches only.
 
     On exit, even if the body raises, it destroys the group the run set up: the launch's, or one the
     body set up, such as the one-rank group a single process's FSDP2 load shards through. A group
@@ -622,7 +622,7 @@ def distributed_run(
             "CUDA device, chosen from LOCAL_RANK; pass device='cuda' or run a single process."
         )
     group_was_there = is_initialized()
-    if group_was_there and timeout is not None:
+    if group_was_there and timeout is not None and size() > 1:
         warn(
             f"distributed_run(timeout={timeout}) does not apply: the process group was set up before "
             "the run, and a group's timeout is fixed when it is set up. Pass it where the group is."
