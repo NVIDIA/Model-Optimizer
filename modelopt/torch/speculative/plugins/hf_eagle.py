@@ -147,13 +147,15 @@ class HFEagleModel(EagleModel):
 
         compile_targets: list[tuple[str, dict[str, Any]]] = [
             ("_prepare_eagle_inputs", {}),
-            ("_eagle_forward", {"mode": "max-autotune"}),
+            # No CUDA graphs: "max-autotune" enables them, and recording them intermittently fails
+            # in training (cudaStreamCaptureStatusInvalidated / "graph recording observed ...").
+            ("_eagle_forward", {"mode": "max-autotune-no-cudagraphs"}),
             ("_eagle_loss", {"fullgraph": True}),
         ]
         for name, kwargs in compile_targets:
             try:
                 setattr(self, name, torch.compile(getattr(self, name), dynamic=False, **kwargs))
-            except Exception:  # noqa: PERF203
+            except Exception:
                 print_rank_0(f"Disabling torch.compile for {name} due to compilation error.")
 
     def get_dummy_inputs(self) -> dict:
@@ -752,7 +754,8 @@ class HFEagleModel(EagleModel):
                 base_outputs,
             )
 
-        # Init rotary_emb outside _eagle_forward so inv_freq is not captured by CUDAGraph.
+        # Init rotary_emb outside _eagle_forward so inv_freq is not captured by CUDAGraph. Capture is
+        # off for now (see _activate_torch_compile); this keeps re-enabling it safe.
         self.eagle_module._maybe_init_rope(device=eagle_input_hiddens.device)
 
         # ====Run eagle forward with extra training-time-test steps====
@@ -900,7 +903,8 @@ class HFEagleModel(EagleModel):
         else:
             eagle_input_hidden_states = base_model_hidden_states
 
-        # Init rotary_emb outside _eagle_forward so inv_freq is not captured by CUDAGraph.
+        # Init rotary_emb outside _eagle_forward so inv_freq is not captured by CUDAGraph. Capture is
+        # off for now (see _activate_torch_compile); this keeps re-enabling it safe.
         self.eagle_module._maybe_init_rope(device=eagle_input_hidden_states.device)
 
         draft_tokens = []

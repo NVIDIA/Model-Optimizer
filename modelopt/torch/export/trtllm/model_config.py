@@ -108,7 +108,7 @@ class LinearConfig:
 
     # For methods like W4A8 AWQ, we have two quantizers for weights
     # For W4A8, the first quantizer is for INT4 quantization and the second quantizer is for FP8 quantization
-    # `weight_scaling_factor_2` is the scaling factor the the second FP8 quantizer
+    # `weight_scaling_factor_2` is the scaling factor for the second FP8 quantizer
     weights_scaling_factor_2: torch.Tensor = None
 
     prequant_scaling_factor: torch.Tensor = None
@@ -319,7 +319,7 @@ class RelativeAttentionTableConfig:
 class AttentionConfig:
     """The attention layer config."""
 
-    # QKV can either be stored as splitted (for easier postprocessing)
+    # QKV can either be stored as split (for easier postprocessing)
     # or merged (for TRT LLM export)
     qkv: QKVConfig | LinearConfig = None
     dense: LinearConfig = None

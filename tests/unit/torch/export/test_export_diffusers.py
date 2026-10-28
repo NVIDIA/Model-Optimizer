@@ -17,6 +17,7 @@ import copy
 import inspect
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -26,6 +27,7 @@ from _test_utils.torch.diffusers_models import (
     get_tiny_dit,
     get_tiny_flux,
     get_tiny_flux2,
+    get_tiny_qwen_image_transformer,
     get_tiny_unet,
     get_tiny_wan22_transformer,
     get_tiny_wan22_vae,
@@ -36,11 +38,13 @@ pytest.importorskip("transformers")
 
 import diffusers
 from safetensors import safe_open
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from transformers import (
     CLIPTextConfig,
     CLIPTextModel,
     CLIPTextModelWithProjection,
+    LlamaConfig,
+    LlamaModel,
     UMT5Config,
     UMT5EncoderModel,
 )
@@ -53,6 +57,7 @@ from modelopt.torch.export.diffusers_utils import (
     hide_quantizers_from_state_dict,
 )
 from modelopt.torch.export.unified_export_hf import _postprocess_safetensors, export_hf_checkpoint
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 
 def _load_config(config_path):
@@ -100,6 +105,25 @@ def test_export_diffusers_models_non_quantized(tmp_path, model_factory):
 
     config_data = _load_config(config_path)
     assert "quantization_config" not in config_data
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+@pytest.mark.parametrize("save_modelopt_state", [False, True])
+@torch.no_grad()
+def test_export_diffusers_save_modelopt_state(
+    tmp_path, enable_hf_checkpointing, quantized, save_modelopt_state
+):
+    model = get_tiny_unet().eval()
+    inputs = generate_diffusion_dummy_inputs(model, torch.device("cpu"), torch.float32)
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(**inputs))
+    if not quantized:
+        # Keep ModelOpt state while exercising the non-quantized save branch.
+        mtq.disable_quantizer(model, "*")
+    export_dir = tmp_path / "export_unet"
+
+    export_hf_checkpoint(model, export_dir=export_dir, save_modelopt_state=save_modelopt_state)
+
+    assert (export_dir / "modelopt_state.pth").is_file() == save_modelopt_state
 
 
 @pytest.fixture
@@ -279,6 +303,177 @@ def test_flux2_dummy_inputs_shape():
 
     # guidance_embeds defaults to True for Flux2
     assert "guidance" in inputs
+
+
+@pytest.mark.parametrize("pos_embed_seq_len", [None, 514], ids=["i2v", "flf2v"])
+@torch.no_grad()
+def test_wan_dummy_inputs_support_qkv_fusion(pos_embed_seq_len):
+    torch.manual_seed(0)
+    model = get_tiny_wan22_transformer(
+        image_dim=32, added_kv_proj_dim=24, pos_embed_seq_len=pos_embed_seq_len
+    ).eval()
+    inputs = generate_diffusion_dummy_inputs(model, torch.device("cpu"), torch.float32)
+    assert inputs is not None
+    image_batch_size = 1 if pos_embed_seq_len is None else 2
+    assert inputs["encoder_hidden_states_image"].shape == (image_batch_size, 257, 32)
+    assert inputs["encoder_hidden_states"].shape == (1, 512, 32)
+
+    # Per-tensor INT8 exercises both input and weight amax fusion on CPU.
+    quant_cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+    quant_cfg["quant_cfg"].append(
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": None}}
+    )
+    mtq.quantize(model, quant_cfg, lambda m: m(**inputs))
+
+    groups = []
+    for block in model.blocks:
+        groups.extend(
+            [
+                (block.attn1.to_q, block.attn1.to_k, block.attn1.to_v),
+                (block.attn2.to_k, block.attn2.to_v),
+                (block.attn2.add_k_proj, block.attn2.add_v_proj),
+            ]
+        )
+    # Distinct values ensure a skipped fusion cannot pass on already-equal scales.
+    for group in groups:
+        for index, module in enumerate(group, start=1):
+            module.input_quantizer.amax = torch.tensor(float(index))
+            module.weight_quantizer.amax = torch.tensor(float(index))
+
+    unified_export_hf._fuse_qkv_linears_diffusion(model, strict=True)
+
+    for group in groups:
+        expected_amax = torch.tensor(float(len(group)))
+        for module in group:
+            torch.testing.assert_close(module.input_quantizer.amax, expected_amax)
+            torch.testing.assert_close(module.weight_quantizer.amax, expected_amax)
+
+
+@pytest.mark.parametrize(
+    ("model_factory", "export_attention_quantizers", "expect_attention_quantizers"),
+    [
+        (get_tiny_qwen_image_transformer, None, False),
+        (get_tiny_flux, None, True),
+        (get_tiny_flux, False, False),
+        (get_tiny_flux, True, True),
+    ],
+)
+def test_export_diffusers_attention_quantizers(
+    tmp_path, model_factory, export_attention_quantizers, expect_attention_quantizers
+):
+    model = model_factory().eval()
+    quant_cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    quant_cfg["quant_cfg"].append(
+        {
+            "quantizer_name": "*[qkv]_bmm_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+            "enable": True,
+        }
+    )
+
+    def calibrate(m):
+        inputs = generate_diffusion_dummy_inputs(m, torch.device("cpu"), torch.float32)
+        assert inputs is not None
+        m(**inputs)
+
+    mtq.quantize(model, quant_cfg, calibrate)
+    # The example disables sensitive blocks after calibration, leaving their amax buffers.
+    mtq.disable_quantizer(model, "transformer_blocks.0.*")
+    quantizers = {
+        name: module
+        for name, module in model.named_modules()
+        if isinstance(module, TensorQuantizer)
+    }
+    attention_amax = {
+        f"{name}._amax": module.amax.clone()
+        for name, module in quantizers.items()
+        if name.endswith(("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"))
+        and module.is_enabled
+    }
+    assert attention_amax
+    assert any(not module.is_enabled and hasattr(module, "_amax") for module in quantizers.values())
+
+    kwargs = (
+        {"export_attention_quantizers": export_attention_quantizers}
+        if export_attention_quantizers is not None
+        else {}
+    )
+    export_hf_checkpoint(model, export_dir=tmp_path, max_shard_size="1KB", **kwargs)
+
+    exported = {}
+    for shard in tmp_path.glob("*.safetensors"):
+        exported.update(load_file(str(shard)))
+    expected_attention = attention_amax if expect_attention_quantizers else {}
+    assert {key for key in exported if "quantizer" in key} == set(expected_attention)
+    for key, value in expected_attention.items():
+        torch.testing.assert_close(exported[key], value)
+    assert any(value.dtype == torch.float8_e4m3fn for value in exported.values())
+    assert any(key.endswith(".weight_scale") for key in exported)
+    config = _load_config(tmp_path / "config.json")["quantization_config"]
+    assert not any(key.startswith("kv_cache") for key in config)
+    for name, module in quantizers.items():
+        assert model.get_submodule(name) is module
+    for key, value in attention_amax.items():
+        torch.testing.assert_close(model.state_dict()[key], value)
+
+
+@pytest.mark.parametrize("is_transformers_component", [False, True])
+@pytest.mark.parametrize("export_attention_quantizers", [None, False, True])
+def test_export_diffusion_component_kv_metadata(
+    tmp_path, is_transformers_component, export_attention_quantizers
+):
+    if is_transformers_component:
+        model = LlamaModel(
+            LlamaConfig(
+                vocab_size=32,
+                hidden_size=16,
+                intermediate_size=32,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                num_key_value_heads=2,
+            )
+        ).eval()
+
+        def calibrate(m):
+            m(input_ids=torch.ones(1, 4, dtype=torch.long))
+
+    else:
+        # Exercise the native nn.Module save path used by LTX-2, with real attention.
+        model = nn.Sequential(get_tiny_flux()).eval()
+
+        def calibrate(m):
+            inputs = generate_diffusion_dummy_inputs(m[0], torch.device("cpu"), torch.float32)
+            m[0](**inputs)
+
+    quant_cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    quant_cfg["quant_cfg"].append(
+        {"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}}
+    )
+    mtq.quantize(model, quant_cfg, calibrate)
+    kv_amax = {
+        f"{name}._amax": module.amax.clone()
+        for name, module in model.named_modules()
+        if name.endswith(("k_bmm_quantizer", "v_bmm_quantizer")) and module.is_enabled
+    }
+    assert kv_amax
+    # LTX-2 exposes its native transformer through the stage-1 ledger.
+    pipe = SimpleNamespace(stage_1_model_ledger=SimpleNamespace(transformer=lambda: model))
+    unified_export_hf._export_diffusers_checkpoint(
+        pipe, None, tmp_path, None, export_attention_quantizers=export_attention_quantizers
+    )
+
+    config = _load_config(tmp_path / "config.json")["quantization_config"]
+    assert ("kv_cache_scheme" in config) == is_transformers_component
+    if is_transformers_component:
+        assert config["kv_cache_scheme"] == {"dynamic": False, "num_bits": 8, "type": "float"}
+    else:
+        assert not any(key.startswith("kv_cache") for key in config)
+
+    exported = load_file(str(tmp_path / "model.safetensors"))
+    expected_kv = kv_amax if is_transformers_component or export_attention_quantizers else {}
+    assert {key for key in exported if "quantizer" in key} == set(expected_kv)
+    for key, value in expected_kv.items():
+        torch.testing.assert_close(exported[key], value)
 
 
 def test_svdquant_diffusers_export_promotes_clean_keys():

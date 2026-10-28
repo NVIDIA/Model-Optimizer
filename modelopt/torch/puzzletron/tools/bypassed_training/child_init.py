@@ -45,6 +45,7 @@ from ...pruning.pruning_utils import (
     _init_moe_module,
     _load_expert_scores,
 )
+from ...utils.misc import get_attention_head_dim
 from ..logger import aprint, mprint
 
 __all__ = ["create_child_state_dict", "update_model_config"]
@@ -445,8 +446,8 @@ def create_child_state_dict(
     num_attention_heads = original_lm_config.num_attention_heads
     is_original_mha = all(kv == num_attention_heads for kv in original_num_kv_heads_per_layer)
     is_same_hidden_size = original_lm_config.hidden_size == new_lm_config.hidden_size
-    head_size = _get_head_dim(new_lm_config)
-    orig_head_size = _get_head_dim(original_lm_config)
+    head_size = get_attention_head_dim(new_lm_config)
+    orig_head_size = get_attention_head_dim(original_lm_config)
     assert head_size == orig_head_size, f"head_size {head_size} != orig_head_size {orig_head_size}"
 
     # Allow different hidden sizes for pruning
@@ -810,7 +811,7 @@ def _init_linear_attn(
     and score 0 to all others: out = (Wo @ Wv) @ x
     """
     n_embd = parent_config.hidden_size
-    head_size = _get_head_dim(parent_config)
+    head_size = get_attention_head_dim(parent_config)
     # Get num_kv_heads from config, compute n_heads_in_group
     n_kv_heads = parent_config.block_configs[layer_idx].attention.num_key_value_heads
     n_heads_in_group = parent_config.num_attention_heads // n_kv_heads
@@ -1223,14 +1224,3 @@ def _prune_hidden_size_dimension(
 
     else:
         raise ValueError(f"Unsupported hidden_size_init_mode: {hidden_size_init_mode}")
-
-
-def _get_head_dim(config) -> int:
-    """Get head dimension from config in a model-agnostic way.
-
-    Some models like Llama have `head_dim` as a direct attribute, while others
-    like Qwen2 don't. This helper computes it from hidden_size and num_attention_heads.
-    """
-    if hasattr(config, "head_dim") and config.head_dim is not None:
-        return config.head_dim
-    return config.hidden_size // config.num_attention_heads

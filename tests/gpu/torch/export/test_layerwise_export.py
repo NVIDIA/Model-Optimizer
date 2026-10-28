@@ -27,7 +27,7 @@ from _test_utils.torch.transformers_models import (
     get_tiny_llama,
     get_tiny_qwen3_moe,
 )
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.layerwise_export import (
@@ -610,20 +610,38 @@ def test_tied_embeddings_are_refused(tmp_path, make_cfg):
         mtq.quantize(model, cfg, _calib)
 
 
-def test_moe_export_matches(tmp_path):
-    """MoE layers take a different path: fused expert inputs and gate/up amax sync."""
+@pytest.mark.parametrize("carry_auxiliary_weight", [False, True])
+def test_moe_export_matches(tmp_path, carry_auxiliary_weight):
+    """Packing fused experts must not reclassify their source tensors as unplaced."""
+    source = tmp_path / "source"
+    source.mkdir()
+    baseline, layerwise = _build_moe_model(), _build_moe_model()
+    source_state = {k: v.cpu().contiguous() for k, v in baseline.state_dict().items()}
+    auxiliary_key = "mtp.eh_proj.weight"
+    if carry_auxiliary_weight:
+        source_state[auxiliary_key] = torch.ones(2, 2, dtype=torch.bfloat16)
+    save_file(source_state, source / "model.safetensors")
+    for model in (baseline, layerwise):
+        # No load-time record, so the unplaced keys are derived: the layerwise exporter's at
+        # bind, before it packs the experts.
+        model._modelopt_source_checkpoint = str(source)
+
     baseline_dir = tmp_path / "baseline"
     base = _nvfp4_cfg()
     base["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
-    export_hf_checkpoint(mtq.quantize(_build_moe_model(), base, _calib), export_dir=baseline_dir)
+    export_hf_checkpoint(mtq.quantize(baseline, base, _calib), export_dir=baseline_dir)
 
     export_dir = tmp_path / "fused"
-    _layerwise_quantize(
-        _build_moe_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt", base=_nvfp4_cfg())
+    mtq.quantize(
+        layerwise, _layerwise_cfg(export_dir, tmp_path / "ckpt", base=_nvfp4_cfg()), _calib
     )
+    export_hf_checkpoint(layerwise, export_dir=export_dir)
 
-    _assert_same_checkpoint(_load_checkpoint(baseline_dir), _load_checkpoint(export_dir))
+    exported = _load_checkpoint(export_dir)
+    _assert_same_checkpoint(_load_checkpoint(baseline_dir), exported)
     _assert_same_quant_config(baseline_dir, export_dir)
+    if carry_auxiliary_weight:
+        assert torch.equal(exported[auxiliary_key], source_state[auxiliary_key])
 
 
 def test_export_consumes_the_model_without_affecting_the_checkpoint(tmp_path):

@@ -57,6 +57,9 @@ try:
     HAS_DIRECT_HF_SFT = True
 except ImportError:
     HAS_DIRECT_HF_SFT = False
+from megatron.core import parallel_state
+from megatron.core.datasets.gpt_dataset import GPTDataset
+from megatron.core.datasets.indexed_dataset import IndexedDataset
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.utils import unwrap_model
@@ -74,6 +77,7 @@ from transformers import AutoTokenizer
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.export import ensure_local_checkpoint
 from modelopt.torch.opt.conversion import ModeloptStateManager
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.mlflow import Tool, masked_args
@@ -179,6 +183,18 @@ def get_args():
     parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
     parser.add_argument(
+        "--num_layers_in_first_pipeline_stage",
+        type=_positive_int,
+        default=None,
+        help="Number of decoder layers on the first pipeline stage (default: even split).",
+    )
+    parser.add_argument(
+        "--num_layers_in_last_pipeline_stage",
+        type=_positive_int,
+        default=None,
+        help="Number of decoder layers on the last pipeline stage (default: even split).",
+    )
+    parser.add_argument(
         "--dsa_kernel_backend",
         choices=["none", "tilelang", "cudnn"],
         default=None,
@@ -199,6 +215,12 @@ def get_args():
         "--data_paths",
         nargs="+",
         help="List of tokenized data paths to load from (weight1 path1 weight2 path2 ...)",
+    )
+    parser.add_argument(
+        "--document_boundaries",
+        action="store_true",
+        help="Pre-tokenized data only: attend within each EOD-separated document of a sequence (THD "
+        "segments) instead of across the whole packed window. Needs --mbs 1 and --cp_size 1.",
     )
     parser.add_argument(
         "--data_path_to_cache", type=str, default=None, help="Path to cache the dataset indices"
@@ -337,6 +359,15 @@ def get_args():
         help="Number of layers per recomputation chunk (only used when --recompute_granularity=full)",
     )
     parser.add_argument(
+        "--recompute_num_layers_per_stage",
+        type=_nonnegative_int,
+        nargs="+",
+        default=None,
+        help="Number of student layers to recompute on each pipeline stage, one value per stage, in "
+        "place of --recompute_num_layers (requires --recompute_granularity full "
+        "--recompute_method block).",
+    )
+    parser.add_argument(
         "--recompute_modules",
         type=str,
         nargs="+",
@@ -427,6 +458,27 @@ def get_args():
         raise ValueError("--checkpoint_keep_last must be >= -1.")
     if args.validate_only and args.eval_iters == 0:
         raise ValueError("--validate_only requires --eval_iters > 0.")
+    if args.pp_size == 1 and (
+        args.num_layers_in_first_pipeline_stage or args.num_layers_in_last_pipeline_stage
+    ):
+        raise ValueError("--num_layers_in_first/last_pipeline_stage require --pp_size > 1.")
+    if args.recompute_num_layers_per_stage is not None:
+        if args.recompute_granularity != "full" or args.recompute_method != "block":
+            raise ValueError(
+                "--recompute_num_layers_per_stage requires --recompute_granularity full "
+                "--recompute_method block."
+            )
+        if args.recompute_num_layers is not None:
+            raise ValueError(
+                "--recompute_num_layers_per_stage replaces --recompute_num_layers; pass only one."
+            )
+        if len(args.recompute_num_layers_per_stage) != args.pp_size:
+            raise ValueError(
+                f"--recompute_num_layers_per_stage needs {args.pp_size} values (one per pipeline "
+                f"stage), got {args.recompute_num_layers_per_stage}."
+            )
+        # Megatron requires a value when building the config; the pre-wrap hook sets each stage's.
+        args.recompute_num_layers = 1
 
     if args.sft and not (args.sft_dataset_root or args.sft_hf_dataset):
         raise ValueError(
@@ -448,6 +500,9 @@ def get_args():
         raise ValueError(
             "--sft_hf_validation / --sft_loss_mode / --sft_in_batch_packing require --sft_hf_dataset."
         )
+    if args.document_boundaries and (args.sft or args.mbs != 1 or args.cp_size != 1):
+        # Each window carries its own number of documents, so windows cannot be stacked.
+        raise ValueError("--document_boundaries needs pre-tokenized data, --mbs 1 and --cp_size 1.")
     if args.sft and (args.data_paths or args.use_mock_data):
         raise ValueError(
             "--sft is mutually exclusive with --data_paths / --use_mock_data: the SFT branch wins "
@@ -496,7 +551,56 @@ def _tokenizer_prepends_bos(args) -> bool:
     return tokenizer("x").input_ids[:1] == [tokenizer.bos_token_id]
 
 
+def _document_eod_id(args) -> int:
+    """The token ending each document: the student tokenizer's EOS, which ``--append_eod`` appends.
+
+    Fails if a data file's first document does not end with it, e.g. chat-template data, which has
+    no EOD between conversations, rather than silently attending across documents.
+    """
+    eod = AutoTokenizer.from_pretrained(
+        args.student_hf_path, trust_remote_code=args.trust_remote_code
+    ).eos_token_id
+    if eod is None:
+        raise ValueError("--document_boundaries needs a student tokenizer with an EOS token.")
+    for prefix in get_blend_from_list(args.data_paths)[0] if args.data_paths else []:
+        # Bound to a name: a document is a view of the dataset's memory map, closed with it.
+        dataset = IndexedDataset(prefix)
+        if dataset[0][-1] != eod:
+            raise ValueError(
+                f"--document_boundaries: the first document of {prefix} does not end with the "
+                f"student tokenizer's EOS ({eod}). Tokenize text data with --append_eod."
+            )
+    return eod
+
+
+def _add_document_boundaries() -> None:
+    """Give each EOD-separated document of a pre-tokenized window its own THD segment."""
+    getitem = GPTDataset.__getitem__
+
+    def getitem_with_boundaries(self, idx):
+        sample = getitem(self, idx)
+        tokens = sample["tokens"]
+        n = tokens.numel()
+        ends = (tokens == self.config.tokenizer.eod).nonzero(as_tuple=True)[0] + 1
+        # On the tokens' (CPU) device: CUDA tensors from a dataloader worker are shared over IPC.
+        bounds = [tokens.new_zeros(1), ends[ends < n], tokens.new_tensor([n])]
+        cu_seqlens = torch.cat(bounds).to(torch.int32)
+        sample["cu_seqlens_q"] = cu_seqlens
+        sample["max_seqlen_q"] = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        return sample
+
+    GPTDataset.__getitem__ = getitem_with_boundaries
+
+
 def main(args: argparse.Namespace, owns_the_run: bool = True):
+    # --student_hf_path stays as given. The student is built and exported from the local copy of
+    # the whole checkpoint in student_local_checkpoint_path, since the HF export reads the source's
+    # files from local disk only; student_hub_model_id is the Hub ID, or None for a local path.
+    args.student_hub_model_id, args.student_local_checkpoint_path = ensure_local_checkpoint(
+        args.student_hf_path
+    )
+    # NullTokenizer's EOD defaults to vocab_size - 1, which pre-tokenized data never contains.
+    eod_id = _document_eod_id(args) if args.document_boundaries else None
     student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
         args.student_megatron_path
     )
@@ -505,7 +609,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     # reads either layout, so it keeps the faster grouped GEMM.
     moe_grouped_gemm = (
         use_moe_grouped_gemm(
-            args.student_hf_path,
+            args.student_local_checkpoint_path,
             trust_remote_code=args.trust_remote_code,
             force_sequential=args.no_moe_grouped_gemm,
         )
@@ -529,6 +633,8 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         provider.sequence_parallel = args.tp_size > 1
         provider.pipeline_model_parallel_size = args.pp_size
         provider.pipeline_dtype = torch.bfloat16
+        provider.num_layers_in_first_pipeline_stage = args.num_layers_in_first_pipeline_stage
+        provider.num_layers_in_last_pipeline_stage = args.num_layers_in_last_pipeline_stage
         provider.context_parallel_size = args.cp_size
         provider.expert_model_parallel_size = args.ep_size
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
@@ -553,7 +659,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     # the built student inside the patched provide() below).
     # Only the student's layout is pinned -- it must match --student_megatron_path (see quantize.py).
     student_provider = _build_model_provider(
-        args.student_hf_path,
+        args.student_local_checkpoint_path,
         load_weights=args.student_megatron_path is None,
         moe_grouped_gemm=moe_grouped_gemm,
     )
@@ -591,7 +697,9 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under
     # ``language_model`` (used as ``distill_submodule`` below).
-    is_vlm = is_vlm_config(args.student_hf_path, trust_remote_code=args.trust_remote_code)
+    is_vlm = is_vlm_config(
+        args.student_local_checkpoint_path, trust_remote_code=args.trust_remote_code
+    )
 
     if is_vlm:
         warn_rank_0(
@@ -629,6 +737,24 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             return model_chunks
 
         distill_provider.register_pre_wrap_hook(_restore_student_hook, prepend=True)
+    if args.document_boundaries:
+        _add_document_boundaries()
+
+    if args.recompute_num_layers_per_stage is not None:
+        # Set this pipeline stage's student recompute depth before the model is wrapped.
+        def _per_stage_recompute_hook(model_chunks):
+            num_layers = args.recompute_num_layers_per_stage[
+                parallel_state.get_pipeline_model_parallel_rank()
+            ]
+            student = unwrap_model(model_chunks[0])
+            if is_vlm:
+                student = student.language_model
+            config = student.decoder.config
+            config.recompute_granularity = "full" if num_layers > 0 else None
+            config.recompute_num_layers = num_layers
+            return model_chunks
+
+        distill_provider.register_pre_wrap_hook(_per_stage_recompute_hook)
 
     # Build optimizer and scheduler
     optimizer_config, scheduler_config = distributed_fused_adam_with_cosine_annealing(
@@ -644,7 +770,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         "path_to_cache": args.data_path_to_cache,
         "random_seed": args.seed,
         "reset_attention_mask": False,
-        "reset_position_ids": False,
+        "reset_position_ids": args.document_boundaries,
         "eod_mask_loss": False,
         "num_dataset_builder_threads": 1,
         "data_sharding": True,
@@ -759,7 +885,9 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             )
             if args.sft
             else TokenizerConfig(
-                tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
+                tokenizer_type="NullTokenizer",
+                vocab_size=distill_provider.vocab_size,
+                null_tokenizer_eod_id=eod_id,
             )
         ),
         checkpoint=CheckpointConfig(
@@ -808,7 +936,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         save_vlm_to_hf(
             full_student,
             args.hf_export_path,
-            args.student_hf_path,
+            args.student_local_checkpoint_path,
             trust_remote_code=args.trust_remote_code,
         )
         print_rank_0(f"Saved distilled VLM to {args.hf_export_path} in HF format")
@@ -825,7 +953,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             export_llm_to_hf(
                 megatron_path=f"{checkpoint_dir}/iter_{args.train_iters:07d}",
                 hf_export_path=args.hf_export_path,
-                student_hf_path=args.student_hf_path,
+                student_hf_path=args.student_local_checkpoint_path,
                 template_hf=args.student_hf_model,
                 trust_remote_code=args.trust_remote_code,
             )

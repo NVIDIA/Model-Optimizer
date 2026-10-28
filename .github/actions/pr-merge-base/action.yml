@@ -20,7 +20,7 @@ runs:
   steps:
     - if: startsWith(github.ref, 'refs/heads/pull-request/')
       id: get-pr-info
-      uses: nv-gha-runners/get-pr-info@main
+      uses: nv-gha-runners/get-pr-info@090577647b8ddc4e06e809e264f7881650ecdccf # main
     # Extract SHAs from pr-info JSON via shell to avoid fromJSON on potentially-empty outputs
     - if: startsWith(github.ref, 'refs/heads/pull-request/')
       id: pr-shas

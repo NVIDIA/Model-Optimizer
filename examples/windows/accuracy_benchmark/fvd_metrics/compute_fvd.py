@@ -265,11 +265,8 @@ def compute_fvd(feats_ref: np.ndarray, feats_gen: np.ndarray) -> float:
 
 def _sha256(path: Path) -> str:
     """Compute SHA-256 hex digest of a file."""
-    h = hashlib.sha256()
     with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+        return hashlib.file_digest(f, "sha256").hexdigest()
 
 
 def resolve_weights(weights_arg: str | None) -> Path:

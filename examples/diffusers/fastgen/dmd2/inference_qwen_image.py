@@ -63,20 +63,16 @@ Usage::
     image.save("dmd2_smoke.png")
 """
 
-from __future__ import annotations
-
 import itertools
 import logging
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import Self
 
 import torch
 from diffusers import QwenImagePipeline, QwenImageTransformer2DModel
 from diffusers.utils.torch_utils import randn_tensor
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +113,7 @@ class QwenImageDMDInferencePipeline:
         ema_path: str | Path | None = None,
         torch_dtype: torch.dtype = torch.bfloat16,
         max_t: float = 0.999,
-    ) -> QwenImageDMDInferencePipeline:
+    ) -> Self:
         """Load the student + base Qwen-Image components.
 
         Args:
@@ -190,7 +186,7 @@ class QwenImageDMDInferencePipeline:
 
         return cls(base_pipeline=pipe, max_t=max_t)
 
-    def to(self, device: str | torch.device) -> QwenImageDMDInferencePipeline:
+    def to(self, device: str | torch.device) -> Self:
         self._pipe.to(device)
         return self
 

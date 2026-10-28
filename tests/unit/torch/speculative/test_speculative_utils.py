@@ -19,12 +19,22 @@ apply_chat_template returns a BatchEncoding on transformers>=5, so the old len(i
 was 2 (field count) and every conversation got dropped by the num_input_tokens <= 10 filter.
 """
 
+import hashlib
+import sys
+from unittest.mock import patch
+
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from transformers import BatchEncoding
 
-from modelopt.torch.speculative.utils import get_conversation_input_ids
+import modelopt.torch.speculative.utils as spec_utils
+from modelopt.torch.speculative.utils import (
+    KIMI_K2_FILE_SHA256,
+    KIMI_K2_PACKAGE_NAME,
+    _setup_kimi_k2_decoder,
+    get_conversation_input_ids,
+)
 
 CONVERSATIONS = [
     {"role": "user", "content": "Explain why the sky is blue in a few sentences."},
@@ -73,3 +83,65 @@ def test_normalizes_to_flat_list(wrap):
     assert input_ids == expected
     # The pre-fix code saw len() in {1, 2} here and silently dropped the conversation.
     assert len(input_ids) > 10
+
+
+def _serve_kimi_k2_files(tmp_path, monkeypatch, sources):
+    """Serve ``sources`` as the downloaded Kimi-K2 files, with their hashes pinned."""
+    for filename, source in sources.items():
+        (tmp_path / filename).write_text(source)
+        digest = hashlib.sha256(source.encode()).hexdigest()
+        monkeypatch.setitem(KIMI_K2_FILE_SHA256, filename, digest)
+    monkeypatch.setattr(
+        spec_utils, "hf_hub_download", lambda repo_id, filename, **kwargs: str(tmp_path / filename)
+    )
+    # Keep the global DynamicCache patch out of the rest of the test session.
+    monkeypatch.setattr(spec_utils, "_patch_dynamic_cache_compatibility", lambda: None)
+
+
+def test_kimi_k2_decoder_refuses_unverified_code(tmp_path, monkeypatch):
+    """No downloaded Kimi-K2 code runs unless every file matches its pinned hash."""
+    marker = tmp_path / "executed"
+    run_marker = f"open({str(marker)!r}, 'w').close()\n"
+    _serve_kimi_k2_files(tmp_path, monkeypatch, dict.fromkeys(KIMI_K2_FILE_SHA256, run_marker))
+    # Only the modeling file fails its check, so the valid config file must not run either.
+    (tmp_path / "modeling_deepseek.py").write_text(run_marker + "# tampered\n")
+
+    with pytest.raises(RuntimeError):
+        _setup_kimi_k2_decoder()
+    assert not marker.exists()
+
+
+def test_kimi_k2_decoder_imports_verified_code(tmp_path, monkeypatch):
+    """Verified files load as one package, so the modeling file's relative import resolves."""
+    modeling = (
+        "from .configuration_deepseek import DeepseekV3Config\n"
+        "class DeepseekV3Attention:\n"
+        "    _init_rope = forward = None\n"
+        "class DeepseekV3DecoderLayer:\n"
+        "    config_class = DeepseekV3Config\n"
+        "    forward = None\n"
+    )
+    config = "class DeepseekV3Config:\n    pass\n"
+    _serve_kimi_k2_files(
+        tmp_path,
+        monkeypatch,
+        {"configuration_deepseek.py": config, "modeling_deepseek.py": modeling},
+    )
+
+    with patch.dict(sys.modules):
+        decoder_cls = _setup_kimi_k2_decoder()
+    assert decoder_cls.config_class.__module__ == f"{KIMI_K2_PACKAGE_NAME}.configuration_deepseek"
+
+
+def test_kimi_k2_decoder_drops_failed_module(tmp_path, monkeypatch):
+    """A module that raises while importing is not left half-initialized in sys.modules."""
+    _serve_kimi_k2_files(
+        tmp_path,
+        monkeypatch,
+        {"configuration_deepseek.py": "", "modeling_deepseek.py": "raise ImportError\n"},
+    )
+
+    with patch.dict(sys.modules):
+        with pytest.raises(ImportError):
+            _setup_kimi_k2_decoder()
+        assert f"{KIMI_K2_PACKAGE_NAME}.modeling_deepseek" not in sys.modules

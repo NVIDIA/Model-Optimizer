@@ -15,8 +15,6 @@
 
 """Qwen-Image integration tests for PDD conversion, training, and execution."""
 
-from __future__ import annotations
-
 import copy
 from types import MethodType
 

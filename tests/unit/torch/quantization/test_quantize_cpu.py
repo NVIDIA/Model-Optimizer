@@ -873,3 +873,50 @@ def test_legacy_dict_format_end_to_end():
                 # but weight/input quantizers are re-enabled by subsequent entries.
                 # output_quantizer is NOT re-enabled so it stays disabled.
                 assert not module.is_enabled
+
+
+@pytest.mark.parametrize("config", ["INT8_DEFAULT_CFG", "W4A8_AWQ_BETA_CFG"])
+@pytest.mark.parametrize("model_mode", ["train", "eval"])
+def test_quantize_keeps_the_training_mode_of_each_module(model_mode, config):
+    # A model can hold a submodule in eval mode, for example a frozen encoder.
+    model = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Sequential(torch.nn.Linear(8, 8)))
+    model.train(model_mode == "train")
+    model[1].eval()
+    modes_during_calibration = []
+
+    def forward_loop(m):
+        modes_during_calibration.extend(module.training for module in m.modules())
+        m(torch.randn(2, 8))
+
+    mtq.quantize(model, getattr(mtq, config), forward_loop)
+    assert not any(modes_during_calibration)
+    # Every module, the inserted quantizers included, is back in its own mode or its parent's.
+    assert all(module.training == (model_mode == "train") for module in model[0].modules())
+    assert model.training == (model_mode == "train")
+    assert not any(module.training for module in model[1].modules())
+
+
+def test_quantize_restores_training_modes_through_train():
+    # Modules can do work in train(), such as dropping a cache, so the mode is put back through it.
+    class Tracked(torch.nn.Sequential):
+        def train(self, mode=True):
+            self.last_mode = mode
+            return super().train(mode)
+
+    model = torch.nn.Sequential(Tracked(torch.nn.Linear(8, 8)), Tracked(torch.nn.Linear(8, 8)))
+    model.train()
+    model[1].eval()
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 8)))
+    assert model[0].last_mode is True and model[0].training
+    assert model[1].last_mode is False and not model[1].training
+
+
+def test_calibrate_gives_quantizer_containers_the_mode_of_their_module():
+    # Some plugins keep quantizers in a plain container created during conversion, in training mode.
+    model = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Sequential(torch.nn.Linear(8, 8)))
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 8)))
+    model.eval()
+    model[1][0].quantizers = torch.nn.ModuleList([TensorQuantizer()])
+    assert model[1][0].quantizers.training
+    mtq.calibrate(model, "max", lambda m: m(torch.randn(2, 8)))
+    assert not any(module.training for module in model.modules())
