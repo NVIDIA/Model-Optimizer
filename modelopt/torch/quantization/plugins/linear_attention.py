@@ -83,6 +83,16 @@ def _restore_legacy_linear_attention_quantizers(model, quantizer_state):
             quantizer = getattr(module, handle)
             if key not in quantizer_state and not quantizer.is_enabled:
                 quantizer_state[key] = quantizer.get_modelopt_state()
+        # GDN prefill operand handles were added after the state-QAT checkpoint
+        # format. Disabled handles are safe defaults for older checkpoints.
+        sites = getattr(module, "gdn_matmul_sites", None)
+        if sites is not None:
+            for suffix, quantizer in sites.named_modules():
+                if not suffix or not isinstance(quantizer, TensorQuantizer):
+                    continue
+                key = f"{name}.gdn_matmul_sites.{suffix}" if name else f"gdn_matmul_sites.{suffix}"
+                if key not in quantizer_state and not quantizer.is_enabled:
+                    quantizer_state[key] = quantizer.get_modelopt_state()
 
 
 class _LinearAttentionQuantMixin(QuantModule):

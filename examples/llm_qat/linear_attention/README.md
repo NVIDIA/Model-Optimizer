@@ -10,6 +10,9 @@ the selected serving arithmetic and state quantization schedule. Loss follows th
 dataset's response mask, with gradients flowing through the state handoff into the prefix.
 See [State quantization alignment](STATE_QUANTIZATION.md) for the mismatch,
 solution, and numerical validation. The example quantizes recurrent state only.
+The separate [experimental GDN prefill operand path](PREFILL_OPERAND_QAT.md)
+provides training-time FP8/NVFP4 fake QDQ at real GEMM boundaries; it is not a
+compressed checkpoint or native serving kernel.
 
 ## Requirements
 

@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  operands: configs/ptq/units/gdn_prefill_nvfp4_dynamic
+
+metadata:
+  description: >-
+    Experimental GDN prefill QAT with dynamic block16 NVFP4 QDQ on both operands
+    of the eight algorithmic GEMMs. Global scales are isolated per chunk and head;
+    KDA and decode are intentionally unsupported.
+quantize:
+  algorithm:
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: operands
+  linear_attention:
+    - module_name: '*'
+      cfg:
+        backend: gdn_prefill
+        precision: gdn_prefill

@@ -63,3 +63,15 @@ def test_two_precision_requires_16_token_windows(window):
 def test_int8_replayssm_recipe_uses_w32():
     config = load_recipe("general/ptq/linear_attention_state_int8_dynamic").quantize
     assert config.linear_attention[0].cfg.replay_window == 32
+
+
+def test_gdn_prefill_policy_is_explicit_and_cannot_replay():
+    policy = LinearAttentionConfig(backend="gdn_prefill", precision="gdn_prefill")
+    assert policy.replay_window == 1
+    for settings in (
+        {"backend": "gdn_prefill"},
+        {"precision": "gdn_prefill"},
+        {"backend": "gdn_prefill", "precision": "gdn_prefill", "replay_window": 2},
+    ):
+        with pytest.raises(ValueError, match=r"GDN|gdn_prefill"):
+            LinearAttentionConfig(**settings)

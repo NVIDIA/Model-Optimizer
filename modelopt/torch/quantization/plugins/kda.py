@@ -28,6 +28,15 @@ class KimiDeltaAttentionStateQuantMixin(_LinearAttentionQuantMixin):
 
     linear_attention_quantizer_names = ("kda_state_quantizer",)
 
+    def validate_linear_attention(self):
+        """Reject the GDN-only operand-QDQ execution profile."""
+        if self.linear_attention_config.backend == "gdn_prefill":
+            raise ValueError(
+                "GDN prefill operand QDQ is unsupported for KDA because its pairwise "
+                "gated interactions are not GEMM operands"
+            )
+        super().validate_linear_attention()
+
     def _state_quantized_chunk_kda(self, kernel, *args, **kwargs):
         if not self.linear_attention_is_enabled:
             return kernel(*args, **kwargs)
