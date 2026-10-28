@@ -804,8 +804,9 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     forwards are intercepted. Both calibrate the same per-expert weight quantizers
     and shared input quantizers, and export the same keys; the activation scales
     they calibrate can differ. Only one backend's hook fires per forward
-    (selected by ``config._experts_implementation``), so installing both is safe.
-    Calibration still runs every model on ``eager``
+    (selected by ``config._experts_implementation``), so installing both is safe:
+    the ``grouped_mm`` fallback does not call ``F.linear``, which the CPU tests that
+    run it pin. Calibration still runs every model on ``eager``
     (``force_eager_experts_impl_on_the_fly``).
 
     Limitation: the ``grouped_mm`` path assumes the non-transposed weight layout
