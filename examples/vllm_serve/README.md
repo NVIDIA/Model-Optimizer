@@ -14,6 +14,58 @@ fake quantizers are enabled and retains it when they are disabled.
 
 The fakequant launcher does not support vLLM 0.9.0. Use one of the tested releases above.
 
+## Layer and quantizer support
+
+The available hooks depend on the vLLM layer class and selected backend. ModelOpt recipes
+enable the hooks listed below; a model is covered only where its layers use a supported
+class and implementation. Q/DQ means quantize then dequantize.
+
+| Layer / operation | vLLM layer class | Available quantizers | Limitations |
+| --- | --- | --- | --- |
+| Attention projections | `QKVParallelLinear`, `ColumnParallelLinear`, `MergedColumnParallelLinear`, `RowParallelLinear` | `input_quantizer`, `weight_quantizer` | Requires exactly `UnquantizedLinearMethod`. Other methods pass through only with these quantizers disabled, except for the Kimi MLP path below. |
+| Dense MLP and shared-expert projections | `ColumnParallelLinear`, `MergedColumnParallelLinear`, `RowParallelLinear` | `input_quantizer`, `weight_quantizer` | Same linear-method restriction. Custom projection methods require separate integration. |
+| Kimi K3 dense and shared-expert MLP projections | Parallel linear children of `KimiMLP` using `KimiK3LowLatencyLinearMethod` | `input_quantizer`, `weight_quantizer` | Requires BF16 strided 2D weights. ModelOpt bypasses fused GEMM collective shortcuts when needed. This exception does not cover Kimi custom attention projections. |
+| Expert gate/up GEMM | `FusedMoE`, `SharedFusedMoE`, `RoutedExperts` | `w13_input_quantizer`, `w13_weight_quantizer` | Use `--moe-backend triton` with exactly `UnquantizedFusedMoEMethod` and unquantized expert weights. See [expert GEMM backend requirements](#expert-gemm-backend-requirements). |
+| Expert down GEMM | `FusedMoE`, `SharedFusedMoE`, `RoutedExperts` | `w2_input_quantizer`, `w2_weight_quantizer` | Same backend and unquantized-method requirements as the gate/up GEMM above. |
+| Regular attention Q/K/V | `Attention` | `q_bmm_quantizer`, `k_bmm_quantizer`, `v_bmm_quantizer` | Hooks operands before native attention. Does not expose P inside the native fused kernel. |
+| Cross-attention and encoder attention Q/K/V | `CrossAttention`, `EncoderOnlyAttention` | `q_bmm_quantizer`, `k_bmm_quantizer`, `v_bmm_quantizer` | Registered only when the installed vLLM exposes these classes. The compact attention and sparse-attention adapters do not support these layouts. |
+| Compact attention Q/K/P/V | `Attention` with `ModelOptSparseAttentionImpl` or `ModelOptSparseFlashInferImpl` | `q_bmm_quantizer`, `k_bmm_quantizer`, `p_bmm_quantizer`, `v_bmm_quantizer` | Each operand supports NVFP4 or FP8. Requires regular decoder attention, FP16/BF16 model and cache, and equal Q/K/V head dimensions divisible by 16. See the [compact worker restrictions](#compact-nvfp4-attention-worker). |
+| MLA query, compressed latent and positional key | `MLAAttention` | `q_bmm_quantizer`, `kv_c_bmm_quantizer`, `k_pe_bmm_quantizer` | Custom MLA/CSA implementations are not automatically covered. No P hook or compact attention adapter for MLA. See [MLA KV-cache configuration](#fake-quantize-the-mla-kv-cache). |
+| DeepSeek V4 indexer query and key cache | `DeepseekV4Indexer` from `vllm.models.deepseek_v4.attention` | `indexer_q_quantizer`, `indexer_k_quantizer` | Applies Q/DQ after native FP8 quantization and requantizes to FP8, retaining the original FP8 rounding. MXFP4 indexer cache is rejected. |
+| GLM 5.3 Flash indexer query and key cache | `Indexer` from `vllm.models.glm5next.common.attention` or `vllm.models.glm5next.nvidia.attention` | `indexer_q_quantizer`, `indexer_k_quantizer` | Same FP8 round-trip restriction. Applied in the rotated basis used by the native indexer. |
+| GLM indexer scorer | GLM `Indexer` | `indexer_scorer_kwargs_quantizer` | Defaults off. Passes options to the scorer through `backend: scorer_kwargs`. Stock DeepGEMM supports `logits_dtype`; BF16 scorer reduction requires SM100. Additional options require a compatible custom backend. DeepSeek V4 rejects scorer controls. |
+| Expert-parallel dispatch and combine | `RoutedExperts` modular MoE path | `dispatch_quantizer`, `combine_quantizer` | Independent of expert GEMM quantizers. Combine needs an accessible modular finalize payload; padded backends require a constant global scale or MX format. `flashinfer_moe_ep_*` combine is rejected. Reduction and residual addition remain unquantized. |
+| DeepGEMM Mega-MoE dispatch and combine | `DeepseekV4MegaMoEExperts`, `KimiK3MegaMoEExperts` | `dispatch_quantizer`, `combine_quantizer` | Supports communication Q/DQ with `--moe-backend deep_gemm_mega_moe`, not expert weight/GEMM Q/DQ. Dispatch requires `VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION=1`. |
+
+### Expert GEMM backend requirements
+
+The `w13_*` and `w2_*` quantizers on `FusedMoE`, `SharedFusedMoE` and `RoutedExperts`
+intercept the decomposed Triton expert GEMMs. All three classes require the same expert
+compute path; the layer class alone does not establish backend support.
+
+| Expert compute backend selection | Expert input/weight fakequant | Requirement or limitation |
+| --- | --- | --- |
+| `--moe-backend triton` | Supported | Requires exactly `UnquantizedFusedMoEMethod`, unquantized expert weights, and the intercepted Triton kernel entry points. |
+| `--moe-backend deep_gemm_mega_moe` | Not supported by the expert GEMM hooks | DeepSeek/Kimi construct dedicated Mega-MoE expert modules instead of the regular `RoutedExperts` path. Mega-MoE runs its existing FP8/FP4 expert kernel; ModelOpt adds separate dispatch/combine fakequant. |
+| `--moe-backend flashinfer_moe_ep_*` | Not supported by the expert GEMM hooks | The fused expert kernel is not intercepted by the Triton hooks. Dispatch Q/DQ remains available through its registered path; combine Q/DQ is rejected. |
+| Other expert compute backends | No dedicated expert GEMM fakequant integration | Their kernels are not intercepted unless execution actually falls back to the supported decomposed Triton path. |
+
+The expert compute backend is separate from the EP communication backend. DeepEP, NIXL
+or another communication backend may be used with the supported modular expert path,
+subject to the dispatch/combine restrictions above. Communication-only recipes do not
+require Triton expert GEMMs. Separately executed shared-expert MLP projections use their
+registered linear hooks rather than the routed-expert `w13_*`/`w2_*` hooks.
+
+Additional limits:
+
+- Router `ReplicatedLinear`, normalization, embeddings and LM-head layers have no dedicated
+  runtime quantizer registration. GDN/KDA recurrent state and decay also have no dedicated
+  vLLM hooks.
+- N:M sparse softmax can combine with compact attention Q/DQ during prefill; N:M is not
+  applied during decode. Skip-softmax cannot combine with active attention Q/K/P/V Q/DQ.
+- Whole-model `FakeQuantWorker` and the sparse-attention workers are separate entry points.
+  Combining live projection/expert fakequant with sparse attention requires a combined integration.
+
 ## Prepare environment
 
 Run the commands below from the ModelOpt repository root (`/workspace/Model-Optimizer`
