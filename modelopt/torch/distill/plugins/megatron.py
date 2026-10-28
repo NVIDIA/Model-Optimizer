@@ -436,8 +436,10 @@ def _scaled_logsumexp(
         sum_exp[c] = shifted.exp_().sum(dim=-1, keepdim=True)
     if tp_group is not None:
         torch.distributed.all_reduce(sum_exp, group=tp_group)
-    shape = (*logits.shape[:-1], -1)
-    return tuple(t.view(shape) for t in (row_max, sum_exp.log(), top_vals, top_idx))
+    # Explicit widths: a -1 cannot be inferred for empty batch or sequence dims.
+    return tuple(
+        t.view(*logits.shape[:-1], t.size(-1)) for t in (row_max, sum_exp.log(), top_vals, top_idx)
+    )
 
 
 class _ScaledLogSumExpAndGather(torch.autograd.Function):
