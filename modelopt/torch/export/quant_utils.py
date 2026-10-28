@@ -868,6 +868,32 @@ def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
         return packed_byte.T.contiguous().view(torch.uint8)
 
 
+@torch.no_grad()
+def _pack_fp8_weight(weight: torch.Tensor, amax: torch.Tensor | None, dtype: torch.dtype):
+    """Pack per-tensor FP8 with the native fake-quantizer's scaling arithmetic."""
+    if weight.ndim not in (2, 3) or weight.is_meta or amax is None or amax.numel() != 1:
+        return None, None  # Retain the exporter's existing scale-based path for other layouts.
+    amax = amax.to(device=weight.device, dtype=torch.float32).reshape(())
+    safe_amax = torch.where(amax <= 448.0 / torch.finfo(torch.float32).max, 1.0, amax)
+    # Python reverse division uses reciprocal/multiply; C++ ATen uses tensor division.
+    multiplier = torch.full_like(safe_amax, 448.0).div_(safe_amax)
+    scale = torch.ones_like(multiplier).div_(multiplier)
+    packed = torch.empty(weight.shape, dtype=torch.float8_e4m3fn, device=weight.device)
+    matrices = weight.unsqueeze(0) if weight.ndim == 2 else weight
+    outputs = packed.unsqueeze(0) if weight.ndim == 2 else packed
+    for matrix, output in zip(matrices, outputs, strict=True):
+        columns = min(matrix.shape[-1], 1 << 20)
+        rows = max(1, (1 << 20) // max(columns, 1))
+        for row in range(0, matrix.shape[0], rows):
+            for column in range(0, matrix.shape[1], max(columns, 1)):
+                index = (slice(row, row + rows), slice(column, column + columns))
+                # Own the FP32 temporary even when the source already has that dtype.
+                chunk = matrix[index].to(dtype).to(torch.float32, copy=True)
+                chunk.mul_(multiplier).clamp_(-448.0, 448.0)
+                output[index].copy_(chunk)
+    return packed, scale
+
+
 def to_quantized_weight(
     weight: torch.Tensor,
     weights_scaling_factor: torch.Tensor,

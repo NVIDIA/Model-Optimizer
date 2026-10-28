@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import copy
+from dataclasses import replace
 
 import pytest
 import torch
@@ -142,14 +143,20 @@ def test_capture_does_not_modify_zero_amax():
     torch.testing.assert_close(module.input_quantizer._amax, input_amax)
 
 
-def test_functional_fp8_export_is_repeatable():
+@pytest.mark.parametrize("shape", [(4, 4), (16,), (2, 2, 2, 2)])
+@pytest.mark.parametrize("device", ["cpu", "meta"])
+def test_functional_fp8_export_is_repeatable(shape, device):
     module = _fp8_linear()
     original_weight = module.weight
     original_buffers = {name: value.clone() for name, value in module.named_buffers()}
     state = capture_quantized_weight_export_state(module)
+    weight = module.weight.detach().reshape(shape).to(device)
+    state = replace(state, weight_shape=shape, packing_permutation=tuple(range(len(shape))))
 
-    base = export_quantized_weight_tensors(module.weight, state, torch.float32)
-    repeated = export_quantized_weight_tensors(module.weight, state, torch.float32)
+    base = export_quantized_weight_tensors(weight, state, torch.float32)
+    repeated = export_quantized_weight_tensors(weight, state, torch.float32)
+    assert base["weight"].shape == shape
+    assert base["weight"].device.type == device
     assert module.weight is original_weight
     assert set(dict(module.named_buffers())) == set(original_buffers)
     for name, value in module.named_buffers():
