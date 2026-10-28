@@ -154,6 +154,8 @@ DLA_TRANSFORMS = (
 
 def _boundary_stage_options(name, quant_types, verbose, prepared_input_ops, prepared_output_ops):
     """Share stage options between the prerequisite probe and the actual ordered pipeline."""
+    if name == "Cast":
+        return {"preserve_topk_indices": "TopK" in prepared_output_ops}
     if name in {"Gather", "GatherElements", "StandaloneReduceOperations", "GroupQueryAttention"}:
         return {"prepared_data_ops": prepared_input_ops}
     if name == "RemoveQDQ":

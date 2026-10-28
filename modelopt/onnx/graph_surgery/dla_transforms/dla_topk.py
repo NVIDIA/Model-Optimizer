@@ -51,12 +51,11 @@ def _private_consumer(cache, name, operation, standard, protected, port=0):
     )
 
 
-def _apply_topk(model: onnx.ModelProto, *, rank_converted=False) -> onnx.ModelProto:
-    """Plan exact private index rewrites before changing nodes, controls or metadata."""
+def _topk_plans(model, cache, *, rank_converted=False):
+    """Prove complete private index-chain eligibility without changing the graph."""
     if next((op.version for op in model.opset_import if op.domain in {"", "ai.onnx"}), 1) < 13:
-        return model
+        return []
     graph = model.graph
-    cache = GraphCache(graph)
     standard_nodes = _operator_nodes(model, {"TopK", "Cast", "Reshape", "Tile", "GatherElements"})
     standard = {id(node) for node in standard_nodes}
     topks = [node for node in standard_nodes if node.op_type == "TopK"]
@@ -84,24 +83,21 @@ def _apply_topk(model: onnx.ModelProto, *, rank_converted=False) -> onnx.ModelPr
         )
         if tile is None or len(reshape.input) != 2 or len(tile.input) != 2:
             continue
-        cast2 = (
-            _private_consumer(cache, tile.output[0], "Cast", standard, protected)
-            if rank_converted
-            else None
-        )
-        if cast2 is not None and get_node_attr_i(cast2, "to", 0) not in {
-            TensorProto.INT32,
-            TensorProto.INT64,
-        }:
-            continue
-        gather = _private_consumer(
-            cache,
-            cast2.output[0] if cast2 else tile.output[0],
-            "GatherElements",
-            standard,
-            protected,
-            1,
-        )
+        casts = []
+        cast_ids = set()
+        tail = tile.output[0]
+        while rank_converted:
+            cast = _private_consumer(cache, tail, "Cast", standard, protected)
+            if (
+                cast is None
+                or id(cast) in cast_ids
+                or get_node_attr_i(cast, "to", 0) not in {TensorProto.INT32, TensorProto.INT64}
+            ):
+                break
+            casts.append(cast)
+            cast_ids.add(id(cast))
+            tail = cast.output[0]
+        gather = _private_consumer(cache, tail, "GatherElements", standard, protected, 1)
         if gather is None or len(gather.input) != 2:
             continue
         axis = 2 if rank_converted else 1
@@ -139,11 +135,21 @@ def _apply_topk(model: onnx.ModelProto, *, rank_converted=False) -> onnx.ModelPr
         required_repeats[axis] = 1
         if reshaped != required_shape or repeats.tolist() != required_repeats:
             continue
-        plans.append((node, cast1, reshape, tile, cast2, gather, n, k))
+        plans.append((node, cast1, reshape, tile, casts, gather, n, k))
 
+    return plans
+
+
+def _apply_topk(model: onnx.ModelProto, *, rank_converted=False) -> onnx.ModelProto:
+    """Plan exact private index rewrites before changing nodes, controls or metadata."""
+    if next((op.version for op in model.opset_import if op.domain in {"", "ai.onnx"}), 1) < 13:
+        return model
+    graph = model.graph
+    cache = GraphCache(graph)
+    plans = _topk_plans(model, cache, rank_converted=rank_converted)
     before = {}
     removed = set()
-    for count, (node, cast1, reshape, tile, cast2, gather, n, k) in enumerate(plans):
+    for count, (node, cast1, reshape, tile, casts, gather, n, k) in enumerate(plans):
         prefix = node.name or f"topk_{count}"
         shape_name = cache.unique_name(prefix + "_reshape_const")
         reshape_out = cache.unique_name(prefix + "_reshape_out")
@@ -188,7 +194,7 @@ def _apply_topk(model: onnx.ModelProto, *, rank_converted=False) -> onnx.ModelPr
             cache.vi_map[cast1.output[0]].type.tensor_type.elem_type = TensorProto.INT32
         gather.op_type = "Gather"
         gather.input[1] = squeezed
-        removed.update(id(item) for item in (reshape, tile, cast2) if item is not None)
+        removed.update(id(item) for item in (reshape, tile, *casts))
     nodes = []
     replacements = {}
     for index, node in enumerate(graph.node):

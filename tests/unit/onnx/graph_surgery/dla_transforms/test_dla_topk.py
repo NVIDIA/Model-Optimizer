@@ -21,6 +21,7 @@
 """Execute private TopK index rewrites and preserve incompatible owners and layouts."""
 
 import copy
+import importlib
 
 import numpy as np
 import onnx
@@ -334,3 +335,88 @@ def test_malformed_late_topk_refuses_before_any_mutation():
     with pytest.raises(ValueError, match="expected"):
         _apply_topk(model, rank_converted=True)
     assert model.SerializeToString() == original
+
+
+@pytest.mark.parametrize(
+    "dtype", [TensorProto.INT32, TensorProto.INT64, TensorProto.FLOAT16, TensorProto.FLOAT]
+)
+def test_registered_pipeline_preserves_integer_topk_casts_for_rewrite(dtype):
+    """Keep integer candidates for TopK while floating Casts retain their FP32 conversion."""
+    pipeline = importlib.import_module("modelopt.onnx.graph_surgery.make_dla_compatible")
+    model = _make_topk_chain_model(rank_converted=True)
+    first = next(node for node in model.graph.node if node.name == "cast1")
+    next(attr for attr in first.attribute if attr.name == "to").i = dtype
+    for value in model.graph.value_info:
+        if value.name in {"cast1", "reshaped", "tiled"}:
+            value.type.tensor_type.elem_type = dtype
+    feeds = _feeds(model)
+    expected = _execute(model, feeds)
+    changed = pipeline._transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    integer = dtype in {TensorProto.INT32, TensorProto.INT64}
+    assert any(node.op_type == "Tile" for node in changed.graph.node) != integer
+    assert any(node.op_type == "Gather" for node in changed.graph.node) == integer
+    cast = next(node for node in changed.graph.node if node.name == "cast1")
+    assert next(attr.i for attr in cast.attribute if attr.name == "to") == (
+        TensorProto.INT32 if integer else TensorProto.FLOAT
+    )
+    for actual, original in zip(_execute(changed, feeds), expected):
+        np.testing.assert_array_equal(actual, original)
+
+
+@pytest.mark.parametrize("topk_stage", [False, True])
+@pytest.mark.parametrize("ineligible", [None, "values_output", "runtime_k"])
+def test_cast_protection_requires_registered_eligible_topk(topk_stage, ineligible, monkeypatch):
+    """Keep FP32 Cast behavior when TopK cannot consume the complete private chain."""
+    pipeline = importlib.import_module("modelopt.onnx.graph_surgery.make_dla_compatible")
+    model = _make_topk_chain_model(rank_converted=True)
+    if ineligible == "values_output":
+        model.graph.output.append(
+            copy.deepcopy(next(v for v in model.graph.value_info if v.name == "values"))
+        )
+    elif ineligible == "runtime_k":
+        model.graph.input.append(_vi("k_val", TensorProto.INT64, [1]))
+    feeds = {name: value for name, value in _feeds(model).items() if name in {"X", "data"}}
+    expected = _execute(model, feeds)
+    if not topk_stage:
+        monkeypatch.setattr(
+            pipeline,
+            "DLA_TRANSFORMS",
+            [(name, stage) for name, stage in pipeline.DLA_TRANSFORMS if name != "TopK"],
+        )
+    changed = pipeline._transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    cast = next(node for node in changed.graph.node if node.name == "cast1")
+    eligible = topk_stage and ineligible is None
+    assert next(attr.i for attr in cast.attribute if attr.name == "to") == (
+        TensorProto.INT32 if eligible else TensorProto.FLOAT
+    )
+    assert any(node.op_type == "Tile" for node in changed.graph.node) != eligible
+    for actual, original in zip(_execute(changed, feeds), expected):
+        np.testing.assert_array_equal(actual, original)
+
+
+@pytest.mark.parametrize("dtype", [TensorProto.INT32, TensorProto.INT64, TensorProto.FLOAT16])
+def test_topk_private_cast_tail_preserves_integer_values_and_float_rounding(dtype):
+    """Collapse added integer index casts while retaining a lossy floating intermediate."""
+    model = _make_topk_chain_model(n=4096, k=1, rank_converted=True)
+    gather = model.graph.node[-1]
+    gather.input[1] = "cast4"
+    model.graph.node.insert(
+        len(model.graph.node) - 1, helper.make_node("Cast", ["cast2"], ["cast3"], to=dtype)
+    )
+    model.graph.node.insert(
+        len(model.graph.node) - 1,
+        helper.make_node("Cast", ["cast3"], ["cast4"], to=TensorProto.INT64),
+    )
+    model = onnx.shape_inference.infer_shapes(model, strict_mode=True)
+    feeds = _feeds(model)
+    feeds["X"].fill(0)
+    feeds["X"].reshape(-1)[2049] = 100
+    expected = _execute(model, feeds)
+    before = model.SerializeToString()
+    changed = _apply_topk(copy.deepcopy(model), rank_converted=True)
+    if dtype == TensorProto.FLOAT16:
+        assert changed.SerializeToString() == before
+    else:
+        assert not any(node.op_type == "Tile" for node in changed.graph.node)
+    for actual, original in zip(_execute(changed, feeds), expected):
+        np.testing.assert_array_equal(actual, original)
