@@ -1841,7 +1841,10 @@ def assert_fused_experts_intercepted(model):
         + "\n\nTheir forward ran, but the active experts backend bypasses both hooks -- "
         "`batched_mm`, `sonicmoe`, or a hand-written `bmm`/`matmul` forward on a class without "
         "`@use_experts_implementation`, which `normalize_experts_impl_on_the_fly` cannot "
-        "redirect. Check the module's `forward` and `config._experts_implementation`."
+        "redirect. Check the module's `forward` and `config._experts_implementation`. A class no "
+        "backend change redirects needs its own quantized wrapper, as GptOssExperts has; to "
+        "quantize the rest of the model meanwhile, disable these modules' quantizers in the quant "
+        "config."
     )
 
 
