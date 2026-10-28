@@ -8,6 +8,7 @@ Changelog
 
 *Quantization*
 
+- Add ``algo_cfg`` to the quantization config to calibrate different parts of a model with different algorithms, each an ordered pipeline, e.g. ``[{"module_name": "*self_attn*", "cfg": ["awq_lite"]}, {"module_name": "*mlp*", "cfg": ["mse", "gptq"]}]``; ``algorithm`` becomes the fallback for whatever no entry matches. Chained stages consume the previous stage's scales, so a range search now feeds GPTQ instead of being discarded by it. Not supported with expert parallelism.
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
 - The functional quantized-weight export API now exports the KV cache: ``capture_kv_cache_export_state`` returns an attention module's ``k_scale`` / ``v_scale``, and ``build_hf_quantization_config`` takes the KV-cache formats from ``get_kv_cache_export_spec``.
 - Add ``use_weight_scale=False`` to ``awq_lite`` and ``awq_full`` calibration for activation-only AWQ scale search. Existing weight-and-activation scaling remains the default.

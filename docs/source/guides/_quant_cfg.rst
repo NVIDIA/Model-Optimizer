@@ -282,6 +282,78 @@ For entirely custom recipes, compose the list directly:
 
 ----------
 
+.. _scoped-calibration:
+
+Per-scope calibration (``algo_cfg``)
+====================================
+
+``algorithm`` picks one calibration algorithm for the whole model. The optional ``algo_cfg``
+key assigns a different *ordered pipeline* to each part of it:
+
+.. code-block:: python
+
+    config = {
+        "quant_cfg": [...],
+        "algo_cfg": [
+            {"module_name": "*self_attn*", "cfg": ["awq_lite"]},
+            {"module_name": "*mlp*", "cfg": [{"method": "mse", "fp8_scale_sweep": True}, "gptq"]},
+        ],
+        "algorithm": "max",   # fallback for anything no entry matches
+    }
+
+Each entry has the same ``{<selector>, "cfg": ...}`` shape as a ``quant_cfg`` entry, with
+exactly one selector:
+
+* ``module_name`` — glob over quantized-linear module names. Use for module-level algorithms
+  (``gptq``, ``awq_lite``, ``smoothquant``), where the role is implied by the algorithm.
+* ``quantizer_name`` — glob over quantizer module names. Use when the role must be explicit,
+  e.g. ``max`` on ``*input_quantizer`` only.
+
+``cfg`` is the ordered list of algorithms for the matched targets. Stages run in order and each
+consumes the previous one's mutated weights and scales, so ``["mse", "gptq"]`` lets a range
+search feed GPTQ: GPTQ compensates rounding error against a specific quantization grid, and the
+hand-off keeps it working against the grid ``mse`` searched rather than re-deriving one from
+max. Every stage is recorded in the ModelOpt state under its own name.
+
+``algorithm`` becomes the fallback for targets no entry claims, and is dropped entirely when the
+entries already cover every quantizer.
+
+.. note::
+
+    Not every algorithm can be scoped. ``smoothquant``, ``svdquant``, ``lsq`` and
+    ``nvfp4_act_headroom`` need whole-model context; giving one a narrower scope is rejected at
+    config-compile time rather than silently writing outside it.
+
+.. note::
+
+    Stages see each other's work. A stage's calibration forward runs with the quantizers of
+    *earlier* stages still fake-quantizing, so each stage calibrates against the previous ones'
+    quantized activations — the same principle as layerwise calibration's
+    ``get_qdq_activations_from_prev_layer``, and the reason chaining helps. A scoped plan is
+    therefore order-dependent, and a stage's activations differ from a whole-model run of the
+    same algorithm.
+
+Unsupported combinations
+------------------------
+
+Scoped calibration has three limitations in this release. Each is detected and warned about
+when the plan is compiled, rather than failing silently:
+
+* **Expert parallelism.** Each rank holds a different slice of the experts, so a scope glob can
+  resolve differently per rank and mismatch calibration's amax collectives, which NCCL hangs on
+  rather than reporting. Run the plan at whole-model scope instead.
+* **Scopes that split a fused sibling group.** ``q/k/v_proj`` and ``gate/up_proj`` share one
+  weight ``global_amax``, reconciled over the whole model after calibration. A scope covering
+  only part of such a group rewrites scales its out-of-scope siblings depend on. Widen the
+  scope to the whole group.
+* **Distributed amax synchronization.** Under data or tensor parallelism the amax syncs run at
+  whole-module granularity, so a ``quantizer_name`` scope that selects one role still syncs the
+  other roles of the modules it touches, and ``*_bmm_quantizer`` — which hangs off the attention
+  module rather than a quantized linear — is not reached by a scoped stage at all, leaving its
+  amax unsynchronized. Calibrate at whole-model scope when running distributed.
+
+----------
+
 .. _sequential-quantizers:
 
 Sequential Quantization
