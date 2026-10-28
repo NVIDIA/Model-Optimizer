@@ -392,7 +392,32 @@ The distilled checkpoint retains the ModelOpt quantization state, so it can be c
 
 #### Scale Learning (LSQ)
 
-QAD can also train the NVFP4 per-block weight scales of a student quantized with a learnable-scale recipe such as `general/qad/nvfp4_lsq-mse_init-fp8_kv` (static-block NVFP4 needs `--tp_size 1` in both `quantize.py` and `distill.py`). Add `--lsq_scale_lr` to the QAD command above to train the scales at their own learning rate alongside the weights, or `--lsq_scale_only` to train only the scales: the weights are frozen and take no gradient or optimizer state, so `--lr` and `--min_lr` apply to the scales (e.g. `--lsq_scale_only --lr 3e-5 --min_lr 0`).
+QAD can also train the NVFP4 per-block weight scales of a student quantized with a learnable-scale recipe such as `general/qad/nvfp4_lsq-mse_init-fp8_kv`. This needs a Megatron-Bridge with [NVIDIA-NeMo/Megatron-Bridge#6699](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/6699), and resuming a scale-only run also needs [NVIDIA-NeMo/Megatron-Bridge#6698](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/6698); until a NeMo container includes both, install Megatron-Bridge from source as [described above](#pre-requisites), at a commit that contains them. Static-block NVFP4 needs `--tp_size 1` in both `quantize.py` and `distill.py`:
+
+```bash
+torchrun --nproc_per_node 8 quantize.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --recipe general/qad/nvfp4_lsq-mse_init-fp8_kv \
+    --tp_size 1 \
+    --export_megatron_path /tmp/Qwen3-8B-NVFP4-LSQ-megatron
+
+torchrun --nproc_per_node 8 distill.py \
+    --tp_size 1 \
+    --teacher_hf_path Qwen/Qwen3-8B \
+    --student_hf_path Qwen/Qwen3-8B \
+    --student_megatron_path /tmp/Qwen3-8B-NVFP4-LSQ-megatron \
+    --data_paths 1.0 tokenized_qwen3/data1_text_document 1.0 tokenized_qwen3/data2_text_document \
+    --data_path_to_cache /path/to/cache/dataset_indices_qwen3 \
+    --seq_length 8192 \
+    --gbs 768 \
+    --train_iters 1000 \
+    --lsq_scale_only \
+    --lr 3e-5 \
+    --min_lr 0 \
+    --output_dir /output/qwen3_8b_nvfp4_lsq_qad
+```
+
+`--lsq_scale_only` trains only the scales: the weights are frozen and take no gradient or optimizer state, so `--lr` and `--min_lr` apply to the scales. To train the scales alongside the weights instead, drop it and give the scales their own peak learning rate with `--lsq_scale_lr` (e.g. `--lr 1e-5 --min_lr 5e-6 --lsq_scale_lr 1e-4`).
 
 #### Evaluating a QAD checkpoint in vLLM with fake quantization
 

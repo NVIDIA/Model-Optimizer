@@ -35,6 +35,7 @@ from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_dir,
 )
 from torch.distributed.checkpoint import FileSystemReader
+from torch.distributed.checkpoint.metadata import BytesStorageMetadata
 
 
 def _load_checkpoint_tensors(checkpoint_path: Path) -> dict[str, torch.Tensor]:
@@ -48,6 +49,32 @@ def _load_checkpoint_tensors(checkpoint_path: Path) -> dict[str, torch.Tensor]:
     }
     dcp.load(tensors, storage_reader=reader)
     return tensors
+
+
+# LSQ scale learning needs NVIDIA-NeMo/Megatron-Bridge#6699, and resuming it #6698.
+# TODO: drop this probe once the minimum Megatron-Bridge carries both.
+try:
+    from megatron.bridge.training.checkpointing import _param_group_lr_bounds  # noqa: F401
+    from megatron.bridge.training.post_training.lsq import freeze_all_but_lsq_scales  # noqa: F401
+
+    HAS_BRIDGE_LSQ = True
+except ImportError:
+    HAS_BRIDGE_LSQ = False
+
+
+def _write_calibration_data(tmp_path: Path) -> str:
+    """Write a small calibration set, so the test needs no dataset download on the GPU node."""
+    calib_path = tmp_path / "calibration.jsonl"
+    calib_path.write_text(
+        "\n".join(
+            json.dumps(
+                {"text": f"Sample {i}: " + "The quick brown fox jumps over the lazy dog. " * 4}
+            )
+            for i in range(8)
+        ),
+        encoding="utf-8",
+    )
+    return str(calib_path)
 
 
 @pytest.mark.timeout(720)  # Multiple steps in one test hence takes longer than the default timeout
@@ -96,17 +123,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
     calib_dataset = "cnn_dailymail"
     if lora_rank:
         # Keep the LoRA smoke test independent of dataset downloads on the GPU node.
-        calib_path = tmp_path / "calibration.jsonl"
-        calib_path.write_text(
-            "\n".join(
-                json.dumps(
-                    {"text": f"Sample {i}: " + "The quick brown fox jumps over the lazy dog. " * 4}
-                )
-                for i in range(8)
-            ),
-            encoding="utf-8",
-        )
-        calib_dataset = str(calib_path)
+        calib_dataset = _write_calibration_data(tmp_path)
 
     # Step 1: PTQ the model and save its quantizers and optional adapters.
     quantize_cmd = extend_cmd_parts(
@@ -285,3 +302,105 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
         state = torch.load(fakequant_path / "quantizer_state.pth", weights_only=True)
         assert any(name.endswith("k_bmm_quantizer") for name in recipe["quantizers"])
         assert {key.rpartition(".")[0] for key in state} <= recipe["quantizers"].keys()
+
+
+def _optimizer_param_groups(iteration_dir: Path) -> list[dict]:
+    """Param groups saved by Megatron's distributed optimizer in a checkpoint iteration."""
+    reader = FileSystemReader(str(iteration_dir))
+    state = {
+        name: None
+        for name, meta in reader.read_metadata().state_dict_metadata.items()
+        if isinstance(meta, BytesStorageMetadata)
+        and name.startswith("optimizer.")
+        and ".optimizer/" in name
+    }
+    dcp.load(state, storage_reader=reader)
+    return [
+        group for entries in state.values() for entry in entries for group in entry["param_groups"]
+    ]
+
+
+@pytest.mark.timeout(720)
+@pytest.mark.skipif(
+    not HAS_BRIDGE_LSQ,
+    reason="Megatron-Bridge lacks LSQ scale learning (NVIDIA-NeMo/Megatron-Bridge#6699, #6698)",
+)
+def test_qad_lsq_scale_only(tmp_path: Path, num_gpus):
+    """Scale-only LSQ QAD across a restart: only the scales train, in their own param group."""
+    hf_model_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+    quantized_megatron_path = tmp_path / "quantized_megatron"
+    # Static-block NVFP4, and so LSQ, needs tp_size 1.
+    quantize_cmd = extend_cmd_parts(
+        ["torchrun", "--nproc_per_node=1", "quantize.py", "--skip_generate"],
+        hf_model_name_or_path=hf_model_path,
+        recipe="general/qad/nvfp4_lsq-mse_init-fp8_kv",
+        tp_size=1,
+        pp_size=1,
+        calib_dataset_name=_write_calibration_data(tmp_path),
+        calib_num_samples=8,
+        calib_batch_size=2,
+        seq_length=16,
+        export_megatron_path=quantized_megatron_path,
+    )
+    run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)
+
+    # The scales get their own peak learning rate; the frozen weights would move at --lr.
+    lr, scale_lr, train_iters = 1e-3, 2e-3, 4
+    distill_output_dir = tmp_path / "qad_output"
+    distill_cmd = extend_cmd_parts(
+        [
+            "torchrun",
+            f"--nproc_per_node={num_gpus}",
+            "distill.py",
+            "--use_mock_data",
+            "--lsq_scale_only",
+        ],
+        student_hf_path=hf_model_path,
+        student_megatron_path=quantized_megatron_path,
+        teacher_hf_path=hf_model_path,
+        output_dir=distill_output_dir,
+        tp_size=1,
+        pp_size=1,
+        seq_length=16,
+        mbs=1,
+        gbs=4,
+        logit_kl_top_k=8,
+        train_iters=train_iters,
+        lr=lr,
+        min_lr=lr / 10,
+        lsq_scale_lr=scale_lr,
+        lr_warmup_iters=1,
+        eval_interval=train_iters,
+        eval_iters=1,
+        save_interval=1,
+        log_interval=1,
+        exit_interval=2,
+        exit_duration_in_mins=10,
+    )
+    # Stop at iteration 2, then resume from it to the end.
+    run_example_command(distill_cmd, example_path="megatron_bridge", setup_free_port=True)
+    run_example_command(distill_cmd, example_path="megatron_bridge", setup_free_port=True)
+    checkpoints = distill_output_dir / "checkpoints"
+    tracker = checkpoints / "latest_checkpointed_iteration.txt"
+    assert tracker.read_text(encoding="utf-8").strip() == str(train_iters)
+
+    ptq = _load_checkpoint_tensors(next(quantized_megatron_path.glob("iter_*")))
+    resumed_from, final = (
+        _load_checkpoint_tensors(checkpoints / f"iter_{iteration:07d}")
+        for iteration in (2, train_iters)
+    )
+    scales = [name for name in ptq if name.endswith(("_amax_pre", "_amax_post"))]
+    assert scales, "The LSQ recipe produced no learnable scales"
+    for name, value in ptq.items():
+        if name not in scales:
+            torch.testing.assert_close(resumed_from[name], value, rtol=0, atol=0, msg=name)
+            torch.testing.assert_close(final[name], value, rtol=0, atol=0, msg=name)
+    assert any(not torch.equal(resumed_from[name], ptq[name]) for name in scales)
+    assert any(not torch.equal(final[name], resumed_from[name]) for name in scales)
+    # The scales are the only trainable parameters; after the restart their group keeps its own
+    # learning rate instead of falling back to --lr.
+    for iteration in (2, train_iters):
+        groups = _optimizer_param_groups(checkpoints / f"iter_{iteration:07d}")
+        assert groups
+        for group in groups:
+            assert group["max_lr"] == scale_lr and group["wd_mult"] == 0.0, group
