@@ -16,6 +16,7 @@
 from collections import defaultdict
 
 import pytest
+import torch
 
 from modelopt.torch.opt.mode import _ModeRegistryCls
 
@@ -52,3 +53,17 @@ def use_channel_div_4():
         for name, kv_for_all in lookup.items():
             for regex, (k, v) in kv_for_all.items():
                 config_class.model_fields[name].default[regex][k] = v
+
+
+@pytest.fixture
+def gloo_world_of_one(skip_on_windows, tmp_path_factory):
+    """A one-rank gloo process group, so the code under test takes its distributed path, and its
+    CPU device mesh."""
+    from torch.distributed.device_mesh import init_device_mesh
+
+    store = tmp_path_factory.mktemp("pg") / "store"
+    torch.distributed.init_process_group("gloo", init_method=store.as_uri(), rank=0, world_size=1)
+    try:
+        yield init_device_mesh("cpu", (1,))
+    finally:
+        torch.distributed.destroy_process_group()
