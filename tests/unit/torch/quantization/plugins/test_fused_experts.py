@@ -1948,6 +1948,37 @@ class TestGroupedMMExperts:
             self._cleanup_registry(_SyntheticGroupedExperts)
         torch.testing.assert_close(outputs[1], outputs[0], rtol=1e-4, atol=1e-6)
 
+    def test_a_widening_pre_quant_scale_gives_one_grouped_forward_in_both_grad_modes(self):
+        """FP32 pre-quant scales on a BF16 model widen what the quantizers return. The grouped forward
+        computes from those FP32 slices with or without autograd, rather than rounding the weights to
+        BF16 only without it."""
+        self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.manual_seed(0)
+        model = _GroupedMoEModel("grouped_mm").to(torch.bfloat16)
+        hidden = torch.randn(8, HIDDEN_DIM, dtype=torch.bfloat16)
+        top_k_index = torch.randint(0, NUM_EXPERTS, (8, TOP_K))
+        top_k_weights = torch.softmax(torch.randn(8, TOP_K), dim=1).to(torch.bfloat16)
+        outputs = []
+        try:
+            register_fused_experts_on_the_fly(model)
+            experts = QuantModuleRegistry.convert(model.moe.experts)
+            for q in experts.modules():
+                if isinstance(q, TensorQuantizer):
+                    q.disable()
+            for name in ("gate_up_proj", "down_proj"):
+                in_dim = getattr(experts, name).shape[-1]
+                getattr(experts, f"{name}_input_quantizer").pre_quant_scale = (
+                    torch.rand(in_dim) + 0.5
+                )
+                for q in getattr(experts, f"{name}_weight_quantizers"):
+                    q.pre_quant_scale = torch.rand(in_dim) + 0.5
+            for grad in (True, False):
+                with torch.set_grad_enabled(grad):
+                    outputs.append(experts(hidden, top_k_index, top_k_weights).detach())
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.testing.assert_close(outputs[1], outputs[0], rtol=0, atol=0)
+
     def test_fake_quantized_grouped_forward_and_backward_match_eager(self):
         """Under autograd (QAT) the grouped forward fake-quantizes every expert's slice at once; its
         output and gradients match the eager forward's on the same calibrated quantizers."""
