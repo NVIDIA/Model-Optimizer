@@ -17,6 +17,9 @@
 
 from abc import abstractmethod
 from collections.abc import Callable
+from typing import Literal
+
+import torch.nn as nn
 
 from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.conversion import ModelLikeModule
@@ -221,6 +224,8 @@ def wrapped_calib_func(
     forward_loop: ForwardLoop | None = None,
     func: Callable | None = None,
     supports_layerwise: bool = True,
+    should_process: Callable | None = None,
+    handoff: dict | None = None,
 ) -> ConvertReturnType:
     """Wrap the calibration function to be compatible with the ModelOpt convert entrypoint.
 
@@ -236,7 +241,15 @@ def wrapped_calib_func(
     export_dir = layerwise_cfg.get("export_dir")
     qdq_from_prev = layerwise_cfg.get("get_qdq_activations_from_prev_layer", True)
     save_every = layerwise_cfg.get("save_every", 1)
+    # Deliberately NOT derived from `writes_weights`: deriving it could only turn the flag off,
+    # which changes the layerwise checkpoint artifact and breaks a resume against an older
+    # manifest. The descriptor's role is to reject an unsafe explicit False, not to set it.
     calib_mutates_weights = layerwise_cfg.get("calib_mutates_weights", True)
+    # Values the plan derived, not user config: the write-mask and the stage hand-off. They
+    # reach the algorithm as ordinary kwargs and are never saved in modelopt state.
+    if should_process is not None:
+        kwargs["should_process"] = should_process
+    kwargs.update(handoff or {})
     if method is not None and "awq" in method:
         # For backward compatibility
         kwargs["algorithm"] = method
@@ -315,6 +328,79 @@ class BaseCalibrateModeDescriptor(ModeDescriptor):
     # declares neither True nor False is refused on a model distributed over several ranks.
     _distributed_calibration: bool | None = None
 
+    # --- What this algorithm does, for the `algo_cfg` planner ---
+    #
+    # Four facts, each with exactly one consumer. Defaults are the conservative answer, so an
+    # algorithm that declares nothing -- including one a user registers -- degrades safely.
+
+    #: Writes weight *values*, not just quantizer state. Understating it makes layerwise
+    #: calibration skip the write-back and silently discard this algorithm's results.
+    writes_weights: bool = True
+    #: Establishes amax on the quantizers it touches. A later stage may skip its own max-init
+    #: only when an earlier one covered every target; False just means it re-initializes.
+    writes_amax: bool = False
+    #: NVFP4 weight block scales this algorithm needs: ``"static"`` (stored per-block amax it
+    #: can search) or ``"dynamic"`` (derived in-kernel). ``None`` works on either.
+    weight_scale_grid: Literal["static", "dynamic"] | None = None
+    #: Threads the ``should_process`` write-mask through everything it writes. False forces
+    #: whole-model scope. Kept honest by a test against the calib func's signature.
+    scopable: bool = False
+
+    @classmethod
+    def grid_for_cfg(cls, cfg: dict) -> Literal["static", "dynamic"] | None:
+        """The weight grid this algorithm needs given its own kwargs.
+
+        Resolved through the config class rather than read off ``cfg``: a plan entry carries only
+        what the user wrote -- ``["local_hessian"]`` lowers to ``{"method": "local_hessian"}`` --
+        while the algorithm is handed a fully defaulted config at convert time. Reading the sparse
+        dict misses defaulted fields and the two disagree in the unsafe direction.
+        """
+        return cls.weight_scale_grid
+
+    @classmethod
+    def prepare(cls, model: nn.Module, quantizers: set[str], cfg: dict) -> bool:
+        """Bring ``quantizers`` into the grid this algorithm needs; ``True`` if anything changed.
+
+        Runs at the start of the stage that needs it rather than the end of the one before: the
+        requirement belongs to the consumer, and a standalone run must not be dragged into a state
+        it never asked for. A ``True`` return invalidates the hand-off, since the amax an earlier
+        stage produced described the old grid.
+        """
+        from .utils import is_weight_quantizer
+
+        grid = cls.grid_for_cfg(cfg)
+        if grid is None:
+            return False
+        # Weight-side only: the requirement is about the *weight* block scales an algorithm
+        # searches. Recipes pair a static weight grid with dynamic activations on purpose.
+        weight_quantizers = [
+            model.get_submodule(name) for name in quantizers if is_weight_quantizer(name)
+        ]
+        if grid == "dynamic":
+            # Static never downgrades: that would discard a completed search. Fail loudly rather
+            # than let the algorithm search a grid that holds nothing.
+            frozen = [q for q in weight_quantizers if getattr(q, "is_nvfp4_static", False)]
+            if frozen:
+                raise ValueError(
+                    f"{cls.__name__} needs dynamic NVFP4 weight block scales, but "
+                    f"{len(frozen)} weight quantizer(s) in its scope hold static ones. "
+                    "Downgrading is refused because it would discard whatever those stored "
+                    "per-block scales hold -- either a search an earlier stage ran, or the "
+                    "grid the quant_cfg asked for. Give this algorithm a dynamic weight unit "
+                    "(e.g. `nvfp4` rather than `nvfp4_static`), or scope it elsewhere."
+                )
+            return False
+        upgrade = [q for q in weight_quantizers if getattr(q, "is_nvfp4_dynamic", False)]
+        for quantizer in upgrade:
+            # Assign a new dict rather than mutate in place: one QuantizerAttributeConfig
+            # configures every quantizer it matches and the setter stores the dict uncopied, so
+            # an in-place write would flip quantizers outside this scope -- which never reach
+            # the reset below and so would hold a dynamic grid's amax under a static grid.
+            quantizer.block_sizes = {**quantizer.block_sizes, "type": "static"}
+            # A dynamic grid's amax is one global scalar and means nothing per block.
+            quantizer.reset_amax()
+        return bool(upgrade)
+
     def __init__(self, *args, **kwargs):
         """Initialize Base calibrate mode descriptor."""
         assert issubclass(self.config_class, QuantizeAlgorithmConfig), (
@@ -373,7 +459,7 @@ class BaseCalibrateModeDescriptor(ModeDescriptor):
             "either define it or override the `convert` method!"
         )
 
-        def wrapped_func(model, config, forward_loop=None):
+        def wrapped_func(model, config, forward_loop=None, should_process=None, handoff=None):
             # Access _calib_func as a class attribute to avoid binding
             # Check if _calib_func is defined as a class attribute
             return wrapped_calib_func(
@@ -382,6 +468,11 @@ class BaseCalibrateModeDescriptor(ModeDescriptor):
                 forward_loop,
                 func=self.__class__._calib_func,
                 supports_layerwise=self.__class__._supports_layerwise,
+                # A non-scopable algorithm does not take the argument at all. It only ever reaches
+                # here at whole-model scope, where the predicate admits everything, so dropping it
+                # changes nothing; passing it would be a TypeError.
+                should_process=should_process if self.__class__.scopable else None,
+                handoff=handoff,
             )
 
         return wrapped_func
@@ -457,6 +548,11 @@ class NoneCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
     _calib_func = None
     _distributed_calibration = True
 
+    writes_weights = False
+    writes_amax = False
+    # no-op: writes nothing, so any scope is vacuously honoured
+    scopable = True
+
 
 @CalibrateModeRegistry.register_mode
 class MaxCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
@@ -469,6 +565,10 @@ class MaxCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = max_calibrate
     _distributed_calibration = True
+
+    writes_weights = False
+    writes_amax = True
+    scopable = True
 
 
 @CalibrateModeRegistry.register_mode
@@ -488,6 +588,11 @@ class NVFP4ActHeadroomCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
     _calib_func = nvfp4_act_headroom_calibrate
     _distributed_calibration = True
 
+    writes_weights = False
+    writes_amax = True
+    # percentile search needs the whole model's activation statistics
+    scopable = False
+
 
 @CalibrateModeRegistry.register_mode
 class MseCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
@@ -500,6 +605,15 @@ class MseCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = mse_calibrate
     _distributed_calibration = True
+
+    writes_weights = False
+    writes_amax = True
+    scopable = True
+
+    @classmethod
+    def grid_for_cfg(cls, cfg: dict) -> Literal["static", "dynamic"] | None:
+        """``fp8_scale_sweep`` searches stored per-block scales, which need a static grid."""
+        return "static" if MseCalibConfig(**cfg).fp8_scale_sweep else None
 
 
 @CalibrateModeRegistry.register_mode
@@ -518,6 +632,15 @@ class LocalHessianModeDescriptor(BaseCalibrateModeDescriptor):
     _calib_func = local_hessian_calibrate
     _distributed_calibration = False  # its distributed_sync syncs only the max amax it starts from
 
+    writes_weights = False
+    writes_amax = True
+    scopable = True
+
+    @classmethod
+    def grid_for_cfg(cls, cfg: dict) -> Literal["static", "dynamic"] | None:
+        """``fp8_scale_sweep`` defaults True here, so the default config needs a static grid."""
+        return "static" if LocalHessianCalibConfig(**cfg).fp8_scale_sweep else None
+
 
 @CalibrateModeRegistry.register_mode
 class SmoothQuantModeDescriptor(BaseCalibrateModeDescriptor):
@@ -530,6 +653,10 @@ class SmoothQuantModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = smoothquant
     _distributed_calibration = True
+
+    writes_weights = True
+    writes_amax = True
+    scopable = True
 
 
 @CalibrateModeRegistry.register_mode
@@ -544,6 +671,11 @@ class AWQLiteModeDescriptor(BaseCalibrateModeDescriptor):
     _calib_func = awq
     _distributed_calibration = False
 
+    writes_weights = True
+    writes_amax = True
+    weight_scale_grid = "dynamic"
+    scopable = True
+
 
 @CalibrateModeRegistry.register_mode
 class AWQClipModeDescriptor(BaseCalibrateModeDescriptor):
@@ -556,6 +688,11 @@ class AWQClipModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = awq
     _distributed_calibration = True
+
+    writes_weights = True
+    writes_amax = True
+    weight_scale_grid = "dynamic"
+    scopable = True
 
 
 @CalibrateModeRegistry.register_mode
@@ -570,6 +707,11 @@ class AWQFullModeDescriptor(BaseCalibrateModeDescriptor):
     _calib_func = awq
     _distributed_calibration = False
 
+    writes_weights = True
+    writes_amax = True
+    weight_scale_grid = "dynamic"
+    scopable = True
+
 
 @CalibrateModeRegistry.register_mode
 class SVDQuantModeDescriptor(BaseCalibrateModeDescriptor):
@@ -582,6 +724,12 @@ class SVDQuantModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = svdquant
     _distributed_calibration = False
+
+    writes_weights = True
+    writes_amax = True
+    weight_scale_grid = "dynamic"
+    # skip_layers already scopes it, and the low-rank factorisation is whole-model
+    scopable = False
     # create_and_replace_svdquant_linear_on_the_fly reads ModeloptStateManager from the
     # root model, which is not present when layerwise_calibrate dispatches per decoder layer.
     _supports_layerwise = False
@@ -604,6 +752,10 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
     _calib_func = gptq
     _distributed_calibration = True
 
+    writes_weights = True
+    writes_amax = True
+    scopable = True
+
 
 @CalibrateModeRegistry.register_mode
 class ImatrixModeDescriptor(BaseCalibrateModeDescriptor):
@@ -617,6 +769,10 @@ class ImatrixModeDescriptor(BaseCalibrateModeDescriptor):
     _calib_func = imatrix_calibrate
     _distributed_calibration = False
 
+    writes_weights = True
+    writes_amax = True
+    scopable = True
+
 
 @CalibrateModeRegistry.register_mode
 class LSQModeDescriptor(BaseCalibrateModeDescriptor):
@@ -629,3 +785,8 @@ class LSQModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = lsq
     _distributed_calibration = True
+
+    writes_weights = True
+    writes_amax = True
+    # learnable scales are trained over the whole model
+    scopable = False
