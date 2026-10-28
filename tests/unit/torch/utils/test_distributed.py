@@ -271,6 +271,12 @@ def test_the_collectives_encoding_refuses_a_value_that_does_not_round_trip(value
         dist._encoded(value)
 
 
+def test_the_collectives_carry_a_plan():
+    """The one class they carry is registered, so it loads back under weights_only."""
+    plan = DistributionPlan(world_size=8, ep_size=4, dense="fsdp")
+    assert dist._decoded(dist._encoded(plan)) == plan
+
+
 def _broadcast_from_job(rank, size):
     ran = []
 
