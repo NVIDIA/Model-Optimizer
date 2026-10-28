@@ -136,9 +136,7 @@ def test_hf_all_tied_weights_keys_contract():
     (``tie_word_embeddings=True`` -> lm_head aliases the embedding). If transformers renames it or
     flips the direction, this breaks instead of silently skipping tied-weight dedup.
     """
-    pytest.importorskip(
-        "transformers", minversion="5.0"
-    )  # attribute only exists on transformers>=5.0
+    pytest.importorskip("transformers")
     from transformers import AutoModelForCausalLM, LlamaConfig
 
     cfg = LlamaConfig(

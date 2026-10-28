@@ -30,6 +30,11 @@ from safetensors import SafetensorError
 from transformers import AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.masking_utils import create_causal_mask
+from transformers.models.nemotron_h.modeling_nemotron_h import (
+    MIXER_TYPES,
+    NemotronHBlock,
+    NemotronHRMSNorm,
+)
 
 from modelopt.torch.quantization.model_calib import (
     _needs_activation_forward_for_max_calib,
@@ -84,9 +89,6 @@ def prefers_bundled_code(hf_config, checkpoint_path: str, config_kwargs: dict) -
         # Config-parsing incompatibilities only; e.g. an OSError from the Hub must propagate.
         return True
     # Parsing can succeed while model construction fails on a block type the built-in lacks.
-    # Native Nemotron-H is optional: older Transformers can still load unrelated models.
-    from transformers.models.nemotron_h.modeling_nemotron_h import MIXER_TYPES
-
     return any(t not in MIXER_TYPES for t in getattr(builtin_config, "layers_block_type", ()))
 
 
@@ -141,13 +143,6 @@ class _NemotronHMTP(torch.nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        # Native Nemotron-H is optional: older Transformers can still load unrelated models.
-        from transformers.models.nemotron_h.modeling_nemotron_h import (
-            MIXER_TYPES,
-            NemotronHBlock,
-            NemotronHRMSNorm,
-        )
-
         block_config = copy.deepcopy(config)
         # Some remote-code revisions drop this field while materializing ``llm_config``.
         # The detected tensor layout is the canonical attention + MoE MTP tail.
