@@ -18,6 +18,7 @@ import torch
 import torch.nn.functional as F
 from _test_utils.torch.quantization.linear_attention_reference import (
     chunk_gdn_reference,
+    install_reference_serving_backend,
     recurrent_delta_rule_reference,
     state_fp8_qdq_reference,
 )
@@ -122,3 +123,16 @@ def test_packed_sequences_reset_the_state():
     ]
     torch.testing.assert_close(packed[0], torch.cat([x[0] for x in separate], dim=1))
     torch.testing.assert_close(packed[1], torch.cat([x[1] for x in separate]))
+
+
+@pytest.mark.parametrize("kda", [False, True])
+def test_reference_serving_backend_matches_independent_recurrence(kda):
+    from modelopt.torch.kernels.quantization.linear_attention.serving import forward
+
+    install_reference_serving_backend()
+    q, k, v, g, beta = (x.detach().float() for x in inputs(length=3, kda=kda))
+    state = torch.randn(2, 3, 4)
+    expected = recurrent_delta_rule_reference(q, k, v, g, beta, initial_state=state[None])
+    actual = forward.prefill(q[0], k[0], v[0], g[0], beta[0], state, 3**-0.5)
+    torch.testing.assert_close(actual[0], expected[0][0])
+    torch.testing.assert_close(actual[1], expected[1][0])

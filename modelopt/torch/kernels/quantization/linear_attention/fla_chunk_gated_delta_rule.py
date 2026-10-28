@@ -599,8 +599,8 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
-    if fla.__version__ != "0.5.1":
-        raise RuntimeError(f"ModelOpt GDN requires fla-core==0.5.1, got {fla.__version__}.")
+    if fla.__version__ != "0.5.2":
+        raise RuntimeError(f"ModelOpt GDN requires fla-core==0.5.2, got {fla.__version__}.")
     if "transpose_state_layout" in kwargs:
         if state_v_first:
             raise ValueError(

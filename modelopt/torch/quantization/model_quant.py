@@ -33,7 +33,6 @@ from modelopt.torch.opt.searcher import ConstraintsDict, ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import (
-    _validate_linear_attention_quantizers,
     preserve_quantizer_attributes_context,
     set_quantizer_attributes_partial,
     set_quantizer_by_cfg,
@@ -270,9 +269,25 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
 
 _INDEXER_UNITS = "the configs/ptq/units/indexer_*_nvfp4 recipe units"
 _MOE_COMM_UNITS = "the configs/ptq/units/moe_*_nvfp4 recipe units"
+_LINEAR_ATTENTION_UNITS = "the configs/ptq/units/linear_attention_state_int8* recipe units"
 # Quantizers that only framework plugins add: (class-name patterns of the modules they belong on,
 # what those modules are, where the supported models are listed).
 _PLUGIN_QUANTIZERS = {
+    "gdn_state_quantizer": (
+        ("*GatedDeltaNet", "*GatedDeltaNet2*", "*GatedDeltaNetAttention"),
+        "GDN layer",
+        _LINEAR_ATTENTION_UNITS,
+    ),
+    "kda_state_quantizer": (
+        (
+            "*KimiDeltaAttention",
+            "*KimiK3DeltaAttention",
+            "*KimiLinearDeltaAttention",
+            "*KimiGatedDeltaNetAttention",
+        ),
+        "KDA layer",
+        _LINEAR_ATTENTION_UNITS,
+    ),
     "indexer_q_quantizer": (("*Indexer",), "sparse-attention indexer", _INDEXER_UNITS),
     "indexer_k_quantizer": (("*Indexer",), "sparse-attention indexer", _INDEXER_UNITS),
     "indexer_scorer_kwargs_quantizer": (
@@ -288,9 +303,9 @@ _PLUGIN_QUANTIZERS = {
 def _check_plugin_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
     """Raise when a config enables a plugin-only quantizer that quantizes nothing.
 
-    The quantizers in ``_PLUGIN_QUANTIZERS`` only exist on modules (sparse-attention indexers, MoE
-    experts) that a framework plugin (vLLM, Megatron-Core) converted. When a plugin does not
-    recognize the installed framework's module class, or the patterns match none of the modules,
+    The quantizers in ``_PLUGIN_QUANTIZERS`` only exist on modules (linear-attention layers,
+    sparse-attention indexers, MoE experts) that a framework plugin (vLLM, Megatron-Core) converted.
+    When a plugin does not recognize the installed framework's module class, or the patterns match none of the modules,
     the tensors silently stay unquantized. Intent is read like in
     :func:`_check_weight_quantization_took_effect`, but only from patterns naming the quantizer, so
     catch-all patterns do not count. A model without such a module (another architecture) is
@@ -301,7 +316,9 @@ def _check_plugin_quantization_took_effect(model: nn.Module, config: QuantizeCon
     last_entry_per_pattern = {entry.quantizer_name: entry for entry in config.quant_cfg}
     for quantizer_name, (owner_patterns, owner_kind, supported) in _PLUGIN_QUANTIZERS.items():
         if not any(
-            entry.enable and quantizer_name in pattern
+            entry.enable
+            and pattern.rsplit(".", 1)[-1].strip("*") not in ("", "quantizer", "_quantizer")
+            and fnmatch.fnmatchcase(quantizer_name, pattern.rsplit(".", 1)[-1])
             for pattern, entry in last_entry_per_pattern.items()
         ):
             continue
@@ -315,7 +332,16 @@ def _check_plugin_quantization_took_effect(model: nn.Module, config: QuantizeCon
         owners = {
             type(module).__name__
             for module in model.modules()
-            if any(fnmatch.fnmatchcase(type(module).__name__, p) for p in owner_patterns)
+            if any(
+                fnmatch.fnmatchcase(cls.__name__, pattern)
+                for cls in type(module).__mro__
+                for pattern in owner_patterns
+            )
+            # Kimi's GDN-named layer implements KDA and owns kda_state_quantizer.
+            and not (
+                quantizer_name == "gdn_state_quantizer"
+                and any("Kimi" in cls.__name__ for cls in type(module).__mro__)
+            )
         }
         # (unconverted owner classes, has the quantizer, has an enabled one)
         local = (
@@ -444,9 +470,16 @@ def quantize(
     if not is_quantized(model):
         model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
     else:
+        # Defer shared plugin imports to avoid the plugin/conversion initialization cycle.
+        from .plugins.linear_attention import (
+            _apply_linear_attention_policy,
+            _validate_linear_attention,
+        )
+
         # Already quantized, so lets apply the quant_cfg from the config
         set_quantizer_by_cfg(model, quantize_config.quant_cfg)
-        _validate_linear_attention_quantizers(model)
+        _apply_linear_attention_policy(model, quantize_config)
+        _validate_linear_attention(model)
     # Fail before calibration rather than after exporting an unquantized checkpoint.
     _check_weight_quantization_took_effect(model, quantize_config)
     _check_plugin_quantization_took_effect(model, quantize_config)

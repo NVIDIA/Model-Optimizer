@@ -247,7 +247,10 @@ def gpu_trtllm(session):
 # Pin must stay in sync with examples/vllm_serve/Dockerfile.
 @nox.session(venv_backend="none")
 def gpu_vllm(session):
-    session.run("python3", "-m", "pip", "install", "-e", ".[hf,puzzletron,dev-test]")
+    # Keep vLLM's TileLang/TVM pins while matching flash-linear-attention's fla-core.
+    session.run(
+        "python3", "-m", "pip", "install", "-e", ".[hf,puzzletron,dev-test]", "fla-core==0.5.2"
+    )
     session.run("python3", "-m", "pytest", "tests/gpu_vllm", *_cov_args())
 
 
