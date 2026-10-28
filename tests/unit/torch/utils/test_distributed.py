@@ -386,14 +386,15 @@ def test_all_reduce_gives_every_rank_the_combined_value(cpu_dist_workers):
 # ---------------------------------------------------------------------------------- process group
 
 
-def test_a_single_process_is_rank_0_of_one_on_the_given_device(monkeypatch):
-    """With no ranks to sync with, the run sets no group up and tears none down."""
+def test_a_single_process_is_rank_0_of_one_on_the_given_device(monkeypatch, recwarn):
+    """No ranks to sync with: no group set up or torn down, and a timeout taken quietly."""
     monkeypatch.delenv("WORLD_SIZE", raising=False)
     monkeypatch.setattr(dist, "setup", lambda **kwargs: pytest.fail("set a group up"))
     monkeypatch.setattr(dist, "_destroy_group", lambda exc: pytest.fail("tore a group down"))
-    with distributed_run(device="cpu") as state:
+    with distributed_run(timeout=timedelta(hours=3), device="cpu") as state:
         assert state == DistributedState(rank=0, world_size=1, device=torch.device("cpu"))
         assert state.is_main
+    assert not [w for w in recwarn if "does not apply" in str(w.message)]
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda:3"])
