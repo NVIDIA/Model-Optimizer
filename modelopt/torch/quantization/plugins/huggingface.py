@@ -929,14 +929,16 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             # the backward (QAT), so stack them there.
             return torch.stack([q(w) for q, w in zip(quantizers, weight, strict=True)])
         # Each slice goes into the output as it is made: a stack would hold all of them beside it.
-        # Strict, so every row of the output is written or the call fails. The output keeps the
-        # quantizers' dtype, as the stack does: a pre-quant scale can widen it, and narrowing it
-        # here would compute from other weights than with autograd.
+        # Strict, so every row of the output is written or the call fails. The output takes the
+        # dtype the stack promotes the slices to: a pre-quant scale can widen one, and narrowing
+        # it here would compute from other weights than with autograd.
         out: torch.Tensor | None = None
         for idx, (q, w) in enumerate(zip(quantizers, weight, strict=True)):
             quantized = q(w)
             if out is None:
                 out = torch.empty_like(weight, dtype=quantized.dtype)
+            elif quantized.dtype != out.dtype:
+                out = out.to(torch.promote_types(out.dtype, quantized.dtype))
             out[idx] = quantized
             del quantized  # not alive beside the next slice
         return out

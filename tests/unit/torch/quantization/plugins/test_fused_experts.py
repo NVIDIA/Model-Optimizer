@@ -2000,10 +2000,11 @@ class TestGroupedMMExperts:
             self._cleanup_registry(_SyntheticGroupedExperts)
         torch.testing.assert_close(outputs[1], outputs[0], rtol=1e-4, atol=1e-6)
 
-    def test_a_widening_pre_quant_scale_gives_one_grouped_forward_in_both_grad_modes(self):
-        """FP32 pre-quant scales on a BF16 model widen what the quantizers return. The grouped forward
-        computes from those FP32 slices with or without autograd, rather than rounding the weights to
-        BF16 only without it."""
+    @pytest.mark.parametrize("widened", ["every-expert", "a-later-expert"])
+    def test_a_widening_pre_quant_scale_gives_one_grouped_forward_in_both_grad_modes(self, widened):
+        """FP32 pre-quant scales on a BF16 model widen what the quantizers return, on every expert or
+        on one after the first. The grouped forward computes from the widened slices with or without
+        autograd, rather than rounding them to BF16 only without it."""
         self._cleanup_registry(_SyntheticGroupedExperts)
         torch.manual_seed(0)
         model = _GroupedMoEModel("grouped_mm").to(torch.bfloat16)
@@ -2022,8 +2023,9 @@ class TestGroupedMMExperts:
                 getattr(experts, f"{name}_input_quantizer").pre_quant_scale = (
                     torch.rand(in_dim) + 0.5
                 )
-                for q in getattr(experts, f"{name}_weight_quantizers"):
-                    q.pre_quant_scale = torch.rand(in_dim) + 0.5
+                for idx, q in enumerate(getattr(experts, f"{name}_weight_quantizers")):
+                    if widened == "every-expert" or idx == 1:
+                        q.pre_quant_scale = torch.rand(in_dim) + 0.5
             for grad in (True, False):
                 with torch.set_grad_enabled(grad):
                     outputs.append(experts(hidden, top_k_index, top_k_weights).detach())
