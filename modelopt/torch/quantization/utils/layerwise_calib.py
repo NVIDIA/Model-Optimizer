@@ -32,6 +32,7 @@ from typing import Any, Self
 
 import torch
 import torch.nn as nn
+from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.utils import distributed as dist
@@ -515,12 +516,18 @@ class LayerActivationCollector:
 
         info = layer._layerwise_calib
         try:
-            forward_loop(self.model)
+            # Captured recurrent caches otherwise mutate during calibration and next-layer replay.
+            with _disable_use_cache(self.model):
+                forward_loop(self.model)
         except Exception:
             # Reset the current layer so subsequent calls don't see stale state.
             info.mode = "original"
             info.collected_inputs = []
             raise
+        finally:
+            # Capture stops before FSDP's post-forward hook can release gathered weights.
+            if isinstance(layer, FSDPModule):
+                layer.reshard()
 
         if not info.collected_inputs:
             info.mode = "original"

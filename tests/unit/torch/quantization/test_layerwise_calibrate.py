@@ -183,6 +183,65 @@ def test_collector_collects_correct_number_of_inputs(monkeypatch):
         collector._unpatch_all_layers()
 
 
+def test_layerwise_hybrid_cache_does_not_change_next_layer_inputs(monkeypatch):
+    # GLM's native recurrent cache requires a newer optional Transformers version.
+    glm = pytest.importorskip("transformers.models.glm5_next.modeling_glm5_next")
+    config = glm.Glm5NextTextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        moe_intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        kv_lora_rank=16,
+        q_lora_rank=16,
+        v_head_dim=16,
+        qk_nope_head_dim=16,
+        linear_head_dim=16,
+        linear_num_heads=2,
+        pad_token_id=0,
+        hc_mult=2,
+        layer_types=["linear_attention", "deepseek_sparse_attention"],
+        mlp_layer_types=["dense", "sparse"],
+        indexer_types=["full", "full"],
+        index_head_dim=16,
+        index_n_heads=2,
+        use_cache=True,
+    )
+    config._attn_implementation = "eager"
+    torch.manual_seed(20261023)
+    model = glm.Glm5NextTextModel(config).eval()
+    _register_test_discoverer(monkeypatch)
+    inputs = torch.randint(1, 64, (1, 16))
+    expected = {}
+    handles = [
+        layer.register_forward_pre_hook(lambda m, args: expected.update({m: args[0].clone()}))
+        for layer in model.layers
+    ]
+    try:
+        with torch.no_grad():
+            model(inputs, use_cache=False)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    def calibrate_layer(layer, forward_loop):
+        handle = layer.register_forward_pre_hook(
+            lambda m, args: torch.testing.assert_close(args[0], expected[m], rtol=0, atol=0)
+        )
+        try:
+            forward_loop(layer)
+            forward_loop(layer)
+        finally:
+            handle.remove()
+
+    layerwise_calibrate(model, lambda m: m(inputs), calibrate_layer)
+    assert model.config.use_cache is True
+
+
 def test_collector_activations_match_expected(monkeypatch):
     """First layer should receive the raw input data."""
     _register_test_discoverer(monkeypatch)

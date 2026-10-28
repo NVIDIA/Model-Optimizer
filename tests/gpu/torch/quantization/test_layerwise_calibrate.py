@@ -18,6 +18,8 @@
 import pytest
 import torch
 import torch.nn as nn
+from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
+from torch.distributed.tensor import DTensor
 
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.utils import layerwise_calib
@@ -95,6 +97,45 @@ def _make_model_and_data(n_layers=3, dim=16, n_batches=2, batch_size=4):
 def _run_forward(model, data):
     for batch in data:
         model(batch)
+
+
+@pytest.mark.parametrize("cpu_offload", [False, True])
+def test_fsdp_capture_releases_completed_layers(dist_workers, cpu_offload):
+    dist_workers.run(_fsdp_capture_releases_completed_layers, cpu_offload)
+
+
+def _fsdp_capture_releases_completed_layers(rank, size, cpu_offload):
+    for qdq_from_prev in (False, True):
+        model, data = _make_model_and_data(n_layers=8, dim=256)
+        model.cuda()
+        data = [batch.cuda() for batch in data]
+        with torch.no_grad():
+            expected = model(data[0]).clone()
+        options = {"offload_policy": CPUOffloadPolicy()} if cpu_offload else {}
+        for layer in model.layers:
+            fully_shard(layer, **options)
+        fully_shard(model, **options)
+        layers = list(model.layers)
+        visited = []
+
+        def calibrate(layer, forward_loop):
+            assert all(isinstance(p, DTensor) for m in visited for p in m.parameters())
+            forward_loop(layer)
+            visited.append(layer)
+
+        with pytest.MonkeyPatch.context() as patch:
+            _register_test_discoverer(patch)
+            layerwise_calibrate(
+                model,
+                forward_loop=lambda m: _run_forward(m, data),
+                calib_func=calibrate,
+                calib_mutates_weights=False,
+                get_qdq_activations_from_prev_layer=qdq_from_prev,
+            )
+        assert visited == layers
+        assert all(isinstance(p, DTensor) for m in layers for p in m.parameters())
+        with torch.no_grad():
+            torch.testing.assert_close(model(data[0]), expected, rtol=0, atol=0)
 
 
 def _register_test_discoverer(monkeypatch):
