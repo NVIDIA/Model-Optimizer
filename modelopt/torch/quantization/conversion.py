@@ -375,6 +375,21 @@ def _normalize_fused_experts_quantizer_name(name: str) -> str:
     return _FUSED_EXPERTS_QUANTIZER_LIST_RE.sub(_repl, name)
 
 
+def quantizer_name_matches(pattern: str, name: str) -> bool:
+    """Whether a quantizer named ``name`` is selected by ``pattern``.
+
+    The normalized form is tried as well as the literal one: a fused wrapper names its
+    quantizers per projection (``gate_up_proj_weight_quantizers.0``), which no pattern written
+    against the singular ``...weight_quantizer`` convention matches. Anything selecting
+    quantizers by name goes through here -- a bare :func:`fnmatch` silently skips every fused
+    expert, which looks like a scope that simply found nothing there.
+    """
+    if fnmatch.fnmatch(name, pattern):
+        return True
+    normalized = _normalize_fused_experts_quantizer_name(name)
+    return normalized != name and fnmatch.fnmatch(normalized, pattern)
+
+
 def _match_quantizer(
     wildcard_or_filter_func: str | Callable,
     name: str,
@@ -385,11 +400,7 @@ def _match_quantizer(
     if not isinstance(module, (TensorQuantizer, SequentialQuantizer)):
         return False
     if isinstance(wildcard_or_filter_func, str):
-        normalized = _normalize_fused_experts_quantizer_name(name)
-        if not (
-            fnmatch.fnmatch(name, wildcard_or_filter_func)
-            or (normalized != name and fnmatch.fnmatch(normalized, wildcard_or_filter_func))
-        ):
+        if not quantizer_name_matches(wildcard_or_filter_func, name):
             return False
     elif callable(wildcard_or_filter_func):
         if not wildcard_or_filter_func(name):

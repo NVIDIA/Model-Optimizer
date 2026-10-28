@@ -1100,6 +1100,12 @@ class SmoothQuantCalibConfig(QuantizeAlgorithmConfig):
 
     SmoothQuant applies a smoothing factor which balances the scale of outliers in weights and activations.
     See `SmoothQuant paper <https://arxiv.org/pdf/2211.10438>`_ for more details.
+
+    **Scoping (**``algo_cfg``**).** This algorithm moves scale between a module's *input* and
+    *weight* quantizers, so it acts only on modules whose scope admits both. Scope it by
+    ``module_name``; a ``quantizer_name`` scope naming one role leaves every module unpaired and
+    the stage does nothing. A *disabled* input quantizer is not a missing half -- weight-only
+    configs pair fine. Modules it cannot pair are reported before the calibration forward runs.
     """
 
     method: Literal["smoothquant"] = ModeloptField("smoothquant")
@@ -1122,6 +1128,16 @@ class AWQLiteCalibConfig(QuantizeAlgorithmConfig):
 
     AWQ lite applies a channel-wise scaling factor which minimizes the output difference after quantization.
     See `AWQ paper <https://arxiv.org/pdf/2306.00978>`_ for more details.
+
+    **Scoping (**``algo_cfg``**).** This algorithm moves scale between a module's *input* and
+    *weight* quantizers, so it acts only on modules whose scope admits both. Scope it by
+    ``module_name``; a ``quantizer_name`` scope naming one role leaves every module unpaired and
+    the stage does nothing. A *disabled* input quantizer is not a missing half -- weight-only
+    configs pair fine. Modules it cannot pair are reported before the calibration forward runs.
+
+    It also acts on the **first level** of a ``SequentialQuantizer`` weight chain (the block-scaled
+    one; W4A8 keeps a per-tensor FP8 range in the second). A scope naming a later level addresses
+    nothing this algorithm can search.
     """
 
     method: Literal["awq_lite"] = ModeloptField("awq_lite")
@@ -1156,6 +1172,16 @@ class AWQClipCalibConfig(QuantizeAlgorithmConfig):
     AWQ clip searches clipped amax for per-group quantization, This search requires much more compute
     compared to AWQ lite. To avoid any OOM, the linear layer weights are batched along the ``out_features``
     dimension of batch size ``max_co_batch_size``. AWQ clip calibration also takes longer than AWQ lite.
+
+    **Scoping (**``algo_cfg``**).** This algorithm moves scale between a module's *input* and
+    *weight* quantizers, so it acts only on modules whose scope admits both. Scope it by
+    ``module_name``; a ``quantizer_name`` scope naming one role leaves every module unpaired and
+    the stage does nothing. A *disabled* input quantizer is not a missing half -- weight-only
+    configs pair fine. Modules it cannot pair are reported before the calibration forward runs.
+
+    It also acts on the **first level** of a ``SequentialQuantizer`` weight chain (the block-scaled
+    one; W4A8 keeps a per-tensor FP8 range in the second). A scope naming a later level addresses
+    nothing this algorithm can search.
     """
 
     method: Literal["awq_clip"] = ModeloptField("awq_clip")
@@ -1202,6 +1228,16 @@ class AWQFullCalibConfig(AWQLiteCalibConfig, AWQClipCalibConfig):
     """The config for ``awq`` or ``awq_full`` algorithm (AWQ full).
 
     AWQ full performs ``awq_lite`` followed by ``awq_clip``.
+
+    **Scoping (**``algo_cfg``**).** This algorithm moves scale between a module's *input* and
+    *weight* quantizers, so it acts only on modules whose scope admits both. Scope it by
+    ``module_name``; a ``quantizer_name`` scope naming one role leaves every module unpaired and
+    the stage does nothing. A *disabled* input quantizer is not a missing half -- weight-only
+    configs pair fine. Modules it cannot pair are reported before the calibration forward runs.
+
+    It also acts on the **first level** of a ``SequentialQuantizer`` weight chain (the block-scaled
+    one; W4A8 keeps a per-tensor FP8 range in the second). A scope naming a later level addresses
+    nothing this algorithm can search.
     """
 
     method: Literal["awq_full"] = ModeloptField("awq_full")
@@ -1496,6 +1532,81 @@ _QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None
 QuantizeAlgoCfgType = _QuantizeAlgoCfgType | list[_QuantizeAlgoCfgType] | None
 
 
+class AlgoCfgEntry(ModeloptBaseConfig):
+    """A single entry in an ``algo_cfg`` list — one scope, one ordered algorithm pipeline.
+
+    Deliberately shaped like :class:`QuantizerCfgEntry`: a selector plus a ``cfg``.  Where
+    ``quant_cfg`` entries carry quantizer *attributes*, ``algo_cfg`` entries carry the ordered
+    list of calibration *algorithms* to run on the matched targets.
+
+    Exactly one selector must be given:
+
+    - ``module_name`` — glob over quantized-linear module names.  Use for weight/module-level
+      algorithms (``gptq``, ``awq_lite``, ``smoothquant``), where the role is implied by the
+      algorithm itself.
+    - ``quantizer_name`` — glob over quantizer module names.  Use when the role must be picked
+      explicitly, e.g. ``max`` on ``*input_quantizer`` only.
+    """
+
+    module_name: str | None = ModeloptField(
+        default=None,
+        title="Module name pattern.",
+        description="Glob matched against quantized-linear module names.",
+    )
+    quantizer_name: str | None = ModeloptField(
+        default=None,
+        title="Quantizer name pattern.",
+        description="Glob matched against quantizer module names.",
+    )
+    cfg: list[_QuantizeAlgoCfgType] = ModeloptField(
+        default=...,
+        title="Ordered calibration pipeline for the matched targets.",
+        description="A list of algorithms run in order, each consuming the previous one's "
+        'mutated weights/scales. An element is an algorithm name (``"max"``), a dict keyed on '
+        '``method`` (``{"method": "gptq", "block_size": 64}``), or a '
+        ":class:`QuantizeAlgorithmConfig`.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_entry(cls, values):
+        """Accept a bare (non-list) ``cfg`` and enforce the exactly-one-selector rule.
+
+        Runs before the model is ever consulted, so a malformed entry fails at config
+        construction rather than part-way through calibration.
+        """
+        if not isinstance(values, dict):
+            return values
+        values = dict(values)
+        # Check emptiness *before* wrapping: `cfg: null` would otherwise become `[None]`, which
+        # is truthy, so the entry would claim its scope (suppressing the `algorithm` fallback)
+        # while contributing no stage -- leaving that scope silently uncalibrated.
+        if values.get("cfg") is None:
+            raise ValueError(
+                f"AlgoCfgEntry 'cfg' must list at least one algorithm. Got: {values!r}"
+            )
+        if not isinstance(values["cfg"], list):
+            values["cfg"] = [values["cfg"]]
+        selectors = [k for k in ("module_name", "quantizer_name") if values.get(k) is not None]
+        if len(selectors) != 1:
+            raise ValueError(
+                "AlgoCfgEntry needs exactly one of 'module_name' / 'quantizer_name'; got "
+                f"{selectors or 'neither'}. Entry: {values!r}"
+            )
+        if not values.get("cfg"):
+            raise ValueError(
+                f"AlgoCfgEntry 'cfg' must list at least one algorithm. Got: {values!r}"
+            )
+        return values
+
+    @property
+    def selector(self) -> tuple[str, str]:
+        """``(selector_kind, glob)`` for this entry."""
+        if self.module_name is not None:
+            return "module_name", self.module_name
+        return "quantizer_name", self.quantizer_name  # type: ignore[return-value]
+
+
 def normalize_quant_cfg_list(
     v: RawQuantizeQuantCfgType | DeprecatedQuantCfgType,
 ) -> list[QuantizerCfgEntry]:
@@ -1636,6 +1747,19 @@ class QuantizeConfig(ModeloptBaseConfig):
         title="Calibration algorithm, see :meth:`calibrate <modelopt.torch.quantization.model_quant.calibrate>` "
         "for more details.",
         validate_default=True,
+    )
+
+    algo_cfg: list[AlgoCfgEntry] | None = ModeloptField(
+        default=None,
+        title="Per-scope calibration pipelines.",
+        description=(
+            "Ordered list of :class:`AlgoCfgEntry` dicts assigning a calibration pipeline to a "
+            "scope, e.g. ``[{'module_name': '*self_attn*', 'cfg': ['awq_lite']}, "
+            "{'module_name': '*mlp*', 'cfg': ['mse', 'gptq']}]``. Each entry's ``cfg`` runs in "
+            "order, every stage consuming the previous one's mutated weights and scales. "
+            "``algorithm`` becomes the fallback for targets no entry matches. Not supported "
+            "together with expert parallelism."
+        ),
     )
 
     effective_bits: float | None = ModeloptField(
