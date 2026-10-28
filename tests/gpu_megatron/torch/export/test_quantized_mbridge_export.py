@@ -57,25 +57,51 @@ def _excluded(patterns, layers):
     return {layer for layer in layers if any(fnmatch.fnmatch(layer, p) for p in patterns)}
 
 
-def _test_matches_megatron_exporter(source, quant_cfg_name, tmp_path, rank, size):
+def _quantize(source, quant_cfg_name, size):
     # Models in a reused worker pick their attention backend through process-wide variables.
     for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
         os.environ.pop(name, None)
     bridge, _, model, unwrapped, _ = load_mbridge_model_from_hf(
         hf_model_name_or_path=str(source),
-        provider_overrides={"pipeline_dtype": torch.bfloat16},
+        provider_overrides={"tensor_model_parallel_size": size, "pipeline_dtype": torch.bfloat16},
         moe_grouped_gemm=use_moe_grouped_gemm(str(source)),
     )
     torch.manual_seed(0)
     input_ids = torch.randint(0, unwrapped.vocab_size, (2, 16), device="cuda")
     mtq.quantize(unwrapped, QUANT_CFGS[quant_cfg_name], lambda m: megatron_prefill(m, input_ids))
-    reference_dir, export_dir = tmp_path / "megatron_exporter", tmp_path / "bridge"
-    export_mcore_gpt_to_hf(
-        unwrapped, str(source), dtype=torch.bfloat16, export_dir=str(reference_dir)
-    )
+    return bridge, model, unwrapped
+
+
+def _export_with_megatron_exporter(source, quant_cfg_name, export_dir, rank, size):
+    _, _, unwrapped = _quantize(source, quant_cfg_name, size)
+    export_mcore_gpt_to_hf(unwrapped, str(source), dtype=torch.bfloat16, export_dir=str(export_dir))
+
+
+def _export_with_bridge(source, quant_cfg_name, export_dir, rank, size):
+    bridge, model, _ = _quantize(source, quant_cfg_name, size)
     bridge.save_hf_pretrained_modelopt(model, str(export_dir))
-    if rank != 0:
-        return
+
+
+@pytest.mark.parametrize(
+    ("create_source", "quant_cfg_name"),
+    [
+        (create_tiny_llama_dir, "nvfp4"),
+        (create_tiny_qwen3_dir, "fp8"),
+        (create_tiny_qwen3_dir, "w4a16_nvfp4"),
+        (create_tiny_qwen3_moe_dir, "nvfp4_mlp_only"),
+    ],
+)
+def test_matches_megatron_exporter(
+    dist_workers_size_1, dist_workers, tmp_path, create_source, quant_cfg_name
+):
+    source = create_source(tmp_path, with_tokenizer=True)
+    reference_dir, export_dir = tmp_path / "megatron_exporter", tmp_path / "bridge"
+    # The Megatron exporter needs TP=1. The bridge exports at TP over all GPUs, so multi-GPU runs
+    # also cover gathering its sharded weights and scales.
+    dist_workers_size_1.run(
+        partial(_export_with_megatron_exporter, source, quant_cfg_name, reference_dir)
+    )
+    dist_workers.run(partial(_export_with_bridge, source, quant_cfg_name, export_dir))
 
     ref_weights, ref_config = _load(reference_dir)
     weights, config = _load(export_dir)
@@ -87,7 +113,11 @@ def _test_matches_megatron_exporter(source, quant_cfg_name, tmp_path, rank, size
             reference = reference.reshape(weight.shape)
         assert weight.shape == reference.shape, name
         assert weight.dtype == reference.dtype, name
-        assert torch.equal(_bits(weight), _bits(reference)), name
+        if name.endswith("input_scale") and torch.cuda.device_count() > 1:
+            # Activations reduced across TP ranks calibrate to slightly different amaxes.
+            torch.testing.assert_close(weight, reference, rtol=2e-2, atol=0, msg=name)
+        else:
+            assert torch.equal(_bits(weight), _bits(reference)), name
 
     quant, ref_quant = config.pop("quantization_config"), ref_config.pop("quantization_config")
     # The Megatron exporter also writes head_dim where the source config leaves it implied.
@@ -105,19 +135,3 @@ def _test_matches_megatron_exporter(source, quant_cfg_name, tmp_path, rank, size
         if name.endswith(".weight") and weight.dim() == 2
     }
     assert _excluded(quant["ignore"], layers) == _excluded(ref_quant["ignore"], layers)
-
-
-@pytest.mark.parametrize(
-    ("create_source", "quant_cfg_name"),
-    [
-        (create_tiny_llama_dir, "nvfp4"),
-        (create_tiny_qwen3_dir, "fp8"),
-        (create_tiny_qwen3_dir, "w4a16_nvfp4"),
-        (create_tiny_qwen3_moe_dir, "nvfp4_mlp_only"),
-    ],
-)
-def test_matches_megatron_exporter(dist_workers_size_1, tmp_path, create_source, quant_cfg_name):
-    source = create_source(tmp_path, with_tokenizer=True)
-    dist_workers_size_1.run(
-        partial(_test_matches_megatron_exporter, source, quant_cfg_name, tmp_path)
-    )
