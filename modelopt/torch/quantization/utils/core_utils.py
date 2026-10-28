@@ -536,6 +536,16 @@ def _fsdp2_unshard_context(fsdp_module: FSDPModule):
             fsdp_module.reshard()
 
 
+def _fsdp2_param_groups(module: nn.Module):
+    """The distinct FSDP2 param groups of the units in ``module``, its own included."""
+    return {
+        id(group): group  # ``fully_shard([a, b])`` gives several modules one group
+        for unit in module.modules()
+        if isinstance(unit, FSDPModule)
+        and (group := fully_shard.state(unit)._fsdp_param_group) is not None
+    }.values()
+
+
 # Per FSDP2 unit, the parameters _fsdp2_owned_params found: the weight-access window opens once per
 # quantized module, and a scan walks the unit's whole parameter group.
 _FSDP2_OWNED_PARAMS: "weakref.WeakKeyDictionary[nn.Module, dict[int, weakref.ref]]" = (
@@ -556,12 +566,7 @@ def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> dict[
     owned = None if refresh else _FSDP2_OWNED_PARAMS.get(fsdp_module)
     if owned is None:
         owned = {}
-        for unit in fsdp_module.modules():
-            if not isinstance(unit, FSDPModule):
-                continue
-            group = fully_shard.state(unit)._fsdp_param_group
-            if group is None:
-                continue
+        for group in _fsdp2_param_groups(fsdp_module):
             for fsdp_param in group.fsdp_params:
                 # The last two exist once their state is first entered.
                 for state_param in (
@@ -592,7 +597,9 @@ def fsdp2_weight_access_and_writeback_context(
 
     Gathers sharded DTensor parameters across FSDP/HSDP shards so they can be
     read or modified. Works for both leaf modules (single ``weight``) and
-    composite modules like decoder layers (all ``named_parameters``).
+    composite modules like decoder layers (all ``named_parameters``). Only the
+    parameters FSDP2 manages are gathered: a DTensor it does not own (an
+    expert-parallel weight ``fully_shard`` was told to ignore, say) stays sharded.
 
     If TP is implemented with DTensor, the weight will be a local tensor of the
     TP DTensor under this context.
@@ -681,7 +688,8 @@ def enable_weight_access_and_writeback(
     """Enable weight access and writeback for a module.
 
     Useful for modules with weight not intact such as Linear layer in FSDP wrapped model or
-    HF accelerate offloaded models (CPU or disk).
+    HF accelerate offloaded models (CPU or disk). Under FSDP2 only the parameters FSDP2 manages
+    are gathered (see :func:`fsdp2_weight_access_and_writeback_context`).
 
     Args:
         module: The module to access weights for.
@@ -896,12 +904,7 @@ def _disable_fsdp_unshard_reshard(layer):
     if not isinstance(layer, FSDPModule):  # nothing was gathered for its FSDP submodules
         yield
         return
-    groups = {
-        id(group): group  # ``fully_shard([a, b])`` gives several modules one group
-        for module in layer.modules()
-        if isinstance(module, FSDPModule)
-        and (group := fully_shard.state(module)._fsdp_param_group) is not None
-    }.values()
+    groups = _fsdp2_param_groups(layer)
     # Contexts nest (``persistent_materialization(writeback=False)`` enters this twice), so restore
     # whatever instance attributes were there before instead of deleting them.
     saved = [
