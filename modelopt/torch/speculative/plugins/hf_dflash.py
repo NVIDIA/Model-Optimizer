@@ -880,16 +880,24 @@ class HFDFlashModel(DFlashModel):
         )
 
     def _draft_zero_loss(self, device, through=()):
-        """A zero loss that every trainable draft parameter feeds, for a step with nothing to train.
+        """A zero loss with a backward path to the draft, for a step with nothing to train.
 
-        DDP expects a gradient for each parameter on every rank; a rank returning a constant
-        loss would leave the others waiting on its reduction. Once the draft has run, pass all
-        of its outputs as ``through`` (``None`` for an absent head) and the loss goes through
-        them: reading the parameters directly would put this rank's collectives out of step
-        when FSDP2 shards the draft as its own unit.
+        DDP expects a gradient for each trainable parameter on every rank; a rank returning a
+        constant loss would leave the others waiting on its reduction. Before the draft has
+        run, the loss reads one element of every trainable draft parameter. Once it has run,
+        pass every one of its outputs as ``through`` (``None`` for an absent head): the loss
+        then reaches only the parameters behind them, so an output left out leaves its
+        parameters unreduced. Reading the parameters directly instead would put this rank's
+        collectives out of step when FSDP2 shards the draft as its own unit.
         """
         if through:
-            return sum(out.sum() * 0.0 for out in through if out is not None)
+            outputs = [out for out in through if out is not None]
+            if not outputs:
+                raise ValueError(
+                    "through= holds no draft output; the parameters cannot stand in for one "
+                    "once the draft has run."
+                )
+            return sum(out.sum() * 0.0 for out in outputs)
         return sum(
             (p.reshape(-1)[0] * 0.0 for p in self.dflash_module.parameters() if p.requires_grad),
             torch.zeros((), device=device),
