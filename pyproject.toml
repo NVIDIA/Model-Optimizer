@@ -122,7 +122,9 @@ dev-test = [
     "pytest~=9.1.0",
     "pytest-cov~=7.1.0",
     "pytest-instafail==0.5.0",
-    "pytest-rerunfailures~=16.7", # rerun known Blackwell cuBLAS crashes (tests/gpu_megatron)
+    # MPL-2.0 (weak copyleft) is fine: test-only and used unmodified, and its copyleft covers only
+    # its own files, not code that uses it (tqdm, a core dependency, is MPL-2.0 too)
+    "pytest-rerunfailures~=16.7", # transient-failure reruns (tests/conftest.py); 16.7 matches the exception chain
     "pytest-timeout~=2.4.0",
     "pytest-xdist~=3.8.0",
     "uv",

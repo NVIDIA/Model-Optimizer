@@ -79,7 +79,8 @@ _DEFAULT_TIMEOUT = {
 _BLACKWELL_CUDA_CRASHES = [
     "illegal memory access",
     "CUBLAS_STATUS_INTERNAL_ERROR",
-    r"Worker process\(es\) died \(rank, exit code\): .*, -6\)",  # the crash can also abort the worker
+    # The crash can also abort the worker (SIGABRT); not when another rank died otherwise, e.g. OOM
+    r"Worker process\(es\) died \(rank, exit code\): \[\(\d+, -6\)(, \(\d+, -6\))*\]",
 ]
 
 
@@ -115,8 +116,6 @@ def pytest_collection_modifyitems(config, items):
             )
         item.add_marker(pytest.mark.timeout(_DEFAULT_TIMEOUT[group]))
 
-    if not config.pluginmanager.hasplugin("rerunfailures"):
-        return
     gpu_megatron_root = tests_root / "gpu_megatron"
     for item in items:
         only_rerun = [TransientError, *map(re.escape, TRANSIENT_MARKERS)]
