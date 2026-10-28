@@ -25,11 +25,14 @@ from itertools import pairwise
 
 import torch
 
+from modelopt.torch.quantization.linear_attention.utils import forward_value
+
 __all__ = [
     "chunk_gdn_reference",
     "install_reference_serving_backend",
     "recurrent_delta_rule_reference",
     "state_fp8_qdq_reference",
+    "two_precision_reference",
 ]
 
 
@@ -82,7 +85,7 @@ class _ReferenceKDAKernels:
         return -rate.float().exp().reshape(-1, 1) * torch.nn.functional.softplus(gate)
 
 
-def install_reference_serving_backend():
+def install_reference_serving_backend(monkeypatch=None):
     """Install the independent oracle in a persistent gpu_megatron worker.
 
     Native vLLM forward parity remains covered in ``tests/gpu_vllm``. Keeping this
@@ -91,10 +94,11 @@ def install_reference_serving_backend():
     """
     from modelopt.torch.kernels.quantization.linear_attention.serving import forward
 
-    forward._kernels = lambda precision: (None, _ReferenceKDAKernels)
-    forward.prefill = _reference_prefill
-    forward.step = _reference_step
-    forward.validate_profile = lambda gate_inputs, normalize, *, precision="vllm": None
+    setter = setattr if monkeypatch is None else monkeypatch.setattr
+    setter(forward, "_kernels", lambda precision: (None, _ReferenceKDAKernels))
+    setter(forward, "prefill", _reference_prefill)
+    setter(forward, "step", _reference_step)
+    setter(forward, "validate_profile", lambda gate_inputs, normalize, *, precision="vllm": None)
 
 
 def state_fp8_qdq_reference(state: torch.Tensor, block_v: int = 64) -> torch.Tensor:
@@ -270,3 +274,63 @@ def chunk_gdn_reference(
     output = torch.cat(outputs).reshape(*v.shape)
     final = torch.stack(finals)
     return output, final.transpose(-1, -2) if state_v_first else final
+
+
+def two_precision_reference(q, k, v, g, beta, state, quantizer, reads=None):
+    """Independent two-precision replay in canonical [H,K,V] layout."""
+
+    def rounded(x, dtype=torch.bfloat16):
+        return forward_value(x, x.to(dtype))
+
+    def read_copy(x):
+        # Each head has its own NVFP4 outer scale, independent of the replay kernel.
+        value_first = x.detach().transpose(-1, -2)
+        rounded = torch.stack([quantizer(head.contiguous()) for head in value_first])
+        rounded = rounded.transpose(-1, -2)
+        return forward_value(x, rounded)
+
+    q = q / (q.square().sum(-1, keepdim=True) + 1e-6).sqrt() * q.shape[-1] ** -0.5
+    k = k / (k.square().sum(-1, keepdim=True) + 1e-6).sqrt()
+    beta = rounded(beta)
+    outputs = []
+    for start in range(0, len(q), 16):
+        stop = min(start + 16, len(q))
+        local_g = g[start:stop].cumsum(0)
+        keys = k[start:stop].transpose(0, 1)
+        read = read_copy(state) if reads is None else forward_value(state, reads[start // 16])
+        updates = []
+        for i in range(stop - start):
+            t = start + i
+            decay = local_g[i].exp()[:, None, None]
+            weights = (local_g[i] - local_g[:i]).exp().T
+            base = rounded(state if t == 0 or i == 15 else read)
+            working = decay * base
+            if i == 15:
+                # Solve all raw-input residuals at once, rather than sequential replay.
+                all_keys = rounded(keys)
+                gram = all_keys @ all_keys.transpose(-1, -2)
+                gates = local_g.T
+                retentions = (gates[:, :, None] - gates[:, None, :]).exp()
+                b = beta[start:stop].T
+                lower = torch.tril(gram * retentions * b[:, :, None], diagonal=-1)
+                lower = lower + torch.eye(16, device=q.device)
+                residual = rounded(
+                    v[start:stop].transpose(0, 1)
+                    - gates.exp()[..., None] * (all_keys @ rounded(state))
+                )
+                u = torch.linalg.solve_triangular(lower, b[..., None] * residual, upper=False)
+                weighted = u * (gates[:, -1:] - gates).exp()[..., None]
+                output = torch.einsum("hk,hkv->hv", q[t], working)
+                output = output + torch.einsum("hlk,hk,hlv->hv", keys, q[t], weighted)
+                state = decay * state + all_keys.transpose(-1, -2) @ rounded(weighted)
+            else:
+                if i:
+                    working = working + keys[:, :i].transpose(-1, -2) @ (
+                        torch.stack(updates, 1) * weights[..., None]
+                    )
+                delta = beta[t, :, None] * (v[t] - torch.einsum("hk,hkv->hv", k[t], working))
+                working = working + k[t, :, :, None] * delta[:, None, :]
+                output = torch.einsum("hk,hkv->hv", q[t], working)
+                updates.append(rounded(delta, torch.float16))
+            outputs.append(output)
+    return torch.stack(outputs)

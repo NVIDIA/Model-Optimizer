@@ -15,7 +15,10 @@
 
 import pytest
 import torch
-from _test_utils.torch.quantization.linear_attention_reference import recurrent_delta_rule_reference
+from _test_utils.torch.quantization.linear_attention_reference import (
+    recurrent_delta_rule_reference,
+    two_precision_reference,
+)
 
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.linear_attention import (
@@ -391,3 +394,70 @@ def test_padding_does_not_extend_decode(compiled_serving_case, packed):
         assert (
             not padded_prefill[0, valid:].count_nonzero() and not padded_prefill[1].count_nonzero()
         )
+
+
+@pytest.mark.parametrize("read_format", ["fp8", "nvfp4"])
+def test_native_gdn_prefix_to_two_precision_handoff(read_format):
+    """Native prefix state feeds quantized reads and propagates suffix gradients into the prefix."""
+    torch.manual_seed(107)
+    q, k, v = [
+        torch.randn(1, 82, 1, 128, device="cuda", dtype=torch.bfloat16).requires_grad_()
+        for _ in range(3)
+    ]
+    raw_gate = torch.full((1, 82, 1), -3.0, device="cuda", dtype=torch.bfloat16)
+    raw_beta = torch.zeros_like(raw_gate)
+    rate = torch.zeros(1, device="cuda")
+    gate, beta = -torch.nn.functional.softplus(raw_gate.float()), raw_beta.float().sigmoid()
+    nvfp4 = read_format == "nvfp4"
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=(2, 1) if nvfp4 else (4, 3),
+            type="dynamic",
+            pass_through_bwd=True,
+            block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)} if nvfp4 else {-1: 128},
+        )
+    ).cuda()
+    output, final = gdn_state_qat(
+        q,
+        k,
+        v,
+        gate,
+        beta,
+        policy=LinearAttentionConfig(
+            backend="serving", precision="replayssm_two_precision", replay_window=16
+        ),
+        read_quantizer=quantizer,
+        prefill_lengths=[65],
+        use_qk_l2norm_in_kernel=True,
+        gate_inputs=(raw_gate, raw_beta, rate, rate),
+    )
+    with torch.no_grad():
+        prepared = gdn_ops.fused_post_conv_prep(
+            torch.cat([x[0, :65].flatten(1) for x in (q, k, v)], dim=-1),
+            raw_gate[0, :65],
+            raw_beta[0, :65],
+            rate,
+            rate,
+            1,
+            128,
+            128,
+        )
+        prefix, state = gdn_ops.chunk_gated_delta_rule(
+            *[x[None] for x in prepared],
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=False,
+        )
+        suffix = two_precision_reference(
+            *[x[0, 65:].float() for x in (q, k, v, gate, beta)],
+            state[0].transpose(-1, -2),
+            quantizer,
+        )
+    assert final is None
+    torch.testing.assert_close(output[:, :65], prefix, rtol=0, atol=0)
+    torch.testing.assert_close(
+        output[0, 65:].float(), suffix.bfloat16().float(), rtol=2e-3, atol=2e-6
+    )
+    gradients = torch.autograd.grad(output[:, 65:].float().square().sum(), (q, k, v))
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
+    assert gradients[1][:, :65].abs().sum() > 0
+    assert gradients[2][:, :65].abs().sum() > 0

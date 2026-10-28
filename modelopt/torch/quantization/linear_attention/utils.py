@@ -76,6 +76,7 @@ def validate_gdn_quantizer(
     name: str,
     num_bits: tuple[int | tuple[int, int], ...] = ((4, 3),),
     block_sizes: tuple[int, ...] = (),
+    rounding: tuple[str, ...] = ("nearest",),
 ) -> None:
     """Check supported formats and the custom backward's identity STE."""
     # Numerical helpers load while QuantizeConfig initializes; defer the quantizer import.
@@ -83,6 +84,9 @@ def validate_gdn_quantizer(
 
     if not isinstance(quantizer, TensorQuantizer):
         raise ValueError(f"{name} requires a single TensorQuantizer")
+    quantizer_rounding = getattr(quantizer, "rounding", "nearest")
+    if quantizer_rounding not in rounding:
+        raise ValueError(f"{name} supports rounding in {rounding}; got {quantizer_rounding}")
     nvfp4 = (
         quantizer.is_nvfp4_dynamic
         and quantizer.block_sizes.get(-1) == 16
@@ -110,10 +114,7 @@ def validate_gdn_quantizer(
                 quantizer.num_bits != (2, 1)
                 and (
                     quantizer.block_sizes is None
-                    or (
-                        quantizer.num_bits == 8
-                        and quantizer.block_sizes in ({-1: size} for size in block_sizes)
-                    )
+                    or quantizer.block_sizes in ({-1: size} for size in block_sizes)
                 )
             )
         )
@@ -127,7 +128,7 @@ def validate_gdn_quantizer(
     ):
         raise ValueError(
             f"{name} supports only dynamic fake quantization with num_bits in {num_bits}, "
-            f"INT8 block_sizes in {block_sizes} (or no blocks), or NVFP4 block16 with "
+            f"block_sizes in {block_sizes} (or no blocks), or NVFP4 block16 with "
             "dynamic E4M3 block scales, "
             "pass_through_bwd=True, no rotation, pre-scaling, bias, constant "
             "amax, or custom backend. Other gradient rules and formats are not implemented."
