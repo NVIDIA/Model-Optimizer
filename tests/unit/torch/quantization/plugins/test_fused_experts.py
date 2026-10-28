@@ -2298,7 +2298,7 @@ class TestGroupedMMExperts:
     @pytest.mark.parametrize(
         "offs",
         [[0, 2, 2, 5], [2, 5], [2, 2, 7], [2, 1, 5]],
-        ids=["leading-zero", "short", "past-the-rows", "out-of-order"],
+        ids=["inclusive-ends", "short", "past-the-rows", "out-of-order"],
     )
     def test_grouped_offsets_of_another_form_are_refused(self, offs):
         """The per-expert split reads the offsets as exclusive cumulative ends, one per expert: any
