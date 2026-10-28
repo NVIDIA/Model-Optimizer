@@ -23,6 +23,7 @@ import torch
 import torch.distributed as dist
 from _test_utils.fs_utils import assert_unmodified_tree
 from _test_utils.mlflow import FakeMlflow, pin_tracking_env
+from _test_utils.sharding import select_shard
 from _test_utils.torch.distributed.utils import init_process
 
 import modelopt.torch.opt as mto
@@ -51,6 +52,18 @@ def pytest_addoption(parser):
         action="store_true",
         default=False,
         help="Run release tests",
+    )
+    parser.addoption(
+        "--shard-count",
+        type=int,
+        default=1,
+        help="Split the collected test files into this many duration-balanced shards (see --shard-index)",
+    )
+    parser.addoption(
+        "--shard-index",
+        type=int,
+        default=1,
+        help="1-based shard to run when --shard-count is above 1",
     )
 
 
@@ -102,6 +115,10 @@ def pytest_collection_modifyitems(config, items):
                 "_DEFAULT_TIMEOUT in tests/conftest.py."
             )
         item.add_marker(pytest.mark.timeout(_DEFAULT_TIMEOUT[group]))
+
+    select_shard(
+        config, items, config.getoption("--shard-index"), config.getoption("--shard-count")
+    )
 
 
 # General Fixtures #################################################################################

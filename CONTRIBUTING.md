@@ -172,6 +172,8 @@ For broader repo validation and dependency setup, use [noxfile.py](./noxfile.py)
 nox -s "unit-3.12(torch_211, tf_latest)"
 ```
 
+CI runs the `gpu` suite as two shards on two runners: `pytest tests/gpu --shard-count 2 --shard-index 1` runs the first half of the test files, split by the durations in `tests/shard_durations.json` (a file without an entry counts as a median one). When the shards drift apart, regenerate the file from the pytest logs of the two CI shards with `tests/_test_utils/shard_durations.py`.
+
 ### Test design principles
 
 - **Prefer the highest-level test that runs the real code path.** Choose an end-to-end test over a mock-heavy one

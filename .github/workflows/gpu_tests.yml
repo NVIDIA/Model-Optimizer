@@ -42,8 +42,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `shards` runners split a lane's test files by duration (tests/shard_durations.json). Only the
+        # longest lane, `gpu`, is split.
         include:
           - example: gpu
+            shard: 1
+            shards: 2
+            timeout: 60
+            container_image: nvcr.io/nvidia/pytorch:26.09-py3
+          - example: gpu
+            shard: 2
+            shards: 2
             timeout: 60
             container_image: nvcr.io/nvidia/pytorch:26.09-py3
           - example: gpu_megatron
@@ -79,7 +88,7 @@ jobs:
         uses: ./.github/actions/restore-jit-caches
         with:
           # Per job: jobs sharing an image build different extensions, and the first to save wins the key.
-          env-key: rtxpro6000-${{ matrix.example }}-${{ matrix.container_image }}
+          env-key: rtxpro6000-${{ matrix.example }}${{ matrix.shards > 1 && format('-{0}', matrix.shard) || '' }}-${{ matrix.container_image }}
       - name: Restore wheels built from source
         # mamba_ssm and fast-hadamard-transform take ~10 min to compile (see noxfile.py `gpu`)
         id: wheelhouse
@@ -107,7 +116,7 @@ jobs:
           PYTEST_ADDOPTS: ${{ github.event_name != 'push' && '--run-manual --run-nightly' || '' }}
         run: |
           # Use `python3` (the vllm image has no `python` on PATH)
-          python3 -m pip install nox && nox -s ${{ matrix.example }}
+          python3 -m pip install nox && nox -s ${{ matrix.example }}${{ matrix.shards > 1 && format(' -- --shard-index {0} --shard-count {1}', matrix.shard, matrix.shards) || '' }}
       - name: Save JIT caches
         # Not tied to the tests passing, see the action description
         if: always()
@@ -124,7 +133,7 @@ jobs:
       - name: Save wheels built from source
         # Not tied to the tests passing, but only once every wheel is built (see noxfile.py `gpu`).
         if: >-
-          always() && matrix.example == 'gpu' && steps.wheelhouse.outputs.cache-hit != 'true'
+          always() && matrix.example == 'gpu' && matrix.shard == 1 && steps.wheelhouse.outputs.cache-hit != 'true'
           && steps.wheelhouse-complete.outputs.complete == 'true'
         uses: actions/cache/save@v6
         with:

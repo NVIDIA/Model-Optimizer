@@ -222,7 +222,7 @@ def gpu(session):
     # freeze a partial wheelhouse under the cache key.
     with open(os.path.join(_wheelhouse(), ".complete"), "w"):
         pass
-    session.run("python", "-m", "pytest", "tests/gpu", *_cov_args())
+    session.run("python", "-m", "pytest", "tests/gpu", *_cov_args(), *session.posargs)
 
 
 # Container: nvcr.io/nvidia/nemo:26.08 or later
