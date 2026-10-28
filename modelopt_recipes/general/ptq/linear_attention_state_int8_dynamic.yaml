@@ -34,3 +34,4 @@ quantize:
       cfg:
         backend: serving
         precision: replayssm
+        replay_window: 32

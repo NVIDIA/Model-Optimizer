@@ -278,6 +278,11 @@ _PLUGIN_QUANTIZERS = {
         "GDN layer",
         _LINEAR_ATTENTION_UNITS,
     ),
+    "gdn_read_quantizer": (
+        ("*GatedDeltaNet", "*GatedDeltaNetAttention"),
+        "GDN layer",
+        "gdn_replayssm_*_read",
+    ),
     "kda_state_quantizer": (
         (
             "*KimiDeltaAttention",

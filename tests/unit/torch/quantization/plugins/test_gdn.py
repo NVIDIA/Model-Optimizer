@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 import torch
 import torch.nn as nn
+import yaml
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -334,3 +335,44 @@ def test_nvfp4_state_recipe_restore():
         "type": "dynamic",
         "scale_bits": (4, 3),
     }
+
+
+@pytest.mark.parametrize("read_format", ["fp8", "nvfp4", "nvfp4_stochastic"])
+def test_two_precision_recipe_and_checkpoint(tmp_path, read_format):
+    config = load_recipe(
+        f"general/ptq/gdn_replayssm_{read_format.removesuffix('_stochastic')}_read"
+    ).quantize.model_dump()
+    if read_format.endswith("_stochastic"):
+        for rule in config["quant_cfg"]:
+            if rule.get("quantizer_name") == "*gdn_read_quantizer":
+                rule["cfg"]["rounding"] = "stochastic"
+        recipe_file = tmp_path / "stochastic.yaml"
+        recipe_file.write_text(
+            yaml.safe_dump({"metadata": {"recipe_type": "ptq"}, "quantize": config})
+        )
+        config = load_recipe(recipe_file).quantize.model_dump()
+    model = mtq.quantize(TinyGatedDeltaNet(), config)
+    assert not model.gdn_state_quantizer.is_enabled
+    assert model.gdn_read_quantizer.is_enabled
+    assert get_linear_attention_layers(model, enabled_only=True) == (model,)
+    unsupported = KimiDeltaAttentionStateQuantMixin.convert(TinyGatedDeltaNet())
+    unsupported.linear_attention_config = model.linear_attention_config
+    with pytest.raises(ValueError, match="GDN read quantizer"):
+        unsupported.validate_linear_attention()
+    checkpoint = tmp_path / "two_precision.pth"
+    mto.save(model, checkpoint)
+    restored = mto.restore(TinyGatedDeltaNet(), checkpoint)
+    assert restored.linear_attention_config == model.linear_attention_config
+    assert (
+        restored.gdn_read_quantizer.get_modelopt_state()
+        == model.gdn_read_quantizer.get_modelopt_state()
+    )
+    assert restored.gdn_read_quantizer.num_bits == ((4, 3) if read_format == "fp8" else (2, 1))
+    assert restored.gdn_read_quantizer.is_enabled
+    restored.gdn_state_quantizer.enable()
+    with pytest.raises(ValueError, match="FP32 anchor"):
+        restored.validate_linear_attention()
+    mtq.disable_quantizer(model, "*")
+    assert not get_linear_attention_layers(model, enabled_only=True)
+    with linear_attention_training_phase(model, [1]):
+        assert model.linear_attention_is_enabled

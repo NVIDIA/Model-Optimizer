@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 import torch
 
+from ._two_precision import two_precision_decode
 from ._vllm_autograd import normalized
 from .utils import _state_qdq, forward_value
 
@@ -118,6 +119,8 @@ def _recurrent_decode(
     state_quantizer,
     initial_state,
     output_final_state=False,
+    read_mode="s32_rs",
+    read_rounding="nearest",
     scale=None,
     use_qk_l2norm_in_kernel=False,
     gate_inputs=None,
@@ -132,6 +135,10 @@ def _recurrent_decode(
         zero = (q.sum() + k.sum() + v.sum() + g.sum() + beta.sum()) * 0
         return v + zero, initial_state if output_final_state else None
     scale = q.shape[-1] ** -0.5 if scale is None else scale
+    if config.precision == "replayssm_two_precision":
+        return two_precision_decode(
+            q, k, v, g, beta, initial_state, gate_inputs, read_mode, read_rounding
+        ), None
     if config.precision == "replayssm":
         output, carry = _replay_decode(
             q,

@@ -46,13 +46,20 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     ``replay_window=1`` refreshes the state every token; larger windows enable replay.
     Fresh prefill has no internal state QDQ; incoming continuation state and
     the handoff to a nonempty suffix use the selected checkpoint encoding.
+    Separate read and recurrence precisions use the GDN-only
+    ``replayssm_two_precision`` profile: an FP32 anchor, an independently rounded
+    read copy, and a fixed 16-token window implemented by ModelOpt's replay
+    backend. The first suffix output reads the unrounded prefill checkpoint
+    before the read copy is encoded; runtime cache storage remains FP32.
 
     TensorQuantizer independently enables QDQ and owns its format and grouping.
     ``state_block_v`` controls grouping only for legacy per-tile quantizers.
     """
 
     backend: Literal["fla", "serving"] = ModeloptField(default="fla")
-    precision: Literal["vllm", "vllm_kimi_k3", "replayssm"] = ModeloptField(default="vllm")
+    precision: Literal["vllm", "vllm_kimi_k3", "replayssm", "replayssm_two_precision"] = (
+        ModeloptField(default="vllm")
+    )
     replay_window: int = Field(default=1, ge=1, le=64, strict=True)
     state_block_v: Literal[16, 32, 64, 128] = ModeloptField(default=64)
 
@@ -68,6 +75,11 @@ class LinearAttentionConfig(ModeloptBaseConfig):
                 raise ValueError("replayssm requires backend='serving'")
             if self.state_block_v < 32:
                 raise ValueError("int8_hadamard32 requires state_block_v >= 32")
+        elif self.precision == "replayssm_two_precision":
+            if self.backend != "serving" or self.replay_window != 16:
+                raise ValueError(
+                    "replayssm_two_precision requires backend='serving' and replay_window=16"
+                )
         elif self.replay_window != 1:
             raise ValueError("Replay requires precision='replayssm'")
         return self
