@@ -436,9 +436,7 @@ def is_pow2(n):
 
 def _get_fsdp2_mesh(module: nn.Module):
     """Get the mesh info of the model."""
-    from torch.distributed._composable_state import _get_module_state
-
-    fsdp_state = _get_module_state(module)
+    fsdp_state = fully_shard.state(module)
     pg = fsdp_state._fsdp_param_group
     if pg is None:
         return None

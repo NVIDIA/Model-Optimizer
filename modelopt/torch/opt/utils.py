@@ -20,7 +20,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 
 import torch.nn as nn
-from torch.distributed.fsdp import FSDPModule
+from torch.distributed.fsdp import FSDPModule, fully_shard
 
 from modelopt.torch.utils import unwrap_model
 
@@ -93,7 +93,6 @@ def forward_with_reshard(model: nn.Module):
     2) use this context manager to reshard FSDPParam in the root module after forward
     passes.
     """
-    from torch.distributed._composable_state import _get_module_state
 
     def _lazy_init_retain_mesh_info(self):
         if self._fsdp_param_group and not hasattr(self, "_post_forward_mesh_info_before"):
@@ -107,7 +106,7 @@ def forward_with_reshard(model: nn.Module):
 
     for module in model.modules():
         if isinstance(module, FSDPModule):
-            fsdp_state = _get_module_state(module)
+            fsdp_state = fully_shard.state(module)
             if not hasattr(fsdp_state, "_lazy_init_original"):
                 fsdp_state._lazy_init_original = fsdp_state._lazy_init
                 fsdp_state._lazy_init = types.MethodType(_lazy_init_retain_mesh_info, fsdp_state)

@@ -1227,7 +1227,7 @@ class TensorQuantizer(nn.Module):
         if (
             not is_torch_export_mode()
             and not torch.compiler.is_compiling()
-            and _in_torchscript_onnx_export()
+            and torch.onnx.is_in_onnx_export()
         ):
             self._check_onnx_readiness(inputs)
 
@@ -1604,14 +1604,6 @@ def _amax_to_scale(
 ) -> torch.Tensor:
     """Convert amax to per-block scale, guarding against small/zero values."""
     return _clamp_scale(amax.float() / max_bound, min_value)
-
-
-def _in_torchscript_onnx_export() -> bool:
-    """Whether the TorchScript ONNX exporter is running."""
-    # Private torch module: imported lazily so a future move cannot break importing modelopt.
-    from torch.onnx._internal.torchscript_exporter._globals import GLOBALS
-
-    return GLOBALS.in_onnx_export
 
 
 def _to_local(t: torch.Tensor) -> torch.Tensor:
