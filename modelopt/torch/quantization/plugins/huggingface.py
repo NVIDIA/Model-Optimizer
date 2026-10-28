@@ -897,10 +897,17 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
         Each expert slice passes through its own weight quantizer (collecting
         ``amax`` during calibration, fake-quantizing afterwards), matching the
-        eager per-expert ``F.linear`` semantics. Returns the weight untouched when
-        every quantizer is disabled so passthrough stays exact (and cheap).
+        eager per-expert ``F.linear`` semantics. Returns the weight untouched when every
+        quantizer would pass its slice through unchanged, so passthrough stays exact (and cheap).
         """
-        if all(not q.is_enabled for q in quantizers):
+        # A disabled quantizer still applies its pre-quant scale and rotation, as on the eager path.
+        if all(
+            isinstance(q, TensorQuantizer)
+            and not q.is_enabled
+            and q.pre_quant_scale is None
+            and not q.rotate_is_enabled
+            for q in quantizers
+        ):
             return weight
         if torch.is_grad_enabled():
             # Slices written into one buffer would chain a full-size gradient copy per expert into
