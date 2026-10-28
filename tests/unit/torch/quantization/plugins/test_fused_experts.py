@@ -1933,6 +1933,35 @@ class TestGroupedMMExperts:
             self._cleanup_registry(_SyntheticGroupedExperts)
         torch.testing.assert_close(outputs[1], outputs[0], rtol=1e-4, atol=1e-6)
 
+    def test_fake_quantized_grouped_forward_and_backward_match_eager(self):
+        """Under autograd (QAT) the grouped forward fake-quantizes every expert's slice at once; its
+        output and gradients match the eager forward's on the same calibrated quantizers."""
+        self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.manual_seed(0)
+        models = [_GroupedMoEModel("eager"), _GroupedMoEModel("grouped_mm")]
+        models[1].load_state_dict(models[0].state_dict())
+        try:
+            # quantize() calibrates every model on eager, so both get the same quantizers.
+            for model in models:
+                mtq.quantize(model, self._quant_cfg(), self._forward_loop_all_experts)
+            models[1].config._experts_implementation = "grouped_mm"
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+        hidden = torch.randn(16, HIDDEN_DIM)
+        top_k_index = torch.stack(
+            [torch.arange(16) % NUM_EXPERTS, (torch.arange(16) + 1) % NUM_EXPERTS], 1
+        )
+        top_k_weights = torch.softmax(torch.randn(16, TOP_K), dim=1)
+        results = []
+        for model in models:
+            x = hidden.clone().requires_grad_()
+            out = model.moe.experts(x, top_k_index, top_k_weights)
+            out.square().sum().backward()
+            experts = model.moe.experts
+            results.append((out, x.grad, experts.gate_up_proj.grad, experts.down_proj.grad))
+        for grouped, eager in zip(results[1], results[0]):
+            torch.testing.assert_close(grouped, eager, rtol=1e-4, atol=1e-6)
+
     def test_an_eager_only_wrapper_refuses_the_grouped_forward(self):
         """A wrapper whose weights are defined on the eager forward raises if the grouped one runs,
         rather than quantize the stored weight."""
