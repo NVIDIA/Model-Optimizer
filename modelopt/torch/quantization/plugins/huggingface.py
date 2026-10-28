@@ -1569,7 +1569,9 @@ def register_fused_experts_on_the_fly(model):
         if wrapper is not None and (
             getattr(module, "is_transposed", False)
             # Stored `(num_experts, out_dim, in_dim)`, the first projection takes the dim down_proj
-            # puts out; a gated container stored transposed never does, whether it says so or not.
+            # puts out. That separates the layouts for a gated container, whose first projection is
+            # `2 * intermediate`, whether it says so or not; a non-gated one's two layouts have the
+            # same shapes, so only its own `is_transposed` gives it away.
             or getattr(module, wrapper._first_proj_attr).shape[-1] != module.down_proj.shape[1]
         ):
             # `_fused_experts_wrapper` matches on parameter SHAPE only, so it also claims a
