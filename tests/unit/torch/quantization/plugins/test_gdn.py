@@ -231,6 +231,8 @@ def test_restore_legacy_gdn_without_new_quantizer_handles(has_policy):
             metadata.pop("linear_attention", None)
         else:
             assert "linear_attention" in metadata
+            for policy in metadata["linear_attention"].values():
+                policy.pop("solve", None)
         for name in ("gdn_state_quantizer", "gdn_w_quantizer"):
             metadata["quantizer_state"].pop(name, None)
     restored = TinyGatedDeltaNet()
@@ -240,6 +242,7 @@ def test_restore_legacy_gdn_without_new_quantizer_handles(has_policy):
     torch.testing.assert_close(restored(x), model(x))
     assert not restored.gdn_state_quantizer.is_enabled
     assert not restored.gdn_w_quantizer.is_enabled
+    assert restored.linear_attention_config.solve.method == "exact"
 
 
 def test_standard_projection_recipe_leaves_gdn_emulation_disabled():
@@ -416,3 +419,15 @@ def test_kda_rejects_gdn_prefill_policy():
     )
     with pytest.raises(ValueError, match="not GEMM operands"):
         model.validate_linear_attention()
+
+
+def test_guarded_solve_policy_survives_modelopt_checkpoint():
+    config = load_recipe("general/ptq/gdn_prefill_fp8_dynamic").quantize
+    model = mtq.quantize(TinyGatedDeltaNet(), config)
+    model.linear_attention_config = LinearAttentionConfig(
+        backend="gdn_prefill",
+        precision="gdn_prefill",
+        solve={"method": "guarded_neumann", "degree": 15, "max_tail_bound": 1e-4},
+    )
+    restored = mto.restore_from_modelopt_state(TinyGatedDeltaNet(), mto.modelopt_state(model))
+    assert restored.linear_attention_config == model.linear_attention_config

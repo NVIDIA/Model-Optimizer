@@ -19,6 +19,7 @@ import pytest
 import torch
 
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.linear_attention.config import LinearAttentionSolveConfig
 from modelopt.torch.quantization.linear_attention.matmul import (
     GDNMatmulSites,
     _apply_operand_quantizer,
@@ -181,4 +182,29 @@ def test_strong_forgetting_does_not_overflow_masked_decay():
     )
     gradients = torch.autograd.grad(output.float().square().mean() + final.square().mean(), inputs)
     assert torch.isfinite(output).all() and torch.isfinite(final).all()
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
+
+
+def test_guarded_neumann_runs_only_for_a_safe_full_prefill():
+    q, k, v, g, beta, state = _inputs(65, requires_grad=True)
+    k = (k.detach() * 0.01).requires_grad_()
+    inputs = (q, k, v, g, beta, state)
+    common = {
+        "sites": GDNMatmulSites().cuda(),
+        "initial_state": state[None],
+        "output_final_state": True,
+    }
+    exact = gdn_prefill_qat(*(value[None] for value in inputs[:5]), **common)
+    approximate = gdn_prefill_qat(
+        *(value[None] for value in inputs[:5]),
+        **common,
+        solve=LinearAttentionSolveConfig(
+            method="guarded_neumann", degree=7, max_tail_bound=1e-4, unsafe_action="error"
+        ),
+    )
+    torch.testing.assert_close(approximate[0], exact[0], rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(approximate[1], exact[1], rtol=1e-4, atol=1e-5)
+    gradients = torch.autograd.grad(
+        approximate[0].float().square().mean() + approximate[1].square().mean(), inputs
+    )
     assert all(torch.isfinite(gradient).all() for gradient in gradients)
