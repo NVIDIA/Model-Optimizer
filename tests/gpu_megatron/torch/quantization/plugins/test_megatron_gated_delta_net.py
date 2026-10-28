@@ -331,5 +331,6 @@ def _test_gdn_operand_qat(rank, size, format_name, solve_method="exact"):
 
 
 @pytest.mark.parametrize("format_name", ["fp8", "nvfp4"])
-def test_gdn_operand_qat_executes_quantizers(compiled_gdn_workers, format_name):
-    compiled_gdn_workers.run(_test_gdn_operand_qat, format_name)
+@pytest.mark.parametrize("solve_method", ["exact", "guarded_neumann"])
+def test_gdn_operand_qat_executes_quantizers(compiled_gdn_workers, format_name, solve_method):
+    compiled_gdn_workers.run(_test_gdn_operand_qat, format_name, solve_method)

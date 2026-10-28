@@ -20,7 +20,9 @@ from numbers import Integral
 
 import torch
 
+from .config import LinearAttentionSolveConfig
 from .matmul import GDNMatmulSites
+from .solve import triangular_inverse
 
 __all__ = []
 
@@ -63,7 +65,7 @@ def _sequences(q, cu_seqlens, cu_seqlens_cpu, sequence_lengths):
     return segments, valid
 
 
-def _chunk_gdn(q, k, v, g, beta, state, sites, scale):
+def _chunk_gdn(q, k, v, g, beta, state, sites, solve, scale):
     """Run one sequence, carrying an FP32 [H,K,V] state across 64-token chunks."""
 
     def mm(name, lhs, rhs):
@@ -90,10 +92,7 @@ def _chunk_gdn(q, k, v, g, beta, state, sites, scale):
         decay = relative.exp().masked_fill(~causal, 0)
         lower = (mm("key_interaction", bc.unsqueeze(-1) * kc, kc) * decay).tril(-1)
         scores = (mm("output_score", qc * scale, kc) * decay).tril()
-        identity = torch.eye(64, dtype=q.dtype, device=q.device).expand_as(lower)
-        inverse = torch.linalg.solve_triangular(
-            identity + lower, identity, upper=False, unitriangular=True
-        )
+        inverse = triangular_inverse(lower, solve)
         u = mm("wy_value", inverse, (bc.unsqueeze(-1) * vc).transpose(-1, -2))
         w = mm(
             "wy_key",
@@ -119,6 +118,7 @@ def gdn_prefill_qat(
     beta,
     *,
     sites: GDNMatmulSites,
+    solve=None,
     scale=None,
     initial_state=None,
     output_final_state=False,
@@ -142,6 +142,7 @@ def gdn_prefill_qat(
     if heads % key_heads or g.shape != (batch, length, heads) or beta.shape != g.shape:
         raise ValueError("GDN prefill requires scalar gates and compatible grouped heads")
     sites.validate()
+    solve = LinearAttentionSolveConfig() if solve is None else solve
     output_dtype = q.dtype
     q, k, v, g, beta = (value.float() for value in (q, k, v, g, beta))
     if use_qk_l2norm_in_kernel:
@@ -169,6 +170,7 @@ def gdn_prefill_qat(
             beta[batch_index, start : start + size],
             states[index],
             sites,
+            solve,
             scale,
         )
         output[batch_index, start : start + size] = sequence_output

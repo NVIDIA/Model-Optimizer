@@ -8,6 +8,9 @@ Changelog
 
 *Quantization*
 
+- Retain guarded Neumann inverse research for GDN prefill. It runs only under a
+  sufficient truncation bound and otherwise uses the exact solve or raises; no
+  built-in recipe selects it because the unguarded candidate failed quality and cost gates.
 - Add experimental GDN prefill operand QAT with dynamic per-row FP8 or block16
   NVFP4 fake QDQ at the eight algorithmic GEMMs. NVFP4 global scales are isolated
   per chunk and head; this is numerical training emulation, not a native kernel.

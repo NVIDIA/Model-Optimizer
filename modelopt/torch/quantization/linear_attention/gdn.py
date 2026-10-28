@@ -88,6 +88,7 @@ def gdn_state_qat(
             g,
             beta,
             sites=matmul_sites,
+            solve=policy.solve,
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
