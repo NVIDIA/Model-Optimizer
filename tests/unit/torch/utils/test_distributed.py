@@ -652,12 +652,12 @@ def test_the_run_ends_the_group_it_set_up(
 
 @pytest.mark.parametrize("raises", [False, True], ids=["returns", "raises"])
 @pytest.mark.parametrize("world_size", [None, "2"], ids=["single-process", "launch"])
-def test_the_run_leaves_a_group_it_found_alone(monkeypatch, world_size, raises):
+def test_the_run_leaves_a_group_it_found_alone(monkeypatch, recwarn, world_size, raises):
     """Under a launch too, and when the body raises: a caller that set its group up before the run
     keeps it, and gets the error. The state is this rank's place in that group, also when the
     caller set it up without the launch's environment. Under a launch the run binds this rank's
     CUDA device all the same, since the caller may not have: the state's device is then the one
-    NCCL runs on."""
+    NCCL runs on. The run's timeout cannot apply to that group, so it warns rather than drop it."""
     bound: list[int] = []
     if world_size is None:
         monkeypatch.delenv("WORLD_SIZE", raising=False)
@@ -676,9 +676,15 @@ def test_the_run_leaves_a_group_it_found_alone(monkeypatch, world_size, raises):
     )
     monkeypatch.setattr(dist, "abort", lambda: pytest.fail("exited the caller's process"))
     expected = pytest.raises(ValueError, match="calibration failed") if raises else nullcontext()
-    with expected, distributed_run(device="cpu" if world_size is None else "cuda") as state:
+    with (
+        expected,
+        distributed_run(
+            timeout=timedelta(hours=1), device="cpu" if world_size is None else "cuda"
+        ) as state,
+    ):
         assert (state.rank, state.world_size) == (1, 2)
         assert torch.device(state.device) == torch.device("cpu" if world_size is None else "cuda:1")
         assert bound == ([] if world_size is None else [1])
         if raises:
             raise ValueError("calibration failed")
+    assert "timeout=1:00:00) does not apply" in str(recwarn.pop(UserWarning).message)
