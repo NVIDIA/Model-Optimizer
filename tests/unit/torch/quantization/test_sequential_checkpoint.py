@@ -34,6 +34,7 @@ from modelopt.torch.quantization.utils.layerwise_calib import (
     _save_layer_files,
 )
 from modelopt.torch.utils.network import get_module_device
+from modelopt.torch.utils.serialization import safe_save
 
 
 class _DecoderBlock(nn.Module):
@@ -279,8 +280,32 @@ def test_host_allocation_failure_is_not_reported_as_corruption(monkeypatch, tmp_
 def test_hf_cache_types_cover_all_cache_classes():
     cache_utils = pytest.importorskip("transformers.cache_utils")
     types = lc._hf_cache_types()
+    defined = [
+        c
+        for c in vars(cache_utils).values()
+        if isinstance(c, type)
+        and c.__module__ == cache_utils.__name__
+        and c.__name__.endswith(("Cache", "Layer"))
+    ]
     assert cache_utils.DynamicCache in types
-    assert all(issubclass(t, (cache_utils.Cache, cache_utils.CacheLayerMixin)) for t in types)
+    assert set(defined) <= set(types)
+
+
+def test_hybrid_linear_attention_cache_round_trips(tmp_path):
+    """A DynamicCache of a hybrid model holds LinearAttentionLayer, which derives from its own
+    mixin rather than CacheLayerMixin; it must stay loadable on resume."""
+    pytest.importorskip("transformers.cache_utils")
+    qwen3_5 = pytest.importorskip("transformers.models.qwen3_5.configuration_qwen3_5")
+    from transformers import DynamicCache
+
+    cache = DynamicCache(config=qwen3_5.Qwen3_5TextConfig(num_hidden_layers=4))
+    assert any(type(layer).__name__ == "LinearAttentionLayer" for layer in cache.layers)
+    path = str(tmp_path / "next_inputs.pt")
+    safe_save({"past_key_values": cache}, path)
+    loaded = lc._load_checkpoint_file(path, "cpu", allow_caches=True)
+    assert [type(layer) for layer in loaded["past_key_values"].layers] == [
+        type(layer) for layer in cache.layers
+    ]
 
 
 def test_resume_hf_model_with_quantizers(tmp_path):
