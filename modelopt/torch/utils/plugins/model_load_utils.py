@@ -456,8 +456,6 @@ def _whole_load_options(kwargs) -> list[str]:
 
 def _route(plan: DistributionPlan) -> str | None:
     """The sharded load ``plan`` takes, or ``None`` when every rank loads the whole model."""
-    from modelopt.torch.utils import distributed as dist
-
     if plan.world_size != dist.size():
         raise ValueError(
             f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}."
@@ -473,8 +471,6 @@ def _route(plan: DistributionPlan) -> str | None:
 
 def _refuse_sharded_load_options(route, auto_class, kwargs) -> None:
     """Refuse the arguments the sharded load ``route`` cannot honor: the arguments alone decide."""
-    from modelopt.torch.utils import distributed as dist
-
     if auto_class not in (None, AutoModelForCausalLM):
         raise NotImplementedError(
             f"The {route} load builds its model class itself; auto_class={auto_class.__name__} "
@@ -506,7 +502,6 @@ def _refuse_sharded_load_options(route, auto_class, kwargs) -> None:
 def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options) -> nn.Module:
     """The sharded load ``route`` names, refusing what it cannot honor before it starts."""
     from modelopt.torch.models.hf import checkpoint_has_mtp
-    from modelopt.torch.utils import distributed as dist
 
     _refuse_sharded_load_options(route, auto_class, kwargs)
     kwargs = {k: v for k, v in kwargs.items() if k not in ("dtype", "torch_dtype")}
@@ -637,7 +632,6 @@ def load_pretrained(
         )
     # Importing modelopt.torch.models registers every model spec; only callers of this need them.
     from modelopt.torch.models.hf import prepare_model_for_loading
-    from modelopt.torch.utils import distributed as dist
 
     # A launcher can start several processes that set no process group up (hf_ptq without
     # --use_fsdp2, say): each then loads as a single process does, the whole model with no plan to
