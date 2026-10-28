@@ -15,7 +15,7 @@
 
 import logging
 from collections.abc import Callable
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 import torch
@@ -49,7 +49,7 @@ from utils import (
 )
 
 
-class ModelType(str, Enum):
+class ModelType(StrEnum):
     """Supported model types."""
 
     SDXL_BASE = "sdxl-1.0"

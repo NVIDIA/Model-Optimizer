@@ -34,8 +34,6 @@
 The masked joint-attention execution follows NVIDIA FastGen merge request 210.
 """
 
-from __future__ import annotations
-
 import math
 import types
 from collections.abc import Mapping

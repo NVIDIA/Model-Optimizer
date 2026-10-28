@@ -394,9 +394,12 @@ def replace_function(package, name, new_func, og_func_cache_name=None):
     old_func = getattr(package, name)
     setattr(package, name, new_func)
     setattr(package, og_func_cache_name, old_func)
-    yield
-    setattr(package, name, old_func)
-    delattr(package, og_func_cache_name)
+    try:
+        yield
+    finally:
+        # Also when the body raises: a replacement left behind would stay patched process-wide.
+        setattr(package, name, old_func)
+        delattr(package, og_func_cache_name)
 
 
 @contextmanager
@@ -1002,6 +1005,9 @@ def fsdp2_aware_weight_update(
     Returns:
         None
     """
+    # Bound only once setup succeeds; the finally skips FSDP bookkeeping until then so an
+    # early error (e.g. an OOM from the unshard below) propagates and FSDP state stays intact.
+    fsdp_param_group = None
     try:
         if isinstance(root_model, FSDPModule):
             # Get FSDP root module, if none is returned, then the update is not made to a submodule of an FSDPModule
@@ -1023,8 +1029,9 @@ def fsdp2_aware_weight_update(
                     root_module.unshard()
 
             # Get FSDPParam list
-            fsdp_param_group = fully_shard.state(root_module)._fsdp_param_group
-            fsdp_param_mapping = create_fsdp_param_mapping(fsdp_param_group.fsdp_params, root_model)
+            param_group = fully_shard.state(root_module)._fsdp_param_group
+            fsdp_param_mapping = create_fsdp_param_mapping(param_group.fsdp_params, root_model)
+            fsdp_param_group = param_group
 
             # Assert that all the modules in the module list are present in this fsdp_param_group
             if len(modules_to_update) > 1:
@@ -1044,7 +1051,7 @@ def fsdp2_aware_weight_update(
     finally:
         from modelopt.torch.quantization.qtensor.base_qtensor import QFSDPParam, QTensorWrapper
 
-        if isinstance(root_model, FSDPModule):
+        if fsdp_param_group is not None:
             # Update FSDPParam list
             for module in modules_to_update:
                 for param_name, param in module.named_parameters():

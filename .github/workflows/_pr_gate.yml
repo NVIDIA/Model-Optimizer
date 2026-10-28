@@ -26,7 +26,7 @@ on:
 
 jobs:
   check-file-changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       # Stacked PRs (base is another PR's branch) skip GPU tests; only the bottom PR, targeting main, runs them.
       any_changed: ${{ steps.base.outputs.stacked != 'true' && (steps.changed-tests.outputs.any_modified || steps.non-pr.outputs.any_changed) || 'false' }}
@@ -37,7 +37,7 @@ jobs:
         if: "!startsWith(github.ref, 'refs/heads/pull-request/')"
         run: echo "any_changed=true" >> $GITHUB_OUTPUT
       - if: startsWith(github.ref, 'refs/heads/pull-request/')
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - if: startsWith(github.ref, 'refs/heads/pull-request/')
@@ -58,7 +58,7 @@ jobs:
     if: >-
       startsWith(github.ref, 'refs/heads/pull-request/') &&
       needs.check-file-changes.outputs.any_changed == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       checks: read
     steps:

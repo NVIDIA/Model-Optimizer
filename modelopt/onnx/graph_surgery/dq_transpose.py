@@ -301,17 +301,31 @@ def transpose_dequantize_linear_weights(
                         break
                 stats["zero_points_transposed"] += 1
 
-        # Update axis attribute (0 -> 1 after transpose)
+        # Update axis attribute (0 -> 1 after transpose). The weight is 2D here and ONNX
+        # allows a negative axis, so normalize before swapping. The "axis" attribute is
+        # optional and defaults to 1 per the ONNX spec, so a DQ node that never set it
+        # explicitly needs the same correction, not a silent no-op -- but only when the
+        # scale is per-axis (more than one element). A per-tensor DQ ignores axis entirely,
+        # and opset < 13 does not define the attribute at all, so adding one there would
+        # make the node invalid for that opset; scale_size > 1 only happens at opset >= 13,
+        # since per-axis quantization is an opset-13 addition.
+        axis_attr_found = False
         for attr in dq_node.attribute:
             if attr.name == "axis":
                 old_axis = attr.i
-                if old_axis == 0:
-                    attr.i = 1
-                elif old_axis == 1:
-                    attr.i = 0
+                attr.i = 1 - (old_axis % 2)
+                axis_attr_found = True
                 if verbose:
                     logger.debug(f"  Updated axis: {old_axis} -> {attr.i}")
                 break
+        if not axis_attr_found:
+            scale_size = int(np.prod(scale_init.dims))
+            if scale_size > 1:
+                dq_node.attribute.append(helper.make_attribute("axis", 0))
+                if verbose:
+                    logger.debug("  Added axis: 1 (default) -> 0")
+            elif verbose:
+                logger.debug("  Per-tensor DQ with no axis attribute; leaving as-is")
 
         # Create intermediate output for DQ (transposed shape)
         dq_output_name = dq_node.output[0]

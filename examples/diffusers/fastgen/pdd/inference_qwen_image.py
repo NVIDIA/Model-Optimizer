@@ -15,8 +15,6 @@
 
 """Generate an image with a trained Qwen-Image PDD transformer."""
 
-from __future__ import annotations
-
 import argparse
 import sys
 import time

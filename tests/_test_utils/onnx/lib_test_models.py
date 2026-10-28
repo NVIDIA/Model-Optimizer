@@ -833,8 +833,9 @@ def build_conv_isinf_model(opset_version=13):
     # Define your model inputs and outputs
     input_names = ["input_0"]
     output_names = ["output_0"]
-    input_shapes = [(6, 32, 900, 256)]
-    output_shapes = [(6, 32, 900, 256)]
+    # Small: the tests check node dtypes, not values, and a large activation costs GBs per worker
+    input_shapes = [(1, 32, 64, 64)]
+    output_shapes = [(1, 32, 64, 64)]
 
     inputs = [
         helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, input_shape)

@@ -14,14 +14,22 @@ concurrency:
   group: ${{ github.workflow }}-${{ startsWith(github.ref, 'refs/heads/pull-request/') && github.ref || github.sha }}
   cancel-in-progress: true
 
-# Each job's `allow_failure` reads the repo variable ALLOW_FAILURE_EXAMPLE_TESTS:
+# Every job passes the repo variable ALLOW_FAILURE_EXAMPLE_TESTS to the runner as `allow_failure_examples`:
 # a comma-separated list of example names whose test failures should be non-blocking, e.g. "torch_trt,llm_qat"
+#
+# An `example` of several names separated by spaces runs them one after the other in one job, each in its own
+# step, which saves the container start and the base install (3-5 min each) of every job after the first. Only
+# small examples with the same image and extras are grouped; each example installs its own requirements just
+# before its tests, so a group lists first the examples that leave the environment alone and last the ones that
+# pin or upgrade packages. An example that changes torch (torch_trt downgrades it) must not be grouped: the
+# extension cache key is the group name plus the image, with no torch version, and a cache built against another
+# torch fails with undefined symbols.
 
 jobs:
   # One changed-files pass decides which lanes run. Lane granularity, not per-example: a job's
   # `if` cannot read `matrix`, so gating an individual example would need a job per example.
   pr-gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       checks: read
       contents: read
@@ -35,7 +43,7 @@ jobs:
       diffusers: ${{ steps.lanes.outputs.diffusers }}
       onnx: ${{ steps.lanes.outputs.onnx }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - if: startsWith(github.ref, 'refs/heads/pull-request/')
@@ -70,6 +78,7 @@ jobs:
               - "!**/*.{md,rst,png,ipynb}"
             vllm:
               - "{examples,tests/examples}/vllm_serve/**"
+              - examples/hf_ptq/convert_ggml_to_int8.py # tests/examples/vllm_serve serves its output
               - "!**/*.{md,rst,png,ipynb}"
             trtllm:
               - "{examples,tests/examples}/{gpt-oss,hf_ptq,llm_eval}/**"
@@ -125,7 +134,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [llm_distill, llm_qat, llm_sparsity, specdec_bench, speculative_decoding]
+        # llm_qat and speculative_decoding take 9-16 min and stay on their own jobs; the three small ones share one.
+        # llm_distill pins trl and torchao, so it goes last.
+        example: ["specdec_bench llm_sparsity llm_distill", llm_qat, speculative_decoding]
     uses: ./.github/workflows/_example_tests_runner.yml
     permissions:
       contents: read
@@ -136,7 +147,7 @@ jobs:
       timeout_minutes: 30
       pip_install_extras: "[hf,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
-      allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), format(',{0},', matrix.example)) }}
+      allow_failure_examples: ${{ vars.ALLOW_FAILURE_EXAMPLE_TESTS }}
 
   ##### vLLM Example Tests #####
   vllm:
@@ -156,7 +167,7 @@ jobs:
       timeout_minutes: 30
       pip_install_extras: "[hf,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
-      allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), format(',{0},', matrix.example)) }}
+      allow_failure_examples: ${{ vars.ALLOW_FAILURE_EXAMPLE_TESTS }}
 
   ##### TensorRT-LLM Example Tests #####
   trtllm:
@@ -165,7 +176,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [gpt-oss, hf_ptq, llm_eval]
+        # hf_ptq is the longest and stays alone. gpt-oss upgrades datasets and trl, so it goes after llm_eval.
+        example: ["llm_eval gpt-oss", hf_ptq]
     uses: ./.github/workflows/_example_tests_runner.yml
     permissions:
       contents: read
@@ -177,7 +189,7 @@ jobs:
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
-      allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), format(',{0},', matrix.example)) }}
+      allow_failure_examples: ${{ vars.ALLOW_FAILURE_EXAMPLE_TESTS }}
 
   ##### Megatron Example Tests #####
   megatron:
@@ -194,7 +206,7 @@ jobs:
       timeout_minutes: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 30 || 75 }}
       pip_install_extras: "[hf,puzzletron,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
-      allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), ',megatron_bridge,') }}
+      allow_failure_examples: ${{ vars.ALLOW_FAILURE_EXAMPLE_TESTS }}
 
   ##### Diffusers Example Tests #####
   diffusers:
@@ -211,7 +223,7 @@ jobs:
       timeout_minutes: 60
       pip_install_extras: "[onnx,hf,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
-      allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), ',diffusers,') }}
+      allow_failure_examples: ${{ vars.ALLOW_FAILURE_EXAMPLE_TESTS }}
 
   ##### ONNX/TensorRT Example Tests #####
   onnx:
@@ -234,14 +246,14 @@ jobs:
       timeout_minutes: 45
       pip_install_extras: "[onnx,hf,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
-      allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), format(',{0},', matrix.example)) }}
+      allow_failure_examples: ${{ vars.ALLOW_FAILURE_EXAMPLE_TESTS }}
 
   ##### Required Check for PR #####
   example-pr-required-check:
     # Run even if example tests are skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
     needs: [pr-gate, torch, vllm, trtllm, megatron, diffusers, onnx]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Stacked PR, example tests deferred
         if: needs.pr-gate.outputs.stacked == 'true'

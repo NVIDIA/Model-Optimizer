@@ -20,8 +20,6 @@ Triton kernel natively. Handles format conversion between HF's [batch, heads, se
 and the kernel's flat packed [total_tokens, heads, dim] varlen format.
 """
 
-from __future__ import annotations
-
 import torch
 import torch.nn as nn
 

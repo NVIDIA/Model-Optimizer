@@ -25,16 +25,159 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+from modelopt.torch.quantization.utils import calib_utils
 from modelopt.torch.quantization.utils.calib_utils import (
+    GPTQHelper,
     compute_hessian_inverse,
     gptq_blockwise_update,
     gptq_blockwise_update_fused_scalar,
     update_hessian,
 )
+from modelopt.torch.utils import get_available_gpu_memory
 from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_dataloader
 
 RAND_SEED = 42
 torch.manual_seed(RAND_SEED)
+
+
+def _report_available(monkeypatch, available):
+    """Make each GPU report ``available[gpu]`` bytes for a new allocation, with no forward measured."""
+    monkeypatch.setattr(calib_utils, "get_available_gpu_memory", lambda gpu: available[gpu])
+    monkeypatch.setattr(calib_utils, "_calib_forward_peak", {})
+
+
+def test_hessian_of_a_full_gpu_goes_to_an_idle_gpu(need_2_gpus, monkeypatch):
+    """A Hessian whose GPU is full lands on an idle GPU rather than the CPU, with the same values."""
+    total = torch.cuda.get_device_properties(0).total_memory
+    _report_available(monkeypatch, {0: total // 10, 1: total * 9 // 10})
+    linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
+    shard = torch.zeros(1, device="cuda:1")  # the model also lives on cuda:1
+    helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
+    assert helper.hessian.device == shard.device
+
+    inputs = torch.randn(32, 64, device="cuda:0")
+    helper.accumulate(inputs)
+    reference, _ = update_hessian(inputs, torch.zeros(64, 64, device="cuda:0"), 0)
+    torch.testing.assert_close(helper.hessian.to("cuda:0"), reference)
+
+
+@pytest.mark.parametrize("blocker", ["idle_gpu_full", "idle_gpu_too_small", "multi_rank"])
+def test_hessian_of_a_full_gpu_falls_back_to_the_cpu(need_2_gpus, monkeypatch, blocker):
+    """With no other GPU that can take it, or on any rank of a multi-rank run, it goes to the CPU."""
+    total = torch.cuda.get_device_properties(0).total_memory
+    reserve = int(calib_utils._HESSIAN_UNMEASURED_RESERVE * total)
+    idle = {
+        "idle_gpu_full": reserve // 2,
+        "idle_gpu_too_small": reserve + 64 * 64 * 4 - 1,  # one byte short of reserve + Hessian
+        "multi_rank": total,
+    }[blocker]
+    _report_available(monkeypatch, {0: total // 10, 1: idle})
+    if blocker == "multi_rank":
+        monkeypatch.setattr(calib_utils.dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(calib_utils.dist, "get_world_size", lambda group=None: 2)
+    linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
+    shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
+    helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
+    assert helper.hessian.device == torch.device("cpu")
+
+
+def test_bf16_hessian_input_gives_the_float32_hessian():
+    """``input_dtype=torch.bfloat16`` gives the float32 Hessian, on the inputs' GPU or the CPU,
+    and with float32-output GEMMs makes no float32 copy of the inputs."""
+    torch.manual_seed(0)
+    batches = [torch.randn(4096, 1024, device="cuda", dtype=torch.bfloat16) for _ in range(3)]
+    inputs = torch.cat(batches).double()
+    expected = 2 * inputs.t() @ inputs / inputs.shape[0]
+    fast = calib_utils._has_float32_out_gemm(batches[0].device)
+
+    for device in ("cuda", "cpu"):
+        hessian, n_samples = torch.zeros(1024, 1024, device=device), 0
+        for batch in batches:
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            base = torch.cuda.memory_allocated()
+            hessian, n_samples = update_hessian(batch, hessian, n_samples, torch.bfloat16)
+            growth = torch.cuda.max_memory_allocated() - base
+        # Tensor cores round float32 sums their own way: ~1e-5 of the diagonal (2), not BF16's 1e-2.
+        torch.testing.assert_close(hessian.cuda().double(), expected, rtol=0, atol=1e-4)
+        if device == "cuda" and fast:
+            assert growth < batch.numel() * 4
+
+
+def test_gptq_hessian_input_dtype_reaches_the_hessian(monkeypatch):
+    """A recipe's ``hessian_input_dtype: bfloat16`` drops the float32 copy of each batch that the
+    default float32 Hessian GEMM makes."""
+    if not calib_utils._has_float32_out_gemm(torch.device("cuda", torch.cuda.current_device())):
+        pytest.skip("needs CUDA GEMMs that take out_dtype")
+    inputs = torch.randn(4, 1024, 2048, device="cuda", dtype=torch.bfloat16)
+    peaks = {}
+    for hessian_input_dtype in ("float32", "bfloat16"):
+        monkeypatch.setattr(calib_utils, "_calib_forward_peak", {})
+        model = torch.nn.Linear(2048, 16, bias=False, device="cuda", dtype=torch.bfloat16)
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            ],
+            "algorithm": {"method": "gptq", "hessian_input_dtype": hessian_input_dtype},
+        }
+        mtq.quantize(model, quant_cfg, forward_loop=lambda m: m(inputs))
+        peaks[hessian_input_dtype] = calib_utils._calib_forward_peak[torch.cuda.current_device()]
+    # The float32 GEMM reads a float32 copy of the batch: 4 bytes per element.
+    assert peaks["float32"] - peaks["bfloat16"] >= inputs.numel() * 2
+
+
+@pytest.mark.parametrize(
+    ("measured_fraction", "stays"),
+    [(None, False), (0.05, True), (0.25, False)],
+    ids=["unmeasured", "small_forward", "large_forward"],
+)
+def test_a_measured_calibration_forward_sets_the_hessian_reserve(
+    monkeypatch, measured_fraction, stays
+):
+    """At 30% available, a GPU keeps a Hessian only once a measured forward leaves it room."""
+    total = torch.cuda.get_device_properties(0).total_memory
+    _report_available(monkeypatch, {0: total * 3 // 10})
+    monkeypatch.setattr(calib_utils, "get_process_gpus", lambda: [0])
+    if measured_fraction is not None:
+        calib_utils._calib_forward_peak[0] = int(measured_fraction * total)
+    linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
+    helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
+    assert helper.hessian.device == (torch.device("cuda", 0) if stays else torch.device("cpu"))
+
+
+def test_available_gpu_memory_is_what_one_allocation_can_get(monkeypatch):
+    """Free pieces of partly used cached blocks do not count: one allocation of all the memory
+    reported beyond the driver's free memory comes from the cache."""
+    torch.cuda.empty_cache()
+    whole = torch.empty(64 * 2**20, dtype=torch.uint8, device="cuda")
+    pieces = [torch.empty(3 * 2**20, dtype=torch.uint8, device="cuda") for _ in range(24)]
+    del whole, pieces[::2]  # a whole free block, and free pieces of partly used ones
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device=None: (0, 2**40))
+    available = get_available_gpu_memory(torch.cuda.current_device())
+    reserved = torch.cuda.memory_reserved()
+    block = torch.empty(available, dtype=torch.uint8, device="cuda")  # noqa: F841
+    assert torch.cuda.memory_reserved() == reserved
+
+
+def test_gptq_records_its_calibration_forward_memory(monkeypatch):
+    """The next layer's Hessian reserve covers what this layer's calibration forward added, and
+    not an earlier peak such as the previous layer's Hessians."""
+    monkeypatch.setattr(calib_utils, "_calib_forward_peak", {})
+    model = torch.nn.Linear(256, 256, device="cuda")
+    inputs = torch.randn(2, 16, 256, device="cuda")
+    mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop=lambda m: m(inputs))
+    transient = 64 * 2**20
+
+    def forward_loop(m):
+        scratch = torch.empty(transient, dtype=torch.uint8, device="cuda")
+        m(inputs)
+        del scratch
+
+    earlier = 16 * transient
+    torch.empty(earlier, dtype=torch.uint8, device="cuda")  # freed at once; only the peak stays
+    gptq(model, forward_loop=forward_loop, perc_damp=0.1, block_size=16)
+    assert transient <= calib_utils._calib_forward_peak[torch.cuda.current_device()] < earlier // 2
 
 
 @pytest.mark.parametrize(
@@ -130,14 +273,14 @@ def test_gptq_export_roundtrip():
 @pytest.mark.parametrize(
     "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
 )
-def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer):
+def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer, calib_jsonl):
     model = get_tiny_llama(vocab_size=tiny_tokenizer.vocab_size).to("cuda")
     model.eval()
 
     quant_cfg = copy.deepcopy(quant_cfg)
     quant_cfg["algorithm"] = {"method": "gptq", "layerwise": {"enable": True}}
     calib_dataloader = get_dataset_dataloader(
-        dataset_name="cnn_dailymail",
+        dataset_name=calib_jsonl,
         tokenizer=tiny_tokenizer,
         batch_size=2,
         num_samples=8,
@@ -206,6 +349,20 @@ def _run_fused_gptq_nvfp4(
         w, block_amax, global_scale, h_inv, gptq_block_size, quant_block_size
     )
     return w
+
+
+@requires_triton
+def test_fused_nvfp4_gptq_runs_on_the_weights_gpu(need_2_gpus):
+    """A layer device_map placed on another GPU is updated there, not from the current GPU."""
+    torch.manual_seed(42)
+    weight, _, block_amax, global_scale, h_inv = _make_nvfp4_test_data(16, 64, 256)
+    expected = _run_fused_gptq_nvfp4(weight, block_amax, global_scale, h_inv, 128, 16)
+
+    weight, block_amax, h_inv = (t.to("cuda:1") for t in (weight, block_amax, h_inv))
+    got = _run_fused_gptq_nvfp4(weight, block_amax, global_scale, h_inv, 128, 16)
+
+    assert torch.cuda.current_device() == 0
+    torch.testing.assert_close(got.cpu(), expected.cpu(), rtol=0, atol=0)
 
 
 _NVFP4_QUANT_BLOCK_SIZES = [16, 128]

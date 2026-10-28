@@ -16,7 +16,7 @@
 """Configurations for speculative decoding modes."""
 
 from copy import deepcopy
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import model_validator
 
@@ -146,8 +146,20 @@ class DFlashConfig(ModeloptBaseConfig):
     )
 
     dflash_use_torch_compile: bool = ModeloptField(
-        default=True,
-        description="Whether to use torch.compile on DFlash forward/loss methods.",
+        default=False,
+        description=(
+            "Whether to torch.compile the draft decoder stack and the DSpark TVD chunk in "
+            "training. Compiles once, on the first step, and needs a working Inductor "
+            "toolchain."
+        ),
+    )
+
+    dflash_use_flex_attention: bool = ModeloptField(
+        default=False,
+        description=(
+            "Compute the draft's attention with FlexAttention over a block-sparse BlockMask "
+            "instead of SDPA with a dense [B, 1, Q, KV] mask, skipping fully-masked tiles."
+        ),
     )
 
     dflash_swa_window_size: int | None = ModeloptField(
@@ -439,7 +451,7 @@ class DFlashConfig(ModeloptBaseConfig):
     )
 
     @model_validator(mode="after")
-    def _check_dpace_alpha(self) -> "DFlashConfig":
+    def _check_dpace_alpha(self) -> Self:
         # Validate at construction regardless of the active objective, so a bad alpha
         # is rejected even if it only becomes active after a later objective override.
         if not 0.0 < self.dflash_dpace_alpha <= 1.0:
@@ -683,7 +695,7 @@ class EagleConfig(ModeloptBaseConfig):
     )
 
     @model_validator(mode="after")
-    def _check_rope_scaling_consistency(self) -> "EagleConfig":
+    def _check_rope_scaling_consistency(self) -> Self:
         if not self.eagle_export_rope_scaling:
             return self
         rope_cfg = self.eagle_architecture_config.get("rope_scaling", {}) or {}

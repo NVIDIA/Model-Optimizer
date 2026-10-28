@@ -24,10 +24,10 @@ permissions:
 jobs:
   build-docs:
     if: github.event.action != 'closed'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/ubuntu-setup
       - name: Build docs
         run: pip install nox uv && nox -s docs
@@ -40,7 +40,7 @@ jobs:
 
   changes:
     if: github.event_name == 'pull_request' && github.event.action != 'closed'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pull-requests: read # list the PR's changed files
     outputs:
@@ -64,7 +64,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       (github.event.action == 'closed' || needs.changes.outputs.docs == 'true')
     needs: [build-docs, changes]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write # push to gh-pages branch
@@ -73,7 +73,7 @@ jobs:
     concurrency:
       group: pr-preview-${{ github.event.pull_request.number }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Download docs artifact
         if: github.event.action != 'closed'
         uses: actions/download-artifact@v8
@@ -88,11 +88,11 @@ jobs:
   deploy-gh-pages:
     if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: build-docs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write # push to gh-pages branch
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Download docs artifact
         uses: actions/download-artifact@v8
         with:

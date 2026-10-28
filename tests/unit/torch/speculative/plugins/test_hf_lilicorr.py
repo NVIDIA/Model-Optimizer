@@ -38,7 +38,7 @@ import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_lilicorr import HFLiLiCorrModel
-from modelopt.torch.speculative.plugins.modeling_dflash import DFlashModule
+from modelopt.torch.speculative.plugins.modeling_dflash import DFlashBaseModelOutput, DFlashModule
 from modelopt.torch.speculative.plugins.modeling_lilicorr import LiLiCorrModule
 
 BLOCK_SIZE = 4
@@ -347,7 +347,9 @@ class TestLiLiCorrForward:
         inputs = {
             "candidate_ids": candidate_ids,
             "anchor_positions": torch.tensor([[0, BLOCK_SIZE]]),
-            "target_logits": target_logits,
+            "base_outputs": DFlashBaseModelOutput(
+                target_hidden=torch.zeros(1, SEQ_LEN, 1), logits=target_logits
+            ),
         }
         at_target = model._candidate_target_logits(**inputs, requested_by="test")
 
