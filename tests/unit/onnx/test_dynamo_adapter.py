@@ -815,6 +815,55 @@ def test_finalize_rejects_unresolved_or_unapproved_operators(domain, op_type, na
         finalize_dynamo_export(model, 23)
 
 
+@pytest.mark.parametrize(
+    ("domain", "op_type"),
+    [
+        ("trt", "TRT_FP8QuantizeLinear"),
+        ("trt", "TRT_FP4QDQ"),
+        ("trt", "TRT_FP4DynamicQuantize"),
+        ("custom", "Identity"),
+        ("", "QuantizeLinear"),
+        ("", "Identity"),
+    ],
+)
+def test_finalize_checks_nested_if_branches_before_mutation(domain, op_type):
+    branch = helper.make_graph(
+        [helper.make_node(op_type, ["input"], ["branch_output"], domain=domain)],
+        "nested_branch",
+        [],
+        [_value("branch_output")],
+    )
+    for depth in range(2):
+        branch = helper.make_graph(
+            [
+                helper.make_node(
+                    "If",
+                    ["condition"],
+                    [f"if_output_{depth}"],
+                    then_branch=branch,
+                    else_branch=branch,
+                )
+            ],
+            f"branch_{depth}",
+            [],
+            [_value(f"if_output_{depth}")],
+        )
+    model = _model(
+        list(branch.node),
+        inputs=[_value("input"), _value("condition", TensorProto.BOOL, ())],
+        outputs=list(branch.output),
+        trt_opset=1,
+    )
+    original = model.SerializeToString()
+    if domain or op_type != "Identity":
+        with pytest.raises(NotImplementedError, match="subgraphs"):
+            finalize_dynamo_export(model, 23)
+        assert model.SerializeToString() == original
+    else:
+        assert finalize_dynamo_export(model, 23) is model
+        assert [(item.domain, item.version) for item in model.opset_import] == [("", 23)]
+
+
 def test_finalize_synchronizes_initializer_and_dq_metadata_and_drops_unused_trt_import():
     weight = _tensor("weight", np.ones((2, 4)), np.uint8)
     scale = _tensor("scale", 0.5)

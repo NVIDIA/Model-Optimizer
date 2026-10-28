@@ -274,6 +274,11 @@ def _translate_quantize_op(
             )
         else:
             scale = _OPSET.Div(_OPSET.CastLike(amax, inputs), _OPSET.CastLike(448.0, inputs))
+            scale = _OPSET.Where(
+                _OPSET.Equal(scale, _OPSET.CastLike(0.0, scale)),
+                _OPSET.CastLike(1.0, scale),
+                scale,
+            )
         return _fp8_qdq(inputs, scale)
 
     output_dtype = _resolve_dtype(inputs, high_precision_dtype)

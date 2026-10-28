@@ -26,6 +26,8 @@ from torch import nn
 onnx = pytest.importorskip("onnx")
 pytest.importorskip("onnxscript")
 
+from onnx.reference import ReferenceEvaluator
+
 import modelopt.torch.quantization as mtq
 from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 from modelopt.torch.quantization import tensor_quant
@@ -452,6 +454,27 @@ def test_mxfp8_fp8_conv_uses_matching_qdq_types(tmp_path, block_quant_export_onl
     assert {value.type.tensor_type.elem_type for value in exported.graph.output} == {
         onnx.TensorProto.FLOAT
     }
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+def test_helper_exports_zero_calibrated_fp8_weights(tmp_path, dtype):
+    inputs = (torch.randn(2, 16, dtype=dtype),)
+    model = nn.Linear(16, 16, bias=False, dtype=dtype).eval()
+    with torch.no_grad():
+        model.weight.zero_()
+    model = _quantize(model, inputs, mtq.FP8_DEFAULT_CFG)
+    exported = _helper_export(model, inputs, 23, tmp_path)
+    packed_weights = [
+        onnx.numpy_helper.to_array(tensor).astype("float32")
+        for tensor in exported.graph.initializer
+        if tensor.data_type == onnx.TensorProto.FLOAT8E4M3FN
+    ]
+    assert packed_weights
+    assert all(torch.isfinite(torch.from_numpy(weight)).all() for weight in packed_weights)
+    actual = ReferenceEvaluator(exported).run(
+        None, {exported.graph.input[0].name: inputs[0].numpy()}
+    )[0]
+    torch.testing.assert_close(torch.from_numpy(actual), model(*inputs))
 
 
 @pytest.mark.parametrize("opset", [23, 24])

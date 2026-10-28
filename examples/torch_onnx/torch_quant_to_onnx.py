@@ -639,6 +639,13 @@ def main():
 
     if args.dynamo_export and args.onnx_opset is not None and args.onnx_opset < 23:
         parser.error("--dynamo_export requires --onnx_opset=23 or newer.")
+    if (
+        args.dynamo_export
+        and args.trt_build
+        and args.onnx_opset is not None
+        and args.onnx_opset > 24
+    ):
+        parser.error("--trt_build with --dynamo_export supports --onnx_opset up to 24.")
 
     recipe = load_recipe(args.recipe) if args.recipe is not None else None
     if recipe is not None and not isinstance(

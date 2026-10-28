@@ -114,7 +114,16 @@ def test_dynamo_fp8_export_with_unquantized_rgb_input(tmp_path, num_convs):
         assert initializers[weight_dq.input[0]].data_type == onnx.TensorProto.FLOAT8E4M3FN
 
 
-def test_cli_rejects_dynamo_opset_below_23(monkeypatch, capsys, tmp_path):
+@pytest.mark.parametrize(
+    ("opset", "trt_build", "message"),
+    [
+        (22, False, "requires --onnx_opset=23 or newer"),
+        (25, True, "supports --onnx_opset up to 24"),
+    ],
+)
+def test_cli_rejects_unsupported_dynamo_opset(
+    monkeypatch, capsys, tmp_path, opset, trt_build, message
+):
     torch_quant_to_onnx = _load_example_module(
         "torch_quant_to_onnx_for_test", "examples/torch_onnx/torch_quant_to_onnx.py"
     )
@@ -127,7 +136,8 @@ def test_cli_rejects_dynamo_opset_below_23(monkeypatch, capsys, tmp_path):
             "--onnx_save_path",
             str(tmp_path / "model.onnx"),
             "--dynamo_export",
-            "--onnx_opset=22",
+            f"--onnx_opset={opset}",
+            *(["--trt_build"] if trt_build else []),
         ],
     )
     monkeypatch.setattr(
@@ -139,7 +149,7 @@ def test_cli_rejects_dynamo_opset_below_23(monkeypatch, capsys, tmp_path):
     with pytest.raises(SystemExit, match="2"):
         torch_quant_to_onnx.main()
 
-    assert "--dynamo_export requires --onnx_opset=23 or newer" in capsys.readouterr().err
+    assert message in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("enabled_int4_layer", [None, 0, 1])

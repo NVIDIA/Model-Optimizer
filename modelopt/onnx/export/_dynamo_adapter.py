@@ -21,6 +21,7 @@ import numpy as np
 import onnx
 from onnx import numpy_helper
 
+from modelopt.onnx.autocast.utils import walk_subgraphs_recursive
 from modelopt.onnx.quantization.graph_indexing import (
     get_tensor_consumer_nodes,
     get_tensor_producer_nodes,
@@ -548,8 +549,24 @@ def normalize_dynamo_weight_paths(model: onnx.ModelProto) -> onnx.ModelProto:
     return model
 
 
+def _reject_quantized_subgraphs(graph, _parent_node, is_subgraph):
+    if is_subgraph and any(
+        node.domain not in {"", "ai.onnx"}
+        or node.op_type in _CARRIER_OPS
+        or node.op_type in _STATIC_MARKERS
+        or node.op_type in _ALLOWED_TRT_OPS
+        or node.op_type in {"QuantizeLinear", "DequantizeLinear"}
+        or node.name.startswith((_DYNAMO_INT4_NODE_PREFIX, _DYNAMO_MXFP8_NODE_PREFIX))
+        for node in graph.node
+    ):
+        raise NotImplementedError(
+            "Dynamo ONNX export does not support quantized or custom-domain subgraphs."
+        )
+
+
 def finalize_dynamo_export(model: onnx.ModelProto, expected_opset: int) -> onnx.ModelProto:
     """Normalize final domains and reject unresolved Dynamo export artifacts."""
+    walk_subgraphs_recursive(model.graph, _reject_quantized_subgraphs)
     producers = get_tensor_producer_nodes(model.graph)
     initializers = {tensor.name: tensor for tensor in model.graph.initializer}
     for node in model.graph.node:
