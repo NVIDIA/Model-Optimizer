@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest import mock
+
 import pytest
 import torch
 from torch.distributed.device_mesh import init_device_mesh
@@ -399,21 +401,27 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size):
     fully_shard(model, mesh=mesh)
     layer = model.layer
     sharded = layer.weight
-    assert {id(model.dense.weight), id(sharded)} <= _fsdp2_owned_params(model, model)
+    assert {id(model.dense.weight), id(sharded)} <= _fsdp2_owned_params(model)
     layer.unshard()
     unsharded = layer.weight
     try:
         assert unsharded is not sharded, "FSDP2 registered the same parameter when unsharded"
-        assert id(unsharded) in _fsdp2_owned_params(model, model)
+        assert id(unsharded) in _fsdp2_owned_params(model, refresh=True)
     finally:
         layer.reshard()
+    # The set is kept for the unit: opening the window again costs the module's parameters only.
+    with mock.patch.object(fully_shard, "state", wraps=fully_shard.state) as state:
+        for _ in range(3):
+            with fsdp2_weight_access_and_writeback_context(model.dense, model):
+                pass
+    assert state.call_count == 0
 
 
 def test_fsdp2_owns_its_parameters_in_every_shard_state(cpu_dist_workers):
     """FSDP2 registers another parameter object once a unit is unsharded (or resharded after the
     forward, under HSDP), and the weight-access window gathers by ownership: each counts as FSDP2's,
     or a weight it does own would be left sharded in the window. So do the parameters of a unit
-    nested in the module the window opens on."""
+    nested in it. The window keeps the set per unit rather than scanning it on every entry."""
     cpu_dist_workers.run(_fsdp2_owns_its_params_in_every_state_job)
 
 
