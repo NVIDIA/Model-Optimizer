@@ -77,3 +77,39 @@ def test_get_modelike_from_algo_cfg_accepts_quantize_algorithm_config():
     # List handling should also accept ``QuantizeAlgorithmConfig`` instances.
     from_list = get_modelike_from_algo_cfg([cfg_obj])
     assert from_list == from_obj
+
+
+@pytest.mark.parametrize("mode_name", sorted(CalibrateModeRegistry._name2descriptor))
+def test_scopable_matches_the_calibration_function_signature(mode_name):
+    """``scopable`` is hand-written; this keeps it from drifting from the code it describes."""
+    import inspect
+
+    descriptor = type(CalibrateModeRegistry._name2descriptor[mode_name])
+    func = descriptor._calib_func
+    if func is None:  # the no-op mode writes nothing, so any scope is vacuously honoured
+        return
+    takes_mask = "should_process" in inspect.signature(func).parameters
+    assert descriptor.scopable == takes_mask, (
+        f"{mode_name}: scopable={descriptor.scopable} but "
+        f"{func.__name__}() {'takes' if takes_mask else 'does not take'} should_process"
+    )
+
+
+@pytest.mark.parametrize(
+    ("algo", "cfg", "expected"),
+    [
+        # local_hessian defaults fp8_scale_sweep=True, so a *sparse* cfg -- which is all a plan
+        # entry carries -- must still resolve to the static grid that sweep searches. Reading
+        # the raw dict instead of the config class disagrees here, in the unsafe direction.
+        ("local_hessian", {}, "static"),
+        ("local_hessian", {"fp8_scale_sweep": False}, None),
+        ("mse", {}, None),
+        ("mse", {"fp8_scale_sweep": True}, "static"),
+        ("awq_lite", {}, "dynamic"),
+        ("gptq", {}, None),
+    ],
+)
+def test_weight_grid_resolves_through_the_config_class(algo, cfg, expected):
+    name = BaseCalibrateModeDescriptor._get_mode_name(algo)
+    descriptor = type(CalibrateModeRegistry._name2descriptor[name])
+    assert descriptor.grid_for_cfg({"method": algo, **cfg}) == expected
