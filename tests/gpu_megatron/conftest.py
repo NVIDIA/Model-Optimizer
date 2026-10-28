@@ -15,7 +15,6 @@
 import contextlib
 import gc
 import queue
-from pathlib import Path
 
 import pytest
 import torch
@@ -25,7 +24,6 @@ from _test_utils.torch.distributed.utils import (
     get_live_pool,
     reset_worker_state,
 )
-from _test_utils.torch.misc import is_blackwell
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from megatron.core.parallel_state import destroy_model_parallel
 
@@ -61,26 +59,6 @@ def _prebuild_quant_cuda_extensions():
     live in ``tests/gpu/_extensions``.)
     """
     ext.precompile()
-
-
-# On Blackwell (sm_120), nemo:26.08's cuBLAS intermittently fails a GEMM once a worker process has
-# run about a dozen model-building jobs. A failed job replaces the worker, so rerun it once on a fresh one.
-_BLACKWELL_CUDA_CRASHES = [
-    "illegal memory access",
-    "CUBLAS_STATUS_INTERNAL_ERROR",
-    r"Worker process\(es\) died \(rank, exit code\): .*, -6\)",  # the crash can also abort the worker
-]
-
-
-def pytest_collection_modifyitems(config, items):
-    if not is_blackwell():
-        return
-    for item in items:
-        # Only pool tests: a crash in the pytest process would poison the rerun, which runs there too
-        if item.path.is_relative_to(Path(__file__).parent) and any(
-            name.startswith("dist_workers") for name in item.fixturenames
-        ):
-            item.add_marker(pytest.mark.flaky(reruns=1, only_rerun=_BLACKWELL_CUDA_CRASHES))
 
 
 @pytest.fixture(scope="session", autouse=True)
