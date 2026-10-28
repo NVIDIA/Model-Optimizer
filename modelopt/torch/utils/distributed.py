@@ -344,7 +344,8 @@ class DistributionPlan:
         return self.dense == "fsdp"
 
 
-# A plan is a value the collectives carry, and they load what the ranks send with weights_only.
+# A plan is a value the collectives carry, and they load what the ranks send with weights_only. A
+# loaded copy skips __post_init__: it is the plan the sending rank built, and checked there.
 torch.serialization.add_safe_globals([DistributionPlan])
 
 _PLAN_ATTR = "_modelopt_distribution_plan"
@@ -506,7 +507,8 @@ def broadcast_from(label: str, fn: Callable[[], _V], src: int = 0) -> _V:
             # SystemExit or KeyboardInterrupt too, which argparse-style checks raise.
             payload, error = None, e
     # One message from the sending rank: its label, so a rank broadcasting another learns the two
-    # are out of step, and its serialized value or its error.
+    # are out of step, and its serialized value or its error. The object collective pickles the
+    # message itself between the job's ranks; weights_only bounds the value inside it.
     message = [(label, payload, _sendable(error))]
     torch.distributed.broadcast_object_list(message, group_src=src)
     sent_label, payload, sent_error = message[0]
@@ -622,7 +624,7 @@ def distributed_run(
             "CUDA device, chosen from LOCAL_RANK; pass device='cuda' or run a single process."
         )
     group_was_there = is_initialized()
-    if group_was_there and timeout is not None and size() > 1:
+    if timeout is not None and is_distributed_run():
         warn(
             f"distributed_run(timeout={timeout}) does not apply: the process group was set up before "
             "the run, and a group's timeout is fixed when it is set up. Pass it where the group is."
