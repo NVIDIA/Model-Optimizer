@@ -135,6 +135,7 @@ Changelog
 
 **Bug Fixes**
 
+- ``export_hf_checkpoint`` now warns when layerwise export ignores ``save_modelopt_state=True`` because saving ModelOpt state is unsupported for this path. Leave the option at its default ``False`` to avoid the warning, including when warnings are treated as errors.
 - Fix LTX-2 distillation full-mode checkpoints to use the safetensors format expected by their file extension and loaders.
 - Fix corrupted ONNX external tensor data when exporting models on Windows by upgrading ONNX. Regenerate affected models from clean weights.
 - Harden the default locations of the TensorRT deployment runtime's build artifacts and the ONNX AutoTune timing cache: they no longer sit at fixed paths under the shared system temp directory, where another local user could pre-create them to plant symlinks or swap a built engine. Both now live in a private temporary directory that is created once per process; pass ``timing_cache_path`` (runtime) or ``--timing_cache`` (AutoTune) to keep a timing cache across processes.
