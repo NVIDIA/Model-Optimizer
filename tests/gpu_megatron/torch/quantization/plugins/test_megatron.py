@@ -119,9 +119,6 @@ except ImportError:
 
 SEED = 1234
 
-# Marked tests intermittently hit a CUDA illegal memory access on Blackwell (sm_120); see conftest.py.
-flaky_on_blackwell = pytest.mark.flaky_cuda_crash_on_blackwell
-
 
 def test_convert_megatron_parallel_linear(distributed_setup_size_1):
     initialize_for_megatron(seed=SEED)
@@ -491,7 +488,6 @@ FP8_GEMM_KV_CFG["quant_cfg"].extend(mtq.FP8_KV_CFG["quant_cfg"])
 )
 @pytest.mark.parametrize("meta_device", [False, True])
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
-@flaky_on_blackwell
 def test_homogeneous_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -517,7 +513,6 @@ def test_homogeneous_sharded_state_dict(
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
 @pytest.mark.timeout(240)
 # Compressed state dict takes longer due to real quant conversion & saving/loading
-@flaky_on_blackwell
 def test_homogeneous_compressed_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -599,7 +594,6 @@ def test_homogeneous_sharded_state_dict_hybrid(dist_workers, tmp_path, config):
         mixed_block_size_config,
     ],
 )
-@flaky_on_blackwell
 def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     dist_workers.run(
         partial(_test_sharded_state_dict, tmp_path, config, 256, None, False, False, {}),
@@ -689,7 +683,6 @@ def _test_fp8_real_quantize_helper(rank, size):
     assert real_quant_mem < cur_mem
 
 
-@flaky_on_blackwell
 def test_fp8_real_quantize(dist_workers):
     dist_workers.run(_test_fp8_real_quantize_helper)
 
@@ -1724,7 +1717,6 @@ def _test_layerwise_calibrate_vlm_text_forward_loop(drive_wrapper, rank, size):
     assert all(m.input_quantizer.amax is not None for m in calibrated)
 
 
-@flaky_on_blackwell
 @pytest.mark.parametrize("drive_wrapper", [False, True])
 def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wrapper):
     dist_workers_size_1.run(partial(_test_layerwise_calibrate_vlm_text_forward_loop, drive_wrapper))
@@ -2304,7 +2296,6 @@ def _test_dsa_kv_cache_quant_helper(tmp_path, rank, size):
     assert all(m.k_bmm_quantizer.is_enabled and m.v_bmm_quantizer.is_enabled for m in restored)
 
 
-@flaky_on_blackwell
 def test_dsa_kv_cache_quant(dist_workers_size_1, tmp_path):
     """DSAttention gets calibrated K/V KV-cache quantizers that survive a checkpoint round-trip."""
     pytest.importorskip("megatron.core.transformer.experimental_attention_variant.dsa")

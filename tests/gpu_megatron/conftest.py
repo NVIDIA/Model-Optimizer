@@ -15,6 +15,7 @@
 import contextlib
 import gc
 import queue
+from pathlib import Path
 
 import pytest
 import torch
@@ -62,36 +63,21 @@ def _prebuild_quant_cuda_extensions():
     ext.precompile()
 
 
-# Errors the nemo:26.08 TE/CUDA 13 stack intermittently raises on Blackwell (sm_120); not modelopt bugs
-_BLACKWELL_CUDA_CRASHES = ("illegal memory access", "CUBLAS_STATUS_INTERNAL_ERROR")
+# On Blackwell (sm_120), nemo:26.08's cuBLAS intermittently fails a GEMM once a worker process has
+# run about a dozen model-building jobs. A failed job replaces the worker, so rerun it once on a fresh one.
+_BLACKWELL_CUDA_CRASHES = [
+    "illegal memory access",
+    "CUBLAS_STATUS_INTERNAL_ERROR",
+    r"Worker process\(es\) died \(rank, exit code\): .*, -6\)",  # the crash can also abort the worker
+]
 
 
-def pytest_configure(config):
-    config.addinivalue_line(
-        "markers",
-        "flaky_cuda_crash_on_blackwell: on Blackwell, report a known CUDA crash as xfail, other failures still fail",
-    )
-
-
-@pytest.hookimpl(wrapper=True)
-def pytest_runtest_makereport(item, call):
-    """Report a known Blackwell CUDA crash in a marked test as xfail instead of a failure.
-
-    Only for tests run in a worker pool: a crashed pool is replaced, so later tests are unaffected.
-    """
-    report = yield
-    if (
-        report.when == "call"
-        and report.failed
-        and item.get_closest_marker("flaky_cuda_crash_on_blackwell")
-        and call.excinfo is not None
-        # The message, not report.longreprtext: the traceback source lines can mention these errors
-        and any(err in str(call.excinfo.value) for err in _BLACKWELL_CUDA_CRASHES)
-        and is_blackwell()
-    ):
-        report.outcome = "skipped"
-        report.wasxfail = "known flaky CUDA crash on Blackwell (nemo:26.08 TE/CUDA 13 stack)"
-    return report
+def pytest_collection_modifyitems(config, items):
+    if not is_blackwell():
+        return
+    for item in items:
+        if item.path.is_relative_to(Path(__file__).parent):
+            item.add_marker(pytest.mark.flaky(reruns=1, only_rerun=_BLACKWELL_CUDA_CRASHES))
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -122,6 +122,7 @@ dev-test = [
     "pytest~=9.1.0",
     "pytest-cov~=7.1.0",
     "pytest-instafail==0.5.0",
+    "pytest-rerunfailures~=16.7", # rerun known Blackwell cuBLAS crashes (tests/gpu_megatron)
     "pytest-timeout~=2.4.0",
     "pytest-xdist~=3.8.0",
     "uv",
