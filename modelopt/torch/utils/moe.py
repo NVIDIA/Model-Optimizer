@@ -110,6 +110,7 @@ def _routed_expert_modules(model: "nn.Module", ep_plan: dict[str, str]) -> "dict
     ``language_model.model.`` a causal LM or a VLM puts in front. Deciding a model's distribution and
     loading it expert-parallel both find the experts this way, so the two cannot disagree.
     """
+    # Local: transformers is the optional [hf] extra, and this module must import without it.
     from transformers.integrations.tensor_parallel import replace_layer_number_by_wildcard
 
     keys = _routed_expert_keys(ep_plan)
