@@ -26,48 +26,95 @@ import modelopt.torch.quantization as mtq
 from examples.hf_ptq.hf_gsq_rco import _disabled_layers, _formats, _reload_packed_for_validation
 from modelopt.torch.export.quant_utils import preprocess_linear_fusion
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
+from modelopt.torch.kernels.quantization import gemm as triton_kernel
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 from modelopt.torch.quantization.utils.shared_input import SHARED_PATTERNS, find_shared_input_groups
 
 
-def _fp8_snapshot(model):
+def _native_snapshot(model, nvfp4):
     result = {}
     for name, module in model.named_modules():
         q = getattr(module, "weight_quantizer", None)
         if not isinstance(module, torch.nn.Linear) or q is None or not q.is_enabled:
             continue
-        scale = q.amax.float().reshape(1) / 448
         stored = module.weight.detach().clone()
-        result[name] = (
-            stored,
-            q(stored).detach(),
-            (stored.float() / scale).to(torch.float8_e4m3fn),
-            scale,
-        )
+        qdq = q(stored).detach()
+        if nvfp4:
+            block, global_scale = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(q, stored)
+            packed, _, _ = NVFP4QTensor.quantize(
+                stored, 16, weights_scaling_factor=block, weights_scaling_factor_2=global_scale
+            )
+            physical = triton_kernel.compute_fp4_scales(q.amax, q.global_amax).reshape_as(block)
+            assert torch.count_nonzero(qdq.reshape(*block.shape, 16)[physical == 0]) == 0
+            denominator = torch.where(physical == 0, 1.0, physical)
+            inferred = NVFP4QTensor._cast_fp4(
+                (qdq.float().reshape(*block.shape, 16) / denominator.unsqueeze(-1)).reshape_as(
+                    stored
+                )
+            )
+            torch.testing.assert_close(
+                inferred[..., ::2] | (inferred[..., 1::2] << 4),
+                packed._quantized_data,
+                rtol=0,
+                atol=0,
+            )
+            fields = {
+                "weight": packed._quantized_data,
+                "weight_scale": block,
+                "weight_scale_2": global_scale,
+            }
+            native = packed.dequantize(
+                dtype=stored.dtype, scale=block, double_scale=global_scale, block_sizes={-1: 16}
+            )
+        else:
+            scale = q.amax.float().reshape(1) / 448
+            codes = (stored.float() / scale).to(torch.float8_e4m3fn)
+            fields = {"weight": codes, "weight_scale": scale}
+            native = (codes.float() * scale).to(stored.dtype)
+        result[name] = (stored, qdq, fields, native)
     return result
 
 
-def _check_fp8_export(exported, expected):
+def _bf16_order(value):
+    bits = value.view(torch.int16).int()
+    return torch.where(bits < 0, -32768 - bits, bits)
+
+
+def _check_native_export(exported, expected):
     rounding = {}
-    for name, (stored, qdq, codes, scale) in expected.items():
-        torch.testing.assert_close(
-            exported[name + ".weight"].view(torch.uint8), codes.view(torch.uint8), rtol=0, atol=0
-        )
-        torch.testing.assert_close(
-            exported[name + ".weight_scale"].reshape(-1).view(torch.uint8),
-            scale.reshape(-1).view(torch.uint8),
-            rtol=0,
-            atol=0,
-        )
-        native = (codes.float() * scale).to(stored.dtype)
+    for name, (stored, qdq, fields, native) in expected.items():
+        for field, value in fields.items():
+            published = exported[name + "." + field]
+            assert published.dtype == value.dtype
+            assert published.shape == value.shape or published.numel() == value.numel() == 1
+            torch.testing.assert_close(
+                published.reshape(-1).view(torch.uint8),
+                value.reshape(-1).view(torch.uint8),
+                rtol=0,
+                atol=0,
+                msg=lambda message: f"{name}.{field}: {message}",
+            )
+        if "weight_scale_2" in fields:
+            decoded = NVFP4QTensor(
+                stored.shape, stored.dtype, exported[name + ".weight"]
+            ).dequantize(
+                dtype=stored.dtype,
+                scale=exported[name + ".weight_scale"],
+                double_scale=exported[name + ".weight_scale_2"],
+                block_sizes={-1: 16},
+            )
+        else:
+            decoded = (exported[name + ".weight"].float() * exported[name + ".weight_scale"]).to(
+                stored.dtype
+            )
+        torch.testing.assert_close(decoded, native, rtol=0, atol=0)
         rounding[name] = {
             "stored_mismatches": int((native != stored).sum()),
             "stored_max_abs": float((native.float() - stored.float()).abs().max()),
+            "stored_max_bf16_ulp": int((_bf16_order(native) - _bf16_order(stored)).abs().max()),
             "qdq_mismatches": int((native != qdq).sum()),
             "qdq_max_abs": float((native.float() - qdq.float()).abs().max()),
-            "qdq_max_bf16_ulp": int(
-                (native.view(torch.int16).int() - qdq.view(torch.int16).int()).abs().max()
-            ),
+            "qdq_max_bf16_ulp": int((_bf16_order(native) - _bf16_order(qdq)).abs().max()),
         }
     return rounding
 
@@ -157,31 +204,24 @@ def test_gdn_shared_projection_weights_survive_native_export(
         mtq.quantize(model, cfg, lambda m: m(inputs, use_cache=False))
     with torch.no_grad():
         expected_logits = model(inputs, use_cache=False).logits
-        expected = {
-            name: module.weight_quantizer(module.weight).detach().clone()
-            for name, module in model.named_modules()
-            if isinstance(module, torch.nn.Linear) and module.weight_quantizer.is_enabled
-        }
-        fp8 = _fp8_snapshot(model) if not nvfp4 else None
+        expected = _native_snapshot(model, nvfp4)
     if algorithm != "autoquant_max":
         assert model.model.language_model.layers[0].gsq["linear_attn"]["steps"] == 2
     export_hf_checkpoint(model, export_dir=tmp_path / "export")
     del model
     exported = load_file(str(tmp_path / "export/model.safetensors"), device="cuda")
     packed_only = _reload_packed_for_validation(tmp_path / "export", multimodal=True)
-    for name, weight in expected.items():
-        native = packed_only.get_submodule(name).weight
-        if nvfp4:
-            torch.testing.assert_close(native, weight, rtol=0, atol=0)
-        else:
-            stored, _, codes, scale = fp8[name]
-            torch.testing.assert_close(
-                native, (codes.float() * scale).to(stored.dtype), rtol=0, atol=0
-            )
-            if algorithm != "autoquant_max":
-                torch.testing.assert_close(native, stored, rtol=0, atol=0)
-    if fp8 is not None:
-        record_property("native_weight_rounding", json.dumps(_check_fp8_export(exported, fp8)))
+    for name, (_, _, _, native) in expected.items():
+        torch.testing.assert_close(packed_only.get_submodule(name).weight, native, rtol=0, atol=0)
+    record_property("native_weight_rounding", json.dumps(_check_native_export(exported, expected)))
+    if nvfp4 and algorithm == "autoquant_max":
+        name = next(name for name in expected if name.endswith("linear_attn.in_proj_z"))
+        key = name + ".weight_scale_2"
+        # Reproduce the observed old GDN export's 1.827868x global-scale rewrite.
+        altered = {**exported, key: exported[key] * 1.8278681891030244}
+        with pytest.raises(AssertionError, match="weight_scale_2"):
+            _check_native_export(altered, expected)
+        record_property("old_gdn_scale_negative_control", "rejected")
     with torch.no_grad():
         packed_logits = packed_only(inputs, use_cache=False).logits
         record_property(
@@ -258,30 +298,11 @@ def test_gsq_region_reconstruction_and_restore(tmp_path, record_property, initia
     restored = mto.restore(pristine, tmp_path / "model.pt")
     torch.testing.assert_close(restored(inputs).logits, result, rtol=0, atol=0)
 
-    projection = restored.model.layers[0].self_attn.q_proj
-    weight = projection.weight.detach().clone()
-    shape, dtype = weight.shape, weight.dtype
-    qdq = projection.weight_quantizer(weight).detach()
-    fp8 = _fp8_snapshot(restored) if not nvfp4 else None
+    expected = _native_snapshot(restored, nvfp4)
     export_hf_checkpoint(restored, export_dir=tmp_path / "export")
     exported = load_file(str(tmp_path / "export" / "model.safetensors"), device="cuda")
-    prefix = "model.layers.0.self_attn.q_proj."
-    if nvfp4:
-        packed = NVFP4QTensor(shape, dtype, exported[prefix + "weight"])
-        decoded = packed.dequantize(
-            dtype=dtype,
-            scale=exported[prefix + "weight_scale"],
-            double_scale=exported[prefix + "weight_scale_2"],
-            block_sizes={-1: 16},
-        )
-    else:
-        decoded = (
-            exported[prefix + "weight"].float() * exported[prefix + "weight_scale"].float()
-        ).to(dtype)
-    if nvfp4:
-        torch.testing.assert_close(decoded, qdq, rtol=0, atol=0)
-    else:
-        record_property("native_weight_rounding", json.dumps(_check_fp8_export(exported, fp8)))
+    record_property("native_weight_rounding", json.dumps(_check_native_export(exported, expected)))
+    decoded = expected["model.layers.0.self_attn.q_proj"][3]
     assert torch.count_nonzero(decoded[0, :16]) == 0
 
 
@@ -365,37 +386,18 @@ def test_auto_quantize_rco_candidates_survive_native_export(
     mto.save(model, tmp_path / "selected.pt")
     model = mto.restore(copy.deepcopy(original), tmp_path / "selected.pt")
     torch.testing.assert_close(model(inputs).logits, before, rtol=0, atol=0)
-    expected = {
-        name: (module.weight_quantizer(module.weight).detach().clone(), module.weight.dtype)
-        for name, module in model.named_modules()
-        if isinstance(module, torch.nn.Linear) and module.weight_quantizer.is_enabled
-    }
+    expected = _native_snapshot(model, nvfp4)
     assert "model.layers.0.self_attn.q_proj" in expected
-    fp8 = _fp8_snapshot(model) if not nvfp4 else None
     export_hf_checkpoint(model, export_dir=tmp_path / "export")
     exported = load_file(str(tmp_path / "export" / "model.safetensors"), device="cuda")
-    for name, (qdq, dtype) in expected.items():
-        if nvfp4:
-            packed = NVFP4QTensor(qdq.shape, dtype, exported[name + ".weight"])
-            decoded = packed.dequantize(
-                dtype=dtype,
-                scale=exported[name + ".weight_scale"],
-                double_scale=exported[name + ".weight_scale_2"],
-                block_sizes={-1: 16},
-            )
-        else:
-            decoded = (
-                exported[name + ".weight"].float() * exported[name + ".weight_scale"].float()
-            ).to(dtype)
-        if nvfp4:
-            torch.testing.assert_close(decoded, qdq, rtol=0, atol=0)
-    if fp8 is not None:
-        record_property("native_weight_rounding", json.dumps(_check_fp8_export(exported, fp8)))
+    record_property("native_weight_rounding", json.dumps(_check_native_export(exported, expected)))
     assert torch.count_nonzero(expected["model.layers.0.self_attn.q_proj"][0][0, :16]) == 0
     del model, original, state, bank
     source.unlink()
     (tmp_path / "selected.pt").unlink()
     packed_only = _reload_packed_for_validation(tmp_path / "export")
+    for name, (_, _, _, native) in expected.items():
+        torch.testing.assert_close(packed_only.get_submodule(name).weight, native, rtol=0, atol=0)
     with torch.no_grad():
         packed_logits = packed_only(inputs).logits
         record_property("packed_reload_max_abs", float((packed_logits - before).abs().max()))
