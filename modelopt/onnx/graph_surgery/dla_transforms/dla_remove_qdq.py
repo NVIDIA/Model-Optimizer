@@ -122,6 +122,10 @@ def _remove_qdq_from_model(
                     "dtype is unknown. Ensure shape inference has been run."
                 )
             if keep_clip_after_inputs and q_node.input[0] in input_names:
+                if any(name in input_names for name in [*q_node.input[1:], *dq_node.input[1:]]):
+                    raise NotImplementedError(
+                        "Input clipping requires fixed scale and zero-point controls"
+                    )
                 if (
                     in_dtype != out_dtype
                     or f"tensor({onnx.TensorProto.DataType.Name(out_dtype).lower()})"

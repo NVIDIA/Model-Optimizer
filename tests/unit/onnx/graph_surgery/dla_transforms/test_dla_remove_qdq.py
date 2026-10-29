@@ -53,6 +53,7 @@ import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms.dla_remove_qdq import _remove_qdq_from_model
 
@@ -133,6 +134,46 @@ def _make_qdq_nodes(name_prefix, input_name, output_name, onnx_zp_type):
 
 
 _RNG = np.random.default_rng(2024)
+
+
+@pytest.mark.parametrize("ir_version", [3, 9])
+@pytest.mark.parametrize("control", ["scale", "zero"])
+def test_input_clip_refuses_overridable_control_defaults(ir_version, control):
+    """Initializer defaults exposed as inputs cannot be baked into fixed clipping bounds."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("QuantizeLinear", ["x", "scale", "zero"], ["q"]),
+                helper.make_node("DequantizeLinear", ["q", "scale", "zero"], ["y"]),
+            ],
+            "overridable_clip_controls",
+            [
+                _vi("x", TensorProto.FLOAT, [1]),
+                _vi("scale", TensorProto.FLOAT, []),
+                _vi("zero", TensorProto.UINT8, []),
+            ],
+            [_vi("y", TensorProto.FLOAT, [1])],
+            [
+                numpy_helper.from_array(np.float32(1), "scale"),
+                numpy_helper.from_array(np.uint8(0), "zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=ir_version,
+    )
+    feeds = {
+        "x": np.array([256 if control == "scale" else 255], np.float32),
+        control: np.array(2, np.float32) if control == "scale" else np.array(1, np.uint8),
+    }
+    onnx.checker.check_model(model, full_check=True)
+    expected = np.array([256 if control == "scale" else 254], np.float32)
+    np.testing.assert_array_equal(ReferenceEvaluator(model).run(None, feeds)[0], expected)
+    if ir_version > 3:
+        np.testing.assert_array_equal(_run_ort(model, feeds)["y"], expected)
+    before = model.SerializeToString()
+    with pytest.raises(NotImplementedError, match=r"fixed.*controls"):
+        _apply(model, quant_types=["uint8"], keep_clip_after_inputs=True)
+    assert model.SerializeToString() == before
 
 
 @pytest.mark.parametrize("operation", ["Add", "Mul"])
@@ -624,7 +665,7 @@ def test_remove_qdq_keeps_values_captured_by_control_flow(captured):
     ],
 )
 def test_input_clip_respects_opset_and_output_dtype(opset, dtype, ir_version):
-    """Input clipping uses a valid schema and returns values in the declared output dtype."""
+    """Input clipping requires a supported schema, matching dtypes, and fixed controls."""
     np_dtype = np.float16 if dtype == TensorProto.FLOAT16 else np.float32
     model = helper.make_model(
         helper.make_graph(
@@ -651,6 +692,12 @@ def test_input_clip_respects_opset_and_output_dtype(opset, dtype, ir_version):
         ir_version=ir_version,
     )
     onnx.checker.check_model(model, full_check=True)
+    if ir_version <= 3:
+        before = model.SerializeToString()
+        with pytest.raises(NotImplementedError, match=r"fixed.*controls"):
+            _apply(model, quant_types=["uint8"], keep_clip_after_inputs=True)
+        assert model.SerializeToString() == before
+        return
     assert _apply(model, quant_types=["uint8"], keep_clip_after_inputs=True) == 1
     onnx.checker.check_model(model, full_check=True)
     x = np.array([-10, 1, 100], dtype=np_dtype)
