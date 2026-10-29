@@ -24,6 +24,7 @@ layout (``prefix_gru.*`` / ``embed_proj.*``).
 import json
 from copy import deepcopy
 
+import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
 from safetensors.torch import load_file
@@ -155,6 +156,14 @@ class TestDominoForward:
         input_ids, attention_mask, labels = self._make_batch(vocab)
         out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         assert abs(out.loss.item() - out.domino_metrics["final_loss"]) < 1e-4
+
+    def test_ar_validation_is_refused(self):
+        """DFlash's decode would draft Domino's block one position off and without its head."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", _get_domino_config())])
+        input_ids, _, _ = self._make_batch(model.dflash_config.vocab_size)
+        with pytest.raises(NotImplementedError):
+            model.pseudo_speculative_generate(input_ids, steps=2)
 
 
 class TestDominoSwa:
