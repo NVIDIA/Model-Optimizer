@@ -37,10 +37,7 @@ def _is_full_world_shard0(v, world: int, _mesh_memo: dict | None = None) -> bool
     a plain global rank on the default process group, with no mesh-local/global translation to get
     wrong. Any other layout is rejected by :func:`_materialize_owned` rather than routed through a
     slower path, so no untested transport can silently produce a mis-assembled tensor.
-
-    ``_mesh_memo`` caches the mesh-layout answer by mesh identity: FSDP2 gives every parameter the
-    SAME mesh object, so without it a few hundred keys each redo the tensor-to-list conversion and
-    the range compare for one shared answer. (``mesh.mesh`` is a CPU tensor, so none of them syncs.)
+    ``_mesh_memo`` keeps the answer per mesh, since FSDP2 gives every parameter the same mesh.
     """
     if len(v.placements) != 1 or not v.placements[0].is_shard(0):
         return False
@@ -58,9 +55,7 @@ def _is_full_world_shard0(v, world: int, _mesh_memo: dict | None = None) -> bool
 def _run_to_completion(ops: list) -> None:
     """Run the point-to-point ``ops`` and wait for all of them, then empty ``ops``.
 
-    This is what frees the send buffers, copies of everything this rank sends, before the caller
-    assembles what it received. A ``P2POp`` keeps its tensor, and so does its request after the
-    wait: the ops go with the emptied list, and the requests never leave this call.
+    Emptying the list frees the send buffers, which the ops hold, before the caller assembles.
     """
     if ops:
         for req in dist.batch_isend_irecv(ops):
@@ -73,12 +68,9 @@ def _gather_shard0_to_owners(
 ) -> None:
     """Gather each dim-0-sharded DTensor to its owner and drop it elsewhere, in place.
 
-    Each shard travels once, to its owner, where ``full_tensor()`` would all-gather every tensor to
-    every rank. Everything a rank owes a peer goes in one flat buffer per (peer, dtype), one
-    operation each, so the operation count is O(world x dtypes), not O(keys x peers). Both sides
-    build those buckets from the same sorted keys and owner map, so every send meets a receive of
-    the same length. ``all_shapes[r][k]`` is rank ``r``'s dim-0 extent of key ``k``, whose shards
-    the caller has checked tile the global tensor.
+    What a rank owes a peer goes in one flat buffer per (peer, dtype), which both sides build from
+    the same sorted keys and owner map, so every send meets a receive of its length.
+    ``all_shapes[r][k]`` is the shape of rank ``r``'s shard of ``k``; the caller checked they tile.
     """
 
     def _numel(shape):
@@ -87,9 +79,7 @@ def _gather_shard0_to_owners(
             n *= s
         return n
 
-    # A chunk bounds how many keys one round of transfers carries, not their bytes: within a chunk
-    # the op count is O(world x dtypes) however many keys it holds, and a model of fewer keys than a
-    # chunk moves in one round.
+    # Keys per round of transfers: a round's op count does not grow with its keys.
     chunk = 4096
     for base in range(0, len(keys), chunk):
         part = keys[base : base + chunk]
@@ -161,13 +151,14 @@ def _materialize_owned(
 ) -> None:
     """Make every tensor in ``local_sd`` whole and owned by exactly one rank, in place.
 
-    Experts are already whole, plain and disjoint per rank; one still a DTensor is refused. Each
-    dense key goes to one owner, largest first onto the lightest rank (seeded with each rank's expert
-    bytes), and keys this rank does not own are dropped. Each group in ``together`` (the same on
-    every rank, which is checked) goes to one owner as a unit, with any group it shares a key with,
-    since the reverse conversion merges a group only where it is whole. Afterwards nothing is a
-    DTensor or partial. A rank holds at most about twice its owned set: the shards it receives and
-    the tensors assembled from them.
+    Experts must come whole, plain and disjoint per rank, as the caller splits them; one still a
+    DTensor is refused. Each dense key goes to one owner, largest first onto the lightest rank
+    (seeded with each rank's expert bytes), and keys this rank does not own are dropped. Each group
+    in ``together`` (the same on every rank, which is checked) goes to one owner as a unit, with any
+    group it shares a key with, since the reverse conversion merges a group only where it is whole.
+    Afterwards nothing is a DTensor or partial. On top of the shards it is handed, which the model
+    keeps, a rank holds at most about twice its owned set: the shards it receives and the tensors
+    assembled from them.
     """
     expert_keys = sorted(k for k in local_sd if k in expert_key_set)
     dense_keys = sorted(k for k in local_sd if k not in expert_key_set)
@@ -191,7 +182,7 @@ def _materialize_owned(
 
     # A key outside ``together`` is a unit of its own, which keeps the order of a model without merge
     # groups. Groups sharing a key are one unit, whatever their order: split, one of them would be a
-    # merge its owner cannot complete.
+    # merge its owner cannot complete. Expert keys stay out: a rank holds its experts whole already.
     unit_of = {k: (k,) for k in dense_keys}
     for group in together:
         unit = tuple(sorted({j for k in group if k in unit_of for j in unit_of[k]}))

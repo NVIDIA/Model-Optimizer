@@ -27,6 +27,7 @@ import torch
 from _test_utils.torch.distributed.utils import bounded_collectives
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
+from torch.distributed.tensor.placement_types import _StridedShard
 from torch.multiprocessing.reductions import StorageWeakRef
 
 pytest.importorskip("safetensors")
@@ -114,13 +115,25 @@ def _padded_shard(mesh):
             "cannot materialize",
         ),
         (_padded_shard, "do not tile their global shape"),
+        # Its shards interleave, so joining them in rank order would permute the rows.
+        (
+            lambda mesh: DTensor.from_local(
+                torch.zeros(4, 3),
+                mesh,
+                [_StridedShard(0, split_factor=2)],
+                run_check=False,
+                shape=torch.Size([4, 3]),
+                stride=(3, 1),
+            ),
+            "cannot materialize",
+        ),
         # Empty, so there is nothing to assemble, but in a layout it would refuse a non-empty one in.
         (
             lambda mesh: distribute_tensor(torch.zeros(0, 4), mesh, [Shard(1)]),
             "cannot materialize",
         ),
     ],
-    ids=["shard1", "2d-mesh", "padded", "empty-shard1"],
+    ids=["shard1", "2d-mesh", "padded", "strided-shard0", "empty-shard1"],
 )
 def test_materialize_owned_rejects_a_tensor_it_cannot_assemble(gloo_world_of_one, build, match):
     """Refused before anything moves, rather than assembled wrong."""
@@ -204,6 +217,10 @@ def _materialize_two_ranks_job(rank, world_size):
     # Rank 0 owns the larger and holds all of its rows: it assembles having received nothing, so
     # what it sent is all it could still be holding.
     send_only = {"e.weight": torch.randn(1, 60), "f.weight": torch.randn(7, 4)}
+    # Two merge groups sharing a key: one owner for all three, where their sizes alone would put x
+    # on one rank and y and z on the other.
+    grouped = {k: torch.randn(n, 4) for k, n in (("x", 6), ("y", 5), ("z", 4))}
+    together = [["x", "y"], ["y", "z"]]
     # The copies this rank sends, and how many of them are still held at each assembled store.
     sent, held = [], []
     batch_isend_irecv = torch.distributed.batch_isend_irecv
@@ -218,7 +235,7 @@ def _materialize_two_ranks_job(rank, world_size):
             held.append(sum(not ref.expired() for ref in sent))
             super().__setitem__(key, value)
 
-    for layout in (full, send_only):
+    for layout, groups in ((full, ()), (send_only, ()), (grouped, together)):
         sd = CountingHeldSends(
             {k: distribute_tensor(v, mesh, [Shard(0)]) for k, v in layout.items()}
         )
@@ -227,7 +244,7 @@ def _materialize_two_ranks_job(rank, world_size):
             bounded_collectives(),
             mock.patch.object(torch.distributed, "batch_isend_irecv", recording_sends),
         ):
-            _materialize_owned(sd, set(), rank, world_size)
+            _materialize_owned(sd, set(), rank, world_size, groups)
 
         for k, v in sd.items():
             assert not isinstance(v, DTensor), k
@@ -235,11 +252,13 @@ def _materialize_two_ranks_job(rank, world_size):
         owned: list = [None] * world_size
         torch.distributed.all_gather_object(owned, sorted(sd))
         assert sorted(k for keys in owned for k in keys) == sorted(layout)
+        if groups:
+            assert sorted(layout) in owned, owned
     assert sent and held and not any(held), held
 
 
 def test_materialize_owned_moves_each_shard_to_its_owner_over_two_ranks(cpu_dist_workers):
     """Each key ends whole on exactly one rank, its shards packed per peer and dtype, unpacked at
-    their offsets and joined in rank order, an uneven and an empty shard included. What a rank
-    sent is freed before it assembles what it owns."""
+    their offsets and joined in rank order, an uneven and an empty shard included, and merge groups
+    that share a key on one rank. What a rank sent is freed before it assembles what it owns."""
     cpu_dist_workers.run(_materialize_two_ranks_job)
