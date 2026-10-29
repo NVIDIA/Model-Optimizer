@@ -29,8 +29,11 @@ from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
 import modelopt.torch.export.hf_export_handlers as handlers
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.quant_utils import pack_int4_in_uint8
 from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
-from modelopt.torch.quantization.qtensor import NVFP4QTensor
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
+from modelopt.torch.quantization.qtensor import INT4QTensor, MXFP4QTensor, NF4QTensor, NVFP4QTensor
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
@@ -85,6 +88,45 @@ def test_nvfp4_cast_keeps_the_global_shape_of_an_uneven_shard(gloo_world_of_one)
     assert isinstance(packed, DTensor) and packed.placements == (Shard(0),)
     assert packed.shape == (3, 32)
     assert torch.equal(packed.to_local(), NVFP4QTensor._cast_fp4(local.clone()))
+
+
+def _nvfp4_through_a_static_quantizer(weight):
+    whole = weight.full_tensor() if isinstance(weight, DTensor) else weight
+    quantizer = NVFP4StaticQuantizer(
+        quant_attribute_cfg=QuantizerAttributeConfig(
+            num_bits=(2, 1), block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)}
+        )
+    )
+    quantizer.amax = whole.reshape(-1, 16).abs().amax(-1)
+    quantizer.global_amax = whole.abs().amax()
+    scale, scale_2 = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(quantizer, weight)
+    return NVFP4QTensor.quantize(weight, 16, scale, scale_2)
+
+
+@pytest.mark.parametrize(
+    "pack",
+    [
+        lambda weight: INT4QTensor.quantize(weight, 16),
+        lambda weight: NF4QTensor.quantize(weight, 16, 4),
+        lambda weight: MXFP4QTensor.quantize(weight, 32),
+        lambda weight: pack_int4_in_uint8(weight, torch.ones(4, 2), 16),
+        _nvfp4_through_a_static_quantizer,
+    ],
+    ids=["int4", "nf4", "mxfp4", "int4-export", "nvfp4-static"],
+)
+def test_a_packer_that_packs_only_whole_tensors_refuses_a_shard(gloo_world_of_one, pack):
+    """Only NVFP4, with the per-block scale it computes off the shard, packs a DTensor shard.
+
+    The other 4-bit packers combine their input with plain tensors, which DTensor refuses deep
+    inside, or gather it whole (INT4's fallback, whose ``<<`` also dropped the shift on a DTensor).
+    They refuse a shard up front, as NVFP4 does a plain per-block scale, a static quantizer's.
+    """
+    torch.manual_seed(0)
+    weight = torch.randn(4, 32)
+    pack(weight)
+
+    with pytest.raises(NotImplementedError):
+        pack(distribute_tensor(weight, gloo_world_of_one, [Shard(0)]))
 
 
 @pytest.mark.parametrize("held", [True, False], ids=["held", "per-module"])
