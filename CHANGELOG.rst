@@ -63,7 +63,7 @@ Changelog
 
 **Bug Fixes**
 
-- Megatron-Core fake quantization of Gated DeltaNet (Qwen3.5 / Qwen3.6) with the Transformer Engine ``in_proj`` now leaves its beta / alpha gate rows unquantized, as exported checkpoints do, including in ``fold_weight`` and the vLLM fake-quant export. PTQ evaluation and QAD previously saw quantization error on these rows that deployment does not have. Other ``in_proj`` layers warn and stay fully quantized.
+- Megatron-Core fake quantization of Gated DeltaNet (Qwen3.5 / Qwen3.6) with a Transformer Engine ``in_proj`` now keeps its beta / alpha gates in BF16 during evaluation, QAD, ``fold_weight`` and the vLLM fake-quant export, matching deployment. Other ``in_proj`` layers stay fully quantized and warn.
 - ``hf_quant_config.json`` now declares ``pre_quant_scale`` only for INT4 / W4A8 layers that have the tensor; loading INT4 / W4A8 fused-MoE checkpoints in TensorRT-LLM also needs a release whose MoE loader treats it as optional. AWQ, SmoothQuant and SVDQuant now warn when they skip quantized fused-MoE experts.
 - Hugging Face fused MoE experts stored transposed, ``(num_experts, in_dim, out_dim)``, without a quantized wrapper of their own (for example Aria's) are now left unquantized with a warning. They were quantized with gate and up split along the wrong axis, so their exported weights were wrong; the Hugging Face export now refuses such a model's MoE block instead.
 - Calibrating a Megatron-Core MLA model now gives ``linear_q_down_proj`` and ``linear_kv_down_proj`` one per-tensor input and weight range, as vLLM and TensorRT-LLM fuse them into one GEMM with one scale per tensor. Re-calibrate existing MLA checkpoints to get the shared ranges.

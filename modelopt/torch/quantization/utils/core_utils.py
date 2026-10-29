@@ -1030,7 +1030,7 @@ def apply_without_qdq(quantizer, inputs: torch.Tensor) -> torch.Tensor:
     For rows a quantized module computes in high precision, so they keep the transforms (e.g.
     an AWQ / SmoothQuant scale that the stored weight compensates for) of the quantized rows.
     """
-    from ..nn import SequentialQuantizer
+    from ..nn import SequentialQuantizer  # local import: ..nn imports this module
 
     members = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
     for member in members:

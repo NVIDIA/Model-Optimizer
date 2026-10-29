@@ -22,6 +22,7 @@ from importlib.util import find_spec
 
 import pytest
 import torch
+import transformers
 import yaml
 from _test_utils.torch.megatron.models import get_mcore_gpt_model, get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import initialize_for_megatron, run_mcore_inference
@@ -29,6 +30,7 @@ from _test_utils.torch.transformers_models import (
     create_tiny_gpt_oss_dir,
     create_tiny_llama_dir,
     create_tiny_nemotron_h_dir,
+    create_tiny_qwen3_5_vl_dir,
 )
 from megatron.core.parallel_state import is_pipeline_last_stage
 from safetensors import safe_open
@@ -412,6 +414,68 @@ def test_mcore_vllm_export_mtp(request, tmp_path):
     """Reject unsupported settings and quantized MTP while preserving BF16 MTP weights."""
     workers = request.getfixturevalue(f"dist_workers_size_{min(torch.cuda.device_count(), 2)}")
     workers.run(partial(_test_mcore_vllm_export_mtp, tmp_path))
+
+
+def _test_mcore_vllm_export_gdn(source, tmp_path, rank, size):
+    text_cfg = transformers.AutoConfig.from_pretrained(source).text_config
+    model = get_mcore_gpt_model(
+        tensor_model_parallel_size=size,
+        initialize_megatron=True,
+        num_layers=text_cfg.num_hidden_layers,
+        hidden_size=text_cfg.hidden_size,
+        num_attention_heads=text_cfg.num_attention_heads,
+        num_query_groups=text_cfg.num_key_value_heads,
+        ffn_hidden_size=text_cfg.intermediate_size,
+        max_sequence_length=text_cfg.max_position_embeddings,
+        vocab_size=text_cfg.vocab_size,
+        normalization="RMSNorm",
+        transformer_impl="modelopt",
+        kv_channels=text_cfg.head_dim,
+        experimental_attention_variant="gated_delta_net",
+        linear_attention_freq=len(text_cfg.layer_types),
+    ).cuda()
+    model.eval()
+
+    def forward_loop(model):
+        with torch.no_grad():
+            run_mcore_inference(model, torch.randint(0, 32, (1, 32), device="cuda"))
+
+    model = mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop)
+    export_dir = tmp_path / "gdn_export"
+    export_mcore_gpt_to_hf_vllm_fq(
+        model, str(source), dtype=torch.bfloat16, export_dir=str(export_dir)
+    )
+
+    gdn = model.decoder.layers[0].self_attention
+    weight = gdn.in_proj.weight.detach().to(torch.bfloat16).cpu()
+    sections = dict(zip(gdn.in_proj_split_names, gdn.in_proj_split_sections))
+    qkvz_rows = sum(sections[name] for name in ("query", "key", "value", "z"))
+    gate_rows = {
+        "in_proj_b": weight[qkvz_rows : qkvz_rows + sections["beta"]],
+        "in_proj_a": weight[qkvz_rows + sections["beta"] :],
+    }
+    prefix = "model.language_model.layers.0.linear_attn."
+    state = torch.load(export_dir / "quantizer_state.pth", weights_only=True, map_location="cpu")
+    recipe = yaml.safe_load((export_dir / "quant_recipe.yaml").read_text())["quantizers"]
+    weight_map = json.loads((export_dir / "model.safetensors.index.json").read_text())["weight_map"]
+    # The beta / alpha gates are written unquantized and get no quantizers; qkv / z keep theirs.
+    for name, expected in gate_rows.items():
+        key = f"{prefix}{name}.weight"
+        with safe_open(export_dir / weight_map[key], framework="pt") as f:
+            assert torch.equal(f.get_tensor(key), expected)
+        assert not any(f"{prefix}{name}." in key for key in state.keys() | recipe.keys())
+    key = f"{prefix}in_proj_qkv.weight"
+    qkv_rows = sum(sections[name] for name in ("query", "key", "value"))
+    with safe_open(export_dir / weight_map[key], framework="pt") as f:
+        assert not torch.equal(f.get_tensor(key), weight[:qkv_rows])
+    for name in ("in_proj_qkv", "in_proj_z"):
+        assert f"{prefix}{name}.input_quantizer" in recipe
+
+
+def test_mcore_vllm_export_gdn(dist_workers_size_1, tmp_path):
+    """GatedDeltaNet's beta / alpha gates export unquantized, with no quantizers of their own."""
+    source = create_tiny_qwen3_5_vl_dir(tmp_path, with_processor=True)
+    dist_workers_size_1.run(partial(_test_mcore_vllm_export_gdn, source, tmp_path))
 
 
 def _assert_unsupported_settings(model, source, export_dir, rank, size):
