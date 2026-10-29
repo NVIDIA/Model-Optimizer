@@ -104,7 +104,7 @@ except ImportError:
     export_sparse_attention_config = None
 
 # Importing the built-in handlers installs their entries in the two registries.
-from . import hf_export_handlers as _hf_export_handlers  # noqa: F401
+from . import hf_export_handlers as _hf_export_handlers
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import get_experts_list, is_layernorm, is_quantlinear, sync_moe_gate_up_amax
 from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
@@ -636,6 +636,12 @@ def _export_quantized_weight(
     The export includes converting weight tensor to correct quantized values and quantized dtype,
     and registering scaling factors.
 
+    An export handler packs through ``hf_export_handlers._export_weight`` rather than calling this
+    directly: on the keep-fused export an FSDP2-owned weight must be packed inside its unit's
+    weight-update window, which that helper opens.
+    Packed outside it, the unit's next reshard puts FSDP2's unquantized shard back, and the
+    checkpoint is written unquantized.
+
     Tied-weight dedup is not handled here: both sides of a tie are packed independently
     (identically, once ``sync_tied_input_amax`` has equalized their scales), and the
     duplicate is dropped by name in :func:`postprocess_state_dict`. Deduping per-module at
@@ -996,8 +1002,12 @@ def _process_quantized_modules(
         model_type=hf_model_type(model),
     )
 
-    for name, sub_module in model.named_modules():
-        _dispatch_export_handler(name, sub_module, ctx)
+    # For the no-gather export, which is to set keep_fused_experts on this context and let a sharded
+    # model past the assert above: each FSDP2 unit's modules are then packed in one weight window,
+    # held across them. Until then no window opens here.
+    with _hf_export_handlers.held_fsdp2_weight_windows(ctx):
+        for name, sub_module in model.named_modules():
+            _dispatch_export_handler(name, sub_module, ctx)
 
 
 def _prepare_model_for_export(model, dtype, is_modelopt_qlora):

@@ -23,19 +23,30 @@ on one process.
 
 The routing-weight gradient check guards that the routing weights keep their gradient: they never
 travel, and weight their tokens' expert results on the rank that holds them.
+
+The tests at the end cover the module's helpers that count a model's routed experts, choose the EP
+degree they are sharded over, and find them by the model's ``base_model_ep_plan``.
 """
 
 import copy
 import warnings
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.distributed as dist
+from _test_utils.torch.moe_models import MoeLayer, model_with_decoder_at
 from packaging.version import Version
+from torch import nn
 
 import modelopt.torch.utils.moe as moe
-from modelopt.torch.utils.moe import a2a_moe
+from modelopt.torch.utils.moe import (
+    _choose_ep_degree,
+    _num_experts_from_config,
+    _routed_expert_modules,
+    a2a_moe,
+)
 
 # Small, fully-deterministic problem. E must be divisible by every world size under test.
 E, TOP_K, H, T = 4, 2, 8, 6
@@ -401,3 +412,94 @@ def test_fp32_routing_weights_give_grouped_mms_result_at_ep1(cpu_dist_workers):
     if Version(transformers.__version__) < Version("5.6"):
         pytest.skip("expert parallelism needs transformers >= 5.6")
     cpu_dist_workers.run(_fp32_routing_weights_job)
+
+
+# ------------------------------------------------------------------------------- expert counting
+
+
+@pytest.mark.parametrize(
+    ("config", "experts"),
+    [
+        (SimpleNamespace(hidden_size=128), 0),
+        (SimpleNamespace(num_experts=16), 16),
+        (SimpleNamespace(num_local_experts=16), 16),
+        (SimpleNamespace(n_routed_experts=16), 16),
+        (SimpleNamespace(num_routed_experts=16), 16),
+        (SimpleNamespace(text_config=SimpleNamespace(n_routed_experts=32)), 32),
+        (SimpleNamespace(llm_config=SimpleNamespace(n_routed_experts=32)), 32),
+    ],
+    ids=[
+        "dense",
+        "num_experts",
+        "num_local_experts",
+        "n_routed_experts",
+        "num_routed_experts",
+        "vlm-text_config",
+        "vlm-llm_config",
+    ],
+)
+def test_the_expert_count_is_read_under_every_spelling(config, experts):
+    """Architectures disagree on the field name, and a VLM's MoE is its nested LM, whose root
+    config has no expert count of its own: missing either would silently disable EP."""
+    assert _num_experts_from_config(config) == experts
+
+
+# ------------------------------------------------------------------------------- degree selection
+
+
+@pytest.mark.parametrize(
+    ("world", "experts", "degree"),
+    [(8, 64, 8), (8, 6, 2), (8, 5, 1), (8, 0, 1), (1, 64, 1)],
+    ids=["largest-valid", "divides-the-experts", "nothing-divides", "dense", "single-rank"],
+)
+def test_the_largest_ep_degree_dividing_the_world_and_the_experts_is_chosen(world, experts, degree):
+    """EP must divide the expert count, so every rank holds whole experts; with nothing dividing, a
+    dense model, or a single rank, there is no expert parallelism."""
+    assert _choose_ep_degree(world, experts) == degree
+
+
+# ---------------------------------------------------------------------------- routed experts
+
+
+_STOCK_PLAN = {
+    "layers.*.mlp.gate": "ep_router",
+    "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+    "layers.*.mlp.experts.down_proj": "grouped_gemm",
+    "layers.*.mlp.experts": "moe_tp_experts",
+}
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        _STOCK_PLAN,
+        {"layers.*.mlp.experts": "moe_tp_experts"},
+        {"layers.*.mlp.experts": "nemotron_experts_ep"},
+        {k: v for k, v in _STOCK_PLAN.items() if v == "grouped_gemm"},
+        {
+            "layers.*.block_sparse_moe.experts": "moe_tp_experts",
+            "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+        },
+    ],
+    ids=["stock", "experts-style-only", "nemotron-style-only", "grouped-gemm-only", "hybrid"],
+)
+@pytest.mark.parametrize(
+    "prefix",
+    ["", "model.", "model.language_model.", "language_model.model."],
+    ids=["base-model", "causal-lm", "vlm", "legacy-vlm"],
+)
+def test_routed_experts_are_the_plans_containers_under_any_prefix(plan, prefix):
+    """The base-relative plan keys match the decoder wherever the model nests it, at every layer
+    index, the container named by its style or as its grouped-GEMM parameters' parent, also in a
+    plan that names some containers one way and some the other. The router, the shared experts, and
+    a module whose name merely ends in a key's text are not routed experts."""
+    pytest.importorskip("transformers.integrations.tensor_parallel")
+    model = model_with_decoder_at(prefix)
+    model.add_module("sublayers", nn.ModuleList([MoeLayer()]))  # "sublayers.0.mlp.experts"
+
+    found = _routed_expert_modules(model, plan)
+
+    modules = dict(model.named_modules())
+    assert found == {
+        name: modules[name] for name in [f"{prefix}layers.{i}.mlp.experts" for i in (0, 1)]
+    }

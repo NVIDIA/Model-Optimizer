@@ -16,9 +16,16 @@
 """Built-in module handlers for unified Hugging Face export."""
 
 import collections.abc
+import contextlib
 import warnings
+from dataclasses import dataclass
 
 import torch.nn as nn
+from torch.distributed.fsdp import FSDPModule
+
+from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, module_name_maps
+from modelopt.torch.quantization.utils.core_utils import ModuleNames, _get_enclosing_fsdp_module
+from modelopt.torch.utils.distributed import distribution_plan
 
 from .layer_utils import get_expert_linear_names, is_quantlinear, set_expert_quantizer_amax
 from .moe_utils import _export_fused_experts
@@ -34,6 +41,86 @@ def _has_fused_experts_quantizers(module: nn.Module) -> bool:
     return hasattr(module, f"{first_proj_attr}_weight_quantizers")
 
 
+@dataclass
+class _HeldWindow:
+    """An FSDP2 unit's weight-update window, and the modules packed in it so far."""
+
+    unit: nn.Module
+    modules: list[nn.Module]
+    stack: contextlib.ExitStack
+
+
+def _enclosing_unit(ctx: ExportContext, module: nn.Module) -> nn.Module:
+    """The innermost FSDP2 unit enclosing ``module``, or the model if none does."""
+    if ctx.module_names is None:
+        ctx.module_names = module_name_maps(ctx.model)
+    return _get_enclosing_fsdp_module(module, ctx.model, ctx.module_names) or ctx.model
+
+
+def _window_root(ctx: ExportContext, unit: nn.Module) -> tuple[nn.Module, ModuleNames | None]:
+    """The root a weight-update window on ``unit`` is opened on, and its module names.
+
+    A window does nothing on an unwrapped root, which expert parallelism leaves (it FSDP2-shards
+    only the dense layers), so there the unit itself is the root, with names relative to it.
+    """
+    if isinstance(ctx.model, FSDPModule) or unit is ctx.model:
+        # The model's own names, which _enclosing_unit has built.
+        return ctx.model, ctx.module_names
+    return unit, module_name_maps(unit)
+
+
+def _fsdp2_weight_window(
+    ctx: ExportContext, module: nn.Module
+) -> contextlib.AbstractContextManager:
+    """The ``fsdp2_aware_weight_update`` window to pack ``module``'s weights in.
+
+    Inside :func:`held_fsdp2_weight_windows`, the window of the module's FSDP2 unit, held open
+    across the unit's modules. Anywhere else, a window of the module's own, closed when the handler
+    is done, so a dispatch loop that knows nothing of held windows cannot leave a unit unsharded.
+    """
+    unit = _enclosing_unit(ctx, module)
+    if not ctx.hold_fsdp2_windows:
+        root, names = _window_root(ctx, unit)
+        return fsdp2_aware_weight_update(root, module, names=names)
+    held = ctx.fsdp2_window
+    if held is not None and held.unit is unit:
+        # Once per module, though a handler packing several weights asks once per weight: the
+        # window re-registers each listed module's weights with FSDP2 when it closes.
+        if not any(m is module for m in held.modules):
+            held.modules.append(module)
+        return contextlib.nullcontext()
+    _close_fsdp2_weight_window(ctx)
+    root, names = _window_root(ctx, unit)
+    held = _HeldWindow(unit, [module], contextlib.ExitStack())
+    held.stack.enter_context(fsdp2_aware_weight_update(root, held.modules, names=names))
+    ctx.fsdp2_window = held
+    return contextlib.nullcontext()
+
+
+@contextlib.contextmanager
+def held_fsdp2_weight_windows(ctx: ExportContext):
+    """Within the block, pack each FSDP2 unit's modules in one weight-update window.
+
+    The window unshards the whole unit and reshards it when it closes, so a window per module
+    gathers a decoder layer once per quantized linear in it. Here the unit's window stays open from
+    one handler to the next until the export reaches another unit, each module joining the list
+    whose weights it re-registers with FSDP2, and leaving the block closes the last.
+    """
+    ctx.hold_fsdp2_windows = True
+    try:
+        yield
+    finally:
+        ctx.hold_fsdp2_windows = False
+        _close_fsdp2_weight_window(ctx)
+
+
+def _close_fsdp2_weight_window(ctx: ExportContext) -> None:
+    """Close the weight-update window the handlers hold open, if any, resharding its unit."""
+    held, ctx.fsdp2_window = ctx.fsdp2_window, None
+    if held is not None:
+        held.stack.close()
+
+
 def _export_weight(
     module: nn.Module,
     ctx: ExportContext,
@@ -43,6 +130,12 @@ def _export_weight(
     # install the built-in handlers while retaining this legacy helper's import path.
     from .unified_export_hf import _export_quantized_weight
 
+    # The no-gather export packs a still-sharded model: an FSDP2-owned weight goes in its unit's
+    # weight-update window, or the unit's next reshard puts FSDP2's unquantized shard back.
+    if ctx.keep_fused_experts and distribution_plan(ctx.model).is_fsdp_dense:
+        with _fsdp2_weight_window(ctx, module):
+            _export_quantized_weight(module, ctx.dtype, weight_name)
+        return
     _export_quantized_weight(module, ctx.dtype, weight_name)
 
 

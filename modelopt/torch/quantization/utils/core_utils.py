@@ -942,7 +942,17 @@ def get_prefixed_param_names(parent_model, target_module, param_index=None):
     target_ids = {id(p) for p in target_module.parameters()}
     # Lowest position == first in named_parameters() order, matching a linear scan's result.
     match = min((param_index[pid] for pid in target_ids if pid in param_index), default=None)
-    return match[1].rsplit(".", 1)[0] if match is not None else None
+    # "" for a parameter the parent owns itself.
+    return match[1].rpartition(".")[0] if match is not None else None
+
+
+def _param_key(module_name: str | None, param_name: str) -> str:
+    """The full name of ``module_name``'s parameter ``param_name``; ``""`` names the root module.
+
+    A module the name map does not know (``None``) keeps the ``None.`` key no parameter has, so it is
+    skipped rather than taken for the root.
+    """
+    return param_name if module_name == "" else f"{module_name}.{param_name}"
 
 
 def create_fsdp_param_mapping(fsdp_param_list, model):
@@ -966,8 +976,7 @@ def create_fsdp_param_mapping(fsdp_param_list, model):
         if module_name is not None:
             # Get the parameter name from _module_info and construct full param name
             param_name = param._module_info.param_name
-            full_param_name = f"{module_name}.{param_name}"
-            mapping[full_param_name] = param
+            mapping[_param_key(module_name, param_name)] = param
     return mapping
 
 
@@ -1054,7 +1063,9 @@ def fsdp2_aware_weight_update(
     Args:
         root_model (nn.Module): The root model of the FSDPModule.
         modules_to_update (list): The list of modules to update which should be a list of modules that are
-            direct children of the FSDPModule.
+            direct children of the FSDPModule. A list is read again when the context exits, so a caller
+            may append modules of the same FSDP unit to it inside the context, and their weights are
+            re-registered with FSDP2 too (the export's held weight windows rely on this).
         reshard (bool): Whether to reshard the FSDP root module after the weight update.
 
     Returns:
@@ -1094,7 +1105,7 @@ def fsdp2_aware_weight_update(
                     module_name = _get_module_name(module, root_model, names)
                     # Check if any parameter from this module is in the mapping
                     module_params_in_mapping = any(
-                        f"{module_name}.{n}" in fsdp_param_mapping
+                        _param_key(module_name, n) in fsdp_param_mapping
                         for n, _ in module.named_parameters()
                     )
                     assert module_params_in_mapping, (
@@ -1110,8 +1121,7 @@ def fsdp2_aware_weight_update(
             # Update FSDPParam list
             for module in modules_to_update:
                 for param_name, param in module.named_parameters():
-                    name = _get_module_name(module, root_model, names)
-                    name = f"{name}.{param_name}"
+                    name = _param_key(_get_module_name(module, root_model, names), param_name)
                     if name not in fsdp_param_mapping:
                         continue
 
