@@ -119,9 +119,18 @@ def _quantized_sdpa(self, *args, **kwargs):
     query, key, value = fp8_sdpa_args[:3]
 
     if not torch.onnx.is_in_onnx_export():
-        query = self.q_bmm_quantizer(query)
-        key = self.k_bmm_quantizer(key)
-        value = self.v_bmm_quantizer(value)
+        # FP8SDPA only builds the ONNX graph and has no backward; the native op keeps QAT working.
+        return self.bmm2_output_quantizer(
+            original_scaled_dot_product_attention(
+                self.q_bmm_quantizer(query),
+                self.k_bmm_quantizer(key),
+                self.v_bmm_quantizer(value),
+                attn_mask=param_dict["attn_mask"],
+                dropout_p=param_dict["dropout_p"],
+                is_causal=param_dict["is_causal"],
+                scale=param_dict["scale"],
+            )
+        )
 
     q_quantized_scale = self.q_bmm_quantizer._get_amax(query)
     k_quantized_scale = self.k_bmm_quantizer._get_amax(key)
