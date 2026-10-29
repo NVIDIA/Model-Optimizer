@@ -649,7 +649,7 @@ def main():
             model.get_output_embeddings().requires_grad_(False)
             torch.cuda.reset_peak_memory_stats()
             candidate_start = time.perf_counter()
-            _, candidate_state = _search(
+            model, candidate_state = _search(
                 args,
                 model,
                 calibration,

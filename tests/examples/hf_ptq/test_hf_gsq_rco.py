@@ -16,7 +16,9 @@
 """The cached-teacher example preserves full-vocabulary loss and decoder gradients."""
 
 import importlib
+import json
 import shutil
+import weakref
 from pathlib import Path
 
 import pytest
@@ -280,3 +282,69 @@ def test_example_gsq_search_traverses_layerwise_capture_and_preserves_head(examp
     torch.testing.assert_close(
         restored(input_ids=batch["input_ids"], use_cache=False).logits, expected, rtol=0, atol=0
     )
+
+
+def test_example_releases_preparation_model_before_budget_search(example, tmp_path, monkeypatch):
+    tokenizer = get_tiny_tokenizer()
+    references = []
+
+    def load_model(args):
+        model = get_tiny_llama(dtype=torch.float32, vocab_size=tokenizer.vocab_size).eval()
+        references.append(weakref.ref(model))
+        return model
+
+    def release_device_cache():
+        if (tmp_path / "ordinary/candidates.json").exists():
+            assert references[-1]() is None, "candidate preparation model remains resident"
+
+    formats = example._formats("max")[1:]
+    monkeypatch.setattr(example, "_load_model", load_model)
+    monkeypatch.setattr(example, "_formats", lambda *args: formats)
+    monkeypatch.setattr(example.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: tokenizer)
+    monkeypatch.setattr(
+        example,
+        "load_dataset",
+        lambda repo, *args, **kwargs: [
+            {"text": "This is a test sentence." if repo == "allenai/c4" else "A second document."}
+        ],
+    )
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: "CPU lifetime fixture")
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "empty_cache", release_device_cache)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "hf_gsq_rco.py",
+            "--model",
+            "local-fixture",
+            "--model-revision",
+            "a" * 40,
+            "--tokenizer-revision",
+            "b" * 40,
+            "--c4-revision",
+            "c" * 40,
+            "--wikitext-revision",
+            "d" * 40,
+            "--output",
+            str(tmp_path),
+            "--variant",
+            "ordinary",
+            "--budget-index",
+            "0",
+            "--calibration-count",
+            "1",
+            "--heldout-count",
+            "1",
+            "--max-length",
+            "4",
+        ],
+    )
+    example.main()
+    assert len(references) == 2
+    assert all(reference() is None for reference in references)
+    preparation = json.loads((tmp_path / "ordinary/candidates.json").read_text())
+    result = json.loads((tmp_path / "ordinary/budget_00/result.json").read_text())
+    assert preparation["minimum_effective_bits"] >= 8
+    assert result["status"] == "infeasible"
