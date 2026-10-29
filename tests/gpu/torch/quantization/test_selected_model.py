@@ -34,7 +34,7 @@ from modelopt.torch.quantization._selected_search import (
     _load_selected_search,
     _selected_search_binding,
 )
-from modelopt.torch.quantization.mode import MaxCalibrateModeDescriptor, MseCalibrateModeDescriptor
+from modelopt.torch.quantization.mode import MseCalibrateModeDescriptor
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
@@ -65,9 +65,10 @@ def test_frozen_mixture_preserves_fixed_states_and_recalibrates_selected(monkeyp
     LayerActivationCollector.register_decoder_layer_support(
         lambda model: isinstance(model, _Model), lambda model: model.layers
     )
-    # The internal constructor is tested before the public automatic capability is enabled.
-    for mode in (MaxCalibrateModeDescriptor, MseCalibrateModeDescriptor):
-        monkeypatch.setattr(mode, "_auto_quantize_layerwise_estimator", "source_activation_v1")
+    # Exercise internal dispatch for MSE without declaring production support for its estimator.
+    monkeypatch.setattr(
+        MseCalibrateModeDescriptor, "_auto_quantize_layerwise_estimator", "source_activation_v1"
+    )
     torch.manual_seed(42)
     source = _Model().eval()
     if invalid == "outside":
@@ -201,9 +202,6 @@ def test_frozen_mixture_from_source_estimation_workers(monkeypatch, tmp_path):
     monkeypatch.setattr(LayerActivationCollector, "_decoder_layer_support", [])
     LayerActivationCollector.register_decoder_layer_support(
         lambda model: isinstance(model, _Model), lambda model: model.layers
-    )
-    monkeypatch.setattr(
-        MaxCalibrateModeDescriptor, "_auto_quantize_layerwise_estimator", "source_activation_v1"
     )
     torch.manual_seed(42)
     source = _Model().eval()

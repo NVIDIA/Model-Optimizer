@@ -34,6 +34,8 @@ from typing import Any, Self
 import torch
 import torch.nn as nn
 from torch.distributed.fsdp import FSDPModule
+from torch.distributed.tensor import DTensor
+from torch.utils._pytree import tree_leaves
 
 from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.utils import distributed as dist
@@ -52,6 +54,21 @@ from modelopt.torch.utils.network import (
 from modelopt.torch.utils.serialization import safe_load, safe_save
 
 from .core_utils import has_accelerate_offload
+
+
+def _input_storages(inputs):
+    storages = {}
+    for value in tree_leaves(inputs):
+        if isinstance(value, torch.Tensor):
+            if isinstance(value, DTensor) or value.is_meta or value.layout != torch.strided:
+                raise ValueError("Source estimates require materialized, strided inputs")
+            storage = value.untyped_storage()
+            storages[value.device, storage.data_ptr()] = storage.nbytes()
+        elif value is not None and not isinstance(
+            value, (str, bool, int, float, torch.dtype, torch.device)
+        ):
+            raise ValueError("Source estimates cannot account for opaque input state")
+    return storages
 
 
 class _EarlyStopForwardError(Exception):
@@ -220,13 +237,35 @@ class LayerActivationCollector:
     _decoder_layer_support: list[tuple[Any, Any]] = []
     _LAYER_ATTR = "_layerwise_calib"
 
-    def __init__(self, model: nn.Module, status_callback: Callable[[str], None] | None = None):
+    def __init__(
+        self,
+        model: nn.Module,
+        status_callback: Callable[[str], None] | None = None,
+        *,
+        max_activation_bytes: int | None = None,
+    ):
         """Initialize the collector for the given model."""
+        if max_activation_bytes is not None and (
+            type(max_activation_bytes) is not int or max_activation_bytes < 1
+        ):
+            raise ValueError("Activation cache requires a positive byte limit")
+        self.max_activation_bytes = max_activation_bytes
+        self.peak_activation_bytes = 0
+        self._capture_storages = {}
         self.model = model
         self._decoder_layers: nn.ModuleList | None = None
         self._layer_to_idx: dict[nn.Module, int] = {}
         self._patched = False
         self._status_callback = status_callback
+
+    def _check_capture(self, inputs):
+        if self.max_activation_bytes is not None:
+            proposed = self._capture_storages | _input_storages(inputs)
+            size = sum(proposed.values())
+            if size > self.max_activation_bytes:
+                raise ValueError("Layer activation cache exceeds its byte limit")
+            self._capture_storages = proposed
+            self.peak_activation_bytes = max(self.peak_activation_bytes, size)
 
     def _swap_to_dummy(self, idx: int):
         """Replace decoder layer *idx* with a parameter-free dummy.
@@ -308,6 +347,7 @@ class LayerActivationCollector:
             decoder_layers: Pre-resolved decoder layers. If *None*, layers are
                 discovered via :meth:`get_decoder_layers`.
         """
+        collector = self
 
         def _patched_forward(self, *args, **kwargs):
             info: _LayerCalibState = self._layerwise_calib
@@ -331,6 +371,7 @@ class LayerActivationCollector:
                 return output
 
             if info.mode == "capture":
+                collector._check_capture((args, kwargs))
                 info.collected_inputs.append((args, kwargs))
                 raise _EarlyStopForwardError()
 
@@ -513,6 +554,13 @@ class LayerActivationCollector:
                 "get_input_activations() requires _patch_all_layers() to be called first."
             )
         layer_idx = self._layer_to_idx[layer]
+        # The caller retains the preceding layer inputs while collecting the successor.
+        self._capture_storages = {}
+        if self.max_activation_bytes is not None and layer_idx:
+            assert self._decoder_layers is not None
+            self._check_capture(
+                self._decoder_layers[layer_idx - 1]._layerwise_calib.collected_inputs
+            )
         self._set_layer_states(layer_idx)
         self._log_layer_summary(layer_idx)
 
@@ -562,6 +610,8 @@ class LayerActivationCollector:
         assert self._decoder_layers is not None
 
         if resumed_inputs is not None:
+            self._capture_storages = {}
+            self._check_capture(resumed_inputs)
             n = len(self._decoder_layers)
             self._emit_status(f"Calibrating layer {start_layer + 1}/{n} | resumed")
             for i in range(start_layer):

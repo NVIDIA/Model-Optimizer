@@ -23,12 +23,13 @@ import pytest
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe, plan_auto_quantize
 from modelopt.torch.quantization.algorithms import QuantRecipe
-from modelopt.torch.quantization.mode import GPTQModeDescriptor
+from modelopt.torch.quantization.mode import GPTQModeDescriptor, MaxCalibrateModeDescriptor
 
 
-def test_plan_preserves_group_methods_and_reuses_budget_statistics():
+@pytest.mark.parametrize("layerwise", [False, True])
+def test_plan_preserves_group_methods_and_reuses_budget_statistics(layerwise):
     iq = load_recipe("general/ptq/iq2_xs").quantize.model_dump()
-    iq["algorithm"] = [{"method": "imatrix", "layerwise": {"enable": False}}, "max"]
+    iq["algorithm"] = [{"method": "imatrix", "layerwise": {"enable": layerwise}}, "max"]
     recipe = ModelOptAutoQuantizeRecipe(
         quantize=mtq.FP8_DEFAULT_CFG,
         auto_quantize={
@@ -52,6 +53,7 @@ def test_plan_preserves_group_methods_and_reuses_budget_statistics():
     iq_id = hashlib.sha256(signature.encode()).hexdigest()
     iq_plan = next(f for f in snapshot["search"]["formats"] if f["id"] == iq_id)
     assert iq_plan["signature"] == signature
+    assert iq_plan["final_layerwise"] is layerwise
     assert [a["settings"]["method"] for a in iq_plan["algorithms"]] == ["imatrix", "max"]
     assert snapshot["search"]["module_search_spaces"][0]["format_ids"][0] == iq_id
     assert (
@@ -74,7 +76,12 @@ def test_plan_preserves_group_methods_and_reuses_budget_statistics():
 @pytest.mark.parametrize(
     ("method", "layerwise"), [("gptq", True), ("max", True), ("local_hessian", False)]
 )
-def test_plan_refuses_undeclared_estimators_without_replacing_algorithms(method, layerwise):
+def test_plan_refuses_undeclared_estimators_without_replacing_algorithms(
+    monkeypatch, method, layerwise
+):
+    if layerwise:
+        descriptor = GPTQModeDescriptor if method == "gptq" else MaxCalibrateModeDescriptor
+        monkeypatch.setattr(descriptor, "_auto_quantize_layerwise_estimator", None)
     config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
     algorithm = {"method": method, "layerwise": {"enable": layerwise}}
     if method == "gptq":
@@ -103,5 +110,9 @@ def test_plan_uses_declared_layerwise_requirement(monkeypatch):
     )
     plan_auto_quantize(recipe).require_supported()
     monkeypatch.setattr(GPTQModeDescriptor, "_requires_final_layerwise", True)
+    plan = plan_auto_quantize(recipe)
+    plan.require_supported()
+    assert plan.as_dict()["search"]["formats"][0]["final_layerwise"]
+    monkeypatch.setattr(GPTQModeDescriptor, "_auto_quantize_layerwise_estimator", None)
     with pytest.raises(ValueError):
         plan_auto_quantize(recipe).require_supported()

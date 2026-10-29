@@ -1574,24 +1574,29 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.best["constraints"] = {"effective_bits": effective_bits_from_search}
         self.best["score"] = best_scores
 
-        names = module_name_maps(self.model)
-        for module in names.name_to_module.values():
-            if not isinstance(module, QuantModule):
-                continue
-            if not any(
-                q.is_enabled and getattr(q, "backend", None) == "ggml"
-                for q in module.iter_weight_quantizers_for_calibration()
-            ):
-                continue
-            with torch.no_grad(), enable_weight_access_and_writeback(module, self.model, names):
-                for weight, quantizer in module.iter_weights_for_calibration():
-                    if quantizer.is_enabled and getattr(quantizer, "backend", None) == "ggml":
-                        GGML_FORMAT_REGISTRY[quantizer.num_bits].materialize_search_weight(
-                            quantizer, weight
-                        )
-                    del weight
+        _materialize_selected_ggml_weights(self.model)
 
         QuantRecipe.fold_pqs_to_weights(self.model)
+
+
+def _materialize_selected_ggml_weights(model):
+    """Apply the selected codes before export splits fused source-preserving weights."""
+    names = module_name_maps(model)
+    for module in names.name_to_module.values():
+        if not isinstance(module, QuantModule):
+            continue
+        if not any(
+            q.is_enabled and getattr(q, "backend", None) == "ggml"
+            for q in module.iter_weight_quantizers_for_calibration()
+        ):
+            continue
+        with torch.no_grad(), enable_weight_access_and_writeback(module, model, names):
+            for weight, quantizer in module.iter_weights_for_calibration():
+                if quantizer.is_enabled and getattr(quantizer, "backend", None) == "ggml":
+                    GGML_FORMAT_REGISTRY[quantizer.num_bits].materialize_search_weight(
+                        quantizer, weight
+                    )
+                del weight
 
 
 def _get_auto_quantize_score(grad_output, output_diff):

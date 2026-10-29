@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from modelopt.torch.export import export_hf_checkpoint
+from modelopt.torch.quantization.algorithms import _materialize_selected_ggml_weights
 
 __all__ = []
 _MANIFEST = ".autoquant-manifest.json"
@@ -74,6 +75,21 @@ def _inventory(directory, limit, *, hash_files=True):
     return files
 
 
+def verify_export(destination, assignment, resources):
+    """Verify a retained export before reuse or reclamation of its calibration checkpoint."""
+    if destination.is_symlink() or not destination.is_dir():
+        raise ValueError("A complete managed export is required")
+    receipt = destination / _MANIFEST
+    if receipt.is_symlink() or receipt.stat().st_size > resources["metadata_bytes"]:
+        raise ValueError("Export provenance exceeds its byte limit")
+    manifest = json.loads(receipt.read_text())
+    if manifest != {
+        "assignment": assignment,
+        "files": _inventory(destination, resources["export_bytes"] - receipt.stat().st_size),
+    }:
+        raise ValueError("Published export differs from the current assignment or payloads")
+
+
 def export_pipeline(args, model):
     """Publish once, or verify an already published export against the current assignment."""
     destination, stage = Path(args.export_path), Path(args.auto_quantize_export_stage)
@@ -82,15 +98,7 @@ def export_pipeline(args, model):
     if destination.is_symlink() or stage.is_symlink():
         raise ValueError("Automatic export directories cannot be symlinks")
     if destination.exists():
-        receipt = destination / _MANIFEST
-        if receipt.is_symlink() or receipt.stat().st_size > resources["metadata_bytes"]:
-            raise ValueError("Export provenance exceeds its byte limit")
-        manifest = json.loads(receipt.read_text())
-        if manifest != {
-            "assignment": assignment,
-            "files": _inventory(destination, resources["export_bytes"] - receipt.stat().st_size),
-        }:
-            raise ValueError("Published export differs from the current assignment or payloads")
+        verify_export(destination, assignment, resources)
         args.checkpoint_exported = True
         return
     if stage.exists():
@@ -98,6 +106,8 @@ def export_pipeline(args, model):
         shutil.rmtree(stage)
     stage.mkdir()
     try:
+        if getattr(args, "auto_quantize_final_layerwise", False):
+            _materialize_selected_ggml_weights(model)
         export_hf_checkpoint(
             model,
             export_dir=stage,

@@ -134,6 +134,9 @@ def configure_pipeline_args(args):
     args.auto_quantize_checkpoint = str(root / "search") if spec["candidate"] is None else None
     args.auto_quantize_assignment = str(root / f"assignment-{recipe_id}.json")
     args.auto_quantize_resources = spec["resources"]
+    args.auto_quantize_final_layerwise = any(
+        f["final_layerwise"] for f in plan.as_dict()["search"]["formats"]
+    )
 
 
 def configure_pipeline_device(args):

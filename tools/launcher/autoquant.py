@@ -45,7 +45,7 @@ def generate_auto_quantize_pipeline(
 
     Returns a launcher YAML dictionary. ``resources`` must set concurrency, total GPUs,
     per-worker GPU/host/input bytes, candidate/checkpoint bytes, total artifact bytes and retries.
-    The initial rollout supports single-GPU workers and gradient, non-layerwise recipes.
+    The initial rollout supports single-GPU workers and gradient weight search.
     """
     resolved = load_recipe(recipe)
     plan = plan_auto_quantize(resolved)

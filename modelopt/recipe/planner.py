@@ -301,6 +301,9 @@ def _validate_execution_limits(plan, spec):
         "artifact_storage_bytes",
         "retries",
     }
+    layerwise = any(f["final_layerwise"] for f in plan.as_dict()["search"]["formats"])
+    if layerwise:
+        required.update({"activation_bytes", "final_checkpoint_bytes"})
     if (
         not isinstance(resources, dict)
         or set(resources) != required
@@ -333,6 +336,11 @@ def _validate_execution_limits(plan, spec):
         raise ValueError("Automatic pipeline requires a dataset name or local path")
     if resources["host_bytes"] < 1024**2 or resources["input_bytes"] > resources["host_bytes"]:
         raise ValueError("Input snapshot must fit the host-memory limit (at least one MiB)")
+    if layerwise and (
+        resources["activation_bytes"] > min(resources["host_bytes"], resources["gpu_bytes"])
+        or resources["final_checkpoint_bytes"] < 65536
+    ):
+        raise ValueError("Layerwise activation/checkpoint limits exceed the supported budget")
     count = len(plan.as_dict()["search"]["formats"])
     concurrency = min(resources["max_concurrent_formats"], count)
     if (
@@ -353,6 +361,7 @@ def _pipeline_storage_bytes(count, resources):
         (count + min(count, resources["max_concurrent_formats"])) * resources["candidate_bytes"]
         + 2 * resources["checkpoint_bytes"]
         + resources["metadata_bytes"]
+        + resources.get("final_checkpoint_bytes", 0)
     )
 
 

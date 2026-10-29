@@ -4,10 +4,11 @@ Supply an ordinary AutoQuant recipe and execution limits. ModelOpt resolves the
 recipe's algorithms and grouping, generates independent format calibration/scoring
 workers, and joins them with one coordinator. Users do not define stages.
 
-This preview supports gradient weight search with non-layerwise max, MSE, imatrix
-and GGML GPTQ. BF16 creates no calibration worker. Layerwise recipes, KV search,
-disk-offloaded/meta weights and multi-GPU worker computation are rejected. The
-existing serial APIs and manual calibration workers retain their defaults.
+This preview supports gradient weight search with max, MSE, imatrix and GGML GPTQ.
+Layerwise max, imatrix and GGML GPTQ use source-activation search estimates followed
+by final calibration of the selected configuration. BF16 creates no calibration
+worker. Layerwise MSE, KV search, disk-offloaded/meta weights and multi-GPU worker
+computation are rejected. Existing serial APIs and manual workers keep their defaults.
 
 ## Generate and inspect a launch
 
@@ -107,16 +108,47 @@ managed generations are reclaimed under the destination lock. A frozen assignmen
 records each group's complete algorithm and settings; changing only the target bit
 budget reuses validated calibration and sensitivity statistics.
 
-Layerwise search estimation is explicitly unsupported in this preview. A future
-integration must declare and validate its estimator and run final calibration only
-after freezing the entire assignment, with each group's own algorithm and the
-selected quantized prefix. GPTQ is never silently replaced by imatrix. Held-out KL
-is validation, not selection or reranking.
+### Layerwise recipes
+
+For supported layerwise recipes, `source_activation_v1` captures original-source
+layer inputs and applies each candidate's original algorithm and settings. This is
+an explicit search approximation: it does not include the eventual selected
+quantized prefix. GPTQ remains GPTQ; it is never silently replaced by imatrix.
+Reference and per-group scoring still use the existing gradient scorer.
+
+After the coordinator freezes the complete assignment, it releases the search
+model and reloads original weights. Non-layerwise groups reuse their accepted
+states; layerwise groups receive final calibration through the native sequential
+traversal, preserving their algorithm chains and activation policy. Incompatible
+traversal settings are refused. Enabled quantizers must lie within frozen decoder
+groups; each group must belong to one decoder layer.
+
+Layerwise requests additionally require explicit byte limits:
+
+```yaml
+resources:
+  # Include the other limits from the request above.
+  activation_bytes: 1073741824
+  final_checkpoint_bytes: 4294967296
+```
+
+The activation limit covers simultaneously cached adjacent layers and must fit
+both host and GPU limits. The final checkpoint reservation counts toward
+`artifact_storage_bytes`; increase that total accordingly. The pipeline owns final
+checkpoint/export paths, so recipe-level layerwise `checkpoint_dir` and `export_dir`
+must be unset. Source weights must be contiguous and unshared on one device.
+
+Completed final-calibration layers resume only with matching assignment, source,
+inputs and implementation. Their exact packed payloads are retained. The one owned
+final checkpoint is reclaimed only after checking the exported assignment and file
+hashes. Interrupted reclamation can resume; incomplete exports do not authorize
+deletion. Held-out KL is validation, not selection or reranking.
 
 ## Current validation limits
 
-CPU/example checks and tiny-model GPU tests establish correctness only. No
-representative-model concurrency speedup is established. The bounded exporter
+CPU/example checks and tiny-model GPU tests establish scoped correctness.
+Representative-layer measurements do not establish full-model quality or a
+repeatable concurrency speedup. The bounded exporter
 currently supports a single-process transformers model without offload, FSDP,
 layerwise export or a ModelOpt-state sidecar. Limits describe managed pipeline
 writes, not a filesystem quota protecting against external writers. Use a dedicated
