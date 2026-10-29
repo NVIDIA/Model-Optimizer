@@ -24,14 +24,11 @@ import transformer_engine as te
 import transformer_engine.pytorch.module.grouped_linear as te_grouped_linear
 import transformer_engine.pytorch.module.layernorm_linear as te_layernorm_linear
 import transformer_engine.pytorch.module.linear as te_linear
-from packaging.version import Version
 
 from modelopt.torch.quantization.utils import replace_function
 
 from ..nn import GroupedQuantizer, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from .custom import _ParallelLinear
-
-_TE_VERSION = Version(te.__version__)
 
 _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV = "MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP"
 
@@ -317,20 +314,6 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
     """Patched version of _LayerNormLinear to quantize the input to the GEMM operation."""
 
     @staticmethod
-    def _get_original_gemm():
-        if Version("2.0") <= _TE_VERSION:
-            return te_layernorm_linear.general_gemm
-        else:
-            return te_layernorm_linear.tex.gemm
-
-    @staticmethod
-    def _gemm_replace_args():
-        if Version("2.0") <= _TE_VERSION:
-            return (te_layernorm_linear, "general_gemm")
-        else:
-            return (te_layernorm_linear.tex, "gemm")
-
-    @staticmethod
     def forward(ctx, inp, ln_weight, ln_bias, weight, *args, **kwargs):
         input_quantizer, weight_quantizer = _QuantLayerNormLinearFunc.modelopt_quantizers
 
@@ -340,15 +323,16 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
             # We need to recompute the quantized input for the backward pass, so we save the input_quantizer
             ctx.modelopt_input_quantizer = input_quantizer
 
-        original_gemm = _QuantLayerNormLinearFunc._get_original_gemm()
+        original_gemm = te_layernorm_linear.general_gemm
 
         def _patched_general_gemm(weight, input, *gemm_args, **gemm_kwargs):
             qinput = input_quantizer(input)
             return original_gemm(weight, qinput, *gemm_args, **gemm_kwargs)
 
         with replace_function(
-            *_QuantLayerNormLinearFunc._gemm_replace_args(),
-            _patched_general_gemm,  # type: ignore[call-arg]
+            te_layernorm_linear,
+            "general_gemm",
+            _patched_general_gemm,
         ):
             outputs = te_layernorm_linear._og_LayerNormLinear.forward(
                 ctx, inp, ln_weight, ln_bias, qweight, *args, **kwargs
@@ -366,7 +350,7 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
         """
         gemm_call_counter = {"count": 0}
 
-        original_gemm = _QuantLayerNormLinearFunc._get_original_gemm()
+        original_gemm = te_layernorm_linear.general_gemm
 
         def _patched_general_gemm(a, b, *gemm_args, **gemm_kwargs):
             # The first time, gemm is used for dgrad calculation
@@ -385,8 +369,9 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
             return original_gemm(qinput, b, *gemm_args, **gemm_kwargs)
 
         with replace_function(
-            *_QuantLayerNormLinearFunc._gemm_replace_args(),
-            _patched_general_gemm,  # type: ignore[call-arg]
+            te_layernorm_linear,
+            "general_gemm",
+            _patched_general_gemm,
         ):
             # During backward, the patch does not exist; autograd will automatically use
             # _QuantLayerNormLinearFunc.backward

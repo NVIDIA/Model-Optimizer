@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HuggingFace model loading: :func:`load_pretrained`, and parallel FSDP2 loading."""
+"""HuggingFace model loading: :func:`load_pretrained`, and the plan to distribute a model by."""
 
 import logging
 import os
@@ -33,17 +33,35 @@ from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
-from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoModelForSeq2SeqLM,
+    AutoModelForSpeechSeq2Seq,
+    PretrainedConfig,
+)
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
 
+from modelopt.torch.utils import distributed as dist
+from modelopt.torch.utils import env
 from modelopt.torch.utils.distributed import (
+    DistributionPlan,
     barrier,
     broadcast_state_dict,
     fsdp2_wrap,
     is_initialized,
 )
 from modelopt.torch.utils.logging import print_rank_0, warn_rank_0
+from modelopt.torch.utils.moe import (
+    _choose_ep_degree,
+    _ep_config,
+    _num_experts_from_config,
+    _routed_expert_keys,
+    _routed_expert_modules,
+)
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     checkpoint_tensor_files,
     ensure_local_checkpoint,
@@ -194,8 +212,19 @@ def build_meta_causal_lm(
     trust_remote_code: bool,
     attn_implementation: str | None,
     hf_config=None,
+    auto_class: Any = None,
 ):
-    """Build a meta-init causal LM (no real storage allocated)."""
+    """Build a meta-init causal LM (no real storage allocated), or ``auto_class``'s model.
+
+    It leaves ``auto_class`` as it found it, and the auto classes a remote model's ``__init__``
+    builds its parts through (``AutoModel``, ``AutoModelForCausalLM``). Building a remote-code
+    model through an auto class registers its class there, as it is, and a later load through that
+    auto class builds the registered class, without the ``GenerationMixin`` a first load adds: a
+    rank that built one more meta model than its peers, as rank 0 deciding a distribution does,
+    would load its model without the ``generate`` theirs have. That assumes a remote model registers
+    its classes while it is built: one its module registered when imported is undone as well, and a
+    later load in the process, which finds the module imported, does not register it again.
+    """
     if hf_config is None:
         config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
         if attn_implementation is not None:
@@ -207,16 +236,27 @@ def build_meta_causal_lm(
     dtype = getattr(hf_config, "dtype", None) or torch.bfloat16
     from accelerate import init_empty_weights  # only real callers of this function need it
 
-    model_factory = AutoModelForCausalLM
-    if is_fsdp2_text_only_vlm(hf_config):
-        # Only newer Transformers versions supporting these models expose this factory.
-        from transformers import AutoModelForImageTextToText
-
-        model_factory = AutoModelForImageTextToText
-    with init_empty_weights(include_buffers=False):
-        model = model_factory.from_config(
-            hf_config, dtype=dtype, trust_remote_code=trust_remote_code
-        )
+    model_factory = auto_class
+    if model_factory is None:
+        model_factory = AutoModelForCausalLM
+        if is_fsdp2_text_only_vlm(hf_config):
+            model_factory = AutoModelForImageTextToText
+    # Where transformers records the class a remote-code build registers: in the auto class built
+    # through, and in those a remote VLM builds its towers through. Read without a fallback: if a
+    # release moves it, this fails here rather than leave one rank's model without generate.
+    kept = [
+        (cls._model_mapping._extra_content, dict(cls._model_mapping._extra_content))
+        for cls in (model_factory, AutoModel, AutoModelForCausalLM)
+    ]
+    try:
+        with init_empty_weights(include_buffers=False):
+            model = model_factory.from_config(
+                hf_config, dtype=dtype, trust_remote_code=trust_remote_code
+            )
+    finally:
+        for registered, saved in kept:
+            registered.clear()
+            registered.update(saved)
     model.eval()
     return model
 
@@ -882,3 +922,249 @@ def parallel_load_and_prepare_fsdp2(
     if hasattr(model, "tie_weights"):
         model.tie_weights()
     return model
+
+
+def _auto_class(hf_config, trust_remote_code: bool = False) -> Any:
+    """The auto class that builds ``hf_config``'s whole model, LM head included.
+
+    A causal LM builds through ``AutoModelForCausalLM``. A VLM -- a nested text config, a vision
+    config, or a ``*ForConditionalGeneration`` architecture -- builds through the remote
+    ``AutoModelForCausalLM`` when the checkpoint registers its ``*ForConditionalGeneration`` there,
+    its code is trusted and it registers no image-text class, else through
+    ``AutoModelForImageTextToText`` if that recognizes the config or, its code trusted, the
+    checkpoint registers one, else through ``AutoModelForCausalLM`` if that recognizes it (as it
+    does Phi-4-multimodal), else through ``AutoModel``, which leaves the head out. An
+    encoder-decoder model (``is_encoder_decoder``, whether or not it names its architecture, which
+    reads like a VLM's) builds through its seq2seq class.
+    """
+    architectures = getattr(hf_config, "architectures", None) or []
+    is_vlm = (
+        getattr(hf_config, "text_config", None) is not None
+        or getattr(hf_config, "vision_config", None) is not None
+        or any("conditionalgeneration" in str(arch).lower() for arch in architectures)
+    )
+    if not is_vlm and not getattr(hf_config, "is_encoder_decoder", False):
+        return AutoModelForCausalLM
+    auto_map = getattr(hf_config, "auto_map", None) or {}
+    remote_with_head = (
+        trust_remote_code
+        and "conditionalgeneration" in str(auto_map.get("AutoModelForCausalLM", "")).lower()
+    )
+    if remote_with_head and "AutoModelForImageTextToText" not in auto_map:
+        return AutoModelForCausalLM
+    for seq2seq in (AutoModelForSeq2SeqLM, AutoModelForSpeechSeq2Seq):
+        if type(hf_config) in seq2seq._model_mapping:
+            return seq2seq
+    if type(hf_config) in AutoModelForImageTextToText._model_mapping or (
+        trust_remote_code and "AutoModelForImageTextToText" in auto_map
+    ):
+        return AutoModelForImageTextToText
+    if type(hf_config) in AutoModelForCausalLM._model_mapping:
+        return AutoModelForCausalLM
+    return AutoModel
+
+
+# The share of one GPU's memory a rank may take with the dense part replicated: that whole copy and
+# the rank's share of the routed experts. The rest is left to calibration's activations and
+# communication buffers.
+_REPLICATED_SHARE = 0.6
+
+
+def _gpu_memory() -> int | None:
+    """This rank's GPU memory in bytes, or ``None`` without a GPU."""
+    if not torch.cuda.is_available():
+        return None
+    return torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
+
+
+def _dense_from_env(world_size: int) -> str:
+    """``MODELOPT_FSDP_SIZE`` as a dense layout, or ``"auto"``."""
+    value = env.fsdp_size().lower()
+    if value == "auto":
+        return "auto"
+    if value == "1":
+        return "replicate"
+    if value in ("world", str(world_size)):
+        return "fsdp"
+    raise ValueError(
+        f"MODELOPT_FSDP_SIZE={value!r}: expected auto, 1 (replicate the dense part) or world "
+        f"(FSDP2-shard it over all {world_size} ranks)."
+    )
+
+
+def _ep_degree(ep_size) -> int | str:
+    """``ep_size`` as an EP degree or ``"auto"``; ``None`` reads ``MODELOPT_EP_DEGREE``."""
+    value = env.ep_degree() if ep_size is None else ep_size
+    if str(value).lower() in ("auto", "0"):
+        return "auto"
+    try:
+        return int(value)
+    except ValueError:
+        name = "MODELOPT_EP_DEGREE" if ep_size is None else "ep_size"
+        raise ValueError(f"{name}={value!r}: expected auto, 0 (auto) or an EP degree.") from None
+
+
+def _decide_distribution(
+    ckpt_path: str, hf_config, world_size: int, ep_size, dense, trust_remote_code: bool
+) -> DistributionPlan:
+    """The plan :func:`resolve_distribution_plan` returns, decided by this rank alone."""
+    # What the caller set the EP degree with, for a refusal to name it.
+    knob = "MODELOPT_EP_DEGREE" if ep_size is None else "ep_size"
+    if world_size == 1:
+        # Nothing to shard over, so nothing about the model matters, nor do the knobs: a shell still
+        # exporting a multi-GPU run's would otherwise reshape a single process's load. The caller's
+        # own arguments still count, as dense="fsdp" for FSDP2 on one rank.
+        single = 1 if ep_size is None else _ep_degree(ep_size)
+        return DistributionPlan(
+            ep_size=single if isinstance(single, int) else 1,
+            dense="replicate" if dense in (None, "auto") else dense,
+        )
+    ep_size = _ep_degree(ep_size)
+    dense = _dense_from_env(world_size) if dense is None else dense
+    try:
+        model = build_meta_causal_lm(
+            ckpt_path,
+            trust_remote_code,
+            None,
+            hf_config,
+            auto_class=_auto_class(hf_config, trust_remote_code),
+        )
+        # init_empty_weights re-wraps every parameter it registers, which unties what from_config
+        # tied: re-tie, so a tied embedding and LM head count once, as the loaded model holds them.
+        model.tie_weights()
+    except Exception as e:
+        raise RuntimeError(
+            f"Deciding how to distribute {hf_config.model_type} needs its model built on the meta "
+            f"device, which failed: {type(e).__name__}: {e}"
+        ) from e
+    ep_plan = getattr(_ep_config(hf_config), "base_model_ep_plan", None) or {}
+    experts = _routed_expert_modules(model, ep_plan)
+    num_experts = _num_experts_from_config(_ep_config(hf_config)) if experts else 0
+    if ep_plan and not experts and ep_size != 1 and _num_experts_from_config(_ep_config(hf_config)):
+        # The plan names routed experts the built model has none of under those names: deciding
+        # without them would replicate every expert on every rank, and the expert-parallel load
+        # finds them the same way.
+        containers = ", ".join(sorted(_routed_expert_keys(ep_plan))) or "none"
+        raise ValueError(
+            f"{hf_config.model_type} has routed experts and a base_model_ep_plan, but none of the "
+            f"plan's expert containers ({containers}) names a module of the built model, so they "
+            f"can be neither counted nor sharded. Set {knob}=1 to load it without expert "
+            "parallelism."
+        )
+    if experts and not num_experts and ep_size != 1:
+        # The mirror case: the containers are there, but no count to choose a degree by, which
+        # would leave every expert replicated on every rank.
+        raise ValueError(
+            f"{hf_config.model_type}'s base_model_ep_plan names routed experts the built model has, "
+            "but its config gives no expert count (num_experts, num_local_experts, "
+            f"n_routed_experts or num_routed_experts) to shard them by. Set {knob}=1 to load it "
+            "without expert parallelism."
+        )
+    if ep_size == "auto":
+        ep_size = _choose_ep_degree(world_size, num_experts)
+    elif ep_size > 1 and world_size % ep_size:
+        raise ValueError(f"{knob}={ep_size} must divide the world size ({world_size}).")
+    elif ep_size > 1 and (num_experts == 0 or num_experts % ep_size):
+        raise ValueError(
+            f"{knob}={ep_size} must divide the routed experts {hf_config.model_type} shards "
+            f"({num_experts})."
+        )
+    if dense == "auto":
+        # A rank holds a whole copy of what expert parallelism does not shard, and its 1/ep_size
+        # share of the routed experts it does.
+        sharded = (
+            {id(p) for m in experts.values() for p in m.parameters()} if ep_size > 1 else set()
+        )
+        held = sum(
+            p.numel() * p.element_size() // (ep_size if id(p) in sharded else 1)
+            for p in model.parameters()
+        )
+        memory = _gpu_memory()
+        too_big = memory is not None and held > _REPLICATED_SHARE * memory
+        dense = "fsdp" if too_big else "replicate"
+    return DistributionPlan(world_size, ep_size, dense)
+
+
+def resolve_distribution_plan(
+    ckpt_path: str,
+    *,
+    trust_remote_code: bool = False,
+    ep_size: int | str | None = None,
+    dense: str | None = None,
+    revision: str | None = None,
+    token: str | bool | None = None,
+    cache_dir: str | os.PathLike | None = None,
+    local_files_only: bool = False,
+    subfolder: str | None = None,
+) -> tuple[DistributionPlan, PretrainedConfig]:
+    """Decide how this run distributes ``ckpt_path``'s model over its ranks.
+
+    The one place a run decides it: a distributed load loads the model by the plan this returns and
+    records it on the model (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), and
+    every later step reads it back from there
+    (:func:`~modelopt.torch.utils.distributed.distribution_plan`). Returns ``(plan, hf_config)``,
+    ``hf_config`` being this rank's own copy of the config (rank 0 decides the plan from its copy),
+    for a sharded load to build from.
+
+    Rank 0 decides, from the model built on the meta device: from its parameters rather than
+    estimates of them, and from its routed experts as an expert-parallel load finds them. Every rank
+    takes rank 0's plan (:func:`~modelopt.torch.utils.distributed.broadcast_from`): the inputs are
+    read locally, ranks deciding for themselves could disagree, and ranks loading different plans
+    hang. Collective: every rank must call it.
+
+    * ``ep_size``: the expert-parallel degree, or ``"auto"``, the largest that divides both the
+      world and the routed-expert count of a model whose config carries a ``base_model_ep_plan``.
+    * ``dense``: ``"replicate"`` or ``"fsdp"`` for the rest of the model, or ``"auto"``, which
+      FSDP2-shards it when a whole copy of it and the rank's share of the routed experts would take
+      more than 60% of one GPU's memory. That GPU is rank 0's, by its total memory, so ``"auto"``
+      assumes the run's GPUs are alike; a rank 0 without a GPU replicates it.
+
+    ``None`` reads ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE`` (``1`` replicates; ``world``,
+    or the world size as a number, shards) from rank 0's environment, both defaulting to
+    ``"auto"``. A single process reads neither and holds the whole model, unless ``dense="fsdp"``
+    asks for FSDP2 on one rank.
+
+    ``revision``, ``token``, ``cache_dir``, ``local_files_only`` and ``subfolder`` locate the
+    checkpoint as :func:`load_pretrained` takes them, so the plan is decided for what the load reads:
+    all but ``subfolder`` resolve a Hub model ID (:func:`ensure_local_checkpoint`), and the config
+    read takes all but ``revision``, for custom code its ``auto_map`` names in another Hub repo. It
+    returns no path, so a caller that loads the checkpoint resolves it first, with
+    :func:`ensure_local_checkpoint`, and passes the local directory: the plan is then decided for
+    the snapshot the load reads.
+    """
+    # Each rank reads the checkpoint for itself. One that cannot must fail every rank here, rather
+    # than leave the others waiting in a broadcast below for a rank that already raised.
+    read: list[tuple[str, PretrainedConfig]] = []
+
+    def checkpoint_read() -> bool:
+        _, local_path = ensure_local_checkpoint(
+            ckpt_path,
+            revision=revision,
+            token=token,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+        )
+        if subfolder:
+            local_path = os.path.join(local_path, subfolder)
+        config = AutoConfig.from_pretrained(
+            local_path,
+            trust_remote_code=trust_remote_code,
+            token=token,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+        )
+        read.append((local_path, config))
+        return True
+
+    dist.all_reduce("checkpoint read", checkpoint_read, all)
+    ckpt_path, hf_config = read[0]
+    world_size = dist.size()
+    plan = dist.broadcast_from(
+        "plan",
+        lambda: _decide_distribution(
+            ckpt_path, hf_config, world_size, ep_size, dense, trust_remote_code
+        ),
+    )
+    if plan != DistributionPlan():
+        print_rank_0(f"Distribution: {plan!r}")
+    return plan, hf_config
