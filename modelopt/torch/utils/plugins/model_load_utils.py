@@ -1057,8 +1057,21 @@ def _meta_dcp_load(
 
     Every target param ends up filled -- from the checkpoint, by ``tie_weights`` with a param the
     checkpoint filled, or with the value it already had -- or the load fails: nothing is left as the
-    uninitialized memory ``to_empty`` hands out.
+    uninitialized memory ``to_empty`` hands out. A rank failing before ``dcp.load`` fails every rank.
     """
+    prepared: list[tuple] = []
+    # Each rank reads the checkpoint, checks it and materializes its params itself: one failing must
+    # fail every rank here, before the others enter dcp.load's collectives and wait there for it.
+    dist.all_reduce(
+        "the meta-DCP load's preparation",
+        lambda: prepared.append(_meta_dcp_prepare(model, local_dir, device, load_names)),
+        lambda _: None,
+    )
+    _meta_dcp_fill(model, *prepared[0])
+
+
+def _meta_dcp_prepare(model: "torch.nn.Module", local_dir: str, device, load_names: set) -> tuple:
+    """:func:`_meta_dcp_load`'s checks and materialization, up to the state dict DCP fills."""
     # Read what the checkpoint holds before changing the model, so a refusal leaves it as it was.
     reader = HuggingFaceStorageReader(str(local_dir))
     ckpt_md = reader.read_metadata().state_dict_metadata
@@ -1199,6 +1212,13 @@ def _meta_dcp_load(
 
     full_sd = model.state_dict()  # the materialized tensors: to_empty replaced the meta params
     load_sd = {inv[mk]: full_sd[mk] for mk in full_sd if mk in inv}
+    return reader, load_sd, full_sd, want_params, mapped_names, emptied, kept_names
+
+
+def _meta_dcp_fill(
+    model, reader, load_sd, full_sd, want_params, mapped_names, emptied, kept_names
+) -> None:
+    """:func:`_meta_dcp_load`'s DCP load and re-tie, from :func:`_meta_dcp_prepare`'s state."""
     dcp.load(load_sd, storage_reader=reader)
     # Taken before tying, which can swap a filled param out of its module; in state_dict order, the
     # same on every rank, so every rank keeps the same param of a tied group.
