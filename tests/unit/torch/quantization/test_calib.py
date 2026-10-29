@@ -20,6 +20,7 @@ from functools import partial
 import pytest
 import torch
 import torch.nn as nn
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.quantization.quantize_common import get_awq_config
 
 import modelopt.torch.quantization as mtq
@@ -33,6 +34,7 @@ from modelopt.torch.quantization.model_calib import (
 )
 from modelopt.torch.quantization.nn import QuantLinear, TensorQuantizer
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
 class _SimpleMLP(nn.Module):
@@ -264,6 +266,32 @@ def test_awq_clip():
     config = get_awq_config("awq_clip")
     model, model_ref, dataloader, ref_data = get_test_args(config)
     _awq_clip_tester(model, model_ref, ref_data, config)
+
+
+def _awq_clip_on_every_rank_job(rank, size):
+    model = nn.Sequential(nn.Linear(16, 4, bias=False))
+    with torch.no_grad():
+        # Every rank's copy: small weights, and a large one per row on input channel 0.
+        model[0].weight.copy_(torch.linspace(-0.1, 0.1, 64).view(4, 16))
+        model[0].weight[:, 0] = 1.0
+    set_distribution_plan(model, DistributionPlan(size))
+    x = torch.randn(8, 16, generator=torch.Generator().manual_seed(rank))
+    if rank % 2 == 0:
+        x[:, 0] = 0  # never reaches the large weights: a tighter clip only sharpens the rest
+    else:
+        x[:, 1:] = 0  # reaches only them: clipping them costs the most
+    with bounded_collectives():
+        mtq.quantize(model, get_awq_config("awq_clip"), lambda m: m(x))
+        clips = [None] * size
+        torch.distributed.all_gather_object(clips, model[0].weight_quantizer.amax)
+    assert all(torch.equal(clip, clips[0]) for clip in clips), clips
+
+
+def test_awq_clip_picks_the_same_clips_on_every_rank(cpu_dist_workers):
+    """Each rank of a model distributed over several ranks calibrates on its own data. awq_clip
+    averages each candidate clip's loss over the data-parallel ranks, so the ranks' copies of a
+    weight take the same clips, though each rank's own data would pick others."""
+    cpu_dist_workers.run(_awq_clip_on_every_rank_job)
 
 
 @pytest.mark.parametrize("use_weight_scale", [None, False])
