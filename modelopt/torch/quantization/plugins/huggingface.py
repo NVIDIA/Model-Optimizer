@@ -24,6 +24,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import transformers
 from torch import Tensor
@@ -1777,6 +1778,32 @@ def normalize_experts_impl_on_the_fly(model):
         )
 
 
+def _bypassed_both_hooks(module) -> bool:
+    """Whether ``module``'s forward ran past both hooks, with a quantizer that needed them.
+
+    See :func:`assert_fused_experts_intercepted`.
+    """
+    # A missing attribute (rather than 0) means it was already cleaned up -- say nothing.
+    if getattr(module, "_intercept_count", None) != 0 or not getattr(module, "_forward_count", 0):
+        return False
+    first = module._first_proj_attr
+    quantizers = [getattr(module, f"{first}_input_quantizer", None)]
+    quantizers.append(getattr(module, "down_proj_input_quantizer", None))
+    if getattr(module, "_weight_input_capture", False):
+        for attr in (f"{first}_weight_quantizers", "down_proj_weight_quantizers"):
+            quantizers.extend(getattr(module, attr, None) or [])
+    return any(getattr(q, "is_enabled", False) for q in quantizers)
+
+
+def _expert_parallel_group(module):
+    """The process group ``module``'s experts are sharded over (expert parallelism), else ``None``."""
+    weight = getattr(module, module._first_proj_attr, None)
+    if not isinstance(weight, DTensor) or weight.shape[0] == module.num_experts:
+        return None
+    dims = [dim for dim, placement in enumerate(weight.placements) if placement == Shard(0)]
+    return weight.device_mesh.get_group(dims[0]) if dims else None
+
+
 def assert_fused_experts_intercepted(model):
     """Raise if a quantized fused-experts module was never reached by an interception hook.
 
@@ -1803,31 +1830,37 @@ def assert_fused_experts_intercepted(model):
     experts module no calibration token reached (vision experts under text-only calibration) falls
     back to weight-derived scales as before.
 
-    The check is rank-local: under data parallelism it raises on the ranks whose experts saw rows,
-    and a rank whose experts saw none goes on to its next collective and waits there until the
-    launcher stops it or the collective times out, so the error is in another rank's log.
+    Under expert parallelism, a module's verdict is reduced over the group its experts are sharded
+    over, which every member already joins in the experts' forward, so the whole group raises
+    together. Otherwise the check is rank-local: under data parallelism it raises on the ranks whose
+    experts saw rows, and a rank whose experts saw none goes on to its next collective and waits
+    there until the launcher stops it or the collective times out, so the error is in another rank's
+    log.
     """
+    experts = [
+        (name, module, _bypassed_both_hooks(module), _expert_parallel_group(module))
+        for name, module in model.named_modules()
+        if isinstance(module, _QuantFusedExperts)
+    ]
+    bypassed = [here for _, _, here, _ in experts]
+    # Each member of an expert-parallel group holds the same experts modules in the same order, so
+    # one reduction per group, whatever this rank found, tells it what any member found.
+    for group in dict.fromkeys(group for *_, group in experts if group is not None):
+        members = [i for i, (*_, g) in enumerate(experts) if g is group]
+        device = experts[members[0]][1].down_proj.device  # where the group's backend reads it
+        flags = torch.tensor([bypassed[i] for i in members], dtype=torch.int32, device=device)
+        dist.all_reduce(flags, op=dist.ReduceOp.MAX, group=group)
+        for i, flag in zip(members, flags.tolist()):
+            bypassed[i] = bool(flag)
+
     missed = []
-    for name, module in model.named_modules():
-        if not isinstance(module, _QuantFusedExperts):
-            continue
-        # A missing attribute (rather than 0) means it was already cleaned up -- say nothing.
-        if getattr(module, "_intercept_count", None) != 0 or not getattr(
-            module, "_forward_count", 0
-        ):
-            continue
-
-        first = module._first_proj_attr
-        quantizers = [getattr(module, f"{first}_input_quantizer", None)]
-        quantizers.append(getattr(module, "down_proj_input_quantizer", None))
-        if getattr(module, "_weight_input_capture", False):
-            for attr in (f"{first}_weight_quantizers", "down_proj_weight_quantizers"):
-                quantizers.extend(getattr(module, attr, None) or [])
-        if not any(getattr(q, "is_enabled", False) for q in quantizers):
-            continue
-
-        impl = getattr(getattr(module, "config", None), "_experts_implementation", None)
-        missed.append(f"  {name} ({type(module).__name__}, experts_implementation={impl!r})")
+    for (name, module, here, _), anywhere in zip(experts, bypassed):
+        if anywhere:
+            impl = getattr(getattr(module, "config", None), "_experts_implementation", None)
+            where = "" if here else ", on another rank of its expert-parallel group"
+            missed.append(
+                f"  {name} ({type(module).__name__}, experts_implementation={impl!r}{where})"
+            )
 
     if not missed:
         return

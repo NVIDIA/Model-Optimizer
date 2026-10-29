@@ -70,6 +70,7 @@ from modelopt.torch.quantization.plugins.huggingface import (
     _is_sparse_sequaential_moe_block,
     _QuantFusedExperts,
     _QuantNonGatedFusedExperts,
+    assert_fused_experts_intercepted,
     normalize_experts_impl_on_the_fly,
     register_fused_experts_on_the_fly,
     register_sparse_moe_on_the_fly,
@@ -3353,3 +3354,26 @@ def _ep_gptq_helpers_take_local_experts_job(rank, size):
 def test_ep_gptq_builds_its_expert_helpers_from_this_ranks_experts(cpu_dist_workers):
     """A GPTQ helper only needs its expert's shape, so it must not gather other ranks' experts."""
     cpu_dist_workers.run(_ep_gptq_helpers_take_local_experts_job)
+
+
+def _ep_interception_check_job(rank, size):
+    """Only rank 0's experts ran past both hooks: every rank of their group raises, not just rank 0,
+    and none does once every rank's experts were reached."""
+    config = _ep_experts_config()
+    mesh = init_device_mesh("cpu", (size,))
+    whole = _experts_with_distinct_scales(config)
+    model = _ExpertsHolder(_sharded_like_transformers(whole, config, mesh, size))
+    mtq.quantize(model, _INT8_EXPERTS_CFG)
+    experts = model.experts
+    experts._forward_count, experts._intercept_count = 1, int(rank != 0)
+    with pytest.raises(RuntimeError, match="collected nothing") as raised:
+        assert_fused_experts_intercepted(model)
+    assert ("on another rank" in str(raised.value)) == (rank != 0)
+    experts._intercept_count = 1
+    assert_fused_experts_intercepted(model)
+
+
+def test_ep_interception_check_raises_on_every_rank_of_the_group(cpu_dist_workers):
+    """A rank whose experts saw no rows must not go on to wait in its next collective while the
+    others raise: the check reduces its verdict over the experts' expert-parallel group."""
+    cpu_dist_workers.run(_ep_interception_check_job)
