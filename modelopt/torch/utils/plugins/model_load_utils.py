@@ -240,9 +240,6 @@ def build_meta_causal_lm(
     if model_factory is None:
         model_factory = AutoModelForCausalLM
         if is_fsdp2_text_only_vlm(hf_config):
-            # Only newer Transformers versions supporting these models expose this factory.
-            from transformers import AutoModelForImageTextToText
-
             model_factory = AutoModelForImageTextToText
     # Where transformers records the class a remote-code build registers: in the auto class built
     # through, and in those a remote VLM builds its towers through. Read without a fallback: if a
