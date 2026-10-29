@@ -82,7 +82,8 @@ def test_final_initializer_metadata_matches_materialized_layout(existing_metadat
 
 
 @pytest.mark.parametrize("operation", ["Slice", "Reshape", "Tile"])
-def test_initializer_promotion_preserves_shared_structural_controls(operation):
+@pytest.mark.parametrize("ir_version", [3, 9])
+def test_initializer_promotion_preserves_shared_structural_controls(operation, ir_version):
     """Arithmetic readers receive a private view while structural controls keep their native rank."""
     shape = [1, 1, 2, 4] if operation == "Tile" else [1, 1, 2, 3]
     control = {"Slice": [1], "Reshape": [6], "Tile": [1, 1, 1, 2]}[operation]
@@ -112,8 +113,13 @@ def test_initializer_promotion_preserves_shared_structural_controls(operation):
             initializers,
         ),
         opset_imports=[helper.make_opsetid("", 21)],
-        ir_version=9,
+        ir_version=ir_version,
     )
+    if ir_version <= 3:
+        model.graph.input.extend(
+            helper.make_tensor_value_info(tensor.name, tensor.data_type, list(tensor.dims))
+            for tensor in model.graph.initializer
+        )
     feeds = {"x": np.arange(np.prod(shape), dtype=np.int64).reshape(shape)}
     expected = _execute(model, feeds)
     tensor = model.graph.initializer[0]
