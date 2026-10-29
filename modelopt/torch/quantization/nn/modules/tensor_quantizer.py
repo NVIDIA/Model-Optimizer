@@ -1133,6 +1133,11 @@ class TensorQuantizer(nn.Module):
 
     def export_amax(self) -> torch.Tensor | None:
         """Export correctly formatted/shaped amax."""
+        if self._use_constant_amax:
+            # This mode has no amax buffer; export the same range used by forward.
+            return torch.tensor(
+                [torch.finfo(torch.float8_e4m3fn).max], dtype=torch.float32, device="cpu"
+            )
         if self.block_sizes is not None and self.block_sizes.get("type", None) == "dynamic":
             # Dynamic block quantizers keep a per-tensor amax (the NVFP4 second-level scale) that
             # needs no reshaping, but it still has to be positive for the exporters.

@@ -739,8 +739,14 @@ def _kv_attention(k_cfg, v_cfg, k_amax=896.0, v_amax=224.0) -> nn.Module:
         (_FP8_KV, _NVFP4_KV, "FP8_K_NVFP4_V", 2.0, 0.5),
     ],
 )
-def test_kv_cache_capture(k_cfg, v_cfg, quantization_format, k_scale, v_scale):
+@pytest.mark.parametrize("constant_amax", [False, True])
+def test_kv_cache_capture(k_cfg, v_cfg, quantization_format, k_scale, v_scale, constant_amax):
     attention = _kv_attention(k_cfg, v_cfg)
+    if constant_amax:
+        for quantizer in (attention.k_bmm_quantizer, attention.v_bmm_quantizer):
+            quantizer.set_from_attribute_config({"use_constant_amax": True})
+            del quantizer._amax
+        k_scale = v_scale = 1.0
 
     state = capture_kv_cache_export_state(attention)
 
@@ -750,7 +756,7 @@ def test_kv_cache_capture(k_cfg, v_cfg, quantization_format, k_scale, v_scale):
     assert not state.k_scale.requires_grad and state.k_scale.device.type == "cpu"
     if quantization_format == "FP8":
         unclamped = capture_kv_cache_export_state(attention, clamp_fp8_scales=False)
-        assert unclamped.v_scale.item() == 0.5
+        assert unclamped.v_scale.item() == (1.0 if constant_amax else 0.5)
 
 
 def test_kv_cache_spec_rejects_what_it_cannot_export():
