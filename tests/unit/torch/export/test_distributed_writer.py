@@ -23,6 +23,7 @@ left out of the weight index. These tests drive each piece directly, on CPU.
 import contextlib
 import json
 import math
+import os
 import types
 from unittest import mock
 
@@ -682,6 +683,36 @@ def test_a_write_that_fails_on_one_rank_fails_on_every_rank(
     cpu_dist_workers.run(_one_rank_fails_job, tmp_dir=tmp_path, fails=fails)
 
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
+def _shard_commit_fails_job(rank, world_size, tmp_dir):
+    # Every file is written; rank 1 then fails to rename its shard into place.
+    replace = os.replace
+
+    def failing_shard_rename(src, dst):
+        if str(dst).endswith(".safetensors"):
+            raise OSError("disk full")
+        replace(src, dst)
+
+    failure = (
+        mock.patch(f"{_WRITER}.os.replace", side_effect=failing_shard_rename)
+        if rank == 1
+        else contextlib.nullcontext()
+    )
+    with bounded_collectives(), failure, pytest.raises((OSError, RuntimeError), match="disk full"):
+        _write_even_shards({f"rank{rank}.weight": torch.ones(2)}, tmp_dir, "1MB", rank, world_size)
+
+
+@pytest.mark.parametrize("existing", [False, True], ids=["empty", "over-a-checkpoint"])
+def test_the_index_goes_in_place_only_after_every_shard(cpu_dist_workers, tmp_path, existing):
+    """A rank that fails to put its shard in place leaves the index as it was, so an index in the
+    directory never names shards that are missing."""
+    index = tmp_path / "model.safetensors.index.json"
+    before = _existing_checkpoint(tmp_path)[index.name] if existing else None
+
+    cpu_dist_workers.run(_shard_commit_fails_job, tmp_dir=tmp_path)
+
+    assert (index.read_bytes() if index.exists() else None) == before
 
 
 def _cross_rank_collision_job(rank, world_size, tmp_dir):
