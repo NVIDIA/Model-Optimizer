@@ -20,14 +20,18 @@
 model's ``state_dict`` names; ``_fsdp2_wrap_modules`` picks the blocks FSDP2 shards. The loads run
 for real on CPU, from tiny transformers models into hand-written safetensors files. DCP loads in a
 single process without a process group; the tests that need the distributed path start a one-rank
-gloo group.
+gloo group, or run on the pooled two-rank one.
 """
+
+from contextlib import nullcontext
+from unittest import mock
 
 import pytest
 import torch
 import torch.distributed.checkpoint as dcp
 from safetensors.torch import save_file
 from torch import nn
+from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
@@ -35,6 +39,7 @@ from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tenso
 pytest.importorskip("accelerate")
 pytest.importorskip("transformers")
 
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.transformers_models import get_tiny_llama
 from accelerate import init_empty_weights
 from transformers import AutoModelForImageTextToText, Qwen2_5_VLConfig
@@ -638,3 +643,45 @@ def test_a_tie_laid_out_differently_is_refused_and_left_as_it_was(gloo_world_of_
         _copy_tied_values(kept, src, "lm_head.weight")
 
     assert torch.equal(local, before)
+
+
+# ---------------------------------------------------------------- one rank failing to prepare
+
+# Where a rank's preparation fails, before the load's collectives: what it raises, and with what.
+_FAILURES = {
+    "metadata": (HuggingFaceStorageReader, "read_metadata", OSError, "cannot read the checkpoint"),
+    "materialize": (nn.Module, "to_empty", MemoryError, "out of device memory"),
+}
+
+
+def _one_rank_fails_preparing_job(rank, size, ckpt_dir, failure):
+    owner, attr, error, message = _FAILURES[failure]
+    model = _meta_twin(get_tiny_llama)
+    entered, refused = [], None
+
+    def dcp_load(state_dict, **kwargs):
+        # As the load's collectives do: a rank in them waits for every peer.
+        entered.append(rank)
+        torch.distributed.barrier()
+
+    with (
+        bounded_collectives(),
+        mock.patch.object(dcp, "load", dcp_load),
+        mock.patch.object(owner, attr, side_effect=error(message)) if rank == 1 else nullcontext(),
+    ):
+        try:  # not pytest.raises: its failure would end the pooled worker instead of the job
+            _meta_dcp_load(model, ckpt_dir, "cpu", load_names=_every_name(model))
+        except Exception as e:
+            refused = str(e)
+    # Rank 1's failure on both ranks, before either entered the load.
+    assert not entered, (rank, entered)
+    assert refused is not None and message in refused, (rank, refused)
+    assert rank == 1 or "rank 1 failed" in refused, refused
+
+
+@pytest.mark.parametrize("failure", list(_FAILURES))
+def test_a_rank_failing_to_prepare_the_load_fails_every_rank(cpu_dist_workers, tmp_path, failure):
+    """Each rank reads the checkpoint and materializes its params before DCP's collective load. One
+    failing there, alone, fails every rank, rather than leave the others waiting in the load."""
+    ckpt_dir = _save(tmp_path, get_tiny_llama().state_dict())
+    cpu_dist_workers.run(_one_rank_fails_preparing_job, ckpt_dir=ckpt_dir, failure=failure)
