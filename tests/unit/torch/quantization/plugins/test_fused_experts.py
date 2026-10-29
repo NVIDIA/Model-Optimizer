@@ -15,11 +15,13 @@
 
 """Tests for _QuantFusedExperts: generic fused MoE quantization and export."""
 
+import ast
 import copy
 import sys
 import warnings
 import weakref
 from contextlib import nullcontext
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -34,6 +36,7 @@ from torch.distributed.tensor.debug import CommDebugMode
 
 pytest.importorskip("transformers")
 
+import transformers
 from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_params
 from transformers import PretrainedConfig, Qwen3MoeConfig
 from transformers.integrations.finegrained_fp8 import FP8Experts
@@ -3011,6 +3014,30 @@ class TestFusedExpertsInterceptionCheck:
         finally:
             TestFusedExpertsCalibration._cleanup_registry(_SyntheticFusedExperts)
         assert counts == [1, 1]
+
+    def test_transformers_experts_take_the_routing_indices_second(self):
+        """forward() reads the routing indices as the second positional argument, after the hidden
+        states, to count only the forwards that route rows to this rank's experts: an experts class
+        taking them in another place would have its routing weights compared with num_experts.
+        GPT-OSS-style experts name them router_indices."""
+        checked = 0
+        for path in sorted((Path(transformers.__file__).parent / "models").glob("*/modeling_*.py")):
+            source = path.read_text()
+            if "use_experts_implementation" not in source:
+                continue
+            for node in ast.parse(source).body:
+                if not isinstance(node, ast.ClassDef) or not any(
+                    "use_experts_implementation" in ast.unparse(d) for d in node.decorator_list
+                ):
+                    continue
+                methods = {n.name: n for n in node.body if isinstance(n, ast.FunctionDef)}
+                if "forward" not in methods:  # inherited: checked on the class that defines it
+                    continue
+                params = [arg.arg for arg in methods["forward"].args.args]
+                assert params[1] == "hidden_states", (node.name, params)
+                assert params[2] in ("top_k_index", "router_indices"), (node.name, params)
+                checked += 1
+        assert checked
 
     @pytest.mark.parametrize("reached_before", [False, True], ids=["first-pass", "later-pass"])
     def test_experts_whose_forward_ran_past_both_hooks_still_fail_loudly(self, reached_before):
