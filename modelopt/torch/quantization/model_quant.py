@@ -76,7 +76,6 @@ __all__ = [
 # own there too when its config turns distributed_sync off.
 _RANK_LOCAL_CALIBRATION = (
     "awq_lite",
-    "awq_clip",
     "awq_full",
     "svdquant",
     "local_hessian",
@@ -151,8 +150,8 @@ def _refuse_unsupported_distributed_calibration(
             f"Calibrating with {', '.join(refused)} is not supported on a model distributed over "
             f"{plan.world_size} ranks. Each rank calibrates on its own data and this calibration "
             "keeps what it gathers on the rank, so the ranks would calibrate their copies, or their "
-            "shards, of a weight differently. Calibrate with max, MSE, GPTQ or SmoothQuant, with "
-            "distributed_sync on, or in a single process."
+            "shards, of a weight differently. Calibrate with max, MSE, GPTQ, SmoothQuant or "
+            "awq_clip, with distributed_sync on, or in a single process."
         )
     if algorithm is None or not plan.is_expert_parallel:
         return

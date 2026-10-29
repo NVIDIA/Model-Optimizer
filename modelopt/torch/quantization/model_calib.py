@@ -2067,6 +2067,14 @@ def awq_clip(
                 indices, self.awq_clip.w_amax * shrink, self.awq_clip.best_clip_val
             )
 
+    def _data_parallel_mean(self, loss):
+        """``loss`` averaged over the data-parallel ranks, so every replica picks the same clip."""
+        parallel_group = self.parallel_state.data_parallel_group
+        if parallel_group.is_initialized():
+            dist.all_reduce(loss, op=dist.ReduceOp.SUM, group=parallel_group.group)
+            loss /= parallel_group.world_size()
+        return loss
+
     def _clip_search(self, inputs, co_bsz=256, max_tokens=16):
         weight = self.weight
         self.weight_quantizer.enable()
@@ -2080,7 +2088,7 @@ def awq_clip(
                 self.weight_quantizer.amax = original_amax * shrink
                 out = inputs @ self.weight_quantizer(self.weight).T
                 loss = (out - out_actual).float().pow(2).mean()
-                self.awq_clip.loss[shrink] += loss
+                self.awq_clip.loss[shrink] += _data_parallel_mean(self, loss)
         else:
             # weight  [co, ci] -> [co, 1, n_block, block_size]
             # inputs  [..., ci] -> [1, max_tokens, n_block, block_size]
@@ -2124,12 +2132,7 @@ def awq_clip(
                     cur_out = (inputs * cur_w).sum(dim=-1)  # co_bsz, max_tokens, n_block
 
                     # co_bsz, n_block
-                    loss = (cur_out - org_out).float().pow(2).mean(dim=1)
-
-                    parallel_group = self.parallel_state.data_parallel_group
-                    if parallel_group.is_initialized():
-                        dist.all_reduce(loss, op=dist.ReduceOp.SUM, group=parallel_group.group)
-                        loss /= parallel_group.world_size()
+                    loss = _data_parallel_mean(self, (cur_out - org_out).float().pow(2).mean(dim=1))
 
                     del cur_out, cur_w
                     self.awq_clip.loss[shrink][
