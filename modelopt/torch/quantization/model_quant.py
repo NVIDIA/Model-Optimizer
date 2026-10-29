@@ -113,18 +113,21 @@ def _names_the_experts_groups(
 ) -> bool:
     """Whether ``state`` names the groups a routed expert of ``plan`` syncs its scales over.
 
-    Those of the ``(edp, ep)`` mesh the expert-parallel load lays the ranks out in: as its
-    expert-parallel group, this rank's row, whose ranks hold the experts' shards in row order, and
-    as its data-parallel group, its column, the ranks holding the same shard.
+    Those of the ``(edp, ep)`` mesh the expert-parallel load lays the ranks out in, with either axis
+    innermost: as its expert-parallel group, this rank's row, whose ranks hold the experts' shards
+    in row order, and as its data-parallel group, its column, the ranks holding the same shard.
     """
     if state is None or not state.expert_model_parallel_group.is_initialized():
         return False
-    row, column = divmod(dist.rank(), plan.ep_size)
-    expert_parallel = range(row * plan.ep_size, (row + 1) * plan.ep_size)
-    data_parallel = range(column, plan.world_size, plan.ep_size)
-    return _group_ranks(state.expert_model_parallel_group) == list(expert_parallel) and sorted(
-        _group_ranks(state.data_parallel_group)
-    ) == list(data_parallel)
+    r, ep, edp, world = dist.rank(), plan.ep_size, plan.edp, plan.world_size
+    groups = (
+        _group_ranks(state.expert_model_parallel_group),
+        sorted(_group_ranks(state.data_parallel_group)),
+    )
+    return groups in (  # (row, column) with the ep axis innermost, or outermost
+        (list(range(r - r % ep, r - r % ep + ep)), list(range(r % ep, world, ep))),
+        (list(range(r % edp, world, edp)), list(range(r - r % edp, r - r % edp + edp))),
+    )
 
 
 def _refuse_unsupported_distributed_calibration(

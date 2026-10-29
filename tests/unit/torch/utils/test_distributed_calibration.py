@@ -681,29 +681,32 @@ def test_expert_parallel_calibration_needs_the_experts_expert_parallel_group(
     cpu_dist_workers.run(_expert_parallel_calibration_job, layout=layout)
 
 
-# Rank 0 of four at EP 2, in the (edp, ep) = (2, 2) mesh: ranks 0 and 1 shard the experts between
-# them, ranks 2 and 3 do the same, and rank 2 holds the same shard as rank 0. The two-rank pool cannot
-# build these groups, so the process group answers as a four-rank launch's would.
+# Rank 0 of four at EP 2, in the (edp, ep) = (2, 2) mesh: with ep innermost, ranks 0 and 1 shard the
+# experts between them, ranks 2 and 3 do the same, and rank 2 holds the same shard as rank 0; with ep
+# outermost, ranks 0 and 2 shard them and rank 1 holds rank 0's. The two-rank pool cannot build these
+# groups, so the process group answers as a four-rank launch's would.
 _FOUR_RANK_GROUPS = {
-    "ep": [0, 1],
-    "ep-reordered": [1, 0],
-    "edp": [0, 2],
-    "diagonal": [0, 3],
-    "world": [0, 1, 2, 3],
+    "0,1": [0, 1],
+    "1,0": [1, 0],
+    "0,2": [0, 2],
+    "0,3": [0, 3],
+    "all": [0, 1, 2, 3],
 }
 
 
 @pytest.mark.parametrize(
     ("ep", "dp", "seeded"),
     [
-        ("ep", "edp", True),
-        ("ep", "ep", False),
-        ("ep", "diagonal", False),
-        ("ep-reordered", "edp", False),
-        ("world", "edp", False),
+        ("0,1", "0,2", True),
+        ("0,2", "0,1", True),
+        ("0,1", "0,1", False),
+        ("0,1", "0,3", False),
+        ("1,0", "0,2", False),
+        ("all", "0,2", False),
     ],
     ids=[
         "seeded",
+        "seeded-with-ep-outermost",
         "data-parallel-over-the-expert-parallel-ranks",
         "data-parallel-over-another-shard",
         "expert-parallel-in-another-order",
@@ -715,7 +718,7 @@ def test_the_experts_groups_are_checked_by_their_ranks(monkeypatch, ep, dp, seed
     expert-parallel ranks, or ranks that meet them only at this one but hold another shard (rank 3
     holds rank 1's), max's and GPTQ's syncs would merge different experts' scales. Nor is an
     expert-parallel group over more ranks than the plan shards over, or in another order, which
-    gives this rank another shard."""
+    gives this rank another shard. Either axis of the mesh may be the innermost."""
     monkeypatch.setattr(mto_dist, "backend", lambda: "torch")
     monkeypatch.setattr(mto_dist, "rank", lambda group=None: 0)
     monkeypatch.setattr(
