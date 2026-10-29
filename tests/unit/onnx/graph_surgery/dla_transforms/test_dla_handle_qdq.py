@@ -87,14 +87,14 @@ def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
     """Execute the test model on the CPU and return named outputs."""
     _clamp_ir(model)
     options = ort.SessionOptions()
-    # Preserve the wrappers under test; ORT's QDQ propagation can introduce invalid signed Q nodes.
+    options.intra_op_num_threads = 1
     options.add_session_config_entry(
         "optimization.disable_specified_optimizers", "QDQPropagationTransformer"
     )
     sess = ort.InferenceSession(
         model.SerializeToString(), options, providers=["CPUExecutionProvider"]
     )
-    return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
+    return dict(zip([output.name for output in model.graph.output], sess.run(None, feeds)))
 
 
 def _assert_wrapped(tr, op_type: str, orig_name: str) -> None:

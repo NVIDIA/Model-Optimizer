@@ -84,12 +84,12 @@ def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
     """Execute all graph outputs with the optional CPU runtime."""
     _clamp_ir_version(model)
     options = ort.SessionOptions()
-    # Compare graph-surgery semantics before runtime quantization fusions.
+    options.intra_op_num_threads = 1
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
     sess = ort.InferenceSession(
         model.SerializeToString(), options, providers=["CPUExecutionProvider"]
     )
-    return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
+    return dict(zip([output.name for output in model.graph.output], sess.run(None, feeds)))
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

@@ -146,7 +146,11 @@ def _execute(model, feeds, runtime):
     """Execute all graph outputs with the selected independent engine."""
     if runtime == "reference":
         return ReferenceEvaluator(model).run(None, feeds)
-    session = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    session = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"], sess_options=options
+    )
     return session.run(None, feeds)
 
 

@@ -110,8 +110,12 @@ def _make_instancenorm_model(input_shape: list, epsilon: float = 1e-5) -> onnx.M
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
     """Execute all public outputs on the CPU runtime."""
     _clamp_ir(model)
-    sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
-    return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    sess = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"], sess_options=options
+    )
+    return dict(zip([output.name for output in model.graph.output], sess.run(None, feeds)))
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

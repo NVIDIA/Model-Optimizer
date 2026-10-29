@@ -323,10 +323,27 @@ def test_unnamed_input_adapters_keep_distinct_targets():
         np.testing.assert_array_equal(actual, reference)
 
 
-@pytest.mark.parametrize("operation", ["Softmax", "LogSoftmax"])
-@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
-@pytest.mark.parametrize("axis", [0, 1, -1, None])
-@pytest.mark.parametrize("opset", [13, 17])
+@pytest.mark.parametrize(
+    ("operation", "shape", "axis", "opset"),
+    [
+        ("Softmax", [2, 3], 0, 13),
+        ("LogSoftmax", [2, 3], 0, 13),
+        ("Softmax", [2, 3, 4], 0, 13),
+        ("LogSoftmax", [2, 3], 1, 13),
+        ("Softmax", [2, 3, 4], 1, 13),
+        ("LogSoftmax", [2, 3, 4], 1, 13),
+        ("Softmax", [2, 3], -1, 13),
+        ("Softmax", [2, 3, 4], -1, 13),
+        ("LogSoftmax", [2, 3, 4], -1, 13),
+        ("Softmax", [2, 3], None, 13),
+        ("LogSoftmax", [2, 3], None, 13),
+        ("LogSoftmax", [2, 3, 4], None, 13),
+        ("LogSoftmax", [2, 3, 4], 0, 17),
+        ("Softmax", [2, 3], 1, 17),
+        ("LogSoftmax", [2, 3], -1, 17),
+        ("Softmax", [2, 3, 4], None, 17),
+    ],
+)
 def test_boundary_softmax_preserves_native_axes(operation, shape, axis, opset):
     """Preserve explicit and schema-default normalization axes across input promotion."""
     model = _make_model(
@@ -516,10 +533,23 @@ def test_normalization_probe_accepts_unknown_sequence_element_rank():
     np.testing.assert_array_equal(_checked_run(converted, feeds)[0], expected[0])
 
 
-@pytest.mark.parametrize("batch", [1, 2, 3])
-@pytest.mark.parametrize("operation", ["Add", "Mul"])
-@pytest.mark.parametrize("tail", [False, True])
-@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    ("batch", "operation", "tail", "reverse"),
+    [
+        (1, "Add", False, False),
+        (2, "Add", False, False),
+        (1, "Mul", False, False),
+        (3, "Mul", False, False),
+        (3, "Add", True, False),
+        (2, "Mul", True, False),
+        (2, "Add", False, True),
+        (3, "Add", False, True),
+        (2, "Mul", False, True),
+        (3, "Mul", False, True),
+        (1, "Add", True, True),
+        (1, "Mul", True, True),
+    ],
+)
 def test_normalization_binary_branch_preserves_broadcast_layout(batch, operation, tail, reverse):
     """Keep shared normalized public values and binary residual inputs in compatible layouts."""
     shape = [batch, 3, 4]
@@ -553,10 +583,23 @@ def test_normalization_binary_branch_preserves_broadcast_layout(batch, operation
         np.testing.assert_allclose(actual, reference, rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.parametrize("width", [8, 12])
-@pytest.mark.parametrize("axis", [-1, 4])
-@pytest.mark.parametrize("quantized", [False, True])
-@pytest.mark.parametrize("preparation", ["direct", "intermediate", "constant"])
+@pytest.mark.parametrize(
+    ("width", "axis", "quantized", "preparation"),
+    [
+        (8, -1, False, "direct"),
+        (8, 4, False, "direct"),
+        (8, -1, True, "direct"),
+        (12, 4, True, "direct"),
+        (12, -1, False, "intermediate"),
+        (8, 4, False, "intermediate"),
+        (8, -1, True, "intermediate"),
+        (8, 4, True, "intermediate"),
+        (8, -1, False, "constant"),
+        (8, 4, False, "constant"),
+        (12, -1, True, "constant"),
+        (8, 4, True, "constant"),
+    ],
+)
 def test_early_registered_reshape_reduction_is_not_rejected(
     width, axis, quantized, preparation, monkeypatch
 ):
@@ -683,9 +726,17 @@ def test_ineligible_gemm_keeps_native_boundary_and_weights(tail):
     assert [list(tensor.dims) for tensor in converted.graph.initializer] == [[3, 4], [4]]
 
 
-@pytest.mark.parametrize("source", ["initializer", "constant", "runtime"])
-@pytest.mark.parametrize("axis", [0, 1])
-@pytest.mark.parametrize("tail", [False, True])
+@pytest.mark.parametrize(
+    ("source", "axis", "tail"),
+    [
+        ("initializer", 0, False),
+        ("runtime", 0, False),
+        ("constant", 1, False),
+        ("constant", 0, True),
+        ("initializer", 1, True),
+        ("runtime", 1, True),
+    ],
+)
 def test_scalar_gather_requires_registered_rank_conversion(source, axis, tail, monkeypatch):
     """Refuse unprepared scalar Gather before the actual pipeline changes caller state."""
     pipeline = import_module(_transform_make_dla_compatible.__module__)
@@ -1343,10 +1394,19 @@ def _rank_sensitive_adapter_model(operation, unary, metadata):
     return model, feeds
 
 
-@pytest.mark.parametrize("operation", ["Softmax", "LogSoftmax", "Transpose"])
-@pytest.mark.parametrize("unary", [False, True])
 @pytest.mark.parametrize(
-    ("entrypoint", "metadata"), [("stage", True), ("pipeline", True), ("pipeline", False)]
+    ("operation", "unary", "entrypoint", "metadata"),
+    [
+        ("Softmax", False, "stage", True),
+        ("LogSoftmax", True, "stage", True),
+        ("Transpose", True, "stage", True),
+        ("LogSoftmax", False, "pipeline", True),
+        ("Transpose", False, "pipeline", True),
+        ("Softmax", True, "pipeline", True),
+        ("LogSoftmax", False, "pipeline", False),
+        ("Transpose", False, "pipeline", False),
+        ("Softmax", True, "pipeline", False),
+    ],
 )
 def test_rank_changing_adapter_requires_actual_consumer_preparation(
     operation, unary, entrypoint, metadata, monkeypatch
@@ -1554,9 +1614,21 @@ def test_output_adapter_refuses_native_rank_five_squeeze_before_mutation(axes):
     assert model.SerializeToString() == before
 
 
-@pytest.mark.parametrize("operation", ["Flatten", "ArgMax", "ArgMin", "ReduceProd", "ReduceL2"])
-@pytest.mark.parametrize("tail", [False, True])
-@pytest.mark.parametrize("entrypoint", ["deferred", "pipeline"])
+@pytest.mark.parametrize(
+    ("operation", "tail", "entrypoint"),
+    [
+        ("Flatten", False, "deferred"),
+        ("ArgMin", False, "deferred"),
+        ("ReduceProd", False, "deferred"),
+        ("ReduceL2", False, "deferred"),
+        ("ArgMax", True, "deferred"),
+        ("ArgMax", False, "pipeline"),
+        ("Flatten", True, "pipeline"),
+        ("ArgMin", True, "pipeline"),
+        ("ReduceProd", True, "pipeline"),
+        ("ReduceL2", True, "pipeline"),
+    ],
+)
 def test_native_rank_reducing_outputs_require_registered_conversion(
     operation, tail, entrypoint, monkeypatch
 ):

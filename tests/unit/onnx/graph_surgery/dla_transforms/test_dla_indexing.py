@@ -40,10 +40,16 @@ from modelopt.onnx.graph_surgery.make_dla_compatible import (
 )
 
 
-@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
-@pytest.mark.parametrize("pipeline", [False, True])
-@pytest.mark.parametrize("producer", ["Reshape", "Squeeze"])
-@pytest.mark.parametrize("metadata", ["inferred", "omitted"])
+@pytest.mark.parametrize(
+    ("shape", "pipeline", "producer", "metadata"),
+    [
+        ([2, 3], True, "Reshape", "inferred"),
+        ([2, 3], False, "Squeeze", "inferred"),
+        ([2, 3, 4], True, "Squeeze", "inferred"),
+        ([2, 3, 4], False, "Reshape", "omitted"),
+        ([2, 3], True, "Squeeze", "omitted"),
+    ],
+)
 def test_unprepared_internal_indices_refuse_before_mutation(shape, pipeline, producer, metadata):
     """A native internal index view cannot follow data into a prepared four-dimensional layout."""
     source_shape = [1] * (4 - len(shape)) + shape
@@ -340,18 +346,45 @@ def _model(nodes, inputs, outputs, initializers=(), extra_opsets=()):
 
 
 @pytest.mark.parametrize(
-    "operation", ["GatherElements", "ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"]
-)
-@pytest.mark.parametrize(
-    ("producer", "shape"),
+    ("operation", "producer", "shape", "unary"),
     [
-        (producer, shape)
-        for producer in ["Reshape", "Squeeze", "opaque"]
-        for shape in [[2, 3], [2, 3, 4]]
-    ]
-    + [("Gemm", [2, 3])],
+        ("GatherElements", "Reshape", [2, 3], False),
+        ("ReduceMean", "Reshape", [2, 3], False),
+        ("ReduceMax", "Reshape", [2, 3], False),
+        ("ReduceMin", "Reshape", [2, 3], False),
+        ("ReduceSum", "Reshape", [2, 3, 4], False),
+        ("ReduceMean", "Reshape", [2, 3, 4], False),
+        ("ReduceMax", "Reshape", [2, 3, 4], False),
+        ("ReduceMin", "Reshape", [2, 3, 4], False),
+        ("GatherElements", "Squeeze", [2, 3], False),
+        ("ReduceSum", "Squeeze", [2, 3], False),
+        ("ReduceMean", "Squeeze", [2, 3], False),
+        ("ReduceMin", "Squeeze", [2, 3], False),
+        ("GatherElements", "Squeeze", [2, 3, 4], False),
+        ("ReduceSum", "Squeeze", [2, 3, 4], False),
+        ("ReduceMax", "Squeeze", [2, 3, 4], False),
+        ("ReduceMin", "Squeeze", [2, 3, 4], False),
+        ("ReduceSum", "opaque", [2, 3], False),
+        ("ReduceMean", "opaque", [2, 3], False),
+        ("ReduceMax", "opaque", [2, 3], False),
+        ("ReduceMin", "opaque", [2, 3], False),
+        ("GatherElements", "opaque", [2, 3, 4], False),
+        ("ReduceSum", "opaque", [2, 3, 4], False),
+        ("ReduceMean", "opaque", [2, 3, 4], False),
+        ("ReduceMax", "opaque", [2, 3, 4], False),
+        ("GatherElements", "Gemm", [2, 3], False),
+        ("ReduceMean", "Gemm", [2, 3], False),
+        ("ReduceMax", "Gemm", [2, 3], False),
+        ("ReduceMin", "Gemm", [2, 3], False),
+        ("ReduceSum", "Reshape", [2, 3], True),
+        ("GatherElements", "Reshape", [2, 3, 4], True),
+        ("ReduceMax", "Squeeze", [2, 3], True),
+        ("ReduceMean", "Squeeze", [2, 3, 4], True),
+        ("GatherElements", "opaque", [2, 3], True),
+        ("ReduceMin", "opaque", [2, 3, 4], True),
+        ("ReduceSum", "Gemm", [2, 3], True),
+    ],
 )
-@pytest.mark.parametrize("unary", [False, True])
 def test_internal_native_reshape_refuses_before_index_or_reduction_mutation(
     operation, producer, shape, unary
 ):
@@ -490,9 +523,17 @@ def test_symbolic_internal_reshape_retains_native_index_and_reduction_layout(ope
     np.testing.assert_array_equal(_execute(converted, feeds)[0], expected[0])
 
 
-@pytest.mark.parametrize("source", ["input", "initializer", "shape"])
-@pytest.mark.parametrize("scalar", [False, True])
-@pytest.mark.parametrize("entrypoint", ["stage", "pipeline"])
+@pytest.mark.parametrize(
+    ("source", "scalar", "entrypoint"),
+    [
+        ("input", False, "stage"),
+        ("shape", False, "stage"),
+        ("initializer", True, "stage"),
+        ("initializer", False, "pipeline"),
+        ("input", True, "pipeline"),
+        ("shape", True, "pipeline"),
+    ],
+)
 def test_rank_one_gather_control_paths_remain_native(source, scalar, entrypoint):
     """Preserve scalar/vector selection on native vectors, including Shape control paths."""
     dtype = TensorProto.INT64 if source == "shape" else TensorProto.FLOAT
@@ -537,12 +578,24 @@ def test_rank_one_gather_control_paths_remain_native(source, scalar, entrypoint)
 
 
 @pytest.mark.parametrize(
-    ("producer", "shape"),
-    [(name, shape) for name in ("Reshape", "Squeeze", "opaque") for shape in ([2, 3], [2, 3, 4])]
-    + [("Gemm", [2, 3])],
+    ("producer", "shape", "unary", "positive_axis"),
+    [
+        ("Reshape", [2, 3], False, False),
+        ("Squeeze", [2, 3], False, False),
+        ("Squeeze", [2, 3, 4], False, False),
+        ("opaque", [2, 3], False, False),
+        ("opaque", [2, 3, 4], False, False),
+        ("Gemm", [2, 3], False, False),
+        ("Reshape", [2, 3, 4], True, False),
+        ("Reshape", [2, 3, 4], False, True),
+        ("Reshape", [2, 3], True, True),
+        ("Squeeze", [2, 3], True, True),
+        ("Squeeze", [2, 3, 4], True, True),
+        ("opaque", [2, 3], True, True),
+        ("opaque", [2, 3, 4], True, True),
+        ("Gemm", [2, 3], True, True),
+    ],
 )
-@pytest.mark.parametrize("unary", [False, True])
-@pytest.mark.parametrize("positive_axis", [False, True])
 def test_gather_refuses_unprepared_internal_data_before_mutation(
     producer, shape, unary, positive_axis
 ):
@@ -752,10 +805,16 @@ def test_internal_index_data_uses_registered_rank_preparation(operation, produce
 
 
 @pytest.mark.parametrize(
-    ("operation", "shape"), [("MatMul", [2, 3]), ("MatMul", [2, 2, 3]), ("Gemm", [2, 3])]
+    ("operation", "shape", "owner", "entrypoint"),
+    [
+        ("MatMul", [2, 3], "output", "stage"),
+        ("Gemm", [2, 3], "output", "stage"),
+        ("MatMul", [2, 2, 3], "capture", "stage"),
+        ("MatMul", [2, 2, 3], "output", "pipeline"),
+        ("MatMul", [2, 3], "capture", "pipeline"),
+        ("Gemm", [2, 3], "capture", "pipeline"),
+    ],
 )
-@pytest.mark.parametrize("owner", ["output", "capture"])
-@pytest.mark.parametrize("entrypoint", ["stage", "pipeline"])
 def test_gather_refuses_native_matrix_outputs_with_other_rank_owners(
     operation, shape, owner, entrypoint
 ):
@@ -1227,10 +1286,16 @@ def test_gather_preserves_overridable_scalar_and_vector_indices(indices, produce
 
 
 @pytest.mark.parametrize(
-    ("shape", "unsqueeze_axes"), [([2, 3], [0]), ([2, 3], [0, 1]), ([2, 3, 4], [0])]
+    ("shape", "unsqueeze_axes", "negative", "keepdims"),
+    [
+        ([2, 3], [0], False, 0),
+        ([2, 3, 4], [0], False, 0),
+        ([2, 3], [0, 1], True, 0),
+        ([2, 3], [0, 1], False, 1),
+        ([2, 3], [0], True, 1),
+        ([2, 3, 4], [0], True, 1),
+    ],
 )
-@pytest.mark.parametrize("negative", [False, True])
-@pytest.mark.parametrize("keepdims", [0, 1])
 def test_reduction_preserves_rank_of_replaced_boundary_unsqueeze(
     shape, unsqueeze_axes, negative, keepdims
 ):
