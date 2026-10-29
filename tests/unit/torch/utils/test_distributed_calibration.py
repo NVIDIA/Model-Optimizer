@@ -568,12 +568,12 @@ def test_forward_loop_refuses_a_batch_that_is_not_a_mapping():
         ("calibrate", "awq_lite", "awq_lite"),
         (
             "calibrate",
-            {"method": "nvfp4_act_headroom", "weight_scale_algorithm": "local_hessian"},
+            {"method": "nvfp4_act_headroom", "weight_scale_algorithm": {"method": "local_hessian"}},
             "local_hessian",
         ),
         (
             "calibrate",
-            {"method": "max", "distributed_sync": False},
+            {"method": "max", "distributed_sync": "false"},
             "max with distributed_sync=False",
         ),
         ("auto_quantize", {"method": "awq_lite"}, "awq_lite"),
@@ -585,7 +585,8 @@ def test_rank_local_calibration_is_refused_before_it_changes_a_distributed_model
 ):
     """Each rank calibrates on its own data, and AWQ keeps what its search gathers on the rank: the
     ranks' copies of a weight would come out different. So would local_hessian, run by another
-    algorithm for its weight scales, and max told not to sync. The refusal comes before any change."""
+    algorithm for its weight scales, and max told not to sync, in any spelling its schema reads as
+    off. The refusal comes before any change."""
     model = nn.Sequential(nn.Linear(16, 16))
     set_distribution_plan(model, DistributionPlan(world_size=2))
     if entry == "calibrate":
