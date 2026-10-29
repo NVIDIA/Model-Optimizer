@@ -589,6 +589,39 @@ The example scripts above also have an additional flag `--tasks`, where the actu
 
 > *NOTE: AutoQuantize requires backpropagation of the model. Models without backpropagation support (e.g., Llama-4) will not work with AutoQuantize when using the `gradient` or `aumann_shapley` methods. Aumann-Shapley does not need labels, but it still backpropagates its comparison loss. The `kl_div` method does not require backpropagation.*
 
+### Frozen-data GSQ/RCO comparison
+
+`hf_gsq_rco.py` compares ordinary AutoQuant, GSQ with gradient search, RCO with ordinary candidates,
+and GSQ plus RCO. All use BF16 activations, per-tensor FP8 and static block-16 NVFP4 weights,
+the same frozen C4 tokens and exact cached teacher head inputs. The text decoder is eligible;
+vision, embeddings, output head, MTP and the existing protected projections remain unquantized.
+
+Prepare a four-layer hybrid-block pilot on one visible CUDA GPU. Supply exact repository
+commit revisions, including when the model and tokenizer are already cached locally:
+
+```bash
+python hf_gsq_rco.py --model /path/to/original/Qwen3.8-27B --multimodal \
+  --model-revision MODEL_COMMIT --tokenizer-revision TOKENIZER_COMMIT \
+  --c4-revision C4_COMMIT --wikitext-revision WIKITEXT_COMMIT \
+  --output /path/to/fresh/pilot --pilot-layers 4 --calibration-count 8 \
+  --heldout-count 4 --max-length 128 --head-chunk-tokens 16 --prepare-only
+```
+
+`--prepare-only` writes frozen tokens, masks, provenance and exact teacher caches without a search.
+For the full workload, omit `--pilot-layers`, use 512 calibration sequences up to 4096 tokens, and
+declare the optimization schedules before running. `--initializer max` and `--initializer gptq`
+select matched candidate initialization; use separate output directories for these comparisons.
+`--gsq-options` and `--rco-options` accept their normal algorithm/method settings. The defaults
+include all four variants and the ten exact historical input ceilings; repeated `--variant` and
+`--budget-index` flags restrict a pilot without changing budget identities.
+
+The example reuses candidate checkpoints across budgets and uses separate RCO search checkpoints.
+GSQ optimizer checkpoints are separate for each format, with automatic resume when their manifests
+exist. Per-target JSON records requested/achieved cost, minimum feasible cost, duplicate allocations,
+held-out perplexity/KL, time, peak GPU memory, and checkpoint reload comparisons. Ceilings below the
+stock minimum are reported as infeasible. A completed run does not itself certify interrupted-resume
+equivalence or an accuracy improvement; those require separate measured validation.
+
 ## Real Quant
 
 When working with large language models, memory constraints can be a significant challenge. ModelOpt provides a workflow for initializing HF models with compressed weights across multiple GPUs to dramatically reduce memory usage. Check `--low_memory_mode` option in hf_ptq.py for more details.
