@@ -15,16 +15,19 @@
 """GPTQ on a GGML format through ``mtq.quantize``, with the CUDA encoders."""
 
 import copy
+from unittest.mock import patch
 
 import pytest
 import torch
 from _test_utils.torch.quantization.models import TOY_MOE_HIDDEN, ToyMoE
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.algorithms import AutoQuantizeGradientSearcher
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.nn import QuantModule
 from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
+from modelopt.torch.utils import safe_load
 
 
 def _iq1_s_config(algorithm):
@@ -178,3 +181,129 @@ def _autoquant_mixed_iq(rank, size, layout, tmp_path):
                         )
                         torch.testing.assert_close(weight, decoded, rtol=0, atol=0)
                 del weight
+
+
+@pytest.mark.timeout(90)
+@pytest.mark.parametrize("offload", [False, True])
+def test_candidate_workers_merge_all_formats_and_resume(dist_workers, tmp_path, offload):
+    dist_workers.run(_candidate_workers_merge, tmp_path, offload)
+
+
+def _candidate_workers_merge(rank, size, tmp_path, offload):
+    # This test specifically requires the optional FSDP2 API.
+    from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
+
+    torch.manual_seed(24)
+    source = ToyMoE().to(device="cuda", dtype=torch.bfloat16)
+    inputs = torch.randn(8 + rank, TOY_MOE_HIDDEN, device="cuda", dtype=torch.bfloat16)
+    formats = []
+    for name in ("iq2_xxs", "iq2_xs", "iq2_s"):
+        config = _iq1_s_config({"method": "gptq", "block_size": 256, "perc_damp": 0.3})
+        config["quant_cfg"][1]["cfg"].update(
+            num_bits=name, effective_bits=GGML_FORMAT_REGISTRY[name].effective_bits
+        )
+        formats.append((config, name))
+    options = {
+        "constraints": {"effective_bits": 3.25},
+        "quantization_formats": [*formats, mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
+        "data_loader": [inputs],
+        "forward_step": lambda m, b: m(b),
+        "loss_func": lambda output, batch: output.float().square().mean(),
+        "num_calib_steps": 1,
+        "num_score_steps": 1,
+        "verbose": False,
+    }
+
+    def fresh_model():
+        model = copy.deepcopy(source)
+        kwargs = {"offload_policy": CPUOffloadPolicy()} if offload else {}
+        fully_shard(model.mlp, **kwargs)
+        fully_shard(model, **kwargs)
+        torch.manual_seed(123)
+        return model
+
+    directory, checkpoint = tmp_path / "candidates", tmp_path / "search"
+    for index in (0, 2, 1, 4, 3, 0):
+        model, state = mtq.auto_quantize(
+            fresh_model(), **options, calibration={"directory": directory, "candidate": index}
+        )
+        assert len(state["quantizer_states"]) == 1 and not state["candidate_stats"]
+        with enable_weight_access_and_writeback(model.mlp.experts, model):
+            for name, value in model.mlp.experts.named_parameters(recurse=False):
+                torch.testing.assert_close(value, getattr(source.mlp.experts, name), rtol=0, atol=0)
+        del model, state
+    model, merged = mtq.auto_quantize(
+        fresh_model(), **options, calibration={"directory": directory}, checkpoint=str(checkpoint)
+    )
+    with torch.no_grad():
+        actual = model(inputs).cpu()
+    del model
+    serial, expected = mtq.auto_quantize(fresh_model(), **options)
+    with torch.no_grad():
+        torch.testing.assert_close(actual, serial(inputs).cpu(), rtol=0, atol=0)
+    for recipe, state in merged["quantizer_states"].items():
+        reference = expected["quantizer_states"][recipe]
+        assert state["metadata"] == reference["metadata"]
+        torch.testing.assert_close(state["state_dict"], reference["state_dict"], rtol=0, atol=0)
+    assert merged["candidate_stats"] == expected["candidate_stats"]
+    saved = safe_load(checkpoint / f"rank{rank}.pth")
+    assert saved["calibration_provenance"] == merged["calibration_provenance"]
+    del serial
+    generation = checkpoint.resolve()
+    for budget in (2.75, 3.0):
+        options["constraints"]["effective_bits"] = budget
+        model, resumed = mtq.auto_quantize(
+            fresh_model(),
+            **options,
+            calibration={"directory": directory},
+            checkpoint=str(checkpoint),
+        )
+        assert resumed["candidate_stats"] == merged["candidate_stats"]
+        assert resumed["best"]["is_satisfied"]
+        assert checkpoint.resolve() == generation
+        del model
+
+    for failure in ("inputs", "destination", "write"):
+        if failure == "write":
+            checkpoint = tmp_path / "interrupted-search"
+
+            def interrupt_scoring(self):
+                raise RuntimeError("Injected scoring interruption")
+
+            with (
+                patch.object(
+                    AutoQuantizeGradientSearcher, "estimate_sensitivity_scores", interrupt_scoring
+                ),
+                pytest.raises(RuntimeError),
+            ):
+                mtq.auto_quantize(
+                    fresh_model(),
+                    **options,
+                    calibration={"directory": directory},
+                    checkpoint=str(checkpoint),
+                )
+            generation = checkpoint.resolve()
+        local_options = dict(options)
+        destination = checkpoint
+        if failure == "inputs" and rank == 0:
+            local_options["data_loader"] = [inputs + 1]
+        if failure == "destination" and rank == 0:
+            destination = tmp_path / "different-checkpoint"
+
+        def save_on_rank(value, path):
+            if failure == "write" and rank == 0:
+                raise OSError("Injected rank-local write failure")
+            torch.save(value, path)
+
+        with (
+            patch("modelopt.torch.quantization._calibration_store.safe_save", save_on_rank),
+            pytest.raises(ValueError),
+        ):
+            mtq.auto_quantize(
+                fresh_model(),
+                **local_options,
+                calibration={"directory": directory},
+                checkpoint=str(destination),
+            )
+        assert checkpoint.resolve() == generation
+        assert (generation / f"rank{rank}.pth").is_file()

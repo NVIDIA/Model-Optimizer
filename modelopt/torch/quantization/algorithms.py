@@ -719,6 +719,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "disabled_layers": None,
             "verbose": is_master(),
             "checkpoint": None,
+            "calibration": None,
             "cost_model": COST_MODEL_WEIGHT,
             "cost": {},
             "active_moe_expert_ratio": None,
@@ -741,6 +742,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "disabled_layers": None,
             "candidate_stats": defaultdict(dict),
             "quantizer_states": {},
+            "calibration_provenance": None,
             "best": {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False},
         }
 
@@ -761,6 +763,12 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     def load_search_checkpoint(self) -> bool:
         return super().load_search_checkpoint(strict=False)
+
+    def save_search_checkpoint(self, verbose=False):
+        if self.config.get("calibration") is not None:
+            self.config["calibration"].save(self)
+        else:
+            super().save_search_checkpoint(verbose)
 
     @staticmethod
     def _is_auto_quantize_module(module):
@@ -1297,6 +1305,19 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.resolved_search_setup_signature = resolved_search_setup_signature
         self._verify_resolved_constraint(quant_recipe_hparams)
 
+        calibration = self.config.get("calibration")
+        if calibration is not None:
+            schemas = {}
+            try:
+                for recipe in search_recipes:
+                    for hparam in quant_recipe_hparams:
+                        hparam.set_calibration_recipe(recipe)
+                    schemas[recipe] = set(get_quantizer_state_dict(self.model))
+            finally:
+                for hparam in quant_recipe_hparams:
+                    hparam.restore_active_quantizers()
+            calibration.prepare(self, search_recipes, schemas)
+
         QuantRecipe.disable_folding_pqs_to_weights()
 
         # Iterate over the search recipes and calibrate the quantizers for each recipe
@@ -1304,6 +1325,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         try:
             for recipe in search_recipes:
                 if recipe == QuantRecipe(quant_cfg=None):  # No-quant format
+                    continue
+                if calibration is not None and not calibration.includes(recipe):
                     continue
 
                 for hparam in quant_recipe_hparams:
@@ -1364,6 +1387,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             # workers publish one immutable candidate; serial calibration avoids growing rewrites.
             if calibrated:
                 self.save_search_checkpoint(verbose=self.config["verbose"])
+
+        if calibration is not None and calibration.candidate is not None:
+            return
 
         if self.candidate_stats:
             if self.config["verbose"]:
@@ -1464,6 +1490,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     def run_search(self):
         """Search for the best per-layer quantization configuration and return the best model and configuration."""
+        calibration = self.config.get("calibration")
+        if calibration is not None and calibration.candidate is not None:
+            return
         verbose = self.config["verbose"]
         assert "effective_bits" in self.constraints and (
             set(self.constraints) <= AUTO_QUANTIZE_CONSTRAINT_KEYS
