@@ -473,7 +473,10 @@ her fear and anger)."""
                 break
             tried.add(remove_count)
             result, length = candidate(remove_count)
-            if best is None or abs(length - num_tokens) < abs(best[1] - num_tokens):
+            if best is None or (abs(length - num_tokens), length) < (
+                abs(best[1] - num_tokens),
+                best[1],
+            ):
                 best = (result, length)
             if length == num_tokens:
                 return result
@@ -485,7 +488,10 @@ her fear and anger)."""
                     continue
                 tried.add(remove_count)
                 result, length = candidate(remove_count)
-                if best is None or abs(length - num_tokens) < abs(best[1] - num_tokens):
+                if best is None or (abs(length - num_tokens), length) < (
+                    abs(best[1] - num_tokens),
+                    best[1],
+                ):
                     best = (result, length)
                 if length == num_tokens:
                     return result
