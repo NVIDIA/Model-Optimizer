@@ -701,7 +701,9 @@ class _StridedIterableShard(IterableDataset):
     the equal-per-rank-batch invariant that keeps per-step EP collectives from hanging when one rank
     runs short. A stream shorter than ``world_size`` has no complete group, so it is refused rather
     than leaving every rank with nothing to calibrate on. It is iterated in the loader's own process
-    (:func:`shard_dataloader` refuses workers for a stream).
+    (:func:`shard_dataloader` refuses workers for a stream). Every rank still reads and decodes every
+    sample, keeping one in ``world_size``: for a stream costly to decode, a map-style dataset, or a
+    source that shards itself, saves that work.
     ``vlm_dataset_utils._ShardedIterable`` cannot stand in: it pads every rank to a count its own loader
     knows, while this wraps any loader's stream, which may know none.
     """
