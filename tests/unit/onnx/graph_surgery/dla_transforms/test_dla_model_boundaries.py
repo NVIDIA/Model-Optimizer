@@ -370,7 +370,8 @@ def test_normalization_preserves_rank_sensitive_and_opaque_consumers(operation, 
         np.testing.assert_allclose(actual, reference, rtol=1e-5, atol=1e-6)
 
 
-def test_normalization_refuses_unprepared_consumers_before_mutation():
+@pytest.mark.parametrize("through_pipeline", [False, True])
+def test_normalization_refuses_unprepared_consumers_before_mutation(through_pipeline):
     """Refuse a rank-sensitive consumer before widening any eligible normalization node."""
     shape = [2, 3, 4]
     model = _make_model(
@@ -388,7 +389,10 @@ def test_normalization_refuses_unprepared_consumers_before_mutation():
     _checked_run(model, {"x": np.arange(24, dtype=np.float32).reshape(shape)})
     before = model.SerializeToString()
     with pytest.raises(ValueError, match="Unsupported normalization consumer"):
-        _apply_fix_instancenorm_channels(model)
+        if through_pipeline:
+            _transform_make_dla_compatible(model, verbose=False)
+        else:
+            _apply_fix_instancenorm_channels(model)
     assert model.SerializeToString() == before
 
 
@@ -1490,3 +1494,57 @@ def test_native_rank_reducing_outputs_require_registered_conversion(
         with pytest.raises(ValueError, match=r"rank.*conversion"):
             _apply_non4d_model_outputs(model, defer_rank_conversion=True)
     assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize(
+    ("other_normalized", "through_pipeline"), [(False, False), (False, True), (True, True)]
+)
+@pytest.mark.parametrize("unary", [False, True])
+def test_normalization_concat_requires_prepared_operands(other_normalized, through_pipeline, unary):
+    """Widen Concat only when every operand receives a normalization bridge."""
+    shape = [2, 3, 4]
+    nodes = [helper.make_node("InstanceNormalization", ["x", "scale", "bias"], ["normalized"])]
+    controls = [
+        numpy_helper.from_array(np.ones(3, np.float32), "scale"),
+        numpy_helper.from_array(np.zeros(3, np.float32), "bias"),
+        numpy_helper.from_array(np.ones([2, 5, 4], np.float32), "other"),
+    ]
+    inputs = [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)]
+    right = "other"
+    if other_normalized:
+        controls.extend(
+            [
+                numpy_helper.from_array(np.ones(5, np.float32), "other_scale"),
+                numpy_helper.from_array(np.zeros(5, np.float32), "other_bias"),
+            ]
+        )
+        nodes.append(
+            helper.make_node(
+                "InstanceNormalization",
+                ["other", "other_scale", "other_bias"],
+                ["other_normalized"],
+            )
+        )
+        right = "other_normalized"
+    left = "normalized"
+    if unary:
+        nodes.append(helper.make_node("Relu", [left], ["activated"]))
+        left = "activated"
+    nodes.append(helper.make_node("Concat", [left, right], ["y"], axis=1))
+    model = _make_model(
+        nodes, inputs, [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 8, 4])], controls
+    )
+    feeds = {"x": np.arange(24, dtype=np.float32).reshape(shape)}
+    expected = _checked_run(model, feeds)
+    before = model.SerializeToString()
+    if other_normalized:
+        result = _transform_make_dla_compatible(model, verbose=False)
+        for actual, reference in zip(_checked_run(result, feeds), expected):
+            np.testing.assert_allclose(actual, reference, rtol=1e-5, atol=1e-6)
+    else:
+        with pytest.raises(ValueError, match="normalization Concat"):
+            if through_pipeline:
+                _transform_make_dla_compatible(model, verbose=False)
+            else:
+                _apply_fix_instancenorm_channels(model)
+        assert model.SerializeToString() == before

@@ -649,7 +649,7 @@ def _apply_remove_intermediary_squeeze_unsqueeze(
     return model
 
 
-def _apply_fix_instancenorm_channels(model, *, prepared_consumer_ops=()):
+def _apply_fix_instancenorm_channels(model, *, prepared_consumer_ops=(), validate_only=False):
     """Append spatial singleton dimensions while retaining normalization channels and outputs."""
     graph = model.graph
     cache = GraphCache(graph)
@@ -765,6 +765,16 @@ def _apply_fix_instancenorm_channels(model, *, prepared_consumer_ops=()):
             shape = _shape_before_boundary_promotion(cache, node.input[0])
             if shape is not None and len(shape) == 3:
                 plans.append((index, node, shape, list(output_consumers(node.output[0]))))
+    concat_inputs = {}
+    for _, _, _, consumers in plans:
+        for consumer, _, port, native in consumers:
+            if consumer.op_type == "Concat" and not native:
+                concat_inputs.setdefault(id(consumer), (consumer, set()))[1].add(port)
+    for consumer, ports in concat_inputs.values():
+        if ports != set(range(len(consumer.input))):
+            raise ValueError("Unsupported normalization Concat with unprepared operands")
+    if validate_only:
+        return model
     bridges = {}
     for index, node, shape, consumers in plans:
         target = add_initializer(
