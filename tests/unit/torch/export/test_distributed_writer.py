@@ -1105,9 +1105,7 @@ def _expert_input_scale_job(rank, world_size, tmp_dir):
 
     # A scale one rank holds and the other lacks fails on both, named, rather than leave the ranks
     # hanging or mismatched in the reduce.
-    from torch.distributed.checkpoint import state_dict
-
-    real = state_dict.get_model_state_dict
+    real = distributed_writer.get_model_state_dict
 
     def without_a_scale(*args, **kwargs):
         sd = real(*args, **kwargs)
@@ -1118,7 +1116,7 @@ def _expert_input_scale_job(rank, world_size, tmp_dir):
     try:
         with (
             bounded_collectives(),
-            mock.patch.object(state_dict, "get_model_state_dict", without_a_scale),
+            mock.patch.object(distributed_writer, "get_model_state_dict", without_a_scale),
         ):
             _nogather_export(_fsdp2_shard(model, mesh), tmp_dir / "diverging")
     except RuntimeError as error:
