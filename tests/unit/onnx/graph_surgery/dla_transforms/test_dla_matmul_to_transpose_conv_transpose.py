@@ -294,69 +294,28 @@ def _apply_and_run(model, feeds):
 # ── Tests: cases that SHOULD convert ─────────────────────────────────────────────────────────────
 
 
-def test_matmul_2d_activation_converts():
-    """2D activation → Unsqueeze[0,1] + Conv + Squeeze[0,1]; output must match MatMul."""
-    model, feeds = _make_matmul_2d()
-    ref, got, tr = _apply_and_run(model, feeds)
-
-    assert not any(n.op_type in ("MatMul", "Gemm") for n in tr.graph.node), (
-        "MatMul should be replaced"
-    )
-    assert sum(1 for n in tr.graph.node if n.op_type == "Conv") == 1
-    assert any(n.op_type == "Unsqueeze" for n in tr.graph.node), "Unsqueeze expected for 2D input"
-    assert any(n.op_type == "Squeeze" for n in tr.graph.node), "Squeeze expected for 2D input"
-
-    _assert_outputs_match(ref, got)
-
-
-def test_matmul_3d_activation_converts():
-    """3D activation [B,M,N] → Unsqueeze[0] + Conv + Squeeze[0]; output must match MatMul."""
-    model, feeds = _make_matmul_3d()
-    ref, got, tr = _apply_and_run(model, feeds)
-
-    assert not any(n.op_type in ("MatMul", "Gemm") for n in tr.graph.node)
-    assert sum(1 for n in tr.graph.node if n.op_type == "Conv") == 1
-    assert any(n.op_type == "Unsqueeze" for n in tr.graph.node), "Unsqueeze expected for 3D input"
-    assert any(n.op_type == "Squeeze" for n in tr.graph.node), "Squeeze expected for 3D input"
-
-    _assert_outputs_match(ref, got)
+@pytest.mark.parametrize(
+    ("builder", "adapters"),
+    [(_make_matmul_2d, True), (_make_matmul_3d, True), (_make_matmul_4d, False)],
+)
+def test_matmul_activation_converts(builder, adapters):
+    """Convert each supported activation rank with only the required boundary adapters."""
+    model, feeds = builder()
+    expected, actual, transformed = _apply_and_run(model, feeds)
+    assert not any(node.op_type in {"MatMul", "Gemm"} for node in transformed.graph.node)
+    assert sum(node.op_type == "Conv" for node in transformed.graph.node) == 1
+    for operation in ["Unsqueeze", "Squeeze"]:
+        assert any(node.op_type == operation for node in transformed.graph.node) == adapters
+    _assert_outputs_match(expected, actual)
 
 
-def test_matmul_4d_activation_converts():
-    """4D activation [1,B,M,N] → Conv only, NO Unsqueeze/Squeeze; output must match MatMul."""
-    model, feeds = _make_matmul_4d()
-    ref, got, tr = _apply_and_run(model, feeds)
-
-    assert not any(n.op_type in ("MatMul", "Gemm") for n in tr.graph.node)
-    assert sum(1 for n in tr.graph.node if n.op_type == "Conv") == 1
-    assert not any(n.op_type == "Unsqueeze" for n in tr.graph.node), (
-        "No Unsqueeze expected for 4D input"
-    )
-    assert not any(n.op_type == "Squeeze" for n in tr.graph.node), (
-        "No Squeeze expected for 4D input"
-    )
-
-    _assert_outputs_match(ref, got)
-
-
-def test_gemm_transb_converts():
-    """Gemm transB=1 (W[K,N] → used without extra transpose): output must match Gemm."""
-    model, feeds = _make_gemm_transb()
-    ref, got, tr = _apply_and_run(model, feeds)
-
-    assert not any(n.op_type in ("MatMul", "Gemm") for n in tr.graph.node)
-
-    _assert_outputs_match(ref, got)
-
-
-def test_gemm_transa_converts():
-    """Gemm transA=1 (A[N,M] used transposed): output must match Gemm."""
-    model, feeds = _make_gemm_transa()
-    ref, got, tr = _apply_and_run(model, feeds)
-
-    assert not any(n.op_type in ("MatMul", "Gemm") for n in tr.graph.node)
-
-    _assert_outputs_match(ref, got)
+@pytest.mark.parametrize("builder", [_make_gemm_transb, _make_gemm_transa])
+def test_gemm_transpose_converts(builder):
+    """Preserve values with either supported Gemm transpose convention."""
+    model, feeds = builder()
+    expected, actual, transformed = _apply_and_run(model, feeds)
+    assert not any(node.op_type in {"MatMul", "Gemm"} for node in transformed.graph.node)
+    _assert_outputs_match(expected, actual)
 
 
 @pytest.mark.parametrize("trans_b", [False, True])
@@ -467,24 +426,18 @@ def test_matmul_dq_weight_converts():
 # ── Tests: cases that should NOT convert ─────────────────────────────────────────────────────────
 
 
-def test_matmul_dynamic_weight_not_converted():
-    """Dynamic weight: MatMul remains; both inputs and output promoted to 4D; ORT parity."""
+@pytest.mark.parametrize("defer", [False, True])
+def test_matmul_dynamic_weight_not_converted(defer):
+    """Keep dynamic-weight MatMul valid with immediate or deferred rank conversion."""
     model, feeds = _make_matmul_dynamic_weight()
-    ref, got, tr = _apply_and_run(model, feeds)
-
-    matmul_nodes = [n for n in tr.graph.node if n.op_type == "MatMul"]
-    assert len(matmul_nodes) == 1, "MatMul must remain when weight is a graph input"
-    assert not any(n.op_type == "Conv" for n in tr.graph.node), "No Conv should be added"
-    # Fallback: both 2D inputs promoted → Unsqueeze nodes inserted
-    assert any(n.op_type == "Unsqueeze" for n in tr.graph.node), (
-        "Unsqueeze expected for 4D promotion of dynamic inputs"
-    )
-    # Fallback: 2D output squeezed back
-    assert any(n.op_type == "Squeeze" for n in tr.graph.node), (
-        "Squeeze expected to restore original output rank"
-    )
-
-    _assert_outputs_match(ref, got)
+    expected = _run_ort(model, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model), defer_rank_conversion=defer)
+    onnx.checker.check_model(transformed, full_check=True)
+    assert sum(node.op_type == "MatMul" for node in transformed.graph.node) == 1
+    assert not any(node.op_type == "Conv" for node in transformed.graph.node)
+    assert any(node.op_type == "Unsqueeze" for node in transformed.graph.node)
+    assert any(node.op_type == "Squeeze" for node in transformed.graph.node)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
 
 
 def test_matmul_nchw_non_unary_not_converted():
@@ -684,15 +637,6 @@ def test_integer_matmul_remains_a_valid_matmul():
     np.testing.assert_array_equal(
         ReferenceEvaluator(transformed).run(None, {"A": data})[0], expected
     )
-
-
-def test_deferred_dynamic_matmul_restores_output_rank():
-    """Keep deferred graph-input weight promotion valid at the current stage boundary."""
-    model, feeds = _make_matmul_dynamic_weight()
-    expected = _run_ort(model, feeds)
-    transformed = _apply_matmul_to_conv(copy.deepcopy(model), defer_rank_conversion=True)
-    onnx.checker.check_model(transformed, full_check=True)
-    _assert_outputs_match(expected, _run_ort(transformed, feeds))
 
 
 @pytest.mark.parametrize("symbolic", [False, True])
