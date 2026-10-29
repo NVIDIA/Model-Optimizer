@@ -7,7 +7,8 @@ description: >-
   wants experiment logs reviewed, or wants to check whether a run's acceptance rate
   meets threshold. Triggers on "EAGLE3", "DFlash", "DSpark", "Domino", "draft model",
   "acceptance rate", "speculative decoding pipeline". Do NOT use for quantizing a
-  model (use ptq) or serving a checkpoint (use deployment).
+  model (use ptq), serving a checkpoint (use deployment), or the end-to-end flow that
+  trains, benchmarks and returns a drafter readiness verdict (use specdec-release).
 user_invocable: true
 ---
 

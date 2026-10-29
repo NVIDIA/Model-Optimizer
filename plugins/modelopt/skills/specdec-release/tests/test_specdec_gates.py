@@ -23,7 +23,9 @@ the fields the gates read. Run with:
 """
 
 import copy
+import hashlib
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -31,6 +33,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
+from freeze_drafter import main as freeze_main
 from gate_bench import evaluate_bench
 from gate_bench import main as bench_main
 from gate_correctness import evaluate_correctness
@@ -430,6 +433,79 @@ def test_correctness_reports_greedy_match_without_gating():
         assert r["pass"] and not r["measurable"] and r["notes"]
 
 
+# ── freeze_drafter ────────────────────────────────────────────────────
+
+
+def test_freeze_copies_checksums_and_detects_tampering(tmp_path, capsys, monkeypatch):
+    src = tmp_path / "exported-checkpoint-final"
+    src.mkdir()
+    _write(src / "config.json", _export_config())
+    (src / "model.safetensors").write_bytes(b"\1" * 64)
+    dst = tmp_path / "drafts" / "run-1"
+    dst.parent.mkdir()
+    args = ["--src", str(src), "--dst", str(dst)]
+
+    capsys.readouterr()
+    assert freeze_main(args) == 0
+    manifest_sha256 = json.loads(capsys.readouterr().out)["manifest_sha256"]
+    sums = (dst / "SHA256SUMS").read_text().splitlines()
+    assert sorted(line.split("  ")[1] for line in sums) == ["config.json", "model.safetensors"]
+    mode = (dst / "model.safetensors").stat().st_mode
+    assert mode & 0o004 and not mode & 0o222  # world-readable, read-only
+    assert not (tmp_path / "drafts" / "run-1.partial").exists()
+    assert freeze_main(args) == 0  # a resumed run re-freezes into the same copy
+    assert json.loads(capsys.readouterr().out)["manifest_sha256"] == manifest_sha256
+    verify = ["--dst", str(dst), "--verify"]
+    assert freeze_main([*verify, "--manifest-sha256", manifest_sha256]) == 0
+
+    # Tamper with a weight and rewrite SHA256SUMS to match: only the recorded hash catches it.
+    (dst / "model.safetensors").chmod(0o644)
+    (dst / "model.safetensors").write_bytes(b"\2" * 64)
+    (dst / "SHA256SUMS").chmod(0o644)
+    (dst / "SHA256SUMS").write_text(
+        "".join(
+            f"{hashlib.sha256((dst / rel).read_bytes()).hexdigest()}  {rel}\n"
+            for rel in ("config.json", "model.safetensors")
+        )
+    )
+    assert freeze_main(verify) == 0
+    assert freeze_main([*verify, "--manifest-sha256", manifest_sha256]) == 1
+    capsys.readouterr()
+    assert freeze_main(args) == 1  # an existing, different copy is never overwritten
+    assert not json.loads(capsys.readouterr().out)["notes"]
+
+    (dst / "SHA256SUMS").write_text("not a manifest\n")
+    assert freeze_main(verify) == 1
+    assert json.loads(capsys.readouterr().out)["failure_class"] == "FREEZE_MISMATCH"
+
+    empty = tmp_path / "drafts" / "empty"
+    empty.mkdir()
+    assert freeze_main(["--src", str(src), "--dst", str(empty)]) == 2  # a pre-created dst
+    (empty / "SHA256SUMS").write_text("")
+    assert freeze_main(["--dst", str(empty), "--verify"]) == 1  # an empty manifest is no export
+
+    real_copytree = shutil.copytree
+
+    def corrupting_copytree(from_dir, to_dir):
+        real_copytree(from_dir, to_dir)
+        (Path(to_dir) / "model.safetensors").write_bytes(b"\3" * 64)
+
+    monkeypatch.setattr(shutil, "copytree", corrupting_copytree)
+    run_3 = tmp_path / "drafts" / "run-3"
+    assert freeze_main(["--src", str(src), "--dst", str(run_3)]) == 1
+    assert not run_3.exists()  # a bad copy is never published
+    monkeypatch.undo()
+
+    (src / "model.safetensors").write_bytes(b"")
+    assert freeze_main(["--src", str(src), "--dst", str(tmp_path / "drafts" / "run-2")]) == 1
+    assert freeze_main(["--src", str(tmp_path / "nope"), "--dst", str(dst)]) == 2
+    assert freeze_main(["--src", str(src), "--dst", str(src / "inside")]) == 2
+    assert freeze_main(["--src", str(src), "--dst", str(src)]) == 2
+    assert freeze_main(["--src", str(src), "--dst", str(dst), "--verify"]) == 2
+    assert freeze_main([*args, "--manifest-sha256", manifest_sha256]) == 2
+    assert freeze_main([*verify, "--manifest-sha256", "abc"]) == 2
+
+
 # ── CLIs ──────────────────────────────────────────────────────────────
 
 
@@ -474,6 +550,14 @@ def test_cli_exit_codes(tmp_path, capsys):
     assert train_main([*common, "--regression", missing, "--algorithm", "dflash2"]) == 2
     missing = str(tmp_path / "regression_missing.json")
     assert train_main([*common, "--regression", missing, "--algorithm", "dflash2"]) == 1
+    # An existing drafter has no training run: --export-only checks the export alone.
+    export_only = [*common[2:], "--export-only"]
+    assert train_main([*export_only, "--algorithm", "dflash2"]) == 0
+    assert train_main([*export_only, "--algorithm", "dspark"]) == 1
+    for both_or_neither in ([*common, "--export-only"], common[2:]):
+        with pytest.raises(SystemExit) as exc:
+            train_main([*both_or_neither, "--algorithm", "dflash2"])
+        assert exc.value.code == 2
 
     for not_an_object in ([], "stage", None):
         bad = _write(tmp_path / "bad.json", not_an_object)
