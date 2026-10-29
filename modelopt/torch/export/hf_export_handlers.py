@@ -313,8 +313,8 @@ def _export_quant_embedding(name: str, module: nn.Module, ctx: ExportContext) ->
 def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Export fused BMM-style expert weights (Llama4 / GPT-OSS).
 
-    Its weight quantizer has one amax covering all experts, so under FSDP2 each rank can pack
-    just the experts it owns and produce identical bytes -- no gather or unshard needed.
+    Their weight quantizer has one amax covering all experts. The keep-fused export refuses them,
+    since they store their experts transposed.
     """
     if ctx.keep_fused_experts:
         # The keep-fused export leaves fused experts for the writer to split by their
