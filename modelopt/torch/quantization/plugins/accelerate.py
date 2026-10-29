@@ -14,6 +14,8 @@
 # limitations under the License.
 """Quantization support for accelerate modified models."""
 
+import inspect
+import os
 import warnings
 from contextlib import contextmanager
 from typing import Any
@@ -299,23 +301,48 @@ def init_quantized_weights(
     # Create patched from_pretrained that applies quantization and compression
     def patched_from_pretrained(cls, /, pretrained_model_name_or_path, *args, **kwargs):
         """Patched from_pretrained that handles quantization, compression and device mapping."""
+        # This loader quantizes with quant_cfg and places the model itself.
+        if kwargs.pop("quantization_config", None) is not None:
+            raise ValueError(
+                "init_quantized_weights() quantizes with quant_cfg; drop quantization_config."
+            )
+        if kwargs.pop("device_map", None) is not None:
+            raise ValueError(
+                "init_quantized_weights() computes the device map; drop device_map and set "
+                "gpu_mem_percentage instead."
+            )
+        # As in load_pretrained(), the subfolder is part of the checkpoint path: the config and
+        # the weights are both read from it.
+        subfolder = kwargs.pop("subfolder", None)
+        if subfolder:
+            pretrained_model_name_or_path = os.path.join(pretrained_model_name_or_path, subfolder)
         # Initialize with empty config first to avoid loading weights twice
         config = kwargs.pop("config", None)
         trust_remote_code = kwargs.pop("trust_remote_code", False)
+        legacy_dtype = kwargs.pop("torch_dtype", None)
+        if kwargs.get("dtype") is None and legacy_dtype is not None:
+            kwargs["dtype"] = legacy_dtype
+        # load_checkpoint_and_dispatch() gets only the kwargs it takes; the rest build the model.
+        dispatch_params = inspect.signature(load_checkpoint_and_dispatch).parameters
+        dispatch_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in dispatch_params}
         if config is None:
             # Get config from pretrained model
             from transformers import AutoConfig
 
-            config = AutoConfig.from_pretrained(
-                pretrained_model_name_or_path, trust_remote_code=trust_remote_code
+            # As in from_pretrained(), the config load takes the Hub options (revision, token, ...)
+            # and any of the config's own attributes; the weights are still read from the path.
+            config, kwargs = AutoConfig.from_pretrained(
+                pretrained_model_name_or_path,
+                trust_remote_code=trust_remote_code,
+                return_unused_kwargs=True,
+                **kwargs,
             )
 
         with init_empty_weights():
-            # Fix torch_dtype to match original model
-            torch_dtype = kwargs.get(
-                "dtype", kwargs.get("torch_dtype", getattr(config, "torch_dtype", torch.float16))
-            )
-            model = cls.from_config(config, dtype=torch_dtype)
+            # config.dtype is None, not absent, when unset, so a getattr default never applies.
+            dtype = dispatch_kwargs.get("dtype") or getattr(config, "dtype", None) or torch.float16
+            # from_config() raises on any kwarg the model doesn't take.
+            model = cls.from_config(config, dtype=dtype, **kwargs)
         # init_empty_weights re-wraps every registered parameter, so the tie made inside
         # from_config is lost; without it the absent tied checkpoint key (e.g. lm_head) stays meta.
         model.tie_weights()
@@ -329,7 +356,7 @@ def init_quantized_weights(
             checkpoint=pretrained_model_name_or_path,
             device_map=_device_map,
             *args,
-            **kwargs,
+            **dispatch_kwargs,
         )
 
     try:

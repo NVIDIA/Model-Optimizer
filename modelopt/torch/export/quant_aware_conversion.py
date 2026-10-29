@@ -188,8 +188,14 @@ def _apply_split_rule(state_dict: dict[str, torch.Tensor], rule: SplitRule) -> N
             state_dict[target_key] = _split_leaf_tensor(leaf, tensor, n, idx, rule.dim)
 
 
-def _apply_merge_rule(state_dict: dict[str, torch.Tensor], rule: _MergeRule) -> None:
-    """Merge all complete tensor groups matched by a reversed ``WeightConverter``."""
+def _apply_merge_rule(
+    state_dict: dict[str, torch.Tensor], rule: _MergeRule, unmatched: list[str] | None = None
+) -> None:
+    """Merge all complete tensor groups matched by a reversed ``WeightConverter``.
+
+    A rule matching no key is refused, unless ``unmatched`` is given: it then gets the refusal's
+    message instead (see :func:`revert_weight_conversion_quant_aware`).
+    """
     converter = rule.converter
     source_patterns = tuple(_as_list(converter.source_patterns))
     groups: dict[str, dict[str, str]] = {}
@@ -216,11 +222,15 @@ def _apply_merge_rule(state_dict: dict[str, torch.Tensor], rule: _MergeRule) -> 
         sources[source_pattern] = key
 
     if not groups:
-        raise QuantConversionUnsupportedError(
+        message = (
             f"merge rule for {source_patterns} matched no state-dict key "
             f"(scope_prefix={getattr(converter, 'scope_prefix', None)!r}, "
             f"base_model_prefix={getattr(converter, 'base_model_prefix', None)!r})"
         )
+        if unmatched is None:
+            raise QuantConversionUnsupportedError(message)
+        unmatched.append(message)
+        return
 
     for target_key, sources in groups.items():
         missing = [pattern for pattern in source_patterns if pattern not in sources]
@@ -330,6 +340,8 @@ def apply_reverse_rules(
     rename_rules: list[RenameRule],
     merge_rules: list[_MergeRule] | None = None,
     source_keys: set[str] | None = None,
+    *,
+    unmatched_merges: list[str] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Apply quant-aware reverse conversion: tensor transforms first, then renames.
 
@@ -342,12 +354,15 @@ def apply_reverse_rules(
     ``source_keys`` are the tensor names of the checkpoint the model was loaded from.
     They let a rename that would otherwise invent a name resolve to the spelling the
     checkpoint actually carries; omitting them applies the rules unchanged.
+
+    ``unmatched_merges``, when given, collects the refusal message of each merge rule that
+    matched no key instead of raising; see :func:`revert_weight_conversion_quant_aware`.
     """
     out = dict(state_dict)
     for rule in split_rules:
         _apply_split_rule(out, rule)
     for merge_rule in merge_rules or []:
-        _apply_merge_rule(out, merge_rule)
+        _apply_merge_rule(out, merge_rule, unmatched_merges)
 
     rename = _SourceAwareRenamer(rename_rules, source_keys)
     renamed: dict[str, torch.Tensor] = {}
@@ -359,13 +374,20 @@ def apply_reverse_rules(
     return renamed
 
 
-def revert_weight_conversion_quant_aware(model, state_dict: dict[str, torch.Tensor]):
+def revert_weight_conversion_quant_aware(
+    model, state_dict: dict[str, torch.Tensor], *, unmatched_merges: list[str] | None = None
+):
     """Reverse a transformers conversion_mapping on a quantized state dict.
 
     Builds reverse rules from the model's conversion mapping and applies them
     carrying companion scale tensors. Raises :class:`QuantConversionUnsupportedError`
     when the mapping uses an op that cannot be reversed quant-aware yet, so the
     caller can fall back to the legacy behavior.
+
+    ``unmatched_merges`` is for a ``state_dict`` that holds one rank's share of the model,
+    with each merge group whole on one rank: a merge rule matching none of its keys appends
+    the refusal's message there instead of raising, since other ranks may hold the rule's
+    groups. The caller refuses a rule that no rank matched.
     """
     split_rules, merge_rules, rename_rules, expert_fused_leaves, source_keys = _build_reverse_rules(
         model
@@ -373,7 +395,14 @@ def revert_weight_conversion_quant_aware(model, state_dict: dict[str, torch.Tens
     if not split_rules and not merge_rules and not rename_rules:
         return state_dict
     _assert_experts_pre_expanded(state_dict, expert_fused_leaves)
-    return apply_reverse_rules(state_dict, split_rules, rename_rules, merge_rules, source_keys)
+    return apply_reverse_rules(
+        state_dict,
+        split_rules,
+        rename_rules,
+        merge_rules,
+        source_keys,
+        unmatched_merges=unmatched_merges,
+    )
 
 
 def build_reverse_name_mapper(model, *, tensor_keys: bool = False):

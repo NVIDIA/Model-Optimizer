@@ -17,6 +17,7 @@
 
 import copy
 import warnings
+import weakref
 from contextlib import nullcontext
 
 import pytest
@@ -30,17 +31,29 @@ from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_par
 from transformers import PretrainedConfig
 from transformers.integrations.finegrained_fp8 import FP8Experts
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.export.model_utils import _release_exported_tensors
 from modelopt.torch.export.moe_utils import _export_fused_experts, _fallback_amax
-from modelopt.torch.export.quant_utils import get_quant_config, get_quantization_format
+from modelopt.torch.export.quant_utils import (
+    _has_pre_quant_scale,
+    get_quant_config,
+    get_quantization_format,
+    process_layer_quant_config,
+)
+from modelopt.torch.export.unified_export_hf import _prepare_moe_inputs
+from modelopt.torch.models import is_moe
+from modelopt.torch.opt.conversion import ApplyModeError
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
-from modelopt.torch.quantization.model_calib import local_hessian_calibrate
+from modelopt.torch.quantization.model_calib import (
+    _register_weight_input_hooks,
+    local_hessian_calibrate,
+)
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
-    _fused_experts_wrapper_class,
+    _fused_experts_wrapper,
     _is_fused_experts_module,
     _is_sparse_sequaential_moe_block,
     _QuantFusedExperts,
@@ -49,7 +62,7 @@ from modelopt.torch.quantization.plugins.huggingface import (
     register_fused_experts_on_the_fly,
     register_sparse_moe_on_the_fly,
 )
-from modelopt.torch.quantization.utils.core_utils import weight_attr_names
+from modelopt.torch.quantization.utils.core_utils import module_name_maps, weight_attr_names
 
 
 def test_native_fp8_experts_dequantized_before_nvfp4_export():
@@ -281,6 +294,116 @@ def _route_once_to_each_expert(model):
 
 
 # ---------------------------------------------------------------------------
+# grouped_mm backend fixtures: a synthetic fused-experts module that can run
+# either the eager (F.linear) forward or the real transformers grouped_mm
+# forward, selected by ``config._experts_implementation``. Used to verify
+# grouped_mm calibration matches eager and that local-Hessian capture works in
+# grouped mode. The class avoids the ``@use_experts_implementation`` decorator so
+# it imports on transformers builds that predate the grouped_mm backend.
+# ---------------------------------------------------------------------------
+try:
+    import transformers.integrations.moe as _moe_integration
+
+    HAS_GROUPED_MM = hasattr(_moe_integration, "_grouped_linear")
+except ImportError:
+    HAS_GROUPED_MM = False
+
+
+class _ExpertsConfig:
+    """Minimal config carrying the experts-implementation selector."""
+
+    def __init__(self, impl="grouped_mm"):
+        self._experts_implementation = impl
+        self.hidden_act = "silu"
+
+
+class _SyntheticGroupedExperts(nn.Module):
+    """Fused experts dispatching to eager or the real grouped_mm forward.
+
+    Mirrors the HF transformers 5.x fused-experts contract
+    (``has_gate``/``has_bias``/``is_transposed``/``_apply_gate`` + 3-D
+    ``gate_up_proj``/``down_proj``) that ``grouped_mm_experts_forward`` expects.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.num_experts = NUM_EXPERTS
+        self.hidden_dim = HIDDEN_DIM
+        self.intermediate_dim = INTERMEDIATE_DIM
+        self.has_gate = True
+        self.has_bias = False
+        self.is_transposed = False
+        self.is_concatenated = True
+        # What transformers' @use_experts_implementation sets (5.18+ reads it in grouped_mm).
+        self._is_expert_parallel = False
+        self.gate_up_proj = nn.Parameter(
+            torch.randn(NUM_EXPERTS, 2 * INTERMEDIATE_DIM, HIDDEN_DIM) * 0.02
+        )
+        self.down_proj = nn.Parameter(torch.randn(NUM_EXPERTS, HIDDEN_DIM, INTERMEDIATE_DIM) * 0.02)
+        self.act_fn = nn.SiLU()
+
+    def _apply_gate(self, gate_up_out):
+        gate, up = gate_up_out.chunk(2, dim=-1)
+        return self.act_fn(gate) * up
+
+    def _eager_forward(self, hidden_states, top_k_index, top_k_weights):
+        final_hidden_states = torch.zeros_like(hidden_states)
+        with torch.no_grad():
+            expert_mask = F.one_hot(top_k_index, num_classes=self.num_experts).permute(2, 1, 0)
+            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+        for expert_idx in expert_hit:
+            expert_idx = expert_idx[0]
+            if expert_idx == self.num_experts:
+                continue
+            top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+            current_state = hidden_states[token_idx]
+            gate, up = F.linear(current_state, self.gate_up_proj[expert_idx]).chunk(2, dim=-1)
+            current_hidden_states = self.act_fn(gate) * up
+            current_hidden_states = F.linear(current_hidden_states, self.down_proj[expert_idx])
+            current_hidden_states = (
+                current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
+            )
+            final_hidden_states.index_add_(
+                0, token_idx, current_hidden_states.to(final_hidden_states.dtype)
+            )
+        return final_hidden_states
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        if self.config._experts_implementation == "grouped_mm":
+            return _moe_integration.grouped_mm_experts_forward(
+                self, hidden_states, top_k_index, top_k_weights
+            )
+        return self._eager_forward(hidden_states, top_k_index, top_k_weights)
+
+
+class _GroupedSparseMoeBlock(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.gate = _SyntheticTopKRouter()
+        self.experts = _SyntheticGroupedExperts(config)
+
+    def forward(self, hidden_states):
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+        _, top_k_weights, top_k_index = self.gate(hidden_states)
+        hidden_states = self.experts(hidden_states, top_k_index, top_k_weights)
+        return hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+
+
+class _GroupedMoEModel(nn.Module):
+    """Minimal MoE model whose experts run the selected backend."""
+
+    def __init__(self, impl):
+        super().__init__()
+        self.config = _ExpertsConfig(impl=impl)
+        self.moe = _GroupedSparseMoeBlock(self.config)
+
+    def forward(self, x):
+        return self.moe(x)
+
+
+# ---------------------------------------------------------------------------
 # Tests for _is_fused_experts_module
 # ---------------------------------------------------------------------------
 class TestIsFusedExpertsModule:
@@ -350,6 +473,100 @@ class TestQuantFusedExperts:
         assert QuantModuleRegistry.get(block_type) is None
         self._cleanup_registry(expert_type)
 
+    @pytest.mark.parametrize("declared", [True, False], ids=["declared", "by-shape"])
+    def test_transposed_fused_experts_are_left_unquantized(self, declared):
+        """Matched by shape, a transposed container would export with gate/up split along its input
+        dim; registration leaves it unquantized, with a warning, rather than let export write wrong
+        weights or abort the rest of the model's quantization. A gated container's shapes give it
+        away when it does not say so."""
+
+        class _TransposedExperts(_SyntheticFusedExperts):
+            pass
+
+        experts = _TransposedExperts()
+        if declared:
+            experts.is_transposed = True
+        else:
+            for name in ("gate_up_proj", "down_proj"):
+                weight = getattr(experts, name).detach().transpose(1, 2).contiguous()
+                setattr(experts, name, nn.Parameter(weight))
+        model = nn.Module()
+        model.experts = experts
+
+        with pytest.warns(UserWarning, match="store their weights transposed"):
+            register_fused_experts_on_the_fly(model)
+        assert QuantModuleRegistry.get(_TransposedExperts) is None
+
+    def test_a_transposed_containers_moe_block_is_refused_at_export(self):
+        """Left unquantized, a transposed container reaches the export inside an MoE block it
+        recognizes, with no handler for its experts, so the export refuses the block rather than
+        write it."""
+
+        class _TransposedExperts(_SyntheticFusedExperts):
+            pass
+
+        model = _TinyMoEModel()
+        model.moe.experts = _TransposedExperts()
+        model.moe.experts.is_transposed = True
+        with pytest.warns(UserWarning, match="store their weights transposed"):
+            register_fused_experts_on_the_fly(model)
+        assert is_moe(model.moe)
+
+        with pytest.raises(NotImplementedError):
+            _prepare_moe_inputs(model, torch.float16, is_modelopt_qlora=False)
+
+    def test_a_state_saved_with_transposed_experts_quantized_no_longer_restores(self):
+        """An earlier release quantized such a container, wrongly. Restoring that state now finds its
+        experts left unquantized and refuses the quantizers saved for them."""
+
+        class _TransposedExperts(_SyntheticFusedExperts):
+            pass
+
+        def build():
+            model = _TinyMoEModel()
+            model.moe.experts = _TransposedExperts()
+            model.moe.experts.is_transposed = True
+            return model
+
+        model = build()
+        # As an earlier release did: matched by shape, with the gated wrapper.
+        QuantModuleRegistry.register({_TransposedExperts: "test.TransposedExperts"})(
+            _QuantFusedExperts
+        )
+        try:
+            mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4, HIDDEN_DIM)))
+            state = mto.modelopt_state(model)
+        finally:
+            self._cleanup_registry(_TransposedExperts)
+
+        with (
+            pytest.warns(UserWarning, match="store their weights transposed"),
+            pytest.raises(ApplyModeError),
+        ):
+            mto.restore_from_modelopt_state(build(), state)
+
+    def test_a_wrapper_that_defines_its_weights_in_get_expert_weight_is_eager_only(self):
+        """The grouped_mm forward quantizes the stored weight without get_expert_weight, so a wrapper
+        that defines its weight domain there must calibrate on the eager forward. One that does not
+        say so is refused when it is defined, rather than calibrating the stored weights."""
+        with pytest.raises(TypeError, match="_eager_only"):
+
+            class _Scaled(_QuantFusedExperts):
+                def get_expert_weight(self, name, idx, dtype=None):
+                    return super().get_expert_weight(name, idx, dtype)
+
+        class _ScaledOnEager(_QuantFusedExperts):
+            _eager_only = True
+
+            def get_expert_weight(self, name, idx, dtype=None):
+                return super().get_expert_weight(name, idx, dtype)
+
+        # Inheriting the override does not take it off the eager forward either.
+        with pytest.raises(TypeError, match="_eager_only"):
+
+            class _ScaledOnGroupedMM(_ScaledOnEager):
+                _eager_only = False
+
     def test_convert_creates_quantizers(self):
         """After conversion, fused experts should have shared input and per-expert weight quantizers."""
         model = _TinyMoEModel()
@@ -394,6 +611,26 @@ class TestQuantFusedExperts:
             f"Max diff: {(out_ref - out_test).abs().max().item()}"
         )
         self._cleanup_registry(expert_type)
+
+    def test_checkpoint_recompute_restores_linear(self):
+        """Non-reentrant checkpointing stops its recompute by raising inside the experts forward.
+
+        The ``F.linear`` interception must not stay installed after that, or every later
+        ``F.linear`` call in the process runs this module's hook.
+        """
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+        register_fused_experts_on_the_fly(model)
+        model.moe.experts = QuantModuleRegistry.convert(model.moe.experts)
+        linear = F.linear
+        try:
+            x = torch.randn(1, 8, HIDDEN_DIM, requires_grad=True)
+            torch.utils.checkpoint.checkpoint(model, x, use_reentrant=False).sum().backward()
+            assert F.linear is linear
+        finally:
+            F.linear = linear
+            self._cleanup_registry(expert_type)
 
     def test_expert_index_recovery(self):
         """Storage-offset based expert index recovery should be correct."""
@@ -852,6 +1089,79 @@ class TestExportFusedExperts:
             if QuantModuleRegistry.get(expert_type) is not None:
                 QuantModuleRegistry.unregister(expert_type)
 
+    @pytest.mark.parametrize("fmt", ["w4a8_awq", "int4_awq"])
+    def test_int4_experts_do_not_promise_a_pre_quant_scale(self, fmt):
+        """AWQ-family algorithms skip fused experts, so INT4 / W4A8 experts carry no
+        pre_quant_scale; the config must not promise one."""
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        if QuantModuleRegistry.get(expert_type) is not None:
+            QuantModuleRegistry.unregister(expert_type)
+        try:
+            mtq.quantize(
+                model, copy.deepcopy(mtq.FP8_DEFAULT_CFG), forward_loop=_route_once_to_each_expert
+            )
+            experts = model.moe.experts
+            for wq_list in (
+                experts.gate_up_proj_weight_quantizers,
+                experts.down_proj_weight_quantizers,
+            ):
+                for idx in range(NUM_EXPERTS):
+                    stage = TensorQuantizer(
+                        QuantizerAttributeConfig(num_bits=4, block_sizes={-1: 16, "type": "static"})
+                    )
+                    wq_list[idx] = (
+                        SequentialQuantizer(
+                            stage, TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3)))
+                        )
+                        if fmt == "w4a8_awq"
+                        else stage
+                    )
+            config = get_quant_config(model)["quantization"]
+            assert config["quant_algo"] == fmt.upper().replace("INT4", "W4A16")
+            assert config["pre_quant_scale"] is False
+
+            # The exporter does not write a scale for fused experts, even if an input quantizer
+            # held one, so the config still must not promise it.
+            for input_q, dim in (
+                (experts.gate_up_proj_input_quantizer, HIDDEN_DIM),
+                (experts.down_proj_input_quantizer, INTERMEDIATE_DIM),
+            ):
+                input_q.register_buffer("_pre_quant_scale", torch.ones(dim))
+            assert get_quant_config(model)["quantization"]["pre_quant_scale"] is False
+        finally:
+            if QuantModuleRegistry.get(expert_type) is not None:
+                QuantModuleRegistry.unregister(expert_type)
+
+    def test_pre_quant_scale_presence(self):
+        """A module has a pre_quant_scale when AWQ left a buffer or fused it into a sibling."""
+
+        def _linear(*, buffer=False, fused=False):
+            linear = nn.Linear(4, 4)
+            linear.input_quantizer = TensorQuantizer(QuantizerAttributeConfig(enable=False))
+            if buffer:
+                linear.input_quantizer.register_buffer("_pre_quant_scale", torch.ones(4))
+            linear.fused_with_prequant = fused
+            return linear
+
+        assert not _has_pre_quant_scale(_linear(), ["weight"])
+        assert _has_pre_quant_scale(_linear(buffer=True), ["weight"])
+        assert _has_pre_quant_scale(_linear(fused=True), ["weight"])
+
+    def test_per_layer_pre_quant_scale_flag(self):
+        config = process_layer_quant_config(
+            {
+                "dense.quantization": "int4_awq",
+                "dense.awq_block_size": 16,
+                "experts.quantization": "int4_awq",
+                "experts.awq_block_size": 16,
+                "experts.pre_quant_scale": False,
+            }
+        )
+        layers = config["quantized_layers"]
+        assert layers["dense"]["pre_quant_scale"] is True
+        assert layers["experts"]["pre_quant_scale"] is False
+
     @pytest.mark.parametrize(
         ("amax_layout", "expected_gate_shape", "expected_down_shape"),
         [
@@ -1103,6 +1413,46 @@ class TestFusedExpertsCalibration:
     def _cleanup_registry(mod_type):
         if QuantModuleRegistry.get(mod_type) is not None:
             QuantModuleRegistry.unregister(mod_type)
+
+    @pytest.mark.parametrize(
+        ("cfg_name", "warns"),
+        [
+            ("INT4_AWQ_CFG", True),
+            ("W4A8_AWQ_BETA_CFG", True),
+            ("INT8_SMOOTHQUANT_CFG", True),
+            ("FP8_DEFAULT_CFG", False),
+        ],
+    )
+    def test_linear_layer_algorithms_warn_when_skipping_fused_experts(self, cfg_name, warns):
+        """AWQ, SmoothQuant and SVDQuant only process 2-D linears, so on fused experts they are a
+        silent no-op (the experts keep max calibration): warn, except for FP8 experts."""
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+        try:
+            quant_cfg = copy.deepcopy(getattr(mtq, cfg_name))
+            for entry in quant_cfg["quant_cfg"]:
+                cfg = entry.get("cfg")
+                for c in cfg if isinstance(cfg, list) else [cfg]:
+                    if isinstance(c, dict) and (c.get("block_sizes") or {}).get(-1) == 128:
+                        c["block_sizes"] = {**c["block_sizes"], -1: 16}
+
+            def forward_loop(m):
+                torch.manual_seed(0)
+                _route_once_to_each_expert(m)
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
+            skipped = [w for w in caught if "does not apply to fused MoE experts" in str(w.message)]
+            assert bool(skipped) == warns
+            if warns:  # the message names the algorithm that ran
+                expected = "smoothquant" if "SMOOTHQUANT" in cfg_name else "awq"
+                assert expected in str(skipped[0].message)
+            # The experts still get their max-calibrated amax.
+            assert model.moe.experts.gate_up_proj_weight_quantizers[0].amax is not None
+        finally:
+            self._cleanup_registry(expert_type)
 
     def test_calibration_populates_all_expert_quantizers(self):
         """After PTQ, every input/weight quantizer on the fused-experts module has amax set."""
@@ -1458,6 +1808,304 @@ class TestNormalizeFusedExpertsQuantizerName:
 
 
 # ---------------------------------------------------------------------------
+# Tests for the grouped_mm backend: _QuantFusedExperts intercepts the real
+# transformers grouped_mm forward (via _grouped_linear), and grouped calibration
+# must produce the same per-expert quantizer state as the eager F.linear path.
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(not HAS_GROUPED_MM, reason="transformers grouped_mm backend unavailable")
+class TestGroupedMMExperts:
+    @staticmethod
+    def _cleanup_registry(mod_type):
+        if QuantModuleRegistry.get(mod_type) is not None:
+            QuantModuleRegistry.unregister(mod_type)
+
+    @staticmethod
+    def _quant_cfg():
+        return {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*gate_up_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*down_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*gate_up_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+                {
+                    "quantizer_name": "*down_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+            ],
+            "algorithm": "max",
+        }
+
+    @staticmethod
+    def _forward_loop_all_experts(m):
+        # Route every token to all experts (round-robin) so eager and grouped both
+        # calibrate every expert's weight quantizer — eager only sees routed experts.
+        torch.manual_seed(0)
+        seq = 16
+        hidden = torch.randn(seq, HIDDEN_DIM)
+        top_k_index = torch.stack(
+            [torch.arange(seq) % NUM_EXPERTS, (torch.arange(seq) + 1) % NUM_EXPERTS], dim=1
+        )
+        top_k_weights = torch.softmax(torch.randn(seq, TOP_K), dim=1)
+        with torch.no_grad():
+            m.moe.experts(hidden, top_k_index, top_k_weights)
+
+    def test_forward_passthrough_matches(self):
+        """Converted grouped experts with their quantizers disabled match the unconverted forward."""
+        self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.manual_seed(0)
+        model = _GroupedMoEModel("grouped_mm")
+        ref = _SyntheticGroupedExperts(_ExpertsConfig("grouped_mm"))
+        ref.load_state_dict(model.moe.experts.state_dict())
+
+        try:
+            register_fused_experts_on_the_fly(model)
+            converted = QuantModuleRegistry.convert(model.moe.experts)
+            for q in converted.modules():
+                if isinstance(q, TensorQuantizer):
+                    q.disable()
+
+            seq = 8
+            hidden = torch.randn(seq, HIDDEN_DIM)
+            top_k_index = torch.randint(0, NUM_EXPERTS, (seq, TOP_K))
+            top_k_weights = torch.softmax(torch.randn(seq, TOP_K), dim=1)
+            with torch.no_grad():
+                out_ref = ref(hidden, top_k_index, top_k_weights)
+                out_test = converted(hidden, top_k_index, top_k_weights)
+            assert torch.allclose(out_ref, out_test, atol=1e-6), (
+                f"Max diff: {(out_ref - out_test).abs().max().item()}"
+            )
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+
+    def test_calibration_matches_eager(self):
+        """grouped_mm PTQ calibration yields the same quantizer state as eager PTQ.
+
+        Identical weights + identical routing ⇒ the shared input quantizers see the
+        same activation set and each per-expert weight quantizer sees the same slice,
+        so amax must match (max abs is order-free; only the down-proj input flows
+        through a GEMM, hence the small tolerance there).
+        """
+        self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.manual_seed(0)
+        eager_model = _GroupedMoEModel("eager")
+        grouped_model = _GroupedMoEModel("grouped_mm")
+        grouped_model.load_state_dict(eager_model.state_dict())
+
+        try:
+            for model in (eager_model, grouped_model):
+                impl = model.config._experts_implementation
+                # quantize() calibrates every model on eager; calibrate on the backend under test.
+                mtq.quantize(model, self._quant_cfg())
+                model.config._experts_implementation = impl
+                mtq.calibrate(model, "max", self._forward_loop_all_experts)
+
+            e = eager_model.moe.experts
+            g = grouped_model.moe.experts
+
+            # Shared input quantizers (down flows through a GEMM -> small tolerance).
+            for q_name in ("gate_up_proj_input_quantizer", "down_proj_input_quantizer"):
+                ea = getattr(e, q_name).amax
+                ga = getattr(g, q_name).amax
+                assert ea is not None and ga is not None, f"{q_name} not calibrated"
+                assert torch.allclose(ea, ga, atol=1e-3, rtol=1e-2), (
+                    f"{q_name} amax mismatch: eager={ea} grouped={ga}"
+                )
+
+            # Per-expert weight amax (weights identical -> tight match), all experts calibrated.
+            for idx in range(NUM_EXPERTS):
+                for q_list in ("gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"):
+                    eq = getattr(e, q_list)[idx].amax
+                    gq = getattr(g, q_list)[idx].amax
+                    assert eq is not None and gq is not None, f"{q_list}[{idx}] not calibrated"
+                    assert torch.allclose(eq, gq, atol=1e-5), (
+                        f"{q_list}[{idx}] weight amax mismatch"
+                    )
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+
+    def test_fake_quantizing_a_projection_keeps_one_experts_slice_alive(self):
+        """Without autograd each expert's fake-quantized slice goes into the output as it is made:
+        a projection's slices all alive beside the output would double its memory."""
+        model = _GroupedMoEModel("grouped_mm")
+        try:
+            mtq.quantize(model, self._quant_cfg(), self._forward_loop_all_experts)
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+        experts = model.moe.experts
+        weight, quantizers = experts.gate_up_proj, experts.gate_up_proj_weight_quantizers
+        made = []
+
+        def one_alive(_quantizer, _args, output):
+            assert all(ref() is None for ref in made), "an earlier expert's slice is still alive"
+            made.append(weakref.ref(output))
+
+        handles = [q.register_forward_hook(one_alive) for q in quantizers]
+        try:
+            with torch.no_grad():
+                out = experts._quantize_grouped_weight(weight, quantizers)
+        finally:
+            for handle in handles:
+                handle.remove()
+
+        assert len(made) == NUM_EXPERTS
+        with torch.no_grad():
+            expected = torch.stack([q(weight[idx]) for idx, q in enumerate(quantizers)])
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("transform", ["pre_quant_scale", "rotate"])
+    def test_disabled_quantizers_keep_their_pre_quant_scale_and_rotation(
+        self, monkeypatch, transform
+    ):
+        """A disabled weight quantizer still applies its pre-quant scale and rotation, as on the eager
+        path, so the grouped forward does not pass the stored weight through unchanged."""
+        # A stand-in rotation that changes any weight it is applied to.
+        monkeypatch.setattr(
+            tensor_quantizer_module,
+            "normalized_hadamard_transform",
+            lambda inputs, rotate_fp32=False, block_size=None: inputs.flip(-1),
+        )
+        self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.manual_seed(0)
+        models = [_GroupedMoEModel("eager"), _GroupedMoEModel("grouped_mm")]
+        models[1].load_state_dict(models[0].state_dict())
+        scale = torch.rand(HIDDEN_DIM) + 0.5
+        hidden = torch.randn(8, HIDDEN_DIM)
+        top_k_index = torch.randint(0, NUM_EXPERTS, (8, TOP_K))
+        top_k_weights = torch.softmax(torch.randn(8, TOP_K), dim=1)
+        outputs = []
+        try:
+            register_fused_experts_on_the_fly(models[0])
+            for model in models:
+                experts = QuantModuleRegistry.convert(model.moe.experts)
+                for q in experts.modules():
+                    if isinstance(q, TensorQuantizer):
+                        q.disable()
+                for q in experts.gate_up_proj_weight_quantizers:
+                    if transform == "rotate":
+                        q.set_from_attribute_config({"rotate": True})
+                    else:
+                        q.pre_quant_scale = scale
+                with torch.no_grad():
+                    outputs.append(experts(hidden, top_k_index, top_k_weights))
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.testing.assert_close(outputs[1], outputs[0], rtol=1e-4, atol=1e-6)
+
+    @pytest.mark.parametrize("widened", ["every-expert", "a-later-expert"])
+    def test_a_widening_pre_quant_scale_gives_one_grouped_forward_in_both_grad_modes(self, widened):
+        """FP32 pre-quant scales on a BF16 model widen what the quantizers return, on every expert or
+        on one after the first. The grouped forward computes from the widened slices with or without
+        autograd, rather than rounding them to BF16 only without it."""
+        self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.manual_seed(0)
+        model = _GroupedMoEModel("grouped_mm").to(torch.bfloat16)
+        hidden = torch.randn(8, HIDDEN_DIM, dtype=torch.bfloat16)
+        top_k_index = torch.randint(0, NUM_EXPERTS, (8, TOP_K))
+        top_k_weights = torch.softmax(torch.randn(8, TOP_K), dim=1).to(torch.bfloat16)
+        outputs = []
+        try:
+            register_fused_experts_on_the_fly(model)
+            experts = QuantModuleRegistry.convert(model.moe.experts)
+            for q in experts.modules():
+                if isinstance(q, TensorQuantizer):
+                    q.disable()
+            for name in ("gate_up_proj", "down_proj"):
+                in_dim = getattr(experts, name).shape[-1]
+                getattr(experts, f"{name}_input_quantizer").pre_quant_scale = (
+                    torch.rand(in_dim) + 0.5
+                )
+                for idx, q in enumerate(getattr(experts, f"{name}_weight_quantizers")):
+                    if widened == "every-expert" or idx == 1:
+                        q.pre_quant_scale = torch.rand(in_dim) + 0.5
+            for grad in (True, False):
+                with torch.set_grad_enabled(grad):
+                    outputs.append(experts(hidden, top_k_index, top_k_weights).detach())
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.testing.assert_close(outputs[1], outputs[0], rtol=0, atol=0)
+
+    def test_fake_quantized_grouped_forward_and_backward_match_eager(self):
+        """Under autograd (QAT) the grouped forward fake-quantizes every expert's slice at once; its
+        output and gradients match the eager forward's on the same calibrated quantizers."""
+        self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.manual_seed(0)
+        models = [_GroupedMoEModel("eager"), _GroupedMoEModel("grouped_mm")]
+        models[1].load_state_dict(models[0].state_dict())
+        try:
+            # quantize() calibrates every model on eager, so both get the same quantizers.
+            for model in models:
+                mtq.quantize(model, self._quant_cfg(), self._forward_loop_all_experts)
+            models[1].config._experts_implementation = "grouped_mm"
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+        hidden = torch.randn(16, HIDDEN_DIM)
+        top_k_index = torch.stack(
+            [torch.arange(16) % NUM_EXPERTS, (torch.arange(16) + 1) % NUM_EXPERTS], 1
+        )
+        top_k_weights = torch.softmax(torch.randn(16, TOP_K), dim=1)
+        results = []
+        for model in models:
+            x = hidden.clone().requires_grad_()
+            out = model.moe.experts(x, top_k_index, top_k_weights)
+            out.square().sum().backward()
+            experts = model.moe.experts
+            results.append((out, x.grad, experts.gate_up_proj.grad, experts.down_proj.grad))
+        for grouped, eager in zip(results[1], results[0]):
+            torch.testing.assert_close(grouped, eager, rtol=1e-4, atol=1e-6)
+
+    def test_weight_input_captures_skip_the_grouped_forward(self):
+        """The weight-input captures key on the eager loop's expert index, which names no expert in the
+        grouped forward's batch of every expert's rows: they skip it rather than credit one expert
+        with all of it."""
+        model = _GroupedMoEModel("eager")
+        rows = {}
+
+        def capture(quantizer, _weight, inputs):
+            rows[id(quantizer)] = rows.get(id(quantizer), 0) + inputs.shape[0]
+
+        try:
+            mtq.quantize(model, self._quant_cfg(), self._forward_loop_all_experts)
+            handles = _register_weight_input_hooks(model, module_name_maps(model), capture)
+            model.config._experts_implementation = "grouped_mm"
+            try:
+                self._forward_loop_all_experts(model)
+            finally:
+                for handle in handles:
+                    handle.remove()
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+        assert rows == {}
+
+    def test_an_eager_only_wrapper_refuses_the_grouped_forward(self):
+        """A wrapper whose weights are defined on the eager forward raises if the grouped one runs,
+        rather than quantize the stored weight."""
+
+        class _EagerOnlyExperts(_QuantFusedExperts):
+            _eager_only = True
+
+        self._cleanup_registry(_SyntheticGroupedExperts)
+        QuantModuleRegistry.register({_SyntheticGroupedExperts: "test.SyntheticGroupedExperts"})(
+            _EagerOnlyExperts
+        )
+        try:
+            model = _GroupedMoEModel("grouped_mm")
+            QuantModuleRegistry.convert(model.moe.experts)
+            with pytest.raises(RuntimeError, match="eager experts forward only"):
+                self._forward_loop_all_experts(model)
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+
+
+# ---------------------------------------------------------------------------
 # Tests for the non-gated fused-experts path (NemotronH NemotronHExperts):
 # single up_proj (no gate half) + down_proj. Quantizers are named after the
 # backing weights: up_proj_* and down_proj_*.
@@ -1471,10 +2119,10 @@ class TestNonGatedFusedExperts:
     def test_detected_and_picks_nongated_wrapper(self):
         module = _SyntheticNonGatedFusedExperts()
         assert _is_fused_experts_module(module) is True
-        assert _fused_experts_wrapper_class(module) is _QuantNonGatedFusedExperts
+        assert _fused_experts_wrapper(module) is _QuantNonGatedFusedExperts
 
     def test_gated_still_picks_base_wrapper(self):
-        assert _fused_experts_wrapper_class(_SyntheticFusedExperts()) is _QuantFusedExperts
+        assert _fused_experts_wrapper(_SyntheticFusedExperts()) is _QuantFusedExperts
 
     def test_register_uses_nongated_wrapper(self):
         model = _TinyNonGatedMoEModel()
@@ -1662,7 +2310,7 @@ class TestNonGatedFusedExperts:
                 self.act_fn = nn.SiLU()
 
         module = _SplitGatedExperts()
-        assert _fused_experts_wrapper_class(module) is None
+        assert _fused_experts_wrapper(module) is None
         assert _is_fused_experts_module(module) is False
 
     def test_get_quant_config_resolves_nongated_experts(self):
@@ -1747,7 +2395,7 @@ class TestQwen3VLMoeTextExperts:
         """The experts must be left to the generic fused-experts wrapper."""
         # A static registration would shadow on-the-fly detection.
         assert QuantModuleRegistry.get(self._experts_type()) is None
-        assert _fused_experts_wrapper_class(_make_qwen3_vl_moe_experts()) is _QuantFusedExperts
+        assert _fused_experts_wrapper(_make_qwen3_vl_moe_experts()) is _QuantFusedExperts
 
     def test_convert_and_forward_matches_reference(self):
         """Conversion must succeed and stay numerically transparent before calibration."""

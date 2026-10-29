@@ -3,6 +3,5 @@ datasets>=2.14.4
 # torch / torchvision / torch-tensorrt trio together: torchvision pins an exact
 # torch, so if the base install pulls a newer torch (e.g. 2.13) the torch-tensorrt
 # downgrade would otherwise leave torchvision mismatched and break `import`.
-torch-tensorrt>=2.4.0,<2.13
+torch-tensorrt>=2.10,<2.13
 torchvision<0.28
-transformers>=4.56
