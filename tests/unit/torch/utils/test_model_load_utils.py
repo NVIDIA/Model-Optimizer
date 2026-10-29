@@ -20,17 +20,20 @@ import torch
 from safetensors.torch import save_file
 
 pytest.importorskip("accelerate")
-
+pytest.importorskip("transformers")
 from _test_utils.torch.transformers_models import (
     _TinyQwen35Tokenizer,
     get_tiny_qwen3_5_moe_vl,
     get_tiny_qwen3_5_vl,
 )
+from transformers import AutoConfig
 
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils.plugins.model_load_utils import (
     _conversion_plan,
     _convert_keys,
     _resolve_target,
+    build_meta_causal_lm,
     record_unplaced_source_keys,
     unplaced_source_keys,
 )
@@ -131,3 +134,22 @@ def test_record_unplaced_source_keys_stores_sorted_keys_and_provenance():
 def test_record_unplaced_source_keys_accepts_any_iterable():
     model = torch.nn.Linear(2, 2)
     assert record_unplaced_source_keys(model, "/c", iter(["b", "a"])) == ["a", "b"]
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+def test_meta_qwen_vlm_preserves_architecture_and_vision(model_type):
+    try:
+        config = AutoConfig.for_model(model_type)
+    except ValueError:
+        pytest.skip("Qwen3.5 requires a recent Transformers")
+    config.text_config.num_hidden_layers = 2
+    config.text_config.layer_types = ["linear_attention", "full_attention"]
+    config.vision_config.depth = 1
+    model = build_meta_causal_lm("unused", False, "eager", config)
+    assert type(model).__name__.endswith("ForConditionalGeneration")
+    assert hasattr(model.model, "visual")
+    assert (
+        len(LayerActivationCollector.get_decoder_layers(model))
+        == config.text_config.num_hidden_layers
+    )
+    assert all(parameter.is_meta for parameter in model.parameters())

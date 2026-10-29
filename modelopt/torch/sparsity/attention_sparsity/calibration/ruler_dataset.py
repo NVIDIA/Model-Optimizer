@@ -268,9 +268,8 @@ def generate_niah_sample(
     from nltk.tokenize import sent_tokenize
 
     try:
-        nltk.data.find("tokenizers/punkt")
+        nltk.data.find("tokenizers/punkt_tab")
     except LookupError:
-        nltk.download("punkt", quiet=True)
         nltk.download("punkt_tab", quiet=True)
 
     if random_seed is not None:

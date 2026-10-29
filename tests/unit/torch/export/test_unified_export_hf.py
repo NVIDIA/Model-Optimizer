@@ -17,6 +17,7 @@
 
 import importlib.util
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -39,8 +40,10 @@ from modelopt.torch.export.quant_utils import (
     sync_tied_input_amax,
 )
 from modelopt.torch.export.unified_export_hf import (
+    _fuse_shared_input_modules,
     _resolve_export_dtype,
     _source_checkpoint,
+    collect_shared_input_modules,
     read_unplaced_weights,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -133,9 +136,7 @@ def test_hf_all_tied_weights_keys_contract():
     (``tie_word_embeddings=True`` -> lm_head aliases the embedding). If transformers renames it or
     flips the direction, this breaks instead of silently skipping tied-weight dedup.
     """
-    pytest.importorskip(
-        "transformers", minversion="5.0"
-    )  # attribute only exists on transformers>=5.0
+    pytest.importorskip("transformers")
     from transformers import AutoModelForCausalLM, LlamaConfig
 
     cfg = LlamaConfig(
@@ -550,6 +551,85 @@ def _linear_with_input_quantizer():
     linear = torch.nn.Linear(4, 4, bias=False)
     linear.input_quantizer = TensorQuantizer()
     return linear
+
+
+class _LinearAttention(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        for name in ("in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b"):
+            setattr(self, name, torch.nn.Linear(32, 32))
+
+    def forward(self, inputs):
+        return sum(module(inputs) for module in self.children())
+
+
+@pytest.mark.parametrize("mismatch_within_pair", [None, "qkvz", "ba", "ba_reverse"])
+def test_export_preserves_linear_attention_runtime_groups(mismatch_within_pair):
+    model = torch.nn.Sequential()
+    model.add_module("decoder", torch.nn.Module())
+    model.decoder.add_module("linear_attn", _LinearAttention())
+    inputs = torch.randn(1, 8, 32)
+    for name, module in list(model.decoder.linear_attn.named_children()):
+        fp8 = name in {"in_proj_a", "in_proj_b"} or (
+            mismatch_within_pair == "qkvz" and name == "in_proj_z"
+        )
+        if mismatch_within_pair == "ba":
+            fp8 = name == "in_proj_a"
+        elif mismatch_within_pair == "ba_reverse":
+            fp8 = name == "in_proj_b"
+        mtq.quantize(
+            module, mtq.FP8_DEFAULT_CFG if fp8 else mtq.INT8_DEFAULT_CFG, lambda m: m(inputs)
+        )
+    groups, norms = collect_shared_input_modules(model, lambda: model.decoder.linear_attn(inputs))
+    assert any(len(modules) == 4 for modules in groups.values())
+    if mismatch_within_pair:
+        with pytest.raises(AssertionError, match="different quantization formats"):
+            _fuse_shared_input_modules(model, groups, norms)
+    else:
+        fused = _fuse_shared_input_modules(model, groups, norms)
+        assert {frozenset(names) for names in fused.values()} == {
+            frozenset({"decoder.linear_attn.in_proj_qkv", "decoder.linear_attn.in_proj_z"}),
+        }
+
+
+@pytest.mark.parametrize("partitioned", [True, False])
+def test_shared_layernorm_awq_fusion_respects_runtime_groups(partitioned):
+    model = torch.nn.Sequential()
+    model.add_module("decoder", torch.nn.Sequential())
+    norm = torch.nn.LayerNorm(32)
+    model.decoder.add_module("norm", norm)
+    projections = _LinearAttention()
+    model.decoder.add_module("linear_attn" if partitioned else "attention", projections)
+    with torch.no_grad():
+        norm.weight.copy_(torch.linspace(0.7, 1.3, 32))
+        norm.bias.copy_(torch.linspace(-0.2, 0.2, 32))
+    inputs = torch.randn(1, 8, 32)
+    config = deepcopy(mtq.INT4_AWQ_CFG)
+    config["algorithm"] = "max"
+    for entry in config["quant_cfg"]:
+        if entry.get("quantizer_name") == "*weight_quantizer":
+            entry["cfg"]["block_sizes"][-1] = 16
+    config["quant_cfg"].append({"quantizer_name": "*in_proj_[ab].weight_quantizer", "enable": True})
+    mtq.quantize(model, config, lambda m: m(inputs))
+    scale = torch.linspace(1.0, 2.0, 32)
+    # Fixed AWQ smoothing scales isolate export fusion from the calibration search.
+    for name, module in projections.named_children():
+        module.input_quantizer.pre_quant_scale = scale * (
+            2 if partitioned and name in {"in_proj_a", "in_proj_b"} else 1
+        )
+    weight, bias = norm.weight.detach().clone(), norm.bias.detach().clone()
+    groups, norms = collect_shared_input_modules(
+        model, lambda: model(inputs), collect_layernorms=True
+    )
+
+    fused = _fuse_shared_input_modules(model, groups, norms, fuse_layernorms=True)
+
+    assert sorted(len(group) for group in fused.values()) == ([2, 2] if partitioned else [4])
+    torch.testing.assert_close(norm.weight, weight if partitioned else weight * scale)
+    torch.testing.assert_close(norm.bias, bias if partitioned else bias * scale)
+    for module in projections.children():
+        assert hasattr(module.input_quantizer, "_pre_quant_scale") == partitioned
+        assert getattr(module, "fused_with_prequant", False) == (not partitioned)
 
 
 def test_fuse_prequant_layernorm_skips_modules_without_pre_quant_scale():
