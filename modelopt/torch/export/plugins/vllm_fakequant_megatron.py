@@ -33,6 +33,7 @@ from modelopt.torch.export.plugins.vllm_fakequant_hf import (
 from modelopt.torch.export.quant_format import QUANTIZATION_NONE
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.nn import GroupedQuantizer, SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.utils.core_utils import apply_without_qdq
 from modelopt.torch.utils import get_unwrapped_name
 from modelopt.torch.utils.distributed import DistributedProcessGroup, is_master
 
@@ -477,9 +478,15 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         name_to_value = self._get_weight_bias(module, dtype, name_to_value, keep_weight_device=True)
         # Grouped slicing reads QDQ weights from the hooked module.state_dict().
         if "weight" in name_to_value and module not in self._grouped_fq_modules:
-            name_to_value["weight"] = self._fakequant_weight(
-                name_to_value["weight"], getattr(module, "weight_quantizer", None), dtype
-            )
+            weight = name_to_value["weight"]
+            weight_quantizer = getattr(module, "weight_quantizer", None)
+            name_to_value["weight"] = self._fakequant_weight(weight, weight_quantizer, dtype)
+            # Rows the fake-quant forward leaves unquantized (GatedDeltaNet's beta / alpha gates).
+            rows = getattr(module, "_modelopt_unquantized_output_rows", None)
+            if rows is not None and weight_quantizer is not None:
+                with torch.no_grad():
+                    row_weight = apply_without_qdq(weight_quantizer, weight[rows])
+                name_to_value["weight"][rows] = row_weight.to(dtype).cpu()
 
         # Save activation ranges; weight quantizers are folded into the weights above.
         for name, quantizer in module.named_modules():

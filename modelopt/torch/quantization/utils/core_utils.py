@@ -1024,6 +1024,25 @@ def enable_quant(quantizer):
         quantizer._if_quant = original_if_quant
 
 
+def apply_without_qdq(quantizer, inputs: torch.Tensor) -> torch.Tensor:
+    """Apply ``quantizer``'s pre-quant scale and rotation to ``inputs``, without quantizing them.
+
+    For rows a quantized module computes in high precision, so they keep the transforms (e.g.
+    an AWQ / SmoothQuant scale that the stored weight compensates for) of the quantized rows.
+    """
+    from ..nn import SequentialQuantizer
+
+    members = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
+    for member in members:
+        disabled = member._disabled
+        member._disabled = True
+        try:
+            inputs = member(inputs)
+        finally:
+            member._disabled = disabled
+    return inputs
+
+
 @contextmanager
 def disable_calib(quantizer):
     """Temporarily disable calibration for a quantizer.
