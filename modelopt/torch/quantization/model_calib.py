@@ -67,6 +67,7 @@ from .utils import (
     enable_fake_quant,
     enable_quant,
     enable_weight_access_and_writeback,
+    find_shared_input_groups,
     is_quantized_column_parallel_linear,
     is_quantized_linear,
     is_quantized_parallel_linear,
@@ -218,9 +219,8 @@ _EXPORT_COMPATIBLE_CALIBRATION = ContextVar("export_compatible_calibration", def
 
 def _prepare_export_fusion(model: nn.Module) -> None:
     # Export uses these same stock groups and scale updates before packing weights.
+    # Calibration and export import each other; defer the export dependency.
     from modelopt.torch.export.quant_utils import preprocess_linear_fusion
-
-    from .utils.shared_input import find_shared_input_groups
 
     for _, members in find_shared_input_groups(model, SHARED_PATTERNS):
         preprocess_linear_fusion(members)

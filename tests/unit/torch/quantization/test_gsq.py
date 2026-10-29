@@ -22,6 +22,7 @@ import torch.nn as nn
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization import gsq
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 
@@ -76,8 +77,6 @@ def test_gsq_reconstructs_region_and_restores_checkpoint(tmp_path, monkeypatch, 
     resumed = mtq.quantize(copy.deepcopy(pristine), cfg, forward)
     torch.testing.assert_close(forward(resumed), result, atol=0, rtol=0)
     # A changed deployment grouping policy cannot reuse old independently learned scales.
-    from modelopt.torch.quantization import gsq
-
     with monkeypatch.context() as patch:
         patch.setattr(gsq, "SHARED_PATTERNS", ())
         rejected = copy.deepcopy(pristine)
