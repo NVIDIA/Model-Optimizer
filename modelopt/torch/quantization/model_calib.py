@@ -2083,6 +2083,8 @@ def awq_clip(
         module.awq_clip.num_tokens = int(tokens.item())
 
     def _clip_search(self, inputs, co_bsz=256, max_tokens=16):
+        if inputs.numel() == 0:  # no tokens to search with; their loss, a mean over none, is NaN
+            return
         weight = self.weight
         self.weight_quantizer.enable()
 
