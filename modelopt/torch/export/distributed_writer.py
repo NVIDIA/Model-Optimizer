@@ -32,10 +32,12 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from safetensors.torch import save_file
+from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.tensor import DTensor
 
 from modelopt.torch.utils.distributed import all_reduce
 
+from .model_utils import TiedWeightMap
 from .moe_utils import _FUSED_PROJ, _fused_experts_prefixes, _split_local_fused_module
 from .quant_aware_conversion import (
     _QUANT_STATE_SUFFIXES,
@@ -43,6 +45,7 @@ from .quant_aware_conversion import (
     _build_reverse_rules,
     revert_weight_conversion_quant_aware,
 )
+from .quant_utils import postprocess_state_dict
 from .unified_export_hf_streaming import _parse_shard_size
 
 # A checkpoint's files: its weights, sharded as save_pretrained names them or in one file, and index.
@@ -704,11 +707,6 @@ def _distributed_save_hf_checkpoint_impl(
     inference tensor in its shard. Placements the point-to-point transport does not cover are
     rejected rather than routed through an untested slower path.
     """
-    from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
-
-    from .model_utils import TiedWeightMap
-    from .quant_utils import postprocess_state_dict
-
     # Name-based tied-weight dedup, matching the gather path. ``fully_shard`` splits a shared
     # nn.Parameter into distinct per-module shards, so a declared tie surfaces here as two
     # independent DTensors and both sides would be written. The map is derived from names and is

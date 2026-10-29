@@ -2106,6 +2106,7 @@ def export_hf_checkpoint(
             # every rank entering a gather window and all but one discarding the result. Same
             # outputs; the win grows with world size, where the replicated gather costs ~world x the
             # bytes. Left opt-in so the default path is unchanged.
+            # Imported here: the writer imports unified_export_hf_streaming, which imports this module.
             from .distributed_writer import distributed_save_hf_checkpoint
 
             _qlora = kwargs.get("is_modelopt_qlora", False)
