@@ -55,6 +55,7 @@ from ._auto_quantize_cost import (
 from .config import QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
 from .conversion import set_quantizer_by_cfg
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
+from .qtensor.nvfp4_tensor import NVFP4QTensor
 from .utils import is_quantized_linear
 
 
@@ -547,6 +548,7 @@ class QuantRecipeHparam(Hparam):
             module.weight = nn.Parameter(
                 reference.detach().clone(), requires_grad=reference.requires_grad
             )
+            module.weight_quantizer.enable_quant()
 
     def restore_active_quantizers(self) -> None:
         """Restore quantizer objects corresponding to the solver-visible active recipe."""
@@ -849,9 +851,32 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 continue
             candidates = {}
             for module, name in zip(hparam.quant_modules, hparam.quant_module_names):
-                weight = module.weight
-                if method in (None, "max"):
-                    weight = module.weight_quantizer(weight)
+                weight, q = module.weight, module.weight_quantizer
+                if method != "gsq" and q.is_nvfp4_static:
+                    block, global_scale = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
+                        q, weight
+                    )
+                    packed, _, _ = NVFP4QTensor.quantize(
+                        weight,
+                        q.block_sizes[-1],
+                        weights_scaling_factor=block,
+                        weights_scaling_factor_2=global_scale,
+                    )
+                    weight = packed.dequantize(
+                        dtype=weight.dtype,
+                        scale=block,
+                        double_scale=global_scale,
+                        block_sizes={-1: q.block_sizes[-1]},
+                    )
+                elif method != "gsq" and q.is_fp8:
+                    scale = q.export_amax().float() / 448
+                    codes = (weight.float() / scale).to(torch.float8_e4m3fn)
+                    weight = (codes.float() * scale).to(weight.dtype)
+                elif method in (None, "max"):
+                    weight = q(weight)
+                # Freeze the native values without disabling export's format/scale metadata.
+                module.weight.copy_(weight)
+                q.disable_quant()
                 candidates[module] = weights[name] = weight.detach().to(device="cpu", copy=True)
             hparam.weight_candidates[recipe] = candidates
         return weights
@@ -1373,14 +1398,14 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 raise ValueError("Learned candidates require materialized ordinary Parameters.")
             fingerprint = _model_parameter_fingerprint(self.model)
             if has_restored_calibration_or_scores and (
-                self.candidate_weights_version != 1
+                self.candidate_weights_version != 2
                 or self.candidate_model_fingerprint != fingerprint
                 or self.candidate_data_fingerprint != self.config["data_fingerprint"]
             ):
                 raise ValueError(
                     "Learned-candidate checkpoint schema, model, or data does not match."
                 )
-            self.candidate_weights_version = 1
+            self.candidate_weights_version = 2
             self.candidate_model_fingerprint = fingerprint
             self.candidate_data_fingerprint = self.config["data_fingerprint"]
         self._verify_constraint(search_recipes)
@@ -1464,15 +1489,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                             if method not in (None, "max"):
                                 raise ValueError("Learned checkpoint is missing hardened weights.")
                             model_calib._prepare_export_fusion(self.model)
+                            saved["weights"] = self._capture_candidate_weights(
+                                recipe, quant_recipe_hparams
+                            )
                             restored_metadata: dict = {}
                             update_quantize_metadata(
                                 self.model, QuantizeConfig(), restored_metadata
                             )
                             saved["metadata"] = restored_metadata["quantizer_state"]
                             saved["state_dict"] = get_quantizer_state_dict(self.model)
-                            saved["weights"] = self._capture_candidate_weights(
-                                recipe, quant_recipe_hparams
-                            )
                             # Old sensitivities used unfused grids; score the prepared bank again.
                             self.candidate_stats.clear()
                         else:
@@ -1539,6 +1564,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     model_calib._EXPORT_COMPATIBLE_CALIBRATION.reset(token)
                 if learned_candidates:
                     model_calib._prepare_export_fusion(self.model)
+                    candidate_weights = self._capture_candidate_weights(
+                        recipe, quant_recipe_hparams
+                    )
                 # Calibrate adds a new mode to the model. Since auto_quantize mixes the quantization recipes
                 # across layers, lets not save this new mode in the modelopt state.
                 # TODO: This is a hack. We need to create a mode for auto_quantize to handle this in a clean way.
@@ -1551,9 +1579,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     "state_dict": get_quantizer_state_dict(self.model),
                 }
                 if learned_candidates:
-                    self.quantizer_states[recipe]["weights"] = self._capture_candidate_weights(
-                        recipe, quant_recipe_hparams
-                    )
+                    self.quantizer_states[recipe]["weights"] = candidate_weights
                     self.save_search_checkpoint(verbose=self.config["verbose"])
                 calibrated_new = True
         finally:

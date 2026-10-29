@@ -247,7 +247,7 @@ class AutoQuantizeRCOSearcher(_AutoQuantizeBaseSearcher):
             if not saved.get("candidate_stats"):
                 raise ValueError("Candidate checkpoint must record complete candidate preparation.")
             if (
-                saved.get("candidate_weights_version") != 1
+                saved.get("candidate_weights_version") != 2
                 or not saved.get("candidate_model_fingerprint")
                 or saved.get("candidate_data_fingerprint") != self.config["data_fingerprint"]
             ):

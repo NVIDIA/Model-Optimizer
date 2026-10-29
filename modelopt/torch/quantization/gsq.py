@@ -124,6 +124,8 @@ class _Assignment(nn.Module):
             q.global_amax = (global_scale * (6 * 448)).reshape_as(q.global_amax)
         else:
             q.amax = (scale * 448).reshape_as(q.amax)
+        # Hard values already have the native representation; a second QDQ can round again.
+        q.disable_quant()
 
 
 def _tensor_output(output):
@@ -131,7 +133,9 @@ def _tensor_output(output):
 
 
 def _fingerprint(model, settings):
-    digest = hashlib.sha256(repr((type(model), settings, SHARED_PATTERNS)).encode())
+    digest = hashlib.sha256(
+        repr((type(model), settings, SHARED_PATTERNS, "native-hard-execution-v2")).encode()
+    )
     if hasattr(getattr(model, "config", None), "to_json_string"):
         digest.update(model.config.to_json_string().encode())
     for name, tensor in model.state_dict().items():

@@ -622,6 +622,8 @@ exist. Per-target JSON records requested/achieved cost, minimum feasible cost, d
 held-out perplexity/KL, time, peak GPU memory, and checkpoint reload comparisons. Ceilings below the
 stock minimum are reported as infeasible. Packed parity validation decodes only the exported
 configuration and safetensors into ordinary PyTorch layers using the native FP8/NVFP4 layouts.
+Certified hard weights execute directly without a second fake quantization; their ordinary
+quantizer metadata remains available for saving and export.
 A completed run does not itself certify interrupted-resume
 equivalence or an accuracy improvement; those require separate measured validation.
 

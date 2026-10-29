@@ -92,6 +92,37 @@ def test_gsq_reconstructs_region_and_restores_checkpoint(tmp_path, monkeypatch, 
         assert torch.equal(candidate, original)
 
 
+def test_gsq_executes_native_hard_weights_after_save_restore(tmp_path):
+    torch.manual_seed(0)
+    original = Decoder().bfloat16().eval()
+    model = copy.deepcopy(original)
+    inputs = torch.eye(4, dtype=torch.bfloat16)
+    mask = torch.ones(4, dtype=torch.bfloat16)
+    cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        ],
+        "algorithm": {"method": "gsq", "steps": 0, "layerwise": {"enable": False}},
+    }
+    mtq.quantize(model, cfg, lambda m: m(inputs, mask=mask))
+    expected = nn.functional.linear(
+        nn.functional.silu(nn.functional.linear(inputs, model.mlp[0].weight)),
+        model.mlp[2].weight,
+    )
+    torch.testing.assert_close(model(inputs, mask=mask), expected, rtol=0, atol=0)
+    mto.save(model, tmp_path / "native.pt")
+    restored = mto.restore(original, tmp_path / "native.pt")
+    torch.testing.assert_close(restored(inputs, mask=mask), expected, rtol=0, atol=0)
+    for candidate in (model, restored):
+        for module in (candidate.mlp[0], candidate.mlp[2]):
+            assert module.weight.dtype == torch.bfloat16
+            assert module.weight_quantizer.is_enabled
+            torch.testing.assert_close(
+                module.weight_quantizer(module.weight), module.weight, rtol=0, atol=0
+            )
+
+
 def test_gsq_interrupted_optimizer_resumes_exactly(tmp_path, monkeypatch):
     torch.manual_seed(11)
     pristine = Decoder().eval()

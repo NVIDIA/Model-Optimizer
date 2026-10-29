@@ -2040,6 +2040,79 @@ def test_auto_quantize_retains_gptq_candidates(method, tmp_path):
         torch.testing.assert_close(incompatible[0].weight, original[0].weight, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("method", ["gradient", "rco"])
+@pytest.mark.parametrize("initializer", ["max", "gptq"])
+@pytest.mark.parametrize("zero", [False, True])
+def test_auto_quantize_executes_native_fp8_bank(method, initializer, zero, tmp_path):
+    torch.manual_seed(0)
+    original = torch.nn.Sequential(torch.nn.Linear(4, 4, bias=False)).bfloat16().eval()
+    if zero:
+        with torch.no_grad():
+            original[0].weight.zero_()
+    batch = torch.eye(4, dtype=torch.bfloat16)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        ],
+        "algorithm": initializer,
+    }
+    checkpoint = str(tmp_path / "native-bank.pth")
+
+    def run(model=None):
+        return mtq.auto_quantize(
+            copy.deepcopy(original) if model is None else model,
+            constraints={"effective_bits": 8},
+            quantization_formats=[config],
+            data_loader=[batch],
+            forward_step=lambda m, data: m(data),
+            loss_func=lambda output, data: output.float().square().mean(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            method={
+                "method": method,
+                "preserve_candidate_weights": True,
+                "data_fingerprint": "native-fp8-bank",
+                **(
+                    {"steps": 0, "objective_fingerprint": "output-square"}
+                    if method == "rco"
+                    else {}
+                ),
+            },
+            checkpoint=checkpoint,
+            verbose=False,
+        )
+
+    for _ in range(2):  # New calibration and replay must execute the same frozen bank.
+        selected, state = run()
+        weight = selected[0].weight
+        q = selected[0].weight_quantizer
+        scale = q.export_amax().float() / 448
+        canonical = ((weight.float() / scale).to(torch.float8_e4m3fn).float() * scale).to(
+            weight.dtype
+        )
+        torch.testing.assert_close(weight, canonical, rtol=0, atol=0)
+        expected = torch.nn.functional.linear(batch, canonical)
+        torch.testing.assert_close(selected(batch), expected, rtol=0, atol=0)
+        assert q.is_enabled
+        assert state["candidate_weights_version"] == 2
+        torch.testing.assert_close(q(weight), weight, rtol=0, atol=0)
+        buffer = io.BytesIO()
+        mto.save(selected, buffer)
+        buffer.seek(0)
+        restored = mto.restore(copy.deepcopy(original), buffer)
+        torch.testing.assert_close(restored(batch), expected, rtol=0, atol=0)
+        assert restored[0].weight_quantizer.is_enabled
+
+    stale = safe_load(checkpoint)
+    stale["candidate_weights_version"] = 1
+    safe_save(stale, checkpoint)
+    failed = copy.deepcopy(original)
+    with pytest.raises(ValueError, match="schema"):
+        run(failed)
+    torch.testing.assert_close(failed[0].weight, original[0].weight, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("stage", ["calibration", "scoring"])
 def test_auto_quantize_recovers_failed_learned_candidate(stage):
     torch.manual_seed(7)

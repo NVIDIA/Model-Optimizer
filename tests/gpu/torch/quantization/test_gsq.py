@@ -71,6 +71,8 @@ def _native_snapshot(model, nvfp4):
             codes = (stored.float() / scale).to(torch.float8_e4m3fn)
             fields = {"weight": codes, "weight_scale": scale}
             native = (codes.float() * scale).to(stored.dtype)
+        torch.testing.assert_close(stored, native, rtol=0, atol=0)
+        torch.testing.assert_close(qdq, native, rtol=0, atol=0)
         result[name] = (stored, qdq, fields, native)
     return result
 
