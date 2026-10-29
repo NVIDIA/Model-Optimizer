@@ -20,6 +20,7 @@ import logging
 import os
 import re
 from collections import defaultdict
+from contextlib import contextmanager
 from itertools import chain
 from typing import TYPE_CHECKING, Any
 
@@ -469,6 +470,32 @@ def _route(plan: DistributionPlan) -> str | None:
     return _FSDP2 if plan.is_fsdp_dense else None
 
 
+@contextmanager
+def _refused_together(label: str, alone: bool):
+    """Raise on every rank if the block raises on any, through :func:`dist.all_reduce`.
+
+    A rank refusing a load alone would leave the others waiting in the load's next collective (the
+    checkpoint's fetch, the sharded load). A process of a launch that set no group up (``alone``) has
+    no peers to tell.
+    """
+    error = None
+    try:
+        yield
+    # A SystemExit too: the others would wait for this rank all the same.
+    except BaseException as e:
+        error = e
+    if alone:
+        if error is not None:
+            raise error
+        return
+
+    def refuse() -> None:
+        if error is not None:
+            raise error
+
+    dist.all_reduce(label, refuse, combine=lambda _: None)
+
+
 def _refuse_sharded_load_options(route, auto_class, kwargs) -> None:
     """Refuse the arguments the sharded load ``route`` cannot honor: the arguments alone decide."""
     if auto_class not in (None, AutoModelForCausalLM):
@@ -499,8 +526,8 @@ def _refuse_sharded_load_options(route, auto_class, kwargs) -> None:
         )
 
 
-def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options) -> nn.Module:
-    """The sharded load ``route`` names, refusing what it cannot honor before it starts."""
+def _sharded_load_kwargs(route, ckpt_path, auto_class, model_type, kwargs, hub_options) -> dict:
+    """What the sharded load ``route`` names takes, refusing what it cannot honor."""
     from modelopt.torch.models.hf import checkpoint_has_mtp
 
     _refuse_sharded_load_options(route, auto_class, kwargs)
@@ -531,24 +558,27 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
             "it whole on every rank, pass its model class as auto_class, with MODELOPT_FSDP_SIZE=1 "
             f"or distribution=DistributionPlan({dist.size()}, dense='replicate')."
         )
-    if not dist.is_initialized():
+    if not dist.is_initialized() and "RANK" not in os.environ:
         # FSDP2 shards through a process group even on one rank; a launch without its group was
-        # refused before the load. A run (distributed_run) destroys the group on exit.
-        if "RANK" not in os.environ:
-            raise RuntimeError(
-                f"The {route} load shards through a process group, even on one rank, which a "
-                "process started without a launcher cannot set up; launch it with "
-                "`torchrun --nproc_per_node=1`."
-            )
+        # refused before the load.
+        raise RuntimeError(
+            f"The {route} load shards through a process group, even on one rank, which a process "
+            "started without a launcher cannot set up; launch it with `torchrun --nproc_per_node=1`."
+        )
+    return {"trust_remote_code": trust_remote_code, "hf_config": hf_config, **kwargs}
+
+
+def _load_sharded(ckpt_path, load_kwargs) -> nn.Module:
+    """The FSDP2 load, by the arguments :func:`_sharded_load_kwargs` checked."""
+    if not dist.is_initialized():
+        # A single process's group of one; a run (distributed_run) destroys it on exit.
         dist.setup()
     return parallel_load_and_prepare_fsdp2(
         ckpt_path,
         torch.device("cuda", dist.local_rank()),
         dist.rank(),
         dist.size(),
-        trust_remote_code=trust_remote_code,
-        hf_config=hf_config,
-        **kwargs,
+        **load_kwargs,
     )
 
 
@@ -578,7 +608,8 @@ def load_pretrained(
       whole model, ``device_map`` defaulting to the rank's GPU.
 
     A plan with ``ep_size > 1`` raises: no load here shards the routed experts. On a distributed run
-    every rank loads the plan rank 0 was handed. A launch whose processes set no process group up (a
+    every rank loads the plan rank 0 was handed, and a refusal on any rank, of its own arguments or
+    of the config it reads, raises on every rank. A launch whose processes set no process group up (a
     launcher that only exports ``WORLD_SIZE``) has each process load as a single process does, the
     whole model with no plan to agree on; a plan for several ranks and a sharded load need the group,
     so there they are refused: set it up first, with
@@ -618,18 +649,6 @@ def load_pretrained(
       is returned alone: ``output_loading_info=True`` is refused. So is a ``variant``: the record
       and the export read the checkpoint's default weight files.
     """
-    if kwargs.pop("output_loading_info", False):
-        raise ValueError(
-            "load_pretrained returns the model alone and does not take output_loading_info=True; "
-            "the checkpoint tensors the model has no parameter for are recorded on it instead "
-            "(see record_unplaced_source_keys)."
-        )
-    if kwargs.get("variant") is not None:
-        raise ValueError(
-            f"load_pretrained does not take variant={kwargs['variant']!r}: the checkpoint tensors "
-            "the model has no parameter for are recorded from, and carried into the export from, "
-            "the checkpoint's default weight files."
-        )
     # Importing modelopt.torch.models registers every model spec; only callers of this need them.
     from modelopt.torch.models.hf import prepare_model_for_loading
 
@@ -669,8 +688,6 @@ def load_pretrained(
             )
     config = kwargs.get("config")
     config = config if isinstance(config, PretrainedConfig) else None
-    if config is not None and "hf_config" in kwargs:
-        raise TypeError("config and hf_config both name the config to load with; pass one.")
 
     def handed() -> DistributionPlan | None:
         if distribution is None:
@@ -686,31 +703,48 @@ def load_pretrained(
     # so one it refuses raises on every rank instead of leaving them in the broadcast, and before
     # the checkpoint is fetched.
     plan = handed() if alone else dist.broadcast_from("distribution", handed)
-    if "hf_config" in kwargs and (plan is None or _route(plan) is None):
-        # Only a sharded load builds from hf_config, as given, so the plan must be the one it came
-        # with, not one decided here from another config nor one that loads the model whole.
-        raise TypeError(
-            "hf_config is the config resolve_distribution_plan returned with a plan that shards "
-            "the model: pass that plan as distribution=, or pass config= to have the plan decided "
-            "from your config."
-        )
     hub_options = {
         k: kwargs.pop(k) for k in ("token", "cache_dir", "local_files_only") if k in kwargs
     }
     revision = {"revision": kwargs.pop("revision")} if "revision" in kwargs else {}
-    if plan is not None and _route(plan) is not None:
-        # A handed plan names its load before anything is fetched, and the arguments alone decide
-        # what that load refuses. A config passed for it becomes its hf_config; subfolder is where
-        # the checkpoint is.
-        _refuse_sharded_load_options(
-            _route(plan),
-            auto_class,
-            {
-                k: v
-                for k, v in kwargs.items()
-                if k != "subfolder" and not (k == "config" and config is not None)
-            },
-        )
+    # Each rank's arguments are its own, so each rank checks its own, and a refusal on one fails
+    # every rank before the checkpoint is fetched.
+    with _refused_together("load arguments", alone):
+        if kwargs.pop("output_loading_info", False):
+            raise ValueError(
+                "load_pretrained returns the model alone and does not take "
+                "output_loading_info=True; the checkpoint tensors the model has no parameter for "
+                "are recorded on it instead (see record_unplaced_source_keys)."
+            )
+        if kwargs.get("variant") is not None:
+            raise ValueError(
+                f"load_pretrained does not take variant={kwargs['variant']!r}: the checkpoint "
+                "tensors the model has no parameter for are recorded from, and carried into the "
+                "export from, the checkpoint's default weight files."
+            )
+        if config is not None and "hf_config" in kwargs:
+            raise TypeError("config and hf_config both name the config to load with; pass one.")
+        if "hf_config" in kwargs and (plan is None or _route(plan) is None):
+            # Only a sharded load builds from hf_config, as given, so the plan must be the one it
+            # came with, not one decided here from another config nor one that loads it whole.
+            raise TypeError(
+                "hf_config is the config resolve_distribution_plan returned with a plan that "
+                "shards the model: pass that plan as distribution=, or pass config= to have the "
+                "plan decided from your config."
+            )
+        if plan is not None and _route(plan) is not None:
+            # A handed plan names its load before anything is fetched, and the arguments alone
+            # decide what that load refuses. A config passed for it becomes its hf_config;
+            # subfolder is where the checkpoint is.
+            _refuse_sharded_load_options(
+                _route(plan),
+                auto_class,
+                {
+                    k: v
+                    for k, v in kwargs.items()
+                    if k != "subfolder" and not (k == "config" and config is not None)
+                },
+            )
     _, ckpt_path = ensure_local_checkpoint(ckpt_path, **revision, **hub_options)
     subfolder = kwargs.pop("subfolder", None)
     if subfolder:
@@ -731,37 +765,46 @@ def load_pretrained(
         if _route(plan) is not None:
             kwargs.setdefault("hf_config", hf_config)
     route = _route(plan)
-    placed = _whole_load_options(kwargs)
-    if decided and route == _FSDP2 and env.fsdp_size().lower() == "auto" and placed:
-        # Rank 0's GPU memory chose to shard: say so, rather than refuse the options below as if
-        # the caller had asked for the sharded load.
-        raise TypeError(
-            f"{placed} place a whole model, but no plan or MODELOPT_FSDP_SIZE asked for a layout, "
-            f"and by rank 0's GPU memory the model does not fit one GPU, so {plan!r} shards it. "
-            "To load it whole on every rank and place it yourself, set MODELOPT_FSDP_SIZE=1 or "
-            f"pass distribution=DistributionPlan({plan.world_size}, dense='replicate')."
-        )
-    if route is not None and config is not None:
-        # The sharded load builds the model from hf_config: the plan's copy of this one, or a copy
-        # of it, since building writes to the config.
-        del kwargs["config"]
-        if "hf_config" not in kwargs:
-            kwargs["hf_config"] = copy.deepcopy(config)
-    if model_type is None:
-        # The load uses the config passed for it, if any, so the loading hook follows that one.
-        if route == _FSDP2 and hf_config is None and config is None:
-            # The FSDP2 load builds from the checkpoint's config too: read it once, for both.
-            hf_config = AutoConfig.from_pretrained(
-                ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+    # Each rank reads the checkpoint's config itself, so a refusal of what it reads, or of its own
+    # arguments, fails every rank before the load's collectives.
+    with _refused_together("load checks", alone):
+        placed = _whole_load_options(kwargs)
+        if decided and route == _FSDP2 and env.fsdp_size().lower() == "auto" and placed:
+            # Rank 0's GPU memory chose to shard: say so, rather than refuse the options below as
+            # if the caller had asked for the sharded load.
+            raise TypeError(
+                f"{placed} place a whole model, but no plan or MODELOPT_FSDP_SIZE asked for a "
+                f"layout, and by rank 0's GPU memory the model does not fit one GPU, so {plan!r} "
+                "shards it. To load it whole on every rank and place it yourself, set "
+                "MODELOPT_FSDP_SIZE=1 or pass "
+                f"distribution=DistributionPlan({plan.world_size}, dense='replicate')."
             )
-            kwargs["hf_config"] = hf_config
-        model_type = getattr(hf_config or config, "model_type", None) or (
-            AutoConfig.from_pretrained(
-                ckpt_path, trust_remote_code=trust_remote_code, **hub_options
-            ).model_type
+        if route is not None and config is not None:
+            # The sharded load builds the model from hf_config: the plan's copy of this one, or a
+            # copy of it, since building writes to the config.
+            del kwargs["config"]
+            if "hf_config" not in kwargs:
+                kwargs["hf_config"] = copy.deepcopy(config)
+        if model_type is None:
+            # The load uses the config passed for it, if any, so the loading hook follows that one.
+            if route == _FSDP2 and hf_config is None and config is None:
+                # The FSDP2 load builds from the checkpoint's config too: read it once, for both.
+                hf_config = AutoConfig.from_pretrained(
+                    ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+                )
+                kwargs["hf_config"] = hf_config
+            model_type = getattr(hf_config or config, "model_type", None) or (
+                AutoConfig.from_pretrained(
+                    ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+                ).model_type
+            )
+        load_kwargs = (
+            {}
+            if route is None
+            else _sharded_load_kwargs(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
         )
     if route is not None:
-        model = _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
+        model = _load_sharded(ckpt_path, load_kwargs)
         # A sharded load finds the unplaced keys while it places the weights.
         keys = model._modelopt_unplaced_source_keys
     else:
