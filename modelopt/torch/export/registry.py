@@ -28,12 +28,13 @@ editing if/elif chains inside ``unified_export_hf.py``.
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 
 if TYPE_CHECKING:
+    from modelopt.torch.export.hf_export_handlers import _HeldWindow
     from modelopt.torch.quantization.utils.core_utils import ModuleNames
 
 __all__ = [
@@ -77,7 +78,7 @@ class ExportContext:
     only inside :func:`~modelopt.torch.export.hf_export_handlers.held_fsdp2_weight_windows`, which
     closes the last window. Elsewhere each module is packed in a window of its own."""
 
-    fsdp2_window: Any = None
+    fsdp2_window: "_HeldWindow | None" = None
     """The FSDP2 unit's weight-update window the handlers hold open across its modules."""
 
 

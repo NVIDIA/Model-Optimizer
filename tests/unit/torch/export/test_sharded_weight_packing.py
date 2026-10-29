@@ -135,3 +135,29 @@ def test_quant_linear_handlers_pack_an_fsdp2_unit_in_one_weight_window(
         for name in ("weight_scale", "weight_scale_2", "input_scale"):
             want = _raw_bytes(getattr(ref, name))
             assert torch.equal(_raw_bytes(sd[f"0.{i}.{name}"]), want), name
+
+
+def test_a_module_joins_its_units_held_window_once(gloo_world_of_one):
+    """A handler packing several weights of one module asks for the window once per weight.
+
+    The module must join its unit's held window once: listed twice, it would be re-registered with
+    FSDP2 a second time when the window closes, from the shard the first registration put back.
+    """
+    torch.manual_seed(0)
+    layer = nn.Sequential(nn.Linear(32, 16, bias=False))
+    model = nn.Sequential(layer)
+    mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(torch.randn(4, 32)))
+    ref = copy.deepcopy(layer[0])
+    ExportModuleRegistry.match(ref)("0.0", ref, ExportContext(model=ref, dtype=torch.bfloat16))
+    fully_shard(layer, mesh=gloo_world_of_one)
+    fully_shard(model, mesh=gloo_world_of_one)
+    set_distribution_plan(model, DistributionPlan(dense="fsdp"))
+    ctx = ExportContext(model=model, dtype=torch.bfloat16, keep_fused_experts=True)
+
+    with handlers.held_fsdp2_weight_windows(ctx):
+        ExportModuleRegistry.match(layer[0])("0.0", layer[0], ctx)
+        with handlers._fsdp2_weight_window(ctx, layer[0]):  # as for the module's next weight
+            pass
+
+    sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
+    assert torch.equal(sd["0.0.weight"].full_tensor(), ref.weight)
