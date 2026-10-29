@@ -2624,9 +2624,8 @@ def gptq(
     finally:
         for hook in hooks:
             hook.remove()
-
-    for handle in gptq_handles.values():
-        handle.cleanup()
+        for handle in gptq_handles.values():
+            handle.cleanup()
     for handle in [*gptq_handles.values(), *expert_handles.values()]:
         handle.sync_hessian_across_dp()
 

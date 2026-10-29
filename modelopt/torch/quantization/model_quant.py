@@ -467,6 +467,8 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
     "awq_lite",
     "awq_full",
     "awq_clip",
+    "gptq",
+    "gsq",
 }
 
 
@@ -812,6 +814,9 @@ def auto_quantize(
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step.
+            GPTQ/GSQ candidate checkpoints require a stable frozen-data identity supplied as
+            ``method={"method": "gradient", "data_fingerprint": "..."}``. Supplying this option
+            also fingerprints ordinary calibration checkpoints for compatible candidate reuse.
         module_search_spaces: Optional module-specific candidate overrides. Each entry contains
             ``module_name_patterns`` (one or more glob patterns), ``quantization_formats``, and
             optional ``allow_no_quant`` (default True). A matching entry replaces the global
@@ -1047,7 +1052,11 @@ def auto_quantize(
         fixed_cfg, fixed_name = processed_fixed_quantization_config
         fixed_recipe = QuantRecipe(fixed_cfg, name=fixed_name)
         set_quantizer_by_cfg(model, fixed_recipe.config.quant_cfg)
-    searcher.search(model, search_constraints, config=search_config)
+    try:
+        searcher.search(model, search_constraints, config=search_config)
+    except Exception:
+        searcher.restore_reference_weights()
+        raise
 
     return model, searcher.state_dict()
 

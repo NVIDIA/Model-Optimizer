@@ -1891,6 +1891,134 @@ def test_get_auto_quantize_config_keeps_selected_lm_head_enabled():
     assert weight_entry["cfg"]["num_bits"] == (4, 3)
 
 
+@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+def test_auto_quantize_retains_gptq_candidates(method, tmp_path):
+    """Mutating calibrations start from BF16 and survive selection, resume, and normal save."""
+    torch.manual_seed(7)
+    original = torch.nn.Sequential(torch.nn.Linear(16, 8, bias=False)).bfloat16()
+    batches = [torch.randn(8, 16).bfloat16()]
+    formats = []
+    expected = {}
+    for bits in (4, 8):
+        config = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": bits, "axis": 0}},
+            ],
+            "algorithm": {"method": "gptq", "block_size": 16},
+        }
+        formats.append((config, f"gptq{bits}"))
+        reference = mtq.quantize(copy.deepcopy(original), config, lambda m: m(batches[0]))
+        expected[bits] = reference[0].weight.detach().clone()
+
+    def run(
+        model,
+        ceiling,
+        checkpoint=None,
+        data_fingerprint="tiny-gptq-fixed-data-v1",
+        forward_step=lambda m, batch: m(batch),
+    ):
+        return mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": ceiling},
+            quantization_formats=formats,
+            data_loader=batches,
+            forward_step=forward_step,
+            loss_func=lambda output, batch: output.float().square().sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            method={"method": method, "data_fingerprint": data_fingerprint},
+            checkpoint=checkpoint,
+            verbose=False,
+        )
+
+    checkpoint = str(tmp_path / "candidates.pth")
+    forwards = 0
+
+    def interrupt_second_candidate(m, batch):
+        nonlocal forwards
+        forwards += 1
+        if forwards == 2:
+            raise RuntimeError("interrupt second candidate")
+        return m(batch)
+
+    interrupted = copy.deepcopy(original)
+    with pytest.raises(RuntimeError, match="interrupt second candidate"):
+        run(interrupted, 4, checkpoint, forward_step=interrupt_second_candidate)
+    assert len(safe_load(checkpoint)["quantizer_states"]) == 1
+    torch.testing.assert_close(interrupted[0].weight, original[0].weight, rtol=0, atol=0)
+    selected, state = run(copy.deepcopy(original), 4, checkpoint)
+    torch.testing.assert_close(selected[0].weight, expected[4], rtol=0, atol=0)
+    for recipe, candidate in state["quantizer_states"].items():
+        torch.testing.assert_close(
+            candidate["weights"]["0"], expected[recipe.num_bits], rtol=0, atol=0
+        )
+    restored, _ = run(copy.deepcopy(original), 16, checkpoint)
+    torch.testing.assert_close(restored[0].weight, original[0].weight, rtol=0, atol=0)
+
+    buffer = io.BytesIO()
+    mto.save(selected, buffer)
+    buffer.seek(0)
+    reloaded = mto.restore(copy.deepcopy(original), buffer)
+    torch.testing.assert_close(reloaded(batches[0]), selected(batches[0]), rtol=0, atol=0)
+    with pytest.raises(ValueError):
+        mtq.get_auto_quantize_config(state)
+
+    incompatible = copy.deepcopy(original)
+    with torch.no_grad():
+        incompatible[0].weight.add_(1)
+    before = incompatible[0].weight.detach().clone()
+    with pytest.raises(ValueError):
+        run(incompatible, 4, checkpoint)
+    torch.testing.assert_close(incompatible[0].weight, before, rtol=0, atol=0)
+    for fingerprint in (None, "different-data"):
+        incompatible = copy.deepcopy(original)
+        with pytest.raises(ValueError):
+            run(incompatible, 4, checkpoint, fingerprint)
+        torch.testing.assert_close(incompatible[0].weight, original[0].weight, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("stage", ["calibration", "scoring"])
+def test_auto_quantize_recovers_failed_learned_candidate(stage):
+    torch.manual_seed(7)
+    model = torch.nn.Sequential(torch.nn.Linear(16, 8, bias=False)).bfloat16()
+    original = copy.deepcopy(model)
+    weight = model[0].weight
+    batch = torch.randn(8, 16).bfloat16()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+        ],
+        "algorithm": {"method": "gptq", "block_size": 16},
+    }
+
+    def forward_step(m, data):
+        output = m(data)
+        if stage == "calibration":
+            raise RuntimeError("controlled failure")
+        return output
+
+    def loss_func(output, data):
+        raise RuntimeError("controlled failure")
+
+    with pytest.raises(RuntimeError, match="controlled failure"):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 4},
+            quantization_formats=[config],
+            data_loader=[batch],
+            forward_step=forward_step,
+            loss_func=loss_func,
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+    assert model[0].weight is weight
+    torch.testing.assert_close(model(batch), original(batch), rtol=0, atol=0)
+    # A fresh public calibration must work after the interrupted calibration/search.
+    mtq.quantize(model, config, lambda m: m(batch))
+
+
 @pytest.mark.parametrize("with_persisted_attrs", [True, False])
 def test_get_auto_quantize_config_emits_fused_expert_quantizer_names(with_persisted_attrs):
     recipe = QuantRecipe(copy.deepcopy(mtq.FP8_DEFAULT_CFG), name="fp8")

@@ -19,6 +19,7 @@ import copy
 import fnmatch
 import functools
 import gc
+import hashlib
 import types
 import warnings
 from abc import ABC, abstractmethod
@@ -454,6 +455,8 @@ class QuantRecipeHparam(Hparam):
         no_quant_recipe = QuantRecipe(quant_cfg=None)
         calibration_recipes = sorted({*self.choices, no_quant_recipe})
         self._all_quantizer_choices = {quant_recipe: {} for quant_recipe in calibration_recipes}
+        self.reference_weights: dict[nn.Module, nn.Parameter] = {}
+        self.weight_candidates: dict[QuantRecipe, dict[nn.Module, torch.Tensor]] = {}
 
         quant_recipe: QuantRecipe
         for quant_recipe in calibration_recipes:
@@ -511,11 +514,25 @@ class QuantRecipeHparam(Hparam):
         for nn_module, quantizer_choices in self._all_quantizer_choices[recipe].items():
             for quantizer_attr_name, quantizer in quantizer_choices.items():
                 setattr(nn_module, quantizer_attr_name, quantizer)
+        for module, reference in self.reference_weights.items():
+            weight = self.weight_candidates.get(recipe, {}).get(module)
+            # Replace the Parameter instead of modifying tensors saved by a baseline backward.
+            module.weight = (
+                reference
+                if weight is None
+                else nn.Parameter(
+                    weight.to(reference.device), requires_grad=reference.requires_grad
+                )
+            )
 
     def set_calibration_recipe(self, recipe: QuantRecipe) -> None:
         """Enable ``recipe`` for this calibration pass or isolate the group."""
         calibration_recipe = recipe if recipe in self.choices else QuantRecipe(quant_cfg=None)
         self._apply_quantizer_choice(calibration_recipe)
+        for module, reference in self.reference_weights.items():
+            module.weight = nn.Parameter(
+                reference.detach().clone(), requires_grad=reference.requires_grad
+            )
 
     def restore_active_quantizers(self) -> None:
         """Restore quantizer objects corresponding to the solver-visible active recipe."""
@@ -665,6 +682,14 @@ def _quantization_formats_signature(quant_recipes) -> tuple[str, ...]:
     return tuple(sorted(recipe.checkpoint_signature for recipe in quant_recipes))
 
 
+def _model_parameter_fingerprint(model: nn.Module) -> str:
+    digest = hashlib.sha256()
+    for name, parameter in model.named_parameters():
+        digest.update(f"{name}:{parameter.shape}:{parameter.dtype}".encode())
+        digest.update(memoryview(parameter.detach().cpu().contiguous().view(torch.uint8).numpy()))
+    return digest.hexdigest()
+
+
 class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     """Base searcher for AutoQuantize algorithm."""
 
@@ -677,7 +702,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     best: dict[str, Any]
     quantizer_states: dict
     method_name: str | None = None
-    method_config_keys: frozenset[str] = frozenset()
+    method_config_keys: frozenset[str] = frozenset({"data_fingerprint"})
+    _preserve_candidate_weights = False
 
     quant_grouping_rules = [
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
@@ -716,6 +742,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost_model": COST_MODEL_WEIGHT,
             "cost": {},
             "active_moe_expert_ratio": None,
+            "data_fingerprint": None,
         }
 
     @property
@@ -735,6 +762,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "disabled_layers": None,
             "candidate_stats": defaultdict(dict),
             "quantizer_states": {},
+            "candidate_weights_version": None,
+            "candidate_model_fingerprint": None,
+            "candidate_data_fingerprint": None,
             "best": {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False},
         }
 
@@ -748,10 +778,57 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         assert config["forward_step"] is not None, (
             "`forward_step` must be provided for `auto_quantize`."
         )
+        identity = config["data_fingerprint"]
+        if identity is not None and (not isinstance(identity, str) or not identity.strip()):
+            raise ValueError("data_fingerprint must be a nonempty string when supplied.")
         return config
 
     def validate_search_input(self, constraints, config) -> None:
         """Validate method-specific inputs before quantizing the model."""
+        formats = [
+            *config["quantization_formats"],
+            *([config["fixed_quantization_config"]] if config["fixed_quantization_config"] else []),
+            *(f for space in config["module_search_spaces"] for f in space["quantization_formats"]),
+        ]
+        algorithms = {
+            recipe.config.algorithm["method"]
+            if isinstance(recipe.config.algorithm, dict)
+            else recipe.config.algorithm
+            for recipe in self._get_search_recipes(formats)
+        }
+        if not self._preserve_candidate_weights and not algorithms.intersection({"gptq", "gsq"}):
+            return
+        if not algorithms.issubset({None, "max", "gptq", "gsq"}):
+            raise ValueError("Learned candidates support max, GPTQ, and GSQ calibration only.")
+        if config["checkpoint"] and (
+            not isinstance(config["data_fingerprint"], str)
+            or not config["data_fingerprint"].strip()
+        ):
+            raise ValueError("Learned-candidate checkpoints require a nonempty data_fingerprint.")
+
+    def restore_reference_weights(self) -> None:
+        """Recover original weights and quantizers after a failed learned-candidate search."""
+        for _, hparam in named_hparams(self.model, unique=True):
+            if isinstance(hparam, QuantRecipeHparam) and hparam.reference_weights:
+                hparam._apply_quantizer_choice(QuantRecipe(None))
+                model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = True
+
+    @torch.no_grad()
+    def _capture_candidate_weights(self, recipe, hparams):
+        weights = {}
+        method = recipe.config.algorithm
+        method = method.get("method") if isinstance(method, dict) else method
+        for hparam in hparams:
+            if recipe not in hparam.choices:
+                continue
+            candidates = {}
+            for module, name in zip(hparam.quant_modules, hparam.quant_module_names):
+                weight = module.weight
+                if method in (None, "max"):
+                    weight = module.weight_quantizer(weight)
+                candidates[module] = weights[name] = weight.detach().to(device="cpu", copy=True)
+            hparam.weight_candidates[recipe] = candidates
+        return weights
 
     def load_search_checkpoint(self) -> bool:
         return super().load_search_checkpoint(strict=False)
@@ -1114,7 +1191,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 costs.append(cost)
                 prev_score = score
 
-            self.candidate_stats[name]["formats"] = formats
+            self.candidate_stats.setdefault(name, {})["formats"] = formats
             self.candidate_stats[name]["scores"] = scores
             self.candidate_stats[name]["raw_scores"] = raw_scores
             self.candidate_stats[name]["costs"] = costs
@@ -1252,6 +1329,30 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 ),
             }
         )
+        learned_candidates = self._preserve_candidate_weights or any(
+            (
+                recipe.config.algorithm.get("method")
+                if isinstance(recipe.config.algorithm, dict)
+                else recipe.config.algorithm
+            )
+            in {"gptq", "gsq"}
+            for recipe in search_recipes
+        )
+        if learned_candidates or self.config["data_fingerprint"] is not None:
+            if any(p.is_meta or type(p) is not nn.Parameter for p in self.model.parameters()):
+                raise ValueError("Learned candidates require materialized ordinary Parameters.")
+            fingerprint = _model_parameter_fingerprint(self.model)
+            if has_restored_calibration_or_scores and (
+                self.candidate_weights_version != 1
+                or self.candidate_model_fingerprint != fingerprint
+                or self.candidate_data_fingerprint != self.config["data_fingerprint"]
+            ):
+                raise ValueError(
+                    "Learned-candidate checkpoint schema, model, or data does not match."
+                )
+            self.candidate_weights_version = 1
+            self.candidate_model_fingerprint = fingerprint
+            self.candidate_data_fingerprint = self.config["data_fingerprint"]
         self._verify_constraint(search_recipes)
         self._cost_model = cost_model
         self.insert_hparams_after_merge_rules(
@@ -1267,6 +1368,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             for _, hparam in named_hparams(self.model, unique=True)
             if isinstance(hparam, QuantRecipeHparam)
         ]
+        if learned_candidates:
+            parameter_ids = [id(p) for _, p in self.model.named_parameters(remove_duplicate=False)]
+            for hparam in quant_recipe_hparams:
+                for module in hparam.quant_modules:
+                    if not isinstance(module, nn.Linear) or module.weight.ndim != 2:
+                        raise ValueError("Learned candidates require dense 2D linear weights.")
+                    if parameter_ids.count(id(module.weight)) != 1:
+                        raise ValueError("Learned candidates do not support tied weights.")
+                    hparam.reference_weights[module] = module.weight
         resolved_search_setup_signature = self._resolved_search_setup_signature(
             quant_recipe_hparams
         )
@@ -1309,6 +1419,31 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                         self.model, QuantizeConfig(), {"quantizer_state": saved["metadata"]}
                     )
                     set_quantizer_state_dict(self.model, saved["state_dict"])
+                    if learned_candidates:
+                        if "weights" not in saved:
+                            method = recipe.config.algorithm
+                            method = method.get("method") if isinstance(method, dict) else method
+                            if method not in (None, "max"):
+                                raise ValueError("Learned checkpoint is missing hardened weights.")
+                            saved["weights"] = self._capture_candidate_weights(
+                                recipe, quant_recipe_hparams
+                            )
+                        for hparam in quant_recipe_hparams:
+                            if recipe in hparam.choices:
+                                candidates = {}
+                                for module, name in zip(
+                                    hparam.quant_modules, hparam.quant_module_names
+                                ):
+                                    weight = saved["weights"][name]
+                                    if (
+                                        weight.shape != module.weight.shape
+                                        or weight.dtype != module.weight.dtype
+                                    ):
+                                        raise ValueError(
+                                            "Candidate weight shape or dtype does not match."
+                                        )
+                                    candidates[module] = weight
+                                hparam.weight_candidates[recipe] = candidates
                     if self.config["verbose"]:
                         print_rank_0(f"AutoQuantize: Restored calibration for {recipe}")
                     continue
@@ -1343,6 +1478,11 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     "metadata": metadata["quantizer_state"],
                     "state_dict": get_quantizer_state_dict(self.model),
                 }
+                if learned_candidates:
+                    self.quantizer_states[recipe]["weights"] = self._capture_candidate_weights(
+                        recipe, quant_recipe_hparams
+                    )
+                    self.save_search_checkpoint(verbose=self.config["verbose"])
                 calibrated_new = True
         finally:
             for hparam in quant_recipe_hparams:
@@ -1551,6 +1691,12 @@ class _AutoQuantizeBackwardScoringSession(ABC):
             )
             for hparam in hparams:
                 self._stack.callback(setattr, hparam, "active", hparam.active)
+                if (
+                    isinstance(hparam, QuantRecipeHparam)
+                    and hparam.reference_weights
+                    and hparam.is_configurable
+                ):
+                    hparam.active = QuantRecipe(None)
 
             def patched_forward(module, *args, **kwargs):
                 return self.forward(module, *args, **kwargs)
@@ -2145,6 +2291,11 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
     Returns:
         A config dict suitable for :func:`quantize`.
     """
+    if any(state.get("weights") for state in search_state.get("quantizer_states", {}).values()):
+        raise ValueError(
+            "A flat quantization config cannot reproduce hardened candidate weights. "
+            "Save and restore the finalized model with the ordinary ModelOpt APIs."
+        )
     if constraints is not None:
         best_recipe = _resolve_best_recipe(search_state, constraints, verbose=verbose)
     else:
