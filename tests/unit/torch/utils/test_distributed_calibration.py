@@ -681,25 +681,41 @@ def test_expert_parallel_calibration_needs_the_experts_expert_parallel_group(
     cpu_dist_workers.run(_expert_parallel_calibration_job, layout=layout)
 
 
-# Rank 0 of four at EP 2: ranks 0 and 1 shard the experts between them, and rank 2 holds the same
-# experts as rank 0. The two-rank pool cannot build these groups, so the process group answers as a
-# four-rank launch's would.
-_FOUR_RANK_GROUPS = {"ep": [0, 1], "edp": [0, 2], "world": [0, 1, 2, 3]}
+# Rank 0 of four at EP 2, in the (edp, ep) = (2, 2) mesh: ranks 0 and 1 shard the experts between
+# them, ranks 2 and 3 do the same, and rank 2 holds the same shard as rank 0. The two-rank pool cannot
+# build these groups, so the process group answers as a four-rank launch's would.
+_FOUR_RANK_GROUPS = {
+    "ep": [0, 1],
+    "ep-reordered": [1, 0],
+    "edp": [0, 2],
+    "diagonal": [0, 3],
+    "world": [0, 1, 2, 3],
+}
 
 
 @pytest.mark.parametrize(
     ("ep", "dp", "seeded"),
-    [("ep", "edp", True), ("ep", "ep", False), ("world", "edp", False)],
+    [
+        ("ep", "edp", True),
+        ("ep", "ep", False),
+        ("ep", "diagonal", False),
+        ("ep-reordered", "edp", False),
+        ("world", "edp", False),
+    ],
     ids=[
         "seeded",
         "data-parallel-over-the-expert-parallel-ranks",
+        "data-parallel-over-another-shard",
+        "expert-parallel-in-another-order",
         "expert-parallel-over-every-rank",
     ],
 )
 def test_the_experts_groups_are_checked_by_their_ranks(monkeypatch, ep, dp, seeded):
     """A data-parallel group of the plan's edp ranks is not enough: over the experts'
-    expert-parallel ranks, which hold other experts, max's and GPTQ's syncs would merge different
-    experts' scales. Nor is an expert-parallel group over more ranks than the plan shards over."""
+    expert-parallel ranks, or ranks that meet them only at this one but hold another shard (rank 3
+    holds rank 1's), max's and GPTQ's syncs would merge different experts' scales. Nor is an
+    expert-parallel group over more ranks than the plan shards over, or in another order, which
+    gives this rank another shard."""
     monkeypatch.setattr(mto_dist, "backend", lambda: "torch")
     monkeypatch.setattr(mto_dist, "rank", lambda group=None: 0)
     monkeypatch.setattr(
@@ -719,7 +735,7 @@ def test_the_experts_groups_are_checked_by_their_ranks(monkeypatch, ep, dp, seed
     if seeded:
         _refuse_unsupported_distributed_calibration(model, "max")
     else:
-        with pytest.raises(NotImplementedError, match="expert-parallel group of 2 ranks"):
+        with pytest.raises(NotImplementedError, match=r"row of the \(2, 2\) expert-parallel mesh"):
             _refuse_unsupported_distributed_calibration(model, "max")
 
 

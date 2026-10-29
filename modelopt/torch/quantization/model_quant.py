@@ -101,13 +101,11 @@ def _rank_local_calibrations(algorithm: QuantizeAlgoCfgType) -> list[str]:
     return found
 
 
-def _group_ranks(group: dist.DistributedProcessGroup) -> set[int]:
-    """The ranks ``group`` spans; just this rank for a group not set."""
+def _group_ranks(group: dist.DistributedProcessGroup) -> list[int]:
+    """The ranks ``group`` spans, in its rank order; just this rank for a group not set."""
     if not group.is_initialized():
-        return {dist.rank()}
-    return set(
-        torch.distributed.get_process_group_ranks(group.group or torch.distributed.group.WORLD)
-    )
+        return [dist.rank()]
+    return torch.distributed.get_process_group_ranks(group.group or torch.distributed.group.WORLD)
 
 
 def _names_the_experts_groups(
@@ -115,15 +113,18 @@ def _names_the_experts_groups(
 ) -> bool:
     """Whether ``state`` names the groups a routed expert of ``plan`` syncs its scales over.
 
-    Its expert-parallel group of ``ep_size`` ranks, and as its data-parallel group the ``edp``
-    ranks holding the same experts, which meet the expert-parallel group, whose ranks hold the
-    others, only at this rank.
+    Those of the ``(edp, ep)`` mesh the expert-parallel load lays the ranks out in: as its
+    expert-parallel group, this rank's row, whose ranks hold the experts' shards in row order, and
+    as its data-parallel group, its column, the ranks holding the same shard.
     """
     if state is None or not state.expert_model_parallel_group.is_initialized():
         return False
-    ep = _group_ranks(state.expert_model_parallel_group)
-    dp = _group_ranks(state.data_parallel_group)
-    return len(ep) == plan.ep_size and len(dp) == plan.edp and ep & dp == {dist.rank()}
+    row, column = divmod(dist.rank(), plan.ep_size)
+    expert_parallel = range(row * plan.ep_size, (row + 1) * plan.ep_size)
+    data_parallel = range(column, plan.world_size, plan.ep_size)
+    return _group_ranks(state.expert_model_parallel_group) == list(expert_parallel) and sorted(
+        _group_ranks(state.data_parallel_group)
+    ) == list(data_parallel)
 
 
 def _refuse_unsupported_distributed_calibration(
@@ -170,10 +171,10 @@ def _refuse_unsupported_distributed_calibration(
     if not holders or wrong:
         raise NotImplementedError(
             f"Calibrating a model whose experts are sharded over {plan.ep_size} ranks needs each "
-            f"routed expert's ParallelState to name its expert-parallel group of {plan.ep_size} "
-            f"ranks and, as its data-parallel group, the {plan.edp} rank(s) holding the same "
-            "experts, which share only this rank with that group, or calibration would sync their "
-            "scales over the wrong ranks. "
+            "routed expert's ParallelState to name, as its expert-parallel group, this rank's row "
+            f"of the ({plan.edp}, {plan.ep_size}) expert-parallel mesh and, as its data-parallel "
+            f"group, its column, the {plan.edp} rank(s) holding the same experts, or calibration "
+            "would sync their scales over the wrong ranks. "
             + (
                 f"These modules do not: {wrong[:3]}."
                 if wrong
