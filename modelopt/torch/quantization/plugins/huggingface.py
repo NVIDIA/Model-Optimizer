@@ -1187,19 +1187,22 @@ class _QuantFP8Experts(_QuantFusedExperts):
 
     def unpack_weight(self):
         """Materialize floating weights before folding; retain scales for native forward."""
-        for name in (self._first_proj_attr, "down_proj"):
+        names = [
+            n for n in (self._first_proj_attr, "down_proj") if getattr(self, n).element_size() == 1
+        ]
+        # Sharded over the experts, one unpacked parameter would have to stay sharded too. Checked for
+        # both projections before either is unpacked, so a refusal leaves the module as it was.
+        if any(self._local_experts(getattr(self, n)) is not getattr(self, n) for n in names):
+            raise NotImplementedError(
+                f"{type(self).__name__} cannot unpack native FP8 expert weights sharded over the "
+                "experts. Quantize the model without expert parallelism."
+            )
+        for name in names:
             weight = getattr(self, name)
-            if weight.element_size() == 1:
-                if self._local_experts(weight) is not weight:
-                    # Sharded over the experts: one unpacked parameter would have to stay sharded too.
-                    raise NotImplementedError(
-                        f"{type(self).__name__} cannot unpack native FP8 expert weights sharded "
-                        "over the experts. Quantize the model without expert parallelism."
-                    )
-                unpacked = torch.empty_like(weight, dtype=torch.get_default_dtype())
-                for idx in range(self.num_experts):
-                    unpacked[idx].copy_(self.get_expert_weight(name, idx))
-                setattr(self, name, nn.Parameter(unpacked, requires_grad=False))
+            unpacked = torch.empty_like(weight, dtype=torch.get_default_dtype())
+            for idx in range(self.num_experts):
+                unpacked[idx].copy_(self.get_expert_weight(name, idx))
+            setattr(self, name, nn.Parameter(unpacked, requires_grad=False))
 
 
 def _get_fused_experts_quantizer_attr_names(module):

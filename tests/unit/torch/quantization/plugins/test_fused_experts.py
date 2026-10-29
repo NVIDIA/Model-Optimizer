@@ -2833,13 +2833,15 @@ def _expert_layouts_the_wrappers_cannot_index_job(rank, size):
             getattr(fp8, name).copy_(torch.randn(getattr(fp8, name).shape))
             getattr(fp8, f"{name}_scale_inv").fill_(0.01)
     mtq.quantize(fp8, _WEIGHT_ONLY_INT8_EXPERTS_CFG)
-    owned = fp8.gate_up_proj.detach()[rank * n_local : (rank + 1) * n_local]
-    fp8.gate_up_proj = nn.Parameter(
+    # Only the second projection sharded: the refusal must come before the first is unpacked.
+    owned = fp8.down_proj.detach()[rank * n_local : (rank + 1) * n_local]
+    fp8.down_proj = nn.Parameter(
         DTensor.from_local(owned, mesh, [Shard(0)], run_check=False), requires_grad=False
     )
     fp8.num_experts = n_local
     with pytest.raises(NotImplementedError, match="sharded over the experts"):
         fp8.unpack_weight()
+    assert fp8.gate_up_proj.dtype == torch.float8_e4m3fn
 
 
 def test_expert_weights_the_quantizers_cannot_index_are_refused(cpu_dist_workers):
