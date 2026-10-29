@@ -178,7 +178,7 @@ def _gsq_calibration(model, config):
         path = Path(config.optimizer_checkpoint_dir) / "manifest.pt"
         fingerprint = _fingerprint(model, settings)
         if config.resume:
-            manifest = torch.load(path, weights_only=False) if path.exists() else {}
+            manifest = torch.load(path, weights_only=True) if path.exists() else {}
             if manifest.get("schema") != 1 or manifest.get("fingerprint") != fingerprint:
                 raise ValueError("Incompatible GSQ model, data, or optimization settings")
         else:
@@ -293,7 +293,7 @@ def gsq(
     settings = {k: v for k, v in options.items() if k not in {"resume", "optimizer_checkpoint_dir"}}
     fingerprint = _fingerprint(model, settings) if path else None
     saved = (
-        torch.load(path, map_location="cpu", weights_only=False)
+        torch.load(path, map_location="cpu", weights_only=True)
         if resume and path and path.exists()
         else None
     )
