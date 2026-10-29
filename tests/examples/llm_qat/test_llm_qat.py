@@ -15,6 +15,7 @@
 
 
 import json
+import os
 
 import pytest
 import torch
@@ -74,7 +75,13 @@ def _run_quantize(config: str, extra_cmd_args: list[str], cache_dir: str = ""):
     )
 
 
-def _run_train(config: str, extra_cmd_args: list[str], backend: str = "fsdp2", cache_dir: str = ""):
+def _run_train(
+    config: str,
+    extra_cmd_args: list[str],
+    backend: str = "fsdp2",
+    cache_dir: str = "",
+    env: dict[str, str] | None = None,
+):
     config_file = BACKEND_CONFIGS[backend]
     gradient_args = (
         ["--gradient_checkpointing", "True"]
@@ -94,6 +101,7 @@ def _run_train(config: str, extra_cmd_args: list[str], backend: str = "fsdp2", c
         ],
         "llm_qat",
         setup_free_port=True,
+        env=env,
     )
 
 
@@ -263,6 +271,31 @@ def test_qwen3_qad_nvfp4(tied_qwen3_path, nvfp4_ptq_dir, dataset_cache_dir, tmp_
         ],
         backend=backend,
         cache_dir=dataset_cache_dir,
+    )
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="context parallelism needs 2 GPUs")
+@pytest.mark.parametrize("distill", [False, True])
+def test_qwen3_nvfp4_context_parallel(
+    tied_qwen3_path, nvfp4_ptq_dir, dataset_cache_dir, tmp_path, distill
+):
+    """QAT and QAD, eval included, with each sequence split across 2 GPUs by accelerate."""
+    distill_args = ["--distill", "True", "--teacher_model", tied_qwen3_path] if distill else []
+    visible = os.environ.get(
+        "CUDA_VISIBLE_DEVICES", ",".join(map(str, range(torch.cuda.device_count())))
+    )
+    _run_train(
+        f"configs/train/{'qad' if distill else 'qat'}_nvfp4.yaml",
+        [
+            "--model_name_or_path", nvfp4_ptq_dir,
+            "--do_train", "True",
+            "--output_dir", str(tmp_path / "cp"),
+            "--attn_implementation", "sdpa",
+            "--cp_size", "2",
+            *distill_args,
+        ],
+        cache_dir=dataset_cache_dir,
+        env={**os.environ, "CUDA_VISIBLE_DEVICES": ",".join(visible.split(",")[:2])},
     )
 
 

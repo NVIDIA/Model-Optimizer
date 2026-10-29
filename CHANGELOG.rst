@@ -22,6 +22,7 @@ Changelog
 - Add ``examples/hf_ptq/convert_ggml_to_int8.py`` to expand a checkpoint exported with a GGML recipe (IQ formats, ``q8_0``) into an INT8 weight-only compressed-tensors checkpoint. Stock vLLM serves it with its integer kernels at about half the BF16 weight memory, reproducing the GGML weights up to rounding their scales to the model dtype.
 - Add a fake-quantized weight cache for QAT and QAD. Enroll the model with ``mtq.utils.enable_weight_cache(model)`` and wrap the forward and backward passes of each optimizer step in ``mtq.utils.weight_cache_scope(model)``: each weight is then fake-quantized once per step instead of once per micro-batch and activation recomputation, at the cost of one extra copy of each cached weight. It needs a straight-through weight gradient (``pass_through_bwd=True``, the default).
 - Speed up NVFP4 QAT and QAD of Hugging Face fused MoE experts: all experts of a projection are now fake-quantized in one kernel launch instead of one per expert, about 2x faster per MoE layer on Qwen3-30B-A3B with FSDP2.
+- Add context parallelism to QAT and QAD in ``examples/llm_qat``: ``--cp_size N`` splits each sequence across ``N`` GPUs with accelerate (FSDP2, ``--attn_implementation sdpa``, models whose layers all use full causal attention). ``QATTrainer``, ``QADTrainer`` and ``KDTrainer`` now train correctly under accelerate's context parallelism.
 
 *Speculative Decoding*
 

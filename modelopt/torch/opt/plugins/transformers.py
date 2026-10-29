@@ -17,6 +17,7 @@
 
 import dataclasses
 import fnmatch
+import functools
 import gc
 import json
 import os
@@ -758,14 +759,30 @@ class ModelOptHFTrainer(Trainer):
         """Compute loss, patching lm_head to identity when using liger fused loss."""
         if self.use_liger_kernel:
             # The fused loss is computed here from the hidden states, so drop the ``skip_logits``
-            # that transformers>=5.15 adds for eval: Liger would then need the popped labels.
-            inputs = {k: v for k, v in inputs.items() if k != "skip_logits"}
-            with self._liger_identity_lm_head():
-                return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
+            # that transformers>=5.15 adds for eval: Liger would then need the popped labels. Under
+            # context parallelism the Trainer adds ``shift_labels``, shifted before the sequence was
+            # split; a Liger forward given them skips its logits, so the fused loss takes them.
+            shift_labels = inputs.get("shift_labels")
+            inputs = {k: v for k, v in inputs.items() if k not in ("skip_logits", "shift_labels")}
+            loss_func = self.compute_loss_func
+            if shift_labels is not None:
+                self.compute_loss_func = functools.partial(loss_func, shift_labels=shift_labels)
+            try:
+                with self._liger_identity_lm_head():
+                    return super().compute_loss(
+                        model, inputs, return_outputs=return_outputs, **kwargs
+                    )
+            finally:
+                self.compute_loss_func = loss_func
         return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
 
-    def _liger_loss_func(self, outputs, labels, num_items_in_batch=None, **kwargs):
-        """Fused lm_head + CE loss via liger kernel."""
+    def _liger_loss_func(
+        self, outputs, labels, num_items_in_batch=None, shift_labels=None, **kwargs
+    ):
+        """Fused lm_head + CE loss via liger kernel.
+
+        ``shift_labels`` are labels the Trainer shifted before context parallelism split the sequence.
+        """
         from liger_kernel.transformers.model.loss_utils import LigerForCausalLMLoss
 
         model = self.accelerator.unwrap_model(self.model)
@@ -777,6 +794,7 @@ class ModelOptHFTrainer(Trainer):
                 hidden_states=hidden_states,
                 lm_head_weight=lm_head.weight,
                 labels=labels,
+                shift_labels=shift_labels,
                 hidden_size=hidden_states.size(-1),
                 num_items_in_batch=num_items_in_batch,
                 ignore_index=IGNORE_INDEX,

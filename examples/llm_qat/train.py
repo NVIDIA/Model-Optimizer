@@ -56,8 +56,39 @@ from modelopt.torch.utils import print_rank_0
 mto.enable_huggingface_checkpointing()
 
 
+def enable_context_parallelism(model_args, training_args):
+    """Split each sequence across ``cp_size`` GPUs with accelerate's context parallelism."""
+    from accelerate import ParallelismConfig
+
+    # Other backends would give the ranks of a context-parallel group different samples.
+    if os.environ.get("ACCELERATE_USE_FSDP") != "true" or os.environ.get("FSDP_VERSION") != "2":
+        raise ValueError("--cp_size > 1 needs the FSDP2 accelerate config, e.g. fsdp2.yaml.")
+    if model_args.attn_implementation != "sdpa":
+        raise ValueError(
+            "--cp_size > 1 needs --attn_implementation sdpa: context parallelism splits the "
+            "sequence inside SDPA only."
+        )
+    seq_chunks = 2 * training_args.cp_size
+    if model_args.model_max_length % seq_chunks:
+        raise ValueError(
+            f"--model_max_length must be a multiple of 2 * --cp_size ({seq_chunks}) so each "
+            "sequence splits evenly across the context-parallel group."
+        )
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    if world_size % training_args.cp_size:
+        raise ValueError(
+            f"The number of GPUs ({world_size}) must be a multiple of --cp_size "
+            f"({training_args.cp_size})."
+        )
+    training_args.parallelism_config = ParallelismConfig(
+        cp_size=training_args.cp_size, dp_shard_size=world_size // training_args.cp_size
+    )
+
+
 def train():
     model_args, training_args, data_args, distill_args = get_training_args()
+    if training_args.cp_size > 1:
+        enable_context_parallelism(model_args, training_args)
 
     print_rank_0(f"arguments: {model_args}, {training_args}, {data_args}, {distill_args}")
 
