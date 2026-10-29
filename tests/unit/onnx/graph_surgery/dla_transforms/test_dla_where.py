@@ -50,6 +50,7 @@ from onnx import TensorProto, helper, numpy_helper
 from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms import dla_where as _mod
+from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
 
 ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
@@ -455,3 +456,43 @@ def test_where_allocates_distinct_names_and_legacy_controls(legacy):
     assert len(names) == len(set(names))
     for name, actual in _run_ort(transformed, feeds).items():
         np.testing.assert_array_equal(actual, expected[name])
+
+
+@pytest.mark.parametrize("source_kind", ["initializer", "Transpose"])
+@pytest.mark.parametrize("zero_branch", [0, 1])
+def test_registered_where_uses_materialized_promoted_shapes(source_kind, zero_branch):
+    """Lower selections after rank preparation even when intermediate metadata is deferred."""
+    nodes, inputs, feeds = [], [], {}
+    values = np.arange(1, 7, dtype=np.float32).reshape(3, 2)
+    initializers = [
+        numpy_helper.from_array(np.array(True), "condition"),
+        numpy_helper.from_array(np.zeros((3, 2), np.float32), "zero"),
+    ]
+    if source_kind == "initializer":
+        initializers.append(numpy_helper.from_array(values, "data"))
+    else:
+        inputs.append(_vi("x", TensorProto.FLOAT, [2, 3]))
+        feeds["x"] = values.T.copy()
+        nodes.append(helper.make_node("Transpose", ["x"], ["data"], perm=[1, 0]))
+    branches = ["data", "data"]
+    branches[zero_branch] = "zero"
+    nodes.append(helper.make_node("Where", ["condition", *branches], ["y"]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "promoted_where",
+            inputs,
+            [_vi("y", TensorProto.FLOAT, [3, 2])],
+            initializers,
+            value_info=[_vi("data", TensorProto.FLOAT, [3, 2])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    expected = _run_ort(model, feeds)
+    result = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    assert not any(node.op_type == "Where" for node in result.graph.node)
+    onnx.checker.check_model(result, full_check=True)
+    actual = _run_ort(result, feeds)
+    for name in expected:
+        np.testing.assert_array_equal(actual[name], expected[name])

@@ -29,9 +29,11 @@ from onnx import TensorProto, helper, numpy_helper
 from ...logging_config import logger
 from ..utils.graph_utils import (
     GraphCache,
+    _attribute,
     add_unique_initializers,
     add_value_info,
     batch_replace_nodes,
+    pad4d,
 )
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_indexing import _operator_nodes
@@ -68,6 +70,27 @@ def _apply_where(model: onnx.ModelProto) -> onnx.ModelProto:
     runtime = _runtime_input_names(model)
     zeros = {}
 
+    transposes = {id(node) for node in _operator_nodes(model, {"Transpose"})}
+
+    def current_shape(name):
+        """Read materialized layouts while rank stages defer intermediate value-info updates."""
+        tensor = cache.get_init(name)
+        if tensor is not None and name not in runtime:
+            return list(tensor.dims)
+        producer = cache.get_producer(name)
+        if producer is not None and id(producer) in transposes:
+            perm = _attribute(producer, "perm")
+            source = cache.get_shape(producer.input[0])
+            if (
+                perm is not None
+                and sorted(perm.ints) == [0, 1, 2, 3]
+                and source is not None
+                and len(source) <= 4
+            ):
+                source = pad4d(source)
+                return [source[index] for index in perm.ints]
+        return cache.get_shape(name)
+
     for node in _operator_nodes(model, {"Where"}):
         condition = node.input[0]
         x_name = node.input[1]  # true branch
@@ -80,7 +103,7 @@ def _apply_where(model: onnx.ModelProto) -> onnx.ModelProto:
         non_zero_name = y_name if zero_idx == 0 else x_name
         if cache.get_dtype(non_zero_name) != TensorProto.FLOAT:
             continue
-        shapes = [cache.get_shape(name) for name in [condition, x_name, y_name]]
+        shapes = [current_shape(name) for name in [condition, x_name, y_name]]
         if any(shape is None for shape in shapes):
             continue
         if np.broadcast_shapes(*shapes) != np.broadcast_shapes(
@@ -123,7 +146,7 @@ def _apply_where(model: onnx.ModelProto) -> onnx.ModelProto:
                     name=cache.unique_name(f"{node.name}_cast_cond"),
                 )
                 nodes_to_add.append(cast_node)
-                cond_shape = cache.get_shape(condition)
+                cond_shape = current_shape(condition)
                 if cond_shape is not None:
                     add_value_info(graph, float_name, TensorProto.FLOAT, cond_shape)
                 mask_name = float_name
@@ -147,7 +170,7 @@ def _apply_where(model: onnx.ModelProto) -> onnx.ModelProto:
                     name=cache.unique_name(f"{node.name}_inv"),
                 )
                 nodes_to_add.append(sub_node)
-                cond_shape = cache.get_shape(condition)
+                cond_shape = current_shape(condition)
                 if cond_shape is not None:
                     add_value_info(graph, inv_name, TensorProto.FLOAT, cond_shape)
                 mul_inputs = [non_zero_name, inv_name]
