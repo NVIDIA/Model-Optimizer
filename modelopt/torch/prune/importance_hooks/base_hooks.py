@@ -161,10 +161,10 @@ class ForwardHook(ABC):
         cls: type["ForwardHook"],
         activation_hooks: dict[str, "ForwardHook"],
         activations_log_dir: Path | str,
-    ) -> None:
+    ) -> Path:
         """Save hook states for checkpointing (separate from final results).
 
-        This can be called periodically during scoring.
+        Returns the path of the written file. This can be called periodically during scoring.
         Note: Synchronization should be handled at a higher level to avoid deadlocks.
         """
         activations_log_dir = Path(activations_log_dir)
@@ -176,6 +176,7 @@ class ForwardHook(ABC):
             module_name: hook.state_dict() for module_name, hook in activation_hooks.items()
         }
         torch.save(hook_states, hook_states_path)
+        return hook_states_path
 
 
 class L2NormHook(ForwardHook):

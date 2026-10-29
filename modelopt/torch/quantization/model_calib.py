@@ -19,8 +19,10 @@ import fnmatch
 import math
 import time
 import warnings
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from functools import partial
 from typing import Any, TypeAlias
 
@@ -65,15 +67,18 @@ from .utils import (
     enable_weight_access_and_writeback,
     is_quantized_column_parallel_linear,
     is_quantized_linear,
+    is_quantized_parallel_linear,
     is_quantized_row_parallel_linear,
     module_name_maps,
     persistent_materialization,
     promote_static_block_weight_quantizers,
+    requires_weight_materialization,
 )
 from .utils.calib_utils import (
     _GPTQ_HELPER_REGISTRY,
     _IMATRIX_ENCODER_REGISTRY,
     GPTQHelper,
+    bfloat16_hessian_gemm,
     track_calib_forward_memory,
 )
 
@@ -957,10 +962,13 @@ class _LocalHessianAccumulator:
     scale; the buffer is allocated lazily so never-routed experts cost nothing.
     """
 
-    def __init__(self, cout: int, cin: int, block_size: int):
+    def __init__(
+        self, cout: int, cin: int, block_size: int, input_dtype: torch.dtype = torch.float32
+    ):
         self.cout = cout
         self.cin = cin
         self.block_size = block_size
+        self.input_dtype = input_dtype
         self.num_blocks_per_cin = cin // block_size
         # Not block-divisible -> no Hessian (falls back to plain MSE).
         self.is_enabled = cin % block_size == 0
@@ -973,10 +981,15 @@ class _LocalHessianAccumulator:
         """Accumulate ``XᵀX`` per block from an activation of shape ``(..., cin)``."""
         if not self.is_enabled:
             return
-        # fp32 GEMM avoids bf16/fp16 precision loss; (cin, tokens) -> (n_blocks, bs, tokens).
-        x = input_tensor.reshape(-1, self.cin).to(torch.float32).T
+        # (cin, tokens) -> (n_blocks, bs, tokens). A float32 GEMM avoids bf16/fp16 precision loss;
+        # a bfloat16 one, accumulating in float32, is faster and needs no float32 copy.
+        bf16 = bfloat16_hessian_gemm(self.input_dtype, input_tensor)
+        x = input_tensor.reshape(-1, self.cin).to(torch.bfloat16 if bf16 else torch.float32).T
         x = x.reshape(self.num_blocks_per_cin, self.block_size, -1)
-        hessian_batch = x @ x.transpose(-1, -2)
+        if bf16:
+            hessian_batch = torch.bmm(x, x.transpose(-1, -2), out_dtype=torch.float32)
+        else:
+            hessian_batch = x @ x.transpose(-1, -2)
         if self.hessian_per_block is None:
             self.hessian_per_block = hessian_batch
         else:
@@ -1061,8 +1074,10 @@ def _fused_expert_projections(module: nn.Module):
     """Yield ``(weight_name, weight, weight_quantizers, input_quantizer)`` per fused-experts projection.
 
     ``weight`` is the 3-D ``(num_experts, out, in)`` parameter, ``weight_quantizers`` holds one
-    quantizer per expert, and ``input_quantizer`` is shared by the experts and runs once per expert
-    forward with ``module._current_expert_idx`` already set to that expert.
+    quantizer per expert, and ``input_quantizer`` is shared by the experts. Under eager it runs once
+    per expert forward with ``module._current_expert_idx`` set to that expert; under grouped_mm once
+    per projection, on every expert's rows, with the index cleared (``None``), so a capture keyed on
+    it skips that batch.
     """
     first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     for weight_name, quantizers_name, input_q_name in (
@@ -1078,6 +1093,26 @@ def _fused_expert_projections(module: nn.Module):
         input_quantizer = getattr(module, input_q_name, None)
         if weight is not None and quantizers is not None and input_quantizer is not None:
             yield weight_name, weight, quantizers, input_quantizer
+
+
+def _warn_if_fused_experts_skipped(model: nn.Module, algorithm: str) -> None:
+    """Warn that a linear-layer algorithm (AWQ, SmoothQuant, SVDQuant) skips fused experts.
+
+    These algorithms only process 2-D quantized linears, so quantized experts keep max
+    calibration. FP8 experts need no such algorithm and are not reported.
+    """
+    for name, module in model.named_modules():
+        if not _is_quant_fused_experts(module):
+            continue
+        for _, _, quantizers, input_quantizer in _fused_expert_projections(module):
+            for q in (*quantizers, input_quantizer):
+                for stage in q if isinstance(q, SequentialQuantizer) else [q]:
+                    if stage.is_enabled and stage.num_bits != (4, 3):
+                        warn_rank_0(
+                            f"{algorithm} does not apply to fused MoE experts "
+                            f"(e.g. {name}); they keep max calibration."
+                        )
+                        return
 
 
 def _refuse_packed_fused_expert_weights(name, module, method, updates):
@@ -1178,6 +1213,7 @@ def local_hessian_calibrate(
     block_size: int = 16,
     debug: bool = False,
     shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
+    hessian_input_dtype: str = "float32",
 ):
     """Calibrate weight quantizers by minimizing the Hessian-weighted error.
 
@@ -1206,6 +1242,8 @@ def local_hessian_calibrate(
         block_size: Block size for local Hessian computation (default: 16).
         debug: If True, retain the per-quantizer Hessian accumulators on the model
             (``model._local_hessian_accumulators``) for inspection.
+        hessian_input_dtype: ``"float32"`` or ``"bfloat16"``, the dtype the Hessian GEMM reads
+            the activations in.
 
     See :class:`LocalHessianCalibConfig <modelopt.torch.quantization.config.LocalHessianCalibConfig>`
     for details on the configuration options.
@@ -1227,7 +1265,9 @@ def local_hessian_calibrate(
         input_local = input_tensor.to_local() if hasattr(input_tensor, "to_local") else input_tensor
         acc = accumulators.get(id(weight_quantizer))
         if acc is None:
-            acc = _LocalHessianAccumulator(weight.shape[0], weight.shape[1], block_size)
+            acc = _LocalHessianAccumulator(
+                weight.shape[0], weight.shape[1], block_size, getattr(torch, hessian_input_dtype)
+            )
             accumulators[id(weight_quantizer)] = acc
         acc.accumulate(input_local)
 
@@ -1455,6 +1495,8 @@ def smoothquant(model: nn.Module, forward_loop: ForwardLoop | None = None, alpha
     See :class:`SmoothQuantCalibConfig <modelopt.torch.quantization.config.SmoothQuantCalibConfig>` for
     details on the remaining arguments.
     """
+    _warn_if_fused_experts_skipped(model, "smoothquant")
+
     # distributed synchronization
     # max_calibrate performs amax sync for data parallel
 
@@ -1548,6 +1590,7 @@ def awq(
     See :class:`AWQFullCalibConfig <modelopt.torch.quantization.config.AWQFullCalibConfig>` for
     details on the remaining arguments.
     """
+    _warn_if_fused_experts_skipped(model, algorithm)
     with SequentialQuantizer.convert_to_single_quantizer(model):
         if algorithm in ["awq_full", "awq_lite"]:
             awq_lite(model, forward_loop, **kwargs)
@@ -1570,6 +1613,7 @@ def awq_lite(
     forward_loop: ForwardLoop,
     alpha_step: float = 0.1,
     debug: bool = False,
+    use_weight_scale: bool = True,
     **kwargs,
 ):
     """Lite version of AWQ.
@@ -1595,7 +1639,9 @@ def awq_lite(
             self.num_cache_steps = 0
             self.num_search_steps = 0
             self.block_size = _get_awq_quantizer_block_size(module.weight, module.weight_quantizer)
-            self.weight_scale = get_weight_scale(module.weight, self.block_size)
+            self.weight_scale = (
+                get_weight_scale(module.weight, self.block_size) if use_weight_scale else None
+            )
             self.loss = {
                 k.item(): torch.zeros((), device=module.weight.device, dtype=torch.float32)
                 for k in torch.arange(0, 1.0 + alpha_step, alpha_step)
@@ -1645,14 +1691,12 @@ def awq_lite(
         return x.abs().contiguous().view(-1, x.shape[-1]).mean(0).to(torch.float32)
 
     def get_scale(x_max, w_max, alpha, tensor_parallel_group=None):
-        scales = (
-            (
-                x_max.pow(alpha)
-                / (w_max.to(x_max.device).pow(1 - alpha) + torch.finfo(torch.float32).tiny)
+        scales = x_max.pow(alpha)
+        if use_weight_scale:
+            scales = scales / (
+                w_max.to(x_max.device).pow(1 - alpha) + torch.finfo(torch.float32).tiny
             )
-            .clamp(min=1e-4, max=1e4)
-            .view(-1)
-        )
+        scales = scales.clamp(min=1e-4, max=1e4).view(-1)
         scales = (scales / (scales.max() * scales.min()).sqrt()).view(-1)
         if tensor_parallel_group and tensor_parallel_group.is_initialized():
             dist.all_reduce(scales, op=dist.ReduceOp.SUM, group=tensor_parallel_group.group)
@@ -1775,9 +1819,11 @@ def awq_lite(
             module._if_calib = True
             module.awq_lite.act_scale = module.awq_lite.act_scale / module.awq_lite.num_cache_steps
 
-            has_nan_local = torch.any(torch.isnan(module.awq_lite.act_scale)) or torch.any(
-                torch.isnan(module.awq_lite.weight_scale)
-            )
+            has_nan_local = torch.any(torch.isnan(module.awq_lite.act_scale))
+            if use_weight_scale:
+                has_nan_local = has_nan_local or torch.any(
+                    torch.isnan(module.awq_lite.weight_scale)
+                )
             has_nan = DistributedProcessGroup.get_dist_syncd_obj(
                 has_nan_local, module.parallel_state.data_parallel_group, lambda objs: any(objs)
             )
@@ -2425,6 +2471,7 @@ def gptq(
     block_size: int = 128,
     fused: bool = False,
     importance_weighted: bool = False,
+    hessian_input_dtype: str = "float32",
 ):
     """GPTQ quantization.
 
@@ -2463,6 +2510,8 @@ def gptq(
         fused: If True, use fused Triton kernel for NVFP4 static quantization.
         importance_weighted: If True, formats whose codebook search takes a per-input-column
             importance weight it by the square root of the Hessian diagonal.
+        hessian_input_dtype: ``"float32"`` or ``"bfloat16"``, the dtype the Hessian GEMM reads
+            the activations in; see :class:`GPTQCalibConfig <modelopt.torch.quantization.config.GPTQCalibConfig>`.
     """
     total_start = time.time()
 
@@ -2513,6 +2562,7 @@ def gptq(
             offload_to_cpu=True,
             fused=fused,
             importance_weighted=importance_weighted,
+            hessian_input_dtype=hessian_input_dtype,
             weight_quantizer=weight_quantizer,
             weight=weight,
             log_mse=log_mse,
@@ -2695,19 +2745,62 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
         for handle in handles:
             handle.remove()
 
+    def encode(weight, quantizer):
+        sum_sq, count = targets[id(quantizer)]
+        second_moments = None if count == 0 else sum_sq.to(weight.device) / count
+        encoder = _IMATRIX_ENCODER_REGISTRY[quantizer.backend]
+        weight.copy_(encoder.encode(weight, quantizer, second_moments))
+
+    # Weights readable as they stand are grouped by device and encoded by one thread per GPU: a
+    # model that device_map spreads over GPUs would otherwise keep all but one of them idle.
+    # Offloaded or sharded weights are encoded in turn, each inside its materialization window.
+    by_device: dict[torch.device, list] = defaultdict(list)
     encoded = 0
     for _, module in target_modules:
-        with enable_weight_access_and_writeback(module, model, names):
+        in_window = requires_weight_materialization(
+            module, model, names
+        ) or is_quantized_parallel_linear(module)
+        with (
+            enable_weight_access_and_writeback(module, model, names) if in_window else nullcontext()
+        ):
             for weight, quantizer in module.iter_weights_for_calibration():
-                entry = targets.get(id(quantizer))
-                if entry is None:
+                if id(quantizer) not in targets:
                     continue
-                sum_sq, count = entry
-                second_moments = None if count == 0 else sum_sq.to(weight.device) / count
-                encoder = _IMATRIX_ENCODER_REGISTRY[quantizer.backend]
-                weight.copy_(encoder.encode(weight, quantizer, second_moments))
+                if in_window:
+                    encode(weight, quantizer)
+                else:
+                    by_device[weight.device].append((weight, quantizer))
                 encoded += 1
+    _encode_on_each_gpu(by_device, encode)
     print_rank_0(f"imatrix: encoded {encoded} weights")
+
+
+def _encode_on_each_gpu(by_device, encode):
+    """Call ``encode(weight, quantizer)`` on every item, one thread per GPU when several hold items."""
+    gpus = [device for device in by_device if device.type == "cuda"]
+    if len(gpus) < 2:
+        gpus = []
+    for device, items in by_device.items():
+        if device not in gpus:
+            for item in items:
+                encode(*item)
+    if not gpus:
+        return
+    # The first encode runs here, so lazy setup that is not thread-safe, such as loading a format's
+    # CUDA extension, happens once before the workers start.
+    first, *by_device[gpus[0]] = by_device[gpus[0]]
+    encode(*first)
+
+    def worker(device):
+        torch.cuda.set_device(device)  # per thread, like grad mode
+        with torch.no_grad():
+            for item in by_device[device]:
+                encode(*item)
+        torch.cuda.synchronize(device)
+
+    with ThreadPoolExecutor(len(gpus)) as pool:
+        for future in [pool.submit(worker, gpu) for gpu in gpus]:
+            future.result()
 
 
 def _run_weight_scale_calibration(model, forward_loop, scale_algorithm):
