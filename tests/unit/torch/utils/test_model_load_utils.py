@@ -1072,6 +1072,62 @@ def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path, 
     cpu_dist_workers.run(_every_rank_loads_rank0s_plan_job, ckpt=str(tmp_path), handed=handed)
 
 
+def _fetched_in_step(ckpt_path, **hub_options):
+    """The checkpoint's fetch, as the collective it is: a rank not in it leaves the others waiting."""
+    torch.distributed.barrier()
+    return None, ckpt_path
+
+
+def _loaded_in_step(*args, **kwargs):
+    """The FSDP2 load, as the collectives it runs."""
+    torch.distributed.barrier()
+    return _Loaded()
+
+
+def _one_rank_refused_job(rank, size, ckpt, refused_on_1, match):
+    refused = None
+    with (
+        bounded_collectives(),
+        mock.patch.object(model_load_utils, "ensure_local_checkpoint", _fetched_in_step),
+        mock.patch.object(model_load_utils, "parallel_load_and_prepare_fsdp2", _loaded_in_step),
+    ):
+        try:  # not pytest.raises: its failure would end the pooled worker instead of the job
+            load_pretrained(
+                ckpt,
+                distribution=DistributionPlan(2, dense="fsdp"),
+                **(refused_on_1 if rank == 1 else {}),
+            )
+        except Exception as error:
+            refused = str(error)
+    # Rank 1's refusal on both ranks, rather than rank 0 failing at the group's timeout.
+    assert refused is not None and match in refused, (rank, refused)
+    assert rank == 1 or "rank 1 failed" in refused, refused
+
+
+@pytest.mark.parametrize(
+    ("refused_on_1", "match"),
+    [
+        ({"config": LlamaConfig(**_TINY), "hf_config": LlamaConfig(**_TINY)}, "both name"),
+        ({"dtype": torch.float32}, "keeps their dtype"),
+        (
+            {"hf_config": LlamaConfig(**_TINY, quantization_config={"quant_method": "fp8"})},
+            "cannot dequantize",
+        ),
+    ],
+    ids=["two-configs", "dtype", "quantized-config"],
+)
+def test_a_load_refused_on_one_rank_fails_every_rank(
+    cpu_dist_workers, tmp_path, refused_on_1, match
+):
+    """Rank 1 alone is refused, by its arguments before the checkpoint is fetched or by the config
+    it was handed before the FSDP2 load: every rank raises the refusal, rather than leave rank 0
+    waiting in the fetch's or the load's collectives, which stand-ins on a bounded group run here."""
+    LlamaConfig(**_TINY).save_pretrained(tmp_path)
+    cpu_dist_workers.run(
+        _one_rank_refused_job, ckpt=str(tmp_path), refused_on_1=refused_on_1, match=match
+    )
+
+
 @pytest.mark.parametrize(
     ("change", "error", "match"),
     [
