@@ -2029,16 +2029,10 @@ def awq_clip(
             clip_ratios = [
                 round(float(k), 2) for k in torch.arange(min_clip_ratio, 1.0, shrink_step)
             ] + [1.0]
-            if self.is_per_tensor_clip(module):
-                self.loss = {k: torch.tensor(0.0, device=module.weight.device) for k in clip_ratios}
-            else:
-                self.loss = {
-                    k: torch.zeros(
-                        (co, math.ceil(ci / self.block_size)),
-                        device=module.weight.device,
-                    )
-                    for k in clip_ratios
-                }
+            shape = () if self.is_per_tensor_clip(module) else (co, math.ceil(ci / self.block_size))
+            # One buffer for every candidate's loss, which the data-parallel sync reduces in place.
+            self.loss_buffer = torch.zeros(len(clip_ratios), *shape, device=module.weight.device)
+            self.loss = dict(zip(clip_ratios, self.loss_buffer))
             self.best_clip_val = None
             self.best_loss = None
 
@@ -2075,13 +2069,12 @@ def awq_clip(
         group = module.parallel_state.data_parallel_group
         if not group.is_initialized():
             return
-        losses = torch.stack(list(module.awq_clip.loss.values()))
-        # One all-reduce: the token count rides in the fp32 losses, exact for any calibration set.
-        packed = torch.cat([losses.reshape(-1), losses.new_tensor([module.awq_clip.num_tokens])])
-        dist.all_reduce(packed, op=dist.ReduceOp.SUM, group=group.group)
-        reduced = packed[:-1].view_as(losses) / group.world_size()
-        module.awq_clip.loss = dict(zip(module.awq_clip.loss, reduced))
-        module.awq_clip.num_tokens = int(packed[-1].item())
+        losses = module.awq_clip.loss_buffer
+        dist.all_reduce(losses, op=dist.ReduceOp.SUM, group=group.group)
+        losses /= group.world_size()
+        tokens = torch.tensor(module.awq_clip.num_tokens, device=losses.device)
+        dist.all_reduce(tokens, op=dist.ReduceOp.SUM, group=group.group)
+        module.awq_clip.num_tokens = int(tokens.item())
 
     def _clip_search(self, inputs, co_bsz=256, max_tokens=16):
         if inputs.numel() == 0:  # no tokens to search with; their loss, a mean over none, is NaN
