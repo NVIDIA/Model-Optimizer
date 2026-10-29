@@ -34,6 +34,7 @@ from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
 from modelopt.torch.quantization.qtensor import INT4QTensor, MXFP4QTensor, NF4QTensor, NVFP4QTensor
+from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, module_name_maps
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
@@ -209,6 +210,24 @@ def test_a_module_joins_its_units_held_window_once(gloo_world_of_one):
 
     sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
     assert torch.equal(sd["0.0.weight"].full_tensor(), ref.weight)
+
+
+def test_a_module_the_window_cannot_name_never_takes_the_roots_own_weight(gloo_world_of_one):
+    """A unit that owns its weight directly keys it by its bare name in the window.
+
+    A module the window's name map does not know must not take that key when the window closes: it
+    would be handed to FSDP2 as the unit's own weight.
+    """
+    torch.manual_seed(0)
+    unit, stranger = nn.Linear(32, 16, bias=False), nn.Linear(32, 16, bias=False)
+    fully_shard(unit, mesh=gloo_world_of_one)
+    want = unit.weight.full_tensor().clone()
+    modules = [unit]
+
+    with fsdp2_aware_weight_update(unit, modules, names=module_name_maps(unit)):
+        modules.append(stranger)  # as a held window takes a module in
+
+    assert torch.equal(unit.weight.full_tensor(), want)
 
 
 class _Unit(nn.Module):

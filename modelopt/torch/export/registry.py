@@ -64,9 +64,9 @@ class ExportContext:
     model's spec in ``modelopt.torch.models``. ``None`` means unknown: spec lookups then
     fail loudly instead of guessing."""
 
-    # Distributed (no-gather) export: the handlers pack while the model is still sharded, an
-    # FSDP2-owned weight inside its unit's weight-update window.
     keep_fused_experts: bool = False
+    """Marks the distributed no-gather export, whose handlers pack while the model is still sharded:
+    an FSDP2-owned weight is packed inside its unit's weight-update window."""
 
     module_names: "ModuleNames | None" = None
     """``model``'s name maps, built once per export by the first handler that looks a module up
