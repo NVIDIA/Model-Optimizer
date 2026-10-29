@@ -228,8 +228,7 @@ def test_sanitize_hf_config_for_deployment_trims_nextn_layer_types():
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("keep_tokenizer", [False, True])
 def test_export_config_reloads_nemotron_h_with_source_auto_map(tmp_path, native, keep_tokenizer):
-    # Native NemotronH is optional on the minimum-Transformers test lane.
-    transformers = pytest.importorskip("transformers", minversion="5.5")
+    transformers = pytest.importorskip("transformers")
     from modelopt.torch.export.unified_export_hf import (
         _write_hf_export_config,
         save_non_weight_artifacts,

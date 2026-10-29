@@ -638,13 +638,6 @@ def test_build_reverse_rules_from_mixtral_conversion_mapping_cpu():
     pytest.importorskip("transformers")
     from _test_utils.torch.transformers_models import get_tiny_mixtral
 
-    try:
-        from transformers.conversion_mapping import get_checkpoint_conversion_mapping
-    except ImportError:
-        pytest.skip("transformers build has no conversion_mapping API")
-    if not get_checkpoint_conversion_mapping("mixtral"):
-        pytest.skip("transformers build has no mixtral conversion_mapping")
-
     model = get_tiny_mixtral(**_MIXTRAL_KWARGS)
 
     p = "model.layers.0"
