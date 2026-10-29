@@ -48,6 +48,7 @@ from modelopt.onnx.export._dynamo_adapter import (
     finalize_dynamo_export,
     normalize_dynamo_weight_paths,
 )
+from modelopt.onnx.export.fp8_exporter import _DynamoFP8QuantExporter
 from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_with_smallest_nonzero
 from modelopt.onnx.utils import (
     change_casts_to_fp16,
@@ -438,7 +439,9 @@ def _disable_fp8_conv_weight_quantizers(model: nn.Module):
             module.weight_quantizer.enable()
 
 
-def quantize_weights(model: nn.Module, onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+def quantize_weights(
+    model: nn.Module, onnx_model: onnx.ModelProto, *, dynamo_export: bool = False
+) -> onnx.ModelProto:
     """Real quantizes the weights in the onnx model.
 
     Applies weight quantization to an ONNX model based on the quantization scheme detected
@@ -454,6 +457,7 @@ def quantize_weights(model: nn.Module, onnx_model: onnx.ModelProto) -> onnx.Mode
         model (nn.Module): The original PyTorch model used to detect quantization schemes.
             This model should have been quantized using modelopt's quantization APIs.
         onnx_model (onnx.ModelProto): The ONNX model whose weights will be quantized.
+        dynamo_export: Whether captured Conv quantizers supply their own scales and exclusions.
 
     Returns:
         onnx.ModelProto: The ONNX model with quantized weights applied. The returned model
@@ -474,7 +478,7 @@ def quantize_weights(model: nn.Module, onnx_model: onnx.ModelProto) -> onnx.Mode
     if is_mxfp8_quantized(model):
         onnx_exporters.append(MXFP8QuantExporter)
     if is_fp8_quantized(model):
-        onnx_exporters.append(FP8QuantExporter)
+        onnx_exporters.append(_DynamoFP8QuantExporter if dynamo_export else FP8QuantExporter)
     if is_int8_quantized(model):
         onnx_exporters.append(INT8QuantExporter)
 
@@ -649,10 +653,13 @@ def get_onnx_bytes_and_metadata(
     quantizer_context = (
         configure_linear_module_onnx_quantizers(model) if uses_fp4 or uses_mxfp8 else nullcontext()
     )
-    # Disable FP8 Conv weight quantizers: TorchScript custom ops produce outputs with
-    # unknown shapes, causing _convolution symbolic to fail. Conv weights are quantized
-    # to FP8 in post-processing by FP8QuantExporter instead.
-    conv_wq_context = _disable_fp8_conv_weight_quantizers(model) if uses_fp8 else nullcontext()
+    # Only TorchScript needs the workaround for custom Conv outputs with unknown shapes.
+    # Dynamo preserves weight markers so packing uses calibrated scales and exclusions.
+    conv_wq_context = (
+        _disable_fp8_conv_weight_quantizers(model)
+        if uses_fp8 and not dynamo_export
+        else nullcontext()
+    )
     with torch.inference_mode(), autocast, quantizer_context, conv_wq_context:
         additional_kwargs = {}
         if dynamo_export:
@@ -696,7 +703,7 @@ def get_onnx_bytes_and_metadata(
     if dynamo_export:
         onnx_opt_graph = normalize_dynamo_weight_paths(onnx_opt_graph)
 
-    onnx_opt_graph = quantize_weights(model, onnx_opt_graph)
+    onnx_opt_graph = quantize_weights(model, onnx_opt_graph, dynamo_export=dynamo_export)
 
     if dq_only:
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)

@@ -131,7 +131,11 @@ class FP8QuantExporter(ONNXQuantExporter):
 
                 # Replace it with Dequantize with FP8 weights. This is a WAR because numpy does not support fp8.
                 numpy_weights = (
-                    (torch_weights / torch_scale).to(torch.float8_e4m3fn).view(torch.uint8).numpy()
+                    (torch_weights / torch_scale)
+                    .clamp_(-_FP8_E4M3_MAX, _FP8_E4M3_MAX)
+                    .to(torch.float8_e4m3fn)
+                    .view(torch.uint8)
+                    .numpy()
                 )
                 tensor = onnx.TensorProto()
                 tensor.data_type = onnx.TensorProto.FLOAT8E4M3FN
@@ -457,8 +461,8 @@ class FP8QuantExporter(ONNXQuantExporter):
         graph.cleanup().toposort()
         return count
 
-    @staticmethod
-    def post_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+    @classmethod
+    def post_process(cls, onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Post-processes the ONNX model for FP8 quantization.
 
         Converts TRT_FP8 QDQ ops to native ONNX QuantizeLinear/DequantizeLinear,
@@ -502,14 +506,14 @@ class FP8QuantExporter(ONNXQuantExporter):
                 )
 
         # Add FP8 weight DQ for Conv layers that had weight quantizers disabled during export
-        count = FP8QuantExporter._quantize_conv_weights_to_fp8(graph)
+        count = cls._quantize_conv_weights_to_fp8(graph)
         if count > 0:
             logger.info(f"Inserted FP8 weight DequantizeLinear for {count} Conv nodes")
 
         # Attention-aware rewrites so TRT can fuse DQ into the attention MatMuls.
-        n_mul = FP8QuantExporter._move_mul_before_qdq(graph)
-        n_t = FP8QuantExporter._move_transpose_before_qdq(graph)
-        n_sm = FP8QuantExporter._insert_qdq_after_softmax(graph)
+        n_mul = cls._move_mul_before_qdq(graph)
+        n_t = cls._move_transpose_before_qdq(graph)
+        n_sm = cls._insert_qdq_after_softmax(graph)
         if n_mul or n_t or n_sm:
             logger.info(
                 f"Attention QDQ rewrites: moved {n_mul} Mul, {n_t} Transpose; "
@@ -518,3 +522,11 @@ class FP8QuantExporter(ONNXQuantExporter):
 
         graph.cleanup().toposort()
         return gs.export_onnx(graph)
+
+
+class _DynamoFP8QuantExporter(FP8QuantExporter):
+    """Pack captured FP8 weights without legacy Conv reconstruction."""
+
+    @staticmethod
+    def _quantize_conv_weights_to_fp8(graph: gs.Graph) -> int:
+        return 0

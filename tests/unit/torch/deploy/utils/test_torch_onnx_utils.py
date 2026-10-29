@@ -305,6 +305,60 @@ def test_onnx_export_and_inputs(model: BaseDeployModel):
         )
 
 
+@pytest.mark.parametrize("weights_dtype", ["fp32", "fp16"])
+@pytest.mark.parametrize("excluded_conv", [False, True])
+def test_dynamo_fp8_conv_preserves_calibration_and_exclusions(weights_dtype, excluded_conv):
+    inputs = torch.ones(1, 3, 2, 2)
+    model = nn.Sequential(
+        nn.Conv2d(3, 4, 1, bias=False),
+        *([nn.Conv2d(4, 4, 1, bias=False)] if excluded_conv else []),
+    ).eval()
+    with torch.no_grad():
+        for conv in model:
+            conv.weight.fill_(1.0)
+    model = mtq.quantize(
+        model, mtq.FP8_DEFAULT_CFG, forward_loop=lambda candidate: candidate(inputs)
+    )
+    for conv in model:
+        conv.input_quantizer.disable()
+    model[0].weight_quantizer._amax.fill_(0.5)
+    if excluded_conv:
+        model[1].weight_quantizer.disable()
+    expected = model(inputs)
+
+    payload, metadata = get_onnx_bytes_and_metadata(
+        model, (inputs,), dynamo_export=True, weights_dtype=weights_dtype
+    )
+    exported = onnx.load_model_from_string(
+        OnnxBytes.from_bytes(payload).get_onnx_model_file_bytes()
+    )
+    onnx.checker.check_model(exported, full_check=True)
+    initializers = {tensor.name: tensor for tensor in exported.graph.initializer}
+    producers = {output: node for node in exported.graph.node for output in node.output}
+    convs = [node for node in exported.graph.node if node.op_type == "Conv"]
+    weight_dq = producers[convs[0].input[1]]
+    assert (weight_dq.domain, weight_dq.op_type) == ("", "DequantizeLinear")
+    packed = initializers[weight_dq.input[0]]
+    assert packed.data_type == onnx.TensorProto.FLOAT8E4M3FN
+    assert np.isfinite(onnx.numpy_helper.to_array(packed).astype(np.float32)).all()
+    scale = onnx.numpy_helper.to_array(initializers[weight_dq.input[1]])
+    np.testing.assert_allclose(scale, 0.5 / 448, rtol=1e-3)
+    if excluded_conv:
+        excluded_weight = initializers[convs[1].input[1]]
+        assert excluded_weight.data_type == (
+            onnx.TensorProto.FLOAT16 if weights_dtype == "fp16" else onnx.TensorProto.FLOAT
+        )
+        np.testing.assert_array_equal(onnx.numpy_helper.to_array(excluded_weight), 1.0)
+
+    generated = {
+        name: tensor.numpy() for name, tensor in generate_onnx_input(metadata, (inputs,)).items()
+    }
+    actual = ReferenceEvaluator(exported).run(None, generated)[0]
+    torch.testing.assert_close(
+        torch.from_numpy(actual).to(expected), expected, rtol=1e-3, atol=1e-3
+    )
+
+
 @pytest.mark.parametrize(
     ("source_dtype", "weights_dtype", "expected_onnx_dtype"),
     [
