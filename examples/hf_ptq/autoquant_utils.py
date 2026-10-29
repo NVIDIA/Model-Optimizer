@@ -22,6 +22,7 @@ from fnmatch import fnmatch
 from typing import Any
 
 import torch
+from autoquant_final import finalize_selected, request_final_reload
 from autoquant_pipeline import publish_json
 from torch.utils.data import DataLoader
 
@@ -265,6 +266,15 @@ def auto_quantize(
             ],
         )
 
+    if getattr(args, "auto_quantize_final_layerwise", False):
+        auto_quantize_kwargs["calibration"]["source_activation_bytes"] = (
+            args.auto_quantize_resources["activation_bytes"]
+        )
+        if args.auto_quantize_calibration_candidate is None and finalize_selected(
+            args, language_model, auto_quantize_kwargs
+        ):
+            return language_model
+
     language_model, search_state = mtq.auto_quantize(
         language_model,
         **auto_quantize_kwargs,
@@ -282,6 +292,10 @@ def auto_quantize(
             search_state["calibration_provenance"]["contract"]["identity"],
         )
         publish_json(args.auto_quantize_assignment, assignment.as_dict(), args)
+        if getattr(args, "auto_quantize_final_layerwise", False):
+            request_final_reload(args, assignment)
+            if getattr(args, "auto_quantize_reload", False):
+                return language_model
 
     # KV cache quantization is uniform; applied after the LP search.
     kv_cache_quant_cfg = inputs["kv_cache_quant_cfg"]

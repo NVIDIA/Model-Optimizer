@@ -132,7 +132,8 @@ def test_candidate_listing_needs_no_model_or_gpu(monkeypatch, capsys, recipe, co
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Automatic workers require POSIX locks")
-def test_automatic_pipeline_expansion_and_cli(monkeypatch, tmp_path):
+@pytest.mark.parametrize("layerwise", [False, True])
+def test_automatic_pipeline_expansion_and_cli(monkeypatch, tmp_path, layerwise):
     monkeypatch.delenv("SLURM_GPUS_ON_NODE", raising=False)
     monkeypatch.syspath_prepend(str(_EXAMPLES_DIR.parents[1] / "tools" / "launcher"))
     generate = importlib.import_module("autoquant").generate_auto_quantize_pipeline
@@ -161,6 +162,26 @@ def test_automatic_pipeline_expansion_and_cli(monkeypatch, tmp_path):
         "slurm_config": {"time": "00:10:00"},
         "resources": resources,
     }
+    if layerwise:
+        recipe = load_recipe(options["recipe"])
+        for candidate in recipe.auto_quantize.candidate_formats:
+            candidate.algorithm = {"method": "max", "layerwise": {"enable": True}}
+        payload = recipe.model_dump()
+        payload["metadata"]["recipe_type"] = recipe.recipe_type.value
+        path = tmp_path / "layerwise.yaml"
+        path.write_text(yaml.safe_dump(payload))
+        options["recipe"] = str(path)
+        with pytest.raises(ValueError):
+            generate(**options)
+        resources.update(activation_bytes=1024**3, final_checkpoint_bytes=1024**3)
+        for invalid in (
+            {"activation_bytes": resources["gpu_bytes"] + 1},
+            {"final_checkpoint_bytes": 65535},
+            {"final_checkpoint_bytes": resources["artifact_storage_bytes"]},
+        ):
+            with pytest.raises(ValueError):
+                generate(**{**options, "resources": {**resources, **invalid}})
+        assert not Path(options["work_dir"]).exists()
     pipeline = generate(**options)["pipeline"]
     assert pipeline["max_concurrent_tasks"] == 2
     assert len(pipeline["tasks"]) == 3
@@ -183,6 +204,7 @@ def test_automatic_pipeline_expansion_and_cli(monkeypatch, tmp_path):
         assert args.auto_quantize_calibration_candidate == (index if index < 2 else None)
         assert (args.calib_size, args.batch_size, args.calib_seq) == ([512], 1, 512)
         assert args.kv_cache_qformat == "none"
+        assert args.auto_quantize_final_layerwise is layerwise
         candidates = importlib.import_module("autoquant_utils")._calibration_candidates(args)
         assert len(candidates) == 2
         assert task["slurm_config"]["mem"] == "32768M"

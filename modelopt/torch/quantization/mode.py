@@ -442,6 +442,7 @@ class MaxCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = max_calibrate
     _auto_quantize_search_policy = "same_algorithm"
+    _auto_quantize_layerwise_estimator = "source_activation_v1"
 
 
 @CalibrateModeRegistry.register_mode
@@ -569,6 +570,7 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = gptq
     _auto_quantize_search_policy = "same_algorithm"
+    _auto_quantize_layerwise_estimator = "source_activation_v1"
 
 
 @CalibrateModeRegistry.register_mode
@@ -582,6 +584,7 @@ class ImatrixModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = imatrix_calibrate
     _auto_quantize_search_policy = "same_algorithm"
+    _auto_quantize_layerwise_estimator = "source_activation_v1"
 
 
 @CalibrateModeRegistry.register_mode

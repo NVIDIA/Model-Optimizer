@@ -41,7 +41,6 @@ from modelopt.torch.quantization._selected_search import (
 from modelopt.torch.quantization._source_estimation import _estimate_source_activations
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight, preserve_source_weights
-from modelopt.torch.quantization.mode import GPTQModeDescriptor, MaxCalibrateModeDescriptor
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
 from modelopt.torch.quantization.utils import layerwise_calib
@@ -254,8 +253,6 @@ def test_selected_layerwise_gptq_mixed_formats(
         )
     original_groups = copy.deepcopy(groups)
     if recover == "selected":
-        for mode in (GPTQModeDescriptor, MaxCalibrateModeDescriptor):
-            monkeypatch.setattr(mode, "_auto_quantize_layerwise_estimator", "source_activation_v1")
         spaces = []
         for names, algorithm in groups:
             (name,) = names

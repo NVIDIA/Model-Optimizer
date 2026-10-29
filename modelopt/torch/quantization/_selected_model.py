@@ -40,7 +40,7 @@ from .utils.layerwise_calib import LayerActivationCollector
 __all__ = []
 
 
-def _selected_model(model, assignment, plan, search_state, identity):
+def _selected_model(model, assignment, plan, search_state, identity, *, before_conversion=None):
     """Prepare final calibration from an immutable assignment and validated coordinator state.
 
     The caller validates the search checkpoint and replay inputs before entering. No estimation
@@ -193,7 +193,7 @@ def _selected_model(model, assignment, plan, search_state, identity):
         raise ValueError("Selected candidate quantizers differ from the source layout")
     inside = {
         module
-        for layer in LayerActivationCollector.get_decoder_layers(probe)
+        for layer in LayerActivationCollector.get_decoder_layers(probe) or ()
         for module in layer.modules()
     }
     if any(
@@ -203,8 +203,11 @@ def _selected_model(model, assignment, plan, search_state, identity):
         for name, module in probe.named_modules()
     ):
         raise ValueError("Selected finalization requires quantizers in frozen decoder groups")
-    _SelectedLayerCalibrator(probe, methods)
-    del probe, mode
+    prepared = _SelectedLayerCalibrator(probe, methods)
+    settings = prepared.layerwise_config
+    del probe, mode, inside, prepared
+    if before_conversion is not None:
+        before_conversion(settings, len(layers))
 
     configure(model)
     merged = quantizer_state(model)

@@ -552,9 +552,11 @@ def test_autoquant_export_guard_not_bypassed_by_effective_bits(autoquant_utils):
         autoquant_utils._mtq_inputs_from_auto_quantize_config(aq, args)
 
 
-@pytest.mark.parametrize("automatic", [False, True])
+@pytest.mark.parametrize("automatic", [False, True, "layerwise"])
 @pytest.mark.skipif(sys.platform == "win32", reason="Calibration workers require POSIX locks")
-def test_hf_candidate_worker_and_coordinator_use_public_api(autoquant_utils, tmp_path, automatic):
+def test_hf_candidate_worker_and_coordinator_use_public_api(
+    autoquant_utils, monkeypatch, tmp_path, automatic
+):
     if automatic:
         tmp_path = tmp_path / "work" / "search"
         tmp_path.mkdir(parents=True)
@@ -567,6 +569,13 @@ def test_hf_candidate_worker_and_coordinator_use_public_api(autoquant_utils, tmp
         candidate_formats=[QuantizeConfig(**QUANT_CFG_CHOICES["fp8"])],
         score_size=1,
     )
+    if automatic == "layerwise":
+        aq.candidate_formats[0].algorithm = {"method": "max", "layerwise": {"enable": True}}
+        aq.disabled_layers = ["*lm_head*"]
+        aq.cost_excluded_layers = ["*lm_head*"]
+        source.config._name_or_path = str(tmp_path / "source")
+        source.save_pretrained(source.config._name_or_path)
+        source = type(source).from_pretrained(source.config._name_or_path).eval()
     args = SimpleNamespace(
         calib_with_images=False,
         inference_pipeline_parallel=1,
@@ -583,6 +592,7 @@ def test_hf_candidate_worker_and_coordinator_use_public_api(autoquant_utils, tmp
         payload["metadata"]["recipe_type"] = recipe.recipe_type.value
         args.recipe = str(tmp_path / "recipe.yaml")
         Path(args.recipe).write_text(yaml.safe_dump(payload))
+        aq = load_recipe(args.recipe).auto_quantize
         args.auto_quantize_pipeline = True
         args.auto_quantize_resources = {
             "candidate_bytes": 1024**2,
@@ -590,8 +600,20 @@ def test_hf_candidate_worker_and_coordinator_use_public_api(autoquant_utils, tmp
             "metadata_bytes": 1024**2,
         }
         args.auto_quantize_assignment = str(tmp_path / "assignment.json")
+    if automatic == "layerwise":
+        args.auto_quantize_final_layerwise = True
+        args.auto_quantize_concurrency = 1
+        args.auto_quantize_resources.update(
+            activation_bytes=1024**2,
+            final_checkpoint_bytes=2 * 1024**2,
+            export_bytes=2 * 1024**2,
+            host_bytes=1024**3,
+        )
+        args.export_path = str(tmp_path / "export")
+        args.auto_quantize_export_available_bytes = 2 * 1024**2
     autoquant_utils.auto_quantize(args, copy.deepcopy(source), batches, aq)
     args.auto_quantize_calibration_candidate = None
+    args.auto_quantize_checkpoint = str(tmp_path / "search")
     model = autoquant_utils.auto_quantize(
         args, copy.deepcopy(source), batches, aq, checkpoint=str(tmp_path / "search")
     )
@@ -600,9 +622,52 @@ def test_hf_candidate_worker_and_coordinator_use_public_api(autoquant_utils, tmp
         assignment = json.loads(Path(args.auto_quantize_assignment).read_text())
         assert assignment["provenance"]["source"]
         assert all(
-            yaml.safe_load(group["configuration_yaml"])["algorithm"] == "max"
+            yaml.safe_load(group["configuration_yaml"])["algorithm"]
+            == aq.candidate_formats[0].algorithm
             for group in assignment["groups"]
+            if group["format_id"] is not None
         )
-        assert not any(group["final_layerwise"] for group in assignment["groups"])
-    with torch.no_grad():
-        assert torch.isfinite(model(**batches[0]).logits).all()
+        assert any(group["final_layerwise"] for group in assignment["groups"]) == (
+            automatic == "layerwise"
+        )
+    if automatic == "layerwise":
+        assert args.auto_quantize_reload
+        args.auto_quantize_reload = False
+        pipeline = importlib.import_module("autoquant_pipeline")
+        exports = importlib.import_module("autoquant_export")
+        final = importlib.import_module("autoquant_final")
+        with pipeline.pipeline_run(args):
+            model = autoquant_utils.auto_quantize(args, copy.deepcopy(source), batches, aq)
+            assert not args.auto_quantize_reload
+            assert (tmp_path / "final/layer_0000").is_dir()
+            with torch.no_grad():
+                output = model(**batches[0]).logits
+                assert torch.isfinite(output).all()
+            retained = {
+                p: (p.read_bytes(), p.stat().st_mtime_ns)
+                for p in (tmp_path / "final/layer_0000").iterdir()
+            }
+            with pytest.raises(ValueError):
+                final.reclaim_final_checkpoint(args)
+            model = autoquant_utils.auto_quantize(args, copy.deepcopy(source), batches, aq)
+            with torch.no_grad():
+                torch.testing.assert_close(model(**batches[0]).logits, output, rtol=0, atol=0)
+            assert retained == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in retained}
+            exports.export_pipeline(args, model)
+            with monkeypatch.context() as failure:
+
+                def interrupt_delete(*_args, **_kwargs):
+                    raise OSError("interrupted reclamation")
+
+                failure.setattr(final.shutil, "rmtree", interrupt_delete)
+                with pytest.raises(OSError):
+                    final.reclaim_final_checkpoint(args)
+            assert (tmp_path / ".final-reclaimed").is_dir()
+            assert (tmp_path / "final.json").is_file()
+            final.reclaim_final_checkpoint(args)
+            assert not (tmp_path / ".final-reclaimed").exists()
+        assert not (tmp_path / "final").exists()
+        assert not (tmp_path / "final.json").exists()
+    else:
+        with torch.no_grad():
+            assert torch.isfinite(model(**batches[0]).logits).all()

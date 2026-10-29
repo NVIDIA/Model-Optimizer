@@ -21,7 +21,6 @@ import torch
 from torch import nn
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
-from torch.utils._pytree import tree_leaves
 
 from modelopt.torch.opt.searcher import ForwardLoop
 
@@ -35,21 +34,6 @@ from .utils.layerwise_calib import LayerActivationCollector
 __all__ = []
 
 _SOURCE_ACTIVATION_ESTIMATOR = "source_activation_v1"
-
-
-def _input_storages(inputs):
-    storages = {}
-    for value in tree_leaves(inputs):
-        if isinstance(value, torch.Tensor):
-            if isinstance(value, DTensor) or value.is_meta or value.layout != torch.strided:
-                raise ValueError("Source estimates require materialized, strided inputs")
-            storage = value.untyped_storage()
-            storages[value.device, storage.data_ptr()] = storage.nbytes()
-        elif value is not None and not isinstance(
-            value, (str, bool, int, float, torch.dtype, torch.device)
-        ):
-            raise ValueError("Source estimates cannot account for opaque input state")
-    return storages
 
 
 def _validate_source_layout(model):
@@ -110,37 +94,17 @@ def _estimate_source_activations(
     layers = LayerActivationCollector.get_decoder_layers(model)
     assert layers is not None
     original_layers = list(layers)
-    collector = LayerActivationCollector(model)
-    peak_bytes = 0
-
-    def capture(layer, retained):
-        nonlocal peak_bytes
-        storages = _input_storages(retained)
-
-        def check_inputs(_module, args, kwargs):
-            nonlocal peak_bytes
-            proposed = storages | _input_storages((args, kwargs))
-            size = sum(proposed.values())
-            if size > max_activation_bytes:
-                raise ValueError("Source estimate activation cache exceeds its byte limit")
-            storages.update(proposed)
-            peak_bytes = max(peak_bytes, size)
-
-        handle = layer.register_forward_pre_hook(check_inputs, with_kwargs=True)
-        try:
-            return collector.get_input_activations(layer, forward_loop)
-        finally:
-            handle.remove()
+    collector = LayerActivationCollector(model, max_activation_bytes=max_activation_bytes)
 
     try:
         for q in flags:
             q.disable()
         collector._patch_all_layers(decoder_layers=layers)
-        inputs = capture(original_layers[0], [])
+        inputs = collector.get_input_activations(original_layers[0], forward_loop)
         for index, layer in enumerate(original_layers):
             # Capture the unquantized successor before any candidate update in this layer.
             following = (
-                capture(original_layers[index + 1], inputs)
+                collector.get_input_activations(original_layers[index + 1], forward_loop)
                 if index + 1 < len(original_layers)
                 else []
             )
@@ -165,4 +129,7 @@ def _estimate_source_activations(
         # Restore by identity: the collector temporarily removes layers from named_modules().
         for q, was_enabled in flags.items():
             q._disabled = not was_enabled
-    return {"policy": _SOURCE_ACTIVATION_ESTIMATOR, "peak_activation_bytes": peak_bytes}
+    return {
+        "policy": _SOURCE_ACTIVATION_ESTIMATOR,
+        "peak_activation_bytes": collector.peak_activation_bytes,
+    }

@@ -2286,6 +2286,7 @@ def layerwise_calibrate(
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
     checkpoint_state = calib_kwargs.pop("_checkpoint_state", None)
+    max_activation_bytes = calib_kwargs.pop("_max_activation_bytes", None)
     export_dir = calib_kwargs.pop("export_dir", None)
     qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", True)
     save_every = calib_kwargs.pop("save_every", 1)
@@ -2380,7 +2381,9 @@ def layerwise_calibrate(
     def _set_layer_status(status: str):
         layer_pbar.set_postfix_str(status, refresh=True)
 
-    input_getter = LayerActivationCollector(model, status_callback=_set_layer_status)
+    input_getter = LayerActivationCollector(
+        model, status_callback=_set_layer_status, max_activation_bytes=max_activation_bytes
+    )
 
     try:
         input_getter._patch_all_layers(decoder_layers=transformer_layers)

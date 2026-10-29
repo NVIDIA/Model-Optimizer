@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import gc
 import json
 import os
 import random
@@ -27,6 +28,7 @@ import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
 from autoquant_export import export_pipeline
+from autoquant_final import reclaim_final_checkpoint
 from autoquant_pipeline import configure_pipeline_args, configure_pipeline_device, pipeline_run
 from autoquant_utils import (
     _calibration_candidates,
@@ -1140,10 +1142,14 @@ def quantize_main(
         else:
             print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
 
-    if getattr(args, "auto_quantize_calibration_candidate", None) is not None:
+    if getattr(args, "auto_quantize_calibration_candidate", None) is not None or getattr(
+        args, "auto_quantize_reload", False
+    ):
         return
     if getattr(args, "auto_quantize_pipeline", False):
         export_pipeline(args, full_model)
+        if getattr(args, "auto_quantize_final_layerwise", False):
+            reclaim_final_checkpoint(args)
         return
 
     # If asked, run the closed-form MXFP4 -> NVFP4 cast: read the source MXFP4
@@ -1559,8 +1565,36 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-# Derived state and the tracking settings themselves; everything else argparse parsed is a
-# parameter of the run. Deriving the list means a new flag is tracked without touching this.
+def _load_and_optimize(args):
+    """Keep source model references inside one pass so finalization can reload once."""
+    (
+        full_model,
+        language_model,
+        model_type,
+        calibration_only,
+        processor,
+        tokenizer,
+        device,
+    ) = load_model(args)
+
+    if args.sparsity_fmt != "dense":
+        # Sparse
+        sparsity_main(args, full_model, tokenizer, device)
+    else:
+        # Quantize
+        quantize_main(
+            args,
+            full_model,
+            language_model,
+            model_type,
+            calibration_only,
+            processor,
+            tokenizer,
+            device,
+        )
+    return getattr(args, "auto_quantize_reload", False)
+
+
 def main(args: argparse.Namespace):
     if getattr(args, "auto_quantize_list_calibration_candidates", False):
         print(json.dumps(_calibration_candidates(args)))
@@ -1595,31 +1629,18 @@ def main(args: argparse.Namespace):
             # Force eager execution for all model types.
             torch.compiler.set_stance("force_eager")
 
-            (
-                full_model,
-                language_model,
-                model_type,
-                calibration_only,
-                processor,
-                tokenizer,
-                device,
-            ) = load_model(args)
-
-            if args.sparsity_fmt != "dense":
-                # Sparse
-                sparsity_main(args, full_model, tokenizer, device)
-            else:
-                # Quantize
-                quantize_main(
-                    args,
-                    full_model,
-                    language_model,
-                    model_type,
-                    calibration_only,
-                    processor,
-                    tokenizer,
-                    device,
-                )
+            for attempt in range(2):
+                if getattr(args, "auto_quantize_pipeline", False):
+                    torch.manual_seed(RAND_SEED)
+                    random.seed(RAND_SEED)
+                    np.random.seed(RAND_SEED)
+                args.auto_quantize_reload = False
+                if not _load_and_optimize(args):
+                    break
+                if attempt:
+                    raise RuntimeError("Finalization requested a second source reload")
+                gc.collect()
+                torch.cuda.empty_cache()
     finally:
         cleanup_distributed(args)
 
