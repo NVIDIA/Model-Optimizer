@@ -15,8 +15,10 @@
 
 import copy
 import io
+import shutil
 import warnings
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -2045,3 +2047,94 @@ def test_get_auto_quantize_config_emits_fused_expert_quantizer_names(with_persis
     assert f"{module_name}.gate_up_proj_weight_quantizer" in quantizer_names
     assert f"{module_name}.down_proj_weight_quantizer" in quantizer_names
     assert f"{module_name}.weight_quantizer" not in quantizer_names
+
+
+def test_auto_quantize_resumes_interrupted_gsq_with_moved_optimizer(tmp_path, monkeypatch):
+    torch.manual_seed(19)
+    original = torch.nn.Sequential()
+    original.add_module(
+        "mlp",
+        torch.nn.Sequential(
+            torch.nn.Linear(4, 4, bias=False), torch.nn.SiLU(), torch.nn.Linear(4, 4, bias=False)
+        ),
+    )
+    batches = [torch.randn(2, 4)]
+
+    def formats(directory, resume=False):
+        return [
+            (
+                {
+                    "quant_cfg": [
+                        {"quantizer_name": "*", "enable": False},
+                        {
+                            "quantizer_name": "*weight_quantizer",
+                            "cfg": {"num_bits": (4, 3), "axis": None},
+                        },
+                    ],
+                    "algorithm": {
+                        "method": "gsq",
+                        "initializer": initializer,
+                        "steps": 2,
+                        "eval_every": 1,
+                        "seed": 31,
+                        "data_fingerprint": "gsq-two-fixed-rows",
+                        "optimizer_checkpoint_dir": str(directory / initializer),
+                        "resume": resume,
+                        "layerwise": {"enable": False, "checkpoint_dir": str(directory / "layers")},
+                    },
+                },
+                "gsq_" + initializer,
+            )
+            for initializer in ("max", "gptq")
+        ]
+
+    def run(configs, checkpoint=None, ceiling=8):
+        return mtq.auto_quantize(
+            copy.deepcopy(original),
+            constraints={"effective_bits": ceiling},
+            quantization_formats=configs,
+            data_loader=batches,
+            forward_step=lambda m, batch: m(batch),
+            loss_func=lambda output, batch: output.float().square().sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            method={"method": "gradient", "data_fingerprint": "autoquant-two-fixed-rows"},
+            checkpoint=str(checkpoint) if checkpoint else None,
+            verbose=False,
+        )
+
+    expected, expected_state = run(formats(tmp_path / "reference"))
+    optimizer = tmp_path / "optimizer"
+    checkpoint = tmp_path / "candidates.pt"
+    real_replace, completed = Path.replace, set()
+
+    def interrupt_second_recipe(path, target):
+        result = real_replace(path, target)
+        if result.name == "decoder.pt":
+            completed.add(result.parent)
+            if len(completed) == 2:
+                raise OSError("interrupt second GSQ optimizer after durable save")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", interrupt_second_recipe)
+        with pytest.raises(OSError):
+            run(formats(optimizer), checkpoint)
+    assert len(safe_load(checkpoint)["quantizer_states"]) == 1
+    relocated = tmp_path / "relocated"
+    shutil.copytree(optimizer, relocated)
+    configs = formats(relocated, resume=True)
+    resumed, state = run(configs, checkpoint)
+    torch.testing.assert_close(resumed(batches[0]), expected(batches[0]), rtol=0, atol=0)
+    for recipe, candidate in expected_state["quantizer_states"].items():
+        for name, weight in candidate["weights"].items():
+            torch.testing.assert_close(
+                state["quantizer_states"][recipe]["weights"][name], weight, rtol=0, atol=0
+            )
+    restored, _ = run(configs, checkpoint, ceiling=16)
+    torch.testing.assert_close(restored(batches[0]), original(batches[0]), rtol=0, atol=0)
+    for key, value in (("steps", 3), ("scale_lr", 0.02), ("data_fingerprint", "changed-data")):
+        incompatible = copy.deepcopy(configs)
+        incompatible[0][0]["algorithm"][key] = value
+        with pytest.raises(ValueError):
+            run(incompatible, checkpoint)

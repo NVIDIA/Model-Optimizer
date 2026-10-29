@@ -205,3 +205,27 @@ def test_gsq_later_layer_failure_recovers_earlier_weights():
     for layer in model.layers:
         assert not hasattr(layer, "_original_forward")
         assert layer.mlp[0].weight_quantizer.amax is None
+
+
+@pytest.mark.parametrize("fingerprint", ["", "   "])
+def test_gsq_optimizer_checkpoint_requires_initial_data_identity(tmp_path, fingerprint):
+    model = Decoder().eval()
+    original = copy.deepcopy(model)
+    cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        ],
+        "algorithm": {
+            "method": "gsq",
+            "steps": 0,
+            "layerwise": {"enable": False},
+            "optimizer_checkpoint_dir": str(tmp_path),
+            "data_fingerprint": fingerprint,
+        },
+    }
+    with pytest.raises(ValueError):
+        mtq.quantize(model, cfg, lambda m: m(torch.ones(1, 4), mask=torch.ones(4)))
+    for parameter, reference in zip(model.parameters(), original.parameters()):
+        assert torch.equal(parameter, reference)
+    assert not (tmp_path / "manifest.pt").exists()

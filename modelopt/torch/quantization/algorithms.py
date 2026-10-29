@@ -309,12 +309,26 @@ class QuantRecipe(CustomHPType):
         self.compression = estimate_quant_compression(self.config)
 
         self._str_repr: str = f"{name}(effective-bits: {self.compression * 16})"
-        self._config_signature = self.config.model_dump_json()
+        self._config_signature = self._make_config_signature()
+
+    def _make_config_signature(self) -> str:
+        algorithm = self.config.model_dump(mode="json")["algorithm"]
+        exclude = None
+        if isinstance(algorithm, dict) and algorithm.get("method") == "gsq":
+            exclude = {
+                "algorithm": {
+                    "resume": True,
+                    "optimizer_checkpoint_dir": True,
+                    "layerwise": {"checkpoint_dir": True},
+                }
+            }
+        return self.config.model_dump_json(exclude=exclude)
 
     @property
     def checkpoint_signature(self) -> str:
         """Return the canonical identity used for ordering and checkpoint validation."""
-        return getattr(self, "_config_signature", self.config.model_dump_json())
+        signature = getattr(self, "_config_signature", None)
+        return signature if signature is not None else self._make_config_signature()
 
     @property
     def is_no_quant(self) -> bool:
