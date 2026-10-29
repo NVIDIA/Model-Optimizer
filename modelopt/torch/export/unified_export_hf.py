@@ -520,6 +520,10 @@ def _llm_dummy_forward(model: torch.nn.Module) -> None:
 
         if language_model_lineage is not None:
             language_model = language_model_lineage[-1]
+            if is_fsdp2_model(model):
+                # Calling a submodule skips the FSDP2 root's unshard hook and leaves the root's
+                # params (embed_tokens) sharded; the root forward is text-only safe.
+                language_model = model
             print(
                 f"Running optimization on language model with fake_input shape: {fake_input.shape}"
             )

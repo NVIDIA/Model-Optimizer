@@ -58,6 +58,8 @@ from transformers import (
 )
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
+from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
 from modelopt.torch.export.model_utils import get_language_model_from_vl
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -108,7 +110,6 @@ except ImportError:
 __all__ = [
     "build_meta_causal_lm",
     "fsdp2_wrap",
-    "is_fsdp2_text_only_vlm",
     "load_and_prepare_ep",
     "load_pretrained",
     "parallel_load_and_prepare_fsdp2",
@@ -120,9 +121,29 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def is_fsdp2_text_only_vlm(config) -> bool:
-    """Whether the VLM has a supported text-only FSDP2 decoder layout."""
-    return getattr(config, "model_type", None) in {"qwen3_5", "qwen3_5_moe"}
+def _meta_model_factory(config):
+    """Auto class that builds ``config``'s whole model, vision tower included for a VLM.
+
+    A remote-code checkpoint is built with the head its ``auto_map`` registers: image-text-to-text
+    for a multimodal config that registers it, else causal-LM (Nemotron VL registers its full model
+    there). A Transformers VLM is built as image-text-to-text: ``AutoModelForCausalLM`` rejects most
+    VLM configs, and for the rest may build a text-only class whose parameter names no longer match
+    the checkpoint.
+    """
+    auto_map = getattr(config, "auto_map", None) or {}
+    multimodal = hasattr(config, "vision_config")
+    if "AutoModelForImageTextToText" in auto_map and (
+        multimodal or "AutoModelForCausalLM" not in auto_map
+    ):
+        return AutoModelForImageTextToText
+    if "AutoModelForCausalLM" in auto_map:
+        return AutoModelForCausalLM
+    if (
+        multimodal
+        and getattr(config, "model_type", None) in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
+    ):
+        return AutoModelForImageTextToText
+    return AutoModelForCausalLM
 
 
 def _resolve_checkpoint_dir(ckpt_path: str, rank: int) -> str:
@@ -185,6 +206,7 @@ def _conversion_plan(model: nn.Module, conversions: list | None = None) -> dict 
     if not (legacy_renames or renamings or converters):
         return None
     return {
+        "conversions": conversions,
         "legacy_renames": legacy_renames,
         "renamings": renamings,
         "converters": converters,
@@ -255,6 +277,21 @@ def _convert_keys(plan: dict, state: dict) -> dict:
     return result
 
 
+def resolve_model_class(config, trust_remote_code: bool = False) -> type | None:
+    """The class :func:`build_meta_causal_lm` builds for ``config``, found without building it.
+
+    ``None`` when it cannot be resolved that way: remote code without ``trust_remote_code``, or a
+    config type no Transformers auto class maps.
+    """
+    factory = _meta_model_factory(config)
+    auto_map = getattr(config, "auto_map", None) or {}
+    if factory.__name__ in auto_map:
+        if not trust_remote_code:
+            return None
+        return get_class_from_dynamic_module(auto_map[factory.__name__], config._name_or_path)
+    return factory._model_mapping.get(type(config), None)
+
+
 def build_meta_causal_lm(
     ckpt_path: str,
     trust_remote_code: bool,
@@ -284,11 +321,7 @@ def build_meta_causal_lm(
     dtype = getattr(hf_config, "dtype", None) or torch.bfloat16
     from accelerate import init_empty_weights  # only real callers of this function need it
 
-    model_factory = auto_class
-    if model_factory is None:
-        model_factory = AutoModelForCausalLM
-        if is_fsdp2_text_only_vlm(hf_config):
-            model_factory = AutoModelForImageTextToText
+    model_factory = auto_class if auto_class is not None else _meta_model_factory(hf_config)
     # Where transformers records the class a remote-code build registers: in the auto class built
     # through, and in those a remote VLM builds its towers through. Read without a fallback: if a
     # release moves it, this fails here rather than leave one rank's model without generate.
@@ -385,31 +418,60 @@ def _group_sources_by_layer(
     plans: list[dict],
     model_param_names: set[str],
     layer_prefixes: list[str],
-) -> tuple[dict[int, list[str]], list[str], list[str]]:
+) -> tuple[dict[int, list[str]], list[str], list[str], set[str]]:
     """Bucket checkpoint keys by the decoder layer their converted target lives in.
 
-    Returns ``(layer_sources, non_layer_sources, unplaced)``: ``layer_sources[i]`` holds the keys
-    targeting decoder layer ``i``, ``non_layer_sources`` holds root (embed/lm_head/norm) keys, and
-    ``unplaced`` NAMES the keys whose target isn't in the model -- weights the built model has no
-    home for (an MTP head, an auxiliary tower). The names are kept, not just counted, so the export
-    can copy them through: PTQ never touches them, but the exported checkpoint is still expected to
-    contain them.
+    Returns ``(layer_sources, non_layer_sources, unplaced, targets)``: ``layer_sources[i]`` holds
+    the keys targeting decoder layer ``i``, ``non_layer_sources`` holds root (embed/lm_head/norm)
+    keys, and ``unplaced`` NAMES the keys whose target isn't in the model -- weights the built model
+    has no home for (an MTP head, an auxiliary tower). The names are kept, not just counted, so the
+    export can copy them through: PTQ never touches them, but the exported checkpoint is still
+    expected to contain them. ``targets`` holds the parameter names some key loads into.
     """
     layer_sources: dict[int, list[str]] = {i: [] for i in range(len(layer_prefixes))}
     non_layer_sources: list[str] = []
     unplaced: list[str] = []
+    targets: set[str] = set()
     for ckpt_key in ckpt_keys:
         target = _target_param(plans, ckpt_key, model_param_names)
         if target is None:
             unplaced.append(ckpt_key)
             continue
+        targets.add(target)
         for i, prefix in enumerate(layer_prefixes):
             if target.startswith(prefix):
                 layer_sources[i].append(ckpt_key)
                 break
         else:
             non_layer_sources.append(ckpt_key)
-    return layer_sources, non_layer_sources, unplaced
+    return layer_sources, non_layer_sources, unplaced, targets
+
+
+def _check_every_param_sourced(model: nn.Module, sourced_targets: set[str]) -> None:
+    """Raise if a parameter (or meta buffer) of ``model`` gets no tensor from the checkpoint.
+
+    The FSDP2 loader materializes the model with uninitialized storage, so a parameter no checkpoint
+    key converts into would silently calibrate on garbage, e.g. when a VLM checkpoint names its
+    weights in a layout the conversion plan does not cover. A tied pair (``lm_head`` and the
+    embedding) counts as sourced if either name is: ``tie_weights`` fills the other after the load,
+    from the mapping it recomputes here.
+    """
+    sourced = set(sourced_targets)
+    tied = getattr(model, "get_expanded_tied_weights_keys", None)
+    for target, source in (tied(all_submodels=True) if tied else {}).items():
+        if target in sourced or source in sourced:
+            sourced.update((target, source))
+    required = chain(
+        (n for n, _ in model.named_parameters()),
+        (n for n, b in model.named_buffers() if b.is_meta),
+    )
+    missing = sorted(n for n in required if n not in sourced)
+    if missing:
+        raise RuntimeError(
+            f"FSDP2 load: {len(missing)} parameter(s) of the built model get no tensor from the "
+            f"checkpoint, e.g. {missing[:5]}. The checkpoint's key layout does not match the "
+            "model class it was built with."
+        )
 
 
 def unplaced_source_keys(
@@ -730,12 +792,10 @@ def _sharded_load_kwargs(
         )
     # As build_meta_causal_lm builds: AutoModelForCausalLM refuses most VLMs' configs, and builds
     # some as the language model alone, whose other towers the export would carry unquantized.
-    builds = (
-        AutoModelForImageTextToText if is_fsdp2_text_only_vlm(hf_config) else AutoModelForCausalLM
-    )
+    builds = _meta_model_factory(hf_config)
     if _auto_class(hf_config, trust_remote_code=trust_remote_code) is not builds:
         raise NotImplementedError(
-            f"The {route} load builds a causal LM, or a text-only VLM it supports, which this "
+            f"The {route} load builds a causal LM or a vision-language model, which this "
             f"{model_type} checkpoint is not. To load it whole on every rank, pass its model class "
             f"as auto_class, with {_whole_instead(decided)}."
         )
@@ -1490,14 +1550,16 @@ def parallel_load_and_prepare_fsdp2(
 
     model = build_meta_causal_lm(resolved_path, trust_remote_code, attn_implementation, hf_config)
 
+    # transformers fuses/renames checkpoint keys so they no longer match param names 1:1
+    # (None => nothing to convert). Taken before the wrap: fully_shard swaps in an ``FSDP<cls>``
+    # class that transformers treats as custom code, dropping that class's renamings (a VLM's
+    # ``model.layers`` -> ``model.language_model.layers``). Parameter names are unchanged by it.
+    plan = _conversion_plan(model)
+
     # fsdp2_wrap shards each decoder layer + the root (embed/lm_head/norm sharded, not replicated).
     decoder_layers = fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
     module_to_name = {m: n for n, m in model.named_modules()}
     layer_prefixes = [module_to_name[layer] + "." for layer in decoder_layers]
-
-    # transformers fuses/renames checkpoint keys so they no longer match param names 1:1
-    # (None => nothing to convert).
-    plan = _conversion_plan(model)
 
     # Valid targets; keys converting to anything else are aux weights (e.g. an MTP head) we skip.
     model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
@@ -1506,7 +1568,7 @@ def parallel_load_and_prepare_fsdp2(
     # non_layer_sources). Every tensor in the files the index names, not only the ones it lists, so
     # the unplaced ones fall out of this same pass. A model built from its config ran no
     # conversions of its own, so the stock plan is the only one.
-    layer_sources, non_layer_sources, unplaced = _group_sources_by_layer(
+    layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
         checkpoint_tensor_files(resolved_path),
         [plan] if plan else [],
         model_param_names,
@@ -1522,6 +1584,10 @@ def parallel_load_and_prepare_fsdp2(
     # it came from. Not a state dict: holding these tensors from load to export would waste the
     # memory this loader exists to save.
     record_unplaced_source_keys(model, resolved_path, unplaced)
+    # What from_pretrained records: the conversions some checkpoint key used. The export reverts
+    # these and would otherwise query the wrapped class, which has lost them.
+    model._weight_conversions = [c for c in plan["conversions"] if c.was_used()] if plan else []
+    _check_every_param_sourced(model, sourced_targets)
 
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
 
