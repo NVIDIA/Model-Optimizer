@@ -24,6 +24,7 @@ to adjust axes.
 from __future__ import annotations
 
 import copy
+import os
 import time
 from functools import partial
 from typing import TYPE_CHECKING
@@ -84,7 +85,6 @@ from .utils.graph_utils import (
     GraphCache,
     infer_shapes,
     parse_qdq_quantized_dtype_list,
-    save_onnx_model,
 )
 
 if TYPE_CHECKING:
@@ -359,11 +359,22 @@ def dla_make_dla_compatible(
         qdq_quantized_dtypes=qdq_quantized_dtypes,
         remove_all_qdq=remove_all_qdq,
     )
-    save_onnx_model(
-        model,
-        output_path,
-        use_external_data=use_external_data,
-        external_data_name=external_data_name,
-        verbose=verbose,
-    )
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    if verbose:
+        logger.info("Saving modified model to: %s", output_path)
+    if use_external_data:
+        if external_data_name is None:
+            external_data_name = os.path.basename(output_path) + "_data"
+        onnx.save(
+            model,
+            output_path,
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location=external_data_name,
+            size_threshold=1024,
+        )
+    else:
+        onnx.save(model, output_path)
     return model

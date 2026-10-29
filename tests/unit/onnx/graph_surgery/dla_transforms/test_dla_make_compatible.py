@@ -413,3 +413,64 @@ def test_qdq_dtypes_threaded_through_run_graph_surgery(tmp_path):
     )
     assert _count_op(result.graph, "QuantizeLinear") == 0
     assert _count_op(result.graph, "DequantizeLinear") == 0
+
+
+@pytest.mark.parametrize("external_name", [False, None, "weights.bin"])
+def test_public_pipeline_saves_with_onnx(tmp_path, external_name):
+    """Reload and execute inline or external output produced by the public pipeline."""
+    shape = [1, 1, 1, 512]
+    weights = np.arange(512, dtype=np.float32).reshape(shape)
+    # Include the Windows trailing-0x1A regression pattern in an externalized payload.
+    weights.view(np.uint8).reshape(-1)[-1] = 0x1A
+    bias = np.full(shape, 0.5, np.float32)
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Add", ["x", "weight"], ["sum"]),
+                helper.make_node("Add", ["sum", "bias"], ["y"]),
+            ],
+            "direct_onnx_save",
+            [_vi("x", TensorProto.FLOAT, shape)],
+            [_vi("y", TensorProto.FLOAT, shape)],
+            [numpy_helper.from_array(weights, "weight"), numpy_helper.from_array(bias, "bias")],
+        ),
+        opset_imports=[helper.make_opsetid("", _OPSET)],
+        ir_version=_MAX_IR,
+    )
+    source = tmp_path / "source.onnx"
+    output = tmp_path / "output" / "converted.onnx"
+    onnx.save(model, source)
+    _dla_pipeline.dla_make_dla_compatible(
+        str(source),
+        str(output),
+        use_external_data=external_name is not False,
+        external_data_name=external_name if isinstance(external_name, str) else None,
+        verbose=False,
+    )
+    onnx.checker.check_model(str(output), full_check=True)
+    actual = onnx.load(output)
+    for name, expected in [("weight", weights), ("bias", bias)]:
+        assert (
+            next(t for t in actual.graph.initializer if t.name == name).raw_data
+            == expected.tobytes()
+        )
+    feeds = {"x": np.ones(shape, np.float32)}
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    result = ort.InferenceSession(
+        actual.SerializeToString(), options, providers=["CPUExecutionProvider"]
+    ).run(None, feeds)[0]
+    np.testing.assert_array_equal(result, (feeds["x"] + weights) + bias)
+    saved = onnx.load(output, load_external_data=False)
+    external = [
+        t for t in saved.graph.initializer if onnx.external_data_helper.uses_external_data(t)
+    ]
+    assert bool(external) == (external_name is not False)
+    if external:
+        assert len(external) == 2
+        expected = external_name or output.name + "_data"
+        assert (output.parent / expected).is_file()
+        assert all(
+            next(e.value for e in t.external_data if e.key == "location") == expected
+            for t in external
+        )
