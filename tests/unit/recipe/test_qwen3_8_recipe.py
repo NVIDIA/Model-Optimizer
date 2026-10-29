@@ -45,7 +45,7 @@ class _FusedExperts(nn.Module):
         super().__init__()
         self.num_experts = 2
         self.intermediate_dim = _H
-        self.gate_up_proj = nn.Parameter(torch.randn(2, _H, 2 * _H))
+        self.gate_up_proj = nn.Parameter(torch.randn(2, 2 * _H, _H))
         self.down_proj = nn.Parameter(torch.randn(2, _H, _H))
 
     def forward(self, hidden_states):

@@ -28,7 +28,7 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 from _test_utils.torch.transformers_models import get_tiny_llama
 from safetensors.torch import load_file
-from torch.distributed._composable.fsdp import fully_shard
+from torch.distributed.fsdp import fully_shard
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq

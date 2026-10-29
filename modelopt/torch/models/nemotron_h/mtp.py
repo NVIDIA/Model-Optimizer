@@ -30,6 +30,7 @@ from safetensors import SafetensorError
 from transformers import AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.masking_utils import create_causal_mask
+from transformers.models.nemotron_h import modeling_nemotron_h
 
 from modelopt.torch.quantization.model_calib import (
     _needs_activation_forward_for_max_calib,
@@ -84,10 +85,10 @@ def prefers_bundled_code(hf_config, checkpoint_path: str, config_kwargs: dict) -
         # Config-parsing incompatibilities only; e.g. an OSError from the Hub must propagate.
         return True
     # Parsing can succeed while model construction fails on a block type the built-in lacks.
-    # Native Nemotron-H is optional: older Transformers can still load unrelated models.
-    from transformers.models.nemotron_h.modeling_nemotron_h import MIXER_TYPES
-
-    return any(t not in MIXER_TYPES for t in getattr(builtin_config, "layers_block_type", ()))
+    return any(
+        t not in modeling_nemotron_h.MIXER_TYPES
+        for t in getattr(builtin_config, "layers_block_type", ())
+    )
 
 
 def _normalize_mtp_block_types(block_types, mixer_types):
@@ -141,28 +142,30 @@ class _NemotronHMTP(torch.nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        # Native Nemotron-H is optional: older Transformers can still load unrelated models.
-        from transformers.models.nemotron_h.modeling_nemotron_h import (
-            MIXER_TYPES,
-            NemotronHBlock,
-            NemotronHRMSNorm,
-        )
-
         block_config = copy.deepcopy(config)
         # Some remote-code revisions drop this field while materializing ``llm_config``.
         # The detected tensor layout is the canonical attention + MoE MTP tail.
         block_types = list(getattr(config, "mtp_layers_block_type", None) or ("attention", "moe"))
-        block_config.layers_block_type = _normalize_mtp_block_types(block_types, MIXER_TYPES)
+        block_config.layers_block_type = _normalize_mtp_block_types(
+            block_types, modeling_nemotron_h.MIXER_TYPES
+        )
         self.layers = torch.nn.ModuleList(
-            [NemotronHBlock(block_config, layer_idx) for layer_idx in range(len(block_types))]
+            [
+                modeling_nemotron_h.NemotronHBlock(block_config, layer_idx)
+                for layer_idx in range(len(block_types))
+            ]
         )
         first_layer, last_layer = self.layers[0], self.layers[-1]
-        first_layer.enorm = NemotronHRMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-        first_layer.hnorm = NemotronHRMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        first_layer.enorm = modeling_nemotron_h.NemotronHRMSNorm(
+            config.hidden_size, eps=config.layer_norm_epsilon
+        )
+        first_layer.hnorm = modeling_nemotron_h.NemotronHRMSNorm(
+            config.hidden_size, eps=config.layer_norm_epsilon
+        )
         first_layer.eh_proj = torch.nn.Linear(
             config.hidden_size * 2, config.hidden_size, bias=False
         )
-        last_layer.final_layernorm = NemotronHRMSNorm(
+        last_layer.final_layernorm = modeling_nemotron_h.NemotronHRMSNorm(
             config.hidden_size, eps=config.layer_norm_epsilon
         )
 

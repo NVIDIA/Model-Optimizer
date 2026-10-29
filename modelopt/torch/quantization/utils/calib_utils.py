@@ -38,12 +38,18 @@
 
 """GPTQ helper and Hessian utilities for calibration."""
 
+import functools
 from contextlib import contextmanager
 
 import torch
 import torch.distributed as dist
 
-from modelopt.torch.utils import get_available_gpu_memory, get_process_gpus, print_rank_0
+from modelopt.torch.utils import (
+    get_available_gpu_memory,
+    get_process_gpus,
+    print_rank_0,
+    warn_rank_0,
+)
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
 # A GPU takes a new Hessian only if enough memory stays available after it for the calibration
@@ -107,20 +113,23 @@ def _hessian_offload_device(nbytes: int) -> torch.device:
     return torch.device("cpu")
 
 
-def update_hessian(input, hessian, n_samples):
+def update_hessian(input, hessian, n_samples, input_dtype=torch.float32):
     """Update hessian matrix with new input samples using incremental formula.
 
     Args:
         input: Input tensor (batch_size, ..., features)
         hessian: Current Hessian matrix to update in-place
         n_samples: Number of samples already processed
+        input_dtype: The dtype the GEMM reads ``input`` in: ``torch.float32``, or
+            ``torch.bfloat16`` for a tensor-core GEMM that accumulates in float32.
+
     Returns:
         Tuple of (updated_hessian, new_sample_count)
 
     Note: input must be non-empty (batch_size > 0); a zero-sized input causes division by zero.
     """
     # Flatten to 2D (total_tokens, features) first, so batch_size counts tokens
-    input_flat = input.reshape(-1, input.shape[-1]).float()
+    input_flat = input.reshape(-1, input.shape[-1])
     batch_size = input_flat.shape[0]
 
     if batch_size == 0:  # in MOEs some experts receive no tokens
@@ -130,14 +139,69 @@ def update_hessian(input, hessian, n_samples):
     # once per expert per forward, and separate scale and add passes each rewrite all of H.
     scale = n_samples / (n_samples + batch_size)
     n_samples += batch_size
+    alpha = 2 / n_samples
+    if bfloat16_hessian_gemm(input_dtype, input_flat):
+        # BF16 products are exact in float32, so a tensor-core GEMM writing float32 differs from a
+        # float32 GEMM only in how it rounds the sums: up to ~3e-5 of the Hessian's diagonal at 32K
+        # tokens per batch. It is 9-16x faster on GB300 and needs no float32 copy of the inputs.
+        input_flat = input_flat.to(torch.bfloat16)
+        if hessian.device == input_flat.device:
+            torch.addmm(
+                hessian,
+                input_flat.t(),
+                input_flat,
+                beta=scale,
+                alpha=alpha,
+                out_dtype=torch.float32,
+                out=hessian,
+            )
+        else:
+            gram = torch.mm(input_flat.t(), input_flat, out_dtype=torch.float32)
+            hessian.mul_(scale).add_(gram.to(hessian.device), alpha=alpha)
+        return hessian, n_samples
+
+    input_flat = input_flat.float()
     if hessian.device == input_flat.device:
-        hessian.addmm_(input_flat.t(), input_flat, beta=scale, alpha=2 / n_samples)
+        hessian.addmm_(input_flat.t(), input_flat, beta=scale, alpha=alpha)
     else:
-        hessian.mul_(scale).add_(
-            (input_flat.t() @ input_flat).to(hessian.device), alpha=2 / n_samples
-        )
+        hessian.mul_(scale).add_((input_flat.t() @ input_flat).to(hessian.device), alpha=alpha)
 
     return hessian, n_samples
+
+
+def bfloat16_hessian_gemm(input_dtype: torch.dtype, inputs: torch.Tensor) -> bool:
+    """Whether a Hessian GEMM over ``inputs`` runs on bfloat16 with float32 output.
+
+    True when ``input_dtype`` asks for bfloat16 and the inputs' GPU has such GEMMs; when they are
+    missing, warns once per device and returns False, so the caller computes in float32.
+    """
+    if input_dtype != torch.bfloat16:
+        return False
+    if inputs.is_cuda and _has_float32_out_gemm(inputs.device):
+        return True
+    _warn_bfloat16_hessian_unavailable(inputs.device)
+    return False
+
+
+@functools.cache
+def _has_float32_out_gemm(device: torch.device) -> bool:
+    """Whether GEMMs on CUDA ``device`` take bfloat16 inputs and write float32 (``out_dtype``)."""
+    try:
+        x = torch.zeros(1, 1, device=device, dtype=torch.bfloat16)
+        h = torch.mm(x, x, out_dtype=torch.float32)
+        torch.addmm(h, x, x, out_dtype=torch.float32, out=h)
+        torch.bmm(x[None], x[None], out_dtype=torch.float32)
+    except (TypeError, RuntimeError):
+        return False
+    return True
+
+
+@functools.cache
+def _warn_bfloat16_hessian_unavailable(device: torch.device) -> None:
+    warn_rank_0(
+        f"hessian_input_dtype='bfloat16' needs CUDA GEMMs that take out_dtype, which {device} lacks "
+        "with this torch; computing its Hessians in float32."
+    )
 
 
 def compute_hessian_inverse(hessian, weight, perc_damp):
@@ -202,6 +266,7 @@ class GPTQHelper:
         weight_quantizer=None,
         weight=None,
         log_mse=True,
+        hessian_input_dtype="float32",
     ):
         """Initialize GPTQHelper with module state and Hessian storage.
 
@@ -209,11 +274,13 @@ class GPTQHelper:
         one expert's slice of an HF fused-MoE parameter; by default the helper owns
         ``module.weight`` and ``module.weight_quantizer``. ``log_mse=False`` skips the logged
         Hessian-weighted error, which costs two weight-by-Hessian matmuls.
+        ``hessian_input_dtype`` is the dtype the Hessian GEMM reads the inputs in, by name.
         """
         self.module = module
         self.name = name
         self.fused = fused
         self.importance_weighted = importance_weighted
+        self.hessian_input_dtype = getattr(torch, hessian_input_dtype)
         self._weight_quantizer = weight_quantizer
         self.log_mse = log_mse
         weight = module.weight if weight is None else weight
@@ -259,7 +326,9 @@ class GPTQHelper:
     def accumulate(self, inputs):
         """Add a batch of this weight's inputs, after input quantization, to the Hessian."""
         inputs = inputs.to_local() if hasattr(inputs, "to_local") else inputs
-        self.hessian, self.n_samples = update_hessian(inputs, self.hessian, self.n_samples)
+        self.hessian, self.n_samples = update_hessian(
+            inputs, self.hessian, self.n_samples, self.hessian_input_dtype
+        )
 
     def cleanup(self):
         """Unpatch the module's forward method."""

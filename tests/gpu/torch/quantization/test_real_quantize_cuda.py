@@ -26,7 +26,7 @@ from _test_utils.torch.quantization.quantize_common import save_restore_test
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor
-from transformers import AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
@@ -198,11 +198,42 @@ def test_compress_config(model_cls, quant_config, compress_config):
 
 @pytest.mark.parametrize("quant_config", [mtq.FP8_DEFAULT_CFG])
 @pytest.mark.parametrize("tie_word_embeddings", [False, True])
-def test_real_quantize_linear(quant_config, tie_word_embeddings, tmp_path):
+@pytest.mark.parametrize(
+    ("load_kwargs", "clear_config_dtype", "expected_dtype"),
+    [
+        pytest.param({}, False, torch.bfloat16, id="config_dtype"),
+        # Model-construction kwargs build the model; load_checkpoint_and_dispatch() doesn't take them.
+        pytest.param(
+            {"torch_dtype": torch.float16, "attn_implementation": "eager"},
+            False,
+            torch.float16,
+            id="model_kwargs",
+        ),
+        # With config= there is no config load, so the construction kwargs reach from_config().
+        pytest.param(
+            {"attn_implementation": "eager"}, True, torch.float16, id="config_without_dtype"
+        ),
+        # Hub options go to the config load, as in from_pretrained().
+        pytest.param({"local_files_only": True}, False, torch.bfloat16, id="hub_kwargs"),
+        # The checkpoint sits in a subfolder of the path passed.
+        pytest.param({"subfolder": "tiny_llama"}, False, torch.bfloat16, id="subfolder"),
+    ],
+)
+def test_real_quantize_linear(
+    quant_config, tie_word_embeddings, load_kwargs, clear_config_dtype, expected_dtype, tmp_path
+):
     tiny_llama_dir = create_tiny_llama_dir(tmp_path, tie_word_embeddings=tie_word_embeddings)
+    if clear_config_dtype:
+        config = AutoConfig.from_pretrained(tiny_llama_dir)
+        config.dtype = None
+        load_kwargs = {**load_kwargs, "config": config}
+    path = tiny_llama_dir.parent if "subfolder" in load_kwargs else tiny_llama_dir
     with init_quantized_weights(quant_config):
-        model = AutoModelForCausalLM.from_pretrained(tiny_llama_dir)
+        model = AutoModelForCausalLM.from_pretrained(path, **load_kwargs)
     assert (model.lm_head.weight is model.model.embed_tokens.weight) == tie_word_embeddings
+    assert model.model.norm.weight.dtype == expected_dtype
+    if "attn_implementation" in load_kwargs:
+        assert model.config._attn_implementation == load_kwargs["attn_implementation"]
 
     for _, module in model.named_modules():
         if (
