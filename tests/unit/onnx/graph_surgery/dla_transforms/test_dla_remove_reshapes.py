@@ -37,7 +37,7 @@ def _execute(model, feeds):
 
 @pytest.mark.parametrize("ir_version", [3, 9])
 def test_fixed_chain_controls_respect_legacy_initializer_declarations(ir_version):
-    """Collapse legacy fixed targets, declare new controls, and retain modern runtime defaults."""
+    """Collapse fixed legacy targets while preserving original caller-declared defaults."""
     model = helper.make_model(
         helper.make_graph(
             [
@@ -68,8 +68,15 @@ def test_fixed_chain_controls_respect_legacy_initializer_declarations(ir_version
     assert len(converted.graph.node) == (1 if ir_version == 3 else 2)
     converted = _remove_unused_initializers(converted)
     input_names = {value.name for value in converted.graph.input}
-    assert {"first_shape", "last_shape"}.isdisjoint(input_names) == (ir_version == 3)
-    assert ("unused_default" in input_names) == (ir_version >= 4)
+    assert {"first_shape", "last_shape", "unused_default"} <= input_names
+    for original in model.graph.input:
+        preserved = next(value for value in converted.graph.input if value.name == original.name)
+        assert preserved.SerializeToString() == original.SerializeToString()
+    for original in model.graph.initializer:
+        preserved = next(
+            value for value in converted.graph.initializer if value.name == original.name
+        )
+        assert preserved.SerializeToString() == original.SerializeToString()
     assert {value.name for value in converted.graph.initializer} >= input_names - {"x"}
     for actual, reference in zip(_execute(converted, feeds), expected):
         np.testing.assert_array_equal(actual, reference)
