@@ -23,6 +23,7 @@ replicated across ranks.
 import json
 import math
 import os
+import re
 import warnings
 from collections import Counter
 from pathlib import Path
@@ -42,6 +43,9 @@ from .quant_aware_conversion import (
     revert_weight_conversion_quant_aware,
 )
 from .unified_export_hf_streaming import _parse_shard_size
+
+# A checkpoint's weight files, sharded as save_pretrained names them or in one file.
+_CHECKPOINT_WEIGHTS = re.compile(r"model(-\d{5}-of-\d{5})?\.safetensors")
 
 
 def _even_bins(keys: list, sizes: dict, n: int, max_bytes: int) -> list:
@@ -496,8 +500,10 @@ def _write_even_shards(
     reverse conversion, whose renames and splits fix the names and sizes packed here.
 
     Every file is written under a temporary name and renamed into place only once every rank has
-    written all of its own, the index last, so a failure before then leaves the directory as it was,
-    a checkpoint already there included. Each step a rank can fail alone runs in
+    written all of its own, the index last. A failure while writing leaves the directory as it was, a
+    checkpoint already there included; a rename failing partway through that final commit can leave
+    such a checkpoint mixed. Once every rank's files are in place, rank 0 removes the earlier
+    checkpoint's weight files the new index does not name. Each step a rank can fail alone runs in
     :func:`~modelopt.torch.utils.distributed.all_reduce`, which raises on every rank when one fails.
     """
     export_dir = Path(export_dir)
@@ -582,6 +588,16 @@ def _write_even_shards(
             os.replace(export_dir / f"{name}.tmp", export_dir / name)
         return True
 
+    def remove_stale() -> bool:
+        # Left in place, an earlier checkpoint's shards would outlive it, and its model.safetensors
+        # would be loaded ahead of the new index.
+        if rank == 0:
+            current = set(full_map.values())
+            for path in export_dir.iterdir():
+                if path.name not in current and _CHECKPOINT_WEIGHTS.fullmatch(path.name):
+                    path.unlink()
+        return True
+
     # A failed export removes the temporary files it wrote, and only those: a retry into the
     # directory then finds it as it was. What was written is gone from ``local_sd``, so a retry needs
     # the state dict built again.
@@ -594,7 +610,7 @@ def _write_even_shards(
             total_bytes += b
         all_reduce("index written", write_index, all)
         # Every file is written: only now does the directory change, the index last, so until
-        # then an index already there still names its own shards. Also the closing barrier.
+        # then an index already there still names its own shards.
         all_reduce("shards committed", lambda: commit([n for n in staged if n != index_name]), all)
         all_reduce("index committed", lambda: commit([n for n in staged if n == index_name]), all)
     except BaseException:
@@ -613,3 +629,5 @@ def _write_even_shards(
                 f"wrote to {export_dir}: {left[:5]}"
             )
         raise
+    # Only once every rank has committed, and never on a failure. Also the closing barrier.
+    all_reduce("stale weights removed", remove_stale, all)
