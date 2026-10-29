@@ -695,6 +695,8 @@ def split_fused_experts_state_dict(state_dict: dict) -> dict:
         first_w = state_dict[f"{prefix}.{first}"]
         down_w = state_dict[f"{prefix}.down_proj"]
         n_experts = first_w.shape[0]
+        if down_w.shape[0] != n_experts:
+            raise ValueError(f"{prefix}: {n_experts} {first} experts, {down_w.shape[0]} down_proj.")
 
         def _scales(proj_name):
             ws = state_dict.get(f"{prefix}.{proj_name}_weight_scale")
@@ -707,9 +709,9 @@ def split_fused_experts_state_dict(state_dict: dict) -> dict:
         down_ws, down_in, down_ws2 = _scales("down_proj")
 
         def _slice_weight_scale(ws, expert_idx, row_slice, rows):
-            # A per-expert scalar as is; else the expert's scale rows covering ``row_slice`` of its
-            # ``rows`` weight rows, in proportion: an INT4 weight packs two rows a byte while its
-            # scales stay per row, and an FP8 2-D block scale covers 128 rows.
+            # A per-expert scalar as is; else the expert's scale rows covering ``row_slice``, a cut of
+            # the fused gate|up's ``rows`` rows, in proportion (only gate and up are cut): an INT4
+            # weight packs two rows a byte while its scales stay per row, an FP8 2-D block 128 rows.
             if ws is None:
                 return None
             if ws.dim() <= 1:  # (E,) one scalar per expert

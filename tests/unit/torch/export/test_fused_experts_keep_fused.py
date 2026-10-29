@@ -536,6 +536,16 @@ def test_split_refuses_a_scale_block_gate_and_up_would_share(rows, scale_rows):
         split_fused_experts_state_dict(sd)
 
 
+def test_split_refuses_projections_holding_different_expert_counts():
+    """The split numbers experts by the first projection, so a down_proj expert beyond its count
+    would be dropped unwritten."""
+    sd = _fused_state_dict(gated=True)
+    sd[f"{PREFIX}.down_proj"] = torch.zeros(LOCAL_EXPERTS + 1, 6, 4).to(torch.float8_e4m3fn)
+
+    with pytest.raises(ValueError, match="down_proj"):
+        split_fused_experts_state_dict(sd)
+
+
 def test_fused_experts_prefixes_lists_each_fused_module_once_in_order():
     fused = torch.zeros(2, 4, 4)
     sd = {

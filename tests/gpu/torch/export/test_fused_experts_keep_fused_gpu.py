@@ -177,6 +177,7 @@ def _fold_job(rank, world_size, backend):
 
         sharded = keeping_own_quantizers()
         _export_fused_experts_keep_fused(sharded, torch.bfloat16)
+        assert set(_state(sharded)) == set(plain)
         for key, value in _state(sharded).items():
             local = value.to_local() if isinstance(value, DTensor) else value
             want = plain[key][mine] if isinstance(value, DTensor) else plain[key]
