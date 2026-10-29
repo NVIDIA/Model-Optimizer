@@ -226,9 +226,6 @@ def _export_moe_linear(name: str, module: nn.Module, ctx: ExportContext) -> None
 def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Split and quantize a fused-experts module with plural weight quantizers.
 
-    Under FSDP2 each rank holds only some experts, so it packs just those (kept fused) and the
-    split into per-expert keys is deferred until the gather brings all experts together.
-
     Tied experts are packed independently and their duplicate keys are dropped by name
     in postprocess_state_dict; no per-module dedup cache is used.
 
