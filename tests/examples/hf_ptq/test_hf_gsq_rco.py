@@ -32,7 +32,10 @@ def example(monkeypatch):
     return importlib.import_module("hf_gsq_rco")
 
 
-def test_cached_teacher_callback_matches_direct_kl_and_rejects_stale_cache(example, tmp_path):
+@pytest.mark.parametrize("objective_kind", ["kl", "ce"])
+def test_cached_teacher_callback_matches_direct_loss_and_rejects_stale_cache(
+    example, tmp_path, objective_kind
+):
     model = get_tiny_llama(dtype=torch.float32).eval()
     batch = {
         "sample_id": 0,
@@ -67,15 +70,32 @@ def test_cached_teacher_callback_matches_direct_kl_and_rejects_stale_cache(examp
         student = model(
             input_ids=b["input_ids"], attention_mask=b["attention_mask"], use_cache=False
         ).logits
-        loss = torch.nn.functional.kl_div(
-            student.log_softmax(-1), teacher.log_softmax(-1), log_target=True, reduction="none"
-        ).sum(-1)
-        direct = direct + (loss * b["loss_mask"]).sum()
-    direct = direct / sum(int(b["loss_mask"].sum()) for b in batches)
+        if objective_kind == "kl":
+            loss = torch.nn.functional.kl_div(
+                student.log_softmax(-1), teacher.log_softmax(-1), log_target=True, reduction="none"
+            ).sum(-1)
+            direct = direct + (loss * b["loss_mask"]).sum()
+        else:
+            loss = torch.nn.functional.cross_entropy(
+                student[:, :-1].flatten(0, 1), b["input_ids"][:, 1:].flatten(), reduction="none"
+            ).reshape_as(b["loss_mask"][:, 1:])
+            direct = direct + (loss * b["loss_mask"][:, 1:] * b["attention_mask"][:, :-1]).sum()
+    count = sum(
+        int(
+            (
+                b["loss_mask"]
+                if objective_kind == "kl"
+                else b["loss_mask"][:, 1:] * b["attention_mask"][:, :-1]
+            ).sum()
+        )
+        for b in batches
+    )
+    direct = direct / count
     direct.backward()
     expected = {name: p.grad.clone() for name, p in model.named_parameters() if p.grad is not None}
     model.zero_grad(set_to_none=True)
-    actual = sum(objective(model, b) for b in batches) / len(batches)
+    callback = objective if objective_kind == "kl" else objective.cross_entropy
+    actual = sum(callback(model, b) for b in batches) / len(batches)
     torch.testing.assert_close(actual, direct.detach(), atol=1e-7, rtol=1e-5)
     assert not actual.requires_grad
     for name, parameter in model.named_parameters():
@@ -136,7 +156,7 @@ def test_cached_teacher_autoquant_callback_and_ordinary_restore(example, tmp_pat
         forward_step=lambda m, b: m.model(
             input_ids=b["input_ids"], attention_mask=b["attention_mask"], use_cache=False
         ),
-        forward_backward_step=objective,
+        forward_backward_step=objective.cross_entropy,
         num_calib_steps=1,
         num_score_steps=1,
         method={"method": "gradient", "data_fingerprint": "fixture"},
@@ -144,6 +164,9 @@ def test_cached_teacher_autoquant_callback_and_ordinary_restore(example, tmp_pat
     )
     assert state["best"]["is_satisfied"]
     assert state["best"]["constraints"]["effective_bits"] <= 9
+    assert any(
+        float(score) > 0 for stat in state["candidate_stats"].values() for score in stat["scores"]
+    )
     with torch.no_grad():
         expected = model(input_ids=batch["input_ids"], use_cache=False).logits
     mto.save(model, tmp_path / "modelopt.pt")

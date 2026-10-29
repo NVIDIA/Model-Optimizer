@@ -593,7 +593,8 @@ The example scripts above also have an additional flag `--tasks`, where the actu
 
 `hf_gsq_rco.py` compares ordinary AutoQuant, GSQ with gradient search, RCO with ordinary candidates,
 and GSQ plus RCO. All use BF16 activations, per-tensor FP8 and static block-16 NVFP4 weights,
-the same frozen C4 tokens and exact cached teacher head inputs. The text decoder is eligible;
+the same frozen C4 tokens and exact cached teacher head inputs. Gradient-search controls score causal
+cross-entropy; RCO optimizes full-vocabulary teacher KL. The text decoder is eligible;
 vision, embeddings, output head, MTP and the existing protected projections remain unquantized.
 
 Prepare a four-layer hybrid-block pilot on one visible CUDA GPU. Supply exact repository

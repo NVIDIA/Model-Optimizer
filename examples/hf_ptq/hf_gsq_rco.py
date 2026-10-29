@@ -161,6 +161,7 @@ class CachedTeacherKL:
             raise ValueError("Teacher cache content differs from its manifest")
         self.chunk_tokens = chunk_tokens
         self.mean_valid_tokens = manifest["mean_valid_tokens"]
+        self.mean_prediction_tokens = manifest["mean_prediction_tokens"]
 
     @classmethod
     def prepare(cls, model, batches, directory, fingerprint, chunk_tokens=32):
@@ -172,8 +173,13 @@ class CachedTeacherKL:
             with torch.no_grad():
                 files = {}
                 valid_tokens = []
+                prediction_tokens = []
                 for index, batch in enumerate(batches):
                     valid_tokens.append(int(batch.get("loss_mask", batch["attention_mask"]).sum()))
+                    mask = batch.get("loss_mask", batch["attention_mask"])
+                    prediction_tokens.append(
+                        int((mask[:, 1:] * batch["attention_mask"][:, :-1]).sum())
+                    )
                     hidden = _decoder(model)(
                         **_inputs(batch, device), use_cache=False
                     ).last_hidden_state
@@ -197,6 +203,7 @@ class CachedTeacherKL:
                         "fingerprint": fingerprint,
                         "files": files,
                         "mean_valid_tokens": sum(valid_tokens) / len(valid_tokens),
+                        "mean_prediction_tokens": sum(prediction_tokens) / len(prediction_tokens),
                     }
                 )
             )
@@ -208,32 +215,51 @@ class CachedTeacherKL:
         """Accumulate head gradients by token chunk, then backward through the decoder once."""
         return self.metric(model, batch, backward=True, normalizer=self.mean_valid_tokens)
 
-    def metric(self, model, batch, backward=False, normalizer=None):
+    def cross_entropy(self, model, batch):
+        """Score ordinary AutoQuant controls with causal CE and one decoder backward."""
+        return self.metric(
+            model, batch, backward=True, normalizer=self.mean_prediction_tokens, cross_entropy=True
+        )
+
+    def metric(self, model, batch, backward=False, normalizer=None, cross_entropy=False):
         """Evaluate the same full-vocabulary objective, optionally performing its backward."""
         device = next(model.parameters()).device
         with torch.set_grad_enabled(backward):
             student = _decoder(model)(**_inputs(batch, device), use_cache=False).last_hidden_state
-        teacher = torch.load(
-            self.directory / f"{batch['sample_id']}.pt", map_location="cpu", weights_only=True
-        ).flatten(0, -2)
+        mask = batch.get("loss_mask", batch["attention_mask"])
+        if cross_entropy:
+            student = student[:, :-1]
+            labels = batch["input_ids"][:, 1:].to(device).flatten()
+            mask = mask[:, 1:] * batch["attention_mask"][:, :-1]
+        else:
+            teacher = torch.load(
+                self.directory / f"{batch['sample_id']}.pt", map_location="cpu", weights_only=True
+            ).flatten(0, -2)
         leaf = student.detach().requires_grad_(backward)
         flat = leaf.flatten(0, -2)
-        mask = batch.get("loss_mask", batch["attention_mask"]).to(device).flatten()
+        mask = mask.to(device).flatten()
         count = mask.sum()
         if not bool(count):
-            raise ValueError("KL batch has no valid tokens")
+            raise ValueError("Objective batch has no valid tokens")
         metric = torch.zeros((), device=device)
         head = model.get_output_embeddings()
         for start in range(0, flat.shape[0], self.chunk_tokens):
             stop = start + self.chunk_tokens
-            with torch.no_grad():
-                teacher_logp = F.log_softmax(head(teacher[start:stop].to(device)).float(), -1)
             with torch.set_grad_enabled(backward):
-                student_logp = F.log_softmax(head(flat[start:stop]).float(), -1)
-                loss = (
-                    F.kl_div(student_logp, teacher_logp, log_target=True, reduction="none").sum(-1)
-                    * mask[start:stop]
-                ).sum() / (count if normalizer is None else normalizer)
+                logits = head(flat[start:stop]).float()
+                if cross_entropy:
+                    loss = F.cross_entropy(logits, labels[start:stop], reduction="none")
+                else:
+                    with torch.no_grad():
+                        teacher_logp = F.log_softmax(
+                            head(teacher[start:stop].to(device)).float(), -1
+                        )
+                    loss = F.kl_div(
+                        F.log_softmax(logits, -1), teacher_logp, log_target=True, reduction="none"
+                    ).sum(-1)
+                loss = (loss * mask[start:stop]).sum() / (
+                    count if normalizer is None else normalizer
+                )
                 if backward:
                     loss.backward()
             metric += loss.detach()
@@ -359,7 +385,9 @@ def _search(args, model, calibration, objective, formats, method, checkpoint, ta
         forward_step=lambda m, b: _decoder(m)(
             **_inputs(b, next(m.parameters()).device), use_cache=False
         ),
-        forward_backward_step=objective,
+        forward_backward_step=objective.cross_entropy
+        if method["method"] == "gradient"
+        else objective,
         disabled_layers=_disabled_layers(model),
         num_calib_steps=len(calibration),
         num_score_steps=len(calibration),
@@ -433,6 +461,8 @@ def main():
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
         "device": str(torch.cuda.get_device_properties(0)),
+        "control_objective": "valid-prediction-token-mean causal cross-entropy",
+        "rco_objective": "valid-token-mean full-vocabulary teacher-to-student KL",
     }
     identity = _digest(
         {
@@ -517,6 +547,7 @@ def main():
                 "data": cal_manifest["fingerprint"],
                 "formats": _candidate_identity(formats),
                 "seed": args.seed,
+                "scoring_objective": "shifted-token-ce-v1",
             }
         )
         if not candidate_checkpoint.exists():
@@ -562,6 +593,7 @@ def main():
                 "variant": variant,
                 "budget": f"budget_{index:02d}",
                 "requested": TARGETS[index],
+                "objective": settings["rco_objective" if "rco" in variant else "control_objective"],
             }
             metadata_path = candidate_checkpoint.with_suffix(".json")
             minimum = (
