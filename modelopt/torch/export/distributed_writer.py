@@ -737,7 +737,8 @@ def _distributed_save_hf_checkpoint_impl(
         if parallel_state is None:
             raise RuntimeError(
                 "The model's plan is expert-parallel, but no routed expert carries its expert-parallel "
-                "group: load it with load_and_prepare_ep."
+                "group: load it with an expert-parallel loader, which seeds each routed expert's "
+                "ParallelState."
             )
         ep_rank = parallel_state.expert_model_parallel_group.rank()
         edp_group = parallel_state.data_parallel_group
