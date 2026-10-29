@@ -14,13 +14,12 @@
 # limitations under the License.
 
 import json
-from datetime import timedelta
-from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from torch.utils.data import DataLoader
 
@@ -465,28 +464,23 @@ def _batch_size_job(rank, world_size, planned):
         measured.append(device)
         return (free if len(measured) <= gpus else free - 100, 0)
 
-    # A rank left waiting in the reduction gives up in seconds on this group.
-    group = torch.distributed.new_group(timeout=timedelta(seconds=10))
-    gather = partial(torch.distributed.all_gather_object, group=group)
-    try:
-        with (
-            patch.object(torch.distributed, "all_gather_object", gather),
-            patch("torch.cuda.empty_cache"),
-            patch(
-                "torch.cuda.get_device_properties",
-                return_value=SimpleNamespace(total_memory=10**12),
-            ),
-            patch("torch.cuda.device_count", return_value=4),
-            # A launcher that shows each rank one GPU: every rank computes on cuda:0.
-            patch("torch.cuda.current_device", return_value=0),
-            patch("torch.cuda.mem_get_info", side_effect=mem_get_info),
-            patch("torch.cuda.max_memory_allocated", return_value=0),
-        ):
-            batch_size = get_max_batch_size(
-                model, max_sample_length=8, sample_input_single_batch=torch.ones((1, 8))
-            )
-    finally:
-        torch.distributed.destroy_process_group(group)
+    with (
+        # A rank left waiting in the reduction gives up in seconds.
+        bounded_collectives(),
+        patch("torch.cuda.empty_cache"),
+        patch(
+            "torch.cuda.get_device_properties",
+            return_value=SimpleNamespace(total_memory=10**12),
+        ),
+        patch("torch.cuda.device_count", return_value=4),
+        # A launcher that shows each rank one GPU: every rank computes on cuda:0.
+        patch("torch.cuda.current_device", return_value=0),
+        patch("torch.cuda.mem_get_info", side_effect=mem_get_info),
+        patch("torch.cuda.max_memory_allocated", return_value=0),
+    ):
+        batch_size = get_max_batch_size(
+            model, max_sample_length=8, sample_input_single_batch=torch.ones((1, 8))
+        )
 
     if planned:
         assert measured == [torch.device("cuda", 0)] * 2  # the GPU it computes on, not LOCAL_RANK
