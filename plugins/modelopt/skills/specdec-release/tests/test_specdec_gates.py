@@ -16,7 +16,8 @@
 """Unit tests for the spec-dec readiness gates.
 
 These are deterministic — no GPU, cluster, or network. Inputs carry the values of a real
-Qwen3-8B DFlash2 run (2000 steps on GB300), trimmed to the fields the gates read. Run with:
+Qwen3-8B DFlash2 run (2000 steps on GB300) and of its matched A|B benchmark, trimmed to
+the fields the gates read. Run with:
 
     python -m pytest "$SKILL_DIR/tests/test_specdec_gates.py"
 """
@@ -30,6 +31,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
+from gate_bench import evaluate_bench
+from gate_bench import main as bench_main
+from gate_correctness import evaluate_correctness
+from gate_correctness import main as correctness_main
 from gate_smoke import evaluate_smoke
 from gate_smoke import main as smoke_main
 from gate_train import evaluate_training
@@ -94,6 +99,63 @@ def _smoke():
         "mean_acceptance_length": 1.79,
         "min_acceptance_length": 1.5,
     }
+
+
+# M0 matched benchmark (MT-Bench, 80 requests, temperature 0, 7 speculative tokens):
+# concurrency -> (AL A, AL B, Output TPS A, Output TPS B).
+_M0 = {
+    1: (1.0, 1.7716790663672861, 257.84536489469593, 369.63355605307476),
+    8: (1.0011991946127003, 1.7539989653331933, 1732.5925424359984, 2461.854827003075),
+    32: (1.0006437486492314, 1.7754698448542836, 4150.190548956775, 5761.7201506093925),
+}
+
+
+def _summary():
+    """compare_ab.py ab_summary.json of the M0 benchmark, fields the gates read."""
+    rows = []
+    for conc, (al_a, al_b, tps_a, tps_b) in _M0.items():
+        config = {
+            "draft_model_dir": DRAFT,
+            "num_requests": 80,
+            "model_dir": TARGET,
+            "engine": "VLLM",
+            "engine_version": "0.31.0",
+            "gpu": "NVIDIA GB300",
+            "tp_size": 1,
+            "ep_size": 1,
+            "dataset": "mtbench",
+            "dataset_path": "/hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl",
+            "output_length": 4096,
+            "concurrency": conc,
+        }
+        row = {
+            "repeat": 0,
+            "concurrency": conc,
+            "problems": [],
+            "al_a": al_a,
+            "al_b": al_b,
+            "tps_a": tps_a,
+            "tps_b": tps_b,
+            "speedup": tps_b / tps_a,
+            "responses_a": 80,
+            "responses_b": 80,
+            "turns_a": 160,
+            "turns_b": 160,
+            "temperature_a": 0.0,
+            "temperature_b": 0.0,
+            "config_a": {**config, "speculative_algorithm": "NONE", "block_size": 8},
+            "config_b": {**config, "speculative_algorithm": "DFLASH", "block_size": 7},
+        }
+        if conc == 1:
+            row["match"] = {
+                "pairs": 160,
+                "unpaired_turns": 0,
+                "exact_match_rate": 0.95625,
+                "first_turn_pairs": 80,
+                "first_turn_exact_match_rate": 1.0,
+            }
+        rows.append(row)
+    return {"ok": True, "rows": rows}
 
 
 def _with(obj, path, value):
@@ -264,6 +326,110 @@ def test_smoke(change, kwargs, failure_class):
     assert r["pass"] == (failure_class is None)
 
 
+# ── gate_bench ────────────────────────────────────────────────────────
+
+SUBMITTED = {
+    "concurrencies": [1, 8, 32],
+    "algorithm": "DFLASH",
+    "num_spec_tokens": 7,
+    "draft": DRAFT,
+}
+
+
+def test_bench_m0_passes_and_reproduces_m0_numbers():
+    r = evaluate_bench(_summary(), **SUBMITTED)
+    assert r["pass"], r["detail"]
+    # m0_analysis.json, computed by hand from the same run.py outputs.
+    evidence = {e["concurrency"]: e for e in r["evidence"]}
+    assert evidence[1]["speedup"] == pytest.approx(1.4335474139860265)
+    assert evidence[8]["speedup"] == pytest.approx(1.420908128544606)
+    assert evidence[32]["speedup"] == pytest.approx(1.3883025568687934)
+    assert r["measurement_setup"]["gpu"] == "NVIDIA GB300"
+    assert r["measurement_setup"]["num_speculative_tokens"] == 7
+
+    # --num_requests above the dataset size: run.py runs all 80 MT-Bench questions.
+    summary = _summary()
+    for row in summary["rows"]:
+        row["config_a"]["num_requests"] = row["config_b"]["num_requests"] = 100
+    r = evaluate_bench(summary, **SUBMITTED)
+    assert r["pass"] and r["notes"], r["detail"]
+
+
+def _mutate_row(field, value, arm_config=None):
+    def apply(summary):
+        row = summary["rows"][0]
+        if arm_config:
+            row[arm_config][field] = value
+        else:
+            row[field] = value
+
+    return apply
+
+
+@pytest.mark.parametrize(
+    ("mutate", "submitted", "failure_class"),
+    [
+        (lambda s: s["rows"].pop(), {}, "BENCH_INCOMPLETE"),
+        (lambda s: None, {"repeats": 2}, "BENCH_INCOMPLETE"),
+        (_mutate_row("responses_b", 79), {}, "BENCH_INCOMPLETE"),
+        (_mutate_row("gpu", "NVIDIA H100", "config_b"), {}, "ARMS_UNMATCHED"),
+        (_mutate_row("tp_size", 2, "config_b"), {}, "ARMS_UNMATCHED"),
+        (lambda s: s["rows"][1].update(temperature_a=0.7, temperature_b=0.7), {}, "ARMS_UNMATCHED"),
+        (lambda s: s["rows"][2]["config_b"].update(concurrency=1), {}, "ARMS_UNMATCHED"),
+        (_mutate_row("al_a", 1.3), {}, "SPEC_CONFIG_MISMATCH"),
+        (_mutate_row("speculative_algorithm", "DFLASH", "config_a"), {}, "SPEC_CONFIG_MISMATCH"),
+        (lambda s: None, {"num_spec_tokens": 15}, "SPEC_CONFIG_MISMATCH"),
+        # --block_size left unset: the engine's default ran, and the ceilings can't apply.
+        (
+            _mutate_row("block_size", None, "config_b"),
+            {"num_spec_tokens": None},
+            "SPEC_CONFIG_MISMATCH",
+        ),
+        (_mutate_row("al_b", 1.0), {}, "SPEC_CONFIG_MISMATCH"),
+        (_mutate_row("al_b", 9.0), {}, "ANOMALOUS"),
+        (_mutate_row("tps_a", 0.0), {}, "ANOMALOUS"),
+    ],
+)
+def test_bench_failures(mutate, submitted, failure_class):
+    summary = _summary()
+    mutate(summary)
+    r = evaluate_bench(summary, **{**SUBMITTED, **submitted})
+    assert not r["pass"]
+    assert r["failure_class"] == failure_class, r["detail"]
+
+
+# ── gate_correctness ──────────────────────────────────────────────────
+
+
+def test_correctness_reports_greedy_match_without_gating():
+    summary = _summary()
+    r = evaluate_correctness(summary)
+    assert r["pass"] and r["measurable"] and not r["blocking"]
+    assert r["min_exact_match_rate"] == pytest.approx(0.95625)
+    assert r["min_self_exact_match_rate"] is None and r["notes"]  # no control: say so
+
+    # The target-alone control is reported as the noise floor next to the A-vs-B rate.
+    summary["rows"][0]["a_self_match"] = {
+        "exact_match_rate": 0.2,
+        "first_turn_exact_match_rate": 0.25,
+    }
+    r = evaluate_correctness(summary)
+    assert r["min_self_exact_match_rate"] == 0.2
+    assert r["min_self_first_turn_exact_match_rate"] == 0.25
+    assert "target alone" in r["detail"] and not r["notes"]
+
+    summary["rows"][0]["temperature_b"] = None  # unknown temperature: not greedy evidence
+    r = evaluate_correctness(summary)
+    assert r["pass"] and not r["measurable"]
+
+    # Rows gate_bench would reject are not evidence either: appended results, or arm B
+    # comparing the target with itself.
+    for path, value in ((["rows", 0, "problems"], ["appended"]),
+                        (["rows", 0, "config_b", "speculative_algorithm"], "NONE")):  # fmt: skip
+        r = evaluate_correctness(_with(_summary(), path, value))
+        assert r["pass"] and not r["measurable"] and r["notes"]
+
+
 # ── CLIs ──────────────────────────────────────────────────────────────
 
 
@@ -312,3 +478,19 @@ def test_cli_exit_codes(tmp_path, capsys):
     for not_an_object in ([], "stage", None):
         bad = _write(tmp_path / "bad.json", not_an_object)
         assert smoke_main(["--smoke", bad]) == 2
+        assert bench_main(["--summary", bad]) == 2
+        assert correctness_main(["--summary", bad]) == 2
+
+    for rows in ({"0": {}}, ["row"]):
+        bad = _write(tmp_path / "bad.json", {"rows": rows})
+        assert bench_main(["--summary", bad]) == 2
+        assert correctness_main(["--summary", bad]) == 2
+    bad_match = _with(_summary(), ["rows", 0, "match"], [])
+    assert correctness_main(["--summary", _write(tmp_path / "bad.json", bad_match)]) == 0
+    none_concurrency = _with(_summary(), ["rows", 0, "concurrency"], None)
+    assert bench_main(["--summary", _write(tmp_path / "bad.json", none_concurrency)]) == 1
+
+    summary = _write(tmp_path / "ab_summary.json", _summary())
+    assert bench_main(["--summary", summary, "--concurrencies", "1,8,32"]) == 0
+    assert bench_main(["--summary", summary, "--concurrencies", "1,64"]) == 1
+    assert bench_main(["--summary", str(tmp_path / "missing.json")]) == 2
