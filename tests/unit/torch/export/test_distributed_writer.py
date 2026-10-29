@@ -39,6 +39,8 @@ from modelopt.torch.export.distributed_writer import (
     _nbytes,
 )
 
+_WRITER = "modelopt.torch.export.distributed_writer"
+
 # ------------------------------------------------------------------ pure helpers
 
 
@@ -141,14 +143,25 @@ def test_materialize_owned_rejects_a_tensor_it_cannot_assemble(gloo_world_of_one
         _materialize_owned({"w": build(gloo_world_of_one)}, set(), 0, 1)
 
 
+# A whole tensor rank 1 holds unlike rank 0: the ranks would assign owners by different sizes, or at
+# an equal size write the owner's version of it.
+_PLAIN_DISAGREEMENTS = {
+    "size": lambda rank: torch.zeros(2, dtype=torch.float32 if rank == 0 else torch.bfloat16),
+    "same-size-dtype": lambda rank: torch.zeros(
+        2, dtype=torch.float32 if rank == 0 else torch.int32
+    ),
+    "same-size-shape": lambda rank: torch.zeros((2, 4) if rank == 0 else (4, 2)),
+    "empty-shape": lambda rank: torch.zeros((0, 4) if rank == 0 else (0, 2)),
+}
+
+
 def _refusing_materialize_job(rank, world_size, case):
     if case == "smaller-mesh":
         # A dim-0 shard over a mesh smaller than the world: each rank's own 1-rank sub-mesh.
         sub = init_device_mesh("cpu", (world_size, 1), mesh_dim_names=("dp", "sub"))["sub"]
         w = distribute_tensor(torch.zeros(4, 3), sub, [Shard(0)])
-    elif case == "size":
-        # A plain buffer rank 1 holds in another dtype: the ranks would assign owners by different sizes.
-        w = torch.zeros(2, dtype=torch.float32 if rank == 0 else torch.bfloat16)
+    elif case in _PLAIN_DISAGREEMENTS:
+        w = _PLAIN_DISAGREEMENTS[case](rank)
     elif case == "grouping":
         # Only rank 1 keeps w with another key: the ranks would assign owners by different units.
         w = torch.zeros(2)
@@ -167,6 +180,14 @@ def _refusing_materialize_job(rank, world_size, case):
         elif case == "global-shape":
             # A rewrap that re-inferred the global shape per rank: rank 0's own view tiles, rank 1's not.
             local, placement, gshape = torch.zeros(2, 4), Shard(0), (4 if rank == 0 else 3, 4)
+        elif case in ("device", "devices"):
+            # Only rank 1's shard on another device; or both ranks' shards of a second key.
+            on_meta = case == "device" and rank == 1
+            local, placement, gshape = (
+                torch.zeros(2, 4, device="meta" if on_meta else "cpu"),
+                Shard(0),
+                (4, 4),
+            )
         else:
             # An expert, which each rank writes as it holds it: only rank 1's is still a DTensor.
             local, placement, gshape = torch.zeros(2, 4), Shard(0), (4, 4)
@@ -176,6 +197,15 @@ def _refusing_materialize_job(rank, world_size, case):
         if case == "expert" and rank == 0:
             w = w.to_local()
     local_sd = {"w": w, "b": torch.zeros(1)} if case == "grouping" else {"w": w}
+    if case == "devices":
+        local_sd["m"] = DTensor.from_local(
+            torch.zeros(2, 4, device="meta"),
+            mesh,
+            [Shard(0)],
+            run_check=False,
+            shape=(4, 4),
+            stride=(4, 1),
+        )
     together = [["w", "b"]] if case == "grouping" and rank == 1 else ()
     try:
         with bounded_collectives():
@@ -188,16 +218,29 @@ def _refusing_materialize_job(rank, world_size, case):
         raised = "no error"
     match = {
         "global-shape": "do not tile their global shape",
-        "dtype": "different dtype",
+        "dtype": "different dtype or device",
+        "device": "different dtype or device",
+        "devices": "more than one device type",
         "expert": "still DTensors",
-        "size": "different size",
         "grouping": "group the keys",
+        **dict.fromkeys(_PLAIN_DISAGREEMENTS, "different dtype or shape"),
     }.get(case, "cannot materialize")
     assert match in raised, raised
 
 
 @pytest.mark.parametrize(
-    "case", ["smaller-mesh", "placement", "global-shape", "dtype", "expert", "size", "grouping"]
+    "case",
+    [
+        "smaller-mesh",
+        "placement",
+        "global-shape",
+        "dtype",
+        "device",
+        "devices",
+        "expert",
+        *_PLAIN_DISAGREEMENTS,
+        "grouping",
+    ],
 )
 def test_materialize_owned_refuses_on_every_rank(cpu_dist_workers, case):
     """Every rank refuses, the ranks whose own view looks fine included, instead of waiting in a
@@ -221,13 +264,16 @@ def _materialize_two_ranks_job(rank, world_size):
     # on one rank and y and z on the other.
     grouped = {k: torch.randn(n, 4) for k, n in (("x", 6), ("y", 5), ("z", 4))}
     together = [["x", "y"], ["y", "z"]]
-    # The copies this rank sends, and how many of them are still held at each assembled store.
-    sent, held = [], []
+    # The copies this rank sends, and how many of them are still held at each assembled store; the
+    # buffers it receives into, and how many of them are still held when the next round starts.
+    sent, held, received, stale = [], [], [], []
     batch_isend_irecv = torch.distributed.batch_isend_irecv
 
     def recording_sends(ops):
-        isends = [op for op in ops if op.op is torch.distributed.isend]
-        sent.extend(StorageWeakRef(op.tensor.untyped_storage()) for op in isends)
+        stale.append(sum(not ref.expired() for ref in received))
+        for op in ops:
+            mine = sent if op.op is torch.distributed.isend else received
+            mine.append(StorageWeakRef(op.tensor.untyped_storage()))
         return batch_isend_irecv(ops)
 
     class CountingHeldSends(dict):
@@ -243,6 +289,7 @@ def _materialize_two_ranks_job(rank, world_size):
         with (
             bounded_collectives(),
             mock.patch.object(torch.distributed, "batch_isend_irecv", recording_sends),
+            mock.patch(f"{_WRITER}._KEYS_PER_ROUND", 2),  # rounds of two keys
         ):
             _materialize_owned(sd, set(), rank, world_size, groups)
 
@@ -255,10 +302,12 @@ def _materialize_two_ranks_job(rank, world_size):
         if groups:
             assert sorted(layout) in owned, owned
     assert sent and held and not any(held), held
+    assert received and len(stale) > 1 and not any(stale), stale
 
 
 def test_materialize_owned_moves_each_shard_to_its_owner_over_two_ranks(cpu_dist_workers):
     """Each key ends whole on exactly one rank, its shards packed per peer and dtype, unpacked at
     their offsets and joined in rank order, an uneven and an empty shard included, and merge groups
-    that share a key on one rank. What a rank sent is freed before it assembles what it owns."""
+    that share a key on one rank. What a rank sent is freed before it assembles what it owns, and what
+    it received before the next round of transfers starts."""
     cpu_dist_workers.run(_materialize_two_ranks_job)

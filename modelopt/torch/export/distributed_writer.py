@@ -63,6 +63,17 @@ def _run_to_completion(ops: list) -> None:
     ops.clear()
 
 
+# Keys per round of transfers: a round's op count does not grow with its keys.
+_KEYS_PER_ROUND = 4096
+
+
+def _numel(shape) -> int:
+    n = 1
+    for s in shape:
+        n *= s
+    return n
+
+
 def _gather_shard0_to_owners(
     local_sd: dict, keys: list, owner: dict, all_shapes: list, rank: int, world: int
 ) -> None:
@@ -72,78 +83,75 @@ def _gather_shard0_to_owners(
     the same sorted keys and owner map, so every send meets a receive of its length.
     ``all_shapes[r][k]`` is the shape of rank ``r``'s shard of ``k``; the caller checked they tile.
     """
+    for base in range(0, len(keys), _KEYS_PER_ROUND):
+        _transfer_round(
+            local_sd, keys[base : base + _KEYS_PER_ROUND], owner, all_shapes, rank, world
+        )
 
-    def _numel(shape):
-        n = 1
-        for s in shape:
-            n *= s
-        return n
 
-    # Keys per round of transfers: a round's op count does not grow with its keys.
-    chunk = 4096
-    for base in range(0, len(keys), chunk):
-        part = keys[base : base + chunk]
-
-        # (peer, dtype) -> keys. A rank sends its shard of every key the peer owns; the owner
-        # receives, from every other rank, its shard of every key this rank owns. Both sides build
-        # the identical grouping from shared state. Empty shards are skipped on both sides.
-        send_groups: dict = {}
-        recv_groups: dict = {}
-        for k in part:
-            dt = local_sd[k].dtype
-            o = owner[k]
-            if o != rank:
-                if _numel(all_shapes[rank][k]):
-                    send_groups.setdefault((o, dt), []).append(k)
-            else:
-                for r in range(world):
-                    if r != rank and _numel(all_shapes[r][k]):
-                        recv_groups.setdefault((r, dt), []).append(k)
-
-        ops: list = []
-        pending: list = []
-        for peer, dt in sorted(send_groups, key=lambda kd: (kd[0], str(kd[1]))):
-            ks = sorted(send_groups[(peer, dt)])
-            # Packed straight into its op: no name here then holds the copy past the transfer.
-            ops.append(
-                dist.P2POp(
-                    dist.isend, torch.cat([local_sd[k].to_local().reshape(-1) for k in ks]), peer
-                )
-            )
-        for srcr, dt in sorted(recv_groups, key=lambda kd: (kd[0], str(kd[1]))):
-            ks = sorted(recv_groups[(srcr, dt)])
-            total = sum(_numel(all_shapes[srcr][k]) for k in ks)
-            buf = torch.empty(total, dtype=dt, device=local_sd[ks[0]].to_local().device)
-            pending.append((srcr, ks, buf))
-            ops.append(dist.P2POp(dist.irecv, buf, srcr))
-
-        _run_to_completion(ops)
-
-        # Unpack each peer's flat buffer back into per-key views, in the same order it was packed.
-        parts_by_key: dict = {}
-        for srcr, ks, buf in pending:
-            off = 0
-            for k in ks:
-                shape = all_shapes[srcr][k]
-                n = _numel(shape)
-                parts_by_key.setdefault(k, {})[srcr] = buf[off : off + n].view(shape)
-                off += n
-
-        # Rank order is mesh order (checked by _is_full_world_shard0), so concatenating the parts in
-        # rank order reproduces exactly what full_tensor() would have built.
-        for k in part:
-            if owner[k] != rank:
-                del local_sd[k]
-                continue
-            got = parts_by_key.get(k, {})
-            pieces = []
+def _transfer_round(
+    local_sd: dict, part: list, owner: dict, all_shapes: list, rank: int, world: int
+) -> None:
+    """One round of :func:`_gather_shard0_to_owners`, whose buffers are freed when it returns."""
+    # (peer, dtype) -> keys. A rank sends its shard of every key the peer owns; the owner
+    # receives, from every other rank, its shard of every key this rank owns. Both sides build
+    # the identical grouping from shared state. Empty shards are skipped on both sides.
+    send_groups: dict = {}
+    recv_groups: dict = {}
+    for k in part:
+        dt = local_sd[k].dtype
+        o = owner[k]
+        if o != rank:
+            if _numel(all_shapes[rank][k]):
+                send_groups.setdefault((o, dt), []).append(k)
+        else:
             for r in range(world):
-                if r == rank:
-                    pieces.append(local_sd[k].to_local())
-                elif r in got:
-                    pieces.append(got[r])
-            local_sd[k] = torch.cat(pieces, dim=0)
-        del pending, parts_by_key
+                if r != rank and _numel(all_shapes[r][k]):
+                    recv_groups.setdefault((r, dt), []).append(k)
+
+    ops: list = []
+    pending: list = []
+    for peer, dt in sorted(send_groups, key=lambda kd: (kd[0], str(kd[1]))):
+        ks = sorted(send_groups[(peer, dt)])
+        # Packed straight into its op: no name here then holds the copy past the transfer.
+        ops.append(
+            dist.P2POp(
+                dist.isend, torch.cat([local_sd[k].to_local().reshape(-1) for k in ks]), peer
+            )
+        )
+    for srcr, dt in sorted(recv_groups, key=lambda kd: (kd[0], str(kd[1]))):
+        ks = sorted(recv_groups[(srcr, dt)])
+        total = sum(_numel(all_shapes[srcr][k]) for k in ks)
+        buf = torch.empty(total, dtype=dt, device=local_sd[ks[0]].to_local().device)
+        pending.append((srcr, ks, buf))
+        ops.append(dist.P2POp(dist.irecv, buf, srcr))
+
+    _run_to_completion(ops)
+
+    # Unpack each peer's flat buffer back into per-key views, in the same order it was packed.
+    parts_by_key: dict = {}
+    for srcr, ks, buf in pending:
+        off = 0
+        for k in ks:
+            shape = all_shapes[srcr][k]
+            n = _numel(shape)
+            parts_by_key.setdefault(k, {})[srcr] = buf[off : off + n].view(shape)
+            off += n
+
+    # Rank order is mesh order (checked by _is_full_world_shard0), so concatenating the parts in
+    # rank order reproduces exactly what full_tensor() would have built.
+    for k in part:
+        if owner[k] != rank:
+            del local_sd[k]
+            continue
+        got = parts_by_key.get(k, {})
+        pieces = []
+        for r in range(world):
+            if r == rank:
+                pieces.append(local_sd[k].to_local())
+            elif r in got:
+                pieces.append(got[r])
+        local_sd[k] = torch.cat(pieces, dim=0)
 
 
 def _materialize_owned(
@@ -193,15 +201,16 @@ def _materialize_owned(
     # One collective for all the metadata the steps below need. Every refusal below is decided from
     # it, so it is the same on every rank: one that raised alone would leave its peers waiting.
     dense_sizes = {k: _nbytes(local_sd[k]) for k in dense_keys}
+    dense_kinds = {k: (str(local_sd[k].dtype), tuple(local_sd[k].shape)) for k in dense_keys}
     my_meta = (
         dense_keys,
         sum(_nbytes(local_sd[k]) for k in expert_keys),
         {k: tuple(local_sd[k].to_local().shape) for k in shard0},
         {k: tuple(local_sd[k].shape) for k in shard0},
         [(k, pl, f"mesh.ndim={nd}") for k, pl, nd in unsupported[:3]],
-        {k: str(local_sd[k].dtype) for k in shard0},
+        {k: (str(local_sd[k].dtype), local_sd[k].to_local().device.type) for k in shard0},
         [k for k in expert_keys if isinstance(local_sd[k], DTensor)][:3],
-        dense_sizes,
+        dense_kinds,
         merged_units,
     )
     meta: list = [None] * world
@@ -236,7 +245,7 @@ def _materialize_owned(
     expert_bytes = [m[1] for m in meta]
     all_shapes = [m[2] for m in meta]
     global_shapes = [m[3] for m in meta]
-    dtypes = [m[5] for m in meta]
+    shard_kinds = [m[5] for m in meta]
 
     # all_shapes[r]'s keys are rank r's dim-0 classification: name a rank that disagrees, which would
     # otherwise surface as a bare KeyError below.
@@ -258,9 +267,9 @@ def _materialize_owned(
     untiled, mixed = [], []
     for k in shard0:
         # A shard is sent in the sender's dtype and received in the owner's: ranks that disagree
-        # would mismatch the transfer's byte counts and hang in it.
-        if len({dtypes[r][k] for r in range(world)}) > 1:
-            mixed.append((k, [dtypes[r][k] for r in range(world)][:3]))
+        # would mismatch the transfer's byte counts and hang in it. So would its device.
+        if len({shard_kinds[r][k] for r in range(world)}) > 1:
+            mixed.append((k, [shard_kinds[r][k] for r in range(world)][:3]))
         gshapes = {global_shapes[r][k] for r in range(world)}
         gshape = next(iter(gshapes))
         shard_shapes = [all_shapes[r][k] for r in range(world)]
@@ -271,8 +280,16 @@ def _materialize_owned(
             untiled.append((k, sorted(gshapes), shard_shapes[:3]))
     if mixed:
         raise RuntimeError(
-            f"rank {rank}: {len(mixed)} dim-0 sharded tensor(s) have a different dtype on different "
-            f"ranks, so their shards cannot be moved to one rank; first few: {mixed[:2]}"
+            f"rank {rank}: {len(mixed)} dim-0 sharded tensor(s) have a different dtype or device on "
+            f"different ranks, so their shards cannot be moved to one rank; first few: {mixed[:2]}"
+        )
+    # A peer's shards of one dtype travel in one buffer, and a round's transfers in one batch: neither
+    # spans devices, as a CPU-offloaded shard beside one moved to the accelerator would need.
+    devices = sorted({shard_kinds[rank][k][1] for k in shard0})
+    if len(devices) > 1:
+        raise RuntimeError(
+            f"rank {rank}: dim-0 sharded tensors are on more than one device type ({devices}), "
+            "which the transport cannot move in one batch; put them on one device first."
         )
     if untiled:
         raise RuntimeError(
@@ -283,16 +300,17 @@ def _materialize_owned(
         )
     # Every rank assigns the owners below from these sizes, so ranks that disagree on one (a plain
     # buffer left in another dtype on one rank) would disagree on who keeps which tensor: one could
-    # be dropped everywhere or written twice, or a shard sent to a rank not waiting for it.
-    resized = {
-        r: sorted(k for k in dense_keys if m[7][k] != dense_sizes[k])[:3]
+    # be dropped everywhere or written twice, or a shard sent to a rank not waiting for it. A dtype or
+    # shape that differs at the same size would leave the owner's version in the checkpoint.
+    reshaped = {
+        r: sorted(k for k in dense_keys if m[7][k] != dense_kinds[k])[:3]
         for r, m in enumerate(meta)
-        if m[7] != dense_sizes
+        if m[7] != dense_kinds
     }
-    if resized:
+    if reshaped:
         raise RuntimeError(
-            f"rank {rank}: dense tensor(s) have a different size on different ranks, so the ranks "
-            f"would not agree on which of them writes each; first few per rank: {resized}"
+            f"rank {rank}: dense tensor(s) have a different dtype or shape on different ranks, so "
+            f"the ranks would not agree on which of them writes each; first few per rank: {reshaped}"
         )
     # So would ranks that group the merged keys differently.
     regrouped = {
