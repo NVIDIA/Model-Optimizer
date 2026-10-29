@@ -622,13 +622,7 @@ her fear and anger)."""
                 external_dataset["group"] = external_dataset.index // 2
                 self.external_datasets["mmlu_pro_grouped"] = external_dataset.groupby(
                     ["group", "category"]
-                ).agg(
-                    {
-                        "question": list,
-                        "options": list,
-                        "question_id": lambda question_ids: "_".join(question_ids.astype(str)),
-                    }
-                )
+                ).agg({"question": list, "options": list})
             external_dataset = self.external_datasets["mmlu_pro_grouped"]
             src_id = ast.literal_eval(example["src_id"].removeprefix("mmlu_pro_"))
             external_dataset_example = external_dataset.loc[src_id]
