@@ -1002,7 +1002,9 @@ def _process_quantized_modules(
         model_type=hf_model_type(model),
     )
 
-    # A keep-fused export packs each FSDP2 unit's modules in one weight window, held across them.
+    # For the no-gather export, which is to set keep_fused_experts on this context and let a sharded
+    # model past the assert above: each FSDP2 unit's modules are then packed in one weight window,
+    # held across them. Until then no window opens here.
     with _hf_export_handlers.held_fsdp2_weight_windows(ctx):
         for name, sub_module in model.named_modules():
             _dispatch_export_handler(name, sub_module, ctx)
