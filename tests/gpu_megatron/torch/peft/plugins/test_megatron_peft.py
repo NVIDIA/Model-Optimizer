@@ -25,6 +25,7 @@ from _test_utils.torch.megatron.utils import (
     load_distributed_checkpoint,
     save_distributed_checkpoint,
 )
+from _test_utils.torch.misc import is_blackwell
 
 import modelopt.torch.peft as mtpeft
 import modelopt.torch.quantization as mtq
@@ -40,7 +41,7 @@ from modelopt.torch.utils.plugins import megatron_prefill
 # Megatron-LM, CUBLAS_STATUS_INTERNAL_ERROR), which can poison the process CUDA context for later
 # tests. Deterministic across CI runs; passes on sm_89 with the same container and on nemo:26.06.
 skip_on_blackwell = pytest.mark.skipif(
-    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12,
+    is_blackwell(),
     reason="CUDA illegal memory access on Blackwell (nemo:26.08 TE/CUDA stack)",
 )
 

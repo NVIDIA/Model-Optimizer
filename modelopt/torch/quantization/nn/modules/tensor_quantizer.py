@@ -23,19 +23,9 @@ from typing import Any, Protocol, TypeGuard
 
 import torch
 import torch.distributed as dist
-
-try:
-    from torch.distributed.tensor import DTensor
-except ImportError:
-    DTensor = None
-
-if hasattr(torch.onnx, "_globals"):
-    from torch.onnx._globals import GLOBALS
-else:  # torch >= 2.9
-    from torch.onnx._internal.torchscript_exporter._globals import GLOBALS
-
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed.tensor import DTensor
 
 from modelopt.torch.utils import same_device_as, standardize_constructor_args
 from modelopt.torch.utils.distributed import DistributedProcessGroup
@@ -1196,7 +1186,7 @@ class TensorQuantizer(nn.Module):
         Returns:
             outputs: A Tensor of type output_dtype
         """
-        if DTensor is not None and isinstance(inputs, DTensor):
+        if isinstance(inputs, DTensor):
             # TensorQuantizer only handles regular non-DTensor inputs
             device_mesh, placements = inputs.device_mesh, inputs.placements
             outputs = self.forward(inputs.to_local())
@@ -1237,9 +1227,8 @@ class TensorQuantizer(nn.Module):
         if (
             not is_torch_export_mode()
             and not torch.compiler.is_compiling()
-            and GLOBALS.in_onnx_export
+            and torch.onnx.is_in_onnx_export()
         ):
-            # GLOBALS could break TorchDynamo for some Pytorch versions (i.e., 2.3.0)
             self._check_onnx_readiness(inputs)
 
         if self.block_sizes is not None and self._fake_quant:
@@ -1624,7 +1613,7 @@ def _to_local(t: torch.Tensor) -> torch.Tensor:
     operates on local tensors (see TensorQuantizer.forward DTensor handling).
     to_local() preserves autograd so gradients flow back to the DTensor parameter.
     """
-    if DTensor is not None and isinstance(t, DTensor):
+    if isinstance(t, DTensor):
         return t.to_local()
     return t
 
@@ -2113,7 +2102,7 @@ def _try_stacked_fake_quant(weight: torch.Tensor, quantizers: nn.ModuleList) -> 
     if (
         not quantizers
         or not weight.is_cuda
-        or (DTensor is not None and isinstance(weight, DTensor))
+        or isinstance(weight, DTensor)
         or weight.shape[0] != len(quantizers)
     ):
         return None

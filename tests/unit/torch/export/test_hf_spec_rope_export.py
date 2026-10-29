@@ -216,8 +216,8 @@ class TestGetRopeTheta:
     def test_reads_a_real_config_whichever_layout_it_uses(self):
         """A real config resolves on every supported transformers version.
 
-        Asserts the outcome, not the layout: 5.12 keeps the value only in the dict while
-        the minimum supported version (4.57) has only the flat field and no dict at all.
+        Asserts the outcome, not the layout, which varies across supported releases (5.12
+        keeps the value only in the dict).
         The layouts themselves are pinned above, built explicitly, so they stay covered
         where transformers is absent -- this is the only test here that needs it.
         """

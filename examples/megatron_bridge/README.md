@@ -51,7 +51,7 @@ Some features (e.g. [`--vllm_fakequant_export`](#evaluating-a-qad-checkpoint-in-
 ```bash
 export MBRIDGE_DIR=${PWD}/Megatron-Bridge
 git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git ${MBRIDGE_DIR}
-git -C ${MBRIDGE_DIR} checkout 033ca6f65633d1f740dffc845dfa53dc4c4433bd
+git -C ${MBRIDGE_DIR} checkout 0652ea797ab629e6451c64e1c92f976501b3b8b3
 git -C ${MBRIDGE_DIR} submodule update --init 3rdparty/Megatron-LM
 ```
 
