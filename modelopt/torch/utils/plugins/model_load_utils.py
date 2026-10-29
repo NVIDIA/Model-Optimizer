@@ -1051,6 +1051,15 @@ def _decide_distribution(
             f"can be neither counted nor sharded. Set {knob}=1 to load it without expert "
             "parallelism."
         )
+    if experts and not num_experts and ep_size != 1:
+        # The mirror case: the containers are there, but no count to choose a degree by, which
+        # would leave every expert replicated on every rank.
+        raise ValueError(
+            f"{hf_config.model_type}'s base_model_ep_plan names routed experts the built model has, "
+            "but its config gives no expert count (num_experts, num_local_experts, "
+            f"n_routed_experts or num_routed_experts) to shard them by. Set {knob}=1 to load it "
+            "without expert parallelism."
+        )
     if ep_size == "auto":
         ep_size = _choose_ep_degree(world_size, num_experts)
     elif ep_size > 1 and world_size % ep_size:

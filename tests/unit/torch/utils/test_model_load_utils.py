@@ -425,6 +425,28 @@ def test_an_ep_plan_naming_no_module_of_the_model_is_refused(
         assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4)
 
 
+@pytest.mark.parametrize("degree", [None, "1"], ids=["auto", "set-to-1"])
+def test_routed_experts_the_config_does_not_count_are_refused(
+    run_as, serve, monkeypatch, tmp_path, degree
+):
+    """The mirror case: the plan's containers are in the built model, but the config counts its
+    experts under no field the decision reads, which would leave every expert replicated on every
+    rank without a word. A degree set to 1 asks for exactly that."""
+    plan = {"layers.*.mlp.experts": "moe_tp_experts"}
+    serve(SimpleNamespace(model_type="moe", architectures=[], base_model_ep_plan=plan))
+    built = model_with_decoder_at("model.")
+    built.tie_weights = lambda: None  # a PreTrainedModel's; nothing here is tied
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: built)
+    run_as(4)
+
+    if degree is None:
+        with pytest.raises(ValueError, match=r"no expert count .* MODELOPT_EP_DEGREE=1"):
+            resolve_distribution_plan(str(tmp_path))
+    else:
+        monkeypatch.setenv("MODELOPT_EP_DEGREE", degree)
+        assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4)
+
+
 @pytest.mark.parametrize("source", ["MODELOPT_EP_DEGREE", "ep_size"])
 def test_an_ep_degree_that_does_not_divide_the_world_names_where_it_came_from(
     run_as, serve, monkeypatch, tmp_path, source
