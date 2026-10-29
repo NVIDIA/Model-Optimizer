@@ -1996,9 +1996,10 @@ def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, expert_mo
     cuda = fsdp_mesh.device_type == "cuda"
     device = torch.device(fsdp_mesh.device_type, dist.local_rank() if cuda else None)
     n_dense = _fsdp2_shard_dense(model, fsdp_mesh, expert_modules)
+    # Every alias of a tied param: the checkpoint may store the one named_parameters() drops.
     dense_names = {
         n
-        for n, _ in model.named_parameters()
+        for n, _ in model.named_parameters(remove_duplicate=False)
         if n.endswith((".weight", ".bias")) and not is_expert(n)
     }
     print_rank_0(
