@@ -24,13 +24,22 @@ import math
 import random
 import re
 import time
+from contextlib import ExitStack
 from fnmatch import fnmatch
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from accelerate import init_empty_weights
+from accelerate.utils import set_module_tensor_to_device
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoTokenizer
+from safetensors import safe_open
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoTokenizer,
+)
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -43,6 +52,7 @@ from modelopt.torch.quantization.config import (
     MaxCalibConfig,
     QuantizeConfig,
 )
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
 __all__ = ["CachedTeacherKL", "freeze_samples"]
 
@@ -418,6 +428,68 @@ def _probe_logits(model, batch):
     return model.get_output_embeddings()(hidden[:, -1:]).cpu()
 
 
+def _reload_packed_for_validation(directory, *, multimodal=False, device="cuda:0"):
+    """Decode published weight-only tensors into an ordinary model for parity validation."""
+    directory = Path(directory)
+    config = AutoConfig.from_pretrained(directory, local_files_only=True)
+    quantization = getattr(config, "quantization_config", {})
+    if hasattr(config, "quantization_config"):
+        del config.quantization_config
+    loader = AutoModelForImageTextToText if multimodal else AutoModelForCausalLM
+    with init_empty_weights(include_buffers=False):
+        model = loader.from_config(config, dtype=config.dtype, attn_implementation="sdpa")
+    index_path = directory / "model.safetensors.index.json"
+    weight_map = json.loads(index_path.read_text())["weight_map"] if index_path.exists() else None
+    shards = set(weight_map.values()) if weight_map is not None else {"model.safetensors"}
+    with ExitStack() as stack:
+        readers = {
+            name: stack.enter_context(
+                safe_open(directory / name, framework="pt", device=str(device))
+            )
+            for name in shards
+        }
+        if weight_map is None:
+            weight_map = dict.fromkeys(readers["model.safetensors"].keys(), "model.safetensors")
+        expected = model.state_dict()
+        missing = expected.keys() - weight_map.keys()
+        if missing:
+            raise ValueError(
+                f"Published checkpoint is missing architecture tensors: {sorted(missing)}"
+            )
+
+        def read(name):
+            return readers[weight_map[name]].get_tensor(name)
+
+        for name, parameter in expected.items():
+            value = read(name)
+            if name.endswith(".weight") and value.dtype in {torch.uint8, torch.float8_e4m3fn}:
+                prefix = name.removesuffix(".weight")
+                scheme = quantization.get("quantized_layers", {}).get(prefix, quantization)
+                if any(
+                    prefix + suffix in weight_map for suffix in (".input_scale", ".pre_quant_scale")
+                ):
+                    raise ValueError(
+                        "Packed validation requires weight-only tensors without input scaling"
+                    )
+                if value.dtype == torch.uint8 and scheme.get("quant_algo") == "W4A16_NVFP4":
+                    value = NVFP4QTensor(parameter.shape, parameter.dtype, value).dequantize(
+                        dtype=parameter.dtype,
+                        scale=read(prefix + ".weight_scale"),
+                        double_scale=read(prefix + ".weight_scale_2"),
+                        block_sizes={-1: scheme["group_size"]},
+                    )
+                elif value.dtype == torch.float8_e4m3fn and scheme.get("quant_algo") == "FP8":
+                    value = (value.float() * read(prefix + ".weight_scale").float()).to(
+                        parameter.dtype
+                    )
+                else:
+                    raise ValueError(f"Unsupported published weight scheme for {name}: {scheme}")
+            set_module_tensor_to_device(
+                model, name, device, value=value, dtype=value.dtype, clear_cache=False
+            )
+    return model.to(device).eval()
+
+
 def _weight_fingerprint(model):
     digest = hashlib.sha256()
     for name, tensor in model.state_dict().items():
@@ -713,13 +785,7 @@ def main():
                 model = None
                 gc.collect()
                 torch.cuda.empty_cache()
-                loader = AutoModelForImageTextToText if args.multimodal else AutoModelForCausalLM
-                model = loader.from_pretrained(
-                    directory / "hf",
-                    dtype=torch.bfloat16,
-                    device_map="cuda:0",
-                    attn_implementation="sdpa",
-                ).eval()
+                model = _reload_packed_for_validation(directory / "hf", multimodal=args.multimodal)
                 restored = _probe_logits(model, heldout[0])
                 torch.testing.assert_close(
                     restored, expected, atol=args.reload_atol, rtol=args.reload_rtol

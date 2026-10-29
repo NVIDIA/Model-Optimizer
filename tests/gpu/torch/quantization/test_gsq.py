@@ -22,6 +22,7 @@ from safetensors.torch import load_file
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from examples.hf_ptq.hf_gsq_rco import _reload_packed_for_validation
 from modelopt.torch.export.quant_utils import preprocess_linear_fusion
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
@@ -220,3 +221,9 @@ def test_auto_quantize_rco_candidates_survive_native_export(tmp_path, initialize
             ).to(dtype)
         torch.testing.assert_close(decoded, qdq, rtol=0, atol=0)
     assert torch.count_nonzero(expected["model.layers.0.self_attn.q_proj"][0][0, :16]) == 0
+    del model, original, state, bank
+    source.unlink()
+    (tmp_path / "selected.pt").unlink()
+    packed_only = _reload_packed_for_validation(tmp_path / "export")
+    with torch.no_grad():
+        torch.testing.assert_close(packed_only(inputs).logits, before, rtol=0, atol=0)

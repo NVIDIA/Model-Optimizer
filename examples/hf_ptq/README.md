@@ -620,7 +620,9 @@ The example reuses candidate checkpoints across budgets and uses separate RCO se
 GSQ optimizer checkpoints are separate for each format, with automatic resume when their manifests
 exist. Per-target JSON records requested/achieved cost, minimum feasible cost, duplicate allocations,
 held-out perplexity/KL, time, peak GPU memory, and checkpoint reload comparisons. Ceilings below the
-stock minimum are reported as infeasible. A completed run does not itself certify interrupted-resume
+stock minimum are reported as infeasible. Packed parity validation decodes only the exported
+configuration and safetensors into ordinary PyTorch layers using the native FP8/NVFP4 layouts.
+A completed run does not itself certify interrupted-resume
 equivalence or an accuracy improvement; those require separate measured validation.
 
 ## Real Quant

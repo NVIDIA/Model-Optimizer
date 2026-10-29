@@ -16,6 +16,7 @@
 """The cached-teacher example preserves full-vocabulary loss and decoder gradients."""
 
 import importlib
+import shutil
 from pathlib import Path
 
 import pytest
@@ -176,8 +177,9 @@ def test_frozen_samples_round_trip_with_masks_and_reject_changed_identity(exampl
         )
 
 
-def test_cached_teacher_autoquant_callback_and_ordinary_restore(example, tmp_path):
-    model = get_tiny_llama(dtype=torch.float32).eval()
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_cached_teacher_autoquant_callback_and_ordinary_restore(example, tmp_path, dtype):
+    model = get_tiny_llama(dtype=dtype).eval()
     batch = {
         "sample_id": 0,
         "input_ids": torch.tensor([[1, 2, 3, 4]]),
@@ -211,8 +213,28 @@ def test_cached_teacher_autoquant_callback_and_ordinary_restore(example, tmp_pat
     with torch.no_grad():
         expected = model(input_ids=batch["input_ids"], use_cache=False).logits
     mto.save(model, tmp_path / "modelopt.pt")
-    restored = mto.restore(get_tiny_llama(dtype=torch.float32).eval(), tmp_path / "modelopt.pt")
+    restored = mto.restore(get_tiny_llama(dtype=dtype).eval(), tmp_path / "modelopt.pt")
     with torch.no_grad():
         torch.testing.assert_close(
             restored(input_ids=batch["input_ids"], use_cache=False).logits, expected
         )
+    published = tmp_path / "published"
+    example.export_hf_checkpoint(
+        model,
+        export_dir=published,
+        max_shard_size="4KB",
+        extra_state_dict={"removed_layer.weight": torch.ones(2, 2)},
+    )
+    del model, restored, state
+    (tmp_path / "modelopt.pt").unlink()
+    shutil.rmtree(tmp_path / "teacher")
+    packed = example._reload_packed_for_validation(published, device="cpu")
+    with torch.no_grad():
+        torch.testing.assert_close(
+            packed(input_ids=batch["input_ids"], use_cache=False).logits,
+            expected,
+            rtol=0,
+            atol=1e-7 if dtype == torch.float32 else 0,
+        )
+    assert packed.model.layers[0].mlp.down_proj.weight.dtype == dtype
+    assert packed.model.rotary_emb.inv_freq.dtype == torch.float32
