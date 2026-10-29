@@ -38,7 +38,7 @@ except RuntimeError as e:
 SEED = 1234
 
 
-def _make_model(tp_size):
+def _make_model(tp_size, num_heads=1):
     model = (
         get_mcore_gpt_model(
             tensor_model_parallel_size=tp_size,
@@ -48,8 +48,8 @@ def _make_model(tp_size):
             vocab_size=32,
             max_sequence_length=128,
             experimental_attention_variant="gated_delta_net",
-            linear_num_key_heads=1,
-            linear_num_value_heads=1,
+            linear_num_key_heads=num_heads,
+            linear_num_value_heads=num_heads,
             linear_key_head_dim=32,
             linear_value_head_dim=32,
         )
@@ -173,3 +173,45 @@ def test_gdn_qat_and_sharded_restore(compiled_gdn_workers, tmp_path):
     """Train through QDQ after a Megatron distributed-checkpoint round trip."""
     workers, sites = compiled_gdn_workers
     workers.run(_test_gdn_qat_helper, tmp_path, sites)
+
+
+def _test_in_proj_gates_unquantized_helper(rank, size):
+    initialize_for_megatron(
+        tensor_model_parallel_size=size, pipeline_model_parallel_size=1, seed=SEED
+    )
+    model = _make_model(size, num_heads=2)
+    gdn = next(m for m in model.modules() if isinstance(m, GatedDeltaNet))
+    in_proj = gdn.in_proj
+    num_rows = in_proj.weight.shape[0]
+    gates = slice(num_rows - 2 * 2 // size, num_rows)  # beta + alpha: one row per value head each
+    weight = in_proj.weight.detach().clone()
+    x = torch.randn(8, 2, 64, device="cuda", dtype=weight.dtype)
+    with torch.no_grad():
+        reference = in_proj(x)[0]
+
+    fp8 = {"num_bits": (4, 3), "axis": None}
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*in_proj.weight_quantizer", "cfg": fp8},
+            {"quantizer_name": "*in_proj.input_quantizer", "cfg": fp8},
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, config, get_forward(model))
+
+    with torch.no_grad():
+        output = in_proj(x)[0]
+    torch.testing.assert_close(output[..., gates], reference[..., gates])
+    assert not torch.allclose(output[..., : gates.start], reference[..., : gates.start])
+
+    mtq.fold_weight(model)
+    assert torch.equal(in_proj.weight[gates], weight[gates])
+    assert not torch.equal(in_proj.weight[: gates.start], weight[: gates.start])
+
+
+def test_in_proj_keeps_gates_unquantized(request):
+    """The beta / alpha rows of the fused in_proj stay BF16 in fake quant, as in every export."""
+    # TP stays <= 2, the number of value heads.
+    workers = request.getfixturevalue(f"dist_workers_size_{min(torch.cuda.device_count(), 2)}")
+    workers.run(_test_in_proj_gates_unquantized_helper)

@@ -315,9 +315,20 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, inp, ln_weight, ln_bias, weight, *args, **kwargs):
-        input_quantizer, weight_quantizer = _QuantLayerNormLinearFunc.modelopt_quantizers
+        input_quantizer, weight_quantizer, unquantized_rows = (
+            _QuantLayerNormLinearFunc.modelopt_quantizers
+        )
 
         qweight = weight_quantizer(weight)
+        if unquantized_rows is not None:
+            # Not in place: the fake-quant weight cache may hold qweight.
+            qweight = torch.cat(
+                (
+                    qweight[: unquantized_rows.start],
+                    weight[unquantized_rows],
+                    qweight[unquantized_rows.stop :],
+                )
+            )
         qweight.requires_grad = weight.requires_grad
         if ctx is not None:
             # We need to recompute the quantized input for the backward pass, so we save the input_quantizer
@@ -325,9 +336,19 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
 
         original_gemm = te_layernorm_linear.general_gemm
 
-        def _patched_general_gemm(weight, input, *gemm_args, **gemm_kwargs):
+        def _patched_general_gemm(gemm_weight, input, *gemm_args, **gemm_kwargs):
             qinput = input_quantizer(input)
-            return original_gemm(weight, qinput, *gemm_args, **gemm_kwargs)
+            outputs = original_gemm(gemm_weight, qinput, *gemm_args, **gemm_kwargs)
+            if unquantized_rows is not None:
+                # Deployment keeps these rows in BF16, so compute them from the unquantized input
+                # too. The backward pass treats them as quantized (straight-through).
+                bias = gemm_kwargs.get("bias")
+                outputs[0][..., unquantized_rows] = torch.nn.functional.linear(
+                    input,
+                    weight[unquantized_rows],
+                    None if bias is None else bias[unquantized_rows],
+                ).to(outputs[0].dtype)
+            return outputs
 
         with replace_function(
             te_layernorm_linear,
@@ -394,6 +415,14 @@ class _QuantTELayerNormLinear(_ParallelLinear):
             )
             self.fuse_wgrad_accumulation = False
 
+    def fold_weight(self, keep_attrs: bool = False):
+        """Fold the weight quantizer, keeping the rows the forward pass leaves unquantized."""
+        rows = getattr(self, "_modelopt_unquantized_output_rows", None)
+        unquantized = None if rows is None else self.weight[rows].clone()
+        super().fold_weight(keep_attrs)
+        if unquantized is not None:
+            self.weight.data[rows] = unquantized
+
     def forward(self, *args, **kwargs):
         """Call ModelOpt patch for _LayerNormLinear functional."""
         _assert_te_fp8_enabled()
@@ -401,6 +430,7 @@ class _QuantTELayerNormLinear(_ParallelLinear):
         _QuantLayerNormLinearFunc.modelopt_quantizers = (
             self.input_quantizer,
             self.weight_quantizer,
+            getattr(self, "_modelopt_unquantized_output_rows", None),
         )
         with replace_function(
             te_layernorm_linear,
