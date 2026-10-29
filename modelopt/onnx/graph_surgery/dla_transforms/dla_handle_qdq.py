@@ -57,11 +57,14 @@ def _apply_handle_qdq(model: onnx.ModelProto) -> onnx.ModelProto:
     versions = {opset.domain: opset.version for opset in model.opset_import}
     opset = versions.get("", versions.get("ai.onnx", 1))
 
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     replacements: dict[int, list[onnx.NodeProto]] = {}
     cnt = [0]
 
     for node_pos, node in enumerate(list(graph.node)):
         if node.domain not in {"", "ai.onnx", "com.microsoft"} or node.overload:
+            continue
+        if (node.domain, node.op_type, node.overload) in local_functions:
             continue
         if node.op_type not in ("QuantizeLinear", "DequantizeLinear"):
             continue

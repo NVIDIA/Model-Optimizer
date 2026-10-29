@@ -48,7 +48,7 @@ import copy
 import numpy as np
 import onnx
 import pytest
-from onnx import TensorProto, helper, numpy_helper
+from onnx import TensorProto, helper, inliner, numpy_helper
 from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms import dla_handle_qdq as _mod
@@ -469,3 +469,42 @@ def test_blocked_qdq_is_preserved_until_scale_rank_is_supported(op_type):
     assert model.SerializeToString() == before
     onnx.checker.check_model(model, full_check=True)
     np.testing.assert_array_equal(ReferenceEvaluator(model).run(None, {"X": x})[0], expected)
+
+
+@pytest.mark.parametrize("op_type", ["QuantizeLinear", "DequantizeLinear"])
+def test_local_contrib_qdq_function_keeps_its_rank_contract(op_type):
+    """A local function with a familiar name retains its own tensor semantics."""
+    function = helper.make_function(
+        "com.microsoft",
+        op_type,
+        ["data", "scale", "zero"],
+        ["result"],
+        [helper.make_node("Transpose", ["data"], ["result"], perm=[1, 0, 2])],
+        [helper.make_opsetid("", 21)],
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node(op_type, ["x", "scale", "zero"], ["y"], domain="com.microsoft")],
+            "local_qdq",
+            [_vi("x", TensorProto.FLOAT, [2, 3, 4])],
+            [_vi("y", TensorProto.FLOAT, [3, 2, 4])],
+            initializer=[
+                numpy_helper.from_array(np.float32(1), "scale"),
+                numpy_helper.from_array(np.uint8(0), "zero"),
+            ],
+        ),
+        functions=[function],
+        opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", 1)],
+        ir_version=9,
+    )
+    data = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    expected = data.transpose(1, 0, 2)
+    baseline = model.SerializeToString()
+    original = inliner.inline_local_functions(model)
+    onnx.checker.check_model(original, full_check=True)
+    np.testing.assert_array_equal(ReferenceEvaluator(original).run(None, {"x": data})[0], expected)
+    _apply(model)
+    assert model.SerializeToString() == baseline
+    transformed = inliner.inline_local_functions(model)
+    onnx.checker.check_model(transformed, full_check=True)
+    np.testing.assert_array_equal(_run_ort(transformed, {"x": data})["y"], expected)

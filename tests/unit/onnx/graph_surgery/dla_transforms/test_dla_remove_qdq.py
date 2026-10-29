@@ -750,3 +750,54 @@ def test_input_clip_refusal_preserves_all_pairs(unsupported):
     with pytest.raises((NotImplementedError, ValueError)):
         _apply(model, quant_types=["uint8", "uint16"], keep_clip_after_inputs=True)
     assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("reserved", [False, True])
+def test_generated_dtype_cast_names_preserve_existing_owners(reserved):
+    """Type-changing removal gives unnamed pairs distinct, unoccupied Cast names."""
+    nodes = []
+    outputs = []
+    for index in range(2):
+        nodes.extend(
+            [
+                helper.make_node("QuantizeLinear", ["x", "qscale", "zero"], [f"q{index}"]),
+                helper.make_node(
+                    "DequantizeLinear", [f"q{index}", "dscale", "zero"], [f"y{index}"]
+                ),
+            ]
+        )
+        outputs.append(_vi(f"y{index}", TensorProto.FLOAT, [4]))
+    if reserved:
+        nodes.append(helper.make_node("Identity", ["x"], ["kept"], name="y0_cast"))
+        outputs.append(_vi("kept", TensorProto.FLOAT16, [4]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "cast_names",
+            [_vi("x", TensorProto.FLOAT16, [4])],
+            outputs,
+            initializer=[
+                numpy_helper.from_array(np.float16(0.5), "qscale"),
+                numpy_helper.from_array(np.float32(0.5), "dscale"),
+                numpy_helper.from_array(np.uint16(0), "zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=9,
+    )
+    data = np.arange(4, dtype=np.float16)
+    onnx.checker.check_model(model, full_check=True)
+    expected = ReferenceEvaluator(model).run(None, {"x": data})
+    _apply(model)
+    casts = [node for node in model.graph.node if node.op_type == "Cast"]
+    names = [node.name for node in model.graph.node]
+    assert len(casts) == 2
+    assert len(names) == len(set(names))
+    if reserved:
+        assert (
+            next(node for node in model.graph.node if node.name == "y0_cast").op_type == "Identity"
+        )
+    onnx.checker.check_model(model, full_check=True)
+    actual = _run_ort(model, {"x": data})
+    for output, value in zip(model.graph.output, expected):
+        np.testing.assert_array_equal(actual[output.name], value)

@@ -207,7 +207,7 @@ def _remove_qdq_from_model(
                         "Cast",
                         inputs=[q_node.input[0]],
                         outputs=[dq_node.output[0]],
-                        name=f"{dq_node.name}_cast",
+                        name=cache.unique_name(f"{dq_node.name or dq_node.output[0]}_cast"),
                         to=out_dt,
                     )
                     insert_nodes_at_position(graph, [cast_node], q_node)
