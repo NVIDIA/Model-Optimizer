@@ -337,6 +337,13 @@ def test_dynamo_fp8_conv_preserves_calibration_and_exclusions(weights_dtype, exc
     producers = {output: node for node in exported.graph.node for output in node.output}
     convs = [node for node in exported.graph.node if node.op_type == "Conv"]
     weight_dq = producers[convs[0].input[1]]
+    if weights_dtype == "fp16":
+        assert weight_dq.op_type == "Cast"
+        assert (
+            next(attr.i for attr in weight_dq.attribute if attr.name == "to")
+            == onnx.TensorProto.FLOAT16
+        )
+        weight_dq = producers[weight_dq.input[0]]
     assert (weight_dq.domain, weight_dq.op_type) == ("", "DequantizeLinear")
     packed = initializers[weight_dq.input[0]]
     assert packed.data_type == onnx.TensorProto.FLOAT8E4M3FN

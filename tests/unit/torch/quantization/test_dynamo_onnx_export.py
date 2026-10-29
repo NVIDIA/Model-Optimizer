@@ -102,12 +102,13 @@ def _assert_valid_without_custom_ops(model):
     return model
 
 
-def _helper_export(model, inputs, opset, tmp_path):
+def _helper_export(model, inputs, opset, tmp_path, **kwargs):
     payload, _ = get_onnx_bytes_and_metadata(
         model,
         inputs,
         dynamo_export=True,
         onnx_opset=opset,
+        **kwargs,
     )
     package = OnnxBytes.from_bytes(payload)
     package.write_to_disk(str(tmp_path))
@@ -375,9 +376,23 @@ def test_private_table_rejects_shapes(tmp_path, fmt, inputs, amax, message):
         _raw_export(exported_program, (), tmp_path / f"{fmt}.onnx")
 
 
-def test_helper_exports_biased_nvfp4_with_default_fp32(tmp_path, block_quant_export_only):
+@pytest.mark.parametrize("weights_dtype", ["fp32", "bf16"])
+def test_helper_exports_biased_nvfp4_precision_contract(
+    tmp_path, block_quant_export_only, weights_dtype
+):
     inputs = (SimpleLinear.get_input(),)
     model = _quantize(SimpleLinear().eval(), inputs, mtq.NVFP4_DEFAULT_CFG)
+    if weights_dtype == "bf16":
+        calls = []
+        handle = model.register_forward_pre_hook(lambda *_: calls.append(True))
+        try:
+            with pytest.raises(ValueError):
+                _helper_export(model, inputs, 23, tmp_path, weights_dtype=weights_dtype)
+        finally:
+            handle.remove()
+        assert not calls
+        assert not list(tmp_path.iterdir())
+        return
 
     exported = _helper_export(model, inputs, 23, tmp_path)
 
@@ -440,14 +455,17 @@ def test_mxfp8_fp8_conv_uses_matching_qdq_types(tmp_path, block_quant_export_onl
     )
     producers = {output: node for node in exported.graph.node for output in node.output}
     conv = next(node for node in exported.graph.node if node.op_type == "Conv")
-    activation_dq = producers[conv.input[0]]
+    activation_cast = producers[conv.input[0]]
+    assert activation_cast.op_type == "Cast"
+    assert _attribute(activation_cast, "to") == onnx.TensorProto.FLOAT16
+    activation_dq = producers[activation_cast.input[0]]
     activation_q = producers[activation_dq.input[0]]
     assert (activation_q.op_type, activation_dq.op_type) == (
         "QuantizeLinear",
         "DequantizeLinear",
     )
     assert tensor_types[activation_q.input[0]] == tensor_types[activation_q.input[1]]
-    assert tensor_types[activation_q.input[0]] == onnx.TensorProto.FLOAT16
+    assert tensor_types[activation_q.input[0]] == onnx.TensorProto.FLOAT
     assert {value.type.tensor_type.elem_type for value in exported.graph.input} == {
         onnx.TensorProto.FLOAT
     }
@@ -457,13 +475,15 @@ def test_mxfp8_fp8_conv_uses_matching_qdq_types(tmp_path, block_quant_export_onl
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
-def test_helper_exports_zero_calibrated_fp8_weights(tmp_path, dtype):
-    inputs = (torch.randn(2, 16, dtype=dtype),)
+@pytest.mark.parametrize("weight", [0.0, 1e-5])
+@pytest.mark.parametrize("weights_dtype", ["fp32", "fp16"])
+def test_helper_exports_small_calibrated_fp8_weights(tmp_path, dtype, weight, weights_dtype):
+    inputs = (torch.ones(2, 16, dtype=dtype),)
     model = nn.Linear(16, 16, bias=False, dtype=dtype).eval()
     with torch.no_grad():
-        model.weight.zero_()
+        model.weight.fill_(weight)
     model = _quantize(model, inputs, mtq.FP8_DEFAULT_CFG)
-    exported = _helper_export(model, inputs, 23, tmp_path)
+    exported = _helper_export(model, inputs, 23, tmp_path, weights_dtype=weights_dtype)
     packed_weights = [
         onnx.numpy_helper.to_array(tensor).astype("float32")
         for tensor in exported.graph.initializer
@@ -471,10 +491,28 @@ def test_helper_exports_zero_calibrated_fp8_weights(tmp_path, dtype):
     ]
     assert packed_weights
     assert all(torch.isfinite(torch.from_numpy(weight)).all() for weight in packed_weights)
+    initializers = {tensor.name: tensor for tensor in exported.graph.initializer}
+    weight_dq = next(
+        node
+        for node in exported.graph.node
+        if node.op_type == "DequantizeLinear"
+        and node.input[0] in initializers
+        and list(initializers[node.input[0]].dims) == [16, 16]
+    )
+    scale = initializers[weight_dq.input[1]]
+    assert scale.data_type == onnx.TensorProto.FLOAT
+    torch.testing.assert_close(
+        torch.from_numpy(onnx.numpy_helper.to_array(scale).copy()).float().reshape(()),
+        model.weight_quantizer._amax.float().reshape(()) / 448 if weight else torch.tensor(1.0),
+    )
     actual = ReferenceEvaluator(exported).run(
         None, {exported.graph.input[0].name: inputs[0].numpy()}
     )[0]
-    torch.testing.assert_close(torch.from_numpy(actual), model(*inputs))
+    expected = model(*inputs).to(torch.float16 if weights_dtype == "fp16" else dtype)
+    if weight:
+        assert torch.count_nonzero(expected) == expected.numel()
+        assert torch.count_nonzero(torch.from_numpy(actual)) == expected.numel()
+    torch.testing.assert_close(torch.from_numpy(actual), expected, rtol=1e-3, atol=1e-7)
 
 
 @pytest.mark.parametrize("opset", [23, 24])
@@ -524,7 +562,8 @@ def test_helper_exports_fp16_int4_awq_at_opset23(tmp_path):
     assert (_attribute(dq, "axis"), _attribute(dq, "block_size")) == (1, 128)
 
 
-def test_helper_exports_fp8_nvfp4_autoquant(tmp_path, block_quant_export_only):
+@pytest.mark.parametrize("weights_dtype", ["fp32", "bf16"])
+def test_helper_exports_fp8_nvfp4_autoquant(tmp_path, block_quant_export_only, weights_dtype):
     sample_input = torch.randn(2, 128)
     model = _auto_quantize(
         _linears(128).eval(),
@@ -532,8 +571,40 @@ def test_helper_exports_fp8_nvfp4_autoquant(tmp_path, block_quant_export_only):
         [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
         effective_bits=6.25,
     )
+    if weights_dtype == "bf16":
+        calls = []
+        handle = model.register_forward_pre_hook(lambda *_: calls.append(True))
+        try:
+            with pytest.raises(ValueError):
+                _helper_export(model, (sample_input,), 24, tmp_path, weights_dtype=weights_dtype)
+        finally:
+            handle.remove()
+        assert not calls
+        return
+    with torch.no_grad():
+        for layer in model.modules():
+            if isinstance(layer, nn.Linear) and layer.weight_quantizer.num_bits == (4, 3):
+                layer.weight.fill_(1e-5)
+                layer.weight_quantizer._amax.fill_(1e-5)
     exported = _helper_export(model, (sample_input,), 24, tmp_path)
 
+    initializers = {tensor.name: tensor for tensor in exported.graph.initializer}
+    fp8_weight_dq = next(
+        node
+        for node in exported.graph.node
+        if node.op_type == "DequantizeLinear"
+        and node.input[0] in initializers
+        and list(initializers[node.input[0]].dims) == [128, 128]
+        and initializers[node.input[0]].data_type == onnx.TensorProto.FLOAT8E4M3FN
+    )
+    fp8_scale = initializers[fp8_weight_dq.input[1]]
+    assert fp8_scale.data_type == onnx.TensorProto.FLOAT
+    torch.testing.assert_close(
+        torch.from_numpy(onnx.numpy_helper.to_array(fp8_scale).copy()).float().reshape(()),
+        torch.tensor(1e-5 / 448),
+        rtol=1e-6,
+        atol=0,
+    )
     initializer_dtypes = {initializer.data_type for initializer in exported.graph.initializer}
     assert {onnx.TensorProto.FLOAT4E2M1, onnx.TensorProto.FLOAT8E4M3FN} <= initializer_dtypes
     assert ("trt", "TRT_FP4DynamicQuantize") in {

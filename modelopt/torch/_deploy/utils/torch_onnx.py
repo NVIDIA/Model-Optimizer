@@ -521,7 +521,9 @@ def get_onnx_bytes_and_metadata(
         onnx_opset: The ONNX opset version. Defaults to 20 for legacy export and 23 for
             Dynamo export.
         dq_only: If True, the exported onnx model is converted to a dq_only model.
-        weights_dtype: Requested high-precision dtype for exported weights. For an FP8 model,
+        weights_dtype: Requested high-precision dtype for exported weights. Dynamo FP8 with
+            FP16 parameters preserves FP32 quantizer math when requesting FP16. Dynamo NVFP4
+            rejects BF16 requests. For an FP8 model,
             ``"bf16"`` is accepted only when every floating parameter is already BF16. This is
             a weight-focused no-op, not a graph-wide conversion: floating buffers are not
             considered for eligibility and may preserve higher-precision regions.
@@ -552,6 +554,7 @@ def get_onnx_bytes_and_metadata(
     uses_fp4 = is_fp4_quantized(model)
     uses_mxfp8 = is_mxfp8_quantized(model)
     uses_fp8 = is_fp8_quantized(model)
+    preserve_dynamo_fp8_precision = dynamo_export and uses_fp8
     uses_int8 = is_int8_quantized(model)
     uses_other_unsupported_quantizer = is_int4_quantized(model) or uses_mxfp8 or uses_int8
     is_bf16_fp8_noop = (
@@ -593,6 +596,9 @@ def get_onnx_bytes_and_metadata(
             )
         if dynamo_export and dynamic_axes:
             raise NotImplementedError("Dynamo ONNX export does not support dynamic_axes yet.")
+
+    if dynamo_export and not onnx_load_path and uses_fp4 and weights_dtype == "bf16":
+        raise ValueError("Dynamo NVFP4 export does not support weights_dtype=bf16.")
 
     use_torch_autocast = not (
         uses_fp4 or uses_mxfp8 or uses_fp8 or uses_int8 or weights_dtype == "fp32"
@@ -704,12 +710,25 @@ def get_onnx_bytes_and_metadata(
         onnx_opt_graph = normalize_dynamo_weight_paths(onnx_opt_graph)
 
     onnx_opt_graph = quantize_weights(model, onnx_opt_graph, dynamo_export=dynamo_export)
+    if preserve_dynamo_fp8_precision:
+        assert onnx_opset is not None
+        onnx_opt_graph = finalize_dynamo_export(onnx_opt_graph, onnx_opset)
+        onnx_opt_graph = infer_shapes(onnx_opt_graph)
 
     if dq_only:
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
 
+    is_fp16_fp8_noop = (
+        dynamo_export
+        and weights_dtype == "fp16"
+        and source_parameter_dtypes == {torch.float16}
+        and uses_fp8
+        and not (uses_fp4 or uses_other_unsupported_quantizer)
+    )
     preserve_block_io_types = dynamo_export and (uses_fp4 or uses_mxfp8) and weights_dtype == "fp32"
-    if (weights_dtype in ["fp16", "bf16"] or preserve_block_io_types) and not is_bf16_fp8_noop:
+    if (weights_dtype in ["fp16", "bf16"] or preserve_block_io_types) and not (
+        is_bf16_fp8_noop or is_fp16_fp8_noop
+    ):
         if (dynamo_export and uses_fp4) or uses_other_unsupported_quantizer or uses_fp8:
             blocked_ops = (
                 ["Div"]
@@ -722,15 +741,21 @@ def get_onnx_bytes_and_metadata(
                 disable_shape_infer=True,
                 check_fp16_ready=False,
                 op_block_list=blocked_ops,
+                node_block_list=[
+                    node.name
+                    for node in onnx_opt_graph.graph.node
+                    if preserve_dynamo_fp8_precision
+                    and node.op_type in {"QuantizeLinear", "DequantizeLinear"}
+                    and not any(attr.name == "block_size" for attr in node.attribute)
+                ],
             )
             # Change FP32 cast nodes feeding into Concat/Add to FP16
             op_list = ["Concat", "Add", "Sqrt", "LayerNormalization", "Clip", "Mul", "Exp"]
             onnx_opt_graph = change_casts_to_fp16(onnx_opt_graph, op_list)
-            # Remove Cast(FP32->FP16) nodes after DQ by setting DQ output to FP16 directly
-            onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
-            # Remove Cast(FP16->FP32) feeding Q/DQ scales so DQ stays FP16 for downstream
-            # MatMul/Add layers under strongly-typed TRT parsing.
-            onnx_opt_graph = fold_qdq_scale_fp16_to_fp32_casts(onnx_opt_graph)
+            # Dynamo FP8 needs FP32 scales even when the surrounding graph is FP16.
+            if not preserve_dynamo_fp8_precision:
+                onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
+                onnx_opt_graph = fold_qdq_scale_fp16_to_fp32_casts(onnx_opt_graph)
             if preserve_block_io_types:
                 _sync_initializer_metadata(onnx_opt_graph.graph)
         else:
@@ -741,7 +766,7 @@ def get_onnx_bytes_and_metadata(
     onnx_opt_graph = remove_redundant_casts(onnx_opt_graph)
 
     # Remove Cast nodes around Q/DQ for optimal TRT fusion
-    if uses_fp8:
+    if uses_fp8 and not dynamo_export:
         onnx_opt_graph = fold_q_fp16_to_fp32_casts(onnx_opt_graph)
         onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
 

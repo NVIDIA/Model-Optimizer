@@ -109,7 +109,13 @@ def test_dynamo_fp8_export_with_unquantized_rgb_input(tmp_path, num_convs):
     assert len(convs) == num_convs
     assert convs[0].input[0] == exported.graph.input[0].name
     for conv in convs:
-        weight_dq = producers[conv.input[1]]
+        weight_cast = producers[conv.input[1]]
+        assert weight_cast.op_type == "Cast"
+        assert (
+            next(attr.i for attr in weight_cast.attribute if attr.name == "to")
+            == onnx.TensorProto.FLOAT16
+        )
+        weight_dq = producers[weight_cast.input[0]]
         assert (weight_dq.domain, weight_dq.op_type) == ("", "DequantizeLinear")
         assert initializers[weight_dq.input[0]].data_type == onnx.TensorProto.FLOAT8E4M3FN
 

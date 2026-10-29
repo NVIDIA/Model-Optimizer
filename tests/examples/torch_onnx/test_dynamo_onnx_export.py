@@ -70,12 +70,13 @@ def _quantize(model, sample_input, config):
     )
 
 
-def _compile_and_compare(model, inputs, *, rtol, atol):
+def _compile_and_compare(model, inputs, *, rtol, atol, weights_dtype="fp32"):
     expected = model(*inputs)
     payload, metadata = get_onnx_bytes_and_metadata(
         model,
         inputs,
         dynamo_export=True,
+        weights_dtype=weights_dtype,
     )
     client = TRTLocalClient(_DEPLOYMENT)
     compiled = client.ir_to_compiled(payload, {"decomposable_attentions": True})
@@ -113,6 +114,18 @@ def test_quantized_dynamo_onnx_executes_with_tensorrt(
         rtol=rtol,
         atol=atol,
     )
+
+
+@minimum_sm(89)
+@pytest.mark.parametrize("weights_dtype", ["fp32", "fp16"])
+def test_small_fp16_fp8_weights_execute_with_tensorrt(weights_dtype):
+    inputs = torch.ones(2, 16, device="cuda", dtype=torch.float16)
+    model = nn.Linear(16, 16, bias=False, device="cuda", dtype=torch.float16).eval()
+    with torch.no_grad():
+        model.weight.fill_(1e-5)
+    model = _quantize(model, inputs, mtq.FP8_DEFAULT_CFG)
+    assert torch.count_nonzero(model(inputs)) == inputs.numel()
+    _compile_and_compare(model, (inputs,), rtol=1e-3, atol=1e-7, weights_dtype=weights_dtype)
 
 
 @pytest.mark.timeout(600)

@@ -103,6 +103,8 @@ class FP8QuantExporter(ONNXQuantExporter):
                 cast_to_remove = None
                 for candidate in list(dq_op.outputs[0].outputs):
                     if candidate.op == "Cast":
+                        if candidate.outputs[0].dtype != dq_op.outputs[0].dtype:
+                            continue
                         cast_to_remove = candidate
                         candidate = next(
                             (c for c in candidate.outputs[0].outputs if c.op == "Transpose"),

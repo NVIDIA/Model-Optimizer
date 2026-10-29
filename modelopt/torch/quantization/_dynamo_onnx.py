@@ -266,6 +266,8 @@ def _translate_quantize_op(
     axis: int | None = None,
 ):
     if num_bits == 8 and exponent_bits == 4:
+        source_dtype = int(inputs.dtype)
+        inputs = _cast(inputs, onnx.TensorProto.FLOAT)
         if amax is None:
             scale = _OPSET.CastLike(1.0, inputs)
         elif any(dim != 1 for dim in _static_shape(amax)):
@@ -279,7 +281,12 @@ def _translate_quantize_op(
                 _OPSET.CastLike(1.0, scale),
                 scale,
             )
-        return _fp8_qdq(inputs, scale)
+        output = _fp8_qdq(inputs, scale)
+        return (
+            output
+            if source_dtype == onnx.TensorProto.FLOAT
+            else _OPSET.Cast(output, to=source_dtype)
+        )
 
     output_dtype = _resolve_dtype(inputs, high_precision_dtype)
     if num_bits == 8 and exponent_bits == 0:
