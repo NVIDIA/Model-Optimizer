@@ -42,12 +42,13 @@ from modelopt.onnx.graph_surgery.make_dla_compatible import (
 
 @pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
 @pytest.mark.parametrize("pipeline", [False, True])
-def test_unprepared_internal_indices_refuse_before_mutation(shape, pipeline):
+@pytest.mark.parametrize("producer", ["Reshape", "Squeeze"])
+def test_unprepared_internal_indices_refuse_before_mutation(shape, pipeline, producer):
     """A native internal index view cannot follow data into a prepared four-dimensional layout."""
     source_shape = [1] * (4 - len(shape)) + shape
     model = _model(
         [
-            helper.make_node("Reshape", ["source", "target"], ["indices"]),
+            helper.make_node(producer, ["source", "target"], ["indices"]),
             helper.make_node("GatherElements", ["x", "indices"], ["y"], axis=-1),
         ],
         [
@@ -55,7 +56,14 @@ def test_unprepared_internal_indices_refuse_before_mutation(shape, pipeline):
             helper.make_tensor_value_info("source", TensorProto.INT64, source_shape),
         ],
         [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)],
-        [numpy_helper.from_array(np.asarray(shape, np.int64), "target")],
+        [
+            numpy_helper.from_array(
+                np.asarray(
+                    shape if producer == "Reshape" else list(range(4 - len(shape))), np.int64
+                ),
+                "target",
+            )
+        ],
     )
     model = onnx.shape_inference.infer_shapes(model)
     feeds = {
@@ -66,6 +74,16 @@ def test_unprepared_internal_indices_refuse_before_mutation(shape, pipeline):
     np.testing.assert_array_equal(
         _execute(model, feeds)[0], np.take(feeds["x"], [0] * shape[-1], axis=-1)
     )
+    if (
+        pipeline
+        and producer == "Reshape"
+        and any(name == "Non4DReshape" for name, _ in DLA_TRANSFORMS)
+    ):
+        transformed = _transform_make_dla_compatible(model, verbose=False)
+        np.testing.assert_array_equal(
+            _execute(transformed, feeds)[0], np.take(feeds["x"], [0] * shape[-1], axis=-1)
+        )
+        return
     if not pipeline:
         _apply_non4d_model_inputs(model, prepared_input_ops={"GatherElements"})
     before = model.SerializeToString()
