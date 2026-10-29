@@ -597,15 +597,22 @@ def _apply_non4d_lpnorm(model, *, prepared_data_ops=None):
     return model
 
 
-def _apply_flatten(model):
+def _apply_flatten(model, *, prepared_data_ops=None):
     """Replace Flatten with its four-dimensional equivalent shape."""
     graph = model.graph
     cache = GraphCache(graph)
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    native_sources = {}
+    prepared = _rank_preparation_proofs(model, cache, prepared_data_ops)
     plans = []
     for node in _operator_nodes(model, {"Flatten"}):
+        shape, _, native = _promoted_input_shape(
+            cache, node.input[0], local_functions, native_sources, prepared
+        )
+        if native and prepared_data_ops is not None:
+            continue
         if any(reader.op_type == "Gemm" for reader, _ in cache.get_consumers(node.output[0])):
             raise ValueError(f"{node.name!r}: Flatten output still feeds an unconverted Gemm")
-        shape = _shape_before_boundary_promotion(cache, node.input[0])
         axis = _attribute(node, "axis")
         axis = axis.i if axis is not None else 1
         if shape is None or any(d <= 0 for d in shape):

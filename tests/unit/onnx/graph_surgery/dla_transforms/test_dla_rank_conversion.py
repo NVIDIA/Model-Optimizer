@@ -2169,3 +2169,37 @@ def test_flatten_refuses_native_gemm_before_mutating_other_branches(bad_first):
     with pytest.raises(ValueError, match="Gemm"):
         _apply_flatten(model)
     assert model.SerializeToString() == original
+
+
+@pytest.mark.parametrize("native_shape", [[2, 12], [2, 3, 4]])
+@pytest.mark.parametrize("unary", [False, True])
+def test_internal_native_flatten_keeps_its_output_rank(native_shape, unary):
+    """Keep a native internal Flatten rank visible to a downstream Shape reader."""
+    source_shape = [1] * (4 - len(native_shape)) + native_shape
+    nodes = [helper.make_node("Squeeze", ["x", "axes"], ["native"])]
+    data = "native"
+    if unary:
+        nodes.append(helper.make_node("Relu", [data], ["activated"]))
+        data = "activated"
+    nodes.extend(
+        [
+            helper.make_node("Flatten", [data], ["flat"], axis=1),
+            helper.make_node("Shape", ["flat"], ["y"]),
+        ]
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "native_internal_flatten",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, source_shape)],
+            [helper.make_tensor_value_info("y", TensorProto.INT64, [2])],
+            [numpy_helper.from_array(np.arange(4 - len(native_shape), dtype=np.int64), "axes")],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    feeds = {"x": np.arange(24, dtype=np.float32).reshape(source_shape)}
+    expected = _execute(model, feeds)[0]
+    result = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(result, feeds)[0], expected)
+    assert any(node.op_type == "Flatten" for node in result.graph.node)

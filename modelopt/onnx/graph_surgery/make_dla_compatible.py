@@ -165,6 +165,7 @@ def _boundary_stage_options(name, quant_types, verbose, prepared_input_ops, prep
         "Non4DTranspose",
         "Non4DLpNorm",
         "ArgMax",
+        "Flatten",
         "UpdateAxis",
         "Non4DExpand",
         "Non4DTile",
