@@ -71,6 +71,36 @@ _OPSET_VERSION = 17
 _MAX_IR_VERSION_FOR_ORT = 9
 
 
+@pytest.mark.parametrize("public_control", [False, True])
+def test_shared_reshape_control_uses_private_targets(public_control):
+    """Non-mutating handlers can safely convert multiple readers of one fixed target."""
+    target = _init("target", np.array([3, 2], np.int64))
+    outputs = [_vi("y", TensorProto.FLOAT, [3, 2]), _vi("z", TensorProto.FLOAT, [3, 2])]
+    if public_control:
+        outputs.append(_vi("target", TensorProto.INT64, [2]))
+    model = _make_model(
+        [
+            helper.make_node("Reshape", ["x", "target"], ["y"]),
+            helper.make_node("Reshape", ["x", "target"], ["z"]),
+        ],
+        "shared_reshape_target",
+        [_vi("x", TensorProto.FLOAT, [2, 3])],
+        outputs,
+        [target],
+    )
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    expected, actual, transformed = _apply_and_run(model, feeds)
+    _assert_match(expected, actual)
+    controls = {node.input[1] for node in transformed.graph.node if node.op_type == "Reshape"}
+    assert len(controls) == 2 and "target" not in controls
+    values = {
+        tensor.name: numpy_helper.to_array(tensor) for tensor in transformed.graph.initializer
+    }
+    for name in controls:
+        np.testing.assert_array_equal(values[name], [1, 1, 3, 2])
+    np.testing.assert_array_equal(values["target"], [3, 2])
+
+
 # ── Shared utilities ────────────────────────────────────────────────────────────────────────────────
 
 

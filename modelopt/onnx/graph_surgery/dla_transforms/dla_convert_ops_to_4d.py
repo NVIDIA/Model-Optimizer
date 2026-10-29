@@ -1707,12 +1707,19 @@ def _apply_convert_ops_to_4d(model: onnx.ModelProto) -> onnx.ModelProto:
             if name
         ):
             continue
+        handler = _OP_HANDLERS.get(node.op_type, _handle_generic)
         if any(
             name in init_names
             and len(cache.init_map[name].dims) != 4
             and (
-                len(cache.get_consumers(name)) > 1
-                or name in cache.graph_output_names | cache.graph_input_names | captured
+                name in cache.graph_input_names
+                or (
+                    handler in {_handle_axis_op, _handle_generic, _handle_dequantize_linear}
+                    and (
+                        len(cache.get_consumers(name)) > 1
+                        or name in cache.graph_output_names | captured
+                    )
+                )
             )
             for name in node.input
             if name
@@ -1757,7 +1764,6 @@ def _apply_convert_ops_to_4d(model: onnx.ModelProto) -> onnx.ModelProto:
         if has_bad_5d:
             continue
 
-        handler = _OP_HANDLERS.get(node.op_type, _handle_generic)
         result = handler(
             node,
             graph,
