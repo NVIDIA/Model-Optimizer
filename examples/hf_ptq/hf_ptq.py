@@ -1359,10 +1359,11 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Fused MoE experts backend to load the model with, passed to the HF model loading as "
             "experts_implementation. By default transformers picks grouped_mm where the model "
-            "supports it; eager calibrates exactly as earlier releases did."
+            "supports it; eager calibrates exactly as earlier releases did. Quantization redirects "
+            "every other backend to one of these two."
         ),
         default=None,
-        type=str,
+        choices=["eager", "grouped_mm"],
     )
     parser.add_argument(
         "--auto_quantize_checkpoint",
