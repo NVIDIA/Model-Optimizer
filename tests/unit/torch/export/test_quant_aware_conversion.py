@@ -987,6 +987,19 @@ def test_radio_merge_that_matches_no_keys_raises():
         revert_weight_conversion_quant_aware(model, state_dict)
 
 
+def test_radio_merge_that_matches_no_keys_is_recorded_for_one_ranks_share():
+    """Given ``unmatched_merges``, as for one rank's share of a model, whose other ranks may hold
+    the rule's keys, the refusal is recorded there instead of raised, and the rest still applies."""
+    model = types.SimpleNamespace(_weight_conversions=[_radio_qkv_conversion()])
+    state_dict = {"language_model.layers.0.weight": torch.randn(2, 2)}
+    unmatched: list = []
+
+    out = revert_weight_conversion_quant_aware(model, state_dict, unmatched_merges=unmatched)
+
+    assert len(unmatched) == 1 and "matched no state-dict key" in unmatched[0]
+    assert out.keys() == state_dict.keys()
+
+
 @pytest.mark.parametrize(
     ("leaf", "tensors", "message"),
     [
