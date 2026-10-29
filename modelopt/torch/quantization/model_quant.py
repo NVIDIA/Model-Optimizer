@@ -138,9 +138,9 @@ def _refuse_unsupported_distributed_calibration(
     over the groups their module's ``ParallelState`` names, every rank for a module converted
     without one: a module holding routed experts must name the experts' expert-parallel group and,
     for data parallelism, only the ranks holding the same experts, or any calibration would merge
-    different experts' scales. Called before anything changes; a routed expert's quantized module,
-    whose state calibration reads, is checked once quantization has converted it, before it
-    calibrates.
+    different experts' scales. Called before anything changes, so the caller seeds the routed
+    experts' ``ParallelState`` before quantizing, as the expert-parallel load does; their quantized
+    modules, whose state calibration reads, are checked again once converted, before they calibrate.
     """
     plan = dist.recorded_distribution_plan(model)
     if plan is None or plan.world_size == 1:
