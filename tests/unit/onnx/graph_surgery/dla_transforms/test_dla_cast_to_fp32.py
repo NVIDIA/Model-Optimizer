@@ -13,29 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ORT CPU parity tests for ``dla_cast_to_fp32``.
-
-Transform rule
---------------
-Every Cast node whose output is NOT consumed by a dtype-sensitive op has its
-``to`` attribute changed to FLOAT (float32).
-
-Skip conditions (Cast node left untouched):
-  - Output feeds ``input[1]`` (indices) of a Gather node  → must stay INT32
-  - Output feeds ``input[1]`` (indices) of a GatherElements node → must stay INT32
-  - Output feeds any input of a GroupQueryAttention node  → must stay FP16
-
-Coverage
---------
-Cast INT64→FLOAT redirected to FLOAT, ORT parity
-Cast INT32→FLOAT redirected to FLOAT, ORT parity
-Cast already targeting FLOAT → unchanged (cnt == 0)
-Cast → Gather indices: skipped (output keeps INT32/INT64)
-Cast → GatherElements indices: skipped
-Cast → GroupQueryAttention input: skipped
-Multiple Casts in one graph: eligible ones converted, protected ones skipped
-No Cast nodes: graph unchanged, ORT output unchanged
-"""
+"""Numerical and structural checks for dtype-safe Cast preparation."""
 
 from __future__ import annotations
 
@@ -108,22 +86,24 @@ _RNG = np.random.default_rng(2024)
 # ── 1. Cast INT64 → redirected to FLOAT, ORT parity ─────────────────────────
 
 
-def test_cast_int64_redirected_to_float():
+@pytest.mark.parametrize(
+    ("dtype", "shape"), [(TensorProto.INT64, [2, 4]), (TensorProto.INT32, [3, 8])]
+)
+def test_integer_cast_redirected_to_float(dtype, shape):
     """Cast(to=INT64) on a float input is redirected to FLOAT; ORT output matches."""
-    shape = [2, 4]
     cast_node = helper.make_node(
         "Cast",
         inputs=["X"],
         outputs=["Y"],
-        name="cast_i64",
-        to=TensorProto.INT64,
+        name="cast_integer",
+        to=dtype,
     )
     graph = helper.make_graph(
         [cast_node],
-        "cast_int64",
+        "cast_integer",
         [_vi("X", TensorProto.FLOAT, shape)],
-        [_vi("Y", TensorProto.INT64, shape)],
-        value_info=[_vi("Y", TensorProto.INT64, shape)],
+        [_vi("Y", dtype, shape)],
+        value_info=[_vi("Y", dtype, shape)],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
@@ -139,43 +119,7 @@ def test_cast_int64_redirected_to_float():
     onnx.checker.check_model(tr, full_check=True)
     got = _run_ort(tr, {"X": x})
 
-    assert _cast_to_attr(tr, "cast_i64") == TensorProto.FLOAT
-    np.testing.assert_allclose(got["Y"], ref, rtol=1e-5, atol=1e-5)
-
-
-# ── 2. Cast INT32 → redirected to FLOAT, ORT parity ─────────────────────────
-
-
-def test_cast_int32_redirected_to_float():
-    """Cast(to=INT32) redirected to FLOAT."""
-    shape = [3, 8]
-    cast_node = helper.make_node(
-        "Cast",
-        inputs=["X"],
-        outputs=["Y"],
-        name="cast_i32",
-        to=TensorProto.INT32,
-    )
-    graph = helper.make_graph(
-        [cast_node],
-        "cast_int32",
-        [_vi("X", TensorProto.FLOAT, shape)],
-        [_vi("Y", TensorProto.INT32, shape)],
-    )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
-    _clamp_ir(model)
-    onnx.checker.check_model(model, full_check=True)
-
-    x = _RNG.standard_normal(shape).astype(np.float32)
-    ref = x.copy()
-
-    tr = copy.deepcopy(model)
-    _prepare_model(tr)
-    tr = _apply(tr)
-    onnx.checker.check_model(tr, full_check=True)
-    got = _run_ort(tr, {"X": x})
-
-    assert _cast_to_attr(tr, "cast_i32") == TensorProto.FLOAT
+    assert _cast_to_attr(tr, "cast_integer") == TensorProto.FLOAT
     np.testing.assert_allclose(got["Y"], ref, rtol=1e-5, atol=1e-5)
 
 
@@ -215,61 +159,21 @@ def test_cast_already_float_unchanged():
     np.testing.assert_array_equal(ref["Y"], got["Y"])
 
 
-# ── 4. Cast → Gather indices: skipped ────────────────────────────────────────
-
-
-def test_cast_to_gather_indices_skipped():
-    """Cast feeding Gather input[1] (indices) must NOT be redirected to FLOAT."""
-    data_shape = [4, 8]
-    # Cast INT64 → INT32 for the indices, then feed into Gather
-    cast_node = helper.make_node(
-        "Cast",
-        inputs=["idx_i64"],
-        outputs=["idx_i32"],
-        name="cast_idx",
-        to=TensorProto.INT32,
-    )
-    gather_node = helper.make_node(
-        "Gather",
-        inputs=["X", "idx_i32"],
-        outputs=["Y"],
-        name="gather",
-        axis=0,
-    )
-    graph = helper.make_graph(
-        [cast_node, gather_node],
-        "cast_gather",
-        [
-            _vi("X", TensorProto.FLOAT, data_shape),
-            _vi("idx_i64", TensorProto.INT64, []),
-        ],
-        [_vi("Y", TensorProto.FLOAT, [data_shape[1]])],
-        value_info=[_vi("idx_i32", TensorProto.INT32, [])],
-    )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
-    _clamp_ir(model)
-
-    tr = copy.deepcopy(model)
-    _prepare_model(tr)
-    tr = _apply(tr)
-
-    # Cast must still target INT32 — it was NOT redirected
-    assert _cast_to_attr(tr, "cast_idx") == TensorProto.INT32, (
-        "Cast feeding Gather indices must keep INT32"
-    )
-
-
 # ── 5. Cast → GatherElements indices: skipped ────────────────────────────────
 
 
 @pytest.mark.parametrize(
     ("op_type", "index_dtype"),
-    [("GatherElements", TensorProto.INT32), ("GatherND", TensorProto.INT64)],
+    [
+        ("Gather", TensorProto.INT32),
+        ("GatherElements", TensorProto.INT32),
+        ("GatherND", TensorProto.INT64),
+    ],
 )
 def test_cast_to_gather_indices_remain_executable(op_type, index_dtype):
     """Index casts keep their required dtype and produce the same gathered values."""
     shape = [3, 4]
-    index_shape = shape if op_type == "GatherElements" else [2, 1]
+    index_shape = shape if op_type == "GatherElements" else [2] if op_type == "Gather" else [2, 1]
     cast_node = helper.make_node(
         "Cast",
         inputs=["idx_i64"],
@@ -282,7 +186,7 @@ def test_cast_to_gather_indices_remain_executable(op_type, index_dtype):
         inputs=["X", "idx_i32"],
         outputs=["Y"],
         name="gather_elements",
-        **({"axis": 0} if op_type == "GatherElements" else {}),
+        **({"axis": 0} if op_type in {"Gather", "GatherElements"} else {}),
     )
     graph = helper.make_graph(
         [cast_node, ge_node],
