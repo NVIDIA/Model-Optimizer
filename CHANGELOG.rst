@@ -98,6 +98,7 @@ Changelog
 - Fix QAT of Hugging Face fused MoE experts with non-reentrant activation checkpointing, as in the ``examples/llm_qat`` FSDP2 config: the experts' ``F.linear`` interception stayed installed after the recompute, and training crashed with ``aten.mm.default got mixed torch.Tensor and DTensor``.
 - Fix quantization-aware training of Diffusers models failing in the backward pass with ``NotImplementedError`` once their attention modules are quantized, with or without MHA quantization.
 - Fix weight calibration, GPTQ and weight folding of Hugging Face fused MoE experts sharded by the expert parallelism of Transformers 5.16 and later, which used another rank's expert weights on every rank but the first.
+- Fix ``export_hf_checkpoint`` of an FSDP2 model quantized with W4A8 AWQ (``W4A8_AWQ_BETA_CFG``, e.g. ``examples/hf_ptq`` with ``--use_fsdp2 --qformat w4a8_awq_beta``), which failed with ``AttributeError: 'SequentialQuantizer' object has no attribute '_fake_quant'``.
 
 0.48.0 (2026-10-xx)
 ^^^^^^^^^^^^^^^^^^^

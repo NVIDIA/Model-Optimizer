@@ -1005,17 +1005,22 @@ def no_requires_grad():
 def enable_fake_quant(module):
     """Temporarily set the fake_quant attribute of a module to True.
 
-    This is used to prevent weight compression from being triggered during an unshard() call.
+    This is used to prevent weight compression from being triggered during an unshard() call. A
+    sequential weight quantizer (W4A8) holds the flag on each of its stages.
     """
-    original_fake_quant = []
-    for m in module.modules():
-        if hasattr(m, "weight_quantizer"):
-            original_fake_quant.append(m.weight_quantizer._fake_quant)
-            m.weight_quantizer._fake_quant = True
+    quantizers = [
+        q
+        for m in module.modules()
+        if hasattr(m, "weight_quantizer")
+        for q in m.weight_quantizer.modules()
+        if hasattr(q, "_fake_quant")
+    ]
+    original_fake_quant = [q._fake_quant for q in quantizers]
+    for q in quantizers:
+        q._fake_quant = True
     yield
-    for m in module.modules():
-        if hasattr(m, "weight_quantizer"):
-            m.weight_quantizer._fake_quant = original_fake_quant.pop(0)
+    for q, fake_quant in zip(quantizers, original_fake_quant):
+        q._fake_quant = fake_quant
 
 
 @contextmanager

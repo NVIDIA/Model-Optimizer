@@ -305,7 +305,7 @@ def test_fsdp2_weight_update_context_error_propagates(dist_workers):
         mtq.FP8_DEFAULT_CFG,
         mtq.NVFP4_DEFAULT_CFG,
         mtq.NVFP4_AWQ_LITE_CFG,
-        # mtq.W4A8_AWQ_BETA_CFG, #TODO: Fix unit test for this case
+        mtq.W4A8_AWQ_BETA_CFG,
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
         # NVFP4_MLP_ONLY_CFG is omitted: SmallQKVModel has no MLP, so that config matched
@@ -327,7 +327,7 @@ def test_fsdp2_weight_update_context_for_fuse_layers(dist_workers, quant_config,
         mtq.FP8_DEFAULT_CFG,
         mtq.NVFP4_DEFAULT_CFG,
         mtq.NVFP4_AWQ_LITE_CFG,
-        # mtq.W4A8_AWQ_BETA_CFG, #TODO: Fix unit test for this case
+        mtq.W4A8_AWQ_BETA_CFG,
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
         # NVFP4_MLP_ONLY_CFG is omitted: SmallQKVModel has no MLP, so that config matched
