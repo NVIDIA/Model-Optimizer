@@ -78,7 +78,8 @@ For Megatron Bridge, before constructing commands, read:
    default. Set the target tokenizer and workspace path, then materialize the
    randomly sampled subset before training. Pack the chosen sequence length;
    Megatron's `99,1,0` split creates the 1% validation holdout from the same
-   data.
+   data. Keep every source mixed across training, never ordered as a
+   curriculum, so early stops see the whole blend.
 4. **Run and monitor QAD.** Run one QAD training job at a time and fold startup
    validation into it; do not submit separate GPU preflight jobs or split at
    recovery iterations. Let training continue while evaluating saved
@@ -132,9 +133,9 @@ For Megatron Bridge, before constructing commands, read:
 - At each evaluated checkpoint, decide:
   - **Pass:** every benchmark is within 1% of BF16. Keep the checkpoint and
     stop the run.
-  - **Miss:** the benchmarks still miss after 2-3 evaluated checkpoints
-    without gains beyond run noise, or two consecutive checkpoints decline.
-    Stop and change one QAD knob in the [recipe loop](#recipe-loop).
+  - **Miss:** the scores converge short of 1%, two evaluated checkpoints past
+    the knee bring no gain beyond run noise, or two consecutive checkpoints
+    decline. Stop and change one QAD knob in the [recipe loop](#recipe-loop).
   - **Otherwise continue** to the next checkpoint.
 - Pick the checkpoint by benchmarks, never by KD loss, which keeps falling after
   the benchmarks peak. Between near ties, the benchmark most sensitive to
