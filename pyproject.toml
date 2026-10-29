@@ -76,14 +76,14 @@ onnx = [
     "onnxruntime-ep-nv-tensorrt-rtx-cu13==0.4.0; platform_system == 'Windows' and platform_machine == 'ARM64'",
 ]
 hf = [
-    "accelerate>=1.1.0",
+    "accelerate>=1.6.0",
     "datasets>=3.0.0",
     "deepspeed>=0.9.6; platform_system != 'Darwin' and platform_system != 'Windows'",
     "diffusers>=0.37.0",
     "httpx>=0.23.0,<1",
     "huggingface_hub>=1.5.0",
     "nltk>=3.9",
-    "peft>=0.17.0",
+    "peft>=0.19.0",
     "sentencepiece>=0.2.1",                                                           # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export
     "tiktoken",
     "transformers>=5.9,<5.19",                                                        # Should match modelopt/torch/__init__.py and noxfile.py
