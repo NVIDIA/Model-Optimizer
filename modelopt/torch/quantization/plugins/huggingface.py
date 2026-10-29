@@ -1796,7 +1796,12 @@ def _bypassed_both_hooks(module) -> bool:
 
 
 def _expert_parallel_group(module):
-    """The process group ``module``'s experts are sharded over (expert parallelism), else ``None``."""
+    """The process group ``module``'s experts are sharded over (expert parallelism), else ``None``.
+
+    Read from the experts' weight, a DTensor sharded over the experts under the expert parallelism of
+    transformers 5.16 and later. Earlier versions keep each rank's experts as a plain tensor, which
+    names no group.
+    """
     weight = getattr(module, module._first_proj_attr, None)
     if not isinstance(weight, DTensor) or weight.shape[0] == module.num_experts:
         return None
@@ -1830,12 +1835,13 @@ def assert_fused_experts_intercepted(model):
     experts module no calibration token reached (vision experts under text-only calibration) falls
     back to weight-derived scales as before.
 
-    Under expert parallelism, a module's verdict is reduced over the group its experts are sharded
-    over, which every member already joins in the experts' forward, so the whole group raises
-    together. Otherwise the check is rank-local: under data parallelism it raises on the ranks whose
-    experts saw rows, and a rank whose experts saw none goes on to its next collective and waits
-    there until the launcher stops it or the collective times out, so the error is in another rank's
-    log.
+    Under the expert parallelism of transformers 5.16 and later, a module's verdict is reduced over
+    the group its experts are sharded over, which every member already joins in the experts'
+    forward, so the whole group raises together. Otherwise the check is rank-local, also under
+    earlier versions' expert parallelism, whose plain-tensor shards name no group: it raises on the
+    ranks whose experts saw rows, and a rank whose experts saw none goes on to its next collective
+    and waits there until the launcher stops it or the collective times out, so the error is in
+    another rank's log.
     """
     experts = [
         (name, module, _bypassed_both_hooks(module), _expert_parallel_group(module))
