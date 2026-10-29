@@ -68,6 +68,7 @@ def _apply_where(model: onnx.ModelProto) -> onnx.ModelProto:
     cnt = 0
     runtime = _runtime_input_names(model)
     zeros = {}
+    static_masks = {}
 
     selections = _operator_nodes(model, {"Where"})
     if selections:
@@ -116,20 +117,24 @@ def _apply_where(model: onnx.ModelProto) -> onnx.ModelProto:
 
         if cache.is_init(condition) and condition not in runtime:
             if condition_type == TensorProto.BOOL:
-                cond_raw = cache.get_init_array(condition)
-                if cond_raw is None:
-                    continue
-                cond_arr = cond_raw.astype(np.float32)
-                if zero_idx == 0:
-                    # Where(cond, 0, y) → y * (1 - cond_float)
-                    np.subtract(1.0, cond_arr, out=cond_arr)
-                float_name = cache.unique_name(f"{condition}_float32")
-                graph.initializer.add(
-                    name=float_name,
-                    data_type=TensorProto.FLOAT,
-                    dims=cond_arr.shape,
-                    raw_data=cond_arr.astype("<f4", copy=False).tobytes(),
-                )
+                mask_key = (condition, zero_idx == 0)
+                float_name = static_masks.get(mask_key)
+                if float_name is None:
+                    cond_raw = cache.get_init_array(condition)
+                    if cond_raw is None:
+                        continue
+                    cond_arr = cond_raw.astype(np.float32)
+                    if zero_idx == 0:
+                        # Where(cond, 0, y) → y * (1 - cond_float)
+                        np.subtract(1.0, cond_arr, out=cond_arr)
+                    float_name = cache.unique_name(f"{condition}_float32")
+                    graph.initializer.add(
+                        name=float_name,
+                        data_type=TensorProto.FLOAT,
+                        dims=cond_arr.shape,
+                        raw_data=cond_arr.astype("<f4", copy=False).tobytes(),
+                    )
+                    static_masks[mask_key] = float_name
                 mul_inputs = [non_zero_name, float_name]
             else:
                 # Non-bool static condition — use directly as the float mask.

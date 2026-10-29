@@ -500,3 +500,57 @@ def test_registered_where_uses_materialized_promoted_shapes(source_kind, zero_br
     actual = _run_ort(result, feeds)
     for name in expected:
         np.testing.assert_array_equal(actual[name], expected[name])
+
+
+def test_shared_fixed_bool_masks_are_reused_by_polarity():
+    """Share each direct or inverted FLOAT mask without changing BOOL ownership or values."""
+    shape = [1, 1, 2, 3]
+    condition = np.array([True, False, True, False, True, False]).reshape(shape)
+    branches = [0, 1, 0, 1]
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "Where",
+                    ["condition", "zero" if side == 0 else "x", "x" if side == 0 else "zero"],
+                    [f"y{i}"],
+                )
+                for i, side in enumerate(branches)
+            ],
+            "shared_bool_masks",
+            [_vi("x", TensorProto.FLOAT, shape)],
+            [_vi(f"y{i}", TensorProto.FLOAT, shape) for i in range(len(branches))],
+            initializer=[
+                numpy_helper.from_array(condition, "condition"),
+                numpy_helper.from_array(np.float32(0), "zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    feeds = {"x": np.arange(1, 7, dtype=np.float32).reshape(shape)}
+    onnx.checker.check_model(model, full_check=True)
+    expected = ReferenceEvaluator(model).run(None, feeds)
+    runtime_expected = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"]
+    ).run(None, feeds)
+    original = model.graph.initializer[0]
+    payload = original.SerializeToString()
+    _apply(model)
+    onnx.checker.check_model(model, full_check=True)
+    masks = [node.input[1] for node in model.graph.node if node.op_type == "Mul"]
+    assert len(masks) == 4
+    assert masks[0] == masks[2] and masks[1] == masks[3] and masks[0] != masks[1]
+    assert (
+        sum(t.data_type == TensorProto.FLOAT and t.name != "zero" for t in model.graph.initializer)
+        == 2
+    )
+    assert model.graph.initializer[0] is original
+    assert original.SerializeToString() == payload
+    for actual, reference in zip(ReferenceEvaluator(model).run(None, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+    runtime_actual = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"]
+    ).run(None, feeds)
+    for actual, reference in zip(runtime_actual, runtime_expected):
+        np.testing.assert_array_equal(actual, reference)
