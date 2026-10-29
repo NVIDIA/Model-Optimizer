@@ -95,8 +95,8 @@ class PrecisionConverter:
         custom_ops: set[str] | None = None,
         min_opset: int = 13,
         max_ir_version: int | None = None,
-        trt_plugins: list[str] | None = [],
-        tensor_block_dict: dict[str, dict[str, list[int]]] = {},
+        trt_plugins: list[str] | None = None,
+        tensor_block_dict: dict[str, dict[str, list[int]]] | None = None,
         use_standalone_type_inference: bool = False,
         original_network_io_metadata: dict[str, list[onnx.ValueInfoProto]] | None = None,
         sanitize_model: bool = True,
@@ -162,7 +162,7 @@ class PrecisionConverter:
         }
         self.min_opset = min_opset
         self.max_ir_version = max_ir_version
-        self.trt_plugins = trt_plugins
+        self.trt_plugins = [] if trt_plugins is None else trt_plugins
         self.use_standalone_type_inference = use_standalone_type_inference
 
         # Detect additional ops not supported in low precision according to the model's opset version
@@ -175,7 +175,9 @@ class PrecisionConverter:
         )
 
         # Custom mapping of op types to indices of inputs that should not be converted to low precision
-        self.skip_inputs_map = self._create_skip_inputs_mapping(tensor_block_dict)
+        self.skip_inputs_map = self._create_skip_inputs_mapping(
+            {} if tensor_block_dict is None else tensor_block_dict
+        )
 
         # Flags to log initializer value range warnings only once
         self._warned_values_clamp_max = False
@@ -1857,9 +1859,9 @@ class PrecisionConverter:
         skip_inputs_map = {}
         match self.low_precision_type.str_short:
             case "fp16":
-                skip_inputs_map = SKIP_LOW_PRECISION_MAPPING_FP16
+                skip_inputs_map = dict(SKIP_LOW_PRECISION_MAPPING_FP16)
             case "bf16":
-                skip_inputs_map = SKIP_LOW_PRECISION_MAPPING_BF16
+                skip_inputs_map = dict(SKIP_LOW_PRECISION_MAPPING_BF16)
             case _:
                 raise ValueError(f"Unsupported low precision type: {self.low_precision_type}")
 

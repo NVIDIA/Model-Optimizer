@@ -25,7 +25,6 @@ import numpy as np
 import torch
 import transformers
 from accelerate import Accelerator
-from packaging.version import Version
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -244,10 +243,7 @@ def main():
 
     accelerator = Accelerator()
     with accelerator.main_process_first():
-        if Version(nltk.__version__) < Version("3.8.2"):
-            nltk.download("punkt")
-        else:
-            nltk.download("punkt_tab")
+        nltk.download("punkt_tab")
 
     tokenizer = prepare_tokenizer(accelerator, args.model_dir, args.model_max_length)
     dataset = get_dataset(accelerator, args.data_path, tokenizer)
