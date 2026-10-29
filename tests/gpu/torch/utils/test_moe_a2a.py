@@ -20,6 +20,7 @@ import copy
 import pytest
 import torch
 import torch.distributed as dist
+from packaging.version import Version
 
 import modelopt.torch.utils.moe as moe
 
@@ -66,5 +67,7 @@ def test_torch_a2a_gives_grouped_mms_result_bit_for_bit(dist_workers):
     """fp32 routing weights, as Mixtral's and DeepSeek-V3's routers return, make each token's top-k
     sum an fp32 one, whose bf16 result depends on the order of its adds. At EP=1 the torch_a2a
     forward adds them in grouped_mm's fixed order, not in the order of CUDA atomics."""
-    pytest.importorskip("transformers")
+    transformers = pytest.importorskip("transformers")
+    if Version(transformers.__version__) < Version("5.6"):
+        pytest.skip("expert parallelism needs transformers >= 5.6")
     dist_workers.run(_grouped_mm_bit_for_bit_job)

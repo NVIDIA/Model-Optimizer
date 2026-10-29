@@ -48,7 +48,7 @@ TORCH_VERSIONS = {
 # ``.[all,dev-test]`` install to constrain that env).
 TRANSFORMERS_VERSIONS = {
     "tf_latest": ("transformers~=5.18.0",),
-    "tf_min": ("transformers~=5.9.0",),
+    "tf_min": ("transformers~=5.5.0",),
 }
 
 
