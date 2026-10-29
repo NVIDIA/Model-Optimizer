@@ -504,9 +504,13 @@ def _write_even_shards(
 
     Every file is written under a temporary name and renamed into place only once every rank has
     written all of its own, the index last. It never overwrites a checkpoint: a directory that already
-    holds one is refused on every rank before anything is written. Each step a rank can fail alone
-    runs in :func:`~modelopt.torch.utils.distributed.all_reduce`, which raises on every rank when one
-    fails.
+    holds one is refused on every rank before anything is written. A failure removes the temporary
+    files, but one during the final renames leaves the shards already renamed, which a retry into the
+    directory is refused over until they are removed. Each step a rank can fail alone runs in
+    :func:`~modelopt.torch.utils.distributed.all_reduce`, which raises on every rank when one fails.
+
+    Every name in ``local_sd`` is written, two names for one tensor included: the caller drops tied
+    weights by name beforehand, as the streaming export drops ``_tied_weights_keys``.
     """
     export_dir = Path(export_dir)
     max_bytes = _parse_shard_size(max_shard_size)
@@ -527,8 +531,8 @@ def _write_even_shards(
         if existing:
             raise FileExistsError(
                 f"{export_dir} already holds a checkpoint ({', '.join(existing[:3])}), which the "
-                "distributed export does not overwrite; remove those files or export to another "
-                "directory."
+                "distributed export does not overwrite; remove those files (an export that failed "
+                "during its final renames can leave some behind) or export to another directory."
             )
         return [(len(my_files), write_keys)]
 
