@@ -924,18 +924,20 @@ def parallel_load_and_prepare_fsdp2(
     return model
 
 
-def _auto_class(hf_config, trust_remote_code: bool = False) -> Any:
-    """The auto class that builds ``hf_config``'s whole model, LM head included.
+def _auto_class(hf_config, require_lm_head: bool = True, trust_remote_code: bool = False) -> Any:
+    """The auto class that builds ``hf_config``'s whole model.
 
-    A causal LM builds through ``AutoModelForCausalLM``. A VLM -- a nested text config, a vision
-    config, or a ``*ForConditionalGeneration`` architecture -- builds through the remote
-    ``AutoModelForCausalLM`` when the checkpoint registers its ``*ForConditionalGeneration`` there,
-    its code is trusted and it registers no image-text class, else through
-    ``AutoModelForImageTextToText`` if that recognizes the config or, its code trusted, the
-    checkpoint registers one, else through ``AutoModelForCausalLM`` if that recognizes it (as it
-    does Phi-4-multimodal), else through ``AutoModel``, which leaves the head out. An
-    encoder-decoder model (``is_encoder_decoder``, whether or not it names its architecture, which
-    reads like a VLM's) builds through its seq2seq class.
+    A causal LM builds through ``AutoModelForCausalLM``, head included: ``require_lm_head`` only
+    applies to a model whose architecture reads as a VLM's -- a nested text config, a vision
+    config, or a ``*ForConditionalGeneration`` architecture -- or that is an encoder-decoder model
+    (``is_encoder_decoder``), whether or not it names its architecture. Such a model builds through
+    ``AutoModel``, which leaves its LM head out, unless ``require_lm_head``: then through the
+    remote ``AutoModelForCausalLM`` when the checkpoint registers its ``*ForConditionalGeneration``
+    there, its code is trusted and it registers no image-text class, else through its seq2seq
+    class if it is an encoder-decoder model, else through ``AutoModelForImageTextToText`` if that
+    recognizes the config or, its code trusted, the checkpoint registers one, else through
+    ``AutoModelForCausalLM`` if that recognizes it (as it does Phi-4-multimodal), else still
+    through ``AutoModel``.
     """
     architectures = getattr(hf_config, "architectures", None) or []
     is_vlm = (
@@ -945,6 +947,8 @@ def _auto_class(hf_config, trust_remote_code: bool = False) -> Any:
     )
     if not is_vlm and not getattr(hf_config, "is_encoder_decoder", False):
         return AutoModelForCausalLM
+    if not require_lm_head:
+        return AutoModel
     auto_map = getattr(hf_config, "auto_map", None) or {}
     remote_with_head = (
         trust_remote_code
@@ -1027,7 +1031,7 @@ def _decide_distribution(
             trust_remote_code,
             None,
             hf_config,
-            auto_class=_auto_class(hf_config, trust_remote_code),
+            auto_class=_auto_class(hf_config, trust_remote_code=trust_remote_code),
         )
         # init_empty_weights re-wraps every parameter it registers, which unties what from_config
         # tied: re-tie, so a tied embedding and LM head count once, as the loaded model holds them.
