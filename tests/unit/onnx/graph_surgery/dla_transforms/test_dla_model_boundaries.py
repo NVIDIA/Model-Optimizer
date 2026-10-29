@@ -15,6 +15,7 @@
 
 """Boundary promotion refuses unsupported exposed adapters before changing the graph."""
 
+import copy
 from importlib import import_module
 
 import numpy as np
@@ -32,6 +33,53 @@ from modelopt.onnx.graph_surgery.dla_transforms.dla_model_boundaries import (
 )
 from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
 from modelopt.onnx.graph_surgery.utils.graph_utils import infer_shapes
+
+
+@pytest.mark.parametrize("entrypoint", ["validate", "pipeline"])
+@pytest.mark.parametrize("case", ["rank5", "scalar", "runtime_axes"])
+def test_output_refusal_preflight_preserves_caller_state(entrypoint, case, monkeypatch):
+    """Validate known output refusals before inference or an earlier stage changes the caller."""
+    shape, axes, output_shape = {
+        "rank5": ([1, 2, 1, 3, 4], [0, 2], [2, 3, 4]),
+        "scalar": ([1], [0], []),
+        "runtime_axes": ([1, 2, 3, 4], [0], [2, 3, 4]),
+    }[case]
+    inputs = [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)]
+    if case == "runtime_axes":
+        inputs.append(helper.make_tensor_value_info("axes", TensorProto.INT64, [len(axes)]))
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Squeeze", ["x", "axes"], ["y"])],
+            "output_refusal",
+            inputs,
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, output_shape)],
+            [numpy_helper.from_array(np.asarray(axes, np.int64), "axes")],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=9,
+    )
+    onnx.checker.check_model(model, full_check=True)
+    ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"]).run(
+        None, {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape)}
+    )
+    before = model.SerializeToString()
+    original = copy.deepcopy
+    model_copies = []
+
+    def track(value, *args, **kwargs):
+        if isinstance(value, onnx.ModelProto):
+            model_copies.append(value)
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(copy, "deepcopy", track)
+    with pytest.raises(ValueError, match=r"scalar|exceeds 4|must be fixed"):
+        if entrypoint == "pipeline":
+            _transform_make_dla_compatible(model, verbose=False)
+        else:
+            _apply_non4d_model_outputs(model, defer_rank_conversion=True, validate_only=True)
+    assert model.SerializeToString() == before
+    if case == "runtime_axes":
+        assert not model_copies
 
 
 @pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])

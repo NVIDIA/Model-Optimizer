@@ -44,6 +44,7 @@ from .dla_transforms.dla_model_boundaries import (
     _apply_non4d_model_inputs,
     _apply_non4d_model_outputs,
     _apply_remove_intermediary_squeeze_unsqueeze,
+    _BoundaryPreflightError,
     _require_output_rank_conversion,
 )
 from .dla_transforms.dla_remove_deqlin import _apply_remove_deqlin
@@ -212,6 +213,8 @@ def _transform_make_dla_compatible(
         quant_types = frozenset(onnx.TensorProto.DataType.values())
     try:
         _validate_boundary_contract(model, prepared_input_ops, prepared_output_ops)
+    except _BoundaryPreflightError:
+        raise
     except (ValueError, NotImplementedError):
         # Earlier lowering may consume native operators that lack a later rank pass.
         probe = infer_shapes(copy.deepcopy(model))

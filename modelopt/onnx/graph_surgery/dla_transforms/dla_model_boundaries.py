@@ -32,6 +32,11 @@ from .dla_reorder_nodes import priority_topological_order
 
 __all__ = []
 
+
+class _BoundaryPreflightError(ValueError):
+    """Prerequisite lowering cannot freeze an exposed runtime control."""
+
+
 _RANK_FLOW_OPS = _RANK_AGNOSTIC_OPS | {"Slice", "Transpose", "Reshape", "Expand", "Tile"}
 _REDUCTION_OPS = frozenset({"ReduceSum", "ReduceMean", "ReduceMin", "ReduceMax"})
 
@@ -431,8 +436,6 @@ def _apply_non4d_model_outputs(
                     and "Non4DReshape" not in prepared_output_ops
                 ):
                     raise ValueError("Output rank conversion is unavailable for native Reshape")
-        if validate_only:
-            continue
         if (
             producer is not None
             and _is_standard_node(producer, local_functions, {"Identity"})
@@ -451,11 +454,18 @@ def _apply_non4d_model_outputs(
             if len(existing.input) > 1 and existing.input[1]:
                 initializer = cache.get_init(existing.input[1])
                 if initializer is None or initializer.name in cache.graph_input_names:
-                    raise ValueError(f"Output Squeeze axes must be fixed for {value.name!r}")
+                    error = (
+                        _BoundaryPreflightError
+                        if existing.input[1] in cache.graph_input_names
+                        else ValueError
+                    )
+                    raise error(f"Output Squeeze axes must be fixed for {value.name!r}")
                 axes = numpy_helper.to_array(initializer).reshape(-1).tolist()
             else:
                 input_shape = cache.get_shape(existing.input[0])
                 if input_shape is None:
+                    if validate_only:
+                        continue
                     raise ValueError(f"Output Squeeze input shape must be known for {value.name!r}")
                 axes = [index for index, dim in enumerate(input_shape) if dim == 1]
         source_shape = cache.get_shape(existing.input[0] if existing is not None else value.name)
