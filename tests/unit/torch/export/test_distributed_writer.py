@@ -48,7 +48,7 @@ from transformers import AutoModelForCausalLM, LlamaConfig, MixtralConfig, Qwen2
 from transformers.core_model_loading import Chunk, WeightConverter
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export import distributed_writer, quant_aware_conversion
+from modelopt.torch.export import distributed_writer
 from modelopt.torch.export.distributed_writer import (
     _even_bins,
     _is_full_world_shard0,
@@ -66,6 +66,8 @@ from modelopt.torch.export.unified_export_hf import (
 )
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
+_WRITER = "modelopt.torch.export.distributed_writer"
+
 
 def _write(model, export_dir, **kwargs):
     distributed_save_hf_checkpoint(
@@ -78,8 +80,6 @@ def _nogather_export(model, export_dir, knob="nogather", **kwargs):
         export_hf_checkpoint(
             model, dtype=torch.bfloat16, export_dir=export_dir, max_shard_size="16KB", **kwargs
         )
-
-_WRITER = "modelopt.torch.export.distributed_writer"
 
 
 def _raw_bytes(tensor):
@@ -901,7 +901,7 @@ def test_nogather_export_names_modules_in_the_quant_config_as_the_weights_do(
     model = _load(_save(_mixtral_config(), tmp_path / "src"))
     mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randint(0, 64, (2, 8))))
     failure = mock.patch.object(
-        quant_aware_conversion,
+        distributed_writer,
         "revert_weight_conversion_quant_aware",
         side_effect=RuntimeError("incomplete merge"),
     )
