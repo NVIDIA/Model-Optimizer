@@ -150,20 +150,43 @@ sys.exit(0 if isinstance(config, dict) and config else 1)
 PY
 }
 
+recover_export() {
+    local destination=$1 backup="$1.old"
+
+    [ -e "$backup" ] || return 0
+    if [ -e "$destination" ]; then
+        # Only a complete publication supersedes the backup.
+        export_complete "$destination" || return 1
+        rm -rf "$backup" || return 1
+    else
+        mv -T "$backup" "$destination" || return 1
+    fi
+}
+
 export_draft() {
     local source=$1 destination=$2
+    local scratch="$2.tmp" backup="$2.old"
 
     # Callers use ||, which suppresses ERR handling inside this function.
-    rm -rf "$destination" || return 1
+    recover_export "$destination" || return 1
+    rm -rf "$scratch" || return 1
     echo "=== Exporting: ${source} → ${destination} ==="
     CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
         --model_path "$source" \
-        --export_path "$destination" \
+        --export_path "$scratch" \
         --trust_remote_code || return 1
-    if ! export_complete "$destination"; then
-        echo "ERROR: export produced an invalid config: ${destination}" >&2
+    if ! export_complete "$scratch"; then
+        echo "ERROR: export produced an invalid config: ${scratch}" >&2
         return 1
     fi
+    if [ -e "$destination" ]; then
+        mv -T "$destination" "$backup" || return 1
+    fi
+    if ! mv -T "$scratch" "$destination"; then
+        recover_export "$destination" || return 1
+        return 1
+    fi
+    rm -rf "$backup" || return 1
 }
 
 set -x
@@ -188,6 +211,10 @@ elif [ "${SLURM_PROCID:-0}" = "0" ]; then
     if [ -n "$OUTPUT_DIR" ]; then
         # Export all checkpoints that don't already have an exported version
         EXPORTED=0
+        for BACKUP in "${OUTPUT_DIR}"/exported-checkpoint-*.old; do
+            [ -d "$BACKUP" ] || continue
+            recover_export "${BACKUP%.old}" || exit 1
+        done
         for CKPT in "${OUTPUT_DIR}"/checkpoint-*; do
             [ -d "$CKPT" ] || continue
             STEP=$(basename "$CKPT" | sed 's/checkpoint-//')
@@ -197,25 +224,32 @@ elif [ "${SLURM_PROCID:-0}" = "0" ]; then
                 continue
             fi
             if compgen -G "${CKPT}/pytorch_model_fsdp_*" >/dev/null; then
-                echo "ERROR: ${CKPT} needs re-exporting, but the HF exporter cannot load FSDP shards." >&2
-                exit 1
+                echo "WARNING: cannot re-export FSDP shards in ${CKPT}; checking the required export below." >&2
+                continue
             fi
             export_draft "$CKPT" "$EXPORT_DIR" || exit 1
             EXPORTED=$((EXPORTED + 1))
         done
-
         LATEST_CKPT=$(latest_checkpoint "$OUTPUT_DIR" checkpoint-)
         LATEST_SAVE="${LATEST_CKPT}/trainer_state.json"
         if [ ! -f "$LATEST_SAVE" ]; then
             LATEST_SAVE="$LATEST_CKPT"
         fi
 
+        # Equal timestamps cannot establish ordering; only a newer checkpoint makes the root stale.
         FINAL_IS_CURRENT=0
         if [ -f "${OUTPUT_DIR}/modelopt_state.pth" ] && {
             [ -z "$LATEST_CKPT" ] ||
             ! [ "$LATEST_SAVE" -nt "${OUTPUT_DIR}/modelopt_state.pth" ]
         }; then
             FINAL_IS_CURRENT=1
+        fi
+
+        # Skipped sharded exports are safe only if the current serving artifact is available.
+        if [ "$FINAL_IS_CURRENT" != 1 ] && [ -n "$LATEST_CKPT" ] &&
+            ! export_complete "${OUTPUT_DIR}/exported-${LATEST_CKPT##*/}"; then
+            echo "ERROR: newest checkpoint has no complete export: ${LATEST_CKPT}" >&2
+            exit 1
         fi
 
         FINAL_EXPORT="${OUTPUT_DIR}/exported-checkpoint-final"

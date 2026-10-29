@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""dflash_online_training.sh: export validaion and regression checks."""
+"""dflash_online_training.sh: export validation and regression checks."""
 
 import json
 import os
@@ -26,6 +26,7 @@ import pytest
 _COMMON = Path(__file__).resolve().parents[1] / "common"
 _EXPORT = "modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py"
 _CONFIG = '{"model_type": "qwen3"}'
+_MV = shutil.which("mv")
 
 
 def _run(tmp_path, train_exit=0, loss=4.0, checkpoint_time=None, **env_overrides):
@@ -43,7 +44,9 @@ def _run(tmp_path, train_exit=0, loss=4.0, checkpoint_time=None, **env_overrides
     export.parent.mkdir(parents=True, exist_ok=True)
     export.write_text(
         "import os, sys\n"
-        "d = sys.argv[sys.argv.index('--export_path') + 1]\n"
+        "src = sys.argv[sys.argv.index('--model_path') + 1]\n"
+        f"open({str(tmp_path / 'exports.log')!r}, 'a').write(src + '\\n')\n"
+        "d =sys.argv[sys.argv.index('--export_path') + 1]\n"
         "os.makedirs(d, exist_ok=True)\n"
         "open(os.path.join(d, 'model.safetensors'), 'w').write('new')\n"
         "if os.environ.get('EXPORT_FAIL'):\n"
@@ -65,6 +68,14 @@ def _run(tmp_path, train_exit=0, loss=4.0, checkpoint_time=None, **env_overrides
         ("pip", "exit 0"),
         ("nvidia-smi", "echo 1"),
         ("accelerate", f"touch {launched}; exit {train_exit}"),
+        (
+            "mv",
+            (
+                '[ -n "$PUBLISH_FAIL" ] && [[ "$2" == *.tmp ]] && exit 1\n'
+                '[ -n "$RECOVER_FAIL" ] && [[ "$2" == *.old ]] && exit 1\n'
+                f'exec {_MV} "$@"'
+            ),
+        ),
     ):
         (bin_dir / tool).write_text(f"#!/bin/bash\n{body}\n")
         (bin_dir / tool).chmod(0o755)
@@ -180,26 +191,23 @@ def test_sharded_export_failure_preserves_leftover_final(tmp_path, config):
     out = tmp_path / "out"
     checkpoint = out / "checkpoint-2000"
     (checkpoint / "pytorch_model_fsdp_0").mkdir(parents=True)
-
     state = out / "modelopt_state.pth"
     state.write_text("")
     os.utime(state, (100, 100))
-
     final = out / "exported-checkpoint-final"
     _seed_export(final, _CONFIG)
     os.utime(final / "config.json", (110, 110))
-
     step_export = out / "exported-checkpoint-2000"
     if config is not None:
         _seed_export(step_export, config)
 
-    # The stub exporter would succeed, so failure must come from the shard guard.
+    # The stub exporter would succeed, so the script must reject the missing required export.
     proc, verdict, _ = _run(tmp_path, checkpoint_time=200)
-
     assert proc.returncode == 1, proc.stderr
     assert verdict is None
     assert (final / "model.safetensors").read_text() == "old"
     assert (final / "config.json").read_text() == _CONFIG
+    assert not (tmp_path / "exports.log").exists()
     if config is None:
         assert not step_export.exists()
     else:
@@ -207,26 +215,119 @@ def test_sharded_export_failure_preserves_leftover_final(tmp_path, config):
         assert (step_export / "config.json").read_text() == config
 
 
+@pytest.mark.parametrize(
+    ("incomplete_step", "current_final"),
+    [("1600", None), ("2000", "existing"), ("2000", "export")],
+)
+def test_incomplete_shards_allow_current_export(tmp_path, incomplete_step, current_final):
+    """An obsolete shard export must not block a complete newest step or current final."""
+    out = tmp_path / "out"
+    for step in ("1600", "2000"):
+        (out / f"checkpoint-{step}" / "pytorch_model_fsdp_0").mkdir(parents=True)
+        _seed_export(
+            out / f"exported-checkpoint-{step}", "" if step == incomplete_step else _CONFIG
+        )
+    final = out / "exported-checkpoint-final"
+    if current_final:
+        state = out / "modelopt_state.pth"
+        state.write_text("")
+        os.utime(state, (300, 300))
+        if current_final == "existing":
+            _seed_export(final, _CONFIG)
+            os.utime(final / "config.json", (310, 310))
+
+    proc, verdict, _ = _run(tmp_path, checkpoint_time=200)
+    assert proc.returncode == 0, proc.stderr
+    assert verdict["pass"] is True
+    required = final if current_final else out / "exported-checkpoint-2000"
+    assert json.loads((required / "config.json").read_text())
+    log = tmp_path / "exports.log"
+    assert (log.read_text().splitlines() if log.exists() else []) == (
+        [str(out)] if current_final == "export" else []
+    )
+    assert _latest_export(tmp_path) == str(required)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"EXPORT_FAIL": "1"},
+        {"EXPORT_CONFIG": ""},
+        {"PUBLISH_FAIL": "1"},
+        {"PUBLISH_FAIL": "1", "RECOVER_FAIL": "1"},
+    ],
+)
+def test_failed_replacement_preserves_final(tmp_path, failure):
+    """Export and publication failures retain the previous usable final."""
+    out = tmp_path / "out"
+    _seed_export(out / "exported-checkpoint-2000", _CONFIG)
+    final = out / "exported-checkpoint-final"
+    _seed_export(final, _CONFIG)
+    os.utime(final / "config.json", (250, 250))
+    state = out / "modelopt_state.pth"
+    state.write_text("")
+    os.utime(state, (300, 300))
+    proc, verdict, _ = _run(tmp_path, checkpoint_time=200, **failure)
+    assert proc.returncode == 1, proc.stderr
+    assert verdict is None
+    backup = final.with_name(final.name + ".old")
+    preserved = backup if failure.get("RECOVER_FAIL") else final
+    assert (preserved / "model.safetensors").read_text() == "old"
+    assert (preserved / "config.json").read_text() == _CONFIG
+    assert backup.exists() == bool(failure.get("RECOVER_FAIL"))
+
+
+@pytest.mark.parametrize(
+    ("published", "recovery_fails"), [(False, False), (True, False), (False, True)]
+)
+def test_interrupted_publication_recovery(tmp_path, published, recovery_fails):
+    """Recover a swap, stopping without deleting the backup if restoration fails."""
+    out = tmp_path / "out"
+    _seed_export(out / "exported-checkpoint-2000", _CONFIG)
+    state = out / "modelopt_state.pth"
+    state.write_text("")
+    os.utime(state, (300, 300))
+    final = out / "exported-checkpoint-final"
+    backup = final.with_name(final.name + ".old")
+    _seed_export(backup, _CONFIG)
+    os.utime(backup / "config.json", (310, 310))
+    if published:
+        _seed_export(final, _CONFIG)
+        (final / "model.safetensors").write_text("published")
+        os.utime(final / "config.json", (310, 310))
+    proc, verdict, _ = _run(
+        tmp_path, checkpoint_time=200, **({"RECOVER_FAIL": "1"} if recovery_fails else {})
+    )
+    assert proc.returncode == int(recovery_fails), proc.stderr
+    assert not (tmp_path / "exports.log").exists()
+    if recovery_fails:
+        assert verdict is None
+        assert not final.exists()
+        assert (backup / "model.safetensors").read_text() == "old"
+        assert (backup / "config.json").read_text() == _CONFIG
+    else:
+        assert verdict["pass"] is True
+        assert not backup.exists()
+        assert (final / "model.safetensors").read_text() == ("published" if published else "old")
+
+
 @pytest.mark.parametrize("existing_final", [False, True])
 @pytest.mark.parametrize("root_time", [100, 200, 300])
 def test_final_selection_tracks_latest_checkpoint(tmp_path, existing_final, root_time):
-    """Only a current root model may supply the preferred final export."""
+    """Retire finals only when the checkpoint is strictly newer than the root."""
     out = tmp_path / "out"
     step_export = out / "exported-checkpoint-2000"
     _seed_export(step_export, _CONFIG)
-
     state = out / "modelopt_state.pth"
     state.write_text("")
     current_root = root_time >= 200
     os.utime(state, (root_time, root_time))
-
     final = out / "exported-checkpoint-final"
     if existing_final:
         _seed_export(final, _CONFIG)
         os.utime(final / "config.json", (root_time + 10, root_time + 10))
 
     proc, verdict, _ = _run(tmp_path, checkpoint_time=200)
-
     assert proc.returncode == 0, proc.stderr
     assert verdict["pass"] is True
     assert verdict["trainer_state"].endswith("checkpoint-2000/trainer_state.json")
@@ -235,25 +336,28 @@ def test_final_selection_tracks_latest_checkpoint(tmp_path, existing_final, root
     if current_root:
         assert (final / "model.safetensors").read_text() == ("old" if existing_final else "new")
 
+    assert _latest_export(tmp_path) == str(final if current_root else step_export)
+
+
+def _latest_export(tmp_path):
     selected = subprocess.run(
         [
             "bash",
             "-c",
-            "source common/service_utils.sh >/dev/null; "
-            'latest_checkpoint "$1" exported-checkpoint-',
+            (
+                "source common/service_utils.sh >/dev/null; "
+                'latest_checkpoint "$1" exported-checkpoint-'
+            ),
             "bash",
-            str(out),
+            str(tmp_path / "out"),
         ],
         cwd=tmp_path,
-        env={
-            **os.environ,
-            "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}",
-        },
+        env={**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}"},
         capture_output=True,
         text=True,
         check=True,
     )
-    assert selected.stdout.strip() == str(final if current_root else step_export)
+    return selected.stdout.strip()
 
 
 @pytest.mark.parametrize("train_exit", [0, 1])
