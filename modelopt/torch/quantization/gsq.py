@@ -16,6 +16,7 @@
 """Regionwise Gumbel-Softmax refinement with ordinary ModelOpt quantizer state."""
 
 import hashlib
+import math
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
@@ -431,7 +432,10 @@ def _refine(region, selected, assignments, samples, options, saved, save):
             F.mse_loss(predict(args, kwargs, True).float(), target.float())
             for args, kwargs, target in samples
         ]
-        return torch.stack(losses).mean().item()
+        loss = torch.stack(losses).mean().item()
+        if not math.isfinite(loss):
+            raise FloatingPointError("Nonfinite GSQ reconstruction loss")
+        return loss
 
     initial_loss = evaluate()
     best_loss, best = (

@@ -163,15 +163,21 @@ def test_gsq_hard_fp8_values_include_boundaries_and_zero(zero):
     )
 
 
-def test_gsq_later_layer_failure_recovers_earlier_weights():
+@pytest.mark.parametrize("failure", ["soft", "initial_hard", "final_hard"])
+def test_gsq_later_layer_failure_recovers_earlier_weights(failure):
     class FailingMLP(nn.Sequential):
+        saw_soft_forward = False
+
         def forward(self, inputs):
             output = super().forward(inputs)
-            return (
-                output * float("nan")
-                if torch.is_grad_enabled() and output.requires_grad
-                else output
+            soft = torch.is_grad_enabled() and output.requires_grad
+            self.saw_soft_forward |= soft
+            fail = (
+                failure == "initial_hard"
+                or (failure == "soft" and soft)
+                or (failure == "final_hard" and self.saw_soft_forward and not soft)
             )
+            return output * float("nan") if fail else output
 
     class Model(nn.Module):
         def __init__(self):
@@ -188,23 +194,28 @@ def test_gsq_later_layer_failure_recovers_earlier_weights():
         lambda m: isinstance(m, Model), lambda m: m.layers
     )
     model = Model().eval()
+    model.layers[0].mlp[0].train()
+    model.layers[0].mlp[0].weight.requires_grad_(False)
+    training_modes = {name: module.training for name, module in model.named_modules()}
     original = copy.deepcopy(model)
     cfg = {
         "quant_cfg": [
             {"quantizer_name": "*", "enable": False},
             {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
         ],
-        "algorithm": {"method": "gsq", "steps": 1},
+        "algorithm": {"method": "gsq", "steps": 0 if failure == "initial_hard" else 1},
     }
     with pytest.raises(FloatingPointError):
         mtq.quantize(model, cfg, lambda m: m(torch.ones(2, 4), mask=torch.ones(4)))
     for parameter, reference in zip(model.parameters(), original.parameters()):
         assert torch.equal(parameter, reference)
-        assert parameter.requires_grad
+        assert parameter.requires_grad is reference.requires_grad
     assert not hasattr(model, "_original_forward")
     for layer in model.layers:
         assert not hasattr(layer, "_original_forward")
         assert layer.mlp[0].weight_quantizer.amax is None
+    for name, training in training_modes.items():
+        assert model.get_submodule(name).training is training
 
 
 @pytest.mark.parametrize("fingerprint", ["", "   "])
