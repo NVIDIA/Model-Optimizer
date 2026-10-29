@@ -279,15 +279,8 @@ def _build_transpose_replacement_or_raise(
             f"(op_type={tr.op_type!r}, name={tr.name!r})"
         )
         raise ValueError(msg)
-    if "_transformed" in tr.name:
-        msg = f"{ctx}: Transpose node name contains '_transformed' ({tr.name!r})"
-        raise ValueError(msg)
-
     tr_out = tr.output[0]
     mid_b, r2 = _parse_middleware_strict(tr_out, frozenset({"Reshape"}), cache, path_context=ctx)
-    if "_transformed" in r2.name:
-        msg = f"{ctx}: final Reshape name contains '_transformed' ({r2.name!r})"
-        raise ValueError(msg)
     ini2 = cache.get_init(r2.input[1])
     if ini2 is None or r2.input[1] in cache.graph_input_names:
         raise ValueError(
