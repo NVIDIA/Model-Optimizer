@@ -21,6 +21,7 @@ tiny real transformers configs served from memory, so the decision builds their 
 meta device.
 """
 
+import math
 import os
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -464,16 +465,20 @@ def test_an_ep_degree_of_0_is_auto(run_as, serve, monkeypatch, tmp_path, value):
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4)
 
 
+@pytest.mark.parametrize("tied", [False, True], ids=["untied", "tied-embeddings"])
 @pytest.mark.parametrize(
-    ("gpus_worth", "dense"), [(2, "replicate"), (1, "fsdp")], ids=["fits", "too-big"]
+    ("share", "dense"), [(0.59, "replicate"), (0.61, "fsdp")], ids=["fits", "too-big"]
 )
 def test_a_dense_model_is_fsdp_sharded_only_when_too_big_for_one_gpu(
-    run_as, serve, gpu_memory, tmp_path, gpus_worth, dense
+    run_as, serve, gpu_memory, tmp_path, share, dense, tied
 ):
-    """On a GPU only its own size, the whole model would leave less than 40% of it to calibration."""
+    """Taking more than 60% of a GPU, the whole model would leave too little to calibration. It is
+    sized as it loads, a tied embedding and LM head counting once, though its meta build unties
+    them."""
     run_as(4)
-    config = serve(LlamaConfig(**_TINY))
-    gpu_memory(gpus_worth * _bytes(_meta(config)))
+    config = serve(LlamaConfig(**_TINY, tie_word_embeddings=tied))
+    loaded = AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16)
+    gpu_memory(math.ceil(_bytes(loaded) / share))
 
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, dense=dense)
 
@@ -590,9 +595,9 @@ def test_the_expert_count_is_read_from_the_config_holding_the_plan(
         base_model_ep_plan={"layers.*.mlp.experts": "moe_tp_experts"}, num_experts=8
     )
     serve(SimpleNamespace(model_type="vlm", architectures=[], text_config=text, num_experts=3))
-    monkeypatch.setattr(
-        model_load_utils, "build_meta_causal_lm", lambda *a, **k: _model_with_decoder_at("model.")
-    )
+    built = _model_with_decoder_at("model.")
+    built.tie_weights = lambda: None  # a PreTrainedModel's; nothing here is tied
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: built)
     run_as(4)
 
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4)

@@ -1031,6 +1031,9 @@ def _decide_distribution(
             hf_config,
             auto_class=_auto_class(hf_config, trust_remote_code),
         )
+        # init_empty_weights re-wraps every parameter it registers, which unties what from_config
+        # tied: re-tie, so a tied embedding and LM head count once, as the loaded model holds them.
+        model.tie_weights()
     except Exception as e:
         raise RuntimeError(
             f"Deciding how to distribute {hf_config.model_type} needs its model built on the meta "
