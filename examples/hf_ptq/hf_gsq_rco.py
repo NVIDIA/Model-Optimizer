@@ -406,8 +406,9 @@ def _search(args, model, calibration, objective, formats, method, checkpoint, ta
         constraints={"effective_bits": target},
         quantization_formats=formats,
         data_loader=calibration,
-        forward_step=lambda m, b: _decoder(m)(
-            **_inputs(b, next(m.parameters()).device), use_cache=False
+        # Layerwise capture catches its early stop at the model root.
+        forward_step=lambda m, b: m(
+            **_inputs(b, next(m.parameters()).device), use_cache=False, logits_to_keep=1
         ),
         forward_backward_step=objective.cross_entropy
         if method["method"] == "gradient"

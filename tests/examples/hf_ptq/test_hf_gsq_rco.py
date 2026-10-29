@@ -238,3 +238,45 @@ def test_cached_teacher_autoquant_callback_and_ordinary_restore(example, tmp_pat
         )
     assert packed.model.layers[0].mlp.down_proj.weight.dtype == dtype
     assert packed.model.rotary_emb.inv_freq.dtype == torch.float32
+
+
+def test_example_gsq_search_traverses_layerwise_capture_and_preserves_head(example, tmp_path):
+    torch.manual_seed(5)
+    model = get_tiny_llama(dtype=torch.float32).eval()
+    original_head = model.lm_head.weight.detach().clone()
+    batch = {
+        "sample_id": 0,
+        "input_ids": torch.tensor([[1, 2, 3, 4]]),
+        "attention_mask": torch.ones((1, 4), dtype=torch.long),
+    }
+    objective = example.CachedTeacherKL.prepare(model, [batch], tmp_path / "teacher", "fixture", 2)
+    config = example._formats("max", {"steps": 1, "data_fingerprint": "fixture"})[1]
+    selected, state = example._search(
+        None,
+        model,
+        [batch],
+        objective,
+        [config],
+        {"method": "gradient", "data_fingerprint": "fixture", "preserve_candidate_weights": True},
+        tmp_path / "candidates.pt",
+        9,
+    )
+    assert state["best"]["is_satisfied"]
+    assert state["best"]["constraints"]["effective_bits"] <= 9
+    assert state["quantizer_states"]
+    for layer in selected.model.layers:
+        for region in ("self_attn", "mlp"):
+            assert layer.gsq[region]["best_loss"] <= layer.gsq[region]["initial_loss"]
+        assert not hasattr(layer, "_original_forward")
+    assert not hasattr(selected, "_original_forward")
+    torch.testing.assert_close(selected.lm_head.weight, original_head, rtol=0, atol=0)
+    assert any(
+        float(score) > 0 for stat in state["candidate_stats"].values() for score in stat["scores"]
+    )
+    assert torch.isfinite(objective.metric(selected, batch))
+    expected = selected(input_ids=batch["input_ids"], use_cache=False).logits
+    mto.save(selected, tmp_path / "modelopt.pt")
+    restored = mto.restore(get_tiny_llama(dtype=torch.float32).eval(), tmp_path / "modelopt.pt")
+    torch.testing.assert_close(
+        restored(input_ids=batch["input_ids"], use_cache=False).logits, expected, rtol=0, atol=0
+    )
