@@ -197,10 +197,10 @@ def test_late_refusal_preserves_the_original_model(axes_default):
         helper.make_node("ReduceSum", ["x", "dynamic_axes"], ["y"], keepdims=0),
     ]
     inputs = [
-        helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3]),
+        helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 1, 2, 3]),
         helper.make_tensor_value_info("dynamic_axes", TensorProto.INT64, [1]),
     ]
-    outputs = [helper.make_tensor_value_info("y", TensorProto.FLOAT, [3])]
+    outputs = [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 2, 3])]
     model = helper.make_model(
         helper.make_graph(nodes, "refusal", inputs, outputs),
         opset_imports=[helper.make_opsetid("", 21)],
@@ -210,9 +210,76 @@ def test_late_refusal_preserves_the_original_model(axes_default):
             numpy_helper.from_array(np.asarray([0], np.int64), "dynamic_axes")
         )
     before = model.SerializeToString()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Dynamic reduction axes"):
         _apply_standalone_reduce_operations(model)
     assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("axes_default", [False, True])
+@pytest.mark.parametrize("intermediate", [False, True])
+def test_pipeline_dynamic_reduction_axes_refuse_before_mutation(axes_default, intermediate):
+    """Reduction-control preflight must cover optional intermediate metadata and input defaults."""
+    data = "hidden" if intermediate else "x"
+    nodes = [helper.make_node("Identity", ["x"], [data])] if intermediate else []
+    nodes.extend(
+        [
+            helper.make_node("ReduceSum", [data, "fixed_axes"], ["ready"], keepdims=0),
+            helper.make_node("ReduceSum", [data, "dynamic_axes"], ["y"], keepdims=0),
+        ]
+    )
+    initializers = [numpy_helper.from_array(np.array([0], np.int64), "fixed_axes")]
+    if axes_default:
+        initializers.append(numpy_helper.from_array(np.array([0], np.int64), "dynamic_axes"))
+    model = _model(
+        nodes,
+        [
+            helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3]),
+            helper.make_tensor_value_info("dynamic_axes", TensorProto.INT64, [1]),
+        ],
+        [helper.make_tensor_value_info(name, TensorProto.FLOAT, [3]) for name in ["ready", "y"]],
+        initializers,
+    )
+    feeds = {
+        "x": np.arange(6, dtype=np.float32).reshape(2, 3),
+        "dynamic_axes": np.array([0], np.int64),
+    }
+    _execute(model, feeds)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="Dynamic reduction axes"):
+        _transform_make_dla_compatible(model, verbose=False)
+    assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("control", ["initializer", "Constant"])
+@pytest.mark.parametrize("intermediate", [False, True])
+def test_fixed_reduction_preflight_avoids_model_copy(control, intermediate, monkeypatch):
+    """Known fixed controls and inferable intermediate metadata need no full-model probe."""
+    data = "hidden" if intermediate else "x"
+    nodes = [helper.make_node("Identity", ["x"], [data])] if intermediate else []
+    axes = numpy_helper.from_array(np.array([0], np.int64), "axes")
+    if control == "Constant":
+        nodes.append(helper.make_node("Constant", [], ["axes"], value=axes))
+    nodes.append(helper.make_node("ReduceSum", [data, "axes"], ["y"], keepdims=0))
+    model = _model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [3])],
+        [axes] if control == "initializer" else [],
+    )
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    expected = _execute(model, feeds)
+    original = copy.deepcopy
+    model_copies = []
+
+    def track(value, *args, **kwargs):
+        if isinstance(value, onnx.ModelProto):
+            model_copies.append(value)
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(copy, "deepcopy", track)
+    transformed = _transform_make_dla_compatible(model, verbose=False)
+    np.testing.assert_array_equal(_execute(transformed, feeds)[0], expected[0])
+    assert not model_copies
 
 
 @pytest.mark.parametrize("axes", [[-2], [-1, 0], [0, -1]])

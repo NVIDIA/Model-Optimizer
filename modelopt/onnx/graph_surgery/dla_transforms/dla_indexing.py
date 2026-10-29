@@ -31,7 +31,7 @@ from ..utils.graph_utils import (
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _RANK_AGNOSTIC_OPS, _subgraph_captures
 from .dla_matmul_to_transpose_conv_transpose import _apply_matmul_to_transpose_conv_transpose
-from .dla_model_boundaries import _has_native_symbolic_data, _native_conv1d
+from .dla_model_boundaries import _BoundaryPreflightError, _has_native_symbolic_data, _native_conv1d
 
 __all__ = []
 
@@ -671,29 +671,68 @@ def _apply_gather_elements(model, *, prepared_data_ops=(), validate_only=False):
     return model
 
 
-def _apply_standalone_reduce_operations(model, *, prepared_data_ops=()):
+def _apply_standalone_reduce_operations(model, *, prepared_data_ops=(), validate_only=False):
     """Plan native reduction axes and preserve their output layouts during rank promotion."""
     graph = model.graph
+    selected = _operator_nodes(model, {"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"})
+    if not selected:
+        return model
     cache = GraphCache(graph)
     nodes = []
     count = 0
     plans = {}
-    selected = _operator_nodes(model, {"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"})
     prepared = _prepared_index_data(
-        model, cache, prepared_data_ops, [node.input[0] for node in selected]
+        model,
+        cache,
+        prepared_data_ops,
+        [node.input[0] for node in selected],
+        before_boundary=validate_only,
+    )
+    shapes = {id(node): _shape_before_boundary_promotion(cache, node.input[0]) for node in selected}
+    constant_controls = (
+        {name for node in _operator_nodes(model, {"Constant"}) for name in node.output}
+        if validate_only and model.ir_version > 3 and "ConstantsToInitializers" in prepared_data_ops
+        else set()
     )
     for node in selected:
-        shape = _shape_before_boundary_promotion(cache, node.input[0])
+        tensor = cache.get_init(node.input[1]) if len(node.input) > 1 else None
+        if (
+            len(node.input) > 1
+            and node.input[1] in constant_controls
+            and node.input[1] not in cache.graph_input_names
+        ):
+            continue
+        if (
+            len(node.input) > 1
+            and (tensor is None or tensor.name in cache.graph_input_names)
+            and (
+                (validate_only and prepared[node.input[0]])
+                or shapes[id(node)]
+                or (
+                    validate_only
+                    and (keepdims := _attribute(node, "keepdims")) is not None
+                    and keepdims.i == 0
+                )
+            )
+        ):
+            error = (
+                _BoundaryPreflightError if node.input[1] in cache.graph_input_names else ValueError
+            )
+            raise error(f"Dynamic reduction axes are unsupported for {node.name!r}")
+    for node in selected:
+        shape = shapes[id(node)]
+        tensor = cache.get_init(node.input[1]) if len(node.input) > 1 else None
         if not shape:
+            if validate_only:
+                continue
             keepdims = _attribute(node, "keepdims")
             if keepdims is not None and keepdims.i == 0:
                 raise ValueError(f"Missing static reduction input shape for {node.name!r}")
             continue  # Already rank-preserving, including generated 4D reduction branches.
         if len(shape) in (2, 3) and not prepared[node.input[0]]:
             raise ValueError(f"{node.name!r}: reduction data requires rank preparation")
-        tensor = cache.get_init(node.input[1]) if len(node.input) > 1 else None
-        if len(node.input) > 1 and (tensor is None or tensor.name in cache.graph_input_names):
-            raise ValueError(f"Dynamic reduction axes are unsupported for {node.name!r}")
+        if validate_only:
+            continue
         attribute = _attribute(node, "axes")
         raw_axes = (
             numpy_helper.to_array(tensor).reshape(-1).tolist()
@@ -709,6 +748,8 @@ def _apply_standalone_reduce_operations(model, *, prepared_data_ops=()):
         if output_shape is None:
             output_shape = [dim for index, dim in enumerate(shape) if index not in reduced]
         plans[id(node)] = (shape, raw_axes, output_shape)
+    if validate_only:
+        return model
     for node in graph.node:
         nodes.append(node)
         if id(node) not in plans:

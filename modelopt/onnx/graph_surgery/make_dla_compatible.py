@@ -149,6 +149,10 @@ def _validate_boundary_contract(
     """Refuse unsupported native layouts before adapting any public boundary."""
     if "GatherElements" in prepared_input_ops:
         _apply_gather_elements(model, prepared_data_ops=prepared_input_ops, validate_only=True)
+    if "StandaloneReduceOperations" in prepared_input_ops:
+        _apply_standalone_reduce_operations(
+            model, prepared_data_ops=prepared_input_ops, validate_only=True
+        )
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     cache = GraphCache(model.graph)
     for node in model.graph.node:
