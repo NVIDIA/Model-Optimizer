@@ -71,6 +71,15 @@ def run_as(monkeypatch):
     monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
     monkeypatch.setattr(torch.distributed, "broadcast_object_list", lambda *a, **k: None)
     monkeypatch.setattr(torch.distributed, "all_gather_object", _gathered_alike)
+    broadcast_from = dist.broadcast_from
+
+    def broadcast_as_the_first(label, fn, src=0):
+        # broadcast_from sends from dist.rank(), which process_group sets for the FSDP2 load.
+        with monkeypatch.context() as sending:
+            sending.setattr(dist, "rank", lambda group=None: src)
+            return broadcast_from(label, fn, src)
+
+    monkeypatch.setattr(dist, "broadcast_from", broadcast_as_the_first)
 
     def enter(world_size, rank=0):
         monkeypatch.setattr(dist, "is_distributed_run", lambda: world_size > 1)
