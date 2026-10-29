@@ -761,17 +761,19 @@ def _apply_group_query_attention(model, *, prepared_data_ops=()):
     selected_ids = {
         id(node) for node in _operator_nodes(model, {"GroupQueryAttention"}, ("com.microsoft",))
     }
-    prepared = _prepared_index_data(
-        model,
-        cache,
-        set(prepared_data_ops) | {"GroupQueryAttention"},
-        [
-            name
-            for node in graph.node
-            if id(node) in selected_ids
-            for name in node.input[:3]
-            if name and name not in boundaries
-        ],
+    data_names = [
+        name
+        for node in graph.node
+        if id(node) in selected_ids
+        for name in node.input[:3]
+        if name and name not in boundaries
+    ]
+    prepared = (
+        _prepared_index_data(
+            model, cache, set(prepared_data_ops) | {"GroupQueryAttention"}, data_names
+        )
+        if data_names
+        else {}
     )
     for node in graph.node:
         if id(node) not in selected_ids:
