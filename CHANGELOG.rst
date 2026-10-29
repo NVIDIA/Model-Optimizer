@@ -69,6 +69,7 @@ Changelog
 - Preserve accumulated histogram counts when computing an entropy calibration threshold with NumPy histograms.
 - ``mtq.quantize`` and ``mtq.calibrate`` now give every module back the training mode it had. They used to leave every module in the mode of the model passed in, so a module in eval mode inside a model in training mode came back in training mode.
 - Diffusers ``export_hf_checkpoint`` now honors ``save_modelopt_state=False`` (the default) when HuggingFace checkpointing is enabled. Pass ``save_modelopt_state=True`` to retain the ModelOpt state file.
+- The ``c4``, ``wikipedia`` and ``pile`` calibration datasets load again; they now use ``allenai/c4``, ``wikimedia/wikipedia`` (``20231101.en``) and ``monology/pile-uncopyrighted``. The ``pg19`` entry is removed; pass ``--dataset emozilla/pg19`` or a local copy instead.
 - Layerwise-calibration resume (``checkpoint_dir``) no longer runs code from a modified checkpoint directory; an unusable file now fails with an error instead.
 - The default PTQ recipes now leave multi-token-prediction (MTP) layers unquantized in Megatron vision-language models too (``language_model.mtp.*``), as they already did at the model root.
 - Fix GPT-OSS draft training with pre-normalization teacher hidden states by enabling the target model's final normalization.
