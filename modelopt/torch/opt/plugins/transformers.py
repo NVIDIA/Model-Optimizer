@@ -256,7 +256,9 @@ class ModelOptTrainerArguments(ModelOptHFArguments):
         metadata={
             "help": (
                 "Run `gc.collect()` before each training/prediction step to work around "
-                "GPU memory leaks during QAT/distillation."
+                "GPU memory leaks during QAT/distillation. After the first optimizer step, objects "
+                "that live until `train()` returns are frozen (`gc.freeze()`) so these "
+                "collections skip them."
             ),
         },
     )
@@ -526,6 +528,7 @@ class ModelOptHFTrainer(Trainer):
         if trainer_args is None and isinstance(self.args, ModelOptTrainerArguments):
             trainer_args = self.args
         self.trainer_args = trainer_args or ModelOptTrainerArguments()
+        self._gc_frozen = False
         self._lr_config = self._resolve_lr_config(lr_config, self.trainer_args)
         self._apply_gradient_checkpointing_defaults()
         self.add_callback(_MemoryReportCallback())
@@ -554,14 +557,37 @@ class ModelOptHFTrainer(Trainer):
     def training_step(self, *args, **kwargs):
         """Run gc.collect() before the training step if manual_gc is enabled."""
         if self.trainer_args.manual_gc:
-            gc.collect()
+            self._collect_garbage(freeze=True)
         return super().training_step(*args, **kwargs)
 
     def prediction_step(self, *args, **kwargs):
         """Run gc.collect() before the prediction step if manual_gc is enabled."""
         if self.trainer_args.manual_gc:
-            gc.collect()
+            self._collect_garbage()
         return super().prediction_step(*args, **kwargs)
+
+    def _collect_garbage(self, freeze=False):
+        """``gc.collect()``; with ``freeze``, also ``gc.freeze()`` once training is under way.
+
+        After the first optimizer step the models, quantizers and optimizer state exist and stay
+        alive until ``train()`` returns. Frozen, later collections skip them instead of rescanning
+        them every step, which took about 0.5 s per collection on a 30B MoE.
+        """
+        gc.collect()
+        if freeze and not self._gc_frozen and self.state.global_step >= 1:
+            gc.freeze()
+            self._gc_frozen = True
+
+    def train(self, *args, **kwargs):
+        """Train, then unfreeze what the per-step collections froze so it can be freed."""
+        try:
+            return super().train(*args, **kwargs)
+        finally:
+            if self._gc_frozen:
+                # Also unfreezes anything frozen before (Python itself starts with a few frozen
+                # objects); that only makes later collections scan them again.
+                gc.unfreeze()
+                self._gc_frozen = False
 
     def _load_best_model(self, *args, **kwargs):
         """Run gc.collect() before loading the best model if manual_gc is enabled."""
