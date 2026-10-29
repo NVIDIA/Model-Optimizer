@@ -14,10 +14,12 @@
 # limitations under the License.
 
 import argparse
+import base64
 import copy
 import getpass
 import importlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -127,6 +129,139 @@ def test_candidate_listing_needs_no_model_or_gpu(monkeypatch, capsys, recipe, co
     candidates = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert [candidate["index"] for candidate in candidates] == list(range(count))
     assert len({candidate["signature"] for candidate in candidates}) == count
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Automatic workers require POSIX locks")
+def test_automatic_pipeline_expansion_and_cli(monkeypatch, tmp_path):
+    monkeypatch.delenv("SLURM_GPUS_ON_NODE", raising=False)
+    monkeypatch.syspath_prepend(str(_EXAMPLES_DIR.parents[1] / "tools" / "launcher"))
+    generate = importlib.import_module("autoquant").generate_auto_quantize_pipeline
+    model = tmp_path / "model 'quoted' $(false)"
+    model.mkdir()
+    resources = {
+        "max_concurrent_formats": 2,
+        "max_total_gpus": 2,
+        "allocated_gpus_per_worker": 1,
+        "gpu_bytes": 8 * 1024**3,
+        "host_bytes": 32 * 1024**3,
+        "input_bytes": 1024**2,
+        "candidate_bytes": 1024**3,
+        "checkpoint_bytes": 4 * 1024**3,
+        "metadata_bytes": 1024**2,
+        "export_bytes": 2 * 1024**3,
+        "artifact_storage_bytes": 16 * 1024**3,
+        "retries": 1,
+    }
+    options = {
+        "recipe": "general/auto_quantize/nvfp4_fp8_at_5p4bits",
+        "model": str(model),
+        "dataset": "cnn_dailymail",
+        "work_dir": str(tmp_path / "work"),
+        "export_path": str(tmp_path / "export"),
+        "slurm_config": {"time": "00:10:00"},
+        "resources": resources,
+    }
+    pipeline = generate(**options)["pipeline"]
+    assert pipeline["max_concurrent_tasks"] == 2
+    assert len(pipeline["tasks"]) == 3
+    assert [task["wait_for_all"] for task in pipeline["tasks"]] == [False, False, True]
+    for index, task in enumerate(pipeline["tasks"]):
+        encoded = task["environment"][0]["MODELOPT_AUTOQUANT_PIPELINE"]
+        exported = subprocess.check_output(
+            [
+                "bash",
+                "-c",
+                f'export MODELOPT_AUTOQUANT_PIPELINE={encoded}\nprintf "%s" "$MODELOPT_AUTOQUANT_PIPELINE"',
+            ],
+            text=True,
+            timeout=5,
+        )
+        assert exported == encoded
+        monkeypatch.setenv("MODELOPT_AUTOQUANT_PIPELINE", exported)
+        _, args = _parse_hf_ptq_args(monkeypatch, "--auto_quantize_pipeline")
+        assert load_recipe(args.recipe) == load_recipe(options["recipe"])
+        assert args.auto_quantize_calibration_candidate == (index if index < 2 else None)
+        assert (args.calib_size, args.batch_size, args.calib_seq) == ([512], 1, 512)
+        assert args.kv_cache_qformat == "none"
+        candidates = importlib.import_module("autoquant_utils")._calibration_candidates(args)
+        assert len(candidates) == 2
+        assert task["slurm_config"]["mem"] == "32768M"
+        assert (args.auto_quantize_checkpoint is None) == (index < 2)
+    adapter = importlib.import_module("autoquant_pipeline")
+    assignment = Path(args.auto_quantize_assignment)
+    adapter.publish_json(assignment, {"complete": True}, args)
+    adapter.publish_json(assignment, {"complete": True}, args)
+    with pytest.raises(ValueError):
+        adapter.publish_json(assignment, {"complete": False}, args)
+    oversized = assignment.with_name("oversized.json")
+    with pytest.raises(ValueError):
+        adapter.publish_json(oversized, "x" * resources["metadata_bytes"], args)
+    assert not oversized.exists()
+    interrupted = Path(options["work_dir"]) / ".metadata.tmp"
+    interrupted.write_text("interrupted publication")
+    adapter.publish_json(assignment, {"complete": True}, args)
+    assert not interrupted.exists()
+    spec = json.loads(
+        base64.b64decode(pipeline["tasks"][0]["environment"][0]["MODELOPT_AUTOQUANT_PIPELINE"])
+    )
+    spec["dataset"] = "different-inputs"
+    monkeypatch.setenv(
+        "MODELOPT_AUTOQUANT_PIPELINE", base64.b64encode(json.dumps(spec).encode()).decode()
+    )
+    with pytest.raises(ValueError):
+        _parse_hf_ptq_args(monkeypatch, "--auto_quantize_pipeline")
+    for invalid in (
+        {"max_total_gpus": 1},
+        {"allocated_gpus_per_worker": 4},
+        {"artifact_storage_bytes": 1},
+        {"retries": 4},
+    ):
+        with pytest.raises(ValueError):
+            generate(**{**options, "resources": {**resources, **invalid}})
+        spec = json.loads(
+            base64.b64decode(pipeline["tasks"][0]["environment"][0]["MODELOPT_AUTOQUANT_PIPELINE"])
+        )
+        spec["resources"].update(invalid)
+        spec["work_dir"] = str(tmp_path / "refused-work")
+        monkeypatch.setenv(
+            "MODELOPT_AUTOQUANT_PIPELINE", base64.b64encode(json.dumps(spec).encode()).decode()
+        )
+        with pytest.raises(ValueError):
+            _parse_hf_ptq_args(monkeypatch, "--auto_quantize_pipeline")
+        assert not Path(spec["work_dir"]).exists()
+    whole_node = generate(
+        **{
+            **options,
+            "resources": {**resources, "allocated_gpus_per_worker": 4, "max_total_gpus": 8},
+        }
+    )["pipeline"]
+    assert whole_node["max_concurrent_tasks"] == 2
+    assert all(task["slurm_config"]["gpus_per_node"] == 4 for task in whole_node["tasks"])
+    assert all(
+        task["slurm_config"]["srun_args"] == ["--no-container-mount-home", "--gpus-per-task=1"]
+        for task in whole_node["tasks"]
+    )
+    with pytest.raises(ValueError):
+        generate(**{**options, "slurm_config": {"gpus_per_node": 4}})
+    spec = json.loads(
+        base64.b64decode(pipeline["tasks"][0]["environment"][0]["MODELOPT_AUTOQUANT_PIPELINE"])
+    )
+    spec["work_dir"] = str(tmp_path / "overallocated-work")
+    monkeypatch.setenv(
+        "MODELOPT_AUTOQUANT_PIPELINE", base64.b64encode(json.dumps(spec).encode()).decode()
+    )
+    monkeypatch.setenv("SLURM_GPUS_ON_NODE", "4")
+    with pytest.raises(ValueError):
+        _parse_hf_ptq_args(monkeypatch, "--auto_quantize_pipeline")
+    assert not Path(spec["work_dir"]).exists()
+    with pytest.raises(ValueError):
+        generate(
+            **{
+                **options,
+                "recipe": "models/zai-org/GLM-5.3-Flash-BF16/auto_quantize/iq2_gptq_nvfp4_fp8_at_2p75bits",
+            }
+        )
+    assert not Path(options["export_path"]).exists()
 
 
 def test_recipe_help_distinguishes_weight_and_kv_autoquant(monkeypatch, capsys):

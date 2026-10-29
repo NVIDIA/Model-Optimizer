@@ -22,10 +22,16 @@ from fnmatch import fnmatch
 from typing import Any
 
 import torch
+from autoquant_pipeline import publish_json
 from torch.utils.data import DataLoader
 
 import modelopt.torch.quantization as mtq
-from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
+from modelopt.recipe import (
+    ModelOptAutoQuantizeRecipe,
+    freeze_auto_quantize_assignment,
+    load_recipe,
+    plan_auto_quantize,
+)
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
 from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.kv_cache_auto_quant import _forward_kl
@@ -248,7 +254,18 @@ def auto_quantize(
         if limit is not None:
             auto_quantize_kwargs["calibration"]["max_input_bytes"] = limit
 
-    language_model, _ = mtq.auto_quantize(
+    if getattr(args, "auto_quantize_pipeline", False):
+        auto_quantize_kwargs["calibration"].update(
+            collect_scores=True,
+            max_candidate_bytes=args.auto_quantize_resources["candidate_bytes"],
+            max_artifact_bytes=args.auto_quantize_resources[
+                "candidate_bytes"
+                if args.auto_quantize_calibration_candidate is not None
+                else "checkpoint_bytes"
+            ],
+        )
+
+    language_model, search_state = mtq.auto_quantize(
         language_model,
         **auto_quantize_kwargs,
     )
@@ -257,6 +274,14 @@ def auto_quantize(
         or getattr(args, "auto_quantize_calibration_candidate", None) is not None
     ):
         return language_model
+
+    if getattr(args, "auto_quantize_pipeline", False):
+        assignment = freeze_auto_quantize_assignment(
+            search_state,
+            plan_auto_quantize(load_recipe(args.recipe)),
+            search_state["calibration_provenance"]["contract"]["identity"],
+        )
+        publish_json(args.auto_quantize_assignment, assignment.as_dict(), args)
 
     # KV cache quantization is uniform; applied after the LP search.
     kv_cache_quant_cfg = inputs["kv_cache_quant_cfg"]

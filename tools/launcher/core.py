@@ -28,6 +28,7 @@ import subprocess  # nosec B404
 import sys
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
 
 import nemo_run as run
 import yaml
@@ -74,7 +75,7 @@ def get_default_env(experiment_title=None):
 
 # SlurmConfig type — set by the caller via set_slurm_config_type() before use.
 # This allows both slurm.py and launch.py to use their own SlurmConfig class.
-_SLURM_CONFIG_TYPE = None
+_SLURM_CONFIG_TYPE: type | None = None
 _FACTORY_REGISTRY = {}
 
 
@@ -209,6 +210,10 @@ def _explicit_slurm_fields_from_yaml(yaml_path: str | None, task_name: str) -> s
     if not isinstance(pipeline, dict):
         return None
     task = pipeline.get(task_name)
+    if task is None and isinstance(pipeline.get("tasks"), list):
+        index = int(task_name.removeprefix("task_"))
+        if index < len(pipeline["tasks"]):
+            task = pipeline["tasks"][index]
     if not isinstance(task, dict):
         return None
     slurm_config = task.get("slurm_config")
@@ -248,7 +253,7 @@ class SandboxPipeline:
     task_2: SandboxTask2 = None
     task_3: SandboxTask3 = None
     task_4: SandboxTask4 = None
-    tasks: list[SandboxTask] = None
+    tasks: list[Any] = None  # NeMo's list parser needs raw mappings; normalized below.
 
     assets: list[str] = None  # HF repo paths (relative to hf_local) to verify before submission
 
@@ -277,6 +282,17 @@ class SandboxPipeline:
                 task = getattr(self, f"task_{i}", None)
                 if task is not None:
                     self.tasks += [task]
+
+        # NeMo's YAML parser accepts dictionaries inside lists, but not dataclasses.
+        lookup = self._factory_lookup or _FACTORY_REGISTRY
+        for index, task in enumerate(self.tasks):
+            if isinstance(task, dict):
+                config = dict(task.get("slurm_config") or {})
+                factory = config.pop("_factory_", None)
+                constructor = lookup[factory] if factory else _SLURM_CONFIG_TYPE
+                if constructor is None:
+                    raise ValueError("Register a SlurmConfig type before loading task mappings")
+                self.tasks[index] = SandboxTask(**{**task, "slurm_config": constructor(**config)})
 
         # When slurm.py/launch.py processes a --yaml launcher-format YAML,
         # nemo_run constructs SlurmConfig directly from the YAML dict, silently
