@@ -1008,19 +1008,23 @@ def enable_fake_quant(module):
     This is used to prevent weight compression from being triggered during an unshard() call. A
     sequential weight quantizer (W4A8) holds the flag on each of its stages.
     """
+    from ..nn import TensorQuantizer  # local: ..nn imports this utils package at module scope
+
     quantizers = [
         q
         for m in module.modules()
         if hasattr(m, "weight_quantizer")
         for q in m.weight_quantizer.modules()
-        if hasattr(q, "_fake_quant")
+        if isinstance(q, TensorQuantizer)
     ]
     original_fake_quant = [q._fake_quant for q in quantizers]
     for q in quantizers:
         q._fake_quant = True
-    yield
-    for q, fake_quant in zip(quantizers, original_fake_quant):
-        q._fake_quant = fake_quant
+    try:
+        yield
+    finally:
+        for q, fake_quant in zip(quantizers, original_fake_quant):
+            q._fake_quant = fake_quant
 
 
 @contextmanager
