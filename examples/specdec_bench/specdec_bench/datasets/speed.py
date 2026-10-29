@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # mypy: disable-error-code="index"
-# Paper-derived prompt strings carry intentional whitespace/long lines; keep them verbatim.
+# Paper-derived prompt strings carry intentional long lines; keep them verbatim.
 # ruff: noqa: E501
 import ast
 import json
@@ -79,14 +79,8 @@ DATASETS_AND_LOADERS_FUNCTIONS = {
     BenchmarkDataset.CNN_DAILYMAIL.value: lambda dataset_name, config_name: load_dataset(
         dataset_name, config_name, split="test"
     ),
-    BenchmarkDataset.HLE.value: lambda dataset_name, config_name: (
-        load_dataset(
-            dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb"
-        )
-        if config_name != "train_test_split"
-        else load_dataset(
-            dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb"
-        ).train_test_split(test_size=0.5, shuffle=True, seed=42)
+    BenchmarkDataset.HLE.value: lambda dataset_name, config_name: load_dataset(
+        dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb"
     ),
     BenchmarkDataset.LIVECODEBENCH.value: lambda dataset_name, config_name: load_dataset(
         "json",
@@ -169,11 +163,6 @@ class SPEEDBench(Dataset):
             self.external_datasets[full_name] = DATASETS_AND_LOADERS_FUNCTIONS[dataset_name](
                 dataset_name, config_name
             )
-            if config_name == "train_test_split":
-                self.external_datasets[full_name] = (
-                    self.external_datasets[full_name]["train"],
-                    self.external_datasets[full_name]["test"],
-                )
         return self.external_datasets[full_name]
 
     @staticmethod
@@ -626,18 +615,21 @@ her fear and anger)."""
             example["turns"] = self._generate_chatrag_bench_prompt(external_dataset_example)
 
         elif BenchmarkDataset.MMLU_PRO.value in example["source"]:
-            external_dataset = self._get_external_dataset(
-                BenchmarkDataset.MMLU_PRO.value, config_name="test"
-            ).to_pandas()
-            external_dataset["group"] = external_dataset.index // 2
-            external_dataset = external_dataset.groupby(["group", "category"]).agg(
-                {
-                    "question": lambda questions: list(questions),
-                    "options": lambda options: list(options),
-                    "question_id": lambda question_ids: "_".join(question_ids.astype(str)),
-                    "category": lambda categories: categories.iloc[0],
-                }
-            )
+            if "mmlu_pro_grouped" not in self.external_datasets:
+                external_dataset = self._get_external_dataset(
+                    BenchmarkDataset.MMLU_PRO.value, config_name="test"
+                ).to_pandas()
+                external_dataset["group"] = external_dataset.index // 2
+                self.external_datasets["mmlu_pro_grouped"] = external_dataset.groupby(
+                    ["group", "category"]
+                ).agg(
+                    {
+                        "question": list,
+                        "options": list,
+                        "question_id": lambda question_ids: "_".join(question_ids.astype(str)),
+                    }
+                )
+            external_dataset = self.external_datasets["mmlu_pro_grouped"]
             src_id = ast.literal_eval(example["src_id"].removeprefix("mmlu_pro_"))
             external_dataset_example = external_dataset.loc[src_id]
             example["turns"] = self._generate_mmlu_pro_prompt(
@@ -652,11 +644,17 @@ her fear and anger)."""
             )
             row = external_dataset[fields["row"]]
             answers = [row["all_answers"][index] for index in fields["answers"]]
-            example["turns"] = [
-                self._pad_or_truncate_prompt(
-                    self._generate_stackselect_prompt(row["question"], answers), num_tokens
+            prompt = self._generate_stackselect_prompt(row["question"], answers)
+            # Match v1.1 padding/truncation before validating the reconstructed length.
+            prompt = self._pad_or_truncate_prompt(prompt, num_tokens)
+            actual_tokens = len(
+                tiktoken.get_encoding("o200k_base").encode(prompt, disallowed_special=())
+            )
+            if actual_tokens != num_tokens:
+                raise ValueError(
+                    f"StackSelect prompt for {example['src_id']} has {actual_tokens} tokens; expected {num_tokens}"
                 )
-            ]
+            example["turns"] = [prompt]
 
         elif BenchmarkDataset.ADALEVAL_TEXTSORT.value in example["source"]:
             num_tokens = self._get_num_tokens_from_config(speed_config)
@@ -666,6 +664,8 @@ her fear and anger)."""
             src_id = example["src_id"].split("_")[1]
             external_dataset_example = external_dataset.select([int(src_id)])
             prompt = self._generate_textsort_prompt(external_dataset_example["prompt"][0])
+            # Preserve exact v1.1 reconstruction: only 100K trims Part 4, and short
+            # prompts must fail rather than introduce padding absent from the benchmark.
             example["turns"] = [
                 self._trim_textsort_prompt(
                     prompt, external_dataset_example["chapters"][0][3], num_tokens
