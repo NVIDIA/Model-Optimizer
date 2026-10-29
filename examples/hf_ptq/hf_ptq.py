@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import json
 import os
 import random
 import time
@@ -25,9 +26,11 @@ import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
 from autoquant_utils import (
+    _calibration_candidates,
     _get_autoquant_memory_probe,
     _quantize_config_explicitly_enables_kv,
     _recipe_is_auto_quantize,
+    _recipe_is_kv_auto_quantize,
     auto_quantize,
 )
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
@@ -633,6 +636,8 @@ def _run_auto_quantize_recipe(
     )
 
     if followup_kv is not None:
+        if getattr(args, "auto_quantize_calibration_candidate", None) is not None:
+            return
         auto_quantize(
             args,
             full_model,
@@ -1132,6 +1137,9 @@ def quantize_main(
         else:
             print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
 
+    if getattr(args, "auto_quantize_calibration_candidate", None) is not None:
+        return
+
     # If asked, run the closed-form MXFP4 -> NVFP4 cast: read the source MXFP4
     # *_scales tensors and pin each NVFP4 weight quantizer's scale_2 to 2^m.
     # Runs after calibration (max_calibrate has already promoted weight quantizers
@@ -1160,6 +1168,24 @@ def quantize_main(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--auto_quantize_calibration_dir", help="Shared independent calibration results"
+    )
+    parser.add_argument(
+        "--auto_quantize_list_calibration_candidates",
+        action="store_true",
+        help="Print canonical worker indices and signatures without loading model weights",
+    )
+    parser.add_argument(
+        "--auto_quantize_calibration_max_input_bytes",
+        type=int,
+        help="Maximum CPU input-snapshot bytes per worker (default: 67108864)",
+    )
+    parser.add_argument(
+        "--auto_quantize_calibration_candidate",
+        type=int,
+        help="Calibrate only this canonical candidate index; omit to coordinate",
+    )
     parser.add_argument(
         "--pyt_ckpt_path",
         "--model",
@@ -1434,6 +1460,29 @@ def parse_args() -> argparse.Namespace:
     # Flipped by export_quantized once a checkpoint is actually on disk. The MLflow pointer
     # is gated on it rather than on --export_path existing, which proves nothing.
     args.checkpoint_exported = False
+    if args.auto_quantize_list_calibration_candidates and (
+        not _recipe_is_auto_quantize(args.recipe) or _recipe_is_kv_auto_quantize(args.recipe)
+    ):
+        parser.error("Candidate listing requires a weight AutoQuantize recipe")
+    if args.auto_quantize_calibration_max_input_bytes is not None and (
+        args.auto_quantize_calibration_max_input_bytes < 1 or not args.auto_quantize_calibration_dir
+    ):
+        parser.error(
+            "Input snapshot limits require a positive byte count and calibration directory"
+        )
+    if args.auto_quantize_calibration_dir or args.auto_quantize_calibration_candidate is not None:
+        if (
+            not args.auto_quantize_calibration_dir
+            or not _recipe_is_auto_quantize(args.recipe)
+            or _recipe_is_kv_auto_quantize(args.recipe)
+        ):
+            parser.error(
+                "Independent calibration requires a weight AutoQuantize recipe and calibration directory"
+            )
+        if args.auto_quantize_calibration_candidate is not None and (
+            args.auto_quantize_calibration_candidate < 0 or args.auto_quantize_checkpoint
+        ):
+            parser.error("Candidate workers require a nonnegative index and no shared checkpoint")
     resolve_mlflow_args(args, parser, HF_PTQ)
 
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
@@ -1502,6 +1551,9 @@ def parse_args() -> argparse.Namespace:
 # Derived state and the tracking settings themselves; everything else argparse parsed is a
 # parameter of the run. Deriving the list means a new flag is tracked without touching this.
 def main(args: argparse.Namespace):
+    if getattr(args, "auto_quantize_list_calibration_candidates", False):
+        print(json.dumps(_calibration_candidates(args)))
+        return
     if not torch.cuda.is_available():
         raise OSError("GPU is required for inference.")
 

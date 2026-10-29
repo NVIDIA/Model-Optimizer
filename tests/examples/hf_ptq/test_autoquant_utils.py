@@ -15,6 +15,7 @@
 
 """Offline coverage for the Hugging Face AutoQuantize example helpers."""
 
+import copy
 import importlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -269,7 +270,6 @@ def test_kv_autoquant_kl_excludes_padding_positions(autoquant_utils):
 
 
 def test_kv_autoquant_kl_rejects_misaligned_attention_mask(autoquant_utils):
-
     with pytest.raises(ValueError, match="matching token dimensions"):
         autoquant_utils._select_unpadded_logits(
             torch.zeros(2, 4, 3), {"attention_mask": torch.ones(2, 3)}
@@ -368,7 +368,6 @@ def test_autoquant_retains_fsdp2_warning(autoquant_utils, monkeypatch, domain):
 
 
 def test_recipe_distinguishes_weight_and_kv_autoquant(autoquant_utils):
-
     assert autoquant_utils._recipe_is_kv_auto_quantize(
         "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits"
     )
@@ -548,3 +547,33 @@ def test_autoquant_export_guard_not_bypassed_by_effective_bits(autoquant_utils):
     )
     with pytest.raises(ValueError, match="not supported for unified checkpoint export"):
         autoquant_utils._mtq_inputs_from_auto_quantize_config(aq, args)
+
+
+def test_hf_candidate_worker_and_coordinator_use_public_api(autoquant_utils, tmp_path):
+    torch.manual_seed(19)
+    source = get_tiny_llama(num_hidden_layers=1).eval()
+    inputs = torch.randint(0, source.config.vocab_size, (1, 8))
+    batches = [{"input_ids": inputs, "labels": inputs.clone()}]
+    aq = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(effective_bits=8.0),
+        candidate_formats=[QuantizeConfig(**QUANT_CFG_CHOICES["fp8"])],
+        score_size=1,
+    )
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=False,
+        batch_size=1,
+        kv_cache_qformat="none",
+        auto_quantize_checkpoint=None,
+        auto_quantize_calibration_dir=str(tmp_path / "candidates"),
+        auto_quantize_calibration_candidate=0,
+    )
+    autoquant_utils.auto_quantize(args, copy.deepcopy(source), batches, aq)
+    args.auto_quantize_calibration_candidate = None
+    model = autoquant_utils.auto_quantize(
+        args, copy.deepcopy(source), batches, aq, checkpoint=str(tmp_path / "search")
+    )
+    assert (tmp_path / "search" / "rank0.pth").is_file()
+    with torch.no_grad():
+        assert torch.isfinite(model(**batches[0]).logits).all()

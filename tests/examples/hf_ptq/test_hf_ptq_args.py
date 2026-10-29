@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import copy
 import getpass
 import importlib
 import json
@@ -65,6 +66,67 @@ def _parse_hf_ptq_args(monkeypatch, *args):
     )
     parsed_args.calib_size = [int(num_sample) for num_sample in parsed_args.calib_size.split(",")]
     return hf_ptq, parsed_args
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--auto_quantize_calibration_candidate", "0"],
+        ["--auto_quantize_calibration_dir", "candidates"],
+        ["--auto_quantize_list_calibration_candidates"],
+        ["--auto_quantize_calibration_max_input_bytes", "0"],
+        [
+            "--recipe",
+            "general/auto_quantize/nvfp4_fp8_at_5p4bits",
+            "--auto_quantize_calibration_dir",
+            "candidates",
+            "--auto_quantize_calibration_candidate",
+            "-1",
+        ],
+        [
+            "--recipe",
+            "general/auto_quantize/nvfp4_fp8_at_5p4bits",
+            "--auto_quantize_calibration_dir",
+            "candidates",
+            "--auto_quantize_calibration_candidate",
+            "0",
+            "--auto_quantize_checkpoint",
+            "shared",
+        ],
+        [
+            "--recipe",
+            "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+            "--auto_quantize_calibration_dir",
+            "candidates",
+        ],
+    ],
+)
+def test_candidate_cli_refuses_invalid_workflows(monkeypatch, extra):
+    with pytest.raises(SystemExit) as error:
+        _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "unused", *extra)
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("recipe", "count"),
+    [
+        ("general/auto_quantize/nvfp4_fp8_at_5p4bits", 2),
+        ("models/zai-org/GLM-5.3-Flash-BF16/auto_quantize/iq2_gptq_nvfp4_fp8_at_2p75bits", 5),
+    ],
+)
+def test_candidate_listing_needs_no_model_or_gpu(monkeypatch, capsys, recipe, count):
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "missing-model",
+        "--recipe",
+        recipe,
+        "--auto_quantize_list_calibration_candidates",
+    )
+    hf_ptq.main(args)
+    candidates = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert [candidate["index"] for candidate in candidates] == list(range(count))
+    assert len({candidate["signature"] for candidate in candidates}) == count
 
 
 def test_recipe_help_distinguishes_weight_and_kv_autoquant(monkeypatch, capsys):
@@ -188,7 +250,8 @@ def test_hf_ptq_runs_weight_then_kv_autoquantize_stages(monkeypatch):
     assert calls[1]["checkpoint"] == "kv-search.pth"
 
 
-def test_hf_ptq_runs_real_weight_then_kv_autoquantize_stages(monkeypatch):
+@pytest.mark.parametrize("mode", ["serial", "worker", "coordinator"])
+def test_hf_ptq_runs_real_weight_then_kv_autoquantize_stages(monkeypatch, tmp_path, mode):
     """Exercise the shipped gradient-weight -> KL-div KV composition without mocked stages."""
     hf_ptq = _import_hf_ptq(monkeypatch)
     monkeypatch.setattr(
@@ -211,9 +274,27 @@ def test_hf_ptq_runs_real_weight_then_kv_autoquantize_stages(monkeypatch):
         batch_size=1,
         auto_quantize_checkpoint=None,
         kv_auto_quantize_checkpoint=None,
+        auto_quantize_calibration_dir=str(tmp_path / "candidates") if mode != "serial" else None,
+        auto_quantize_calibration_candidate=0 if mode == "worker" else None,
     )
 
+    if mode == "coordinator":
+        for candidate in range(len(recipe.auto_quantize.candidate_formats)):
+            worker_args = copy.copy(args)
+            worker_args.auto_quantize_calibration_candidate = candidate
+            worker_model = copy.deepcopy(model)
+            hf_ptq._run_auto_quantize_recipe(
+                worker_args, recipe, worker_model, worker_model, None, False, data, False
+            )
+
     hf_ptq._run_auto_quantize_recipe(args, recipe, model, model, None, False, data, False)
+
+    if mode == "worker":
+        attention = model.model.layers[0].self_attn
+        assert not attention.k_bmm_quantizer.is_enabled
+        assert not attention.v_bmm_quantizer.is_enabled
+        assert list((tmp_path / "candidates").rglob("rank0.pth"))
+        return
 
     enabled_weight_quantizers = [
         module
