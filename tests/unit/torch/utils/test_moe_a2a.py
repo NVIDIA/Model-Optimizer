@@ -30,6 +30,7 @@ degree they are sharded over, and find them by the model's ``base_model_ep_plan`
 
 import copy
 import warnings
+from contextlib import nullcontext
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -503,3 +504,16 @@ def test_routed_experts_are_the_plans_containers_under_any_prefix(plan, prefix):
     assert found == {
         name: modules[name] for name in [f"{prefix}layers.{i}.mlp.experts" for i in (0, 1)]
     }
+
+
+@pytest.mark.parametrize(("installed", "refused"), [("5.6.2", True), ("5.7.0", False)])
+def test_a_transformers_below_a_features_floor_is_refused(monkeypatch, installed, refused):
+    transformers = pytest.importorskip("transformers")
+    monkeypatch.setattr(transformers, "__version__", installed)
+
+    with (
+        pytest.raises(RuntimeError, match=r"EP load requires transformers >= 5\.7, but 5\.6\.2 is")
+        if refused
+        else nullcontext()
+    ):
+        moe.require_transformers("5.7", "EP load")
