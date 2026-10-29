@@ -20,9 +20,54 @@ written from there, so no rank ever materializes the whole model and no unit is
 replicated across ranks.
 """
 
+import json
+import math
+import os
+import warnings
+from collections import Counter
+from pathlib import Path
+
 import torch
 import torch.distributed as dist
+import torch.nn as nn
+from safetensors.torch import save_file
 from torch.distributed.tensor import DTensor
+
+from modelopt.torch.utils.distributed import all_reduce
+
+from .quant_aware_conversion import (
+    _QUANT_STATE_SUFFIXES,
+    QuantConversionUnsupportedError,
+    _build_reverse_rules,
+    revert_weight_conversion_quant_aware,
+)
+from .unified_export_hf_streaming import _parse_shard_size
+
+
+def _even_bins(keys: list, sizes: dict, n: int, max_bytes: int) -> list:
+    """Partition ``keys`` into ~``n`` EVEN-sized bins (by bytes), each <= ``max_bytes`` where possible.
+
+    Longest-processing-time greedy (largest item -> lightest bin) balances the bins, so N files come out
+    ~``total/N`` each rather than (N-1) full files + a small remainder -- ``max_shard_size`` is an UPPER
+    BOUND, not the target. ``n`` counts the bins for the tensors within the bound, and is bumped (up to
+    one file per tensor) if a lumpy item pushes a bin over it. A tensor larger than ``max_bytes`` gets
+    a file of its own on top, as in HF, and the rest still pack around it.
+    Returns the non-empty bins (``list[list[key]]``).
+    """
+    oversized = [[k] for k in keys if sizes[k] > max_bytes]
+    fits = [k for k in keys if sizes[k] <= max_bytes]
+    n = max(1, min(n, len(fits))) if fits else 1
+    ordered = sorted(fits, key=lambda k: -sizes[k])
+    while True:
+        bins: list = [[] for _ in range(n)]
+        loads = [0] * n
+        for k in ordered:
+            j = min(range(n), key=lambda i: loads[i])
+            bins[j].append(k)
+            loads[j] += sizes[k]
+        if n >= len(fits) or max(loads) <= max_bytes:
+            return oversized + [b for b in bins if b]
+        n += 1
 
 
 def _nbytes(v) -> int:
@@ -359,3 +404,212 @@ def _materialize_owned(
         # collective above runs on Gloo where the group has it: every rank initializes NCCL here.
         dist.all_reduce(torch.zeros(1, device=local_sd[shard0[0]].to_local().device))
         _gather_shard0_to_owners(local_sd, shard0, owner, all_shapes, rank, world)
+
+
+def _merge_groups(model: nn.Module, keys) -> list:
+    """The keys the model's reverse conversion merges into one tensor, one list per merged tensor.
+
+    A merge needs its whole group on one rank, so :func:`_materialize_owned` keeps each together.
+    A weight's quantization state goes with it: the merge refuses a quantized weight only where it
+    sees its scales, which a weight-specific pattern does not match. A mapping that cannot be
+    reversed has none: its reverse falls back to the in-memory names anyway. Groups are matched on
+    the names before the reverse splits run: a merge whose sources a split produces is whole on one
+    rank only because a split's outputs stay with the fused key they come from.
+    """
+    try:
+        merge_rules = _build_reverse_rules(model)[1]
+    except QuantConversionUnsupportedError:
+        return []
+    key_set = set(keys)
+    groups: dict = {}
+    for i, rule in enumerate(merge_rules):
+        for k in keys:
+            target, source_pattern = rule.converter.rename_source_key(k)
+            if source_pattern is None:
+                continue
+            group = groups.setdefault((i, target), [])
+            group.append(k)
+            if k.endswith(".weight"):
+                module = k.removesuffix(".weight")
+                group += [
+                    module + leaf for leaf in _QUANT_STATE_SUFFIXES if module + leaf in key_set
+                ]
+    return list(groups.values())
+
+
+def _revert_whole_sd(model: nn.Module, local_sd: dict) -> bool:
+    """Reverse the transformers conversion mapping on this rank's whole tensors, in place.
+
+    Each rank reverts the disjoint subset it owns. Every value is a whole plain tensor by now, so no
+    placement handling is needed. Renames and splits act on one tensor at a time, so a subset is
+    all they need. A merge needs its whole group, which ownership keeps on one rank
+    (:func:`_merge_groups`); a rank holding none of a rule's groups skips the rule, and a rule no
+    rank matches is refused, as the single-process path refuses one. Best-effort and atomic across
+    the ranks, mirroring the single-process path, which keeps the in-memory names for the whole dict
+    on any failure. If the reverse fails on any rank, every rank keeps them, rather than writing a
+    checkpoint that mixes the two. Collective.
+    """
+    reverted = local_sd
+
+    def revert() -> tuple[str | None, list]:
+        nonlocal reverted
+        unmatched: list = []
+        try:
+            reverted = revert_weight_conversion_quant_aware(
+                model, local_sd, unmatched_merges=unmatched
+            )
+        except Exception as exc:
+            return str(exc), []
+        return None, unmatched
+
+    def combine(results: list) -> list:
+        failures = [f"rank {r}: {error}" for r, (error, _) in enumerate(results) if error]
+        return failures or sorted(set.intersection(*(set(unmatched) for _, unmatched in results)))
+
+    failures = all_reduce("reverse weight conversion", revert, combine)
+    if failures:
+        warnings.warn(
+            f"Quant-aware reverse weight conversion skipped ({failures[0]}); exported tensor "
+            "names may not match the original HF hub checkpoint."
+        )
+        return False
+    # revert_weight_conversion_quant_aware returns the INPUT dict itself when the model has no
+    # reverse rules (a dense model with no conversion mapping). Clearing then updating would then
+    # read from the dict just emptied and wipe the state dict, so only rebuild on a fresh object.
+    if reverted is not local_sd:
+        local_sd.clear()
+        local_sd.update(reverted)
+    return True
+
+
+def _in_rank_order(values: list[list]) -> list:
+    """``all_reduce``'s combine that keeps every rank's value: each rank's own is wrapped in a list."""
+    return [value for (value,) in values]
+
+
+def _write_even_shards(
+    local_sd: dict, export_dir: "str | Path", max_shard_size: "str | int", rank: int, world: int
+) -> None:
+    """Write this rank's whole tensors as HF safetensors shards; rank 0 writes the index.
+
+    Each rank splits its tensors into even shards, numbered into one global range. Runs after the
+    reverse conversion, whose renames and splits fix the names and sizes packed here.
+
+    Every file is written under a temporary name and renamed into place only once every rank has
+    written all of its own, the index last, so a failure before then leaves the directory as it was,
+    a checkpoint already there included. Each step a rank can fail alone runs in
+    :func:`~modelopt.torch.utils.distributed.all_reduce`, which raises on every rank when one fails.
+    """
+    export_dir = Path(export_dir)
+    max_bytes = _parse_shard_size(max_shard_size)
+
+    write_keys = sorted(local_sd)
+    sizes = {k: _nbytes(local_sd[k]) for k in write_keys}
+    # Tensors over the bound get files of their own, so only the rest decide how many to aim for.
+    fits = sum(size for size in sizes.values() if size <= max_bytes)
+    my_files = _even_bins(write_keys, sizes, max(1, math.ceil(fits / max_bytes)), max_bytes)
+
+    def plan_mine() -> list:
+        # The directory can fail to appear on one rank alone (its node's filesystem), so it is
+        # created inside the first collective, which carries that failure to every rank.
+        export_dir.mkdir(parents=True, exist_ok=True)
+        return [(len(my_files), write_keys)]
+
+    planned = all_reduce("shard plan", plan_mine, _in_rank_order)
+    # The reverse conversion checks for rename collisions, but only within one rank's slice. A
+    # collision ACROSS ranks would be silently swallowed by the index's dict update and ship a
+    # checkpoint quietly missing a tensor, so every rank refuses it here, before any file is written.
+    names = Counter(k for _, keys in planned for k in keys)
+    collisions = sorted(k for k, n in names.items() if n > 1)
+    if collisions:
+        raise RuntimeError(
+            f"tensor name collision across ranks: {len(collisions)} name(s) held by more than one "
+            f"rank; first few: {collisions[:5]}"
+        )
+    counts = [n for n, _ in planned]
+    n_total = sum(counts)
+    if n_total == 0:
+        raise RuntimeError(
+            "distributed export produced no shards on any rank: every tensor was dropped "
+            "before the write (state dict emptied upstream)"
+        )
+    base = sum(counts[:rank])
+    staged: list = []  # this rank's files, each written as <name>.tmp until the commit
+    index_name = "model.safetensors.index.json"
+
+    def stage(name: str) -> Path:
+        # Recorded before the write: one that fails midway leaves a partial file behind.
+        staged.append(name)
+        return export_dir / f"{name}.tmp"
+
+    def write_mine() -> tuple[dict, int]:
+        weight_map: dict = {}
+        my_bytes = 0
+        for i, keys in enumerate(my_files):
+            fname = f"model-{base + i + 1:05d}-of-{n_total:05d}.safetensors"
+            path = stage(fname)
+            tensors: dict = {}
+            ptrs: set = set()
+            for k in keys:
+                t = local_sd[k].detach().to("cpu").contiguous()
+                # Once copied this rank has no further use for its own tensor. The writer never
+                # allocates on the device, so dropping it here does not lower the peak (the owned
+                # set at entry); it frees the tensor now instead of after the whole file is written.
+                del local_sd[k]
+                # save_file refuses tensors sharing memory, and neither call copies a tensor that is
+                # already on the CPU and contiguous, so two names for one tensor arrive aliased. Copy
+                # rather than drop one: every name has to reach the index.
+                if t.data_ptr() in ptrs:
+                    t = t.clone()
+                ptrs.add(t.data_ptr())
+                tensors[k] = t
+            save_file(tensors, str(path), metadata={"format": "pt"})
+            for k in keys:
+                weight_map[k] = fname
+            my_bytes += sum(_nbytes(t) for t in tensors.values())
+            del tensors
+        return weight_map, my_bytes
+
+    def write_index() -> bool:
+        if rank == 0:
+            index = {"metadata": {"total_size": total_bytes}, "weight_map": full_map}
+            with open(stage(index_name), "w") as f:
+                json.dump(index, f, indent=2)
+        return True
+
+    def commit(names: list) -> bool:
+        for name in names:
+            os.replace(export_dir / f"{name}.tmp", export_dir / name)
+        return True
+
+    # A failed export removes the temporary files it wrote, and only those: a retry into the
+    # directory then finds it as it was. What was written is gone from ``local_sd``, so a retry needs
+    # the state dict built again.
+    try:
+        gathered = all_reduce("shards written", lambda: [write_mine()], _in_rank_order)
+        full_map: dict = {}
+        total_bytes = 0
+        for m, b in gathered:
+            full_map.update(m)
+            total_bytes += b
+        all_reduce("index written", write_index, all)
+        # Every file is written: only now does the directory change, the index last, so until
+        # then an index already there still names its own shards. Also the closing barrier.
+        all_reduce("shards committed", lambda: commit([n for n in staged if n != index_name]), all)
+        all_reduce("index committed", lambda: commit([n for n in staged if n == index_name]), all)
+    except BaseException:
+        left = []
+        for name in staged:
+            # Best effort: the filesystem that failed the write can fail this too, and its error
+            # would replace the one naming the rank that failed, so the files it keeps are named in
+            # a warning instead. A file already renamed into place has no temporary file left.
+            try:
+                (export_dir / f"{name}.tmp").unlink(missing_ok=True)
+            except OSError:
+                left.append(f"{name}.tmp")
+        if left:
+            warnings.warn(
+                f"rank {rank}: could not remove {len(left)} temporary file(s) the failed export "
+                f"wrote to {export_dir}: {left[:5]}"
+            )
+        raise
