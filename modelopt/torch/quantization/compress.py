@@ -32,6 +32,7 @@ from modelopt.torch.utils.import_utils import import_plugin
 from .backends.gemm_registry import disable_real_quant_gemm, enable_real_quant_gemm
 from .config import CompressCfgType, CompressConfig
 from .conversion import _replace_quant_module, set_quantizer_attributes_partial
+from .nn import SequentialQuantizer
 from .nn.modules.quant_linear import RealQuantLinear
 from .qtensor import QTensorWrapper, pack_real_quantize_weight
 from .utils import is_quantized_linear
@@ -69,6 +70,12 @@ def compress_convert(
     Returns:
         The compressed model.
     """
+    # A compressed SequentialQuantizer weight can neither run forward nor be restored.
+    for name, module in model.named_modules():
+        if is_quantized_linear(module) and isinstance(module.weight_quantizer, SequentialQuantizer):
+            raise NotImplementedError(
+                f"{name}: compressing W4A8 (SequentialQuantizer) weights is not supported."
+            )
     for _, module in model.named_modules():
         if is_quantized_linear(module) and type(module) not in RealQuantModuleRegistry:
             class_to_register = RealQuantLinear
