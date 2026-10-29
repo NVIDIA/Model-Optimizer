@@ -80,8 +80,12 @@ def freeze_samples(records, tokenizer, directory, identity, count=512, max_lengt
     if count < 1 or not 2 <= max_length <= 4096:
         raise ValueError("Require positive sample count and sequence length in [2, 4096]")
     directory = Path(directory)
+    tokenizer_hash = hashlib.sha256(tokenizer.backend_tokenizer.to_str().encode()).hexdigest()
+    if identity.get("tokenizer_sha256", tokenizer_hash) != tokenizer_hash:
+        raise ValueError("Declared tokenizer content differs from the supplied tokenizer")
     settings = {
         **identity,
+        "tokenizer_sha256": tokenizer_hash,
         "count": count,
         "max_length": max_length,
         "seed": seed,
@@ -90,9 +94,10 @@ def freeze_samples(records, tokenizer, directory, identity, count=512, max_lengt
     manifest_path = directory / "manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
-        if manifest["settings"] != settings or manifest["sha256"] != _file_hash(
-            directory / "tokens.pt"
-        ):
+        # Exact tokenizer content/revision remains authoritative when its location changes.
+        previous = {k: v for k, v in manifest["settings"].items() if k != "tokenizer"}
+        current = {k: v for k, v in settings.items() if k != "tokenizer"}
+        if previous != current or manifest["sha256"] != _file_hash(directory / "tokens.pt"):
             raise ValueError("Frozen data identity or content differs")
         return torch.load(directory / "tokens.pt", weights_only=True), manifest
     rng = random.Random(seed)
@@ -263,7 +268,7 @@ class CachedTeacherKL:
                 if backward:
                     loss.backward()
             metric += loss.detach()
-        if backward:
+        if backward and student.requires_grad:
             student.backward(leaf.grad)
         return metric.detach()
 
@@ -550,7 +555,13 @@ def main():
                 "scoring_objective": "shifted-token-ce-v1",
             }
         )
-        if not candidate_checkpoint.exists():
+        preparation_path = candidate_checkpoint.with_suffix(".json")
+        preparation = (
+            json.loads(preparation_path.read_text()) if preparation_path.exists() else None
+        )
+        if preparation and preparation["data_fingerprint"] != fingerprint:
+            raise ValueError("Candidate preparation model, data, objective or formats differ")
+        if not candidate_checkpoint.exists() or preparation is None:
             model = _load_model(args)
             model.get_output_embeddings().requires_grad_(False)
             torch.cuda.reset_peak_memory_stats()
@@ -570,7 +581,7 @@ def main():
                 * sum(min(s["costs"]) for s in candidate_state["candidate_stats"].values())
                 / candidate_state["cost_denominator"]
             )
-            candidate_checkpoint.with_suffix(".json").write_text(
+            preparation_path.write_text(
                 json.dumps(
                     {
                         "seconds": time.perf_counter() - candidate_start,
@@ -656,6 +667,9 @@ def main():
                         "continuous_expected_effective_bits"
                     ]
                     result["solver_calls"] = state["rco_state"]["solver_calls"]
+                    result["effective_optimization_steps"] = state["rco_state"][
+                        "effective_optimization_steps"
+                    ]
                     result["rco_history"] = state["rco_state"]["history"]
                     result["resolved_schedule"] = state["rco_signature"]
                 if not result["feasible"] or result["achieved"] > TARGETS[index] + 1e-10:

@@ -104,6 +104,9 @@ def test_cached_teacher_callback_matches_direct_loss_and_rejects_stale_cache(
                 parameter.grad / len(batches), expected[name], atol=1e-7, rtol=1e-4
             )
     assert model.lm_head.weight.grad is None
+    expected_metric = callback(model, batches[0])
+    model.requires_grad_(False)
+    torch.testing.assert_close(callback(model, batches[0]), expected_metric)
     with pytest.raises(ValueError):
         example.CachedTeacherKL.prepare(
             model, [batch], tmp_path, fingerprint="different-data", chunk_tokens=3
@@ -113,12 +116,23 @@ def test_cached_teacher_callback_matches_direct_loss_and_rejects_stale_cache(
 def test_frozen_samples_round_trip_with_masks_and_reject_changed_identity(example, tmp_path):
     records = [{"text": "This is a test sentence.", "url": "local:0"}] * 3
     tokenizer = get_tiny_tokenizer()
-    identity = {"dataset": "local-fixture", "revision": "abc", "tokenizer_revision": "def"}
+    identity = {
+        "dataset": "local-fixture",
+        "revision": "abc",
+        "tokenizer_revision": "def",
+        "tokenizer": "original-location",
+    }
     samples, manifest = example.freeze_samples(
         records, tokenizer, tmp_path, identity, count=2, max_length=4, seed=7
     )
     restored, same = example.freeze_samples(
-        [], tokenizer, tmp_path, identity, count=2, max_length=4, seed=7
+        [],
+        tokenizer,
+        tmp_path,
+        {**identity, "tokenizer": "relocated"},
+        count=2,
+        max_length=4,
+        seed=7,
     )
     assert manifest == same
     assert len(restored) == 2
