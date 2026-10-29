@@ -817,26 +817,32 @@ def test_every_rank_takes_the_plan_rank0_decided(cpu_dist_workers, tmp_path):
     )
 
 
-def _one_rank_cannot_see_the_checkpoint_job(rank, size, ckpt):
+def _one_rank_cannot_see_the_checkpoint_job(rank, size, ckpt, load):
     isdir = os.path.isdir
     with (
         bounded_collectives(),
         mock.patch("os.path.isdir", lambda path: (rank == 0 or path != ckpt) and isdir(path)),
     ):
         try:
-            resolve_distribution_plan(ckpt)
+            if load:
+                load_pretrained(ckpt, distribution=DistributionPlan(size), device_map="cpu")
+            else:
+                resolve_distribution_plan(ckpt)
         except RuntimeError as error:
             raised = str(error)
         else:
             raised = "no error"
-    # Rank 1's own error, carried to rank 0, rather than rank 0 timing out in the plan's broadcast.
+    # Rank 1's own error, carried to rank 0, rather than rank 0 timing out in the next collective.
     assert "which this rank cannot see" in raised, raised
 
 
-def test_a_rank_that_cannot_see_the_checkpoint_fails_every_rank(cpu_dist_workers, tmp_path):
-    """Before the plan's broadcast, which rank 0 would otherwise wait in for a rank that raised."""
+@pytest.mark.parametrize("load", [False, True], ids=["plan", "load"])
+def test_a_rank_that_cannot_see_the_checkpoint_fails_every_rank(cpu_dist_workers, tmp_path, load):
+    """Deciding the plan, or loading by a handed one: rank 0 would otherwise wait for the rank that
+    raised in the next collective, the plan's broadcast or the load's checks. The group is the
+    caller's and the error is caught, so nothing else ends rank 0's wait."""
     LlamaConfig(**_TINY).save_pretrained(tmp_path)
-    cpu_dist_workers.run(_one_rank_cannot_see_the_checkpoint_job, ckpt=str(tmp_path))
+    cpu_dist_workers.run(_one_rank_cannot_see_the_checkpoint_job, ckpt=str(tmp_path), load=load)
 
 
 # ------------------------------------------------------------------------------ loading by the plan
