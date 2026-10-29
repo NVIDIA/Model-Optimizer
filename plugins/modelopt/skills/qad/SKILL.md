@@ -67,6 +67,12 @@ For Megatron Bridge, before constructing commands, read:
    - integral DP/EDP, `num_experts % EP == 0`, and
      `GBS % (MBS * DP) == 0`
 
+   Static-block NVFP4 recipes require TP=1; use PP for memory. With PP, balance
+   stages with `--num_layers_in_{first,last}_pipeline_stage` (the first and last
+   stages also hold the embedding and output layer) and recompute only where
+   memory needs it (`--recompute_num_layers_per_stage`). Time a few iterations
+   of each candidate layout in the first job and keep the fastest.
+
 3. **Prepare the full capped dataset once.** Use suitable user-provided data, or
    copy `examples/megatron_bridge/data/nemotron-cascade-2-blend.yaml` as the
    default. Set the target tokenizer and workspace path, then materialize the
@@ -85,39 +91,88 @@ For Megatron Bridge, before constructing commands, read:
 | Sequence length | 32768; adjust for target benchmarks |
 | Peak / minimum LR | `1e-5` / `1e-6` |
 | LR schedule | cosine |
-| Training cap | 1000 iterations |
+| LR horizon (`train_iters`) | 1000 iterations |
 | Global batch size | 512 |
 | Dataset | `nvidia/Nemotron-Cascade-2-SFT-Data` by default |
-| Materialized token budget | 17.3B at 32K; cover the full cap at the chosen length |
+| Materialized token budget | 17.3B at 32K; cover `train_iters` at the chosen length |
 | Training validation | every 25 iterations; deterministic 1% holdout; 2 batches |
 | Checkpoint interval | 50 iterations |
 | Loss logging | every 10 iterations |
-| Recovery benchmark | 150, then every 100 iterations while training runs |
+| Recovery benchmark | from the KD-loss knee, then every 50-100 iterations |
 | Slurm duration exit | 220 minutes for a 4-hour allocation |
 
 ### Run policy
 
-- Keep `train_iters=1000` and leave `exit_interval` unset.
+- `train_iters` sets the cosine LR horizon and is a loop knob: with 1000, the
+  LR stays near its peak through iteration 150. Stop runs by the decisions
+  below, not by `train_iters`, and leave `exit_interval` unset.
 - On Slurm, use initial step timing to submit only enough sequential jobs to reach
-  checkpoint 150; never submit through iteration 1000 upfront. At each recovery
-  checkpoint, submit to the next only after its targeted evaluation and any
-  triggered full suite, and only if the BF16 gap remains at least 1% and
-  recovery has neither plateaued nor regressed.
+  a few checkpoints past the expected KD-loss knee; never submit through
+  `train_iters` upfront. At each recovery checkpoint, submit to the next only
+  after its targeted evaluation and any triggered full suite, and only while
+  the decision is to continue.
 - On Slurm, give all training jobs the same run-specific job name and
   `--dependency=singleton`; record job IDs and, on any stop, cancel pending jobs
   before the active job.
 - Cancel on non-finite loss, repeated skipped iterations, or a sustained spike.
   At iteration 50, require the loss aggregate to be lower than at iteration 10.
 - At each recovery checkpoint, first evaluate the one to three benchmarks with
-  the largest PTQ drops. Run the remaining original PTQ suite at that checkpoint
-  only after recovery beyond run noise.
-- Cancel when the full-suite gap to BF16 is below 1%, benchmark recovery
-  regresses beyond run noise, or benchmark recovery and loss both plateau.
+  the largest PTQ drops or that failed in earlier loops. Run the remaining
+  original PTQ suite at that checkpoint only after recovery beyond run noise.
+- Start benchmark evaluation at the knee of the KD loss curve, where its steep
+  drop ends, rounded to the next checkpoint, then evaluate every checkpoint
+  while the scores still change. Before the knee, use loss only to catch
+  drift.
+- Run noise is about 2x the standard error of a benchmark's gap to BF16, pooled
+  over repeated evaluations; a single evaluation is often noisier than 0.5
+  points. Repeat a benchmark only when its gap is within run noise of 1%, and
+  cap the repeats.
+- Export each checkpoint to evaluate and pass the ptq skill's
+  `references/checkpoint-validation.md` gate on it before evaluation.
+- At each evaluated checkpoint, decide:
+  - **Pass:** every benchmark is within 1% of BF16. Keep the checkpoint and
+    stop the run.
+  - **Miss:** the benchmarks still miss after 2-3 evaluated checkpoints
+    without gains beyond run noise, or two consecutive checkpoints decline.
+    Stop and change one QAD knob in the [recipe loop](#recipe-loop).
+  - **Otherwise continue** to the next checkpoint.
+- Pick the checkpoint by benchmarks, never by KD loss, which keeps falling after
+  the benchmarks peak. Between near ties, the benchmark most sensitive to
+  quantization decides.
 - After a duration exit, resume the latest QAD checkpoint in the same output
   directory with unchanged prepared data paths/cache, seed, topology, optimizer,
   scheduler, iteration, and consumed-sample state; do not restart from PTQ.
 - Report the PTQ recipe, data sample, training topology, loss/state, checkpoints,
   and comparable BF16/PTQ/QAD results.
+
+### Recipe loop
+
+Each loop runs QAD on the best PTQ recipe for one layout and changes one thing
+from the last loop. Record each loop's recipe, calibration, QAD settings,
+checkpoints, and scores.
+
+1. **Start from the best PTQ recipe for the target.** Take it from the
+   preceding PTQ evaluation or recipe search, and run QAD on it with the
+   default policy.
+2. **On a pass, compress more by one module group** from the passing recipe,
+   in order of bytes saved; never add two groups, or the MTP head, in one loop.
+   Find the best PTQ recipe for the new layout, starting from the passing
+   recipe's calibration, and evaluate it before its QAD. When GPUs are idle,
+   run the next 2-3 single-group candidates in parallel. A group can be a slice:
+   its middle layers with the first and last few kept, or some of its
+   projections (such as GDN `in_proj` only, or attention `linear_qkv` only).
+3. **On a miss, change one QAD knob.** Run every new layout first with the
+   default policy as its control. Read each missed benchmark against PTQ:
+   worse than PTQ is drift (lower the peak LR or add matching data); better
+   than PTQ but short is under-recovery (keep the LR high longer with a larger
+   `train_iters`, or train further). Knobs, in order: peak LR, `train_iters`,
+   data blend, then teacher-generated data.
+4. **Compare a knob with its control at the same checkpoints** past the knee,
+   on benchmark scores pooled over fresh runs, never on KD loss. A rejection
+   holds only for that PTQ base: rerun the control when the base changes.
+5. **Compress less** only after the knobs miss clearly on a layout, or at
+   once when QAD stays flat against PTQ or far from passing: shrink the last
+   added group to a slice before dropping it.
 
 ## Hugging Face execution and training policy
 
