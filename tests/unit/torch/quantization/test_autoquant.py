@@ -15,6 +15,8 @@
 
 import copy
 import io
+import itertools
+import math
 import shutil
 import warnings
 from contextlib import nullcontext
@@ -2019,6 +2021,376 @@ def test_auto_quantize_recovers_failed_learned_candidate(stage):
     torch.testing.assert_close(model(batch), original(batch), rtol=0, atol=0)
     # A fresh public calibration must work after the interrupted calibration/search.
     mtq.quantize(model, config, lambda m: m(batch))
+
+
+def test_auto_quantize_rco_hard_budget_and_gradients(tmp_path):
+    torch.manual_seed(13)
+    model = torch.nn.Sequential(
+        torch.nn.Linear(16, 16, bias=False), torch.nn.SiLU(), torch.nn.Linear(16, 8, bias=False)
+    ).bfloat16()
+    model.eval()
+    model[1].train()
+    model.config = SimpleNamespace(use_cache=True)
+    pristine = copy.deepcopy(model)
+    batches = [torch.randn(4, 16).bfloat16() for _ in range(2)]
+    formats = [
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": bits, "axis": 0}},
+            ],
+            "algorithm": "max",
+        }
+        for bits in (4, 8)
+    ]
+
+    def forward_step(m, batch):
+        assert not m.config.use_cache
+        return m(batch)
+
+    selected, state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.0},
+        quantization_formats=formats,
+        data_loader=batches,
+        forward_step=forward_step,
+        num_calib_steps=2,
+        num_score_steps=2,
+        method={"method": "rco", "steps": 3, "seed": 7, "eval_every": 1},
+    )
+    stats = list(state["candidate_stats"].values())
+    assert not selected.training and selected[1].training
+    assert selected.config.use_cache
+    denominator = sum(item["uncompressed_cost"] for item in stats)
+    ceiling = denominator * 6 / 16
+    scores = state["rco_state"]["final_scores"]
+    feasible = [
+        choices
+        for choices in itertools.product(*(range(len(item["formats"])) for item in stats))
+        if math.fsum(item["costs"][choice] for item, choice in zip(stats, choices)) <= ceiling
+    ]
+    optimum = max(sum(row[choice] for row, choice in zip(scores, choices)) for choices in feasible)
+    final = state["rco_state"]["final_assignment"]
+    assert tuple(final) in feasible
+    assert sum(row[choice] for row, choice in zip(scores, final)) == pytest.approx(optimum)
+    assert state["best"]["constraints"]["effective_bits"] <= 6
+    assert state["rco_state"]["solver_calls"] == 4
+    history = state["rco_state"]["history"]
+    assert all(row["sampled_effective_bits"] <= 6 for row in history)
+    assert all(abs(row["expected_effective_bits"] - 6) < 1e-6 for row in history)
+    assert any(row["projected_gradient_norm"] > 0 for row in history)
+    assert all(math.isfinite(row["gradient_norm"]) for row in history)
+    for name, module in selected.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            assert module.weight.requires_grad
+            assert not module.input_quantizer.is_enabled
+    path = tmp_path / "rco.pt"
+    mto.save(selected, path)
+    restored = mto.restore(pristine, path)
+    torch.testing.assert_close(restored(batches[0]), selected(batches[0]), rtol=0, atol=0)
+
+
+def test_auto_quantize_rco_callback_cache_and_interrupted_resume(tmp_path):
+    torch.manual_seed(19)
+    pristine = torch.nn.Sequential(torch.nn.Linear(16, 8, bias=False)).bfloat16()
+    pristine.eval()
+    pristine[0].train()
+    inputs = [torch.randn(4, 16).bfloat16(), torch.randn(2, 16).bfloat16()]
+    batches = [{"inputs": batch, "target": pristine(batch).detach()} for batch in inputs]
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+    cache = str(tmp_path / "candidates.pt")
+    mtq.auto_quantize(
+        copy.deepcopy(pristine),
+        constraints={"effective_bits": 8},
+        quantization_formats=[config],
+        data_loader=batches,
+        forward_step=lambda m, batch: m(batch["inputs"]),
+        loss_func=lambda output, batch: (output.float() - batch["target"].float()).square().mean(),
+        num_calib_steps=2,
+        num_score_steps=2,
+        checkpoint=cache,
+        method={"method": "gradient", "data_fingerprint": "fixed-callback-data"},
+    )
+
+    def run(model, path=None, interrupt=False, identity="fixed-callback-data", candidate=cache):
+        calls = 0
+
+        def backward(m, batch):
+            nonlocal calls
+            calls += 1
+            loss = (m(batch["inputs"]).float() - batch["target"].float()).square().mean()
+            loss.backward()
+            if interrupt and calls == 6:
+                raise RuntimeError("controlled RCO interruption")
+            return loss.detach()
+
+        def no_calibration(m, batch):
+            raise AssertionError("completed candidate cache must avoid recalibration")
+
+        return mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8},
+            quantization_formats=[config],
+            data_loader=batches,
+            forward_step=no_calibration,
+            forward_backward_step=backward,
+            num_calib_steps=2,
+            num_score_steps=2,
+            checkpoint=path,
+            method={
+                "method": "rco",
+                "steps": 3,
+                "seed": 5,
+                "eval_every": 1,
+                "data_fingerprint": identity,
+                "objective_fingerprint": "squared-error-v1",
+                "candidate_checkpoint": candidate,
+            },
+        )
+
+    expected, expected_state = run(copy.deepcopy(pristine))
+    failed = copy.deepcopy(pristine)
+    checkpoint = str(tmp_path / "allocation.pt")
+    with pytest.raises(RuntimeError, match="controlled RCO interruption"):
+        run(failed, checkpoint, interrupt=True)
+    assert failed.training == pristine.training
+    assert failed[0].training == pristine[0].training
+    torch.testing.assert_close(failed(inputs[0]), pristine(inputs[0]), rtol=0, atol=0)
+    partial = safe_load(checkpoint)
+    assert partial["rco_state"]["step"] == 1
+    assert not partial["quantizer_states"]
+    resumed, actual = run(copy.deepcopy(pristine), checkpoint)
+    assert resumed[0].training == pristine[0].training
+    torch.testing.assert_close(resumed(inputs[0]), expected(inputs[0]), rtol=0, atol=0)
+    torch.testing.assert_close(
+        actual["rco_state"]["alpha"], expected_state["rco_state"]["alpha"], rtol=0, atol=0
+    )
+    assert actual["rco_state"]["history"] == expected_state["rco_state"]["history"]
+    assert actual["best"] == expected_state["best"]
+    for name, value in expected_state["rco_state"]["optimizer"]["state"][0].items():
+        torch.testing.assert_close(
+            actual["rco_state"]["optimizer"]["state"][0][name], value, rtol=0, atol=0
+        )
+    completed, completed_state = run(copy.deepcopy(pristine), checkpoint)
+    assert completed_state["rco_state"]["solver_calls"] == actual["rco_state"]["solver_calls"]
+    torch.testing.assert_close(completed(inputs[0]), expected(inputs[0]), rtol=0, atol=0)
+    incompatible = copy.deepcopy(pristine)
+    with pytest.raises(ValueError):
+        run(incompatible, checkpoint, identity="changed-data")
+    torch.testing.assert_close(incompatible(inputs[0]), pristine(inputs[0]), rtol=0, atol=0)
+    partial = safe_load(cache)
+    partial["candidate_stats"] = {}
+    partial_cache = str(tmp_path / "unfinished-candidates.pt")
+    torch.save(partial, partial_cache)
+    incompatible = copy.deepcopy(pristine)
+    with pytest.raises(ValueError, match="complete candidate preparation"):
+        run(incompatible, candidate=partial_cache)
+    torch.testing.assert_close(incompatible(inputs[0]), pristine(inputs[0]), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("ceiling", [3.99999999999, 4.0, 16.0, 20.0])
+def test_auto_quantize_rco_endpoints(ceiling):
+    torch.manual_seed(3)
+    model = torch.nn.Sequential(torch.nn.Linear(16, 8, bias=False)).bfloat16()
+    reference = copy.deepcopy(model)
+    batch = torch.randn(4, 16).bfloat16()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+
+    def run():
+        return mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": ceiling},
+            quantization_formats=[config],
+            data_loader=[batch],
+            forward_step=lambda m, b: m(b),
+            num_calib_steps=1,
+            num_score_steps=1,
+            method={"method": "rco", "steps": 1, "seed": 3},
+        )
+
+    if ceiling < 4:
+        with pytest.raises((ValueError, AssertionError)):
+            run()
+        torch.testing.assert_close(model[0].weight, reference[0].weight, rtol=0, atol=0)
+    else:
+        _, state = run()
+        assert state["best"]["is_satisfied"]
+        assert state["best"]["constraints"]["effective_bits"] <= ceiling
+        assert math.isfinite(state["best"]["continuous_expected_effective_bits"])
+        if ceiling >= 16:
+            torch.testing.assert_close(model[0].weight, reference[0].weight, rtol=0, atol=0)
+
+
+def test_auto_quantize_rco_consumes_gsq_candidates():
+    torch.manual_seed(29)
+    model = torch.nn.Sequential()
+    model.add_module(
+        "mlp",
+        torch.nn.Sequential(
+            torch.nn.Linear(16, 16, bias=False),
+            torch.nn.SiLU(),
+            torch.nn.Linear(16, 16, bias=False),
+        ),
+    )
+    model.bfloat16()
+    pristine = copy.deepcopy(model)
+    batches = [torch.randn(4, 16).bfloat16()]
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        ],
+        "algorithm": {"method": "gsq", "steps": 2, "eval_every": 1, "layerwise": {"enable": False}},
+    }
+    selected, state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 12},
+        quantization_formats=[config],
+        data_loader=batches,
+        forward_step=lambda m, b: m(b),
+        num_calib_steps=1,
+        num_score_steps=1,
+        method={"method": "rco", "steps": 2, "seed": 7, "eval_every": 1},
+    )
+    assert state["best"]["constraints"]["effective_bits"] <= 12
+    for name, recipe in state["best"]["recipe"].items():
+        module_name = name.removesuffix(".quant_recipe")
+        expected = (
+            pristine.get_submodule(module_name).weight
+            if recipe.is_no_quant
+            else state["quantizer_states"][recipe]["weights"][module_name]
+        )
+        torch.testing.assert_close(
+            selected.get_submodule(module_name).weight, expected, rtol=0, atol=0
+        )
+    assert any(row["projected_gradient_norm"] > 0 for row in state["rco_state"]["history"])
+
+
+def test_auto_quantize_rco_constant_allocation_skips_optimization():
+    model = torch.nn.Sequential(torch.nn.Linear(16, 8, bias=False)).bfloat16()
+    reference = copy.deepcopy(model)
+    batch = torch.randn(4, 16).bfloat16()
+    selected, state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 16},
+        quantization_formats=["FP8_DEFAULT_CFG"],
+        disabled_layers=["*"],
+        data_loader=[batch],
+        forward_step=lambda m, b: m(b),
+        num_calib_steps=1,
+        num_score_steps=1,
+        method={"method": "rco", "steps": 2},
+    )
+    torch.testing.assert_close(selected(batch), reference(batch), rtol=0, atol=0)
+    assert state["best"]["constraints"]["effective_bits"] == 16
+    assert state["best"]["score"] == 0
+    assert state["rco_state"]["effective_optimization_steps"] == 0
+    assert not state["rco_state"]["history"]
+
+
+def test_auto_quantize_rco_protected_head_supports_chunked_backward():
+    torch.manual_seed(37)
+    model = torch.nn.Sequential()
+    model.add_module("decoder", torch.nn.Linear(16, 16, bias=False))
+    model.add_module("lm_head", torch.nn.Linear(16, 8, bias=False))
+    model.bfloat16()
+    batch = torch.randn(4, 16).bfloat16()
+    target = model(batch).detach()
+    head_weight = model.lm_head.weight.detach().clone()
+
+    def backward(m, batch):
+        hidden = m.decoder(batch)
+        leaf = hidden.detach().requires_grad_()
+        metric = torch.zeros(())
+        for index in range(len(batch)):
+            loss = (
+                m.lm_head(leaf[index : index + 1]).float() - target[index : index + 1].float()
+            ).square().sum() / target.numel()
+            loss.backward()
+            metric += loss.detach()
+        hidden.backward(leaf.grad)
+        return metric
+
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+    selected, state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 10},
+        quantization_formats=[config],
+        disabled_layers=["lm_head"],
+        data_loader=[batch],
+        forward_step=lambda m, b: m(b),
+        forward_backward_step=backward,
+        num_calib_steps=1,
+        num_score_steps=1,
+        method={"method": "rco", "steps": 2, "eval_every": 1},
+    )
+    torch.testing.assert_close(selected.lm_head.weight, head_weight, rtol=0, atol=0)
+    assert any(row["gradient_norm"] > 0 for row in state["rco_state"]["history"])
+
+
+def test_auto_quantize_rco_default_kl_uses_all_valid_tokens():
+    torch.manual_seed(31)
+    model = torch.nn.Sequential(torch.nn.Linear(16, 8, bias=False)).bfloat16()
+    teacher = copy.deepcopy(model)
+    batches = [
+        {
+            "inputs": torch.randn(1, 3, 16).bfloat16(),
+            "attention_mask": torch.tensor([[1, 1, 0]]),
+            "loss_mask": torch.tensor([[1, 0, 1]]),
+        },
+        {
+            "inputs": torch.randn(1, 5, 16).bfloat16(),
+            "attention_mask": torch.tensor([[1, 1, 1, 1, 0]]),
+            "loss_mask": torch.tensor([[0, 1, 1, 0, 1]]),
+        },
+    ]
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+    selected, state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 4},
+        quantization_formats=[config],
+        data_loader=batches,
+        forward_step=lambda m, b: m(b["inputs"]),
+        num_calib_steps=2,
+        num_score_steps=2,
+        method={"method": "rco", "steps": 0},
+    )
+    total, tokens = 0.0, 0
+    with torch.no_grad():
+        for batch in batches:
+            token_kl = torch.nn.functional.kl_div(
+                selected(batch["inputs"]).float().log_softmax(-1),
+                teacher(batch["inputs"]).float().softmax(-1),
+                reduction="none",
+            ).sum(-1)
+            valid = (batch["attention_mask"] * batch["loss_mask"]).bool()
+            total += float(token_kl[valid].sum())
+            tokens += int(valid.sum())
+    assert state["best"]["score"] == pytest.approx(total / tokens, rel=1e-4, abs=3e-8)
 
 
 @pytest.mark.parametrize("with_persisted_attrs", [True, False])

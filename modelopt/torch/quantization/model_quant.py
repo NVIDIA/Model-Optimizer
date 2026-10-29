@@ -812,6 +812,10 @@ def auto_quantize(
             with the number of candidate formats and path nodes, not with the number of whole-model
             configurations the search considers -- see
             :mod:`modelopt.torch.quantization._auto_quantize_shapley`.
+            ``"rco"`` optimizes frozen candidate assignments against the whole-model loss
+            under a strict upper cost bound. It defaults to full-vocabulary teacher KL;
+            see :class:`modelopt.torch.quantization.rco.AutoQuantizeRCOSearcher` for its
+            optimization, callback, and candidate-checkpoint options.
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step.
@@ -1058,6 +1062,8 @@ def auto_quantize(
     except Exception:
         searcher.restore_reference_weights()
         raise
+    finally:
+        searcher._restore_execution_state()
 
     return model, searcher.state_dict()
 

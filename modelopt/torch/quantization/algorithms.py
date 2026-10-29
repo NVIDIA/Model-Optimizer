@@ -827,6 +827,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 hparam._apply_quantizer_choice(QuantRecipe(None))
                 model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = True
 
+    def _restore_execution_state(self) -> None:
+        """Restore method-owned execution settings after the public search returns."""
+
     @torch.no_grad()
     def _capture_candidate_weights(self, recipe, hparams):
         weights = {}
@@ -2463,3 +2466,4 @@ def _match_quantizer_cfg(quant_cfg, quantizer_attr):
 # Late import avoids a circular dependency: the Aumann-Shapley searcher builds on the
 # AutoQuantize classes above and registers itself in AUTO_QUANTIZE_SEARCHERS on import.
 from . import _auto_quantize_shapley as _auto_quantize_shapley  # noqa: E402
+from . import rco as rco  # noqa: E402
