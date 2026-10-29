@@ -16,6 +16,7 @@
 """Integration tests for layerwise_calibrate and LayerActivationCollector."""
 
 import copy
+import sys
 
 import pytest
 import torch
@@ -25,10 +26,22 @@ from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 from torch.distributed.tensor import DTensor
 
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import (
+    ModelOptAutoQuantizeRecipe,
+    freeze_auto_quantize_assignment,
+    plan_auto_quantize,
+)
+from modelopt.torch.quantization._layerwise_checkpoint import _assignment_checkpoint
 from modelopt.torch.quantization._selected_calibration import _SelectedLayerCalibrator
+from modelopt.torch.quantization._selected_model import _selected_model
+from modelopt.torch.quantization._selected_search import (
+    _load_selected_search,
+    _selected_search_binding,
+)
 from modelopt.torch.quantization._source_estimation import _estimate_source_activations
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight, preserve_source_weights
+from modelopt.torch.quantization.mode import GPTQModeDescriptor, MaxCalibrateModeDescriptor
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
 from modelopt.torch.quantization.utils import layerwise_calib
@@ -158,9 +171,40 @@ def _register_test_discoverer(monkeypatch):
 
 @pytest.mark.timeout(180)
 @pytest.mark.parametrize(
-    ("qdq_from_prev", "estimate"), [(False, False), (True, False), (False, True)]
+    ("qdq_from_prev", "estimate", "recover"),
+    [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        pytest.param(
+            False,
+            False,
+            "selected",
+            marks=pytest.mark.skipif(sys.platform == "win32", reason="POSIX checkpoint leases"),
+        ),
+        pytest.param(
+            True,
+            False,
+            "selected",
+            marks=pytest.mark.skipif(sys.platform == "win32", reason="POSIX checkpoint leases"),
+        ),
+        pytest.param(
+            False,
+            False,
+            True,
+            marks=pytest.mark.skipif(sys.platform == "win32", reason="POSIX checkpoint leases"),
+        ),
+        pytest.param(
+            True,
+            False,
+            True,
+            marks=pytest.mark.skipif(sys.platform == "win32", reason="POSIX checkpoint leases"),
+        ),
+    ],
 )
-def test_selected_layerwise_gptq_mixed_formats(monkeypatch, qdq_from_prev, estimate):
+def test_selected_layerwise_gptq_mixed_formats(
+    monkeypatch, tmp_path, qdq_from_prev, estimate, recover
+):
     _register_test_discoverer(monkeypatch)
     torch.manual_seed(42)
     source = _SimpleTransformerModel(n_layers=0)
@@ -175,7 +219,12 @@ def test_selected_layerwise_gptq_mixed_formats(monkeypatch, qdq_from_prev, estim
         config["quant_cfg"].append(
             {
                 "quantizer_name": f"{prefix}.experts.*weight_quantizer",
-                "cfg": {"num_bits": fmt, "block_sizes": {-1: 256}, "backend": "ggml"},
+                "cfg": {
+                    "num_bits": fmt,
+                    "effective_bits": GGML_FORMAT_REGISTRY[fmt].effective_bits,
+                    "block_sizes": {-1: 256},
+                    "backend": "ggml",
+                },
             }
         )
         preset = mtq.NVFP4_DEFAULT_CFG if i % 2 == 0 else mtq.FP8_DEFAULT_CFG
@@ -185,7 +234,7 @@ def test_selected_layerwise_gptq_mixed_formats(monkeypatch, qdq_from_prev, estim
                 entry["quantizer_name"] = prefix + ".shared_expert." + entry["quantizer_name"]
                 config["quant_cfg"].append(entry)
         traversal = {
-            "enable": True,
+            "enable": recover != "selected" or i > 0,
             "get_qdq_activations_from_prev_layer": qdq_from_prev or estimate,
         }
         groups.extend(
@@ -204,6 +253,77 @@ def test_selected_layerwise_gptq_mixed_formats(monkeypatch, qdq_from_prev, estim
             ]
         )
     original_groups = copy.deepcopy(groups)
+    if recover == "selected":
+        for mode in (GPTQModeDescriptor, MaxCalibrateModeDescriptor):
+            monkeypatch.setattr(mode, "_auto_quantize_layerwise_estimator", "source_activation_v1")
+        spaces = []
+        for names, algorithm in groups:
+            (name,) = names
+            entries = [
+                {
+                    **copy.deepcopy(entry),
+                    "quantizer_name": entry["quantizer_name"].removeprefix(name + "."),
+                }
+                for entry in config["quant_cfg"]
+                if entry["quantizer_name"].startswith(name + ".")
+            ]
+            spaces.append(
+                {
+                    "module_name_patterns": [name],
+                    "candidate_formats": [
+                        {
+                            "quant_cfg": [{"quantizer_name": "*", "enable": False}, *entries],
+                            "algorithm": algorithm,
+                        }
+                    ],
+                    "allow_no_quant": False,
+                }
+            )
+        no_quant = {"quant_cfg": [{"quantizer_name": "*", "enable": False}]}
+        recipe = ModelOptAutoQuantizeRecipe(
+            auto_quantize={
+                "constraints": {"effective_bits": 16},
+                "candidate_formats": [no_quant],
+                "module_search_spaces": spaces,
+            }
+        )
+        options = {
+            "constraints": {"effective_bits": 16},
+            "quantization_formats": [no_quant],
+            "module_search_spaces": [
+                {
+                    **{k: v for k, v in space.items() if k != "candidate_formats"},
+                    "quantization_formats": space["candidate_formats"],
+                }
+                for space in spaces
+            ],
+            "data_loader": data,
+            "forward_step": lambda model, batch: model(batch),
+            "loss_func": lambda output, batch: output.float().square().mean(),
+            "num_calib_steps": 2,
+            "num_score_steps": 1,
+        }
+        limits = {
+            "directory": tmp_path / "formats",
+            "collect_scores": True,
+            "source_activation_bytes": 2**20,
+            "max_artifact_bytes": 64 * 2**20,
+        }
+        for candidate in range(len(spaces)):
+            mtq.auto_quantize(
+                copy.deepcopy(source), **options, calibration=dict(limits, candidate=candidate)
+            )
+        checkpoint = tmp_path / "search"
+        _, search_state = mtq.auto_quantize(
+            copy.deepcopy(source), **options, calibration=limits, checkpoint=str(checkpoint)
+        )
+        identity = search_state["calibration_provenance"]["contract"]["identity"]
+        plan = plan_auto_quantize(recipe)
+        assignment = freeze_auto_quantize_assignment(search_state, plan, identity)
+        binding = _selected_search_binding(checkpoint, assignment, 64 * 2**20)
+        search_state = _load_selected_search(
+            checkpoint, binding, assignment, plan, identity, (2, 1), 64 * 2**20
+        )
 
     def fresh():
         return mtq.quantize(copy.deepcopy(source), copy.deepcopy(config))
@@ -235,8 +355,8 @@ def test_selected_layerwise_gptq_mixed_formats(monkeypatch, qdq_from_prev, estim
                 )
         inputs = [layer(batch).detach() for batch in inputs] if qdq_from_prev else source_outputs
 
-    for order in (groups, list(reversed(groups))):
-        actual = fresh()
+    for order_index, order in enumerate((groups, list(reversed(groups)))):
+        actual = copy.deepcopy(source) if recover == "selected" else fresh()
         if estimate:
             result = _estimate_source_activations(
                 actual, order, lambda model: _run_forward(model, data), max_activation_bytes=2**20
@@ -248,13 +368,72 @@ def test_selected_layerwise_gptq_mixed_formats(monkeypatch, qdq_from_prev, estim
                 if isinstance(q, TensorQuantizer) and q.is_enabled and q.backend == "ggml"
             )
         else:
-            callback = _SelectedLayerCalibrator(actual, order)
-            layerwise_calibrate(
-                actual,
-                lambda model: _run_forward(model, data),
-                callback,
-                **callback.layerwise_config,
+            callback = (
+                _selected_model(actual, assignment, plan, search_state, identity)
+                if recover == "selected"
+                else _SelectedLayerCalibrator(actual, order)
             )
+            if recover is True:
+                options = dict(callback.layerwise_config, save_every=2, calib_mutates_weights=False)
+                directory = tmp_path / str(order_index)
+                binding = {
+                    "assignment_digest": "1" * 64,
+                    "provenance": {
+                        "source": "fixture-source",
+                        "inputs": "fixture-data",
+                        "code": "fixture-code",
+                    },
+                    "num_layers": 3,
+                    "max_bytes": 16 * 2**20,
+                    "save_every": 2,
+                }
+                last_layer = actual.layers[2]
+
+                def interrupt(layer, forward_loop):
+                    if layer is last_layer:
+                        raise RuntimeError("test interruption")
+                    callback(layer, forward_loop)
+
+                with (
+                    _assignment_checkpoint(directory, **binding) as checkpoint,
+                    pytest.raises(RuntimeError, match="test interruption"),
+                ):
+                    layerwise_calibrate(
+                        actual,
+                        lambda model: _run_forward(model, data),
+                        interrupt,
+                        _checkpoint_state=checkpoint,
+                        **options,
+                    )
+                actual = fresh()
+                callback = _SelectedLayerCalibrator(actual, order)
+                with _assignment_checkpoint(directory, **binding) as checkpoint:
+                    assert checkpoint.start_layer == 2
+                    layerwise_calibrate(
+                        actual,
+                        lambda model: _run_forward(model, data),
+                        callback,
+                        _checkpoint_state=checkpoint,
+                        **options,
+                    )
+
+                def unexpected(*args):
+                    pytest.fail("Completed recovery repeated calibration or activation capture")
+
+                actual = fresh()
+                with _assignment_checkpoint(directory, **binding) as checkpoint:
+                    assert checkpoint.start_layer == 3
+                    layerwise_calibrate(
+                        actual, unexpected, unexpected, _checkpoint_state=checkpoint, **options
+                    )
+                assert not list(directory.glob("layer_*/next_inputs.pt"))
+            else:
+                layerwise_calibrate(
+                    actual,
+                    lambda model: _run_forward(model, data),
+                    callback,
+                    **callback.layerwise_config,
+                )
         assert actual.state_dict().keys() == reference.state_dict().keys()
         for name, value in reference.state_dict().items():
             torch.testing.assert_close(
