@@ -20,11 +20,14 @@ The no-gather writer never splits a fused 3-D expert weight while the model is s
 and ``split_fused_experts_state_dict`` cuts the result into per-expert keys later. That pipeline
 must write exactly what the single-process ``_export_fused_experts`` writes, so most tests compare
 the two byte for byte on a tiny synthetic fused-experts module quantized with FP8 and NVFP4.
-Sharded cases run on a one-rank gloo process group.
+Sharded cases run on a gloo process group: one rank in process, and two spawned ranks where a
+non-zero expert offset matters.
 """
 
 import contextlib
 import copy
+import math
+import re
 import warnings
 
 import pytest
@@ -32,17 +35,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import Shard, distribute_tensor
+from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
 pytest.importorskip("transformers")
 pytest.importorskip("safetensors")
 from safetensors.torch import load_file, save_file
-from transformers import NemotronHConfig
+from transformers import NemotronHConfig, PretrainedConfig
 from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHExperts
 
 import modelopt.torch.export.hf_export_handlers as handlers
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.moe_utils import (
+    _dtensor_dim0_offset,
     _export_fused_experts,
     _export_fused_experts_keep_fused,
     _fused_experts_prefixes,
@@ -286,8 +290,8 @@ def test_keep_fused_then_split_writes_unpacked_native_fp8_experts_as_the_per_exp
     """Native FP8 experts unpack at the default dtype, and the per-expert export reads each expert in
     the export dtype (``get_expert_weight``): the fold reads them alike, for the scales it derives
     and for a projection it leaves unquantized."""
-    from transformers import PretrainedConfig
-    from transformers.integrations.finegrained_fp8 import FP8Experts
+    # transformers 5.5 imports triton in this module, which not every platform has.
+    fp8_experts_cls = pytest.importorskip("transformers.integrations.finegrained_fp8").FP8Experts
 
     torch.manual_seed(0)
     config = PretrainedConfig(
@@ -296,7 +300,7 @@ def test_keep_fused_then_split_writes_unpacked_native_fp8_experts_as_the_per_exp
         num_experts=NUM_EXPERTS,
         hidden_act="silu",
     )
-    experts = FP8Experts(config, block_size=None)
+    experts = fp8_experts_cls(config, block_size=None)
     for name in ("gate_up_proj", "down_proj"):
         weight = getattr(experts, name)
         with torch.no_grad():
@@ -304,7 +308,7 @@ def test_keep_fused_then_split_writes_unpacked_native_fp8_experts_as_the_per_exp
             getattr(experts, f"{name}_scale_inv").fill_(0.01)
     hidden = torch.randn(NUM_EXPERTS, HIDDEN_DIM)
     route = (torch.arange(NUM_EXPERTS).unsqueeze(1), torch.ones(NUM_EXPERTS, 1))
-    registered_before = QuantModuleRegistry.get(FP8Experts)
+    registered_before = QuantModuleRegistry.get(fp8_experts_cls)
     try:
         mtq.quantize(experts, mtq.NVFP4_DEFAULT_CFG, lambda m: m(hidden, *route))
         experts.unpack_weight()
@@ -312,8 +316,8 @@ def test_keep_fused_then_split_writes_unpacked_native_fp8_experts_as_the_per_exp
         want = _per_expert_export(experts)
         got = split_fused_experts_state_dict(_keep_fused_export(experts))
     finally:
-        if registered_before is None and QuantModuleRegistry.get(FP8Experts) is not None:
-            QuantModuleRegistry.unregister(FP8Experts)
+        if registered_before is None and QuantModuleRegistry.get(fp8_experts_cls) is not None:
+            QuantModuleRegistry.unregister(fp8_experts_cls)
     _assert_byte_identical(got, want)
 
 
@@ -553,6 +557,130 @@ def test_fused_experts_prefixes_lists_each_fused_module_once_in_order():
 
 
 # ------------------------------------------------------------------ sharded (DTensor) experts
+
+
+def _shard_fused_weights(experts, mesh):
+    for proj in (experts._first_proj_attr, "down_proj"):
+        weight = getattr(experts, proj).data
+        sharded = distribute_tensor(weight, mesh, [Shard(0)])
+        setattr(experts, proj, nn.Parameter(sharded, requires_grad=False))
+    return experts
+
+
+def _whole(value):
+    """A sharded value gathered whole. gloo cannot gather FP8, so one-byte values move as bytes."""
+    if not isinstance(value, DTensor):
+        return value
+    if value.element_size() != 1:
+        return value.full_tensor()
+    raw = value.to_local().view(torch.uint8)
+    raw = DTensor.from_local(
+        raw,
+        value.device_mesh,
+        value.placements,
+        run_check=False,
+        shape=value.shape,
+        stride=value.stride(),
+    )
+    return raw.full_tensor().view(value.dtype)
+
+
+def _two_rank_fold_job(rank, world_size):
+    mesh = init_device_mesh("cpu", (world_size,))
+    cases = [
+        (experts_cls, quant_cfg, NUM_EXPERTS)
+        for experts_cls in (_KeepFusedGatedExperts, _KeepFusedUngatedExperts)
+        for quant_cfg in (mtq.FP8_DEFAULT_CFG, FP8_WEIGHT_ONLY_CFG, mtq.NVFP4_DEFAULT_CFG)
+    ]
+    # Three experts over two ranks: rank 0 holds two, rank 1 one. The folded tensors must keep the
+    # global expert count, not infer local x world rows.
+    cases.append((_KeepFusedGatedExperts, mtq.NVFP4_DEFAULT_CFG, 3))
+    for experts_cls, quant_cfg, num_experts in cases:
+        # Every rank calibrates the same seeded module, so all ranks hold identical quantizers.
+        experts = _quantized_experts(experts_cls, quant_cfg, num_experts)
+        want = _per_expert_export(experts)
+        plain = _keep_fused_export(experts)
+        sharded = _shard_fused_weights(copy.deepcopy(experts), mesh)
+        _export_fused_experts_keep_fused(sharded, torch.bfloat16)
+        fused = _prefixed(sharded.state_dict())
+        assert set(fused) == set(plain)
+        first = fused[f"{PREFIX}.{sharded._first_proj_attr}"]
+        n_local = first.to_local().shape[0]
+        offset = rank * math.ceil(num_experts / world_size)
+        assert _dtensor_dim0_offset(first) == offset
+        for key, value in fused.items():
+            if key.endswith("_input_scale"):  # one scalar shared by every expert
+                assert not isinstance(value, DTensor), key
+                assert torch.equal(_raw_bytes(value), _raw_bytes(plain[key])), key
+            else:  # weights and per-expert scales stay sharded on the expert axis
+                assert isinstance(value, DTensor), key
+                assert value.placements == (Shard(0),), key
+                assert value.shape == plain[key].shape, key
+                local = plain[key][offset : offset + n_local]
+                assert torch.equal(_raw_bytes(value.to_local()), _raw_bytes(local)), key
+        # Gathered whole, the ranks' folds split into exactly what the per-expert export writes.
+        whole = {key: _whole(value) for key, value in fused.items()}
+        _assert_byte_identical(split_fused_experts_state_dict(whole), want)
+
+    # One expert over two ranks leaves rank 1 none: both ranks refuse, rather than rank 1 alone
+    # failing while rank 0 goes on to write.
+    lone = _quantized_experts(_KeepFusedGatedExperts, mtq.FP8_DEFAULT_CFG, num_experts=1)
+    with pytest.raises(NotImplementedError, match="leaves a rank none"):
+        _export_fused_experts_keep_fused(_shard_fused_weights(lone, mesh), torch.bfloat16)
+
+    # Expert parallelism leaves a rank only its own experts' quantizers, in shard order, under a
+    # fused weight spanning every expert. Kept last, with the joint decision below: without that
+    # pairing rank 1 alone fails, and rank 0 then waits only in the collectives below, which the
+    # worker pool ends once a rank has failed.
+    experts = _quantized_experts(_KeepFusedGatedExperts, mtq.NVFP4_DEFAULT_CFG)
+    plain = _keep_fused_export(experts)
+    n_local = NUM_EXPERTS // world_size
+    mine = slice(rank * n_local, (rank + 1) * n_local)
+
+    def sharded_keeping_quantizers(kept):
+        sharded = _shard_fused_weights(copy.deepcopy(experts), mesh)
+        for proj in (sharded._first_proj_attr, "down_proj"):
+            name = f"{proj}_weight_quantizers"
+            setattr(sharded, name, nn.ModuleList(list(getattr(sharded, name))[kept]))
+        return sharded
+
+    with pytest.raises(NotImplementedError, match="3 weight quantizers for 4 experts in 2 shards"):
+        _export_fused_experts_keep_fused(sharded_keeping_quantizers(slice(0, 3)), torch.bfloat16)
+    sharded = sharded_keeping_quantizers(mine)
+    _export_fused_experts_keep_fused(sharded, torch.bfloat16)
+    fused = _prefixed(sharded.state_dict())
+    assert set(fused) == set(plain)
+    for key, value in fused.items():
+        if isinstance(value, DTensor):
+            assert torch.equal(_raw_bytes(value.to_local()), _raw_bytes(plain[key][mine])), key
+        else:
+            assert torch.equal(_raw_bytes(value), _raw_bytes(plain[key])), key
+
+    # Each rank sees only its own experts' quantizers there, so the ranks decide on a projection
+    # together: rank 1 disabling some or all of its experts' is refused on both ranks, rather than
+    # folded on rank 0 alone, and every expert disabled leaves the projection as it is on both.
+    for disabled in ([3], [2, 3], [0, 1, 2, 3]):
+        sharded = sharded_keeping_quantizers(mine)
+        for expert, quantizer in enumerate(sharded.down_proj_weight_quantizers, start=mine.start):
+            if expert in disabled:
+                quantizer.disable()
+        if len(disabled) < NUM_EXPERTS:
+            with pytest.raises(NotImplementedError, match=re.escape(f"quantizers {disabled} of 4")):
+                _export_fused_experts_keep_fused(sharded, torch.bfloat16)
+        else:
+            _export_fused_experts_keep_fused(sharded, torch.bfloat16)
+            assert hasattr(sharded, "gate_up_proj_weight_scale")
+            assert not hasattr(sharded, "down_proj_weight_scale")
+
+
+def test_two_ranks_fold_their_own_experts_under_global_indices(cpu_dist_workers):
+    """Rank 1 holds experts 2-3: each must be folded with ITS quantizer at its global offset, and the
+    fused tensors stay sharded on the expert axis at their global shape, an uneven shard included;
+    gathered, they split into the per-expert export. Its quantizers are every expert's (FSDP2) or,
+    under expert parallelism, its own two, and then the ranks decide on each projection's
+    quantization together. A layout that leaves a rank no expert, or quantizers that are neither,
+    is refused on every rank."""
+    cpu_dist_workers.run(_two_rank_fold_job)
 
 
 @pytest.mark.parametrize(
