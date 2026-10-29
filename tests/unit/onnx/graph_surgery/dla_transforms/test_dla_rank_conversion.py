@@ -48,6 +48,85 @@ from modelopt.onnx.graph_surgery.make_dla_compatible import (
 dla_pipeline = importlib.import_module("modelopt.onnx.graph_surgery.make_dla_compatible")
 
 
+@pytest.mark.parametrize("existing_metadata", [False, True])
+def test_final_initializer_metadata_matches_materialized_layout(existing_metadata):
+    """Deferred native initializer ranks expire after axis conversion, before final inference."""
+    weight = numpy_helper.from_array(np.arange(24, dtype=np.float32).reshape(2, 3, 4), "weight")
+    metadata = (
+        [helper.make_tensor_value_info("weight", TensorProto.FLOAT, [2, 3, 4])]
+        if existing_metadata
+        else []
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Transpose", ["weight"], ["y"], perm=[0, 2, 1])],
+            "initializer_metadata",
+            [],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 4, 3])],
+            [weight],
+            value_info=metadata,
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=9,
+    )
+    expected = _execute(model, {})
+    transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    tensors = {tensor.name: tensor for tensor in transformed.graph.initializer}
+    for info in transformed.graph.value_info:
+        if info.name in tensors:
+            assert [dim.dim_value for dim in info.type.tensor_type.shape.dim] == list(
+                tensors[info.name].dims
+            )
+    for actual, reference in zip(_execute(transformed, {}), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.parametrize("operation", ["Slice", "Reshape", "Tile"])
+def test_initializer_promotion_preserves_shared_structural_controls(operation):
+    """Arithmetic readers receive a private view while structural controls keep their native rank."""
+    shape = [1, 1, 2, 4] if operation == "Tile" else [1, 1, 2, 3]
+    control = {"Slice": [1], "Reshape": [6], "Tile": [1, 1, 1, 2]}[operation]
+    initializers = [numpy_helper.from_array(np.asarray(control, np.int64), "control")]
+    inputs = ["x", "control"]
+    if operation == "Slice":
+        initializers.extend(
+            [
+                numpy_helper.from_array(np.array([2], np.int64), "ends"),
+                numpy_helper.from_array(np.array([2], np.int64), "axes"),
+            ]
+        )
+        inputs.extend(["ends", "axes"])
+    result_shape = {"Slice": [1, 1, 1, 3], "Reshape": [6], "Tile": [1, 1, 2, 8]}[operation]
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Add", ["x", "control"], ["sum"]),
+                helper.make_node(operation, inputs, ["result"]),
+            ],
+            "shared_structural_control",
+            [helper.make_tensor_value_info("x", TensorProto.INT64, shape)],
+            [
+                helper.make_tensor_value_info("sum", TensorProto.INT64, shape),
+                helper.make_tensor_value_info("result", TensorProto.INT64, result_shape),
+            ],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=9,
+    )
+    feeds = {"x": np.arange(np.prod(shape), dtype=np.int64).reshape(shape)}
+    expected = _execute(model, feeds)
+    tensor = model.graph.initializer[0]
+    before = tensor.SerializeToString()
+    transformed = _apply_non4d_initializers(model)
+    assert tensor is transformed.graph.initializer[0]
+    assert tensor.SerializeToString() == before
+    add = next(node for node in transformed.graph.node if node.op_type == "Add")
+    assert add.input[1] != "control"
+    for actual, reference in zip(_execute(transformed, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
 @pytest.mark.parametrize("operation", ["Transpose", "Reshape", "Tile", "Expand"])
 def test_rank_conversion_preserves_operator_values(operation):
     """Execute native operators across explicitly deferred boundary and rank stages."""

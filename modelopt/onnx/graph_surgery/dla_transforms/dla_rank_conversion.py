@@ -29,6 +29,7 @@ from ..utils.graph_utils import (
     _attribute,
     _shape_before_boundary_promotion,
     add_initializer,
+    add_value_info,
     pad4d,
 )
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
@@ -330,6 +331,18 @@ def _apply_non4d_initializers(model):
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     native_sources = {}
     broadcasts = _RANK_AGNOSTIC_OPS - {"Clip"}
+    arithmetic = {"Add", "Sub", "Mul", "Div"}
+    private_users = {}
+    for tensor in model.graph.initializer:
+        consumers = cache.get_consumers(tensor.name)
+        if any(
+            user.op_type == "Shape"
+            or (port > 0 and user.op_type not in broadcasts | {"Concat", "MatMul", "LSTM"})
+            for user, port in consumers
+        ):
+            readers = [(user, port) for user, port in consumers if user.op_type in arithmetic]
+            if readers:
+                private_users[tensor.name] = readers
     native_initializers = {
         name
         for node in supported
@@ -395,7 +408,26 @@ def _apply_non4d_initializers(model):
     legacy_inputs = (
         {value.name: value for value in model.graph.input} if model.ir_version <= 3 else {}
     )
+    views = []
     for tensor, shape in updates:
+        if tensor.name in private_users:
+            axes = add_initializer(
+                model.graph,
+                cache.unique_name(tensor.name + "_4d_axes"),
+                np.arange(4 - len(tensor.dims), dtype=np.int64),
+                dtype=TensorProto.INT64,
+                with_value_info=False,
+            )
+            view = cache.unique_name(tensor.name + "_4d")
+            views.append(
+                helper.make_node(
+                    "Unsqueeze", [tensor.name, axes], [view], name=cache.unique_name(view + "_view")
+                )
+            )
+            add_value_info(model.graph, view, tensor.data_type, shape)
+            for user, port in private_users[tensor.name]:
+                user.input[port] = view
+            continue
         if tensor.name in native_inputs and tensor.name not in value_info:
             # Later axis stages read native ranks from the same deferred metadata snapshot.
             model.graph.value_info.append(
@@ -409,6 +441,9 @@ def _apply_non4d_initializers(model):
                     tensor.name, tensor.data_type, shape
                 ).type.tensor_type.shape
             )
+    if views:
+        _insert_support_nodes(model.graph, [*views, *model.graph.node])
+        _add_legacy_initializer_inputs(model)
     return model
 
 
