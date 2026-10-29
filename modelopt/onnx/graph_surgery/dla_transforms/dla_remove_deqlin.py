@@ -256,8 +256,11 @@ def _apply_remove_deqlin(model: onnx.ModelProto) -> onnx.ModelProto:
         cnt += 1
         logger.debug("DequantizeLinear %r → float32 initializer %r.", node.name, new_name)
 
-    for node in nodes_to_remove:
-        graph.node.remove(node)
+    if nodes_to_remove:
+        removed = {id(node) for node in nodes_to_remove}
+        # Stable partition retains protobuf owners instead of copying Constant payloads.
+        graph.node.sort(key=lambda node: id(node) in removed)
+        del graph.node[-len(nodes_to_remove) :]
 
     logger.debug(
         "remove_deqlin: folded %d DequantizeLinear node(s) into float32 initializers.", cnt

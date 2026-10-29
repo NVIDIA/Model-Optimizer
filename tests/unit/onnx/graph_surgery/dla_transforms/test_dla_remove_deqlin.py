@@ -148,90 +148,6 @@ def _make_dq_node(name: str, output_name: str) -> onnx.NodeProto:
     )
 
 
-# ── 1. uint16 DQ on initializer → dequantized, ORT parity ────────────────────
-
-
-def test_uint16_dq_init_dequantized():
-    """DQ(uint16 init) feeding Relu → folded into float32 init; ORT parity."""
-    shape = [4, 8]
-    scale_val = np.float32(0.01)
-    zp_val = np.uint16(0)
-    x_data = _RNG.integers(0, 65535, shape, dtype=np.int64).astype(np.uint16)
-
-    x_init, scale_init, zp_init = _make_dq_init("w", x_data, np.array(scale_val), np.array(zp_val))
-    dq_node = _make_dq_node("w", "w_float")
-    relu = helper.make_node("Relu", ["X_add"], ["Y"], name="relu")
-    add = helper.make_node("Add", ["X", "w_float"], ["X_add"], name="add")
-
-    graph = helper.make_graph(
-        [dq_node, add, relu],
-        "u16_dq",
-        [_vi("X", TensorProto.FLOAT, shape)],
-        [_vi("Y", TensorProto.FLOAT, shape)],
-        initializer=[x_init, scale_init, zp_init],
-        value_info=[
-            _vi("w_float", TensorProto.FLOAT, shape),
-            _vi("X_add", TensorProto.FLOAT, shape),
-        ],
-    )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
-    _clamp_ir(model)
-
-    x = _RNG.standard_normal(shape).astype(np.float32)
-    _prepare_model(model)
-    ref = _run_ort(model, {"X": x})
-
-    tr = copy.deepcopy(model)
-    _prepare_model(tr)
-    tr = _apply(tr)
-    _prepare_model(tr)
-    got = _run_ort(tr, {"X": x})
-
-    assert not _has_dq(tr), "DQ node must be removed"
-    assert "w_x_dequantized" in _init_names(tr), "float32 initializer must be added"
-    # original quantised init is left for _remove_unused_initializers to clean up
-    np.testing.assert_allclose(ref["Y"], got["Y"], rtol=1e-4, atol=1e-4)
-
-
-# ── 2. int8 DQ feeding non-Conv op → dequantized ─────────────────────────────
-
-
-def test_int8_dq_non_conv_dequantized():
-    """DQ(int8) feeding a Mul (not Conv) → folded into float32."""
-    shape = [2, 4]
-    x_data = _RNG.integers(-127, 127, shape, dtype=np.int8)
-    scale_val = np.array(0.1, dtype=np.float32)
-    zp_val = np.array(0, dtype=np.int8)
-
-    x_init, scale_init, zp_init = _make_dq_init("b", x_data, scale_val, zp_val)
-    dq_node = _make_dq_node("b", "b_float")
-    mul = helper.make_node("Mul", ["X", "b_float"], ["Y"], name="mul")
-
-    graph = helper.make_graph(
-        [dq_node, mul],
-        "int8_dq_mul",
-        [_vi("X", TensorProto.FLOAT, shape)],
-        [_vi("Y", TensorProto.FLOAT, shape)],
-        initializer=[x_init, scale_init, zp_init],
-        value_info=[_vi("b_float", TensorProto.FLOAT, shape)],
-    )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
-    _clamp_ir(model)
-
-    x = _RNG.standard_normal(shape).astype(np.float32)
-    _prepare_model(model)
-    ref = _run_ort(model, {"X": x})
-
-    tr = copy.deepcopy(model)
-    _prepare_model(tr)
-    tr = _apply(tr)
-    _prepare_model(tr)
-    got = _run_ort(tr, {"X": x})
-
-    assert not _has_dq(tr)
-    np.testing.assert_allclose(ref["Y"], got["Y"], rtol=1e-4, atol=1e-4)
-
-
 def test_dq_without_zero_point_dequantized():
     """DQ(data, scale) with omitted zero_point uses zero and folds into float32."""
     shape = [2, 4]
@@ -473,49 +389,73 @@ def test_dq_dynamic_input_not_removed():
 # ── 8. DQ with two consumers → both rewired ───────────────────────────────────
 
 
-def test_dq_multiple_consumers_rewired():
-    """DQ folded and BOTH downstream consumers rewired to the new float init."""
+@pytest.mark.parametrize(
+    ("dtype", "operation", "public_output"),
+    [(np.uint16, "Add", False), (np.uint16, "Add", True), (np.int8, "Mul", False)],
+)
+def test_dq_multiple_consumers_rewired(dtype, operation, public_output):
+    """Preserve shared consumers, public output names and unrelated Constant ownership."""
     shape = [2, 4]
-    x_data = _RNG.integers(0, 255, shape, dtype=np.uint16)
-    scale_val = np.array(0.01, dtype=np.float32)
-    zp_val = np.array(0, dtype=np.uint16)
-
-    x_init, scale_init, zp_init = _make_dq_init("c", x_data, scale_val, zp_val)
-    dq_node = _make_dq_node("c", "c_float")
-    add1 = helper.make_node("Add", ["X", "c_float"], ["add1_out"], name="add1")
-    add2 = helper.make_node("Add", ["add1_out", "c_float"], ["Y"], name="add2")
-
-    graph = helper.make_graph(
-        [dq_node, add1, add2],
-        "dq_multi_consumer",
-        [_vi("X", TensorProto.FLOAT, shape)],
-        [_vi("Y", TensorProto.FLOAT, shape)],
-        initializer=[x_init, scale_init, zp_init],
-        value_info=[
-            _vi("c_float", TensorProto.FLOAT, shape),
-            _vi("add1_out", TensorProto.FLOAT, shape),
-        ],
+    bounds = np.iinfo(dtype)
+    data = _RNG.integers(bounds.min, bounds.max, shape, dtype=dtype)
+    initializers = _make_dq_init("c", data, np.array(0.01, np.float32), np.array(0, dtype))
+    outputs = [_vi("Y", TensorProto.FLOAT, shape)]
+    if public_output:
+        outputs.append(_vi("c_float", TensorProto.FLOAT, shape))
+    nodes = [
+        helper.make_node(
+            "Constant",
+            [],
+            ["retained"],
+            name="retained",
+            value=numpy_helper.from_array(np.arange(16, dtype=np.uint8)),
+        ),
+        _make_dq_node("c", "c_float"),
+        helper.make_node(operation, ["X", "c_float"], ["first"], name="first"),
+        helper.make_node(operation, ["first", "c_float"], ["result"], name="second"),
+        helper.make_node(
+            "Relu" if operation == "Add" else "Identity", ["result"], ["Y"], name="tail"
+        ),
+    ]
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "dq_multi_consumer",
+            [_vi("X", TensorProto.FLOAT, shape)],
+            outputs,
+            initializer=initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", _OPSET_VERSION)],
+        ir_version=9,
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
-    _clamp_ir(model)
-
-    x = _RNG.standard_normal(shape).astype(np.float32)
-    _prepare_model(model)
-    ref = _run_ort(model, {"X": x})
-
-    tr = copy.deepcopy(model)
-    _prepare_model(tr)
-    tr = _apply(tr)
-    _prepare_model(tr)
-    got = _run_ort(tr, {"X": x})
-
-    assert not _has_dq(tr), "DQ must be removed"
-    # Both add1 and add2 must reference the new float init
-    new_name = "c_x_dequantized"
-    for node in tr.graph.node:
-        if node.name in ("add1", "add2"):
-            assert new_name in node.input, f"{node.name} was not rewired to {new_name!r}"
-    np.testing.assert_allclose(ref["Y"], got["Y"], rtol=1e-4, atol=1e-4)
+    feeds = {"X": _RNG.standard_normal(shape).astype(np.float32)}
+    onnx.checker.check_model(model, full_check=True)
+    expected = ReferenceEvaluator(model).run(None, feeds)
+    runtime_expected = _run_ort(model, feeds)
+    transformed = copy.deepcopy(model)
+    retained = {
+        node.name: node for node in transformed.graph.node if node.op_type != "DequantizeLinear"
+    }
+    payload = retained["retained"].attribute[0].t
+    payload_bytes = payload.SerializeToString()
+    _apply(transformed)
+    onnx.checker.check_model(transformed, full_check=True)
+    assert not _has_dq(transformed)
+    for node in transformed.graph.node:
+        if node.name in retained:
+            assert node is retained[node.name]
+        if node.name in {"first", "second"}:
+            assert "c_x_dequantized" in node.input
+    assert retained["retained"].attribute[0].t is payload
+    assert payload.SerializeToString() == payload_bytes
+    if public_output:
+        identity = next(node for node in transformed.graph.node if "c_float" in node.output)
+        assert identity.op_type == "Identity"
+        assert list(identity.input) == ["c_x_dequantized"]
+    for actual, reference in zip(ReferenceEvaluator(transformed).run(None, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+    for name, actual in _run_ort(transformed, feeds).items():
+        np.testing.assert_array_equal(actual, runtime_expected[name])
 
 
 # ── 9. No DQ nodes: graph unchanged ──────────────────────────────────────────
