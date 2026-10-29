@@ -662,7 +662,7 @@ def pad_embedding_lm_head(model_config: ModelConfig, padding_factor: int = 64):
     pad_vocab_size = int((vocab_size + padding_factor - 1) / padding_factor) * padding_factor
     model_config.vocab_size = pad_vocab_size
 
-    if hasattr(model_config, "vocab_embedding"):
+    if model_config.vocab_embedding is not None:
         embedding_config = model_config.vocab_embedding
         original_weight = embedding_config.weight
         pad_size = (0, 0, 0, pad_vocab_size - original_weight.shape[0])
@@ -670,7 +670,7 @@ def pad_embedding_lm_head(model_config: ModelConfig, padding_factor: int = 64):
             original_weight, pad_size, mode="constant", value=0
         )
 
-    if hasattr(model_config, "lm_head"):
+    if model_config.lm_head is not None:
         lm_head_config = model_config.lm_head
         original_weight = lm_head_config.weight
         original_bias = lm_head_config.bias

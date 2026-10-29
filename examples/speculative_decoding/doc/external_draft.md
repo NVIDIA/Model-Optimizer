@@ -3,7 +3,7 @@
 An external draft is an ordinary pretrained causal LM trained to propose tokens for a
 target model. Unlike the head-based modes (EAGLE, Medusa, DFlash) nothing is grafted onto
 the target: it contributes its vocabulary and, on the dense path, its `lm_head`. The result
-exports as a plain HuggingFace checkpoint.
+is a plain HuggingFace checkpoint.
 
 Recipe: [`modelopt_recipes/general/speculative_decoding/external_draft.yaml`](../../../modelopt_recipes/general/speculative_decoding/external_draft.yaml) |
 Swap implementation: [`vocab_swap.py`](../../../modelopt/torch/speculative/external/vocab_swap.py)
@@ -173,10 +173,10 @@ The run reports what carried over, typically a minority of the table and nearly 
 most frequent ids, since the rare tail is where tokenizers disagree.
 
 > **Note on judging a swap:** the match percentage describes the swap, not the draft.
-> Overlap figures far apart have produced similar acceptance. Measure acceptance on held-out
-> data before committing to a swapped draft, and prefer a vocabulary-matched draft where one
-> exists: the replacement matrix is `base_vocab_size × hidden_size` parameters, a large
-> fraction of a small draft, and a swapped draft stays behind a matched one of similar size.
+> Overlap figures far apart have behaved similarly, so do not read the coverage number as a
+> quality score. Prefer a vocabulary-matched draft where one exists: the replacement matrix
+> is `base_vocab_size × hidden_size` parameters, a large fraction of a small draft, and a
+> swapped draft stays behind a matched one of similar size.
 
 A swapped draft starts with a large untrained fraction and wants a higher learning rate than
 a matched draft of comparable size.
@@ -192,6 +192,15 @@ flag on does not rewrite rows that are already base-indexed.
 Training writes an ordinary HuggingFace checkpoint, shipped with the **target's** tokenizer
 when the vocabulary was swapped, since the draft's rows are indexed by the target's ids from
 that point on. Nothing in the saved artifact depends on ModelOpt at load time.
+
+**There is no export step for this mode.** `scripts/export_hf_checkpoint.py` restructures a
+grafted head into a servable checkpoint; an external draft has no head to restructure, so the
+script rejects it. The training output is the artifact.
+
+`training.output_dir` also holds training residue that `from_pretrained` ignores:
+`modelopt_state.pth`, `trainer_state.json`, `training_args.bin` and the `checkpoint-*`
+directories. Ship `config.json`, `generation_config.json`, the weights and the tokenizer
+files.
 
 ## Reference Configuration (Llama-3.2-1B drafting for Qwen3.8-27B)
 
@@ -240,16 +249,16 @@ torchrun --nproc_per_node 8 main.py \
 | Epochs | 1 |
 | Serving policy | top-k 20, top-p 0.95, temperature 1.0 |
 
-> **Note on the learning rate:** we recommend sweeping against held-out acceptance to find
-> the best rate for your own draft and target.
+> **Note on the learning rate:** we recommend sweeping to find the best rate for your own
+> draft and target.
 
 ## Open Items
 
 ### Validated end-to-end
 
-- Sparse teacher-policy training with `tvd`, from dump through training to an exported
-  checkpoint, with acceptance measured on held-out conversations.
-- The cross-tokenizer vocabulary swap, on a draft trained and measured this way.
+- Sparse teacher-policy training with `tvd`, from dump through training to a loadable
+  checkpoint.
+- The cross-tokenizer vocabulary swap, on a draft trained this way.
 
 ### Covered by tests, not yet exercised in a full run
 
@@ -262,5 +271,3 @@ torchrun --nproc_per_node 8 main.py \
 - Streaming the teacher data from a live `vllm serve`. It is accepted for this mode but has
   not been exercised. Online training is rejected outright, since it produces no cached
   target outputs for the draft to be scored against.
-- VLM targets. `main.py` routes through `load_vlm_or_llm`, so the path exists, but no
-  external draft has been trained against one.

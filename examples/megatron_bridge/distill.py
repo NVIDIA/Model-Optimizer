@@ -22,6 +22,7 @@ See `README.md` in this directory for example usage and data preparation instruc
 
 import argparse
 import contextlib
+import inspect
 import os
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from megatron.bridge.models.distillation_provider import convert_to_distillation
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )
+from megatron.bridge.training.callbacks import Callback
 from megatron.bridge.training.config import (
     CheckpointConfig,
     ConfigContainer,
@@ -76,6 +78,7 @@ from mlflow_utils import (
 from transformers import AutoTokenizer
 
 import modelopt.torch.distill as mtd
+import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import ensure_local_checkpoint
 from modelopt.torch.opt.conversion import ModeloptStateManager
@@ -308,6 +311,13 @@ def get_args():
         default=None,
         help="Override the MoE load-balancing loss weight (e.g. 0 to drop it). It is computed over every "
         "token, so with --sft padding it also sends gradient into the padded positions.",
+    )
+    parser.add_argument(
+        "--fake_quant_weight_cache",
+        action="store_true",
+        help="QAD: fake-quantize each student weight once per training step and reuse it for every "
+        "micro-batch and activation recomputation. Can speed up training at the cost of slightly "
+        "more GPU memory (one extra bf16 copy of the student's quantized weights per GPU).",
     )
     parser.add_argument(
         "--no_async_save",
@@ -592,6 +602,28 @@ def _add_document_boundaries() -> None:
     GPTDataset.__getitem__ = getitem_with_boundaries
 
 
+class FakeQuantWeightCache(Callback):
+    """Fake-quantize each student weight once per training step instead of once per micro-batch."""
+
+    def __init__(self):
+        self._scope = contextlib.ExitStack()
+
+    def on_train_start(self, context):
+        # An in-process restart after a failed step comes back here with that step's scope open.
+        self._scope.close()
+        num_cached = mtq.utils.enable_weight_cache(context.model)
+        print_rank_0(
+            f"Caching the fake-quantized weights of {num_cached} weight quantizers per step"
+        )
+
+    def on_train_step_start(self, context):
+        self._scope.enter_context(mtq.utils.weight_cache_scope(context.model))
+
+    def on_train_step_end(self, context):
+        # Before evaluation and the next step's forward, which see the optimizer's updated weights.
+        self._scope.close()
+
+
 def main(args: argparse.Namespace, owns_the_run: bool = True):
     # --student_hf_path stays as given. The student is built and exported from the local copy of
     # the whole checkpoint in student_local_checkpoint_path, since the HF export reads the source's
@@ -604,6 +636,10 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
         args.student_megatron_path
     )
+    if args.fake_quant_weight_cache and not student_has_modelopt_state:
+        raise ValueError("--fake_quant_weight_cache needs a quantized --student_megatron_path.")
+    if args.fake_quant_weight_cache and "callbacks" not in inspect.signature(distill).parameters:
+        raise ValueError("--fake_quant_weight_cache needs a newer Megatron-Bridge; see the README.")
     # A quantized student pins the layout: it must match what quantize.py wrote, so reuse the same
     # data-driven choice. An unquantized (e.g. pruned) student exports via Megatron-Bridge, which
     # reads either layout, so it keeps the faster grouped GEMM.
@@ -909,8 +945,10 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     # Before training: a resumed run starts with the previous run's checkpoint in place, so
     # only a move in this marker shows that this run saved one of its own.
     saved_before = checkpoint_marker(args, DISTILL)
+    # Only a newer Megatron-Bridge's distill() takes callbacks, so pass them only when needed.
+    distill_kwargs = {"callbacks": [FakeQuantWeightCache()]} if args.fake_quant_weight_cache else {}
     try:
-        distill(config)
+        distill(config, **distill_kwargs)
     finally:
         # In a finally: when --exit_interval or --exit_duration_in_mins fires -- which is how
         # a Slurm run usually ends -- Megatron-Bridge calls sys.exit() from inside train(),

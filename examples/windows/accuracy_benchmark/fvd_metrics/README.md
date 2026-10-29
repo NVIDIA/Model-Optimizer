@@ -78,6 +78,11 @@ python compute_fvd.py \
     --weights ./rgb_imagenet.pt
 ```
 
+Tensor state dictionaries load directly. For a custom TorchScript archive, also pass
+`--weights-sha256 <expected-digest>` using a digest from a trusted publisher. Automatic
+downloads and cached weights are checksum-verified before loading. Legacy checkpoints
+that require unrestricted pickle loading are no longer supported.
+
 ### Increase Sample Count with Multiple Clips per Video
 
 ```bash
@@ -120,6 +125,7 @@ python compute_fvd.py \
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `--weights` | Path to I3D weights file | Auto-downloaded `rgb_imagenet.pt` |
+| `--weights-sha256` | Trusted SHA-256 for custom weights; required for TorchScript archives | None |
 | `--device` | Torch device (`cuda`, `cpu`, `cuda:0`) | Auto-detected |
 | `--clip-length` | Number of frames per clip | 16 |
 | `--clips-per-video` | Number of clips sampled per video | 1 |

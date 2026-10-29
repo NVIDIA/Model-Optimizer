@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
@@ -116,10 +117,10 @@ class ExpertRemovalPruningMixIn(PruningMixIn):
         parent_router_keys, orig_experts_keys = self._generate_moe_keys(layer_idx, orig_num_experts)
 
         # Pop parent's router keys from copy list; child-only router keys will be initialized below
-        for rk in sum(parent_router_keys.values(), []):
+        for rk in chain.from_iterable(parent_router_keys.values()):
             if rk in keys:
                 keys.pop(rk)
-        for key in sum(orig_experts_keys.values(), []):
+        for key in chain.from_iterable(orig_experts_keys.values()):
             if key in keys:
                 keys.pop(key)
 
