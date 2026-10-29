@@ -42,7 +42,7 @@ from _test_utils.torch.megatron.utils import (
     save_distributed_checkpoint,
     sharded_state_dict_test_helper,
 )
-from _test_utils.torch.misc import set_seed
+from _test_utils.torch.misc import is_blackwell, set_seed
 from _test_utils.torch.quantization.models import RegularQuantModelForTP
 from _test_utils.torch.quantization.quant_utils import get_model_size
 from _test_utils.torch.quantization.quantize_common import (
@@ -118,15 +118,6 @@ except ImportError:
     HAS_HADAMARD = False
 
 SEED = 1234
-
-# TODO: re-enable the marked tests once fixed. Blackwell (sm_120, e.g. RTX PRO 6000) with the
-# nemo:26.06 / TE 2.16 / CUDA 13 stack hits a flaky, intermittent CUDA "illegal memory access" in
-# several tests: When fails, it poisons the process CUDA context and cascades hang across subsequent tests.
-# Passes locally on different GPUs. Likely an upstream TE/CUDA-13 kernel bug, not modelopt logic.
-skip_flaky_on_blackwell = pytest.mark.skipif(
-    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12,
-    reason="Flaky CUDA illegal memory access on Blackwell (nemo:26.06 / TE 2.16 / CUDA 13)",
-)
 
 
 def test_convert_megatron_parallel_linear(distributed_setup_size_1):
@@ -497,7 +488,6 @@ FP8_GEMM_KV_CFG["quant_cfg"].extend(mtq.FP8_KV_CFG["quant_cfg"])
 )
 @pytest.mark.parametrize("meta_device", [False, True])
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
-@skip_flaky_on_blackwell
 def test_homogeneous_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -523,9 +513,6 @@ def test_homogeneous_sharded_state_dict(
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
 @pytest.mark.timeout(240)
 # Compressed state dict takes longer due to real quant conversion & saving/loading
-# Its real mtq.compress() path exercises the same TE/CUDA-13 kernels that trip the flaky
-# Blackwell (sm_120) illegal-memory-access; #1901 skipped the fake-quant sibling but missed this one.
-@skip_flaky_on_blackwell
 def test_homogeneous_compressed_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -607,7 +594,6 @@ def test_homogeneous_sharded_state_dict_hybrid(dist_workers, tmp_path, config):
         mixed_block_size_config,
     ],
 )
-@skip_flaky_on_blackwell
 def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     dist_workers.run(
         partial(_test_sharded_state_dict, tmp_path, config, 256, None, False, False, {}),
@@ -618,7 +604,13 @@ def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     "hidden_size",
     [
         256,
-        pytest.param(320, marks=skip_flaky_on_blackwell),
+        # Runs in the pytest process, so a Blackwell CUDA crash here would break every later test
+        pytest.param(
+            320,
+            marks=pytest.mark.skipif(
+                is_blackwell(), reason="Flaky CUDA illegal memory access on Blackwell"
+            ),
+        ),
     ],
 )
 def test_regular_state_dict(distributed_setup_size_1, hidden_size):
@@ -691,7 +683,6 @@ def _test_fp8_real_quantize_helper(rank, size):
     assert real_quant_mem < cur_mem
 
 
-@skip_flaky_on_blackwell
 def test_fp8_real_quantize(dist_workers):
     dist_workers.run(_test_fp8_real_quantize_helper)
 
@@ -1726,7 +1717,6 @@ def _test_layerwise_calibrate_vlm_text_forward_loop(drive_wrapper, rank, size):
     assert all(m.input_quantizer.amax is not None for m in calibrated)
 
 
-@skip_flaky_on_blackwell
 @pytest.mark.parametrize("drive_wrapper", [False, True])
 def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wrapper):
     dist_workers_size_1.run(partial(_test_layerwise_calibrate_vlm_text_forward_loop, drive_wrapper))
@@ -2648,3 +2638,38 @@ class TestKeepGptOutputLayerExtraState:
     )
     def test_extra_state_has_data(self, entry, expected):
         assert _output_layer_extra_state_has_data(entry) is expected
+
+
+@pytest.mark.parametrize(
+    "quant_cfg", ["FP8_DEFAULT_CFG", "NVFP4_DEFAULT_CFG", "NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG"]
+)
+def test_mla_fused_down_projections_share_ranges(distributed_setup_size_1, quant_cfg):
+    """vLLM and TRT-LLM fuse MLA's q_down and kv_down into one GEMM with one scale per tensor."""
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    try:
+        model = get_mcore_gpt_model(
+            hidden_size=128,
+            num_attention_heads=2,
+            vocab_size=128,
+            max_sequence_length=32,
+            transformer_impl="transformer_engine",
+            multi_latent_attention=True,
+        ).cuda()
+        attentions = [layer.self_attention for layer in model.decoder.layers]
+        with torch.no_grad():  # give the two weights different ranges
+            for attention in attentions:
+                attention.linear_kv_down_proj.weight.mul_(4)
+
+        model = mtq.quantize(model, copy.deepcopy(getattr(mtq, quant_cfg)), get_forward(model))
+
+        for attention in attentions:
+            q_down, kv_down = attention.linear_q_down_proj, attention.linear_kv_down_proj
+            assert torch.equal(q_down.input_quantizer.amax, kv_down.input_quantizer.amax)
+            if q_down.weight_quantizer.is_nvfp4_static:
+                assert torch.equal(
+                    q_down.weight_quantizer.global_amax, kv_down.weight_quantizer.global_amax
+                )
+            else:
+                assert torch.equal(q_down.weight_quantizer.amax, kv_down.weight_quantizer.amax)
+    finally:
+        destroy_model_parallel()  # not a spawned process

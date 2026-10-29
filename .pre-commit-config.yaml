@@ -21,19 +21,19 @@ repos:
       - id: requirements-txt-fixer
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.20
+    rev: v0.17.3
     hooks:
       - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v2.1.0
+    rev: v2.4.0
     hooks:
       - id: mypy
 
   - repo: https://github.com/pre-commit/mirrors-clang-format
-    rev: v21.1.0
+    rev: v23.1.3
     hooks:
       - id: clang-format
         types_or: [c++, c, c#, cuda, java, javascript, objective-c, proto] # no json!
@@ -85,7 +85,7 @@ repos:
   # Instructions to change license file if ever needed:
   # https://github.com/Lucas-C/pre-commit-hooks#removing-old-license-and-replacing-it-with-a-new-one
   - repo: https://github.com/Lucas-C/pre-commit-hooks
-    rev: v1.5.5
+    rev: v1.5.6
     hooks:
       # Default hook for Apache 2.0 in python and shell files
       - id: insert-license
@@ -163,7 +163,7 @@ repos:
         types_or: [c++, cuda, c]
 
   - repo: https://github.com/PyCQA/bandit
-    rev: 1.7.9
+    rev: 1.9.4
     hooks:
       - id: bandit
         args: ["-c", "pyproject.toml", "-q"]
@@ -185,7 +185,7 @@ repos:
         pass_filenames: false
 
   - repo: https://github.com/DavidAnson/markdownlint-cli2
-    rev: v0.18.1
+    rev: v0.24.0
     hooks:
       - id: markdownlint-cli2
         args: ["--fix"]
@@ -195,7 +195,7 @@ repos:
 
   # Spell checker
   - repo: https://github.com/crate-ci/typos
-    rev: v1.35.8
+    rev: v1.51.1
     hooks:
       - id: typos
         stages: [manual]

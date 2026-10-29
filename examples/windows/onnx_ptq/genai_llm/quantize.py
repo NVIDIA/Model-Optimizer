@@ -351,7 +351,6 @@ def main(args):
 
     if not os.path.exists(output_dir_path):
         os.makedirs(output_dir_path)
-        os.chmod(output_dir_path, 0o777)
 
     calib_inputs = get_calib_inputs(
         args.dataset,

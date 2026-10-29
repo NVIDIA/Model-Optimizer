@@ -61,9 +61,8 @@ import os
 import sys
 from pathlib import Path
 
-import vllm
-from packaging import version
 from vllm.entrypoints.cli.main import main as vllm_main
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm_mlflow_utils import MLFLOW_ENV_VARS, add_mlflow_args, resolve_mlflow_args
 
 
@@ -72,13 +71,6 @@ def _is_missing_entrypoint(error: ModuleNotFoundError, entrypoint: str) -> bool:
     return missing_module is not None and (
         missing_module == entrypoint or entrypoint.startswith(f"{missing_module}.")
     )
-
-
-vllm_version = version.parse(vllm.__version__)
-if vllm_version <= version.parse("0.11.0"):
-    from vllm.utils import FlexibleArgumentParser
-else:
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 # Env vars to copy from the driver to Ray workers (must match fakequant_worker / vllm_ptq_utils).

@@ -39,9 +39,9 @@ from . import (  # noqa: E402
 )
 # isort: on
 
-if _Version(_torch_version) < _Version("2.9"):
+if _Version(_torch_version) < _Version("2.11"):
     _warnings.warn(
-        "nvidia-modelopt will drop torch<2.9 support in a future release.", DeprecationWarning
+        "nvidia-modelopt will drop torch<2.11 support in a future release.", DeprecationWarning
     )
 
 

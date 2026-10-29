@@ -37,8 +37,6 @@ nox.options.envdir = "/tmp/.nox"
 nox.options.reuse_existing_virtualenvs = True
 
 TORCH_VERSIONS = {
-    "torch_28": "torchvision~=0.23.0",
-    "torch_29": "torchvision~=0.24.0",
     "torch_210": "torchvision~=0.25.0",
     "torch_211": "torchvision~=0.26.0",
     "torch_212": "torchvision~=0.27.0",
@@ -63,7 +61,7 @@ def _cov_args():
 _CPU_ONLY_ENV = {"CUDA_VISIBLE_DEVICES": ""}
 
 
-@nox.session(python=["3.10", "3.11", "3.12", "3.13", "3.14"])
+@nox.session(python=["3.11", "3.12", "3.13", "3.14"])
 @nox.parametrize("tf_ver", [nox.param(k, id=k) for k in TRANSFORMERS_VERSIONS])
 @nox.parametrize("torch_ver", [nox.param(k, id=k) for k in TORCH_VERSIONS])
 def unit(session, torch_ver, tf_ver):

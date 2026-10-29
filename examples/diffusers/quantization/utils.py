@@ -20,12 +20,12 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
+from diffusers.models.attention import AttentionModuleMixin
 from diffusers.models.attention_processor import Attention, AttnProcessor
 from diffusers.models.lora import LoRACompatibleConv, LoRACompatibleLinear
 from diffusers.utils import load_image
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.plugins.diffusion.diffusers import AttentionModuleMixin
 
 USE_PEFT = True
 try:

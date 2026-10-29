@@ -34,14 +34,13 @@
 The masked joint-attention execution follows NVIDIA FastGen merge request 210.
 """
 
-from __future__ import annotations
-
 import math
 import types
 from collections.abc import Mapping
 from typing import Any
 
 import torch
+from packaging.version import Version
 from torch import nn
 
 from ..config import PDDConfig
@@ -226,7 +225,12 @@ def enable_qwen_image_pdd_forward(transformer: nn.Module) -> nn.Module:
         return transformer
 
     # Diffusers is an optional dependency used only by the Qwen example.
+    import diffusers
     from diffusers import QwenImageTransformer2DModel
+
+    # Older diffusers builds the joint mask in the root forward, which this forward replaces.
+    if Version(diffusers.__version__) < Version("0.39"):
+        raise RuntimeError(f"Qwen-Image PDD requires diffusers>=0.39, got {diffusers.__version__}.")
 
     if not isinstance(transformer, QwenImageTransformer2DModel):
         raise TypeError(

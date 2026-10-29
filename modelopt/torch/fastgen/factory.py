@@ -21,13 +21,9 @@ fake score directly (e.g. under a meta-init context for FSDP2) instead of callin
 section "How the framework can build the fake_score") for both options.
 """
 
-from __future__ import annotations
-
 import copy
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from torch import nn
+from torch import nn
 
 __all__ = ["create_fake_score"]
 
@@ -39,7 +35,7 @@ def _looks_fsdp_wrapped(module: nn.Module) -> bool:
 
     - **FSDP1** (``torch.distributed.fsdp.FullyShardedDataParallel``): child modules
       carry an ``_fsdp_wrapped_module`` attribute.
-    - **FSDP2** (``torch.distributed._composable.fsdp.fully_shard``): parameters are
+    - **FSDP2** (``torch.distributed.fsdp.fully_shard``): parameters are
       ``DTensor`` instances exposing a ``full_tensor`` method.
 
     Probes only the first parameter to avoid iterating a large model. Intended for

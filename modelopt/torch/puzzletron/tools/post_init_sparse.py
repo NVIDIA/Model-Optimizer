@@ -82,9 +82,9 @@ class SparsityMethod:
 
         if mask_dict is None:
             state_dict_for_sparsifying = {
-                k.rstrip(".weight"): v
+                k.removesuffix(".weight"): v
                 for k, v in model.state_dict().items()
-                if k.rstrip(".weight") in full_name_layers
+                if k.removesuffix(".weight") in full_name_layers
             }
             mask_dict = self.calculate_masks(state_dict_for_sparsifying)
         # print('Apply sparsity')

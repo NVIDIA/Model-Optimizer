@@ -32,8 +32,6 @@ allows a checkpoint mirror for a *planned*, not-yet-released checkpoint, and ptq
 where the backfilled, already-published aliases this check targets actually live.
 """
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 
