@@ -19,6 +19,7 @@ import inspect
 
 import numpy as np
 import onnx
+import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
@@ -93,8 +94,8 @@ def _initializer_arrays(model: onnx.ModelProto) -> dict[str, np.ndarray]:
             "fp8",
             "entropy",
             TensorProto.FLOAT8E4M3FN,
-            0.028210056945681572,
-            [0.06944013386964798, 0.08332816511392593, 0.09721619635820389],
+            0.007997047156095505 * 127 / 448,
+            [2.5 / 448, 3 / 448, 3.5 / 448],
             id="fp8-entropy",
             # ~13s each; entropy calibration is also covered in tests/gpu/onnx
             marks=pytest.mark.manual,
@@ -103,8 +104,8 @@ def _initializer_arrays(model: onnx.ModelProto) -> dict[str, np.ndarray]:
             "fp8",
             "max",
             TensorProto.FLOAT8E4M3FN,
-            2.7776055335998535,
-            [0.06944013386964798, 0.08332816511392593, 0.09721619635820389],
+            100 / 448,
+            [2.5 / 448, 3 / 448, 3.5 / 448],
             id="fp8-max",
         ),
     ],
@@ -117,6 +118,7 @@ def test_explicit_calibrated_quantization_graph_contract(
     activation_scale,
     weight_scales,
 ):
+    """Calibrated Q/DQ pairs must share correctly typed scales and zero points."""
     input_path = tmp_path / "matmul.onnx"
     output_path = tmp_path / "matmul.quant.onnx"
     onnx.save_model(_make_matmul_model(), input_path)
@@ -168,15 +170,68 @@ def test_explicit_calibrated_quantization_graph_contract(
         initializer_arrays[weight_q.input[2]],
         np.zeros_like(initializer_arrays[weight_q.input[2]]),
     )
-    np.testing.assert_array_equal(
+    np.testing.assert_allclose(
         initializer_arrays[activation_q.input[1]], np.float32(activation_scale)
     )
-    np.testing.assert_array_equal(
+    np.testing.assert_allclose(
         initializer_arrays[weight_q.input[1]], np.asarray(weight_scales, dtype=np.float32)
     )
     assert model.graph.input[0].type.tensor_type.elem_type == TensorProto.FLOAT
     assert model.graph.output[0].type.tensor_type.elem_type == TensorProto.FLOAT
     assert [(opset.domain, opset.version) for opset in model.opset_import] == [("", 19)]
+
+
+@pytest.mark.parametrize("high_precision_dtype", ["fp16", "fp32"])
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param([[1, 40000, 2, 40000]], id="large-range"),
+        pytest.param(np.array([[1, 4, 2, 4]]) * 2**-20, id="small-range"),
+    ],
+)
+def test_fp8_max_calibration_preserves_finite_inputs(tmp_path, high_precision_dtype, data):
+    """Large and small calibrated ranges must remain usable in the exported model."""
+    model = _make_matmul_model()
+    weight = np.array([[0.25, 0, 0], [0, 0.25, 0], [0.25, 0, 0], [0, 0.25, 0.25]], np.float32)
+    model.graph.initializer[0].CopyFrom(numpy_helper.from_array(weight, "weight"))
+    data = np.asarray(data, dtype=np.float32)
+    input_path = tmp_path / "matmul.onnx"
+    output_path = tmp_path / "matmul.quant.onnx"
+    onnx.save_model(model, input_path)
+
+    moq.quantize(
+        str(input_path),
+        output_path=str(output_path),
+        quantize_mode="fp8",
+        calibration_method="max",
+        calibration_data={"input": data},
+        calibration_eps=["cpu"],
+        high_precision_dtype=high_precision_dtype,
+        passes=[],
+        enable_gemv_detection_for_trt=False,
+    )
+
+    quantized = onnx.load(output_path)
+    onnx.checker.check_model(quantized, full_check=True)
+    initializers = _initializer_arrays(quantized)
+    activation_q = next(
+        node
+        for node in quantized.graph.node
+        if node.op_type == "QuantizeLinear" and node.input[0] not in initializers
+    )
+    expected_scale = data.max() / 448
+    if high_precision_dtype == "fp16":
+        expected_scale = max(expected_scale, np.finfo(np.float16).smallest_subnormal)
+    np.testing.assert_allclose(initializers[activation_q.input[1]], expected_scale, rtol=5e-4)
+    options = ort.SessionOptions()
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    options.intra_op_num_threads = 1
+    options.inter_op_num_threads = 1
+    result = ort.InferenceSession(
+        str(output_path), sess_options=options, providers=["CPUExecutionProvider"]
+    ).run(None, {"input": data})[0]
+    assert np.isfinite(result).all()
+    np.testing.assert_allclose(result, data @ weight, rtol=0.03)
 
 
 @pytest.mark.xfail(
