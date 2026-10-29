@@ -20,6 +20,7 @@ from collections.abc import Sequence
 import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
+import onnxruntime as ort
 import pytest
 from _test_utils.onnx.lib_test_models import find_init
 
@@ -38,7 +39,7 @@ def _matmul_model(w: np.ndarray, in_shape: Sequence[int], out_shape: Sequence[in
     x = gs.Variable("x", dtype=np.float32, shape=in_shape)
     y = gs.Variable("y", dtype=np.float32, shape=out_shape)
     mm = gs.Node("MatMul", "mm", inputs=[x, w], outputs=[y])
-    g = gs.Graph([mm], inputs=[x, w], outputs=[y])
+    g = gs.Graph([mm], inputs=[x, w], outputs=[y], opset=21)
 
     onnx_model = gs.export_onnx(g)
     onnx_path = os.path.join(tmp_path, "model.onnx")
@@ -58,7 +59,7 @@ def _gather_model(rows, cols, tmp_path):
         op="Gather", inputs=[data_node, indices_var], outputs=[gather_out], attrs={"axis": 0}
     )
 
-    graph = gs.Graph(nodes=[gather_node], inputs=[indices_var], outputs=[gather_out])
+    graph = gs.Graph(nodes=[gather_node], inputs=[indices_var], outputs=[gather_out], opset=21)
 
     onnx_model = gs.export_onnx(graph)
     onnx_path = os.path.join(tmp_path, "gather_base_model.onnx")
@@ -132,22 +133,35 @@ def test_int4_rtn(tmp_path):
     onnx_model = quantize_int4(onnx_path, "rtn", block_size=8)  # Ensure it passes.
 
 
-def test_shape_rtn(tmp_path):
+@pytest.mark.parametrize(("block_size", "layers_8bit"), [(8, None), (-1, None), (8, "mm")])
+def test_shape_rtn(tmp_path, block_size, layers_8bit):
     # Test shape compatibility
-    onnx_dataloader = [{"x": np.random.rand(96, 288)}]
+    rng = np.random.default_rng(0)
+    onnx_dataloader = [{"x": rng.random((96, 288), dtype=np.float32)}]
     onnx_path = _matmul_model(
-        w=np.random.rand(288, 16).astype(np.float32),
+        w=rng.random((288, 16), dtype=np.float32),
         in_shape=(96, 288),
         out_shape=(96, 16),
         tmp_path=tmp_path,
     )
-    quantize_int4(
-        onnx_path,
-        "rtn",
-        onnx_dataloader,
-        block_size=8,
-        use_external_data_format=False,
-    )  # Ensure it passes.
+    outputs = []
+    for method in ["rtn", "rtn_dq"]:
+        model = quantize_int4(
+            onnx_path,
+            method,
+            onnx_dataloader,
+            block_size=block_size,
+            layers_8bit=layers_8bit,
+            use_external_data_format=False,
+        )
+        options = ort.SessionOptions()
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+        options.intra_op_num_threads = 1
+        session = ort.InferenceSession(
+            model.SerializeToString(), options, providers=["CPUExecutionProvider"]
+        )
+        outputs.append(session.run(None, onnx_dataloader[0])[0])
+    np.testing.assert_allclose(outputs[0], outputs[1], rtol=1e-5, atol=1e-5)
 
 
 def test_shape_awq(tmp_path):
@@ -175,7 +189,8 @@ def test_shape_awq(tmp_path):
     )  # Ensure it passes.
 
 
-def test_int4_gather(tmp_path):
+@pytest.mark.parametrize("calibration_method", ["rtn", "rtn_dq"])
+def test_int4_gather(tmp_path, calibration_method):
     gather_rows = 8
     gather_cols = 16
     gather_block_size = 8
@@ -183,10 +198,16 @@ def test_int4_gather(tmp_path):
     m = _gather_model(gather_rows, gather_cols, tmp_path=tmp_path)
 
     m1 = quantize_int4(
-        m, calibration_method="rtn_dq", gather_block_size=gather_block_size, gather_quantize_axis=1
+        m,
+        calibration_method=calibration_method,
+        gather_block_size=gather_block_size,
+        gather_quantize_axis=1,
     )
     m2 = quantize_int4(
-        m, calibration_method="rtn_dq", gather_block_size=gather_block_size, gather_quantize_axis=0
+        m,
+        calibration_method=calibration_method,
+        gather_block_size=gather_block_size,
+        gather_quantize_axis=0,
     )
 
     def is_gather_quantized(model):
@@ -226,7 +247,15 @@ def test_int4_gather(tmp_path):
         "DQ Scale Error in rtn_dq quantization, axis 0"
     )
 
-    # Ensure above tests pass.
+    for model in [m1, m2]:
+        options = ort.SessionOptions()
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+        options.intra_op_num_threads = 1
+        session = ort.InferenceSession(
+            model.SerializeToString(), options, providers=["CPUExecutionProvider"]
+        )
+        output = session.run(None, {"indices": np.asarray(3, dtype=np.int64)})[0]
+        assert output.shape == (gather_cols,)
 
 
 @pytest.mark.parametrize("calibration_method", ["awq_lite", "awq_clip"])
