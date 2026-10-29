@@ -22,6 +22,7 @@ import inspect
 import logging
 import os
 import re
+import sys
 import warnings
 from collections import defaultdict
 from contextlib import contextmanager
@@ -31,7 +32,9 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
+import transformers
 import transformers.distributed as hf_distributed
+import transformers.modeling_utils as hf_modeling_utils
 from huggingface_hub import snapshot_download
 
 if TYPE_CHECKING:
@@ -39,8 +42,8 @@ if TYPE_CHECKING:
 from torch.distributed import device_mesh
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
-from torch.distributed.fsdp import FSDPModule
-from torch.distributed.tensor import DTensor
+from torch.distributed.fsdp import FSDPModule, fully_shard
+from torch.distributed.tensor import DTensor, Replicate
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -52,6 +55,7 @@ from transformers import (
 )
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
+from transformers.integrations.tensor_parallel import replace_layer_number_by_wildcard
 
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import env, moe
@@ -1683,8 +1687,6 @@ def _make_expert_param_matcher(ep_plan: dict[str, Any]):
     (``ep_router`` / ``torch_a2a_router``) are REPLICATED, not sharded, so they're excluded. If the plan is
     empty the matcher is always ``False`` (-> no EP credit -> stock warmup sizing).
     """
-    from transformers.integrations.tensor_parallel import replace_layer_number_by_wildcard
-
     _router_styles = {"ep_router", "torch_a2a_router"}
     keys = [k for k, v in (ep_plan or {}).items() if v not in _router_styles]
 
@@ -1730,12 +1732,7 @@ def _ep_aware_caching_allocator_warmup(
     if ep_degree <= 1:
         yield
         return
-    try:
-        import transformers.modeling_utils as _mu
-    except Exception:
-        yield
-        return
-    orig = getattr(_mu, "get_total_byte_count", None)
+    orig = getattr(hf_modeling_utils, "get_total_byte_count", None)
     if orig is None:
         yield
         return
@@ -1753,8 +1750,6 @@ def _ep_aware_caching_allocator_warmup(
 
     def _ep_aware(model, accelerator_device_map, hf_quantizer=None, *args, **kwargs):
         try:
-            from collections import defaultdict
-
             try:  # where current transformers keeps it (5.18); older releases, under integrations
                 from transformers.distributed.tensor_parallel import _get_parameter_tp_plan
             except ImportError:
@@ -1816,10 +1811,10 @@ def _ep_aware_caching_allocator_warmup(
             return orig(model, accelerator_device_map, hf_quantizer, *args, **kwargs)
 
     try:
-        _mu.get_total_byte_count = _ep_aware
+        hf_modeling_utils.get_total_byte_count = _ep_aware
         yield
     finally:
-        _mu.get_total_byte_count = orig
+        hf_modeling_utils.get_total_byte_count = orig
 
 
 def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_state) -> None:
@@ -1862,16 +1857,11 @@ def _fsdp2_shard_dense(model: nn.Module, fsdp_mesh, expert_modules) -> int:
 
     Returns the number of layers wrapped.
     """
-    from torch.distributed.fsdp import fully_shard
-
     # Every routed-expert param is EP-sharded on the ``ep`` mesh; FSDP must IGNORE them so it never tries
     # to reshard them onto ``fsdp_mesh``. Ignored params not present in a given layer are simply no-ops.
     ignored_params = _off_dtype_params(model)
     for em in expert_modules:
         ignored_params.update(em.parameters(recurse=True))
-
-    from torch.distributed.tensor import DTensor, Replicate
-
     ignored_param_ids = {id(p) for p in ignored_params}  # id-based: Tensor.__eq__ is elementwise
 
     # Wrap only the OUTERMOST _no_split_modules. Some models (e.g. Kimi's MoonViT VLM) list BOTH a
@@ -2005,20 +1995,14 @@ def _ep_dense_meta_load(is_expert):
     normally. Patches ``get_device`` on both ``transformers.modeling_utils`` and the module that actually
     defines the loader (it's looked up as a module global there).
     """
-    import sys as _sys
-
-    import transformers.modeling_utils as _mu
-
-    loader = getattr(_mu, "convert_and_load_state_dict_in_model", None)
-    mods = {_mu}
+    loader = getattr(hf_modeling_utils, "convert_and_load_state_dict_in_model", None)
+    mods = {hf_modeling_utils}
     loader_module = getattr(loader, "__module__", None)
-    dm = _sys.modules.get(loader_module) if loader_module else None
+    dm = sys.modules.get(loader_module) if loader_module else None
     if dm is not None:
         mods.add(dm)
     targets = [m for m in mods if hasattr(m, "get_device")]
     if not targets:
-        import transformers
-
         raise RuntimeError(
             "Sharding the dense part keeps it off the device during from_pretrained through "
             f"transformers' get_device, which none of {sorted(m.__name__ for m in mods)} has on "
