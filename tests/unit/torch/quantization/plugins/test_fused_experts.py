@@ -19,17 +19,23 @@ import copy
 import warnings
 import weakref
 from contextlib import nullcontext
+from unittest import mock
 
 import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
+from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
+from torch.distributed.tensor.debug import CommDebugMode
 
 pytest.importorskip("transformers")
 
 from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_params
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, Qwen3MoeConfig
 from transformers.integrations.finegrained_fp8 import FP8Experts
+from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -62,6 +68,7 @@ from modelopt.torch.quantization.plugins.huggingface import (
     register_fused_experts_on_the_fly,
     register_sparse_moe_on_the_fly,
 )
+from modelopt.torch.quantization.utils.calib_utils import GPTQHelper
 from modelopt.torch.quantization.utils.core_utils import module_name_maps, weight_attr_names
 
 
@@ -2681,3 +2688,237 @@ def test_native_fp8_experts_reject_packed_weight_updates(cfg, algorithm):
     mtq.calibrate(experts, algorithm, forward_loop=lambda m: m(inputs, indices, routing))
     for name, weight in unpacked.items():
         assert not torch.equal(getattr(experts, name), weight)
+
+
+# ---------------------------------------------------------------------------
+# Fused experts under expert parallelism
+# ---------------------------------------------------------------------------
+_EP_EXPERTS, _EP_HIDDEN = 4, 8
+
+
+class _ExpertsHolder(nn.Module):
+    def __init__(self, experts):
+        super().__init__()
+        self.experts = experts
+
+    def forward(self, *args):
+        return self.experts(*args)
+
+
+_WEIGHT_ONLY_INT8_EXPERTS_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*proj_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+    ],
+    "algorithm": "max",
+}
+
+
+def _ep_experts_config():
+    return Qwen3MoeConfig(
+        hidden_size=_EP_HIDDEN,
+        moe_intermediate_size=2 * _EP_HIDDEN,
+        intermediate_size=4 * _EP_HIDDEN,
+        num_experts=_EP_EXPERTS,
+        num_experts_per_tok=TOP_K,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+    )
+
+
+def _experts_with_distinct_scales(config):
+    """Whole fused experts with a distinct weight scale per expert, so a mix-up cannot pass."""
+    experts = Qwen3MoeExperts(config)
+    with torch.no_grad():
+        for e in range(_EP_EXPERTS):
+            experts.gate_up_proj[e].normal_(std=0.1 * (e + 1))
+            experts.down_proj[e].normal_(std=0.1 * (e + 1))
+    return experts
+
+
+def _sharded_like_transformers(whole, config, mesh, size):
+    """``whole``'s experts as transformers' expert parallelism shards them (``MoEParamShard``): a
+    DTensor ``Shard(0)`` over the experts, ``num_experts`` set to the local count."""
+    experts = Qwen3MoeExperts(config)
+    experts.num_experts = _EP_EXPERTS // size
+    for name in ("gate_up_proj", "down_proj"):
+        full = getattr(whole, name).detach().clone()
+        experts._parameters[name] = nn.Parameter(distribute_tensor(full, mesh, [Shard(0)]))
+    return experts
+
+
+def _ep_sharded_experts_use_their_own_weights_job(rank, size, layout):
+    """Each rank's per-expert quantizers must calibrate on, and fold into, the rank's own experts, as
+    in the whole module -- not on the global experts their local index names. ``fsdp2-dense`` is the
+    dense-sharded expert-parallel layout: the decoder layer FSDP2-sharded over ``dp`` with its
+    experts left out (``ignored_params``), so weight calibration opens FSDP2's weight-access window
+    on the layer, which must leave the expert DTensors alone -- gathering them would hand every rank
+    every expert, indexed by local position."""
+    config = _ep_experts_config()
+    whole = _ExpertsHolder(_experts_with_distinct_scales(config))
+    n_local = _EP_EXPERTS // size
+    owned = slice(rank * n_local, (rank + 1) * n_local)
+    # Unnamed meshes give the window nothing but FSDP2's own bookkeeping to tell its shards by.
+    named = layout != "fsdp2-dense-unnamed-meshes"
+    ep_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("ep",) if named else None)
+    experts = _sharded_like_transformers(whole.experts, config, ep_mesh, size)
+    if layout != "plain":
+        layer = nn.Module()
+        layer.dense = nn.Linear(_EP_HIDDEN, _EP_HIDDEN)
+        layer.experts = experts
+        dp_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("dp",) if named else None)
+        fully_shard(layer, mesh=dp_mesh, ignored_params=set(experts.parameters()))
+        model = nn.Module()
+        model.layer = layer
+    else:
+        model = _ExpertsHolder(experts)
+
+    mtq.quantize(whole, _WEIGHT_ONLY_INT8_EXPERTS_CFG)
+    mtq.quantize(model, _WEIGHT_ONLY_INT8_EXPERTS_CFG)
+    sharded = model.experts if layout == "plain" else model.layer.experts
+    for name in ("gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"):
+        local_quantizers = getattr(sharded, name)
+        assert len(local_quantizers) == n_local
+        for i, quantizer in enumerate(local_quantizers):
+            reference = getattr(whole.experts, name)[owned.start + i]
+            torch.testing.assert_close(
+                quantizer.amax, reference.amax, atol=0, rtol=0, msg=f"{name}[{i}]"
+            )
+    # The expert weights stay sharded: nothing gathered them for good.
+    assert sharded.gate_up_proj.to_local().shape[0] == n_local
+
+    if layout == "plain":
+        whole.experts.fold_weight()
+        sharded.fold_weight()
+        for name in ("gate_up_proj", "down_proj"):
+            torch.testing.assert_close(
+                getattr(sharded, name).to_local(),
+                getattr(whole.experts, name)[owned],
+                atol=0,
+                rtol=0,
+            )
+
+
+@pytest.mark.parametrize("layout", ["plain", "fsdp2-dense", "fsdp2-dense-unnamed-meshes"])
+def test_ep_sharded_experts_calibrate_and_fold_their_own_weights(cpu_dist_workers, layout):
+    """Weight calibration and folding run outside the forward, where expert-parallel weights are still
+    DTensors sharded over the experts: each rank must use its own experts, not the global ones. With
+    the dense part FSDP2-sharded, the calibration runs inside FSDP2's weight-access window, which
+    must not gather the expert-parallel weights FSDP2 does not own, its meshes named or not."""
+    cpu_dist_workers.run(_ep_sharded_experts_use_their_own_weights_job, layout=layout)
+
+
+def _expert_layouts_the_wrappers_cannot_index_job(rank, size):
+    mesh = init_device_mesh("cpu", (size,))
+    n_local = _EP_EXPERTS // size
+    # Every expert on every rank, with num_experts at the local count: its local shard is not this
+    # rank's experts, so indexing it by local expert would read the global ones.
+    experts = _experts_with_distinct_scales(_ep_experts_config())
+    experts.num_experts = n_local
+    for name in ("gate_up_proj", "down_proj"):
+        full = getattr(experts, name).detach().clone()
+        experts._parameters[name] = nn.Parameter(distribute_tensor(full, mesh, [Replicate()]))
+    with pytest.raises(RuntimeError, match=f"holds {_EP_EXPERTS} on this rank"):
+        mtq.quantize(_ExpertsHolder(experts), _WEIGHT_ONLY_INT8_EXPERTS_CFG)
+
+    # Native FP8 experts sharded over the experts would unpack into one buffer for every expert.
+    config = PretrainedConfig(
+        hidden_size=32, intermediate_size=32, num_experts=_EP_EXPERTS, hidden_act="silu"
+    )
+    fp8 = FP8Experts(config, block_size=None, has_gate=True)
+    for name in ("gate_up_proj", "down_proj"):
+        with torch.no_grad():
+            getattr(fp8, name).copy_(torch.randn(getattr(fp8, name).shape))
+            getattr(fp8, f"{name}_scale_inv").fill_(0.01)
+    mtq.quantize(fp8, _WEIGHT_ONLY_INT8_EXPERTS_CFG)
+    owned = fp8.gate_up_proj.detach()[rank * n_local : (rank + 1) * n_local]
+    fp8.gate_up_proj = nn.Parameter(
+        DTensor.from_local(owned, mesh, [Shard(0)], run_check=False), requires_grad=False
+    )
+    fp8.num_experts = n_local
+    with pytest.raises(NotImplementedError, match="sharded over the experts"):
+        fp8.unpack_weight()
+
+
+def test_expert_weights_the_quantizers_cannot_index_are_refused(cpu_dist_workers):
+    """A DTensor expert weight whose local shard does not hold the module's experts would be indexed
+    as global experts; native FP8 experts sharded over the experts would unpack into a buffer for
+    every expert. Both raise instead of calibrating or exporting the wrong experts."""
+    cpu_dist_workers.run(_expert_layouts_the_wrappers_cannot_index_job)
+
+
+def _ep_weight_input_hooks_read_local_experts_job(rank, size):
+    """Registering the weight-input hooks (local Hessian, imatrix) hands ``on_weight`` each
+    projection's first LOCAL expert, the one its first quantizer quantizes, and runs no collective:
+    indexing the expert-parallel DTensor would name a global expert and all-gather every expert."""
+    config = _ep_experts_config()
+    torch.manual_seed(0)
+    whole = _experts_with_distinct_scales(config)
+    mesh = init_device_mesh("cpu", (size,))
+    model = _ExpertsHolder(_sharded_like_transformers(whole, config, mesh, size))
+    n_local = _EP_EXPERTS // size
+    mtq.quantize(model, _WEIGHT_ONLY_INT8_EXPERTS_CFG)
+
+    seen, captured = {}, []
+    with CommDebugMode() as comms:
+        handles = _register_weight_input_hooks(
+            model,
+            module_name_maps(model),
+            lambda quantizer, weight, inputs: captured.append(weight),
+            on_weight=lambda name, weight, quantizer: seen.__setitem__(name, (weight, quantizer)),
+        )
+        # An eager forward's per-expert call: the capture reads this rank's first expert too.
+        model.experts._current_expert_idx = 0
+        model.experts.gate_up_proj_input_quantizer(torch.randn(2, _EP_HIDDEN))
+    for handle in handles:
+        handle.remove()
+    assert comms.get_total_counts() == 0, dict(comms.get_comm_counts())
+    for name in ("gate_up_proj", "down_proj"):
+        weight, quantizer = seen[f"experts.{name}"]
+        assert quantizer is getattr(model.experts, f"{name}_weight_quantizers")[0]
+        local_first = getattr(whole, name)[rank * n_local].detach()
+        torch.testing.assert_close(weight, local_first, atol=0, rtol=0, msg=name)
+    torch.testing.assert_close(
+        captured[0], whole.gate_up_proj[rank * n_local].detach(), atol=0, rtol=0
+    )
+
+
+def test_ep_weight_input_hooks_read_this_ranks_experts_without_a_collective(cpu_dist_workers):
+    """Hook registration only needs one expert's shape, so it must not gather other ranks' experts."""
+    cpu_dist_workers.run(_ep_weight_input_hooks_read_local_experts_job)
+
+
+def _ep_gptq_helpers_take_local_experts_job(rank, size):
+    """GPTQ builds each expert's helper from this rank's expert, the one its quantizer quantizes:
+    indexing the expert-parallel DTensor would name a global expert and all-gather every expert."""
+    config = _ep_experts_config()
+    torch.manual_seed(0)
+    whole = _experts_with_distinct_scales(config)
+    mesh = init_device_mesh("cpu", (size,))
+    model = _ExpertsHolder(_sharded_like_transformers(whole, config, mesh, size))
+    n_local = _EP_EXPERTS // size
+    built = {}
+    init = GPTQHelper.__init__
+
+    def recording(helper, module, name, *args, weight=None, **kwargs):
+        if weight is not None:
+            built[name] = weight if isinstance(weight, DTensor) else weight.detach().clone()
+        init(helper, module, name, *args, weight=weight, **kwargs)
+
+    cfg = {**_WEIGHT_ONLY_INT8_EXPERTS_CFG, "algorithm": {"method": "gptq", "block_size": 8}}
+    with mock.patch.object(GPTQHelper, "__init__", recording):
+        mtq.quantize(model, cfg, forward_loop=lambda m: None)
+
+    assert len(built) == 2 * n_local, sorted(built)
+    for name, weight in built.items():
+        _, proj, idx = name.rsplit(".", 2)
+        assert not isinstance(weight, DTensor), name
+        expected = getattr(whole, proj)[rank * n_local + int(idx)].detach()
+        torch.testing.assert_close(weight, expected, atol=0, rtol=0, msg=name)
+
+
+def test_ep_gptq_builds_its_expert_helpers_from_this_ranks_experts(cpu_dist_workers):
+    """A GPTQ helper only needs its expert's shape, so it must not gather other ranks' experts."""
+    cpu_dist_workers.run(_ep_gptq_helpers_take_local_experts_job)

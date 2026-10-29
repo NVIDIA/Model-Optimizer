@@ -1158,8 +1158,11 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
                 return
             idx = expert_module._current_expert_idx
             if idx in enabled:
-                # Read the weight fresh (valid under accelerate/FSDP re-materialization).
-                capture(quantizers[idx], getattr(expert_module, weight_name)[idx], args[0])
+                # Read the weight fresh (valid under accelerate/FSDP re-materialization), indexed by
+                # this rank's own experts: an expert-parallel weight is a DTensor whose index names a
+                # global expert (see ``_local_experts``).
+                weight = expert_module._local_experts(getattr(expert_module, weight_name))
+                capture(quantizers[idx], weight[idx], args[0])
 
         return _expert_hook
 
@@ -1185,7 +1188,11 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
                     module
                 ):
                     if on_weight is not None:
-                        on_weight(f"{name}.{weight_name}", weight[0], quantizers[0])
+                        # This rank's first expert, the one quantizers[0] quantizes: indexing an
+                        # expert-parallel DTensor names a global expert and all-gathers every expert.
+                        on_weight(
+                            f"{name}.{weight_name}", module._local_experts(weight)[0], quantizers[0]
+                        )
                     # Snapshot which experts are enabled now, before the caching forward silences
                     # all weight quantizers — so we don't capture (and discard) disabled experts.
                     enabled = {i for i, q in enumerate(quantizers) if q.is_enabled}
@@ -2592,10 +2599,13 @@ def gptq(
             for weight_name, weight, quantizers, input_quantizer in _fused_expert_projections(
                 module
             ):
-                # An expert's logged error would cost two full matmuls; gptq() logs a summary.
+                # This rank's experts, in quantizer order: an expert-parallel weight is a DTensor
+                # whose index names a global expert and all-gathers every expert. An expert's logged
+                # error would cost two full matmuls; gptq() logs a summary.
+                local = module._local_experts(weight)
                 per_expert = {
                     idx: _make_gptq_handle(
-                        f"{name}.{weight_name}.{idx}", module, q, weight[idx], log_mse=False
+                        f"{name}.{weight_name}.{idx}", module, q, local[idx], log_mse=False
                     )
                     for idx, q in enumerate(quantizers)
                     if q.is_enabled
