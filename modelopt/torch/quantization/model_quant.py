@@ -195,7 +195,10 @@ def calibrate(
         # under a warning that blames the size of the calibration set. Raised once the model is
         # back in its mode, for a caller that catches it to calibrate again. Only a loaded HF plugin
         # installs fused-experts wrappers; importing it here would rerun one that failed to load,
-        # which import_plugin only warns about, and fail every calibration with its error.
+        # which import_plugin only warns about, and fail every calibration with its error. Both
+        # conditions must come out the same on every rank: under expert parallelism the check
+        # all-reduces over the experts' group, and a rank that skipped it would leave its peers
+        # waiting there.
         huggingface = sys.modules.get("modelopt.torch.quantization.plugins.huggingface")
         if huggingface is not None:
             huggingface.assert_fused_experts_intercepted(model)
