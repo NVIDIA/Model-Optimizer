@@ -91,6 +91,8 @@ class MaxCalibrator(_Calibrator):
             and amax.device.type != "meta"
             and not (torch.isfinite(amax) & (amax >= 0)).all()
         ):
+            # Drop the bad stats so a retry with clean data can succeed.
+            self.reset()
             assert not torch.isnan(amax).any(), "detected nan values in amax"
             assert not torch.isinf(amax).any(), "detected inf values in amax"
             raise AssertionError("detected negative values after abs, could be torch or cuda bug")
