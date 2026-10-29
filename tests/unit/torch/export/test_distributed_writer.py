@@ -67,8 +67,7 @@ def _assert_byte_identical(got, want):
 
 
 def _load_checkpoint(export_dir):
-    """Every tensor the index names, read from the shard the index names for it; no other weight file
-    of the checkpoint is left, a ``model.safetensors`` included, which transformers loads first."""
+    """Every tensor the index names, read from the shard the index names for it."""
     index = json.loads((export_dir / "model.safetensors.index.json").read_text())
     weight_map = index["weight_map"]
     shards = sorted(p.name for p in export_dir.glob("model*.safetensors"))
@@ -552,17 +551,46 @@ def test_write_even_shards_writes_even_shards_and_an_index_of_every_tensor(
         assert sum(_nbytes(t) for t in load_file(str(tmp_path / shard)).values()) <= max_bytes
 
 
-@pytest.mark.parametrize("earlier", ["one-shard", "three-shards", "single-file"])
-def test_write_even_shards_replaces_a_checkpoint_already_there(
-    gloo_world_of_one, tmp_path, earlier
-):
-    """A re-export into the directory replaces the checkpoint it finds there: its shards and index,
-    any shards the new index does not name, and a single ``model.safetensors``. Other files stay."""
-    if earlier == "single-file":
-        save_file({"old": torch.zeros(2)}, str(tmp_path / "model.safetensors"))
+def _earlier_checkpoint(export_dir, layout):
+    """A checkpoint an earlier export left in ``export_dir``: one shard, three, or one file."""
+    export_dir.mkdir(parents=True, exist_ok=True)
+    if layout == "single-file":
+        save_file({"old": torch.zeros(2)}, str(export_dir / "model.safetensors"))
     else:
-        n = 1 if earlier == "one-shard" else 3
-        _write_even_shards({f"old{i}": torch.zeros(256) for i in range(n)}, tmp_path, "1100", 0, 1)
+        n = 1 if layout == "one-shard" else 3
+        names = [f"model-{i:05d}-of-{n:05d}.safetensors" for i in range(1, n + 1)]
+        for i, name in enumerate(names):
+            save_file({f"old{i}": torch.zeros(2)}, str(export_dir / name))
+        weight_map = {f"old{i}": name for i, name in enumerate(names)}
+        index = {"metadata": {"total_size": 8 * n}, "weight_map": weight_map}
+        (export_dir / "model.safetensors.index.json").write_text(json.dumps(index))
+    return {p.name: p.read_bytes() for p in export_dir.iterdir()}
+
+
+def _refuses_a_checkpoint_job(rank, world_size, tmp_dir, layout):
+    # Only rank 1's view of the directory holds the checkpoint: rank 0 must not write either.
+    export_dir = tmp_dir / f"rank{rank}"
+    before = _earlier_checkpoint(export_dir, layout) if rank == 1 else {}
+    with bounded_collectives(), pytest.raises((FileExistsError, RuntimeError)) as raised:
+        _write_even_shards(
+            {f"rank{rank}.weight": torch.ones(2)}, export_dir, "1MB", rank, world_size
+        )
+
+    assert "already holds a checkpoint" in str(raised.value), raised.value
+    assert {p.name: p.read_bytes() for p in export_dir.iterdir()} == before
+
+
+@pytest.mark.parametrize("layout", ["one-shard", "three-shards", "single-file"])
+def test_write_even_shards_refuses_a_checkpoint_already_there(cpu_dist_workers, tmp_path, layout):
+    """Every rank refuses before anything is written, though only one rank sees the checkpoint, and
+    the checkpoint is left byte for byte: a rename failing partway through the commit would leave
+    it mixed."""
+    cpu_dist_workers.run(_refuses_a_checkpoint_job, tmp_dir=tmp_path, layout=layout)
+
+
+def test_write_even_shards_writes_beside_other_files(gloo_world_of_one, tmp_path):
+    """A config and an auxiliary weights file the index does not cover are no checkpoint: the export
+    writes beside them and leaves them as they were."""
     others = {"config.json": b"{}", "mtp.safetensors": b"weights the index does not cover"}
     for name, data in others.items():
         (tmp_path / name).write_bytes(data)
@@ -571,9 +599,6 @@ def test_write_even_shards_replaces_a_checkpoint_already_there(
     _write_even_shards(dict(tensors), tmp_path, "1MB", 0, 1)
 
     _assert_byte_identical(_load_checkpoint(tmp_path), tensors)
-    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
-        ["model-00001-of-00001.safetensors", "model.safetensors.index.json", *others]
-    )
     assert all((tmp_path / name).read_bytes() == data for name, data in others.items())
 
 
@@ -674,34 +699,13 @@ def _one_rank_fails_job(rank, world_size, tmp_dir, fails):
         assert f"rank {failing_rank}" in str(raised) and "disk full" in str(raised), raised
 
 
-def _existing_checkpoint(export_dir):
-    """A checkpoint under the names the two-rank export below writes, holding other tensors, and a
-    ``model.safetensors`` a successful export would remove."""
-    weight_map = {
-        "old.a": "model-00001-of-00002.safetensors",
-        "old.b": "model-00002-of-00002.safetensors",
-    }
-    for key, shard in weight_map.items():
-        save_file({key: torch.zeros(3)}, str(export_dir / shard))
-    save_file({"old.c": torch.zeros(3)}, str(export_dir / "model.safetensors"))
-    index = {"metadata": {"total_size": 24}, "weight_map": weight_map}
-    (export_dir / "model.safetensors.index.json").write_text(json.dumps(index))
-    return {p.name: p.read_bytes() for p in export_dir.iterdir()}
-
-
-@pytest.mark.parametrize("existing", [False, True], ids=["empty", "over-a-checkpoint"])
 @pytest.mark.parametrize("fails", ["dir", "shard", "index"])
-def test_a_write_that_fails_on_one_rank_fails_on_every_rank(
-    cpu_dist_workers, tmp_path, fails, existing
-):
+def test_a_write_that_fails_on_one_rank_fails_on_every_rank(cpu_dist_workers, tmp_path, fails):
     """Not just on the rank that failed, while its peers wait in a collective it never joins; and
-    the directory is left as it was: no file of the failed export, and a checkpoint already there
-    byte for byte, though the export would have written its names."""
-    before = _existing_checkpoint(tmp_path) if existing else {}
-
+    the directory is left as it was, with no file of the failed export."""
     cpu_dist_workers.run(_one_rank_fails_job, tmp_dir=tmp_path, fails=fails)
 
-    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+    assert not list(tmp_path.iterdir())
 
 
 def _shard_commit_fails_job(rank, world_size, tmp_dir):
@@ -722,16 +726,12 @@ def _shard_commit_fails_job(rank, world_size, tmp_dir):
         _write_even_shards({f"rank{rank}.weight": torch.ones(2)}, tmp_dir, "1MB", rank, world_size)
 
 
-@pytest.mark.parametrize("existing", [False, True], ids=["empty", "over-a-checkpoint"])
-def test_the_index_goes_in_place_only_after_every_shard(cpu_dist_workers, tmp_path, existing):
-    """A rank that fails to put its shard in place leaves the index as it was, so an index in the
+def test_the_index_goes_in_place_only_after_every_shard(cpu_dist_workers, tmp_path):
+    """A rank that fails to put its shard in place leaves no index behind, so an index in the
     directory never names shards that are missing."""
-    index = tmp_path / "model.safetensors.index.json"
-    before = _existing_checkpoint(tmp_path)[index.name] if existing else None
-
     cpu_dist_workers.run(_shard_commit_fails_job, tmp_dir=tmp_path)
 
-    assert (index.read_bytes() if index.exists() else None) == before
+    assert not (tmp_path / "model.safetensors.index.json").exists()
 
 
 def _cross_rank_collision_job(rank, world_size, tmp_dir):
