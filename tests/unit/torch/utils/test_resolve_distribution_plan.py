@@ -301,11 +301,7 @@ _REMOTE_IMAGE_TEXT_VLM = {
         (Phi4MultimodalConfig(), False, AutoModelForCausalLM),
         (_vlm_config(), False, AutoModel),
         (T5Config(architectures=["T5ForConditionalGeneration"]), False, AutoModelForSeq2SeqLM),
-        (
-            WhisperConfig(architectures=["WhisperForConditionalGeneration"]),
-            False,
-            AutoModelForSpeechSeq2Seq,
-        ),
+        (WhisperConfig(), False, AutoModelForSpeechSeq2Seq),
     ],
     ids=[
         "causal-lm",
@@ -323,7 +319,7 @@ def test_the_class_that_builds_the_whole_model(config, trust_remote_code, expect
     """A VLM's AutoModel leaves the LM head out: it builds through the class that carries the head,
     keeping the headless backbone only when no class recognizes the config. A remote class counts
     only when the checkpoint's code is trusted. An encoder-decoder model's architecture reads like a
-    VLM's, but its seq2seq class carries its head."""
+    VLM's, but its seq2seq class carries its head, also for a config that names no architecture."""
     assert _auto_class(config, trust_remote_code) is expected
 
 
@@ -577,10 +573,19 @@ def test_an_ep_degree_that_cannot_shard_the_experts_is_refused(
         resolve_distribution_plan(str(tmp_path), ep_size=ep_size)
 
 
-def test_a_vlm_is_decided_from_its_whole_model(run_as, serve, gpu_memory, tmp_path):
-    """AutoModelForCausalLM does not build every VLM: the decision builds what the load builds."""
+@pytest.mark.parametrize(
+    "config",
+    [
+        _tiny_qwen2_5_vl(),
+        T5Config(d_model=16, d_ff=32, d_kv=8, num_layers=1, num_heads=2, vocab_size=32),
+    ],
+    ids=["vlm", "encoder-decoder-naming-no-architecture"],
+)
+def test_a_model_is_decided_from_its_whole_model(run_as, serve, gpu_memory, tmp_path, config):
+    """AutoModelForCausalLM builds neither every VLM nor an encoder-decoder model, whose config need
+    not name its architecture: the decision builds what the load builds."""
     run_as(2)
-    serve(_tiny_qwen2_5_vl())
+    serve(config)
     gpu_memory(1)
 
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2, dense="fsdp")

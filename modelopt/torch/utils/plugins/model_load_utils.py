@@ -937,7 +937,8 @@ def _auto_class(hf_config, trust_remote_code: bool = False) -> Any:
     ``AutoModelForImageTextToText`` if that recognizes the config or, its code trusted, the
     checkpoint registers one, else through ``AutoModelForCausalLM`` if that recognizes it (as it
     does Phi-4-multimodal), else through ``AutoModel``, which leaves the head out. An
-    encoder-decoder model, whose architecture reads the same, builds through its seq2seq class.
+    encoder-decoder model (``is_encoder_decoder``, whether or not it names its architecture, which
+    reads like a VLM's) builds through its seq2seq class.
     """
     architectures = getattr(hf_config, "architectures", None) or []
     is_vlm = (
@@ -945,7 +946,7 @@ def _auto_class(hf_config, trust_remote_code: bool = False) -> Any:
         or getattr(hf_config, "vision_config", None) is not None
         or any("conditionalgeneration" in str(arch).lower() for arch in architectures)
     )
-    if not is_vlm:
+    if not is_vlm and not getattr(hf_config, "is_encoder_decoder", False):
         return AutoModelForCausalLM
     auto_map = getattr(hf_config, "auto_map", None) or {}
     remote_with_head = (
