@@ -28,7 +28,7 @@ def _linear_scan(parent_model, target_module):
     target_ids = {id(p) for p in target_module.parameters()}
     return next(
         (
-            name.rsplit(".", 1)[0]
+            name.rpartition(".")[0]
             for name, param in parent_model.named_parameters()
             if id(param) in target_ids
         ),
