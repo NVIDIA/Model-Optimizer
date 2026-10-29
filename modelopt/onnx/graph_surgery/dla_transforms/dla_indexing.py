@@ -737,7 +737,7 @@ def _apply_standalone_reduce_operations(model, *, prepared_data_ops=()):
     return model
 
 
-def _apply_group_query_attention(model):
+def _apply_group_query_attention(model, *, prepared_data_ops=()):
     """Restore native attention ranks across internal tensors while retaining public boundaries."""
     graph = model.graph
     cache = GraphCache(graph)
@@ -761,12 +761,27 @@ def _apply_group_query_attention(model):
     selected_ids = {
         id(node) for node in _operator_nodes(model, {"GroupQueryAttention"}, ("com.microsoft",))
     }
+    prepared = _prepared_index_data(
+        model,
+        cache,
+        set(prepared_data_ops) | {"GroupQueryAttention"},
+        [
+            name
+            for node in graph.node
+            if id(node) in selected_ids
+            for name in node.input[:3]
+            if name and name not in boundaries
+        ],
+    )
     for node in graph.node:
         if id(node) not in selected_ids:
             nodes.append(node)
             continue
         for index, name in enumerate(node.input[:3]):
             if name and name not in boundaries:
+                shape = cache.get_shape(name)
+                if not prepared[name] or (shape is not None and len(shape) == 4 and shape[0] != 1):
+                    continue
                 if name in squeezed_inputs:
                     node.input[index] = squeezed_inputs[name]
                     continue

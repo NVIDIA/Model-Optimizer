@@ -1576,3 +1576,53 @@ def test_cyclic_index_layout_ancestry_refuses_before_mutation():
     with pytest.raises(ValueError, match="Cyclic Gather"):
         _apply_gather(model)
     assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("native_slot", [0, 1, 2])
+def test_attention_keeps_private_native_rank_three_inputs(native_slot):
+    """Execute private native query, key and value views without another Squeeze."""
+    shape = [1, 2, 8]
+    names = ["q", "k", "v"]
+    source = names[native_slot]
+    attention_inputs = names.copy()
+    attention_inputs[native_slot] = "native"
+    model = _model(
+        [
+            helper.make_node("Squeeze", [source, "axes"], ["native"]),
+            helper.make_node(
+                "GroupQueryAttention",
+                [*attention_inputs, "past_key", "past_value", "lengths", "total"],
+                ["y", "present_key", "present_value"],
+                domain="com.microsoft",
+                num_heads=1,
+                kv_num_heads=1,
+            ),
+        ],
+        [
+            helper.make_tensor_value_info(
+                name, TensorProto.FLOAT, [1, *shape] if name == source else shape
+            )
+            for name in names
+        ],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)],
+        [
+            numpy_helper.from_array(np.asarray([0], np.int64), "axes"),
+            numpy_helper.from_array(np.asarray([1], np.int32), "lengths"),
+            numpy_helper.from_array(np.int32(2), "total"),
+            numpy_helper.from_array(np.zeros((1, 1, 2, 8), np.float32), "past_key"),
+            numpy_helper.from_array(np.zeros((1, 1, 2, 8), np.float32), "past_value"),
+        ],
+        [helper.make_opsetid("com.microsoft", 1)],
+    )
+    feeds = {
+        name: (np.arange(16, dtype=np.float32) / 16).reshape(
+            [1, *shape] if name == source else shape
+        )
+        for name in names
+    }
+    expected = _execute(model, feeds)
+    result = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    for actual, reference in zip(_execute(result, feeds), expected):
+        np.testing.assert_allclose(actual, reference, rtol=1e-5, atol=1e-6)
+    attention = next(n for n in result.graph.node if n.op_type == "GroupQueryAttention")
+    assert attention.input[native_slot] == "native"
