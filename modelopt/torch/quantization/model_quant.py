@@ -816,6 +816,9 @@ def auto_quantize(
             under a strict upper cost bound. It defaults to full-vocabulary teacher KL;
             see :class:`modelopt.torch.quantization.rco.AutoQuantizeRCOSearcher` for its
             optimization, callback, and candidate-checkpoint options.
+            ``preserve_candidate_weights=True`` freezes export-compatible hard candidates
+            for matched ordinary controls; it defaults to False. GPTQ, GSQ, and RCO always
+            preserve candidate weights.
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step.

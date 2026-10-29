@@ -23,6 +23,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from contextvars import ContextVar
 from functools import partial
 from typing import Any, TypeAlias
 
@@ -210,6 +211,19 @@ def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) ->
     # Under the default patterns, verify the fusible name groups were actually synced.
     if weight_patterns == list(SHARED_PATTERNS):
         _check_grouped_weight_global_amax_synced(model)
+
+
+_EXPORT_COMPATIBLE_CALIBRATION = ContextVar("export_compatible_calibration", default=False)
+
+
+def _prepare_export_fusion(model: nn.Module) -> None:
+    # Export uses these same stock groups and scale updates before packing weights.
+    from modelopt.torch.export.quant_utils import preprocess_linear_fusion
+
+    from .utils.shared_input import find_shared_input_groups
+
+    for _, members in find_shared_input_groups(model, SHARED_PATTERNS):
+        preprocess_linear_fusion(members)
 
 
 CalibratorFactory: TypeAlias = Callable[
@@ -2522,6 +2536,8 @@ def gptq(
     # TODO: Add support for other scale setting strateiges like weight-mse or local-hessian
     # The Hessian pass below is GPTQ's own forward; max only runs one if activations need amax.
     max_calibrate(model, forward_loop=forward_loop, skip_forward_without_activation_calib=True)
+    if _EXPORT_COMPATIBLE_CALIBRATION.get():
+        _prepare_export_fusion(model)
 
     quantized_layers = [
         (n, m)

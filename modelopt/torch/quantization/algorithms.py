@@ -716,7 +716,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     best: dict[str, Any]
     quantizer_states: dict
     method_name: str | None = None
-    method_config_keys: frozenset[str] = frozenset({"data_fingerprint"})
+    method_config_keys: frozenset[str] = frozenset(
+        {"data_fingerprint", "preserve_candidate_weights"}
+    )
     _preserve_candidate_weights = False
 
     quant_grouping_rules = [
@@ -757,6 +759,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost": {},
             "active_moe_expert_ratio": None,
             "data_fingerprint": None,
+            "preserve_candidate_weights": False,
         }
 
     @property
@@ -793,6 +796,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "`forward_step` must be provided for `auto_quantize`."
         )
         identity = config["data_fingerprint"]
+        if not isinstance(config["preserve_candidate_weights"], bool):
+            raise ValueError("preserve_candidate_weights must be a boolean.")
         if identity is not None and (not isinstance(identity, str) or not identity.strip()):
             raise ValueError("data_fingerprint must be a nonempty string when supplied.")
         return config
@@ -810,7 +815,11 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             else recipe.config.algorithm
             for recipe in self._get_search_recipes(formats)
         }
-        if not self._preserve_candidate_weights and not algorithms.intersection({"gptq", "gsq"}):
+        if not (
+            self._preserve_candidate_weights
+            or config["preserve_candidate_weights"]
+            or algorithms.intersection({"gptq", "gsq"})
+        ):
             return
         if not algorithms.issubset({None, "max", "gptq", "gsq"}):
             raise ValueError("Learned candidates support max, GPTQ, and GSQ calibration only.")
@@ -1346,14 +1355,18 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 ),
             }
         )
-        learned_candidates = self._preserve_candidate_weights or any(
-            (
-                recipe.config.algorithm.get("method")
-                if isinstance(recipe.config.algorithm, dict)
-                else recipe.config.algorithm
+        learned_candidates = (
+            self._preserve_candidate_weights
+            or self.config["preserve_candidate_weights"]
+            or any(
+                (
+                    recipe.config.algorithm.get("method")
+                    if isinstance(recipe.config.algorithm, dict)
+                    else recipe.config.algorithm
+                )
+                in {"gptq", "gsq"}
+                for recipe in search_recipes
             )
-            in {"gptq", "gsq"}
-            for recipe in search_recipes
         )
         if learned_candidates or self.config["data_fingerprint"] is not None:
             if any(p.is_meta or type(p) is not nn.Parameter for p in self.model.parameters()):
@@ -1442,9 +1455,31 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                             method = method.get("method") if isinstance(method, dict) else method
                             if method not in (None, "max"):
                                 raise ValueError("Learned checkpoint is missing hardened weights.")
+                            model_calib._prepare_export_fusion(self.model)
+                            restored_metadata: dict = {}
+                            update_quantize_metadata(
+                                self.model, QuantizeConfig(), restored_metadata
+                            )
+                            saved["metadata"] = restored_metadata["quantizer_state"]
+                            saved["state_dict"] = get_quantizer_state_dict(self.model)
                             saved["weights"] = self._capture_candidate_weights(
                                 recipe, quant_recipe_hparams
                             )
+                            # Old sensitivities used unfused grids; score the prepared bank again.
+                            self.candidate_stats.clear()
+                        else:
+                            original_grids = copy.deepcopy(get_quantizer_state_dict(self.model))
+                            model_calib._prepare_export_fusion(self.model)
+                            prepared_grids = get_quantizer_state_dict(self.model)
+                            if any(
+                                not torch.equal(value, prepared_grids[name][key])
+                                for name, buffers in original_grids.items()
+                                for key, value in buffers.items()
+                            ):
+                                raise ValueError(
+                                    "Candidate checkpoint has incompatible export grids; "
+                                    "regenerate its hardened weights."
+                                )
                         for hparam in quant_recipe_hparams:
                             if recipe in hparam.choices:
                                 candidates = {}
@@ -1479,11 +1514,21 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                         desc=f"Calibrating for {recipe}",
                     )
 
-                calibrate(
-                    self.model,
-                    algorithm=recipe.config.algorithm,
-                    forward_loop=forward_loop,
+                method = recipe.config.algorithm
+                method = method.get("method") if isinstance(method, dict) else method
+                token = model_calib._EXPORT_COMPATIBLE_CALIBRATION.set(
+                    learned_candidates and method == "gptq"
                 )
+                try:
+                    calibrate(
+                        self.model,
+                        algorithm=recipe.config.algorithm,
+                        forward_loop=forward_loop,
+                    )
+                finally:
+                    model_calib._EXPORT_COMPATIBLE_CALIBRATION.reset(token)
+                if learned_candidates:
+                    model_calib._prepare_export_fusion(self.model)
                 # Calibrate adds a new mode to the model. Since auto_quantize mixes the quantization recipes
                 # across layers, lets not save this new mode in the modelopt state.
                 # TODO: This is a hack. We need to create a mode for auto_quantize to handle this in a clean way.

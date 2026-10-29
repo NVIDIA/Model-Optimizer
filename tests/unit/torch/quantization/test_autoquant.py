@@ -30,6 +30,7 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.model_quant as model_quant
+from modelopt.torch.export.quant_utils import preprocess_linear_fusion
 from modelopt.torch.quantization._auto_quantize_cost import (
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
     _get_module_weight_numel,
@@ -2510,3 +2511,152 @@ def test_auto_quantize_resumes_interrupted_gsq_with_moved_optimizer(tmp_path, mo
         incompatible[0][0]["algorithm"][key] = value
         with pytest.raises(ValueError):
             run(incompatible, checkpoint)
+
+
+class _FusedCandidateModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.attn = torch.nn.Module()
+        for name, scale in (("q_proj", 0.13), ("k_proj", 1.0), ("v_proj", 3.7)):
+            layer = torch.nn.Linear(16, 16, bias=False)
+            with torch.no_grad():
+                layer.weight.mul_(scale)
+            setattr(self.attn, name, layer)
+
+    def forward(self, x):
+        return sum(getattr(self.attn, name)(x) for name in ("q_proj", "k_proj", "v_proj"))
+
+
+@pytest.mark.parametrize("initializer", ["max", "gptq"])
+def test_auto_quantize_candidate_survives_export_fusion(tmp_path, initializer):
+    """Fusing deployment projections cannot change the candidate scored by AutoQuantize."""
+    torch.manual_seed(43)
+    original = _FusedCandidateModel().bfloat16()
+    batch = torch.randn(8, 16).bfloat16()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        ],
+        "algorithm": initializer,
+    }
+    model, _ = mtq.auto_quantize(
+        copy.deepcopy(original),
+        constraints={"effective_bits": 8},
+        quantization_formats=[config],
+        data_loader=[batch],
+        forward_step=lambda m, x: m(x),
+        loss_func=lambda output, _: output.float().square().sum(),
+        num_calib_steps=1,
+        num_score_steps=1,
+        method={"method": "gradient", "preserve_candidate_weights": True},
+        verbose=False,
+    )
+    before = model(batch).detach().clone()
+    hard = {
+        name: layer.weight_quantizer(layer.weight).detach().clone()
+        for name, layer in model.attn.named_children()
+        if isinstance(layer, torch.nn.Linear)
+    }
+    preprocess_linear_fusion([model.attn.q_proj, model.attn.k_proj, model.attn.v_proj])
+    for name, layer in model.attn.named_children():
+        if not isinstance(layer, torch.nn.Linear):
+            continue
+        torch.testing.assert_close(layer.weight_quantizer(layer.weight), hard[name], rtol=0, atol=0)
+    torch.testing.assert_close(model(batch), before, rtol=0, atol=0)
+    mto.save(model, tmp_path / "model.pt")
+    restored = mto.restore(copy.deepcopy(original), tmp_path / "model.pt")
+    torch.testing.assert_close(restored(batch), before, rtol=0, atol=0)
+
+
+def test_auto_quantize_rco_imports_unfused_max_seed_without_changing_source(tmp_path):
+    torch.manual_seed(43)
+    original = _FusedCandidateModel().bfloat16()
+    batch = torch.randn(8, 16).bfloat16()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    source = tmp_path / "source.pt"
+    kwargs = {
+        "constraints": {"effective_bits": 8},
+        "quantization_formats": [config],
+        "data_loader": [batch],
+        "forward_step": lambda m, x: m(x),
+        "num_calib_steps": 1,
+        "num_score_steps": 1,
+        "verbose": False,
+    }
+    mtq.auto_quantize(
+        copy.deepcopy(original),
+        **kwargs,
+        checkpoint=str(source),
+        loss_func=lambda output, _: output.float().square().sum(),
+        method={"method": "gradient", "data_fingerprint": "fused-fixed-data"},
+    )
+    immutable = source.read_bytes()
+    method = {"method": "rco", "steps": 0, "data_fingerprint": "fused-fixed-data"}
+    expected, expected_state = mtq.auto_quantize(copy.deepcopy(original), **kwargs, method=method)
+    actual, actual_state = mtq.auto_quantize(
+        copy.deepcopy(original), **kwargs, method={**method, "candidate_checkpoint": str(source)}
+    )
+    assert source.read_bytes() == immutable
+    torch.testing.assert_close(actual(batch), expected(batch), rtol=0, atol=0)
+    for recipe, candidate in expected_state["quantizer_states"].items():
+        imported = actual_state["quantizer_states"][recipe]
+        for name, weight in candidate["weights"].items():
+            torch.testing.assert_close(imported["weights"][name], weight, rtol=0, atol=0)
+        for name, buffers in candidate["state_dict"].items():
+            for key, value in buffers.items():
+                torch.testing.assert_close(imported["state_dict"][name][key], value, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("initializer", ["max", "gptq"])
+def test_auto_quantize_rco_refuses_hard_candidate_with_unfused_grid(tmp_path, initializer):
+    torch.manual_seed(43)
+    original = _FusedCandidateModel().bfloat16()
+    batch = torch.randn(8, 16).bfloat16()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        ],
+        "algorithm": initializer,
+    }
+    kwargs = {
+        "constraints": {"effective_bits": 8},
+        "quantization_formats": [config],
+        "data_loader": [batch],
+        "forward_step": lambda m, x: m(x),
+        "num_calib_steps": 1,
+        "num_score_steps": 1,
+        "verbose": False,
+    }
+    _, state = mtq.auto_quantize(
+        copy.deepcopy(original),
+        **kwargs,
+        method={"method": "rco", "steps": 0, "data_fingerprint": "fixed-fused-data"},
+    )
+    candidate = next(iter(state["quantizer_states"].values()))
+    buffers = candidate["state_dict"]["attn.q_proj.weight_quantizer"]
+    buffers["_amax"] = buffers["_amax"] / 2
+    source = tmp_path / "unfused-hard.pt"
+    safe_save(state, source)
+    immutable = source.read_bytes()
+    model = copy.deepcopy(original)
+    with pytest.raises(ValueError, match=r"export.*grid"):
+        mtq.auto_quantize(
+            model,
+            **kwargs,
+            method={
+                "method": "rco",
+                "steps": 0,
+                "data_fingerprint": "fixed-fused-data",
+                "candidate_checkpoint": str(source),
+            },
+        )
+    assert source.read_bytes() == immutable
+    torch.testing.assert_close(model(batch), original(batch), rtol=0, atol=0)

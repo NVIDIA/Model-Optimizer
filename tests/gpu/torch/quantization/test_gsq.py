@@ -117,3 +117,105 @@ def test_gsq_region_reconstruction_and_restore(tmp_path, initializer, nvfp4):
         ).to(dtype)
     torch.testing.assert_close(decoded, qdq, rtol=0, atol=0)
     assert torch.count_nonzero(decoded[0, :16]) == 0
+
+
+@pytest.mark.parametrize("initializer", ["max", "gptq"])
+@pytest.mark.parametrize("nvfp4", [False, True])
+def test_auto_quantize_rco_candidates_survive_native_export(tmp_path, initializer, nvfp4):
+    """Ordinary controls and RCO share hard candidates that native packing preserves exactly."""
+    torch.manual_seed(43)
+    original = get_tiny_llama().cuda().bfloat16().eval()
+    original.config.architectures = ["LlamaForCausalLM"]
+    with torch.no_grad():
+        attention = original.model.layers[0].self_attn
+        attention.q_proj.weight.mul_(0.13)
+        attention.v_proj.weight.mul_(3.7)
+        attention.q_proj.weight[0, :16].zero_()
+    inputs = torch.randint(0, original.config.vocab_size, (1, 16), device="cuda")
+    numeric = (
+        {"num_bits": (2, 1), "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)}}
+        if nvfp4
+        else {"num_bits": (4, 3), "axis": None}
+    )
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": numeric},
+            {"quantizer_name": "*lm_head*", "enable": False},
+            {"quantizer_name": "*", "parent_class": "nn.Embedding", "enable": False},
+        ],
+        "algorithm": {"method": initializer, "layerwise": {"enable": True}},
+    }
+    source = tmp_path / "candidates.pt"
+    kwargs = {
+        "quantization_formats": [config],
+        "data_loader": [inputs],
+        "forward_step": lambda m, x: m(x, use_cache=False).logits,
+        "num_calib_steps": 1,
+        "num_score_steps": 1,
+        "disabled_layers": ["lm_head"],
+        "verbose": False,
+    }
+    baseline, bank = mtq.auto_quantize(
+        copy.deepcopy(original),
+        **kwargs,
+        constraints={"effective_bits": 16},
+        checkpoint=str(source),
+        method={
+            "method": "gradient",
+            "data_fingerprint": "tiny-native-fixed-data",
+            "preserve_candidate_weights": True,
+        },
+        loss_func=lambda output, x: torch.nn.functional.cross_entropy(
+            output[:, :-1].float().reshape(-1, output.shape[-1]), x[:, 1:].reshape(-1)
+        ),
+    )
+    torch.testing.assert_close(baseline(inputs).logits, original(inputs).logits, rtol=0, atol=0)
+    minimum = (
+        16
+        * sum(min(s["costs"]) for s in bank["candidate_stats"].values())
+        / bank["cost_denominator"]
+    )
+    immutable = source.read_bytes()
+    model, state = mtq.auto_quantize(
+        copy.deepcopy(original),
+        **kwargs,
+        constraints={"effective_bits": minimum},
+        method={
+            "method": "rco",
+            "steps": 1,
+            "data_fingerprint": "tiny-native-fixed-data",
+            "candidate_checkpoint": str(source),
+        },
+    )
+    assert source.read_bytes() == immutable
+    assert state["best"]["is_satisfied"]
+    assert torch.equal(model.lm_head.weight, original.lm_head.weight)
+    assert torch.equal(model.model.embed_tokens.weight, original.model.embed_tokens.weight)
+    before = model(inputs).logits.detach()
+    mto.save(model, tmp_path / "selected.pt")
+    model = mto.restore(copy.deepcopy(original), tmp_path / "selected.pt")
+    torch.testing.assert_close(model(inputs).logits, before, rtol=0, atol=0)
+    expected = {
+        name: (module.weight_quantizer(module.weight).detach().clone(), module.weight.dtype)
+        for name, module in model.named_modules()
+        if isinstance(module, torch.nn.Linear) and module.weight_quantizer.is_enabled
+    }
+    assert "model.layers.0.self_attn.q_proj" in expected
+    export_hf_checkpoint(model, export_dir=tmp_path / "export")
+    exported = load_file(str(tmp_path / "export" / "model.safetensors"), device="cuda")
+    for name, (qdq, dtype) in expected.items():
+        if nvfp4:
+            packed = NVFP4QTensor(qdq.shape, dtype, exported[name + ".weight"])
+            decoded = packed.dequantize(
+                dtype=dtype,
+                scale=exported[name + ".weight_scale"],
+                double_scale=exported[name + ".weight_scale_2"],
+                block_sizes={-1: 16},
+            )
+        else:
+            decoded = (
+                exported[name + ".weight"].float() * exported[name + ".weight_scale"].float()
+            ).to(dtype)
+        torch.testing.assert_close(decoded, qdq, rtol=0, atol=0)
+    assert torch.count_nonzero(expected["model.layers.0.self_attn.q_proj"][0][0, :16]) == 0
