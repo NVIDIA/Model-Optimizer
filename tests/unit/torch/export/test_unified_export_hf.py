@@ -1138,9 +1138,7 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
     swapped_plan = {"layers.*.feed_forward.experts": "torch_a2a_experts"}
     config.distributed_config = distributed_config
     config.text_config.base_model_ep_plan = swapped_plan
-    model = SimpleNamespace(
-        config=config, _modelopt_source_checkpoint=str(source), can_generate=lambda: False
-    )
+    model = SimpleNamespace(config=config, _modelopt_source_checkpoint=str(source))
 
     _write_base_config(model, tmp_path / "export")
 
