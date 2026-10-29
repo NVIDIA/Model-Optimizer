@@ -36,7 +36,7 @@ pytest.importorskip("transformers")
 
 import transformers.core_model_loading as core_model_loading
 import transformers.modeling_utils as modeling_utils
-from _test_utils.torch.transformers_models import get_tiny_llama
+from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3_moe
 from transformers import AutoModelForCausalLM
 
 import modelopt.torch.utils.moe as moe
@@ -407,3 +407,28 @@ def test_the_dense_load_shards_first_then_asks_for_exactly_the_meta_dense_params
     meta_dense = {name for name, param in model.named_parameters() if param.is_meta}
     assert loads == [(str(tmp_path), torch.device("cpu"), meta_dense, [True, True])]
     assert not any(_is_expert(name) or name.endswith("A_log") for name in meta_dense)
+
+
+def test_a_tied_head_the_checkpoint_stores_alone_reaches_both_aliases(fsdp_mesh, tmp_path):
+    """A tied checkpoint can store the pair as ``lm_head.weight`` alone, which ``from_pretrained``
+    loads into both aliases. With a tied MoE as the expert-parallel load leaves it -- the dense part
+    on meta and tied, the experts loaded -- the dense load fills both aliases with it too."""
+    from safetensors.torch import load_file, save_file
+
+    src = get_tiny_qwen3_moe(tie_word_embeddings=True)
+    src.save_pretrained(tmp_path)
+    weights = tmp_path / "model.safetensors"
+    stored = load_file(weights)
+    stored["lm_head.weight"] = stored.pop("model.embed_tokens.weight")
+    save_file(stored, weights, metadata={"format": "pt"})
+    with _ep_dense_meta_load(_is_expert):
+        model = AutoModelForCausalLM.from_pretrained(tmp_path)
+    model.tie_weights()  # as load_and_prepare_ep does once the weights load
+    assert model.lm_head.weight is model.model.embed_tokens.weight
+    assert model.lm_head.weight.is_meta
+
+    experts = [layer.mlp.experts for layer in model.model.layers]
+    _load_ep_dense_distributed(model, fsdp_mesh, str(tmp_path), _is_expert, experts)
+
+    for alias in (model.lm_head.weight, model.model.embed_tokens.weight):
+        assert torch.equal(alias, src.lm_head.weight)
