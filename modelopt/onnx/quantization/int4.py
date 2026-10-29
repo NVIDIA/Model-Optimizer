@@ -56,7 +56,7 @@ from modelopt.onnx.quantization.quant_utils import (
     rtn,
     update_block_size,
 )
-from modelopt.onnx.utils import save_onnx
+from modelopt.onnx.utils import QDQ_PRECISION_MIN_OPSET, get_opset_version, save_onnx
 
 __all__ = ["quantize"]
 
@@ -1461,6 +1461,9 @@ def quantize(
 
     Currently, only ``MatMul`` nodes quantization is supported.
 
+    Standard ONNX RTN exports require input opset 21 or later. Use
+    ``modelopt.onnx.quantization.quantize`` to upgrade older models automatically.
+
     Args:
         onnx_path: Input ONNX model (base model)
         calibration_method: It determines the quantization algorithm. Few important algorithms are:
@@ -1540,14 +1543,21 @@ def quantize(
     nodes_to_exclude = nodes_to_exclude or []
     logger.debug(f"Excluding nodes matching patterns: {nodes_to_exclude}")
 
-    # Patch GS modules to support INT4.
-    patch_gs_modules()
-
     if isinstance(onnx_path, str):
         logger.info(f"Loading ONNX model from path: {onnx_path}")
         onnx_model = onnx.load(onnx_path, load_external_data=True)
     else:
         onnx_model = onnx_path
+
+    min_opset = QDQ_PRECISION_MIN_OPSET["int4"]
+    if calibration_method in ["rtn", "rtn_dq"] and get_opset_version(onnx_model) < min_opset:
+        raise ValueError(
+            f"Standard ONNX INT4 RTN export requires opset {min_opset} or later. "
+            "Use modelopt.onnx.quantization.quantize to upgrade older models automatically."
+        )
+
+    # Patch GS modules to support INT4.
+    patch_gs_modules()
 
     # Initialize calibration_data_reader if not provided
     if calibration_data_reader is None:
