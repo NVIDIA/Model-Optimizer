@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import random
 
 import pytest
@@ -51,6 +52,12 @@ def set_seed(seed_value=42):
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
     random.seed(seed_value)
+
+
+@functools.cache
+def is_blackwell():
+    """Whether the GPU is sm_120 or newer (e.g. RTX PRO 6000), as on the GPU CI runners."""
+    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12
 
 
 def minimum_sm(sm):
