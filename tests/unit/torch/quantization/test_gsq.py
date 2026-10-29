@@ -37,7 +37,7 @@ class Decoder(nn.Module):
 
 
 @pytest.mark.parametrize("initializer", ["max", "gptq"])
-def test_gsq_reconstructs_region_and_restores_checkpoint(tmp_path, initializer):
+def test_gsq_reconstructs_region_and_restores_checkpoint(tmp_path, monkeypatch, initializer):
     torch.manual_seed(3)
     model = Decoder().eval()
     pristine = copy.deepcopy(model)
@@ -75,6 +75,16 @@ def test_gsq_reconstructs_region_and_restores_checkpoint(tmp_path, initializer):
     cfg["algorithm"]["resume"] = True
     resumed = mtq.quantize(copy.deepcopy(pristine), cfg, forward)
     torch.testing.assert_close(forward(resumed), result, atol=0, rtol=0)
+    # A changed deployment grouping policy cannot reuse old independently learned scales.
+    from modelopt.torch.quantization import gsq
+
+    with monkeypatch.context() as patch:
+        patch.setattr(gsq, "SHARED_PATTERNS", ())
+        rejected = copy.deepcopy(pristine)
+        with pytest.raises(ValueError):
+            mtq.quantize(rejected, cfg, forward)
+        for candidate, original in zip(rejected.parameters(), pristine.parameters()):
+            assert torch.equal(candidate, original)
     cfg["algorithm"]["data_fingerprint"] = "different-data"
     rejected = copy.deepcopy(pristine)
     with pytest.raises(ValueError):

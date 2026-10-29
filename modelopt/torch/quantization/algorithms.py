@@ -1444,6 +1444,12 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
                 if recipe in self.quantizer_states:
                     saved = self.quantizer_states[recipe]
+                    # Restoring aliases may overwrite one old member's independent scale.
+                    original_grids = (
+                        copy.deepcopy(saved["state_dict"])
+                        if learned_candidates and "weights" in saved
+                        else {}
+                    )
                     # config is unused by restore_quantizer_state
                     restore_quantizer_state(
                         self.model, QuantizeConfig(), {"quantizer_state": saved["metadata"]}
@@ -1468,11 +1474,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                             # Old sensitivities used unfused grids; score the prepared bank again.
                             self.candidate_stats.clear()
                         else:
-                            original_grids = copy.deepcopy(get_quantizer_state_dict(self.model))
                             model_calib._prepare_export_fusion(self.model)
                             prepared_grids = get_quantizer_state_dict(self.model)
                             if any(
-                                not torch.equal(value, prepared_grids[name][key])
+                                not torch.equal(
+                                    value.to(prepared_grids[name][key].device),
+                                    prepared_grids[name][key],
+                                )
                                 for name, buffers in original_grids.items()
                                 for key, value in buffers.items()
                             ):

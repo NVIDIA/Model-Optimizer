@@ -2553,17 +2553,18 @@ def test_auto_quantize_resumes_interrupted_gsq_with_moved_optimizer(tmp_path, mo
 
 
 class _FusedCandidateModel(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, projection_names=("q_proj", "k_proj", "v_proj")):
         super().__init__()
+        self.projection_names = projection_names
         self.attn = torch.nn.Module()
-        for name, scale in (("q_proj", 0.13), ("k_proj", 1.0), ("v_proj", 3.7)):
+        for name, scale in zip(projection_names, (0.13, 1.0, 3.7)):
             layer = torch.nn.Linear(16, 16, bias=False)
             with torch.no_grad():
                 layer.weight.mul_(scale)
             setattr(self.attn, name, layer)
 
     def forward(self, x):
-        return sum(getattr(self.attn, name)(x) for name in ("q_proj", "k_proj", "v_proj"))
+        return sum(getattr(self.attn, name)(x) for name in self.projection_names)
 
 
 @pytest.mark.parametrize("initializer", ["max", "gptq"])
@@ -2654,9 +2655,11 @@ def test_auto_quantize_rco_imports_unfused_max_seed_without_changing_source(tmp_
 
 
 @pytest.mark.parametrize("initializer", ["max", "gptq"])
-def test_auto_quantize_rco_refuses_hard_candidate_with_unfused_grid(tmp_path, initializer):
+@pytest.mark.parametrize("gdn", [False, True])
+def test_auto_quantize_rco_refuses_hard_candidate_with_unfused_grid(tmp_path, initializer, gdn):
     torch.manual_seed(43)
-    original = _FusedCandidateModel().bfloat16()
+    names = ("in_proj_qkv", "in_proj_z") if gdn else ("q_proj", "k_proj", "v_proj")
+    original = _FusedCandidateModel(names).bfloat16()
     batch = torch.randn(8, 16).bfloat16()
     config = {
         "quant_cfg": [
@@ -2680,7 +2683,7 @@ def test_auto_quantize_rco_refuses_hard_candidate_with_unfused_grid(tmp_path, in
         method={"method": "rco", "steps": 0, "data_fingerprint": "fixed-fused-data"},
     )
     candidate = next(iter(state["quantizer_states"].values()))
-    buffers = candidate["state_dict"]["attn.q_proj.weight_quantizer"]
+    buffers = candidate["state_dict"][f"attn.{names[0]}.weight_quantizer"]
     buffers["_amax"] = buffers["_amax"] / 2
     source = tmp_path / "unfused-hard.pt"
     safe_save(state, source)

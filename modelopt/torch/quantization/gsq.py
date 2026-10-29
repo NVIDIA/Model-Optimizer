@@ -131,7 +131,7 @@ def _tensor_output(output):
 
 
 def _fingerprint(model, settings):
-    digest = hashlib.sha256(repr((type(model), settings)).encode())
+    digest = hashlib.sha256(repr((type(model), settings, SHARED_PATTERNS)).encode())
     if hasattr(getattr(model, "config", None), "to_json_string"):
         digest.update(model.config.to_json_string().encode())
     for name, tensor in model.state_dict().items():
