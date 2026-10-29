@@ -60,12 +60,8 @@ def _enclosing_unit(ctx: ExportContext, module: nn.Module) -> nn.Module:
 def _window_root(ctx: ExportContext, unit: nn.Module) -> tuple[nn.Module, ModuleNames | None]:
     """The root a weight-update window on ``unit`` is opened on, and its module names.
 
-    The window opens on the innermost unit enclosing the module, but only when the root it is handed
-    is wrapped itself: on an unwrapped root it does nothing. Expert parallelism FSDP2-shards only the
-    dense layers and leaves the root unwrapped, where the weight would stay a sharded DTensor, which
-    packing mishandles (``DTensor << int`` is a silent no-op in torch 2.11, so NVFP4 packed unrelated
-    codes next to correct scales). So there that unit is handed in as the root, with names relative
-    to it, which the window resolves the modules' parameters against.
+    A window does nothing on an unwrapped root, which expert parallelism leaves (it FSDP2-shards
+    only the dense layers), so there the unit itself is the root, with names relative to it.
     """
     if isinstance(ctx.model, FSDPModule) or unit is ctx.model:
         # The model's own names, which _enclosing_unit has built.
@@ -134,12 +130,8 @@ def _export_weight(
     # install the built-in handlers while retaining this legacy helper's import path.
     from .unified_export_hf import _export_quantized_weight
 
-    # The no-gather writer packs while the model is still sharded, so unlike the
-    # collect_export_tensors path there is no open weight-access window here and the weight is a
-    # DTensor. FP8 tolerates that; NVFP4 does not -- get_weights_scaling_factor does an
-    # index_put_, which DTensor cannot dispatch. Pack in a weight-update window for that path only,
-    # which reshards the unit when it closes: a layer left unsharded holds all of its weights on
-    # every rank, and FSDP2 later puts its own shards back over anything packed outside a window.
+    # The no-gather export packs a still-sharded model: an FSDP2-owned weight goes in its unit's
+    # weight-update window, or the unit's next reshard puts FSDP2's unquantized shard back.
     if ctx.keep_fused_experts and distribution_plan(ctx.model).is_fsdp_dense:
         with _fsdp2_weight_window(ctx, module):
             _export_quantized_weight(module, ctx.dtype, weight_name)
