@@ -15,13 +15,22 @@
 
 """Integration tests for layerwise_calibrate and LayerActivationCollector."""
 
+import copy
+
 import pytest
 import torch
 import torch.nn as nn
+from _test_utils.torch.quantization.models import TOY_MOE_EXPERTS, TOY_MOE_HIDDEN, ToyMoE
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 from torch.distributed.tensor import DTensor
 
+import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization._selected_calibration import _SelectedLayerCalibrator
+from modelopt.torch.quantization._source_estimation import _estimate_source_activations
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml.common import pinned_packed_weight, preserve_source_weights
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
+from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
 from modelopt.torch.quantization.utils import layerwise_calib
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
@@ -145,6 +154,138 @@ def _register_test_discoverer(monkeypatch):
         "_decoder_layer_support",
         [(lambda m: hasattr(m, "layers"), lambda m: m.layers)],
     )
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(
+    ("qdq_from_prev", "estimate"), [(False, False), (True, False), (False, True)]
+)
+def test_selected_layerwise_gptq_mixed_formats(monkeypatch, qdq_from_prev, estimate):
+    _register_test_discoverer(monkeypatch)
+    torch.manual_seed(42)
+    source = _SimpleTransformerModel(n_layers=0)
+    source.embed = nn.Identity()
+    source.layers = nn.ModuleList([ToyMoE() for _ in range(3)])
+    source = source.to(device="cuda", dtype=torch.bfloat16).eval()
+    data = [torch.randn(32, TOY_MOE_HIDDEN, device="cuda", dtype=torch.bfloat16) for _ in range(2)]
+    config = {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None}
+    groups = []
+    for i, fmt in enumerate(("iq2_xxs", "iq2_xs", "iq2_s")):
+        prefix = f"layers.{i}.mlp"
+        config["quant_cfg"].append(
+            {
+                "quantizer_name": f"{prefix}.experts.*weight_quantizer",
+                "cfg": {"num_bits": fmt, "block_sizes": {-1: 256}, "backend": "ggml"},
+            }
+        )
+        preset = mtq.NVFP4_DEFAULT_CFG if i % 2 == 0 else mtq.FP8_DEFAULT_CFG
+        for entry in preset["quant_cfg"]:
+            if entry.get("quantizer_name") in {"*weight_quantizer", "*input_quantizer"}:
+                entry = copy.deepcopy(entry)
+                entry["quantizer_name"] = prefix + ".shared_expert." + entry["quantizer_name"]
+                config["quant_cfg"].append(entry)
+        traversal = {
+            "enable": True,
+            "get_qdq_activations_from_prev_layer": qdq_from_prev or estimate,
+        }
+        groups.extend(
+            [
+                (
+                    [prefix + ".experts"],
+                    {
+                        "method": "gptq",
+                        "block_size": 256,
+                        "perc_damp": 0.05 * (i + 1),
+                        "importance_weighted": True,
+                        "layerwise": traversal,
+                    },
+                ),
+                ([prefix + ".shared_expert"], {"method": "max", "layerwise": traversal}),
+            ]
+        )
+    original_groups = copy.deepcopy(groups)
+
+    def fresh():
+        return mtq.quantize(copy.deepcopy(source), copy.deepcopy(config))
+
+    reference = fresh()
+    inputs = data
+    for i, layer in enumerate(reference.layers):
+        captured = {"experts": [], "shared_expert": []}
+        handles = [
+            getattr(layer.mlp, name).register_forward_pre_hook(
+                lambda m, args, name=name: captured[name].append(
+                    tuple(x.detach().clone() for x in args)
+                )
+            )
+            for name in captured
+        ]
+        with mtq.set_quantizer_by_cfg_context(layer, [{"quantizer_name": "*", "enable": False}]):
+            source_outputs = [layer(batch).detach() for batch in inputs]
+        for handle in handles:
+            handle.remove()
+        for j, name in enumerate(captured):
+            algorithm = copy.deepcopy(groups[2 * i + j][1])
+            algorithm["layerwise"]["enable"] = False
+            with preserve_source_weights():
+                mtq.calibrate(
+                    getattr(layer.mlp, name),
+                    algorithm,
+                    lambda module, batches=captured[name]: [module(*args) for args in batches],
+                )
+        inputs = [layer(batch).detach() for batch in inputs] if qdq_from_prev else source_outputs
+
+    for order in (groups, list(reversed(groups))):
+        actual = fresh()
+        if estimate:
+            result = _estimate_source_activations(
+                actual, order, lambda model: _run_forward(model, data), max_activation_bytes=2**20
+            )
+            assert result["peak_activation_bytes"] <= 2**20
+            assert all(
+                pinned_packed_weight(q, q.num_bits).device.type == "cpu"
+                for q in actual.modules()
+                if isinstance(q, TensorQuantizer) and q.is_enabled and q.backend == "ggml"
+            )
+        else:
+            callback = _SelectedLayerCalibrator(actual, order)
+            layerwise_calibrate(
+                actual,
+                lambda model: _run_forward(model, data),
+                callback,
+                **callback.layerwise_config,
+            )
+        assert actual.state_dict().keys() == reference.state_dict().keys()
+        for name, value in reference.state_dict().items():
+            torch.testing.assert_close(
+                actual.state_dict()[name].to(value.device), value, rtol=0, atol=0
+            )
+        torch.testing.assert_close(actual(data[0]), reference(data[0]), rtol=0, atol=0)
+        for name, parameter in actual.named_parameters():
+            torch.testing.assert_close(
+                parameter, dict(source.named_parameters())[name], rtol=0, atol=0
+            )
+        packed_counts = {}
+        for quantizer in actual.modules():
+            if (
+                isinstance(quantizer, TensorQuantizer)
+                and quantizer.is_enabled
+                and quantizer.backend == "ggml"
+            ):
+                payload = pinned_packed_weight(quantizer, quantizer.num_bits)
+                assert payload is not None and payload.numel() > 0
+                packed_counts[quantizer.num_bits] = packed_counts.get(quantizer.num_bits, 0) + 1
+        assert packed_counts == dict.fromkeys(("iq2_xxs", "iq2_xs", "iq2_s"), 2 * TOY_MOE_EXPERTS)
+        for module in actual.modules():
+            if isinstance(module, QuantModule):
+                for weight, quantizer in module.iter_weights_for_calibration():
+                    if quantizer.is_enabled and quantizer.backend == "ggml":
+                        packed = GGML_FORMAT_REGISTRY[quantizer.num_bits].pack(weight, quantizer)
+                        expected = pinned_packed_weight(quantizer, quantizer.num_bits)
+                        torch.testing.assert_close(
+                            packed.flatten().to(expected.device), expected.flatten(), rtol=0, atol=0
+                        )
+    assert groups == original_groups
 
 
 def test_layerwise_calib_func_called_per_layer(monkeypatch):

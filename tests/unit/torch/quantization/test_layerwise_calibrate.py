@@ -24,6 +24,8 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization._selected_calibration import _SelectedLayerCalibrator
+from modelopt.torch.quantization._source_estimation import _estimate_source_activations
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils.layerwise_calib import (
@@ -1443,3 +1445,177 @@ def test_layerwise_checkpoint_mismatch_save_every_raises(monkeypatch, tmp_path):
     fresh_model = _SimpleTransformerModel(n_layers=4, dim=16)
     with pytest.raises(ValueError, match="save_every mismatch"):
         mtq.quantize(fresh_model, cfg_mismatched, forward_loop=lambda m: [m(b) for b in calib_data])
+
+
+@pytest.mark.parametrize(
+    ("qdq_from_prev", "estimate"), [(False, False), (True, False), (False, True)]
+)
+def test_selected_layerwise_mixed_algorithms_match_group_calibration(
+    monkeypatch, qdq_from_prev, estimate
+):
+    _register_test_discoverer(monkeypatch)
+    torch.manual_seed(42)
+    source = _SimpleTransformerModel(n_layers=3).eval()
+    data = [torch.randint(0, 32, (2, 8)) for _ in range(2)]
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            *[
+                {"quantizer_name": pattern + ".weight_quantizer", "cfg": {"num_bits": 3, "axis": 0}}
+                for pattern in ("layers.*.attn", "layers.*.ffn.*")
+            ],
+            *[
+                {
+                    "quantizer_name": pattern + ".input_quantizer",
+                    "cfg": {"num_bits": 4, "axis": None},
+                }
+                for pattern in ("layers.*.attn", "layers.*.ffn.*")
+            ],
+        ],
+        "algorithm": None,
+    }
+    layerwise = {"enable": True, "get_qdq_activations_from_prev_layer": qdq_from_prev or estimate}
+    algorithms = {
+        "attn": {"method": "max", "layerwise": layerwise},
+        "ffn": [
+            {"method": "max"},
+            {
+                "method": "mse",
+                "step_size": 0.25,
+                "start_multiplier": 0.5,
+                "stop_multiplier": 1.0,
+                "layerwise": layerwise,
+            },
+        ],
+    }
+    groups = [
+        ([f"layers.{i}.{name}"], algorithm)
+        for i in range(3)
+        for name, algorithm in algorithms.items()
+    ]
+    original_groups = copy.deepcopy(groups)
+
+    def replay(batches):
+        def forward_loop(model):
+            for batch in batches:
+                model(batch)
+
+        return forward_loop
+
+    reference = mtq.quantize(copy.deepcopy(source), copy.deepcopy(config))
+    inputs = [reference.embed(batch).detach() for batch in data]
+    for layer in reference.layers:
+        # Capture the source inputs once, then calibrate each group through the public API.
+        captured = {name: [] for name in algorithms}
+        handles = [
+            getattr(layer, name).register_forward_pre_hook(
+                lambda m, args, name=name: captured[name].append(args[0].detach().clone())
+            )
+            for name in algorithms
+        ]
+        with mtq.set_quantizer_by_cfg_context(layer, [{"quantizer_name": "*", "enable": False}]):
+            source_outputs = [layer(batch).detach() for batch in inputs]
+        for handle in handles:
+            handle.remove()
+        for name, algorithm in algorithms.items():
+            chain = copy.deepcopy(algorithm if isinstance(algorithm, list) else [algorithm])
+            for step in chain:
+                step["layerwise"] = {"enable": False}
+            mtq.calibrate(getattr(layer, name), chain, replay(captured[name]))
+        inputs = [layer(batch).detach() for batch in inputs] if qdq_from_prev else source_outputs
+
+    for order_index, order in enumerate((groups, list(reversed(groups)))):
+        actual = mtq.quantize(copy.deepcopy(source), copy.deepcopy(config))
+        flags = {q: q.is_enabled for q in actual.modules() if isinstance(q, TensorQuantizer)}
+        if estimate:
+            result = _estimate_source_activations(
+                actual, order, replay(data), max_activation_bytes=2**20
+            )
+            assert result["peak_activation_bytes"] <= 2**20
+        else:
+            callback = _SelectedLayerCalibrator(actual, order)
+            layerwise_calibrate(actual, replay(data), callback, **callback.layerwise_config)
+        assert flags == {q: q.is_enabled for q in flags}
+        assert actual.state_dict().keys() == reference.state_dict().keys()
+        for name, value in reference.state_dict().items():
+            torch.testing.assert_close(actual.state_dict()[name], value, rtol=0, atol=0)
+        torch.testing.assert_close(actual(data[0]), reference(data[0]), rtol=0, atol=0)
+        for name, parameter in actual.named_parameters():
+            torch.testing.assert_close(
+                parameter, dict(source.named_parameters())[name], rtol=0, atol=0
+            )
+    assert groups == original_groups
+
+
+@pytest.mark.parametrize(
+    "invalid", ["activation_budget", "shared_weights", "training", "meta", "uncovered"]
+)
+def test_source_estimation_refuses_layout_or_budget_before_calibration(monkeypatch, invalid):
+    _register_test_discoverer(monkeypatch)
+    model = mtq.quantize(_SimpleTransformerModel(n_layers=2).eval(), _int8_cfg_with_algorithm(None))
+    groups = [([f"layers.{i}"], {"method": "max", "layerwise": {"enable": True}}) for i in range(2)]
+    if invalid == "shared_weights":
+        model.layers[1].attn.weight = model.layers[0].attn.weight
+    elif invalid == "training":
+        model.train()
+    elif invalid == "meta":
+        model.to("meta")
+    elif invalid == "uncovered":
+        groups.pop()
+    before = copy.deepcopy(model.state_dict())
+    flags = {q: q.is_enabled for q in model.modules() if isinstance(q, TensorQuantizer)}
+    with pytest.raises(ValueError):
+        _estimate_source_activations(
+            model,
+            groups,
+            lambda m: m(torch.zeros(2, 8, dtype=torch.long)),
+            max_activation_bytes=1 if invalid == "activation_budget" else 2**20,
+        )
+    assert flags == {q: q.is_enabled for q in flags}
+    assert not any(hasattr(m, "_layerwise_calib") for m in model.modules())
+    assert before.keys() == model.state_dict().keys()
+    for name, value in before.items():
+        torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
+    if invalid == "activation_budget":
+        result = _estimate_source_activations(
+            model,
+            groups,
+            lambda m: m(torch.zeros(2, 8, dtype=torch.long)),
+            max_activation_bytes=2**20,
+        )
+        assert 1 < result["peak_activation_bytes"] <= 2**20
+
+
+@pytest.mark.parametrize("invalid", ["overlap", "cross_layer", "traversal", "mutating"])
+def test_selected_layerwise_rejects_invalid_groups_before_calibration(monkeypatch, invalid):
+    _register_test_discoverer(monkeypatch)
+    model = mtq.quantize(_SimpleTransformerModel(n_layers=2), _int8_cfg_with_algorithm(None))
+    algorithm = {"method": "max", "layerwise": {"enable": True}}
+    groups = [(["layers.0.attn"], algorithm)]
+    if invalid == "overlap":
+        groups.append((["layers.0"], algorithm))
+    elif invalid == "cross_layer":
+        groups[0][0].append("layers.1.attn")
+    elif invalid == "traversal":
+        groups.append(
+            (
+                ["layers.1.attn"],
+                {
+                    "method": "max",
+                    "layerwise": {
+                        "enable": True,
+                        "get_qdq_activations_from_prev_layer": False,
+                    },
+                },
+            )
+        )
+    else:
+        groups[0] = (["layers.0.attn"], {"method": "gptq", "layerwise": {"enable": True}})
+    before = copy.deepcopy(model.state_dict())
+    flags = {q: q.is_enabled for q in model.modules() if isinstance(q, TensorQuantizer)}
+    with pytest.raises(ValueError):
+        _SelectedLayerCalibrator(model, groups)
+    assert flags == {q: q.is_enabled for q in flags}
+    assert before.keys() == model.state_dict().keys()
+    for name, value in before.items():
+        torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
