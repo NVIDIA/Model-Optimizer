@@ -78,7 +78,7 @@ _RANK_LOCAL_CALIBRATION = (
     "awq_lite",
     "awq_full",
     "svdquant",
-    "local_hessian",
+    "local_hessian",  # its distributed_sync syncs only the max amax it starts from
     "imatrix",
 )
 
@@ -151,8 +151,8 @@ def _refuse_unsupported_distributed_calibration(
             f"Calibrating with {', '.join(refused)} is not supported on a model distributed over "
             f"{plan.world_size} ranks. Each rank calibrates on its own data and this calibration "
             "keeps what it gathers on the rank, so the ranks would calibrate their copies, or their "
-            "shards, of a weight differently. Calibrate with max, MSE, GPTQ, SmoothQuant or "
-            "awq_clip, with distributed_sync on, or in a single process."
+            "shards, of a weight differently. Calibrate with max or MSE with distributed_sync on, "
+            "GPTQ, SmoothQuant or awq_clip, or in a single process."
         )
     if algorithm is None or not plan.is_expert_parallel:
         return
