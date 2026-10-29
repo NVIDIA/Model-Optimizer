@@ -2076,11 +2076,12 @@ def awq_clip(
         if not group.is_initialized():
             return
         losses = torch.stack(list(module.awq_clip.loss.values()))
-        tokens = torch.tensor(module.awq_clip.num_tokens, device=losses.device)
-        for tensor in (losses, tokens):
-            dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=group.group)
-        module.awq_clip.loss = dict(zip(module.awq_clip.loss, losses / group.world_size()))
-        module.awq_clip.num_tokens = int(tokens.item())
+        # One all-reduce: the token count rides in the fp32 losses, exact for any calibration set.
+        packed = torch.cat([losses.reshape(-1), losses.new_tensor([module.awq_clip.num_tokens])])
+        dist.all_reduce(packed, op=dist.ReduceOp.SUM, group=group.group)
+        reduced = packed[:-1].view_as(losses) / group.world_size()
+        module.awq_clip.loss = dict(zip(module.awq_clip.loss, reduced))
+        module.awq_clip.num_tokens = int(packed[-1].item())
 
     def _clip_search(self, inputs, co_bsz=256, max_tokens=16):
         if inputs.numel() == 0:  # no tokens to search with; their loss, a mean over none, is NaN
@@ -2210,9 +2211,13 @@ def awq_clip(
         if module.awq_clip.is_input_quantized:
             module.input_quantizer.enable()
 
-    for name, module in model.named_modules():
+    # Every module's reduction before any weight gather, which an FSDP2 model's postprocess runs.
+    for module in model.modules():
         if is_quantized_linear(module) and hasattr(module, "awq_clip"):
             sync_across_dp(module)
+
+    for name, module in model.named_modules():
+        if is_quantized_linear(module) and hasattr(module, "awq_clip"):
             if module.awq_clip.num_tokens > 0:
                 with enable_weight_access_and_writeback(module, model, names):
                     postprocess(module)
