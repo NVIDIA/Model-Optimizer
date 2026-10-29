@@ -79,8 +79,11 @@ class _StreamingShardWriter:
     finish before any rank starts writing.
     """
 
-    def __init__(self, export_dir: Path | str, max_shard_size: int, part_tag: str = "") -> None:
+    def __init__(
+        self, export_dir: Path | str, max_shard_size: int, part_tag: str = "", storage_budget=None
+    ) -> None:
         self._export_dir = Path(export_dir)
+        self._storage_budget = storage_budget
         # Distinguishes one writer's part files from another's when several ranks write here.
         self._part_tag = part_tag
         self._max_shard_size = max_shard_size
@@ -98,7 +101,10 @@ class _StreamingShardWriter:
             return
         part_idx = len(self._part_files)
         part_path = self._export_dir / f"__shard_part_{self._part_tag}{part_idx:05d}.safetensors"
-        save_file(self._buffer, str(part_path))
+        if self._storage_budget is None:
+            save_file(self._buffer, str(part_path))
+        else:
+            self._storage_budget.save_safetensors(self._buffer, part_path)
         for key in self._buffer:
             self._key_to_part[key] = part_idx
         self._part_files.append(part_path)
@@ -141,11 +147,13 @@ class _StreamingShardWriter:
         Returns the weight_map ``{key: shard_filename}`` written to the index.
         Single-shard exports use ``model.safetensors`` without an index file.
         """
-        return name_shards_and_write_index(self._export_dir, [self.close()])
+        return name_shards_and_write_index(self._export_dir, [self.close()], self._storage_budget)
 
 
 def name_shards_and_write_index(
-    export_dir: Path | str, closed_writers: list[tuple[list[str], dict[str, int], int]]
+    export_dir: Path | str,
+    closed_writers: list[tuple[list[str], dict[str, int], int]],
+    storage_budget=None,
 ) -> dict[str, str]:
     """Rename the temporary files to proper shard names and write the index.
 
@@ -177,8 +185,11 @@ def name_shards_and_write_index(
 
     weight_map = {key: shard_names[part_idx] for key, part_idx in key_to_part.items()}
     index_path = export_dir / "model.safetensors.index.json"
-    with open(index_path, "w") as f:
-        json.dump({"metadata": {"total_size": total_size}, "weight_map": weight_map}, f)
+    content = json.dumps({"metadata": {"total_size": total_size}, "weight_map": weight_map})
+    if storage_budget is None:
+        index_path.write_text(content)
+    else:
+        storage_budget.write_text(index_path, content)
     return weight_map
 
 
