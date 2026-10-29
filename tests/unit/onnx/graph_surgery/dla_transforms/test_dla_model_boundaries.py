@@ -451,13 +451,17 @@ def test_normalization_preserves_rank_sensitive_and_opaque_consumers(operation, 
         np.testing.assert_allclose(actual, reference, rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.parametrize("through_pipeline", [False, True])
-def test_normalization_refuses_unprepared_consumers_before_mutation(through_pipeline):
+@pytest.mark.parametrize(
+    ("through_pipeline", "intermediate"), [(False, False), (True, False), (True, True)]
+)
+def test_normalization_refuses_unprepared_consumers_before_mutation(through_pipeline, intermediate):
     """Refuse a rank-sensitive consumer before widening any eligible normalization node."""
     shape = [2, 3, 4]
+    data = "r" if intermediate else "x"
     model = _make_model(
-        [
-            helper.make_node("InstanceNormalization", ["x", "scale", "bias"], ["normalized"]),
+        ([helper.make_node("Relu", ["x"], [data])] if intermediate else [])
+        + [
+            helper.make_node("InstanceNormalization", [data, "scale", "bias"], ["normalized"]),
             helper.make_node("Hardmax", ["normalized"], ["y"], axis=1),
         ],
         [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
@@ -1160,10 +1164,13 @@ def test_input_adapters_resolve_unsqueeze_axes_against_output_rank(axes, output_
 @pytest.mark.parametrize("batch", [1, 2, 3])
 @pytest.mark.parametrize("activations", [(), ("Relu",), ("Relu", "Tanh")])
 def test_registered_normalization_preserves_native_channel_axis(batch, activations):
-    """Keep direct rank-three normalization inputs on the channel-preserving route."""
+    """Preserve channels with direct inputs or inferable intermediate metadata."""
     shape = [batch, 3, 4]
     output = "normalized" if activations else "y"
-    nodes = [helper.make_node("InstanceNormalization", ["x", "scale", "bias"], [output])]
+    data = "activated_input" if activations else "x"
+    nodes = ([helper.make_node("Relu", ["x"], [data])] if activations else []) + [
+        helper.make_node("InstanceNormalization", [data, "scale", "bias"], [output])
+    ]
     for index, operation in enumerate(activations):
         following = "y" if index == len(activations) - 1 else f"activation_{index}"
         nodes.append(helper.make_node(operation, [output], [following]))
