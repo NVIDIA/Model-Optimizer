@@ -513,7 +513,15 @@ def _assert_experts_pre_expanded(
         r"\.experts\.(?:" + "|".join(re.escape(leaf) for leaf in expert_fused_leaves) + r")(?:\.|$)"
     )
     for key, tensor in state_dict.items():
-        if fused.search(key) or (".experts." in key and getattr(tensor, "ndim", 0) >= 3):
+        # An indexed GGML expert packs its matrix as [rows, blocks, payload bytes].
+        packed_expert = (
+            getattr(tensor, "dtype", None) == torch.uint8
+            and tensor.ndim == 3
+            and re.search(r"\.experts\.\d+\.[^.]+\.weight$", key) is not None
+        )
+        if fused.search(key) or (
+            ".experts." in key and getattr(tensor, "ndim", 0) >= 3 and not packed_expert
+        ):
             raise QuantConversionUnsupportedError(
                 f"experts not pre-expanded (stacked/fused expert tensor '{key}'); "
                 "quant-aware reverse conversion cannot rename it"

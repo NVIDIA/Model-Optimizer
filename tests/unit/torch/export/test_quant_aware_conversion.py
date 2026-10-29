@@ -627,7 +627,8 @@ def test_end_to_end_minimax_m3_like_reversal():
     assert not any(".gate_up_proj" in k for k in out)
 
 
-def test_build_reverse_rules_from_mixtral_conversion_mapping_cpu():
+@pytest.mark.parametrize("packed_ggml", [False, True])
+def test_build_reverse_rules_from_mixtral_conversion_mapping_cpu(packed_ggml):
     """Derive rules from a real transformers conversion mapping (CPU, no quantize).
 
     Exercises ``revert_weight_conversion_quant_aware`` / ``_build_reverse_rules``:
@@ -643,9 +644,17 @@ def test_build_reverse_rules_from_mixtral_conversion_mapping_cpu():
     p = "model.layers.0"
     sd = {f"{p}.mlp.gate.weight": torch.randn(2, 32)}
     for e in range(2):
-        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.gate_proj", 64, 32))
-        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.up_proj", 64, 32))
-        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.down_proj", 32, 64))
+        for leaf, rows, columns in (
+            ("gate_proj", 64, 32),
+            ("up_proj", 64, 32),
+            ("down_proj", 32, 64),
+        ):
+            prefix = f"{p}.mlp.experts.{e}.{leaf}"
+            if packed_ggml:
+                # GGML stores each expert as [rows, blocks, block_payload_bytes].
+                sd[f"{prefix}.weight"] = torch.randint(256, (rows, 1, 66), dtype=torch.uint8)
+            else:
+                sd.update(_nvfp4_linear(prefix, rows, columns))
 
     out = revert_weight_conversion_quant_aware(model, sd)
 
@@ -655,8 +664,11 @@ def test_build_reverse_rules_from_mixtral_conversion_mapping_cpu():
         assert f"{base}.w1.weight" in out  # gate_proj -> w1
         assert f"{base}.w3.weight" in out  # up_proj   -> w3
         assert f"{base}.w2.weight" in out  # down_proj -> w2
-        assert f"{base}.w1.weight_scale" in out
-        assert f"{base}.w1.weight_scale_2" in out
+        for original, exported in (("gate_proj", "w1"), ("up_proj", "w3"), ("down_proj", "w2")):
+            assert out[f"{base}.{exported}.weight"] is sd[f"{p}.mlp.experts.{e}.{original}.weight"]
+        if not packed_ggml:
+            assert f"{base}.w1.weight_scale" in out
+            assert f"{base}.w1.weight_scale_2" in out
     assert f"{p}.block_sparse_moe.gate.weight" in out
     assert not any(".mlp.experts." in k for k in out)
 

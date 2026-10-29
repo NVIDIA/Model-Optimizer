@@ -43,6 +43,7 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     sanitize_hf_config_for_deployment,
 )
 
+from ._storage import ExportStorageBudget
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
 
 try:
@@ -1611,7 +1612,9 @@ def _sanitize_generation_config_for_save(model: torch.nn.Module) -> None:
         gc.do_sample = True
 
 
-def _copy_non_model_files_from_source(model: nn.Module, export_dir: "str | Path") -> None:
+def _copy_non_model_files_from_source(
+    model: nn.Module, export_dir: "str | Path", storage_budget=None
+) -> None:
     """Copy the source checkpoint's non-model files into the export, from local disk only.
 
     See ``copy_non_model_files``. Exporters never fetch from the Hub: a model loaded by Hub ID
@@ -1628,10 +1631,12 @@ def _copy_non_model_files_from_source(model: nn.Module, export_dir: "str | Path"
             "and load the model from that directory."
         )
         return
-    copy_non_model_files(source, export_dir)
+    copy_non_model_files(
+        source, export_dir, **({"copy_function": storage_budget.copy} if storage_budget else {})
+    )
 
 
-def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
+def save_non_weight_artifacts(model: nn.Module, export_dir: Path, storage_budget=None) -> None:
     """Write config.json and generation_config.json, then copy the source's non-model files.
 
     For exporters that stream weights out themselves and never hand a state dict to
@@ -1644,15 +1649,24 @@ def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
     # transformers' own revert_weight_conversion cannot handle quantized state dicts.
     patches = _patch_revert_weight_conversion()
     try:
-        model.config.save_pretrained(str(export_dir))
+        if storage_budget is None:
+            model.config.save_pretrained(str(export_dir))
+        else:
+            storage_budget.write_text(export_dir / "config.json", model.config.to_json_string())
     finally:
         _unpatch_revert_weight_conversion(patches)
 
     if getattr(model, "generation_config", None) is not None:
-        with contextlib.suppress(Exception):
-            model.generation_config.save_pretrained(str(export_dir))
+        if storage_budget is None:
+            with contextlib.suppress(Exception):
+                model.generation_config.save_pretrained(str(export_dir))
+        else:
+            model.generation_config.validate()
+            storage_budget.write_text(
+                export_dir / "generation_config.json", model.generation_config.to_json_string()
+            )
 
-    _copy_non_model_files_from_source(model, export_dir)
+    _copy_non_model_files_from_source(model, export_dir, storage_budget)
 
 
 def export_speculative_decoding(
@@ -1671,6 +1685,7 @@ def _write_hf_export_config(
     model: nn.Module,
     hf_quant_config: dict | None,
     export_dir: Path,
+    storage_budget=None,
 ) -> None:
     """Write hf_quant_config.json (if quantized) and embed quantization_config into config.json."""
     quantization_details = (hf_quant_config or {}).get("quantization", {})
@@ -1680,8 +1695,12 @@ def _write_hf_export_config(
     )
     quantization_config = None
     if hf_quant_config is not None and is_quantized_export:
-        with open(f"{export_dir}/hf_quant_config.json", "w") as file:
-            json.dump(hf_quant_config, file, indent=4)
+        content = json.dumps(hf_quant_config, indent=4)
+        path = export_dir / "hf_quant_config.json"
+        if storage_budget is None:
+            path.write_text(content)
+        else:
+            storage_budget.write_text(path, content)
         quantization_config = convert_hf_quant_config_format(hf_quant_config)
 
     original_config = f"{export_dir}/config.json"
@@ -1694,8 +1713,11 @@ def _write_hf_export_config(
         sparse_attn_config = export_sparse_attention_config(model)
         if sparse_attn_config is not None:
             config_data["sparse_attention_config"] = sparse_attn_config
-    with open(original_config, "w") as file:
-        json.dump(config_data, file, indent=4)
+    content = json.dumps(config_data, indent=4)
+    if storage_budget is None:
+        Path(original_config).write_text(content)
+    else:
+        storage_budget.write_text(original_config, content)
 
 
 def _revert_hf_quant_config_names(
@@ -1941,6 +1963,7 @@ def export_hf_checkpoint(
     components: list[str] | None = None,
     extra_state_dict: dict[str, torch.Tensor] | None = None,
     max_shard_size: int | str = "10GB",
+    max_export_bytes: int | None = None,
     **kwargs,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
@@ -1964,6 +1987,9 @@ def export_hf_checkpoint(
             to export. If None, all components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
         max_shard_size: Maximum size of each safetensors shard file. Defaults to "10GB".
+        max_export_bytes: Optional conservative cumulative write budget, including metadata and
+            copied source files. Requires a new, non-offloaded, single-process transformers export;
+            unsupported layouts are refused before packing. The caller owns failure cleanup.
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors` for diffusion model exports.
             See its docstring for supported keys. Diffusion exports also accept
@@ -1973,6 +1999,24 @@ def export_hf_checkpoint(
             runtime compatibility; other diffusion components omit them.
             Transformers components always retain them for KV-cache scales.
     """
+    from .layerwise_export import LAYERWISE_EXPORTER_ATTR
+
+    storage_budget = None
+    if max_export_bytes is not None:
+        storage_budget = ExportStorageBudget(max_export_bytes)
+        if (
+            has_accelerate_offload(model)
+            or (torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1)
+            or (HAS_DIFFUSERS and is_diffusers_object(model))
+            or save_modelopt_state
+            or not hasattr(model, "config")
+            or (Path(export_dir).exists() and any(Path(export_dir).iterdir()))
+            or Path(export_dir).is_symlink()
+            or getattr(model, LAYERWISE_EXPORTER_ATTR, None) is not None
+        ):
+            raise ValueError(
+                "Bounded export requires an empty directory and a single-process transformers model without offload"
+            )
     # Weights the model never loaded (MTP head, auxiliary tower, ...) are copied straight from the
     # source so the exported checkpoint is the complete model. Merged here, ahead of the path
     # dispatch, so the gather and no-gather writers behave identically. An explicit extra_state_dict
@@ -1998,8 +2042,6 @@ def export_hf_checkpoint(
     # that, and because only this point knows what was actually written rather than what was
     # merely unplaced.
     model._modelopt_carried_over_names = sorted({*_carried, *off_index_tensor_names(model)})
-
-    from .layerwise_export import LAYERWISE_EXPORTER_ATTR
 
     exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
     if exporter is not None:
@@ -2145,19 +2187,39 @@ def export_hf_checkpoint(
             # `from core_model_loading import revert_weight_conversion`.
             _patches = _patch_revert_weight_conversion()
             try:
-                model.save_pretrained(
-                    export_dir,
-                    state_dict=export_state_dict,
-                    save_modelopt_state=save_modelopt_state,
-                    max_shard_size=max_shard_size,
-                )
+                if storage_budget is None:
+                    model.save_pretrained(
+                        export_dir,
+                        state_dict=export_state_dict,
+                        save_modelopt_state=save_modelopt_state,
+                        max_shard_size=max_shard_size,
+                    )
+                else:
+                    # The shared streaming writer bounds the CPU staging buffer and reserves
+                    # each shard before writing; save_pretrained has no bounded-write hook.
+                    from .unified_export_hf_streaming import (
+                        _parse_shard_size,
+                        _StreamingShardWriter,
+                    )
+
+                    writer = _StreamingShardWriter(
+                        export_dir, _parse_shard_size(max_shard_size), storage_budget=storage_budget
+                    )
+                    for key, tensor in export_state_dict.items():
+                        writer.add(key, tensor.detach().contiguous().cpu())
+                    writer.finalize()
+                    save_non_weight_artifacts(model, export_dir, storage_budget)
             finally:
                 _unpatch_revert_weight_conversion(_patches)
 
         if rank == 0:
-            _write_hf_export_config(model, hf_quant_config, export_dir)
-            copy_off_index_safetensors(_source_checkpoint(model), export_dir)
-            if not (_offloaded or is_fsdp2_sharded):
+            _write_hf_export_config(model, hf_quant_config, export_dir, storage_budget)
+            copy_off_index_safetensors(
+                _source_checkpoint(model),
+                export_dir,
+                **({"copy_function": storage_budget.copy} if storage_budget else {}),
+            )
+            if not (_offloaded or is_fsdp2_sharded or storage_budget):
                 # The streaming paths already did, from save_non_weight_artifacts.
                 _copy_non_model_files_from_source(model, export_dir)
 

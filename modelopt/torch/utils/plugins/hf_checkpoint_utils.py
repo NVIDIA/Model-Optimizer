@@ -696,7 +696,7 @@ def locate_source_keys(ckpt: "str | Path", keys: list[str]) -> dict[str, str]:
 
 
 def copy_off_index_safetensors(
-    src: "str | os.PathLike | None", dst: "str | os.PathLike"
+    src: "str | os.PathLike | None", dst: "str | os.PathLike", *, copy_function=None
 ) -> list[str]:
     """Copy the safetensors files model loading never reads, verbatim.
 
@@ -730,7 +730,7 @@ def copy_off_index_safetensors(
         except ValueError as exc:
             warnings.warn(f"Skipping {name}: {exc}")
             continue
-        shutil.copy2(source, target)
+        (copy_function or shutil.copy2)(source, target)
         copied.append(name)
     if copied:
         print(f"Copied off-index safetensors into {dst}: {copied}")
@@ -948,7 +948,9 @@ def ensure_local_checkpoint(
     return hub_model_id, local_checkpoint_path
 
 
-def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLike) -> list[str]:
+def copy_non_model_files(
+    source: str | os.PathLike, export_dir: str | os.PathLike, *, copy_function=None
+) -> list[str]:
     """Copy the source checkpoint's non-model files into an export, verbatim.
 
     See "Model files vs non-model files" at the top of this module: the export writes the model
@@ -970,6 +972,7 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
         source: Local checkpoint directory. Download a Hub model first with
             :func:`ensure_local_checkpoint`.
         export_dir: Export directory; created if missing.
+        copy_function: Optional bounded copier; its I/O errors propagate to the caller.
 
     Returns:
         The copied paths, relative to the checkpoint root and ``/``-separated on every platform.
@@ -1006,9 +1009,11 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
             continue
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(resolved, dst)
+            (copy_function or shutil.copy2)(resolved, dst)
         except OSError as error:
             dst.unlink(missing_ok=True)  # or a rerun would keep the partial file
+            if copy_function is not None:
+                raise
             warnings.warn(f"Failed to copy checkpoint file {rel}: {error}")
             continue
         copied.append(rel.as_posix())

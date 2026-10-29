@@ -975,7 +975,8 @@ def test_exporters_copy_non_model_files_from_a_local_source(tmp_path):
     assert sorted(p.name for p in export.iterdir()) == ["tokenizer.json"]
 
 
-def test_export_hf_checkpoint_copies_the_source_non_model_files(tmp_path):
+@pytest.mark.parametrize("bounded", [False, True])
+def test_export_hf_checkpoint_copies_the_source_non_model_files(tmp_path, bounded):
     """The regular (non-streaming, non-layerwise) path copies them after save_pretrained."""
     from _test_utils.torch.transformers_models import create_tiny_llama_dir
     from transformers import AutoModelForCausalLM
@@ -989,12 +990,34 @@ def test_export_hf_checkpoint_copies_the_source_non_model_files(tmp_path):
     model = AutoModelForCausalLM.from_pretrained(source)
     export = tmp_path / "export"
 
-    export_hf_checkpoint(model, export_dir=export)
+    options = {"max_export_bytes": 16 * 1024**2, "max_shard_size": 4096} if bounded else {}
+    export_hf_checkpoint(model, export_dir=export, **options)
 
     assert (export / "README.md").read_text() == "# source\n"
     assert (export / "assets" / "notes.txt").read_text() == "asset\n"
     # The export's own config, not the source's.
     assert (export / "config.json").read_text() != (source / "config.json").read_text()
+    if bounded:
+        restored = AutoModelForCausalLM.from_pretrained(export)
+        for key, weight in model.state_dict().items():
+            torch.testing.assert_close(restored.state_dict()[key], weight, rtol=0, atol=0)
+        assert (
+            sum(p.stat().st_size for p in export.rglob("*") if p.is_file())
+            < options["max_export_bytes"]
+        )
+        before = {p.relative_to(export): p.read_bytes() for p in export.rglob("*") if p.is_file()}
+        with pytest.raises(ValueError):
+            export_hf_checkpoint(model, export_dir=export, **options)
+        assert before == {
+            p.relative_to(export): p.read_bytes() for p in export.rglob("*") if p.is_file()
+        }
+        for limit in (1, 4096):
+            refused = tmp_path / f"refused-{limit}"
+            with pytest.raises(ValueError):
+                export_hf_checkpoint(
+                    model, export_dir=refused, max_export_bytes=limit, max_shard_size=1024
+                )
+            assert sum(p.stat().st_size for p in refused.rglob("*") if p.is_file()) <= limit
 
 
 def test_exporters_warn_rather_than_fetch_for_a_hub_source(tmp_path, monkeypatch):
