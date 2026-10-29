@@ -135,6 +135,40 @@ def _make_qdq_nodes(name_prefix, input_name, output_name, onnx_zp_type):
 _RNG = np.random.default_rng(2024)
 
 
+@pytest.mark.parametrize("operation", ["Add", "Mul"])
+def test_graph_output_bypass_renames_duplicate_consumer_inputs(operation):
+    """Every input occurrence follows the renamed producer when a public QDQ pair is removed."""
+    shape = [2, 3]
+    scale, zero = _make_qdq_init("pair", 1.0, 0, np.uint16)
+    quantize, dequantize, _ = _make_qdq_nodes("pair", "middle", "y", TensorProto.UINT16)
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Relu", ["x"], ["middle"]),
+                quantize,
+                dequantize,
+                helper.make_node(operation, ["middle", "middle"], ["z"]),
+            ],
+            "repeated_qdq_consumer",
+            [_vi("x", TensorProto.FLOAT, shape)],
+            [_vi("y", TensorProto.FLOAT, shape), _vi("z", TensorProto.FLOAT, shape)],
+            [scale, zero],
+        ),
+        opset_imports=[helper.make_opsetid("", _OPSET_VERSION)],
+        ir_version=9,
+    )
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(shape)}
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    transformed = copy.deepcopy(model)
+    _prepare_model(transformed)
+    assert _apply(transformed) == 1
+    onnx.checker.check_model(transformed, full_check=True)
+    actual = _run_ort(transformed, feeds)
+    for name in expected:
+        np.testing.assert_array_equal(actual[name], expected[name])
+
+
 # ── 1. Single uint16 Q→DQ: pair removed, output is relu(X) ───────────────────
 
 

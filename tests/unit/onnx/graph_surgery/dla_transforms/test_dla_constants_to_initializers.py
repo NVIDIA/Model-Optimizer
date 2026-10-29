@@ -55,8 +55,48 @@ import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 from modelopt.onnx.graph_surgery.dla_transforms import dla_constants_to_initializers as _mod
+from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
 
 ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
+
+
+@pytest.mark.parametrize("ir_version", [3, 9])
+@pytest.mark.parametrize("used", [False, True])
+def test_pipeline_constant_cleanup_preserves_required_feeds(ir_version, used):
+    """Pruning a folded legacy default must not turn it into a required runtime input."""
+    shape = [1, 1, 2, 3]
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "Constant",
+                    [],
+                    ["weight"],
+                    value=numpy_helper.from_array(np.ones(shape, np.float32)),
+                ),
+                helper.make_node(
+                    "Add" if used else "Identity", ["x", "weight"] if used else ["x"], ["y"]
+                ),
+            ],
+            "legacy_constant_cleanup",
+            [_vi("x", TensorProto.FLOAT, shape)],
+            [_vi("y", TensorProto.FLOAT, shape)],
+        ),
+        opset_imports=[helper.make_opsetid("", 13)],
+        ir_version=ir_version,
+    )
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(shape)}
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    onnx.checker.check_model(transformed, full_check=True)
+    session = ort.InferenceSession(
+        transformed.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    assert [value.name for value in session.get_inputs()] == ["x"]
+    assert ("weight" in {value.name for value in transformed.graph.initializer}) == used
+    np.testing.assert_array_equal(session.run(None, feeds)[0], expected["y"])
+
 
 _OPSET_VERSION = 17
 _MAX_IR_VERSION_FOR_ORT = 9

@@ -848,6 +848,11 @@ def _remove_unused_initializers(model: onnx.ModelProto) -> onnx.ModelProto:
 
     kept = [init for init in graph.initializer if init.name in used]
     removed = len(graph.initializer) - len(kept)
+    if model.ir_version <= 3:
+        removed_names = {init.name for init in graph.initializer if init.name not in used}
+        for index in reversed(range(len(graph.input))):
+            if graph.input[index].name in removed_names:
+                del graph.input[index]
     graph.ClearField("initializer")
     graph.initializer.extend(kept)
     logger.debug("remove_unused_initializers: removed %d unused initializer(s).", removed)
