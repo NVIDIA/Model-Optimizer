@@ -150,6 +150,18 @@ Built-in recipes support full-model, partial-layer, and mixed-precision quantiza
 
 Replace `--config-file configs/accelerate/fsdp2.yaml` with the desired backend config in any of the commands above.
 
+### Context Parallelism
+
+For sequences too long for one GPU, `--cp_size N` splits each sequence across `N` GPUs with accelerate's context parallelism. FSDP2 still shards the model across all GPUs, so the GPU count must be a multiple of `N`:
+
+```bash
+accelerate launch --config-file configs/accelerate/fsdp2.yaml train.py \
+    --config configs/train/qad_nvfp4.yaml \
+    --attn_implementation sdpa --cp_size 2 ...
+```
+
+Context parallelism needs the FSDP2 config, SDPA attention for the student and the teacher, and `--model_max_length` a multiple of `2 * cp_size`. It supports models whose layers all use full causal attention, such as Llama, Qwen3 and Qwen3-MoE, or DeepSeek-V3-style MLA; not sliding-window, linear-attention or sparse (DSA) layers. Softmax (`p_bmm`) quantization is not supported with it.
+
 ## QLoRA (Real Quantization)
 
 [QLoRA](https://arxiv.org/pdf/2305.14314) reduces training memory by quantizing LoRA backbone weights with real quantization via `mtq.compress()`.

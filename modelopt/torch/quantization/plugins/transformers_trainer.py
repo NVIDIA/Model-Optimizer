@@ -169,6 +169,7 @@ class QATTrainer(ModelOptHFTrainer):
 
         self.quant_args = quant_args
         self.quant_cfg = resolve_quant_cfg_from_args(quant_args)
+        self._context_parallel_checked = False
 
         # Add lora adapter before quantizing the model
         if getattr(self.args, "lora_config", None) is not None and not hasattr(
@@ -259,13 +260,36 @@ class QATTrainer(ModelOptHFTrainer):
         gc.collect()
         if self.quant_cfg is not None and not is_quantized(self.model):
             self._quantize_model()
+        if not self._context_parallel_checked:
+            self._check_context_parallel()
         return super().training_step(*args, **kwargs)
+
+    def _check_context_parallel(self):
+        """Refuse quantized attention that context parallelism would split wrongly."""
+        self._context_parallel_checked = True
+        parallelism_config = getattr(self.accelerator, "parallelism_config", None)
+        if parallelism_config is None or not parallelism_config.cp_enabled:
+            return
+        # Softmax (P) quantization runs ModelOpt's own attention kernel instead of SDPA, so each
+        # rank would attend only within its own slice of the sequence.
+        names = [
+            name
+            for name, module in self.model.named_modules()
+            if name.endswith("p_bmm_quantizer") and getattr(module, "is_enabled", False)
+        ]
+        if names:
+            raise ValueError(
+                "Context parallelism does not support softmax (p_bmm) quantization, which runs "
+                f"its own attention kernel: {', '.join(names[:3])}. Disable it or use cp_size=1."
+            )
 
     def prediction_step(self, *args, **kwargs):
         """Prediction step."""
         gc.collect()
         if self.quant_cfg is not None and not is_quantized(self.model):
             self._quantize_model()
+        if not self._context_parallel_checked:
+            self._check_context_parallel()
         return super().prediction_step(*args, **kwargs)
 
     def evaluate(self, *args, **kwargs):

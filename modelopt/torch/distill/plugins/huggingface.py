@@ -183,6 +183,18 @@ class KDTrainer(ModelOptHFTrainer):
         """Prepare teacher model via accelerator (handles FSDP2, DeepSpeed, DDP)."""
         if self._teacher_prepared:
             return
+        # The Trainer checks only the student; another attention would see only this rank's slice.
+        parallelism_config = getattr(self.accelerator, "parallelism_config", None)
+        teacher_attn = getattr(self._teacher_model.config, "_attn_implementation", None)
+        if (
+            parallelism_config is not None
+            and parallelism_config.cp_enabled
+            and teacher_attn != "sdpa"
+        ):
+            raise ValueError(
+                "Context parallelism splits the sequence inside SDPA only, but the teacher uses "
+                f"{teacher_attn!r} attention. Load it with attn_implementation='sdpa'."
+            )
         self._teacher_prepared = True
         self._teacher_model = self._prepare_model(self._teacher_model)
         print_rank_0("Teacher model prepared for distillation.")
@@ -224,8 +236,13 @@ class KDTrainer(ModelOptHFTrainer):
         self._ensure_teacher_prepared()
         # ``skip_logits`` (added for Liger eval by transformers>=5.15) would make the teacher's
         # Liger forward demand labels; the fused KD loss needs its hidden states instead.
-        kd_inputs = {k: v for k, v in inputs.items() if k not in ("labels", "skip_logits")}
+        # Under context parallelism the Trainer adds ``shift_labels``, shifted before the sequence
+        # was split so they stay aligned across shards; given to a Liger forward, they skip logits.
+        kd_inputs = {
+            k: v for k, v in inputs.items() if k not in ("labels", "skip_logits", "shift_labels")
+        }
         labels = inputs.get("labels")
+        shift_labels = inputs.get("shift_labels")
         is_training = model.training
 
         if is_training:
@@ -238,13 +255,17 @@ class KDTrainer(ModelOptHFTrainer):
                 else:
                     outputs = model(**kd_inputs)
                     if self._kd_loss_alpha < 1.0:
-                        ce_loss = self._liger_loss_func(outputs, labels, **kwargs)
+                        ce_loss = self._liger_loss_func(
+                            outputs, labels, shift_labels=shift_labels, **kwargs
+                        )
         else:
             ce_loss, outputs = super().compute_loss(model, inputs, return_outputs=True, **kwargs)
             batch_size = find_batch_size(inputs)
             self._record_eval_ce_loss(ce_loss, batch_size)
 
-        kd_loss = self._compute_kd_loss(outputs, labels, kd_inputs, **kwargs)
+        kd_loss = self._compute_kd_loss(
+            outputs, labels, kd_inputs, shift_labels=shift_labels, **kwargs
+        )
 
         if self._kd_loss_alpha < 1.0:
             loss = self._kd_loss_alpha * kd_loss + (1.0 - self._kd_loss_alpha) * ce_loss
@@ -276,16 +297,24 @@ class KDTrainer(ModelOptHFTrainer):
             self._teacher_model.eval()
             return self._teacher_model(**inputs)
 
-    def _standard_kd_loss(self, outputs, labels, num_items_in_batch=None, **kwargs):
-        """KD loss with causal shift and ignore-index masking."""
+    def _standard_kd_loss(
+        self, outputs, labels, num_items_in_batch=None, shift_labels=None, **kwargs
+    ):
+        """KD loss with causal shift and ignore-index masking.
+
+        ``shift_labels`` (context parallelism) are already aligned with the positions, so every
+        position is scored; otherwise the last one, which has no next label, is dropped.
+        """
         # Match causal LM CE: logits at position t are scored against label t+1.
-        student_logits = outputs.logits[..., :-1, :].float()
-        teacher_logits = self._last_teacher_outputs.logits[..., :-1, :].float()
+        end = None if shift_labels is not None else -1
+        student_logits = outputs.logits[..., :end, :].float()
+        teacher_logits = self._last_teacher_outputs.logits[..., :end, :].float()
         self._last_teacher_outputs = None
         per_token_loss = self._kd_criterion(student_logits, teacher_logits)
-        if labels is None:
-            return per_token_loss.mean()
-        shift_labels = labels[..., 1:]
+        if shift_labels is None:
+            if labels is None:
+                return per_token_loss.mean()
+            shift_labels = labels[..., 1:]
         mask = shift_labels != IGNORE_INDEX
         num_tokens = mask.sum().clamp(min=1)
         loss = (per_token_loss * mask).sum() / num_tokens
@@ -317,7 +346,7 @@ class KDTrainer(ModelOptHFTrainer):
         finally:
             teacher_lm_head.forward = teacher_orig
 
-    def _liger_kd_loss(self, outputs, labels, num_items_in_batch=None, **kwargs):
+    def _liger_kd_loss(self, outputs, labels, num_items_in_batch=None, shift_labels=None, **kwargs):
         """Fused lm_head + JSD for KD."""
         from liger_kernel.transformers import LigerFusedLinearJSD
 
@@ -331,10 +360,13 @@ class KDTrainer(ModelOptHFTrainer):
         teacher_hs = self._last_teacher_outputs.logits.to(teacher_lm_head.weight.dtype)
         self._last_teacher_outputs = None
 
-        # Causal LM shift
-        student_hs = student_hs[..., :-1, :].contiguous().view(-1, student_hs.size(-1))
-        teacher_hs = teacher_hs[..., :-1, :].contiguous().view(-1, teacher_hs.size(-1))
-        shift_labels = labels[..., 1:].contiguous().view(-1)
+        # Causal LM shift, unless context parallelism already shifted the labels
+        end = None if shift_labels is not None else -1
+        student_hs = student_hs[..., :end, :].contiguous().view(-1, student_hs.size(-1))
+        teacher_hs = teacher_hs[..., :end, :].contiguous().view(-1, teacher_hs.size(-1))
+        if shift_labels is None:
+            shift_labels = labels[..., 1:]
+        shift_labels = shift_labels.contiguous().view(-1)
 
         jsd = LigerFusedLinearJSD(
             jsd_beta=self._liger_jsd_beta,

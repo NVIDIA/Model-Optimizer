@@ -231,6 +231,37 @@ def test_standard_kd_loss_without_labels_uses_mean(tmp_path):
     assert loss.item() == pytest.approx(expected.item())
 
 
+def test_context_parallel_shards_add_up_to_the_full_kd_loss(tmp_path):
+    """Under context parallelism each rank gets a slice of the sequence and ``shift_labels``.
+
+    The Trainer shifts the labels before splitting, so the shards' KD losses, each scaled by the
+    global token count, add up to the unsplit loss. Neither model may receive ``shift_labels``.
+    """
+    student, teacher = _make_models()
+    batch = _make_batch()
+    trainer = _make_trainer(tmp_path, student, teacher)
+    trainer.model.train()
+    labels = batch["labels"]
+    shift_labels = F.pad(labels, (0, 1), value=IGNORE_INDEX)[..., 1:]
+    num_items = (shift_labels != IGNORE_INDEX).sum().item()
+
+    full = trainer.compute_loss(trainer.model, batch.copy(), num_items_in_batch=num_items)
+    shards = [
+        trainer.compute_loss(
+            trainer.model,
+            {
+                "input_ids": batch["input_ids"][:, part],
+                "labels": labels[:, part],
+                "shift_labels": shift_labels[:, part],
+            },
+            num_items_in_batch=num_items,
+        )
+        for part in (slice(0, 2), slice(2, 4))
+    ]
+
+    assert sum(shards).item() == pytest.approx(full.item())
+
+
 def test_kd_loss_ddp_scaling(tmp_path):
     """KD loss should be scaled by world_size when average_tokens_across_devices is True."""
     student, teacher = _make_models()

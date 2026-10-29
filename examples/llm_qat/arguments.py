@@ -98,6 +98,16 @@ class TrainingArguments(ModelOptTrainerArguments, transformers.TrainingArguments
         default=True,
         metadata={"help": "Use Liger kernel for fused loss computation. Reduces memory usage."},
     )
+    cp_size: int = field(
+        default=1,
+        metadata={
+            "help": (
+                "Context parallel size: split each sequence across this many GPUs with accelerate's "
+                "context parallelism. Needs the FSDP2 accelerate config, attn_implementation 'sdpa' "
+                "and a model whose layers all use full causal attention."
+            )
+        },
+    )
     lora: bool = field(
         default=False,
         metadata={
