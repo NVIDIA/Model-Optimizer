@@ -543,7 +543,10 @@ her fear and anger)."""
                         BenchmarkDataset.HLE.value, config_name="test"
                     )
                     self.external_datasets["hle_by_id"] = (
-                        dataset.to_pandas().set_index("id").to_dict("index")
+                        dataset.select_columns(["id", "category", "question", "rationale"])
+                        .to_pandas()
+                        .set_index("id")
+                        .to_dict("index")
                     )
                 rows = self.external_datasets["hle_by_id"]
                 prompt = self._generate_hle_prompt(
