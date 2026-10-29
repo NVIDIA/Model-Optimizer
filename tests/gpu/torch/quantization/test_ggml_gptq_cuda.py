@@ -22,12 +22,13 @@ import torch
 from _test_utils.torch.quantization.models import TOY_MOE_HIDDEN, ToyMoE
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization._calibration_workers import _digest
 from modelopt.torch.quantization.algorithms import AutoQuantizeGradientSearcher
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.nn import QuantModule
 from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
-from modelopt.torch.utils import safe_load
+from modelopt.torch.utils import safe_load, safe_save
 
 
 def _iq1_s_config(algorithm):
@@ -184,12 +185,21 @@ def _autoquant_mixed_iq(rank, size, layout, tmp_path):
 
 
 @pytest.mark.timeout(90)
-@pytest.mark.parametrize("offload", [False, True])
-def test_candidate_workers_merge_all_formats_and_resume(dist_workers, tmp_path, offload):
-    dist_workers.run(_candidate_workers_merge, tmp_path, offload)
+@pytest.mark.parametrize(
+    ("offload", "collect_scores"), [(False, False), (True, False), (False, True), (True, True)]
+)
+def test_candidate_workers_merge_all_formats_and_resume(
+    dist_workers, tmp_path, offload, collect_scores
+):
+    dist_workers.run(_candidate_workers_merge, tmp_path, offload, collect_scores)
 
 
-def _candidate_workers_merge(rank, size, tmp_path, offload):
+@pytest.mark.timeout(90)
+def test_format_worker_scoring_single_gpu(tmp_path):
+    _candidate_workers_merge(0, 1, tmp_path, False, True)
+
+
+def _candidate_workers_merge(rank, size, tmp_path, offload, collect_scores):
     # This test specifically requires the optional FSDP2 API.
     from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 
@@ -198,7 +208,9 @@ def _candidate_workers_merge(rank, size, tmp_path, offload):
     inputs = torch.randn(8 + rank, TOY_MOE_HIDDEN, device="cuda", dtype=torch.bfloat16)
     formats = []
     for name in ("iq2_xxs", "iq2_xs", "iq2_s"):
-        config = _iq1_s_config({"method": "gptq", "block_size": 256, "perc_damp": 0.3})
+        config = _iq1_s_config(
+            "imatrix" if collect_scores else {"method": "gptq", "block_size": 256, "perc_damp": 0.3}
+        )
         config["quant_cfg"][1]["cfg"].update(
             num_bits=name, effective_bits=GGML_FORMAT_REGISTRY[name].effective_bits
         )
@@ -217,23 +229,61 @@ def _candidate_workers_merge(rank, size, tmp_path, offload):
     def fresh_model():
         model = copy.deepcopy(source)
         kwargs = {"offload_policy": CPUOffloadPolicy()} if offload else {}
-        fully_shard(model.mlp, **kwargs)
-        fully_shard(model, **kwargs)
+        if size > 1:
+            fully_shard(model.mlp, **kwargs)
+            fully_shard(model, **kwargs)
         torch.manual_seed(123)
         return model
 
     directory, checkpoint = tmp_path / "candidates", tmp_path / "search"
+    worker_options = {
+        "directory": directory,
+        "collect_scores": collect_scores,
+        "max_artifact_bytes": 64 * 1024**2,
+    }
     for index in (0, 2, 1, 4, 3, 0):
         model, state = mtq.auto_quantize(
-            fresh_model(), **options, calibration={"directory": directory, "candidate": index}
+            fresh_model(), **options, calibration={**worker_options, "candidate": index}
         )
         assert len(state["quantizer_states"]) == 1 and not state["candidate_stats"]
         with enable_weight_access_and_writeback(model.mlp.experts, model):
             for name, value in model.mlp.experts.named_parameters(recurse=False):
                 torch.testing.assert_close(value, getattr(source.mlp.experts, name), rtol=0, atol=0)
         del model, state
+    if size == 1:
+        for path in directory.glob("*/rank0.pth"):
+            payload = safe_load(path)
+            entry = payload["state"]
+            packed = [
+                (name, key)
+                for name, buffers in entry["state_dict"].items()
+                for key in buffers
+                if key.startswith("_ggml_pinned_")
+            ]
+            if not packed:
+                continue
+            before = path.read_bytes()
+            name, key = packed[0]
+            del entry["state_dict"][name][key]
+            del entry["metadata"][name]["_pytorch_state_metadata"]["buffers"][key]
+            payload["digest"] = _digest(entry)
+            try:
+                safe_save(payload, path)
+                with pytest.raises(ValueError):
+                    mtq.auto_quantize(
+                        fresh_model(),
+                        **options,
+                        calibration=worker_options,
+                        checkpoint=str(checkpoint),
+                    )
+                assert not checkpoint.exists()
+            finally:
+                path.write_bytes(before)
+            break
+        else:
+            pytest.fail("No packed candidate available for the refusal check")
     model, merged = mtq.auto_quantize(
-        fresh_model(), **options, calibration={"directory": directory}, checkpoint=str(checkpoint)
+        fresh_model(), **options, calibration=worker_options, checkpoint=str(checkpoint)
     )
     with torch.no_grad():
         actual = model(inputs).cpu()
@@ -255,7 +305,7 @@ def _candidate_workers_merge(rank, size, tmp_path, offload):
         model, resumed = mtq.auto_quantize(
             fresh_model(),
             **options,
-            calibration={"directory": directory},
+            calibration=worker_options,
             checkpoint=str(checkpoint),
         )
         assert resumed["candidate_stats"] == merged["candidate_stats"]
@@ -263,7 +313,9 @@ def _candidate_workers_merge(rank, size, tmp_path, offload):
         assert checkpoint.resolve() == generation
         del model
 
-    for failure in ("inputs", "destination", "write"):
+    for failure in (
+        ("inputs", "destination") if collect_scores else ("inputs", "destination", "write")
+    ):
         if failure == "write":
             checkpoint = tmp_path / "interrupted-search"
 
@@ -279,7 +331,7 @@ def _candidate_workers_merge(rank, size, tmp_path, offload):
                 mtq.auto_quantize(
                     fresh_model(),
                     **options,
-                    calibration={"directory": directory},
+                    calibration=worker_options,
                     checkpoint=str(checkpoint),
                 )
             generation = checkpoint.resolve()
@@ -289,6 +341,8 @@ def _candidate_workers_merge(rank, size, tmp_path, offload):
             local_options["data_loader"] = [inputs + 1]
         if failure == "destination" and rank == 0:
             destination = tmp_path / "different-checkpoint"
+        if failure == "destination" and size == 1:
+            continue  # Different rank-local destinations require multiple ranks.
 
         def save_on_rank(value, path):
             if failure == "write" and rank == 0:
@@ -302,7 +356,7 @@ def _candidate_workers_merge(rank, size, tmp_path, offload):
             mtq.auto_quantize(
                 fresh_model(),
                 **local_options,
-                calibration={"directory": directory},
+                calibration=worker_options,
                 checkpoint=str(destination),
             )
         assert checkpoint.resolve() == generation

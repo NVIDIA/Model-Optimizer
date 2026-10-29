@@ -53,7 +53,12 @@ from .kv_cache_auto_quant import (
     get_kv_cache_auto_quantize_config,
 )
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
-from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
+from .mode import (
+    BaseCalibrateModeDescriptor,
+    CalibrateModeRegistry,
+    QuantizeModeRegistry,
+    get_modelike_from_algo_cfg,
+)
 from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized
 
@@ -927,6 +932,9 @@ def auto_quantize(
         )
 
     method_name = method_name or "gradient"
+    collect_scores = isinstance(calibration, dict) and calibration.get("collect_scores", False)
+    if collect_scores and method_name != "gradient":
+        raise ValueError("Independent format scoring currently requires gradient sensitivity")
 
     if fixed_quantization_config is None and quantization_formats is None:
         quantization_formats = [mtq.NVFP4_AWQ_LITE_CFG, mtq.FP8_DEFAULT_CFG]
@@ -1014,6 +1022,18 @@ def auto_quantize(
     for quant_cfg, name in all_processed_formats:
         recipe = QuantRecipe(quant_cfg, name=name)
         algorithms = recipe.config.algorithm
+        if collect_scores:
+            for mode_name, settings in get_modelike_from_algo_cfg(algorithms):
+                descriptor = cast("BaseCalibrateModeDescriptor", CalibrateModeRegistry[mode_name])
+                resolved = descriptor.config_class(**settings)
+                if (
+                    resolved.layerwise.enable
+                    or descriptor._requires_final_layerwise
+                    or descriptor._auto_quantize_search_policy != "same_algorithm"
+                ):
+                    raise ValueError(
+                        "Independent format scoring requires a validated non-layerwise estimator"
+                    )
         for algo in algorithms if isinstance(algorithms, list) else [algorithms]:
             algo_method = algo["method"] if isinstance(algo, dict) else algo
             if calibration is not None and algo_method not in {"max", "mse", "gptq", "imatrix"}:

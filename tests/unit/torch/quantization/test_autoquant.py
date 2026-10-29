@@ -52,9 +52,14 @@ from modelopt.torch.utils.distributed import DistributedProcessGroup
 
 
 @pytest.mark.usefixtures("skip_on_windows")
-def test_candidate_workers_roundtrip_resume_and_coordinator(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("collect_scores", "fixed"), [(False, False), (True, False), (True, True)])
+def test_candidate_workers_roundtrip_resume_and_coordinator(
+    tmp_path, monkeypatch, collect_scores, fixed
+):
     torch.manual_seed(13)
-    source = torch.nn.Sequential(torch.nn.Linear(32, 8, bias=False))
+    source = torch.nn.Sequential(
+        torch.nn.Linear(32, 8, bias=False), torch.nn.Linear(8, 8, bias=False)
+    )
     batch = torch.randn(2, 32)
     options = {
         "constraints": {"effective_bits": 16},
@@ -65,22 +70,49 @@ def test_candidate_workers_roundtrip_resume_and_coordinator(tmp_path, monkeypatc
         "num_calib_steps": 1,
         "num_score_steps": 1,
     }
+    if fixed:
+        formats = options.pop("quantization_formats")
+        options.update(
+            fixed_quantization_config=mtq.FP8_DEFAULT_CFG,
+            module_search_spaces=[{"module_name_patterns": ["0"], "quantization_formats": formats}],
+        )
+    worker_options = {"collect_scores": True} if collect_scores else {}
     monkeypatch.chdir(tmp_path)
     directory, checkpoint = Path("candidates"), Path("search")
+    if collect_scores:
+        malformed = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*absent*weight_quantizer", "cfg": {"num_bits": 8}},
+            ],
+            "algorithm": "max",
+        }
+        invalid_options = copy.deepcopy(options)
+        if fixed:
+            invalid_options["module_search_spaces"][0]["quantization_formats"] = [malformed]
+        else:
+            invalid_options["quantization_formats"] = [malformed]
+        with pytest.raises(ValueError):
+            mtq.auto_quantize(
+                copy.deepcopy(source),
+                **invalid_options,
+                calibration={"directory": directory, "candidate": 0, **worker_options},
+            )
+        assert not list(directory.rglob("*.pth"))
     for index in (0, 1, 0):
         model, state = mtq.auto_quantize(
             copy.deepcopy(source),
             **options,
-            calibration={"directory": directory, "candidate": index},
+            calibration={"directory": directory, "candidate": index, **worker_options},
         )
-        assert len(state["quantizer_states"]) == 1
+        assert 1 <= len(state["quantizer_states"]) <= (2 if fixed else 1)
         assert not state["candidate_stats"]
         torch.testing.assert_close(model[0].weight, source[0].weight, rtol=0, atol=0)
     model, state = mtq.auto_quantize(
         copy.deepcopy(source),
         **options,
         checkpoint=str(checkpoint),
-        calibration={"directory": directory},
+        calibration={"directory": directory, **worker_options},
     )
     assert checkpoint.is_dir() and (checkpoint / "rank0.pth").is_file()
     # Calibration and scoring both publish, but only the current generation remains.
@@ -97,27 +129,69 @@ def test_candidate_workers_roundtrip_resume_and_coordinator(tmp_path, monkeypatc
         )
     assert state["candidate_stats"] == expected["candidate_stats"]
     generation = checkpoint.resolve()
+    orphan = tmp_path / ".search-abcdefgh"
+    orphan.mkdir()
+    (orphan / "rank0.pth").write_bytes(b"interrupted publication")
     mtq.auto_quantize(
         copy.deepcopy(source),
         **options,
         checkpoint=str(checkpoint),
-        calibration={"directory": directory},
+        calibration={"directory": directory, "max_artifact_bytes": 1024**2, **worker_options},
     )
     assert checkpoint.resolve() == generation
+    assert not orphan.exists()
+
     invalid = copy.deepcopy(source)
     with torch.no_grad():
         invalid[0].weight.add_(1)
     with pytest.raises(ValueError):
         mtq.auto_quantize(
-            invalid, **options, checkpoint=str(checkpoint), calibration={"directory": directory}
+            invalid,
+            **options,
+            checkpoint=str(checkpoint),
+            calibration={"directory": directory, **worker_options},
         )
     assert checkpoint.resolve() == generation
+
+    if collect_scores:
+        artifact = next(path for path in directory.iterdir() if path.is_symlink()) / "rank0.pth"
+        payload = safe_load(artifact)
+        if fixed:
+            signature = next(iter(payload["fixed_digests"]))
+            payload["fixed_digests"][signature] = "0" * 64
+        else:
+            group = next(iter(payload["raw_scores"].values()))
+            module = next(iter(group))
+            group[module] += 1
+        # Even a self-consistent artifact must agree with the reference and accepted checkpoint.
+        payload["scoring_digest"] = _calibration_workers._digest(
+            [payload["raw_scores"], payload["fixed_digests"]]
+        )
+        safe_save(payload, artifact)
+        with pytest.raises(ValueError):
+            mtq.auto_quantize(
+                copy.deepcopy(source),
+                **options,
+                checkpoint=str(checkpoint),
+                calibration={"directory": directory, **worker_options},
+            )
+        assert checkpoint.resolve() == generation
 
 
 @pytest.mark.usefixtures("skip_on_windows")
 @pytest.mark.parametrize(
     "failure",
-    ["missing", "payload", "inputs", "callback", "callback_defaults", "kernel_source", "write"],
+    [
+        "missing",
+        "payload",
+        "inputs",
+        "callback",
+        "callback_defaults",
+        "kernel_source",
+        "write",
+        "size",
+        "read_size",
+    ],
 )
 def test_candidate_coordinator_refuses_partial_updates(tmp_path, monkeypatch, failure):
     if failure == "kernel_source":
@@ -152,7 +226,7 @@ def test_candidate_coordinator_refuses_partial_updates(tmp_path, monkeypatch, fa
     mtq.auto_quantize(
         copy.deepcopy(source), **options, calibration={"directory": directory, "candidate": 0}
     )
-    if failure == "write":
+    if failure in {"write", "size"}:
 
         def interrupt_scoring(self):
             raise RuntimeError("Injected interruption after accepted calibration")
@@ -192,7 +266,7 @@ def test_candidate_coordinator_refuses_partial_updates(tmp_path, monkeypatch, fa
         options["loss_func"].__kwdefaults__["scale"].value = 2.0
     elif failure == "kernel_source":
         kernel.write_text("// changed encoder\n")
-    else:
+    elif failure == "write":
 
         def fail_write(*args, **kwargs):
             raise OSError("Injected publication failure")
@@ -203,7 +277,15 @@ def test_candidate_coordinator_refuses_partial_updates(tmp_path, monkeypatch, fa
             copy.deepcopy(source),
             **options,
             checkpoint=str(checkpoint),
-            calibration={"directory": directory},
+            calibration={
+                "directory": directory,
+                **(
+                    {"max_artifact_bytes": (previous / "rank0.pth").stat().st_size}
+                    if failure == "size"
+                    else {}
+                ),
+                **({"max_candidate_bytes": 1} if failure == "read_size" else {}),
+            },
         )
     assert checkpoint.resolve() == previous
     assert (previous / "rank0.pth").is_file()
@@ -1316,6 +1398,18 @@ def _test_candidate_rank_progress(rank, size, tmp_path):
             **options,
             calibration={"directory": directory},
             checkpoint=str(checkpoint),
+        )
+    assert checkpoint.resolve() == generation and path.read_bytes() == before
+    if rank == 0:
+        path.write_bytes(b"interrupted checkpoint read")
+    before = path.read_bytes()
+    torch.distributed.barrier()
+    with pytest.raises(ValueError):
+        mtq.auto_quantize(
+            copy.deepcopy(source),
+            **options,
+            checkpoint=str(checkpoint),
+            calibration={"directory": directory},
         )
     assert checkpoint.resolve() == generation and path.read_bytes() == before
 

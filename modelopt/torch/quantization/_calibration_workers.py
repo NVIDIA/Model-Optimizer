@@ -32,9 +32,11 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 from torch.utils._pytree import tree_flatten, tree_unflatten
 
-from modelopt.torch.utils import safe_load
+from modelopt.torch.opt.utils import named_hparams
 
 from ._calibration_store import _CalibrationStore, _collective_check
+from .algorithms import QuantRecipe, QuantRecipeHparam
+from .nn import TensorQuantizer
 
 __all__ = []
 
@@ -157,9 +159,23 @@ class _CalibrationSession(_CalibrationStore):
             "directory",
             "candidate",
             "max_input_bytes",
+            "collect_scores",
+            "max_artifact_bytes",
+            "max_candidate_bytes",
         }:
             raise ValueError("Invalid calibration worker options")
         super().__init__(options["directory"], options.get("candidate"))
+        self.max_artifact_bytes = options.get("max_artifact_bytes")
+        self.max_candidate_bytes = options.get("max_candidate_bytes", self.max_artifact_bytes)
+        for limit in (self.max_artifact_bytes, self.max_candidate_bytes):
+            if limit is not None and (type(limit) is not int or limit < 1):
+                raise ValueError("Artifact byte limits must be positive")
+        self.collect_scores = options.get("collect_scores", False)
+        if type(self.collect_scores) is not bool:
+            raise ValueError("collect_scores must be a bool")
+        self.scores_ready = False
+        self.raw_scores, self.fixed_digests = {}, {}
+        self.fixed_recipes = set()
         if self.candidate is not None and (type(self.candidate) is not int or self.candidate < 0):
             raise ValueError("candidate must be a nonnegative index or None for the coordinator")
         limit = options.get("max_input_bytes", 64 * 1024**2)
@@ -232,10 +248,38 @@ class _CalibrationSession(_CalibrationStore):
         return self.directory / hashlib.sha256(recipe.checkpoint_signature.encode()).hexdigest()
 
     def prepare(self, searcher, recipes, schemas):
+        if self.collect_scores:
+            self.hparams = {
+                name: hparam
+                for name, hparam in named_hparams(searcher.model, unique=True)
+                if isinstance(hparam, QuantRecipeHparam)
+            }
+            self.module_names = {module: name for name, module in searcher.model.named_modules()}
+            self.fixed_recipes = {
+                hparam.active for hparam in self.hparams.values() if not hparam.is_configurable
+            }
+            self.fixed_recipes = {recipe for recipe in self.fixed_recipes if not recipe.is_no_quant}
+            error = None
+            for name, hparam in self.hparams.items():
+                for recipe, choices in hparam._all_quantizer_choices.items():
+                    assert isinstance(recipe, QuantRecipe)
+                    if recipe.is_no_quant:
+                        continue
+                    if not any(
+                        isinstance(q, TensorQuantizer) and q.is_enabled
+                        for attrs in choices.values()
+                        for quantizer in attrs.values()
+                        for q in quantizer.modules()
+                    ):
+                        error = (
+                            f"Candidate {recipe} enables no quantizers in group {name}; "
+                            "candidate quantizer patterns must be module-relative"
+                        )
+            _collective_check(error)
         self.recipes = [recipe for recipe in recipes if not recipe.is_no_quant]
         state = searcher.state_dict()
         self.contract = {
-            "version": 1,
+            "version": 2 if self.collect_scores else 1,
             "identity": self.identity,
             "setup": {
                 key: value
@@ -292,7 +336,7 @@ class _CalibrationSession(_CalibrationStore):
                     continue
                 if path is None:
                     raise ValueError("A candidate calibration result is missing")
-                artifact = safe_load(Path(path) / f"rank{self.rank}.pth")
+                artifact = self.load(Path(path) / f"rank{self.rank}.pth", self.max_candidate_bytes)
                 _check_provenance(artifact["provenance"], provenance)
                 if artifact["recipe"] != recipe.checkpoint_signature:
                     raise ValueError("Candidate recipe differs")
@@ -306,7 +350,7 @@ class _CalibrationSession(_CalibrationStore):
                 for name, metadata in entry["metadata"].items():
                     description = metadata["_pytorch_state_metadata"]
                     tensors = {**description["buffers"], **description["params"]}
-                    if metadata.get("_backend") == "ggml" and not metadata.get("_disabled", False):
+                    if metadata.get("backend") == "ggml" and not metadata.get("_disabled", False):
                         algorithms = recipe.config.algorithm
                         algorithms = algorithms if isinstance(algorithms, list) else [algorithms]
                         if any(
@@ -329,12 +373,20 @@ class _CalibrationSession(_CalibrationStore):
                             raise ValueError("Candidate buffer layout differs from metadata")
                 if _digest(entry) != artifact["digest"]:
                     raise ValueError("Candidate payload is incomplete or corrupt")
+                if self.collect_scores:
+                    self._validate_scores(recipe, artifact)
                 if (
                     recipe in searcher.quantizer_states
                     and _digest(searcher.quantizer_states[recipe]) != artifact["digest"]
                 ):
                     raise ValueError("Candidate conflicts with the shared checkpoint")
                 accepted[recipe] = entry
+            if self.collect_scores and self.candidate is None:
+                expected_fixed = {
+                    r.checkpoint_signature: _digest(accepted[r]) for r in self.fixed_recipes
+                }
+                if any(value != expected_fixed for value in self.fixed_digests.values()):
+                    raise ValueError("Format workers used different fixed reference states")
         except Exception as exc:
             error = str(exc)
         _collective_check(error)
@@ -346,9 +398,86 @@ class _CalibrationSession(_CalibrationStore):
             searcher.save_search_checkpoint()
 
     def includes(self, recipe):
-        return self.candidate is None or recipe == self.recipes[self.candidate]
+        return (
+            self.candidate is None
+            or recipe == self.recipes[self.candidate]
+            or (self.collect_scores and recipe in self.fixed_recipes)
+        )
+
+    @property
+    def scoring_candidate(self):
+        return (
+            self.recipes[self.candidate]
+            if self.collect_scores and self.candidate is not None
+            else None
+        )
+
+    @property
+    def reused_scoring_candidate(self):
+        return self.scoring_candidate is not None and self.scoring_candidate in self.raw_scores
+
+    def _score_mapping(self, recipe):
+        return {
+            name: {self.module_names[module]: module for module in hparam.score_modules}
+            for name, hparam in self.hparams.items()
+            if hparam.is_configurable and recipe in hparam.choices
+        }
+
+    def _validate_scores(self, recipe, artifact):
+        scores = artifact["raw_scores"]
+        mapping = self._score_mapping(recipe)
+        if set(scores) != set(mapping):
+            raise ValueError("Format scoring group coverage differs")
+        for name, modules in mapping.items():
+            if set(scores[name]) != set(modules):
+                raise ValueError("Format scoring boundaries differ")
+            for value in scores[name].values():
+                if value is not None and (
+                    not isinstance(value, torch.Tensor)
+                    or value.ndim != 0
+                    or not value.is_floating_point()
+                    or not torch.isfinite(value)
+                    or value < 0
+                ):
+                    raise ValueError("Invalid raw gradient sensitivity contribution")
+        fixed = artifact["fixed_digests"]
+        if set(fixed) != {r.checkpoint_signature for r in self.fixed_recipes}:
+            raise ValueError("Format fixed-reference coverage differs")
+        if _digest([scores, fixed]) != artifact["scoring_digest"]:
+            raise ValueError("Format scoring artifact is incomplete or corrupt")
+        self.raw_scores[recipe], self.fixed_digests[recipe] = scores, fixed
+
+    def finish_scoring(self, searcher):
+        if self.candidate is not None:
+            if not self.reused_scoring_candidate:
+                searcher.estimate_sensitivity_scores()
+                self.scores_ready = True
+                searcher.save_search_checkpoint()
+            return
+        for recipe, scores in self.raw_scores.items():
+            for name, modules in self._score_mapping(recipe).items():
+                for module_name, module in modules.items():
+                    self.hparams[name]._importance_dict[recipe][module] = scores[name][module_name]
+        previous = searcher.candidate_stats
+        searcher.candidate_stats = {}
+        searcher.initialize_candidate_stats()
+        error = (
+            "Format scores conflict with the shared checkpoint"
+            if previous and previous != searcher.candidate_stats
+            else None
+        )
+        try:
+            _collective_check(error)
+        except ValueError:
+            searcher.candidate_stats = previous
+            raise
+        self.scores_ready = True
+        if not previous:
+            searcher.save_search_checkpoint()
 
     def save(self, searcher):
+        if self.collect_scores and not self.scores_ready:
+            return
         error = None
         destination = searcher.config["checkpoint"]
         if self.candidate is None and destination is None:
@@ -365,6 +494,25 @@ class _CalibrationSession(_CalibrationStore):
                     "state": entry,
                     "digest": _digest(entry),
                 }
+                if self.collect_scores:
+                    scores = {
+                        name: {
+                            key: value.detach().cpu() if value is not None else None
+                            for key, module in modules.items()
+                            for value in [self.hparams[name]._importance_dict[recipe][module]]
+                        }
+                        for name, modules in self._score_mapping(recipe).items()
+                    }
+                    fixed = {
+                        r.checkpoint_signature: _digest(searcher.quantizer_states[r])
+                        for r in self.fixed_recipes
+                    }
+                    payload.update(
+                        raw_scores=scores,
+                        fixed_digests=fixed,
+                        scoring_digest=_digest([scores, fixed]),
+                    )
+                    self._validate_scores(recipe, payload)
         except Exception as exc:
             error = str(exc)
         _collective_check(error)
@@ -374,10 +522,14 @@ class _CalibrationSession(_CalibrationStore):
             try:
                 if self.candidate is not None and Path(destination).exists():
                     exists = True
-                    old = safe_load(Path(destination).resolve() / f"rank{self.rank}.pth")
+                    old = self.load(
+                        Path(destination).resolve() / f"rank{self.rank}.pth",
+                        self.max_candidate_bytes,
+                    )
                     if (
                         old["provenance"] != payload["provenance"]
                         or old["digest"] != payload["digest"]
+                        or old.get("scoring_digest") != payload.get("scoring_digest")
                     ):
                         raise ValueError("A conflicting candidate was published concurrently")
             except Exception as exc:
