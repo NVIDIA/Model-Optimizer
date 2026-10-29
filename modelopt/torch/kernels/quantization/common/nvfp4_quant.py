@@ -94,7 +94,8 @@ def nvfp4_scalar_quant(
         1.0,
         scale,
     )
-    abs_scaled = x_abs / scale_safe
+    # Approximate division can cross an FP4 rounding boundary and disagree with packed export.
+    abs_scaled = tl.div_rn(x_abs, scale_safe)
     q_val = fp4_round_magnitude(abs_scaled)
     x_rescaled = q_val * scale_safe
     x_quant = tl.where(x >= 0, x_rescaled, -x_rescaled)

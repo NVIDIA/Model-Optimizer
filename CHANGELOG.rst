@@ -48,6 +48,8 @@ Changelog
 
 **Bug Fixes**
 
+- Correct Triton NVFP4 fake-quantization rounding at FP4 boundaries, where values could differ from packed export. Revalidate accuracy measured with affected fake-quantized models.
+
 - Calibrating a Megatron-Core MLA model now gives ``linear_q_down_proj`` and ``linear_kv_down_proj`` one per-tensor input and weight range, as vLLM and TensorRT-LLM fuse them into one GEMM with one scale per tensor. Re-calibrate existing MLA checkpoints to get the shared ranges.
 - ``export_mcore_gpt_to_hf`` and ``capture_kv_cache_export_state`` now write NVFP4 KV-cache ``k_scale`` / ``v_scale`` as amax / 448, like the HF exporter and as vLLM and TensorRT-LLM expect. They wrote amax / (6 * 448), which overflows in the attention kernels. Re-export Megatron checkpoints with an NVFP4 KV cache.
 - Preserve accumulated histogram counts when computing an entropy calibration threshold with NumPy histograms.

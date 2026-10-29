@@ -26,6 +26,7 @@ import modelopt.torch.kernels.quantization.gemm as triton_kernel
 import modelopt.torch.quantization.utils as quant_utils
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.extensions import get_cuda_ext, get_cuda_ext_mx
+from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from modelopt.torch.quantization.tensor_quant import mx_format_map
 
 if triton_kernel.IS_AVAILABLE:
@@ -243,7 +244,7 @@ class Testfp4:
                 (test_out,) * (block_size // 8), dim=-1
             )
 
-        def _test_fp4_kernel(test_in, test_out, skip_triton=False):
+        def _test_fp4_kernel(test_in, test_out):
             inputs, expected_outputs = _get_test_inputs_outputs(test_in, test_out)
             quantized_outputs = cuda_ext_mx.fused_amax_convert(
                 inputs,
@@ -253,7 +254,7 @@ class Testfp4:
                 inputs.abs().amax(),
             )
             assert torch.allclose(quantized_outputs, expected_outputs)
-            if hasattr(triton_kernel, "fp4_fake_quant_block") and not skip_triton:
+            if hasattr(triton_kernel, "fp4_fake_quant_block"):
                 quantized_outputs_triton = triton_kernel.fp4_fake_quant_block(
                     inputs, inputs.abs().amax()
                 )
@@ -266,9 +267,7 @@ class Testfp4:
         # Test with e2m1 boundary values. The even indexes are rounded down and odd indexes are rounded up.
         test_in = torch.tensor([[0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5, 6]]).cuda() * sign
         test_out = torch.tensor([[0.0, 1, 1, 2, 2, 4, 4, 6]]).cuda() * sign
-        # The triton kernel has a numerical issue, the values are not exactly at the boundary after scaling,
-        # e.g. 0.25 -> 0.250061, this won't cause visible error for real-world quantizations.
-        _test_fp4_kernel(test_in, test_out, skip_triton=True)
+        _test_fp4_kernel(test_in, test_out)
 
         # Test slightly below the e2m1 boundary values.
         # Numbers should be quantized down to the corresponding e2m1 value.
@@ -398,6 +397,19 @@ class Testfp4:
         for factor in (2.0**-10, 2.0**-20):
             scaled = triton_kernel.fp4_fake_quant_block(x * factor, x.float().abs().amax() * factor)
             assert torch.equal(scaled, reference * factor)
+
+    @pytest.mark.skipif(
+        not hasattr(triton_kernel, "fp4_fake_quant_block"),
+        reason="fp4_fake_quant_block requires compute >= 8.9",
+    )
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    def test_fp4_kernel_matches_packed_weights(self, dtype):
+        torch.manual_seed(1234)
+        weight = (torch.randn(512, 256, device="cuda") * 0.02).to(dtype)
+        packed, scale, global_scale = NVFP4QTensor.quantize(weight, block_size=16)
+        expected = packed.dequantize(scale=scale, double_scale=global_scale, block_sizes={-1: 16})
+        actual = triton_kernel.fp4_fake_quant_block(weight, weight.float().abs().amax())
+        assert torch.equal(actual, expected)
 
     @pytest.mark.skipif(not triton_kernel.IS_AVAILABLE, reason="triton kernel is not available")
     @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])

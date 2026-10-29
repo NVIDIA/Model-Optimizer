@@ -170,7 +170,15 @@ def test_gptq_updates(block_size, dim, model_weight, expect_weight_change):
         assert torch.allclose(model.weight.data, q_dq_weight), "Weight should be equal"
 
 
-def test_gptq_export_roundtrip():
+@pytest.mark.parametrize(
+    ("block_type", "fused"),
+    [
+        ("dynamic", False),
+        ("static", False),
+        pytest.param("static", True, marks=requires_triton),
+    ],
+)
+def test_gptq_export_roundtrip(block_type, fused):
     """Test that GPTQ export + dequantize produces weights matching in-memory QDQ."""
     torch.manual_seed(RAND_SEED)
     dim = 128
@@ -180,7 +188,10 @@ def test_gptq_export_roundtrip():
     model = torch.nn.Linear(dim, dim, dtype=torch.bfloat16).to("cuda")
     original_weight = model.weight.data.clone()
     input_tensor = torch.randn(2, 16, dim, dtype=torch.bfloat16).to("cuda")
-    quant_cfg = mtq.NVFP4_DEFAULT_CFG
+    quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
+    for entry in quant_cfg["quant_cfg"]:
+        if entry.get("quantizer_name") == "*weight_quantizer":
+            entry["cfg"]["block_sizes"]["type"] = block_type
 
     mtq.quantize(model, quant_cfg, forward_loop=lambda m: m(input_tensor))
 
@@ -188,12 +199,20 @@ def test_gptq_export_roundtrip():
     model.weight.data = original_weight.clone()
 
     # Step 2: Perform GPTQ — compute Hessian and update weights
-    gptq(model, forward_loop=lambda m: m(input_tensor), perc_damp=0.1, block_size=block_size)
+    gptq(
+        model,
+        forward_loop=lambda m: m(input_tensor),
+        perc_damp=0.1,
+        block_size=block_size,
+        fused=fused,
+    )
 
     # Save the QDQ reference from the quantizer applied to GPTQ'd weights
     gptq_weight_shape = model.weight.data.shape
     gptq_weight_dtype = model.weight.data.dtype
-    qdq_ref = model.weight.data.clone()
+    # Dynamic block scales can change during GPTQ; forward requantizes the updated weights.
+    qdq_ref = model.weight_quantizer(model.weight).detach().clone()
+    output_ref = model(input_tensor).detach()
 
     # Step 3: Export — converts weight to packed NVFP4 and registers scale buffers
     _export_quantized_weight(model, torch.bfloat16)
@@ -218,10 +237,10 @@ def test_gptq_export_roundtrip():
     assert deq_weight.shape == qdq_ref.shape, (
         f"Shape mismatch: dequantized {deq_weight.shape} vs QDQ ref {qdq_ref.shape}"
     )
-    assert torch.allclose(deq_weight, qdq_ref, atol=1e-2), (
-        f"Dequantized weight does not match QDQ reference. "
-        f"Max diff: {(deq_weight - qdq_ref).abs().max().item()}"
-    )
+    torch.testing.assert_close(deq_weight, qdq_ref, rtol=0, atol=0)
+    model.weight_quantizer.disable()
+    model.weight.data = deq_weight
+    torch.testing.assert_close(model(input_tensor), output_ref, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
