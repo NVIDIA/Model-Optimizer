@@ -165,8 +165,8 @@ def _materialize_owned(
     in ``together`` (the same on every rank, which is checked) goes to one owner as a unit, with any
     group it shares a key with, since the reverse conversion merges a group only where it is whole.
     Afterwards nothing is a DTensor or partial. On top of the shards it is handed, which the model
-    keeps, a rank holds at most about twice its owned set: the shards it receives and the tensors
-    assembled from them.
+    keeps, a rank holds in each round of transfers copies of its shards of keys other ranks own plus
+    the shards it receives, and then those received shards plus the tensors assembled from them.
     """
     expert_keys = sorted(k for k in local_sd if k in expert_key_set)
     dense_keys = sorted(k for k in local_sd if k not in expert_key_set)
