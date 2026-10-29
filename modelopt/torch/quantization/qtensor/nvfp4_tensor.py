@@ -310,6 +310,16 @@ class NVFP4QTensor(BaseQuantizedTensor):
         Returns:
         tuple: Contains quantized data, quantized per block scaling factor, and per tensor scaling factor.
         """
+        if (
+            isinstance(input, DTensor)
+            and weights_scaling_factor is not None
+            and not isinstance(weights_scaling_factor, DTensor)
+        ):
+            # A plain per-block scale, as a static quantizer's, covers the whole weight.
+            raise NotImplementedError(
+                "NVFP4 packs a DTensor shard with the per-block scale computed off the shard "
+                "(get_weights_scaling_factor), not a plain one such as a static quantizer's."
+            )
         # Get original input shape
         input_shape = input.shape
         input_dtype = input.dtype
@@ -368,7 +378,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
         # Cast weights to fp4
         q_weight = cls._cast_fp4(scaled_weight)
         # Pack weights. torch.bitwise_left_shift, not ``<< 4``: on a DTensor the operator is a silent
-        # no-op (torch 2.11), which would pack unrelated codes on the distributed export path.
+        # no-op, which would pack unrelated codes on the distributed export path.
         packed_weight = torch.bitwise_left_shift(q_weight[..., 1::2], 4) | q_weight[..., 0::2]
         return (
             cls(input_shape, input_dtype, packed_weight),

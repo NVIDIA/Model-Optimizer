@@ -41,6 +41,7 @@ from modelopt.torch.quantization.qtensor import (
     NVFP4QTensor,
     QTensorWrapper,
 )
+from modelopt.torch.quantization.qtensor.base_qtensor import _refuse_dtensor
 from modelopt.torch.quantization.utils import (
     quantizer_attr_names,
     representative_weight_quantizer,
@@ -828,6 +829,7 @@ def _validate_int4_block_size(in_dim, block_size):
 
 def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
     """Packs the INT4 weights into uint8 tensor."""
+    _refuse_dtensor(weight, "INT4 packing")
     out_dim = weight.shape[-2]
     assert out_dim % 2 == 0, f"Cannot pack weight. Out dimension {out_dim} is not an even number."
     in_dim = weight.shape[-1]
@@ -851,7 +853,7 @@ def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
         # Pack two 4-bit values (val0,val1) into a single byte:
         val0 = transpose[..., 0] & 0x0F
         val1 = transpose[..., 1] & 0x0F
-        packed_byte = val0 | (val1 << 4)
+        packed_byte = val0 | torch.bitwise_left_shift(val1, 4)
 
         # Transpose back to the shape (experts, out_dim // 2, in_dim)
         return packed_byte.permute(0, 2, 1).contiguous().view(torch.uint8)
@@ -864,7 +866,7 @@ def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
         # Pack two 4-bit values into one byte
         val0 = reshaped[..., 0] & 0x0F
         val1 = reshaped[..., 1] & 0x0F
-        packed_byte = val0 | (val1 << 4)
+        packed_byte = val0 | torch.bitwise_left_shift(val1, 4)
 
         # Return shape (out_dim // 2, in_dim)
         return packed_byte.T.contiguous().view(torch.uint8)

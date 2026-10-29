@@ -64,10 +64,11 @@ class ExportContext:
     model's spec in ``modelopt.torch.models``. ``None`` means unknown: spec lookups then
     fail loudly instead of guessing."""
 
-    # Distributed (no-gather) export: keep MoE experts FUSED + sharded instead of splitting them
-    # into full per-expert tensors, so each rank materializes only its local experts (the split
-    # happens post-consolidation on the sharded fused weight). See _export_fused_experts_keep_fused.
     keep_fused_experts: bool = False
+    """Marks the distributed no-gather export, whose handlers pack while the model is still sharded:
+    an FSDP2-owned weight is packed inside its unit's weight-update window, and fused MoE experts are
+    folded in place and kept fused and sharded rather than split into whole per-expert tensors,
+    which :func:`~modelopt.torch.export.moe_utils.split_fused_experts_state_dict` does later."""
 
     module_names: "ModuleNames | None" = None
     """``model``'s name maps, built once per export by the first handler that looks a module up

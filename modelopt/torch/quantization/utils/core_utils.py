@@ -946,9 +946,13 @@ def get_prefixed_param_names(parent_model, target_module, param_index=None):
     return match[1].rpartition(".")[0] if match is not None else None
 
 
-def _param_key(module_name: str, param_name: str) -> str:
-    """The full name of ``module_name``'s parameter ``param_name``; ``""`` names the root module."""
-    return f"{module_name}.{param_name}" if module_name else param_name
+def _param_key(module_name: str | None, param_name: str) -> str:
+    """The full name of ``module_name``'s parameter ``param_name``; ``""`` names the root module.
+
+    A module the name map does not know (``None``) keeps the ``None.`` key no parameter has, so it is
+    skipped rather than taken for the root.
+    """
+    return param_name if module_name == "" else f"{module_name}.{param_name}"
 
 
 def create_fsdp_param_mapping(fsdp_param_list, model):
