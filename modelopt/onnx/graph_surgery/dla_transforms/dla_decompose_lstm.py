@@ -217,6 +217,9 @@ def _fold_lstm_constants(graph, nodes, unique_initializer):
 def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
     """Decompose ``LSTM`` nodes into basic ONNX ops (IO per ONNX LSTM layout 0)."""
     graph = model.graph
+    legacy_initializers = (
+        {tensor.name for tensor in graph.initializer} if model.ir_version <= 3 else None
+    )
     cache = GraphCache(graph)
     local_functions = {
         (function.domain, function.name, function.overload) for function in model.functions
@@ -1215,6 +1218,14 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         lstm_counter += 1
 
     batch_replace_nodes(graph, replacements_batch)
+    if legacy_initializers is not None:
+        used = {name for node in graph.node for name in node.input}
+        used.update(value.name for value in graph.output)
+        used.update(_subgraph_captures(graph))
+        for index in range(len(graph.initializer) - 1, -1, -1):
+            name = graph.initializer[index].name
+            if name not in legacy_initializers and name not in used:
+                del graph.initializer[index]
     _add_legacy_initializer_inputs(model)
     logger.debug("Updated %d LSTM nodes with manual decomposition", lstm_counter)
 

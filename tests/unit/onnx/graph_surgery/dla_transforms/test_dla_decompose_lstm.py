@@ -415,16 +415,35 @@ def test_generated_names_preserve_existing_public_values(kind):
     _assert_outputs_match(expected, _run_ort(transformed, feeds))
 
 
-def test_legacy_ir_registers_all_new_lstm_initializers():
+@pytest.mark.parametrize(
+    ("direction", "batch", "omit_bias"),
+    [
+        ("forward", _N, False),
+        ("forward", 1, True),
+        ("bidirectional", 1, False),
+        ("bidirectional", 1, True),
+    ],
+)
+def test_legacy_ir_registers_all_new_lstm_initializers(direction, batch, omit_bias):
     """Keep the legacy initializer-input contract after standalone decomposition."""
-    model = _make_lstm_model("forward")
+    model = _make_lstm_model(direction, batch=batch)
+    if omit_bias:
+        model.graph.node[0].input[3] = ""
+        del model.graph.initializer[2]
     model.ir_version = 3
     for tensor in model.graph.initializer:
         model.graph.input.append(_vi(tensor.name, tensor.data_type, list(tensor.dims)))
     onnx.checker.check_model(model, full_check=True)
-    feeds = {"X": np.random.default_rng(10).standard_normal((_T, _N, _D_IN)).astype(np.float32)}
+    original_inputs = {value.name for value in model.graph.input}
+    original_initializers = {tensor.name for tensor in model.graph.initializer}
+    feeds = {"X": np.random.default_rng(10).standard_normal((_T, batch, _D_IN)).astype(np.float32)}
     expected = _run_ort(model, feeds)
     transformed = _apply_decompose_lstm(onnx.shape_inference.infer_shapes(copy.deepcopy(model)))
+    used = {name for node in transformed.graph.node for name in node.input}
+    used.update(value.name for value in transformed.graph.output)
+    created = {tensor.name for tensor in transformed.graph.initializer} - original_initializers
+    assert created <= used
+    assert {value.name for value in transformed.graph.input} == original_inputs | created
     onnx.checker.check_model(transformed, full_check=True)
     _assert_outputs_match(expected, _run_ort(transformed, feeds))
 
