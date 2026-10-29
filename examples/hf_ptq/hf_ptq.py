@@ -396,10 +396,12 @@ def load_model(args: argparse.Namespace):
 
     # Default to image-text calibration for VLM models. Skip for the AutoQuantize recipe path, whose
     # text-only path does not support image-text calibration yet (auto_quantize() would raise);
-    # auto-enabling it here would make Nemotron-VL AutoQuantize fail unconditionally.
+    # auto-enabling it here would make Nemotron-VL AutoQuantize fail unconditionally. Nor for FSDP2,
+    # which calibrates a VLM on text only.
     if (
         is_nemotron_vl_model
         and not args.calib_with_images
+        and not args.use_fsdp2
         and not _recipe_is_auto_quantize(args.recipe)
     ):
         print("Nemotron VL model detected. Enabling image-text calibration by default.")

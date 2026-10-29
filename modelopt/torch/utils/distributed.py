@@ -775,13 +775,54 @@ def _move_to_fsdp_device(model, params: set[torch.nn.Parameter]) -> None:
             param.data = param.data.to(device)
 
 
+def _auxiliary_modules(model, decoder_layers) -> list[torch.nn.Module]:
+    """Submodules beside the decoder stack that carry a weight matrix.
+
+    E.g. a vision or audio tower, a multimodal projector, an MTP head. Left in the root's shard
+    group they would be all-gathered on every forward, although text-only calibration never runs
+    them; in their own group each is gathered only when it runs. Input and
+    output embeddings stay with the root, as the two are often tied, and so do modules holding only
+    1-D parameters (norms), which are too small to be worth a group of their own.
+    """
+    layer_ids = {id(layer) for layer in decoder_layers}
+    # Modules on the path from the root to a decoder layer: their other children are the candidates.
+    ancestor_ids = {id(model)}
+    for name, module in model.named_modules():
+        if id(module) in layer_ids:
+            parts = name.split(".")
+            for i in range(1, len(parts)):
+                ancestor_ids.add(id(model.get_submodule(".".join(parts[:i]))))
+    embedding_ids = set()
+    for getter in ("get_input_embeddings", "get_output_embeddings"):
+        try:
+            embedding = getattr(model, getter)()
+        except (AttributeError, NotImplementedError):
+            embedding = None
+        if embedding is not None:
+            embedding_ids.add(id(embedding))
+
+    aux = []
+    for module in model.modules():
+        if id(module) not in ancestor_ids:
+            continue
+        for child in module.children():
+            if id(child) in ancestor_ids or id(child) in layer_ids or id(child) in embedding_ids:
+                continue
+            if any(id(m) in embedding_ids for m in child.modules()):
+                continue
+            if any(p.dim() >= 2 for p in child.parameters()):
+                aux.append(child)
+    return aux
+
+
 def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):
     """Auto-detect a HF causal-LM's decoder layers and FSDP2 ``fully_shard`` each one.
 
     By default (``shard_root=True``) the root module is wrapped too, so embed/lm_head/norm are
     sharded instead of replicated per rank; pass ``shard_root=False`` to leave the root replicated
-    (only decoder layers sharded). Returns the detected decoder layers so callers can reuse the
-    detection result.
+    (only decoder layers sharded). With the root sharded, auxiliary modules beside the decoder stack
+    (a vision tower, a projector, an MTP head; see :func:`_auxiliary_modules`) get groups of their
+    own. Returns the detected decoder layers so callers can reuse the detection result.
 
     Parameters whose dtype differs from the model's dominant one are excluded from the wrap (see
     :func:`_off_dtype_params`), since FSDP2 rejects a shard group that mixes dtypes. They stay
@@ -812,6 +853,8 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     for layer in decoder_layers:
         fully_shard(layer, **fsdp_kwargs)
     if shard_root:
+        for module in _auxiliary_modules(model, decoder_layers):
+            fully_shard(module, **fsdp_kwargs)
         fully_shard(model, **fsdp_kwargs)
     if ignored_params:
         _move_to_fsdp_device(model, ignored_params)

@@ -54,9 +54,28 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
 logger = logging.getLogger(__name__)
 
 
-def is_fsdp2_text_only_vlm(config) -> bool:
-    """Whether the VLM has a supported text-only FSDP2 decoder layout."""
-    return getattr(config, "model_type", None) in {"qwen3_5", "qwen3_5_moe"}
+def _meta_model_factory(config):
+    """Auto class that builds ``config``'s whole model, vision tower included for a VLM.
+
+    A remote-code checkpoint is built with the head its ``auto_map`` registers, preferring the
+    causal-LM one. A Transformers VLM is built as image-text-to-text: ``AutoModelForCausalLM``
+    rejects most VLM configs, and for the rest may build a text-only class whose parameter names
+    no longer match the checkpoint.
+    """
+    from transformers import AutoModelForImageTextToText
+    from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
+
+    auto_map = getattr(config, "auto_map", None) or {}
+    if "AutoModelForCausalLM" in auto_map:
+        return AutoModelForCausalLM
+    if "AutoModelForImageTextToText" in auto_map:
+        return AutoModelForImageTextToText
+    if (
+        hasattr(config, "vision_config")
+        and getattr(config, "model_type", None) in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
+    ):
+        return AutoModelForImageTextToText
+    return AutoModelForCausalLM
 
 
 def _resolve_checkpoint_dir(ckpt_path: str, rank: int) -> str:
@@ -119,6 +138,7 @@ def _conversion_plan(model: nn.Module, conversions: list | None = None) -> dict 
     if not (legacy_renames or renamings or converters):
         return None
     return {
+        "conversions": conversions,
         "legacy_renames": legacy_renames,
         "renamings": renamings,
         "converters": converters,
@@ -207,12 +227,7 @@ def build_meta_causal_lm(
     dtype = getattr(hf_config, "dtype", None) or torch.bfloat16
     from accelerate import init_empty_weights  # only real callers of this function need it
 
-    model_factory = AutoModelForCausalLM
-    if is_fsdp2_text_only_vlm(hf_config):
-        # Only newer Transformers versions supporting these models expose this factory.
-        from transformers import AutoModelForImageTextToText
-
-        model_factory = AutoModelForImageTextToText
+    model_factory = _meta_model_factory(hf_config)
     with init_empty_weights(include_buffers=False):
         model = model_factory.from_config(
             hf_config, dtype=dtype, trust_remote_code=trust_remote_code
@@ -322,6 +337,36 @@ def _group_sources_by_layer(
         else:
             non_layer_sources.append(ckpt_key)
     return layer_sources, non_layer_sources, unplaced
+
+
+def _check_every_param_sourced(
+    model: nn.Module,
+    plans: list[dict],
+    model_param_names: set[str],
+    placed_keys: "Iterable[str]",
+) -> None:
+    """Raise if a parameter (or meta buffer) of ``model`` gets no tensor from the checkpoint.
+
+    The FSDP2 loader materializes the model with uninitialized storage, so a parameter no checkpoint
+    key converts into would silently calibrate on garbage, e.g. when a VLM checkpoint names its
+    weights in a layout the conversion plan does not cover. A tied pair (``lm_head`` and the
+    embedding) counts as sourced if either name is: ``tie_weights`` fills the other after the load.
+    """
+    sourced = {_target_param(plans, key, model_param_names) for key in placed_keys}
+    for target, source in (getattr(model, "all_tied_weights_keys", None) or {}).items():
+        if target in sourced or source in sourced:
+            sourced.update((target, source))
+    required = chain(
+        (n for n, _ in model.named_parameters()),
+        (n for n, b in model.named_buffers() if b.is_meta),
+    )
+    missing = sorted(n for n in required if n not in sourced)
+    if missing:
+        raise RuntimeError(
+            f"FSDP2 load: {len(missing)} parameter(s) of the built model get no tensor from the "
+            f"checkpoint, e.g. {missing[:5]}. The checkpoint's key layout does not match the "
+            "model class it was built with."
+        )
 
 
 def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
@@ -801,14 +846,16 @@ def parallel_load_and_prepare_fsdp2(
 
     model = build_meta_causal_lm(resolved_path, trust_remote_code, attn_implementation, hf_config)
 
+    # transformers fuses/renames checkpoint keys so they no longer match param names 1:1
+    # (None => nothing to convert). Taken before the wrap: fully_shard swaps in an ``FSDP<cls>``
+    # class that transformers treats as custom code, dropping that class's renamings (a VLM's
+    # ``model.layers`` -> ``model.language_model.layers``). Parameter names are unchanged by it.
+    plan = _conversion_plan(model)
+
     # fsdp2_wrap shards each decoder layer + the root (embed/lm_head/norm sharded, not replicated).
     decoder_layers = fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
     module_to_name = {m: n for n, m in model.named_modules()}
     layer_prefixes = [module_to_name[layer] + "." for layer in decoder_layers]
-
-    # transformers fuses/renames checkpoint keys so they no longer match param names 1:1
-    # (None => nothing to convert).
-    plan = _conversion_plan(model)
 
     # Valid targets; keys converting to anything else are aux weights (e.g. an MTP head) we skip.
     model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
@@ -833,6 +880,15 @@ def parallel_load_and_prepare_fsdp2(
     # it came from. Not a state dict: holding these tensors from load to export would waste the
     # memory this loader exists to save.
     record_unplaced_source_keys(model, resolved_path, unplaced)
+    # What from_pretrained records: the conversions some checkpoint key used. The export reverts
+    # these and would otherwise query the wrapped class, which has lost them.
+    model._weight_conversions = [c for c in plan["conversions"] if c.was_used()] if plan else []
+    _check_every_param_sourced(
+        model,
+        [plan] if plan else [],
+        model_param_names,
+        chain(non_layer_sources, *layer_sources.values()),
+    )
 
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
 

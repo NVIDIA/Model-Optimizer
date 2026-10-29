@@ -54,7 +54,7 @@ from modelopt.torch.models.hf import (
 )
 from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
-from modelopt.torch.utils.plugins.model_load_utils import is_fsdp2_text_only_vlm, load_pretrained
+from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 logger = logging.getLogger(__name__)
 
@@ -99,11 +99,12 @@ def validate_fsdp2_supported(args, config):
     issues = []
     if "vila" in args.local_checkpoint_path.lower():
         issues.append("VILA (custom builder + non-standard layer layout)")
-    if is_fsdp2_text_only_vlm(config):
-        if getattr(args, "calib_with_images", False):
-            issues.append("image-text calibration (Qwen FSDP2 currently supports text-only inputs)")
-    elif is_nemotron_vl(config) or _is_multimodal_config(config):
-        issues.append("multimodal / VL models (decoder layers not auto-detectable)")
+    # A VLM is calibrated on text through its language model; a layout whose decoder layers cannot
+    # be found fails in fsdp2_wrap. Encoder-decoder models have no single decoder stack to shard.
+    if getattr(config, "is_encoder_decoder", False):
+        issues.append("encoder-decoder models")
+    elif _is_multimodal_config(config) and getattr(args, "calib_with_images", False):
+        issues.append("image-text calibration (FSDP2 currently supports text-only inputs)")
     if any(
         getattr(cfg, "quantization_config", None) is not None
         for cfg in (config, getattr(config, "text_config", None))
