@@ -608,11 +608,11 @@ def load_pretrained(
       whole model, ``device_map`` defaulting to the rank's GPU.
 
     A plan with ``ep_size > 1`` raises: no load here shards the routed experts. On a distributed run
-    every rank loads the plan rank 0 was handed, and a refusal on any rank, of its own arguments or
-    of the config it reads, raises on every rank. A launch whose processes set no process group up (a
-    launcher that only exports ``WORLD_SIZE``) has each process load as a single process does, the
-    whole model with no plan to agree on; a plan for several ranks and a sharded load need the group,
-    so there they are refused: set it up first, with
+    every rank loads the plan rank 0 was handed, and a refusal on any rank, of its own arguments, of a
+    checkpoint it cannot see or of the config it reads, raises on every rank. A launch whose processes
+    set no process group up (a launcher that only exports ``WORLD_SIZE``) has each process load as a
+    single process does, the whole model with no plan to agree on; a plan for several ranks and a
+    sharded load need the group, so there they are refused: set it up first, with
     :func:`~modelopt.torch.utils.distributed.distributed_run`. The plan is recorded on the model
     (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), where calibration and export
     read it back.
@@ -745,7 +745,10 @@ def load_pretrained(
                     if k != "subfolder" and not (k == "config" and config is not None)
                 },
             )
-    _, ckpt_path = ensure_local_checkpoint(ckpt_path, **revision, **hub_options)
+    # Rank 0 fetches the checkpoint, and each rank then checks it can see it: one that cannot fails
+    # every rank, rather than leave the others in the load's next collective.
+    with _refused_together("checkpoint fetch", alone):
+        _, ckpt_path = ensure_local_checkpoint(ckpt_path, **revision, **hub_options)
     subfolder = kwargs.pop("subfolder", None)
     if subfolder:
         ckpt_path = os.path.join(ckpt_path, subfolder)
