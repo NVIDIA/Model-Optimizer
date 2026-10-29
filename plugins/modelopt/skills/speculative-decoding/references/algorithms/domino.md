@@ -87,10 +87,9 @@ export is the whole in-pipeline signal.
 
 ## Quality gate
 
-**Do not trust in-training AR for Domino.** The recipe pins `estimate_ar: false` and
-`ar_validate_steps: 0` deliberately: eval delegates to the DFlash backbone with the
-correction head not applied, so reported acceptance rates are backbone-only. The code
-logs this once as a warning — treat that warning as expected, not as a defect.
+**Domino has no HF AR validation.** `pseudo_speculative_generate` raises for Domino, so
+keep the recipe's `ar_validate_steps: 0` and measure acceptance on the exported drafter
+in a serving engine.
 
 The training-regression gate from `dflash.md` applies and the Qwen3-8B example sets
 it: `MAX_FINAL_LOSS=5.0`, `MIN_FINAL_ACC=0.15`, checked by `check_regression.py`
@@ -110,6 +109,6 @@ failures (`seq_len` divisibility, offline eval, mask token, chat template) are i
 | `shift_label=False is not supported: projector_type 'domino' trains only next-token alignment` | `shift_label: false` | Leave it at `true` |
 | `pure_draft_prefix_len must be in [0, N] (block_size=B), got X` | Prefix length >= block size | Lower it below `block_size` |
 | `DominoLambdaCallback: state.max_steps unset (<=0); lambda_base curriculum disabled` (warning) | `training.max_steps` not set | Set `training.max_steps`, else the curriculum never runs |
-| `Domino eval uses the DFlash backbone only ...` (warning) | Correction head not applied at eval | Expected — do not chase it; evaluate after export once the inference path lands |
+| `Domino has no HF AR validation (pseudo_speculative_generate)` | `ar_validate.py`, or `ar_validate_steps > 0` (training logs `AR validation not available.`) | Evaluate the exported drafter in a serving engine |
 | DDP error about unused parameters | `ddp_find_unused_parameters` turned off | Keep it `true` |
 | Draft trains but quality is poor | Draft dims left at `Qwen3Config` defaults instead of matching the base | Set the GQA/FFN dims explicitly |
