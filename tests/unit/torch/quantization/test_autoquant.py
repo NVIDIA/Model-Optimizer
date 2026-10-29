@@ -26,6 +26,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
+from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -2232,6 +2233,44 @@ def test_auto_quantize_rco_endpoints(ceiling):
         assert math.isfinite(state["best"]["continuous_expected_effective_bits"])
         if ceiling >= 16:
             torch.testing.assert_close(model[0].weight, reference[0].weight, rtol=0, atol=0)
+
+
+def test_auto_quantize_rco_grouped_minimum_with_fixed_head():
+    model = get_tiny_llama().eval()
+    inputs = torch.tensor([[1, 2, 3, 4]])
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+            {"quantizer_name": "*", "parent_class": "nn.Embedding", "enable": False},
+        ],
+        "algorithm": "max",
+    }
+    # 10,752 decoder weights at FP8 plus 1,024 protected BF16 head weights.
+    minimum_cost, denominator = 6400, 11776
+    target = 16 * minimum_cost / denominator
+    _, state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": target},
+        quantization_formats=[config],
+        disabled_layers=["lm_head"],
+        data_loader=[inputs],
+        forward_step=lambda m, b: m(b, use_cache=False),
+        num_calib_steps=1,
+        num_score_steps=1,
+        method={"method": "rco", "steps": 1},
+    )
+    assert state["best"]["constraints"]["effective_bits"] <= target
+    assert state["rco_state"]["solver_calls"] == 2
+    assert (
+        math.fsum(
+            stat["costs"][index]
+            for stat, index in zip(
+                state["candidate_stats"].values(), state["rco_state"]["final_assignment"]
+            )
+        )
+        == minimum_cost
+    )
 
 
 def test_auto_quantize_rco_consumes_gsq_candidates():

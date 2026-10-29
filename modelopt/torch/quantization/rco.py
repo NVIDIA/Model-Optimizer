@@ -416,21 +416,15 @@ class AutoQuantizeRCOSearcher(_AutoQuantizeBaseSearcher):
         return total / count
 
     def _solve(self, scores):
+        allowed = [mask.nonzero().flatten().tolist() for mask in self._mask]
         selections, status = LPS(
             "rco",
             {"weight": self._ceiling / self._denominator * 16},
-            {
-                "weight": [
-                    row[: len(h.solver_choices)].tolist()
-                    for row, h in zip(self._costs, self._hparams)
-                ]
-            },
-            [
-                row[: len(h.solver_choices)].detach().tolist()
-                for row, h in zip(scores, self._hparams)
-            ],
+            {"weight": [row[indices].tolist() for row, indices in zip(self._costs, allowed)]},
+            [row[indices].detach().tolist() for row, indices in zip(scores, allowed)],
             objective_type="maximize",
         )()
+        selections = [indices[index] for indices, index in zip(allowed, selections)]
         cost = math.fsum(
             item["costs"][index] for item, index in zip(self.candidate_stats.values(), selections)
         )
