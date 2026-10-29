@@ -54,6 +54,7 @@ from .quant_format import (
 )
 from .quant_utils import (
     _get_quantization_from_quantizers,
+    _pack_fp8_weight,
     get_kv_cache_dtype,
     get_kv_cache_scaling_factor,
     get_scaling_factor,
@@ -441,6 +442,8 @@ def capture_quantized_weight_export_state(
         if weight_scale is None:
             raise RuntimeError(f"Missing calibrated weight scale for {weight_name!r}")
         tensors.append(_state_tensor("weight_scale", weight_scale, cpu=cpu))
+        if weight_quantizer.axis is None and weight.dtype != torch.float8_e4m3fn:
+            tensors.append(_state_tensor("weight_amax", weight_quantizer.amax, cpu=cpu))
     elif quantization_format == QUANTIZATION_FP8_PC_PT:
         weight_scale = get_scaling_factor(weight_quantizer)
         if weight_scale is None or weight_quantizer.axis is None:
@@ -799,7 +802,7 @@ def export_quantized_weight_tensors(
     packed_weight = weight.permute(state.packing_permutation)
     records = {record.name: record for record in state.tensors}
 
-    weight_scale_2 = None
+    weight_scale_2 = quantized_weight = None
     if state.static_nvfp4:
         block_amax = records["weight_block_amax"].value
         global_amax = records["weight_global_amax"].value
@@ -842,7 +845,13 @@ def export_quantized_weight_tensors(
     if weight_scale_2 is not None:
         weight_scale_2 = weight_scale_2.to(packed_weight.device)
 
-    if state.quantization_format not in _MXFP4_EXPORT_FORMATS:
+    if state.quantization_format == QUANTIZATION_FP8 and "weight_amax" in records:
+        quantized_weight, fp8_scale = _pack_fp8_weight(
+            packed_weight, records["weight_amax"].value, dtype
+        )
+        if quantized_weight is not None:
+            weight_scale = fp8_scale
+    if quantized_weight is None:
         quantized_weight = to_quantized_weight(
             packed_weight.to(dtype),
             weight_scale,

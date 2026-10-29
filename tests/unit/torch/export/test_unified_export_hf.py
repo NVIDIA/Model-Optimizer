@@ -15,6 +15,7 @@
 
 """Tests for tied-weight helpers in unified_export_hf."""
 
+import copy
 import importlib.util
 import json
 from copy import deepcopy
@@ -22,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from _test_utils.torch.export.utils import SmallQKVModel
 from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
     wrap_in_parent_with_tied_keys,
@@ -36,6 +38,7 @@ from modelopt.torch.export.model_utils import (
 )
 from modelopt.torch.export.quant_utils import (
     fuse_prequant_layernorm,
+    get_quantization_format,
     postprocess_state_dict,
     sync_tied_input_amax,
 )
@@ -45,8 +48,43 @@ from modelopt.torch.export.unified_export_hf import (
     _source_checkpoint,
     collect_shared_input_modules,
     read_unplaced_weights,
+    requantize_resmooth_fused_llm_layers,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
+
+
+@pytest.mark.parametrize("fp8_projection", ["q_proj", "v_proj"])
+def test_shared_input_fusion_preserves_mixed_precision(fp8_projection):
+    model = SmallQKVModel(dim=32, device="cpu").eval()
+    config = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+    config["quant_cfg"].append({"quantizer_name": "*weight_quantizer", "cfg": {"axis": None}})
+    config["quant_cfg"] += [
+        {
+            "quantizer_name": f"{fp8_projection}.{quantizer}",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        }
+        for quantizer in ("input_quantizer", "weight_quantizer")
+    ]
+    mtq.quantize(model, config, lambda m: m(torch.randn(1, 32)))
+    modules = [model.q_proj, model.k_proj, model.v_proj]
+    fp8 = model.get_submodule(fp8_projection)
+    integers = [module for module in modules if module is not fp8]
+    expected_amax = torch.stack([m.weight_quantizer.amax for m in integers]).amax()
+    fp8_state = copy.deepcopy(fp8.state_dict())
+    weights = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+    formats = [get_quantization_format(module) for module in modules]
+
+    model.apply_embed = True
+    requantize_resmooth_fused_llm_layers(model)
+
+    assert [get_quantization_format(module) for module in modules] == formats
+    for module in integers:
+        assert torch.equal(module.weight_quantizer.amax, expected_amax)
+    for name, value in fp8.state_dict().items():
+        assert torch.equal(value, fp8_state[name])
+    for name, parameter in model.named_parameters():
+        assert torch.equal(parameter, weights[name])
+    assert torch.isfinite(model(torch.ones(1, 2, dtype=torch.long))).all()
 
 
 def test_multimodal_detection_accepts_null_architectures():

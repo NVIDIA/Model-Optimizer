@@ -34,6 +34,8 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.layer_utils import is_quantlinear
 from modelopt.torch.export.model_utils import TiedWeightMap
+from modelopt.torch.export.quant_format import QUANTIZATION_FP8, QUANTIZATION_NONE
+from modelopt.torch.export.quant_utils import get_quantization_format
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     _export_transformers_checkpoint,
@@ -47,6 +49,19 @@ from modelopt.torch.quantization.utils import (
     module_name_maps,
     patch_fsdp_mp_dtypes,
 )
+
+
+def _mixed_projection_config(base, fp8_projection, *, enable=True):
+    config = copy.deepcopy(base)
+    config["quant_cfg"] += [
+        {
+            "quantizer_name": f"{fp8_projection}.{quantizer}",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+            "enable": enable,
+        }
+        for quantizer in ("input_quantizer", "weight_quantizer")
+    ]
+    return config
 
 
 def _update_weight_test(rank, size):
@@ -190,8 +205,24 @@ def _fuse_layers(rank, size, quant_config, bias):
         model.apply_embed = True
         non_fsdp_model.apply_embed = True
 
+        projections = [non_fsdp_model.q_proj, non_fsdp_model.k_proj, non_fsdp_model.v_proj]
+        preserved = []
+        if len({get_quantization_format(module) for module in projections}) > 1:
+            # Mixed consumers cannot absorb AWQ scales into their shared normalization.
+            preserved = [
+                (module, copy.deepcopy(module.state_dict()))
+                for module in [non_fsdp_model.input_layernorm, *projections]
+                if module is non_fsdp_model.input_layernorm
+                or get_quantization_format(module) in (QUANTIZATION_FP8, QUANTIZATION_NONE)
+            ]
+
         requantize_resmooth_fused_llm_layers(model)
         requantize_resmooth_fused_llm_layers(non_fsdp_model)
+
+        for module, state in preserved:
+            assert module.state_dict().keys() == state.keys()
+            for name, value in module.state_dict().items():
+                assert torch.equal(value, state[name])
 
         torch.distributed.barrier()
 
@@ -312,6 +343,17 @@ def test_fsdp2_weight_update_context_error_propagates(dist_workers):
         # nothing and the parametrization exercised an unquantized model. NVFP4_OMLP_ONLY_CFG
         # covers the same scoped-recipe shape here because it also selects `o_proj`.
         mtq.NVFP4_OMLP_ONLY_CFG,
+        pytest.param(
+            _mixed_projection_config(mtq.NVFP4_DEFAULT_CFG, "q_proj"), id="mixed_fp8_first"
+        ),
+        pytest.param(
+            _mixed_projection_config(mtq.NVFP4_DEFAULT_CFG, "v_proj"), id="mixed_nvfp4_first"
+        ),
+        pytest.param(_mixed_projection_config(mtq.NVFP4_AWQ_LITE_CFG, "v_proj"), id="mixed_awq"),
+        pytest.param(
+            _mixed_projection_config(mtq.NVFP4_AWQ_LITE_CFG, "v_proj", enable=False),
+            id="mixed_awq_unquantized",
+        ),
     ],
 )
 @pytest.mark.parametrize("bias", [True, False])
@@ -334,6 +376,9 @@ def test_fsdp2_weight_update_context_for_fuse_layers(dist_workers, quant_config,
         # nothing and the parametrization exercised an unquantized model. NVFP4_OMLP_ONLY_CFG
         # covers the same scoped-recipe shape here because it also selects `o_proj`.
         mtq.NVFP4_OMLP_ONLY_CFG,
+        pytest.param(
+            _mixed_projection_config(mtq.NVFP4_DEFAULT_CFG, "v_proj"), id="mixed_nvfp4_fp8"
+        ),
     ],
 )
 @pytest.mark.parametrize("bias", [True, False])

@@ -41,7 +41,10 @@ from modelopt.torch.export.quant_utils import (
 from modelopt.torch.export.quantized_weight_export import (
     capture_quantized_weight_export_state,
     export_quantized_weight_tensors,
+    merge_quantized_weight_export_states,
+    restore_quantized_weight_export_state,
     select_quantized_weight_export_state,
+    split_quantized_weight_export_state,
 )
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -208,6 +211,38 @@ def test_functional_export_matches_existing_helpers_without_mutation(quant_cfg):
     if quantization_format == QUANTIZATION_MXFP8:
         assert hasattr(module, "weight_scale")
         assert not hasattr(module.weight_quantizer, "_scale")
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("experts", [False, True])
+def test_fp8_export_preserves_calibrated_weights(dtype, experts):
+    module = nn.Module()
+    shape = (2, 32, 64) if experts else (32, 64)
+    weight = torch.linspace(-0.75, 0.75, math.prod(shape), device="cuda", dtype=dtype)
+    module.weight = nn.Parameter(weight.reshape(shape).transpose(-1, -2), requires_grad=False)
+    module.weight_quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3)))
+    original = module.weight.detach().clone()
+    for amax in [0.0, 0.1875, 0.375, 0.3984375]:
+        module.weight_quantizer.amax = torch.tensor(amax, device="cuda", dtype=torch.float32)
+        expected = module.weight_quantizer(module.weight)
+        state = capture_quantized_weight_export_state(module)
+        metadata, tensors = split_quantized_weight_export_state(state)
+        state = restore_quantized_weight_export_state(metadata, tensors)
+        split = module.weight.shape[0] // 2
+        parts = [
+            select_quantized_weight_export_state(state, 0, range(split)),
+            select_quantized_weight_export_state(state, 0, range(split, module.weight.shape[0])),
+        ]
+        state = merge_quantized_weight_export_states(parts, 0)
+        actual = export_quantized_weight_tensors(module.weight, state, dtype)
+        decoded = (actual["weight"].float() * actual["weight_scale"]).to(dtype)
+        torch.testing.assert_close(decoded, expected, rtol=0, atol=0)
+        torch.testing.assert_close(module.weight, original, rtol=0, atol=0)
+        torch.testing.assert_close(module.weight_quantizer.amax, torch.tensor(amax, device="cuda"))
+        legacy = copy.deepcopy(module)
+        _export_quantized_weight(legacy, dtype)
+        assert torch.equal(legacy.weight.view(torch.uint8), actual["weight"].view(torch.uint8))
+        torch.testing.assert_close(legacy.weight_scale, actual["weight_scale"], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])

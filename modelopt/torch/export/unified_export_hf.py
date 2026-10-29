@@ -131,6 +131,7 @@ from .quant_format import (
 )
 from .quant_utils import (
     _get_kv_cache_postprocess_config,
+    _pack_fp8_weight,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -349,9 +350,12 @@ def collect_shared_input_modules(
             module.name = name
             handle = module.register_forward_hook(_output_hook)
             handles.append(handle)
-        elif is_quantlinear(module) and (
-            _is_enabled_quantizer(module.input_quantizer)
-            or _is_enabled_quantizer(module.weight_quantizer)
+        elif (collect_layernorms and isinstance(module, nn.Linear)) or (
+            is_quantlinear(module)
+            and (
+                _is_enabled_quantizer(module.input_quantizer)
+                or _is_enabled_quantizer(module.weight_quantizer)
+            )
         ):
             module.name = name
             handle = module.register_forward_hook(_input_hook)
@@ -425,6 +429,24 @@ def _fuse_shared_input_modules(
     fused_count = 0
 
     for tensor, modules, can_fuse_layernorm in _shared_input_fusion_groups(model, input_to_linear):
+        if not qkv_only:
+            format_groups = defaultdict(list)
+            for module in modules:
+                format_groups[get_quantization_format(module)].append(module)
+            if len(format_groups) > 1:
+                # Shared inputs do not imply shared precision. Keep normalization unchanged
+                # because folding one subgroup's scales would affect the other consumers.
+                for group_format, group in format_groups.items():
+                    fused_linears.update(
+                        _fuse_shared_input_modules(
+                            model,
+                            {tensor: group},
+                            quantization_format=group_format,
+                            names=names,
+                        )
+                    )
+                continue
+
         # Get quantization format for this group of modules
         # (must be re-evaluated per group as different modules may have different formats)
         group_quant_format = get_quantization_format(modules[0]) if modules else quantization_format
@@ -701,11 +723,16 @@ def _export_quantized_weight(
         compressed_weight_scale is not None and compressed_weight_scale_2 is not None
     )
 
+    fp8_payload = None
     if quantization_format == QUANTIZATION_FP8:
+        if weight_quantizer.axis is None and weight.dtype != torch.float8_e4m3fn:
+            fp8_payload, fp8_scale = _pack_fp8_weight(weight, weight_quantizer.amax, dtype)
         # Convert amax to float32
         weight_quantizer._amax = weight_quantizer._amax.to(torch.float32)
 
-        if weight_quantizer._amax.dim() == 1:
+        if fp8_payload is not None:
+            weight_scaling_factor = fp8_scale
+        elif weight_quantizer._amax.dim() == 1:
             # Per-tensor amax
             weight_scaling_factor = torch.tensor(
                 weight_quantizer.amax.item() / weight_quantizer.maxbound
@@ -865,6 +892,8 @@ def _export_quantized_weight(
         quantized_weight, _ = maybe_transpose_expert_weight_dimensions(
             quantized_weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
+    elif fp8_payload is not None:
+        quantized_weight, weight_scale = fp8_payload, fp8_scale
     else:
         quantized_weight = to_quantized_weight(
             weight.to(dtype),
