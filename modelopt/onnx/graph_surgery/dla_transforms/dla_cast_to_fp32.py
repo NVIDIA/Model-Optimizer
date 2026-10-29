@@ -85,6 +85,8 @@ def _fp32_cast_outputs(model: onnx.ModelProto) -> set[str]:
         if (
             schema is None
             or node.overload
+            # SequenceInsert couples sequence and tensor types across separate schema variables.
+            or (domain == "" and node.op_type == "SequenceInsert")
             or any(
                 parameter.option == onnx.defs.OpSchema.FormalParameterOption.Variadic
                 and not parameter.is_homogeneous

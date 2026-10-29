@@ -559,6 +559,38 @@ def test_mixed_graph_eligible_converted_protected_skipped():
 # ── 8. No Cast nodes: graph and ORT output unchanged ─────────────────────────
 
 
+@pytest.mark.parametrize("dtype", [TensorProto.INT32, TensorProto.FLOAT16])
+def test_sequence_insert_preserves_inserted_tensor_type(dtype):
+    """Keep the tensor type coupled to its sequence element type."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Cast", ["x"], ["inserted"], to=dtype, name="cast"),
+                helper.make_node("SequenceConstruct", ["seed"], ["sequence"]),
+                helper.make_node("SequenceInsert", ["sequence", "inserted"], ["y"]),
+            ],
+            "sequence_insert",
+            [_vi("x", TensorProto.FLOAT, [2]), _vi("seed", dtype, [2])],
+            [helper.make_tensor_sequence_value_info("y", dtype, [2])],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    feeds = {
+        "x": np.array([2, 3], np.float32),
+        "seed": np.array([0, 1], helper.tensor_dtype_to_np_dtype(dtype)),
+    }
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)["y"]
+    before = model.SerializeToString()
+    _apply(model)
+    assert model.SerializeToString() == before
+    onnx.checker.check_model(model, full_check=True)
+    for actual, reference in zip(_run_ort(model, feeds)["y"], expected):
+        np.testing.assert_array_equal(actual, reference)
+        assert actual.dtype == reference.dtype
+
+
 def test_no_cast_nodes_noop():
     """Graph with no Cast nodes: graph structure and ORT output unchanged."""
     shape = [2, 4]
