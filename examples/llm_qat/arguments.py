@@ -145,8 +145,10 @@ def _build_usage_header():
 
     lines += [
         "",
-        "**Note:** Each script accepts only the arguments in its supported groups ✅. Arguments from other "
-        "groups are ignored (if set in a `--config` YAML) or error out (if passed as a CLI flag).",
+        (
+            "**Note:** Each script accepts only the arguments in its supported groups ✅. Arguments from other "
+            "groups are ignored (if set in a `--config` YAML) or error out (if passed as a CLI flag)."
+        ),
     ]
     return "\n".join(lines)
 

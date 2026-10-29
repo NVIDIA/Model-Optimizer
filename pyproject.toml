@@ -100,10 +100,10 @@ puzzletron = [ # Dependedencies for modelopt.torch.puzzletron subpackage
     "typeguard",
 ]
 dev-lint = [
-    "bandit[toml]==1.7.9", # security/compliance checks
-    "mypy==2.1.0",
-    "pre-commit==4.6.0",
-    "ruff==0.15.20",
+    "bandit[toml]==1.9.4", # security/compliance checks
+    "mypy==2.4.0",
+    "pre-commit==4.7.0",
+    "ruff==0.17.3",
 ]
 # Docs are only built on Python >=3.12 (sphinx 9.x requires it); markers keep `uv lock` from resolving these for 3.11, which we don't care about for building docs.
 dev-docs = [
@@ -118,9 +118,9 @@ dev-docs = [
     "sphinxext-rediraffe~=0.3.0; python_version >= '3.12'",
 ]
 dev-test = [
-    "coverage[toml]~=7.14.0", # a1_coverage.pth for subprocess tracking requires this
+    "coverage[toml]~=7.17.0", # a1_coverage.pth for subprocess tracking requires this
     "nox",
-    "pytest~=9.1.0",
+    "pytest~=9.2.0",
     "pytest-cov~=7.1.0",
     "pytest-instafail==0.5.0",
     # MPL-2.0 (weak copyleft) is fine: test-only and used unmodified, and its copyleft covers only
@@ -194,6 +194,7 @@ managed = true
 [tool.ruff]
 target-version = "py311"
 line-length = 100        # Line length limit for code
+extend-exclude = ["*.md"] # ruff 0.17 formats Markdown code blocks; keep docs as written
 fix = true
 
 [tool.ruff.format]
@@ -235,6 +236,7 @@ extend-ignore = [
     "PLR0912",
     "PLR0913",
     "PLR0915",
+    "PLR0917",
     "PLR2004",
     "PLR0911",
     "PT011",
@@ -343,14 +345,16 @@ ignore_errors = true
 
 [tool.bandit]
 exclude_dirs = [".github/", "examples/", "noxfile.py", "tests/"]
-# Do not change `skips`. It should be consistent with NVIDIA's Wheel-CI-CD bandit.yml config.
 # Use of `# nosec BXXX` requires special approval
 skips = [
     "B101", # assert_used
+    "B105", # hardcoded_password_string: flags any "*token*" / "pass" dict key, e.g. "bos_token_id": None
     "B110", # try_except_pass
     "B112", # try_except_continue
     "B303", # MD2, MD4, MD5, or SHA1
     "B311", # random
+    "B614", # pytorch_load: torch>=2.6 already defaults torch.load to weights_only=True
+    "B615", # huggingface_unsafe_download: model / dataset ids and their revisions come from the caller
 ]
 
 

@@ -216,7 +216,7 @@ def get_sparse_method(name: str, version: str | None = None) -> type[SparseAtten
     method_versions = _SPARSE_ATTENTION_METHODS[name]
 
     if not version:
-        version = sorted(method_versions.keys(), key=_version_key)[-1]
+        version = max(method_versions.keys(), key=_version_key)
 
     if version not in method_versions:
         available_versions = list(method_versions.keys())
