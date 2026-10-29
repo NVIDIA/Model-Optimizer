@@ -901,11 +901,12 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     def _local_experts(self, weight: torch.Tensor) -> torch.Tensor:
         """``weight`` indexed the way the per-expert quantizers are: by this module's own experts.
 
-        Under expert parallelism transformers keeps a fused expert weight as a DTensor sharded over
-        the experts and sets ``num_experts`` to the local count, so indexing the DTensor would read
-        the GLOBAL expert: from rank 1 on, another rank's. Its local shard holds this rank's experts in
-        quantizer order. A DTensor holding every expert (FSDP2) is indexed as it is, and one whose local
-        shard holds another number of experts than the quantizers is refused.
+        Under expert parallelism transformers 5.16 and later keep a fused expert weight as a DTensor
+        sharded over the experts (earlier ones keep a plain tensor of this rank's experts) and set
+        ``num_experts`` to the local count, so indexing the DTensor would read the GLOBAL expert: from
+        rank 1 on, another rank's. Its local shard holds this rank's experts in quantizer order. A
+        DTensor holding every expert (FSDP2) is indexed as it is, and one whose local shard holds
+        another number of experts than the quantizers is refused.
         """
         if isinstance(weight, DTensor) and weight.shape[0] != self.num_experts:
             local = weight.to_local()
