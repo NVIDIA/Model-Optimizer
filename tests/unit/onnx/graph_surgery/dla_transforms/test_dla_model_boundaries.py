@@ -34,6 +34,39 @@ from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_
 from modelopt.onnx.graph_surgery.utils.graph_utils import infer_shapes
 
 
+@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
+@pytest.mark.parametrize("input_port", [0, 1])
+@pytest.mark.parametrize("unary", [False, True])
+def test_broadcast_output_restoration_requires_a_promoted_source(shape, input_port, unary):
+    """Leave native broadcasts intact when no operand receives leading dimensions."""
+    operands = ["x", "weight"] if input_port == 0 else ["weight", "x"]
+    nodes = [helper.make_node("Add", operands, ["middle" if unary else "y"])]
+    if unary:
+        nodes.append(helper.make_node("Relu", ["middle"], ["y"]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "native_broadcast_output",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)],
+            [numpy_helper.from_array(np.ones(shape, np.float32), "weight")],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=9,
+    )
+    feeds = {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape)}
+    onnx.checker.check_model(model, full_check=True)
+    expected = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"]
+    ).run(None, feeds)
+    transformed = _transform_make_dla_compatible(model, verbose=False)
+    onnx.checker.check_model(transformed, full_check=True)
+    actual = ort.InferenceSession(
+        transformed.SerializeToString(), providers=["CPUExecutionProvider"]
+    ).run(None, feeds)
+    np.testing.assert_array_equal(actual[0], expected[0])
+
+
 @pytest.mark.parametrize("identity", ["custom", "local", "overload"])
 @pytest.mark.parametrize(
     ("operation", "entrypoint"),

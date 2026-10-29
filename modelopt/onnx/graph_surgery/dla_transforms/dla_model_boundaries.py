@@ -377,11 +377,32 @@ def _apply_non4d_model_outputs(
     append = []
     plans = []
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    native_broadcasts = set()
+    if defer_rank_conversion and "Non4dInitializers" not in prepared_output_ops:
+        live_ranks = {
+            name: len(shape)
+            for name in boundary_names
+            if (shape := cache.get_shape(name)) is not None
+        }
+        for node in graph.node:
+            if (
+                _is_standard_node(node, local_functions, _RANK_AGNOSTIC_OPS)
+                and node.input
+                and all(name in live_ranks for name in node.input)
+            ):
+                rank = max(live_ranks[name] for name in node.input)
+                live_ranks.update(dict.fromkeys(node.output, rank))
+                if rank < 4 and (
+                    len(node.input) > 1 or any(name in native_broadcasts for name in node.input)
+                ):
+                    native_broadcasts.update(node.output)
     rank_sources = {}
     contrib_ops = _boundary_contrib_ops(model)
     for value in graph.output:
         shape = cache.get_shape(value.name)
         if shape is None or len(shape) >= 4 or value.name in boundary_names:
+            continue
+        if value.name in native_broadcasts:
             continue
         producer = cache.get_producer(value.name)
         source = _output_rank_source(cache, producer, local_functions, rank_sources)
