@@ -43,6 +43,7 @@ from modelopt.torch.utils import atomic_print
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
 from ._calibration_store import _collective_check
 from ._calibration_workers import _CalibrationSession
+from ._source_estimation import _SOURCE_ACTIVATION_ESTIMATOR
 from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
@@ -1022,14 +1023,21 @@ def auto_quantize(
     for quant_cfg, name in all_processed_formats:
         recipe = QuantRecipe(quant_cfg, name=name)
         algorithms = recipe.config.algorithm
-        if collect_scores:
+        if collect_scores or (
+            calibration is not None and calibration.get("source_activation_bytes") is not None
+        ):
+            assert calibration is not None
             for mode_name, settings in get_modelike_from_algo_cfg(algorithms):
                 descriptor = cast("BaseCalibrateModeDescriptor", CalibrateModeRegistry[mode_name])
                 resolved = descriptor.config_class(**settings)
-                if (
-                    resolved.layerwise.enable
-                    or descriptor._requires_final_layerwise
-                    or descriptor._auto_quantize_search_policy != "same_algorithm"
+                needs_layerwise = resolved.layerwise.enable or descriptor._requires_final_layerwise
+                if descriptor._auto_quantize_search_policy != "same_algorithm" or (
+                    needs_layerwise
+                    and (
+                        calibration.get("source_activation_bytes") is None
+                        or descriptor._auto_quantize_layerwise_estimator
+                        != _SOURCE_ACTIVATION_ESTIMATOR
+                    )
                 ):
                     raise ValueError(
                         "Independent format scoring requires a validated non-layerwise estimator"

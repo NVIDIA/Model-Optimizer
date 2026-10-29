@@ -1376,11 +1376,14 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 num_modes = len(modelopt_state)
                 try:
                     with preserve_source_weights():
-                        calibrate(
-                            self.model,
-                            algorithm=recipe.config.algorithm,
-                            forward_loop=forward_loop,
-                        )
+                        if calibration is None or not calibration.estimate(
+                            self.model, recipe, quant_recipe_hparams, forward_loop
+                        ):
+                            calibrate(
+                                self.model,
+                                algorithm=recipe.config.algorithm,
+                                forward_loop=forward_loop,
+                            )
                 finally:
                     del modelopt_state[num_modes:]
                 # Checkpoint tensors must share the parked CPU payloads, not retain GPU copies.

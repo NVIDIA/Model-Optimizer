@@ -52,24 +52,8 @@ def _input_storages(inputs):
     return storages
 
 
-@torch.no_grad()
-def _estimate_source_activations(
-    model: nn.Module,
-    groups: Sequence[tuple[Sequence[str], QuantizeAlgoCfgType]],
-    forward_loop: ForwardLoop,
-    *,
-    max_activation_bytes: int,
-):
-    """Estimate configured candidate groups from original-source layer inputs.
-
-    This is not final calibration: it omits the eventual selected quantized prefix. The caller
-    owns source/input identity, fresh candidate quantizers and worker memory/artifact limits.
-    No checkpoints or exports are written; only a complete candidate may be published.
-    """
-    if type(max_activation_bytes) is not int or max_activation_bytes < 1:
-        raise ValueError("Source estimates require a positive activation-cache byte limit")
-    if not callable(forward_loop):
-        raise ValueError("Source estimates require a replayable forward loop")
+def _validate_source_layout(model):
+    """Refuse unsupported source layouts before conversion or calibration."""
     if torch.distributed.is_initialized() and torch.distributed.get_world_size() != 1:
         raise ValueError("Source estimates currently require one process")
     if any(module.training or isinstance(module, FSDPModule) for module in model.modules()):
@@ -88,6 +72,27 @@ def _estimate_source_activations(
         devices.add(parameter.device)
     if len(devices) != 1:
         raise ValueError("Source estimates currently require one materialized model device")
+
+
+@torch.no_grad()
+def _estimate_source_activations(
+    model: nn.Module,
+    groups: Sequence[tuple[Sequence[str], QuantizeAlgoCfgType]],
+    forward_loop: ForwardLoop,
+    *,
+    max_activation_bytes: int,
+):
+    """Estimate configured candidate groups from original-source layer inputs.
+
+    This is not final calibration: it omits the eventual selected quantized prefix. The caller
+    owns source/input identity, fresh candidate quantizers and worker memory/artifact limits.
+    No checkpoints or exports are written; only a complete candidate may be published.
+    """
+    if type(max_activation_bytes) is not int or max_activation_bytes < 1:
+        raise ValueError("Source estimates require a positive activation-cache byte limit")
+    if not callable(forward_loop):
+        raise ValueError("Source estimates require a replayable forward loop")
+    _validate_source_layout(model)
 
     dispatch = _SelectedLayerCalibrator(model, groups)
     owned = set()

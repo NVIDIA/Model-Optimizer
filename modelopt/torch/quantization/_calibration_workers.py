@@ -25,7 +25,7 @@ from contextlib import nullcontext
 from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -162,9 +162,18 @@ class _CalibrationSession(_CalibrationStore):
             "collect_scores",
             "max_artifact_bytes",
             "max_candidate_bytes",
+            "source_activation_bytes",
         }:
             raise ValueError("Invalid calibration worker options")
         super().__init__(options["directory"], options.get("candidate"))
+        self.source_activation_bytes = options.get("source_activation_bytes")
+        if self.source_activation_bytes is not None:
+            if type(self.source_activation_bytes) is not int or self.source_activation_bytes < 1:
+                raise ValueError("Source estimates require a positive activation-cache byte limit")
+            # The estimator imports calibration modes, which depend on this module's algorithms.
+            from ._source_estimation import _validate_source_layout
+
+            _validate_source_layout(model)
         self.max_artifact_bytes = options.get("max_artifact_bytes")
         self.max_candidate_bytes = options.get("max_candidate_bytes", self.max_artifact_bytes)
         for limit in (self.max_artifact_bytes, self.max_candidate_bytes):
@@ -234,6 +243,41 @@ class _CalibrationSession(_CalibrationStore):
         self.contract = None
         self.recipes = []
 
+    def estimate(self, model, recipe, hparams, forward_loop):
+        """Use original-source layer inputs only for explicitly opted-in layerwise estimates."""
+        if self.source_activation_bytes is None:
+            return False
+        # Mode registration depends on algorithms; defer until the search session runs.
+        from ._source_estimation import _estimate_source_activations
+        from .mode import (
+            BaseCalibrateModeDescriptor,
+            CalibrateModeRegistry,
+            get_modelike_from_algo_cfg,
+        )
+
+        modes = [
+            (cast("BaseCalibrateModeDescriptor", CalibrateModeRegistry[name]), settings)
+            for name, settings in get_modelike_from_algo_cfg(recipe.config.algorithm)
+        ]
+        if not any(
+            mode.config_class(**settings).layerwise.enable or mode._requires_final_layerwise
+            for mode, settings in modes
+        ):
+            return False
+        # Source modules were checked before conversion; newly inserted candidates default to train.
+        model.eval()
+        _estimate_source_activations(
+            model,
+            [
+                (hp.quant_module_names, recipe.config.algorithm)
+                for hp in hparams
+                if recipe in hp.choices
+            ],
+            forward_loop,
+            max_activation_bytes=self.source_activation_bytes,
+        )
+        return True
+
     def __iter__(self):
         for leaves, spec in self.batches:
             yield tree_unflatten(
@@ -296,6 +340,10 @@ class _CalibrationSession(_CalibrationStore):
             "steps": [searcher.config["num_calib_steps"], searcher.config["num_score_steps"]],
             "method_options": {key: searcher.config[key] for key in searcher.method_config_keys},
         }
+        if self.source_activation_bytes is not None:
+            from ._source_estimation import _SOURCE_ACTIVATION_ESTIMATOR
+
+            self.contract["layerwise_estimator"] = _SOURCE_ACTIVATION_ESTIMATOR
         # Compare a canonical digest because setup signatures contain tuples and recipe metadata.
         provenance = {"digest": _digest(self.contract), "contract": self.contract}
         restored = state.get("calibration_provenance")

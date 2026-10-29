@@ -157,6 +157,7 @@ def freeze_auto_quantize_assignment(search_state, plan: AutoQuantizePlan, proven
                 "runtime_groups": setup,
                 "groups": groups,
                 "constraints": best["constraints"],
+                "requested_constraints": planned["constraints"],
                 "cost_denominator": search_state["cost_denominator"],
                 "disabled_layers": search_state["disabled_layers"],
                 "cost": search_state["cost"],
