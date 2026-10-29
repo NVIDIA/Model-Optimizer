@@ -2086,3 +2086,63 @@ def test_gather_does_not_retarget_a_cast_after_its_output_was_wrapped():
     _assert_match(expected, _run_ort(converted, feeds))
     cast = next(node for node in converted.graph.node if node.name == "source_cast")
     assert next(attr.i for attr in cast.attribute if attr.name == "to") == TensorProto.INT64
+
+
+@pytest.mark.parametrize("operation", ["Add", "Split", "DequantizeLinear"])
+def test_shared_unchanged_controls_allow_data_rank_conversion(operation):
+    """Only initializer inputs whose dimensions change need private ownership."""
+    shape = [1, 2, 3]
+    initializers = []
+    nodes = []
+    outputs = []
+    if operation == "Add":
+        initializers = [_init("control", np.float32(2))]
+        controls = {"control"}
+        for index in range(2):
+            nodes.append(helper.make_node("Add", ["x", "control"], [f"y{index}"]))
+            outputs.append(_vi(f"y{index}", TensorProto.FLOAT, shape))
+    elif operation == "Split":
+        initializers = [_init("control", np.array([1, 1], np.int64))]
+        controls = {"control"}
+        for index in range(2):
+            names = [f"y{index}a", f"y{index}b"]
+            nodes.append(helper.make_node("Split", ["x", "control"], names, axis=1))
+            outputs.extend(_vi(name, TensorProto.FLOAT, [1, 1, 3]) for name in names)
+    else:
+        initializers = [
+            _init("scale", np.array([0.5, 0.25], np.float32)),
+            _init("zero", np.array([0, 0], np.uint8)),
+        ]
+        controls = {"scale", "zero"}
+        for index in range(2):
+            initializers.append(_init(f"data{index}", np.arange(6, dtype=np.uint8).reshape(shape)))
+            nodes.append(
+                helper.make_node(
+                    operation, [f"data{index}", "scale", "zero"], [f"y{index}"], axis=1
+                )
+            )
+            outputs.append(_vi(f"y{index}", TensorProto.FLOAT, shape))
+    inputs = [] if operation == "DequantizeLinear" else [_vi("x", TensorProto.FLOAT, shape)]
+    model = _make_model(nodes, "shared_unchanged_controls", inputs, outputs, initializers)
+    feeds = {} if not inputs else {"x": np.arange(6, dtype=np.float32).reshape(shape)}
+    owners = {tensor.name: tensor for tensor in model.graph.initializer if tensor.name in controls}
+    before = {name: tensor.SerializeToString() for name, tensor in owners.items()}
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    _apply_convert_ops_to_4d(model)
+    inferred = onnx.shape_inference.infer_shapes(model, strict_mode=True)
+    onnx.checker.check_model(inferred, full_check=True)
+    ranks = {
+        info.name: len(info.type.tensor_type.shape.dim)
+        for info in [*inferred.graph.value_info, *inferred.graph.output]
+    }
+    converted = [node for node in model.graph.node if node.op_type == operation]
+    assert len(converted) == 2
+    assert all(ranks[name] == 4 for node in converted for name in node.output)
+    retained = {tensor.name: tensor for tensor in model.graph.initializer}
+    for name, owner in owners.items():
+        assert retained[name] is owner
+        assert owner.SerializeToString() == before[name]
+    actual = _run_ort(model, feeds)
+    for name in expected:
+        np.testing.assert_array_equal(actual[name], expected[name])

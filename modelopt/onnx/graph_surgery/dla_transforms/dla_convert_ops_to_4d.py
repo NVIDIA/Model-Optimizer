@@ -1131,13 +1131,16 @@ def _handle_lpnorm(node, graph, shape_map, init_names, unique_init, inits_to_add
     return [*pre, node, *post]
 
 
+def _axis_control_input_indices(node):
+    """Identify axis-operation controls whose dimensions must stay unchanged."""
+    if node.op_type == "DequantizeLinear":
+        return {1, 2}
+    return {1} if node.op_type in {"Split", "TopK"} else set()
+
+
 def _handle_axis_op(node, graph, shape_map, init_names, unique_init, inits_to_add, cnt_ref):
     """Softmax, LogSoftmax, Concat, Split, TopK, DequantizeLinear."""
-    skip_input_indices = (
-        {1, 2}
-        if node.op_type == "DequantizeLinear"
-        else ({1} if node.op_type in {"Split", "TopK"} else set())
-    )
+    skip_input_indices = _axis_control_input_indices(node)
     data_inputs = [inp for i, inp in enumerate(node.input) if inp and i not in skip_input_indices]
     if not data_inputs or any(shape_map.get(inp) is None for inp in data_inputs):
         return None
@@ -1708,6 +1711,21 @@ def _apply_convert_ops_to_4d(model: onnx.ModelProto) -> onnx.ModelProto:
         ):
             continue
         handler = _OP_HANDLERS.get(node.op_type, _handle_generic)
+        guarded_inputs = list(node.input)
+        if handler is _handle_dequantize_linear:
+            guarded_inputs = guarded_inputs[:1]
+        elif handler is _handle_axis_op:
+            controls = _axis_control_input_indices(node)
+            guarded_inputs = [
+                name for index, name in enumerate(node.input) if index not in controls
+            ]
+        elif handler is _handle_generic:
+            guarded_inputs = [
+                name
+                for index, name in enumerate(node.input)
+                if not (node.op_type in {"Conv", "ConvTranspose"} and index == 2)
+                and not (name in init_names and not cache.init_map[name].dims)
+            ]
         if any(
             name in init_names
             and len(cache.init_map[name].dims) != 4
@@ -1721,7 +1739,7 @@ def _apply_convert_ops_to_4d(model: onnx.ModelProto) -> onnx.ModelProto:
                     )
                 )
             )
-            for name in node.input
+            for name in guarded_inputs
             if name
         ):
             continue
