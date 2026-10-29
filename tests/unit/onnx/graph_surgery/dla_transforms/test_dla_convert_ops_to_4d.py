@@ -2088,8 +2088,9 @@ def test_gather_does_not_retarget_a_cast_after_its_output_was_wrapped():
     assert next(attr.i for attr in cast.attribute if attr.name == "to") == TensorProto.INT64
 
 
+@pytest.mark.parametrize("public_control", [False, True])
 @pytest.mark.parametrize("operation", ["Add", "Split", "DequantizeLinear"])
-def test_shared_unchanged_controls_allow_data_rank_conversion(operation):
+def test_shared_unchanged_controls_allow_data_rank_conversion(operation, public_control):
     """Only initializer inputs whose dimensions change need private ownership."""
     shape = [1, 2, 3]
     initializers = []
@@ -2124,6 +2125,12 @@ def test_shared_unchanged_controls_allow_data_rank_conversion(operation):
             outputs.append(_vi(f"y{index}", TensorProto.FLOAT, shape))
     inputs = [] if operation == "DequantizeLinear" else [_vi("x", TensorProto.FLOAT, shape)]
     model = _make_model(nodes, "shared_unchanged_controls", inputs, outputs, initializers)
+    if public_control:
+        model.graph.input.extend(
+            _vi(tensor.name, tensor.data_type, list(tensor.dims))
+            for tensor in model.graph.initializer
+            if tensor.name in controls
+        )
     feeds = {} if not inputs else {"x": np.arange(6, dtype=np.float32).reshape(shape)}
     owners = {tensor.name: tensor for tensor in model.graph.initializer if tensor.name in controls}
     before = {name: tensor.SerializeToString() for name, tensor in owners.items()}
@@ -2138,7 +2145,9 @@ def test_shared_unchanged_controls_allow_data_rank_conversion(operation):
     }
     converted = [node for node in model.graph.node if node.op_type == operation]
     assert len(converted) == 2
-    assert all(ranks[name] == 4 for node in converted for name in node.output)
+    assert all(
+        ranks[name] == (3 if public_control else 4) for node in converted for name in node.output
+    )
     retained = {tensor.name: tensor for tensor in model.graph.initializer}
     for name, owner in owners.items():
         assert retained[name] is owner

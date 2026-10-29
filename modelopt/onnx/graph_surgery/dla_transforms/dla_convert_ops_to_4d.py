@@ -1732,14 +1732,15 @@ def _apply_convert_ops_to_4d(model: onnx.ModelProto) -> onnx.ModelProto:
             and (
                 name in cache.graph_input_names
                 or (
-                    handler in {_handle_axis_op, _handle_generic, _handle_dequantize_linear}
+                    name in guarded_inputs
+                    and handler in {_handle_axis_op, _handle_generic, _handle_dequantize_linear}
                     and (
                         len(cache.get_consumers(name)) > 1
                         or name in cache.graph_output_names | captured
                     )
                 )
             )
-            for name in guarded_inputs
+            for name in node.input
             if name
         ):
             continue
