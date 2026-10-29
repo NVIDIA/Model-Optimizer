@@ -53,7 +53,7 @@ from .kv_cache_auto_quant import (
     get_kv_cache_auto_quantize_config,
 )
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
-from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
+from .mode import CalibrateModeRegistry, QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized
 from .utils.core_utils import _get_fsdp2_mesh
@@ -87,19 +87,18 @@ _RANK_LOCAL_CALIBRATION = (
 def _rank_local_calibrations(algorithm: QuantizeAlgoCfgType) -> list[str]:
     """The rank-local calibrations ``algorithm`` runs, with those it runs for its scales."""
     found = []
-    # Reads the options as the caller spelled them, which is enough while every registered default
-    # syncs over the ranks: max and mse default to distributed_sync=True, nvfp4_act_headroom's
-    # weight_scale_algorithm to max, and lsq calibrates its scales with mse when it names none. A
-    # default that keeps its statistics on the rank has to be refused here too.
-    for mode, config in get_modelike_from_algo_cfg(algorithm):
+    for mode, options in get_modelike_from_algo_cfg(algorithm):
         method = mode.removesuffix("_calibrate")
+        # The options as the calibration reads them, through its mode's schema: a string such as
+        # "false" is coerced, and a default counts as if spelled out.
+        config = CalibrateModeRegistry[mode].config_class.model_validate(options)
         if method in _RANK_LOCAL_CALIBRATION:
             found.append(method)
-        elif "distributed_sync" in config and not config["distributed_sync"]:
-            found.append(f"{method} with distributed_sync={config['distributed_sync']}")
+        elif getattr(config, "distributed_sync", True) is False:
+            found.append(f"{method} with distributed_sync=False")
         for key in ("weight_scale_algorithm", "scale_algorithm"):
-            if config.get(key) is not None:
-                found += _rank_local_calibrations(config[key])
+            if getattr(config, key, None) is not None:
+                found += _rank_local_calibrations(getattr(config, key))
     return found
 
 
