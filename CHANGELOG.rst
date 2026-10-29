@@ -8,6 +8,7 @@ Changelog
 
 *Quantization*
 
+- GGML GPTQ can distribute independent fused-expert updates across FSDP2 data-parallel GPUs with ``parallel_experts: true``; serial updates remain the default.
 - The HF PTQ example exposes independent AutoQuant candidate workers, and the Slurm launcher can bound concurrent tasks and join them before coordination.
 - AutoQuantize supports opt-in independent candidate-calibration workers with validated, resumable artifacts and atomic coordinator checkpoints.
 - Per-tensor FP8 matrix and expert-stack exports now match calibrated fake-quantization arithmetic; exported scales can differ by a few float32 ulps and packed values near rounding boundaries can change.

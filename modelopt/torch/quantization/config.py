@@ -155,7 +155,14 @@ import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Literal, TypeAlias
 
-from pydantic import Field, ValidationInfo, field_serializer, field_validator, model_validator
+from pydantic import (
+    Field,
+    ValidationInfo,
+    field_serializer,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
@@ -1278,6 +1285,24 @@ class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):
         (the GGML IQ1 and IQ2 formats) weight it by the square root of the Hessian diagonal,
         llama.cpp's imatrix statistic. Other formats ignore it.""",
     )
+    parallel_experts: bool = ModeloptField(
+        default=False,
+        title="Distribute GGML expert GPTQ updates over FSDP2 ranks.",
+        description="""Requires multiple NCCL ranks in the default data-parallel group, without
+        tensor or expert parallelism. Dense projections retain their serial update path.""",
+    )
+
+    @model_serializer(mode="wrap")
+    def _serialize_execution_setting(self, handler):
+        values = handler(self)
+        if not self.parallel_experts:
+            values.pop("parallel_experts", None)
+        return values
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore the serial default in checkpoints predating parallel updates."""
+        super().__setstate__(state)
+        self.__dict__.setdefault("parallel_experts", False)
 
 
 class ImatrixCalibConfig(QuantizeAlgorithmConfig):

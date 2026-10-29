@@ -15,19 +15,30 @@
 """GPTQ on a GGML format through ``mtq.quantize``, with the CUDA encoders."""
 
 import copy
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import pytest
 import torch
 from _test_utils.torch.quantization.models import TOY_MOE_HIDDEN, ToyMoE
+from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.algorithms import AutoQuantizeGradientSearcher
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.ggml.common import pinned_packed_weight
-from modelopt.torch.quantization.nn import QuantModule
-from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
+from modelopt.torch.quantization.ggml.common import (
+    pin_packed_weight,
+    pinned_packed_weight,
+    preserve_source_weights,
+)
+from modelopt.torch.quantization.ggml.gptq import GGMLGPTQHelper
+from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
+from modelopt.torch.quantization.utils import (
+    enable_weight_access_and_writeback,
+    get_quantizer_state_dict,
+)
 from modelopt.torch.utils import safe_load
+from modelopt.torch.utils.distributed import DistributedProcessGroup
 
 
 def _iq1_s_config(algorithm):
@@ -307,3 +318,173 @@ def _candidate_workers_merge(rank, size, tmp_path, offload):
             )
         assert checkpoint.resolve() == generation
         assert (generation / f"rank{rank}.pth").is_file()
+
+
+@pytest.mark.parametrize(
+    ("cpu_offload", "dtype", "hessian_input_dtype"),
+    [
+        (False, torch.bfloat16, "float32"),
+        (True, torch.bfloat16, "float32"),
+        (False, torch.float16, "float32"),
+        (False, torch.float32, "float32"),
+        (True, torch.bfloat16, "bfloat16"),
+    ],
+)
+def test_parallel_fsdp_experts_preserve_payloads_and_outputs(
+    dist_workers, cpu_offload, dtype, hessian_input_dtype
+):
+    dist_workers.run(_parallel_expert_agreement, cpu_offload, dtype, hessian_input_dtype)
+
+
+def _parallel_expert_agreement(rank, size, cpu_offload, dtype, hessian_input_dtype):
+    assert size > 1
+    for fmt in ("iq2_xxs", "iq2_xs", "iq2_s"):
+        for preserve in (False, True):
+            results = []
+            for parallel in (False, True):
+                torch.manual_seed(42)
+                model = ToyMoE().to(device="cuda", dtype=dtype)
+                original = {n: p.detach().cpu().clone() for n, p in model.named_parameters()}
+                config = _iq1_s_config(None)
+                config["quant_cfg"][1].update(quantizer_name="*experts*weight_quantizer")
+                config["quant_cfg"][1]["cfg"]["num_bits"] = fmt
+                mtq.quantize(model, config)
+                options = {"offload_policy": CPUOffloadPolicy()} if cpu_offload else {}
+                fully_shard(model.mlp, **options)
+                fully_shard(model, **options)
+                inputs = torch.randn(8 + rank, TOY_MOE_HIDDEN, device="cuda", dtype=dtype)
+                updates = [0]
+                update = GGMLGPTQHelper.update_weights
+
+                def count_update(self, *args, **kwargs):
+                    updates[0] += 1
+                    return update(self, *args, **kwargs)
+
+                with (
+                    preserve_source_weights() if preserve else nullcontext(),
+                    patch.object(GGMLGPTQHelper, "update_weights", count_update),
+                ):
+                    mtq.calibrate(
+                        model,
+                        {
+                            "method": "gptq",
+                            "block_size": 256,
+                            "perc_damp": 0.3,
+                            "importance_weighted": True,
+                            "parallel_experts": parallel,
+                            "hessian_input_dtype": hessian_input_dtype,
+                        },
+                        forward_loop=lambda m: m(inputs),
+                    )
+                with torch.no_grad():
+                    output = model(inputs).cpu()
+                states = {
+                    n: {k: v.detach().cpu().clone() for k, v in b.items()}
+                    for n, b in get_quantizer_state_dict(model).items()
+                }
+                with enable_weight_access_and_writeback(model.mlp.experts, model):
+                    for name, weight in model.mlp.experts.named_parameters(recurse=False):
+                        if preserve:
+                            torch.testing.assert_close(
+                                weight.cpu(), original[f"mlp.experts.{name}"], rtol=0, atol=0
+                            )
+                    for weight, quantizer in model.mlp.experts.iter_weights_for_calibration():
+                        if quantizer.is_enabled:
+                            payload = pinned_packed_weight(quantizer, fmt)
+                            assert torch.equal(
+                                GGML_FORMAT_REGISTRY[fmt].pack(weight, quantizer), payload
+                            )
+                results.append((states, output, updates[0]))
+                del model
+            torch.testing.assert_close(results[0][:2], results[1][:2], rtol=0, atol=0)
+            total_updates = torch.tensor(results[1][2], device="cuda")
+            torch.distributed.all_reduce(total_updates)
+            assert total_updates.item() == results[0][2]
+            assert 0 < results[1][2] < results[0][2]
+
+
+@pytest.mark.timeout(90)
+@pytest.mark.parametrize("failure", ["exception", "payload_shape", "hessian_dtype"])
+def test_parallel_experts_reject_rank_disagreement_without_mutation(dist_workers, failure):
+    dist_workers.run(_parallel_expert_rejection, failure)
+
+
+def _parallel_expert_rejection(rank, size, failure):
+    torch.manual_seed(42)
+    model = ToyMoE().to(device="cuda", dtype=torch.bfloat16)
+    config = _iq1_s_config(None)
+    config["quant_cfg"][1].update(quantizer_name="*experts*weight_quantizer")
+    config["quant_cfg"][1]["cfg"]["num_bits"] = "iq2_xxs"
+    mtq.quantize(model, config)
+    fully_shard(model.mlp)
+    fully_shard(model)
+    before = copy.deepcopy(get_quantizer_state_dict(model))
+    if rank == 0:
+        model.mlp.experts.parallel_state.tensor_parallel_group = DistributedProcessGroup(None)
+    with pytest.raises(ValueError):
+        mtq.calibrate(model, {"method": "gptq", "block_size": 256, "parallel_experts": True})
+    torch.testing.assert_close(get_quantizer_state_dict(model), before, rtol=0, atol=0)
+
+    model.mlp.experts.parallel_state.tensor_parallel_group = DistributedProcessGroup(-1)
+    inputs_quantizers = [
+        q
+        for name, q in model.named_modules()
+        if name.endswith("input_quantizer") and isinstance(q, TensorQuantizer)
+    ]
+    assert len(inputs_quantizers) > 1
+    for quantizer in inputs_quantizers:
+        quantizer.enable()
+    if rank == 0:
+        inputs_quantizers[0].disable()
+
+    def refuse_forward(_model):
+        raise AssertionError("Calibration started before layout validation")
+
+    with pytest.raises(ValueError):
+        mtq.calibrate(
+            model,
+            {"method": "gptq", "block_size": 256, "parallel_experts": True},
+            forward_loop=refuse_forward,
+        )
+    torch.testing.assert_close(get_quantizer_state_dict(model), before, rtol=0, atol=0)
+    for quantizer in inputs_quantizers:
+        quantizer.disable()
+
+    if failure == "hessian_dtype":
+        with pytest.raises(ValueError):
+            mtq.calibrate(
+                model,
+                {
+                    "method": "gptq",
+                    "block_size": 256,
+                    "parallel_experts": True,
+                    "hessian_input_dtype": "bfloat16" if rank == 0 else "float32",
+                },
+                forward_loop=refuse_forward,
+            )
+        torch.testing.assert_close(get_quantizer_state_dict(model), before, rtol=0, atol=0)
+        return
+
+    # An owner failure is reported to every peer before payload broadcasts begin.
+    update = GGMLGPTQHelper.update_weights
+
+    def fail_one_owner(self, *args, **kwargs):
+        if rank == 0 and failure == "exception":
+            raise RuntimeError("Injected owner failure")
+        result = update(self, *args, **kwargs)
+        if rank == 0 and failure == "payload_shape":
+            quantizer = self.weight_quantizer
+            payload = pinned_packed_weight(quantizer, "iq2_xxs")
+            pin_packed_weight(quantizer, "iq2_xxs", payload.flatten())
+        return result
+
+    inputs = torch.randn(8, TOY_MOE_HIDDEN, device="cuda", dtype=torch.bfloat16)
+    with (
+        patch.object(GGMLGPTQHelper, "update_weights", fail_one_owner),
+        pytest.raises(RuntimeError),
+    ):
+        mtq.calibrate(
+            model,
+            {"method": "gptq", "block_size": 256, "parallel_experts": True},
+            forward_loop=lambda m: m(inputs),
+        )

@@ -470,3 +470,12 @@ def test_row_keys_do_not_depend_on_the_batch_a_row_is_hashed_in(dtype):
     assert torch.equal(_row_keys(table[index]), keys[index])
     assert all(torch.equal(_row_keys(table[i : i + 1]), keys[i : i + 1]) for i in index.tolist())
     assert len(keys.unique()) == len(table)
+
+
+def test_parallel_experts_refuse_missing_process_group_before_calibration():
+    model = torch.nn.Linear(256, 4, bias=False)
+    mtq.quantize(model, _iq_config(None, "iq2_xxs"))
+    before = copy.deepcopy(model.state_dict())
+    with pytest.raises(ValueError):
+        mtq.calibrate(model, {**GPTQ, "parallel_experts": True})
+    torch.testing.assert_close(model.state_dict(), before, rtol=0, atol=0)

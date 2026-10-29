@@ -2472,6 +2472,7 @@ def gptq(
     fused: bool = False,
     importance_weighted: bool = False,
     hessian_input_dtype: str = "float32",
+    parallel_experts: bool = False,
 ):
     """GPTQ quantization.
 
@@ -2512,12 +2513,28 @@ def gptq(
             importance weight it by the square root of the Hessian diagonal.
         hessian_input_dtype: ``"float32"`` or ``"bfloat16"``, the dtype the Hessian GEMM reads
             the activations in; see :class:`GPTQCalibConfig <modelopt.torch.quantization.config.GPTQCalibConfig>`.
+        parallel_experts: Distribute independent GGML expert updates over FSDP2 data-parallel
+            ranks. Within-expert error correction and Hessian collection remain sequential.
     """
     total_start = time.time()
 
     fused_experts = [(n, m) for n, m in model.named_modules() if _is_quant_fused_experts(m)]
-    for name, module in fused_experts:
-        _refuse_packed_fused_expert_weights(name, module, "GPTQ", lambda q: q.is_enabled)
+    if parallel_experts:
+        # GGML imports calibration helpers during backend registration (circular import).
+        from .ggml.parallel import _update_parallel_experts, _validate_parallel_experts
+
+        _validate_parallel_experts(
+            model,
+            fused_experts,
+            _fused_expert_projections,
+            block_size,
+            perc_damp,
+            importance_weighted,
+            hessian_input_dtype,
+        )
+    else:
+        for name, module in fused_experts:
+            _refuse_packed_fused_expert_weights(name, module, "GPTQ", lambda q: q.is_enabled)
 
     # TODO: Add support for other scale setting strateiges like weight-mse or local-hessian
     # The Hessian pass below is GPTQ's own forward; max only runs one if activations need amax.
@@ -2640,13 +2657,18 @@ def gptq(
     for name, module in fused_experts:
         updated = unreached = 0
         with enable_weight_access_and_writeback(module, model, names):
-            for weight, quantizer in module.iter_weights_for_calibration():
-                handle = expert_handles.pop(id(quantizer), None)
-                if handle is not None:
-                    unreached += handle.n_samples == 0
-                    handle.update_weights(block_size, perc_damp, weight)
-                    handle.free()
-                    updated += 1
+            if parallel_experts:
+                updated, unreached = _update_parallel_experts(
+                    module, expert_handles, block_size, perc_damp
+                )
+            else:
+                for weight, quantizer in module.iter_weights_for_calibration():
+                    handle = expert_handles.pop(id(quantizer), None)
+                    if handle is not None:
+                        unreached += handle.n_samples == 0
+                        handle.update_weights(block_size, perc_damp, weight)
+                        handle.free()
+                        updated += 1
         if updated:
             print_rank_0(
                 f"[{name}] GPTQ updated {updated} expert weights, {unreached} of them never "
