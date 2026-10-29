@@ -33,7 +33,6 @@ from .dla_reorder_nodes import priority_topological_order
 __all__ = []
 
 
-
 class _BoundaryPreflightError(ValueError):
     """Prerequisite lowering cannot freeze an exposed runtime control."""
 
