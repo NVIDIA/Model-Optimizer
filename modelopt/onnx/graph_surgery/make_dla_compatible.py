@@ -131,7 +131,9 @@ def _boundary_stage_options(name, quant_types, verbose, prepared_input_ops, prep
     return {}
 
 
-def _validate_boundary_contract(model, prepared_input_ops, prepared_output_ops):
+def _validate_boundary_contract(
+    model, prepared_input_ops, prepared_output_ops, *, require_inferred_shapes=False
+):
     """Refuse unsupported native layouts before adapting any public boundary."""
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     cache = GraphCache(model.graph)
@@ -148,7 +150,10 @@ def _validate_boundary_contract(model, prepared_input_ops, prepared_output_ops):
         _require_output_rank_conversion(node, local_functions, prepared_output_ops, cache)
     if "FixInstanceNormChannelMismatch" in prepared_input_ops:
         _apply_fix_instancenorm_channels(
-            model, prepared_consumer_ops=prepared_input_ops, validate_only=True
+            model,
+            prepared_consumer_ops=prepared_input_ops,
+            validate_only=True,
+            require_inferred_shapes=require_inferred_shapes,
         )
     _apply_non4d_model_inputs(model, prepared_input_ops=prepared_input_ops, validate_only=True)
     _apply_non4d_model_outputs(
@@ -212,7 +217,9 @@ def _transform_make_dla_compatible(
     if remove_all_qdq:
         quant_types = frozenset(onnx.TensorProto.DataType.values())
     try:
-        _validate_boundary_contract(model, prepared_input_ops, prepared_output_ops)
+        _validate_boundary_contract(
+            model, prepared_input_ops, prepared_output_ops, require_inferred_shapes=True
+        )
     except _BoundaryPreflightError:
         raise
     except (ValueError, NotImplementedError):

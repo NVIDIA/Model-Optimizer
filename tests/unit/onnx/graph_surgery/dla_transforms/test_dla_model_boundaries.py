@@ -481,6 +481,41 @@ def test_normalization_refuses_unprepared_consumers_before_mutation(through_pipe
     assert model.SerializeToString() == before
 
 
+def test_normalization_probe_accepts_unknown_sequence_element_rank():
+    """A probe may retain valid native normalization when inference cannot recover its rank."""
+    shape = [1, 1, 1, 4]
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("SequenceAt", ["sequence", "index"], ["r"]),
+                helper.make_node("InstanceNormalization", ["r", "scale", "bias"], ["unused"]),
+                helper.make_node("Identity", ["x"], ["y"]),
+            ],
+            "unknown_native_rank",
+            [
+                helper.make_tensor_sequence_value_info("sequence", TensorProto.FLOAT, None),
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, shape),
+            ],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)],
+            [
+                numpy_helper.from_array(np.array(0, np.int64), "index"),
+                numpy_helper.from_array(np.ones(1, np.float32), "scale"),
+                numpy_helper.from_array(np.zeros(1, np.float32), "bias"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    values = np.arange(4, dtype=np.float32).reshape(shape)
+    feeds = {"sequence": [values], "x": values}
+    inferred = infer_shapes(copy.deepcopy(model))
+    metadata = next(value for value in inferred.graph.value_info if value.name == "r")
+    assert not metadata.type.tensor_type.HasField("shape")
+    expected = _checked_run(model, feeds)
+    converted = _transform_make_dla_compatible(model, verbose=False)
+    np.testing.assert_array_equal(_checked_run(converted, feeds)[0], expected[0])
+
+
 @pytest.mark.parametrize("batch", [1, 2, 3])
 @pytest.mark.parametrize("operation", ["Add", "Mul"])
 @pytest.mark.parametrize("tail", [False, True])

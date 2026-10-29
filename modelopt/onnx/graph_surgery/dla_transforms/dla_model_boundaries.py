@@ -680,7 +680,9 @@ def _apply_remove_intermediary_squeeze_unsqueeze(
     return model
 
 
-def _apply_fix_instancenorm_channels(model, *, prepared_consumer_ops=(), validate_only=False):
+def _apply_fix_instancenorm_channels(
+    model, *, prepared_consumer_ops=(), validate_only=False, require_inferred_shapes=False
+):
     """Append spatial singleton dimensions while retaining normalization channels and outputs."""
     graph = model.graph
     cache = GraphCache(graph)
@@ -797,6 +799,7 @@ def _apply_fix_instancenorm_channels(model, *, prepared_consumer_ops=(), validat
             input_info = cache.vi_map.get(node.input[0])
             if (
                 validate_only
+                and require_inferred_shapes
                 and shape is None
                 and (input_info is None or not input_info.type.tensor_type.HasField("shape"))
                 and node.input[0] not in cache.graph_input_names
