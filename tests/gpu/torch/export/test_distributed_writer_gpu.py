@@ -15,7 +15,12 @@
 
 """The no-gather writer's transport and shard writing over NCCL, on every visible GPU."""
 
+import os
+import threading
+
+import pytest
 import torch
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
@@ -87,3 +92,42 @@ def test_materialize_owned_moves_uneven_and_empty_shards_over_nccl(need_2_gpus, 
     """Every key ends whole, byte for byte, on exactly one rank: BF16, FP8 and uint8 shards of
     uneven extent, empty ones included, a tensor with no rows, a replicated and a plain one."""
     dist_workers.run(_materialize_job)
+
+
+def _sparse_first_transfer_job(rank, world_size):
+    # A rank stuck in NCCL's initialization exits, so the test fails instead of hanging.
+    watchdog = threading.Timer(60, os._exit, args=(3,))
+    watchdog.start()
+    try:
+        mesh = init_device_mesh("cuda", (world_size,))
+        full = torch.arange(16, dtype=torch.bfloat16, device="cuda").reshape(2, 8)
+        # Rows on ranks 0 and 1 only: the other ranks have nothing to send or receive.
+        local = full[rank : rank + 1] if rank < 2 else full[:0]
+        sd = {
+            "w": DTensor.from_local(
+                local.contiguous(),
+                mesh,
+                [Shard(0)],
+                run_check=False,
+                shape=full.shape,
+                stride=full.stride(),
+            )
+        }
+
+        _materialize_owned(sd, set(), rank, world_size)
+        torch.cuda.synchronize()
+
+        assert torch.equal(sd["w"], full) if rank == 0 else not sd, sorted(sd)
+    finally:
+        watchdog.cancel()
+
+
+@pytest.mark.timeout(300)
+def test_a_first_transfer_most_ranks_sit_out_finishes_on_a_fresh_group():
+    """On a fresh ``cpu:gloo,cuda:nccl`` group, with no collective run on it before, a transfer that
+    only two of three or more ranks take part in finishes: NCCL's first batched P2P on a group needs
+    every rank of it, and the metadata collective runs on Gloo."""
+    world_size = torch.cuda.device_count()
+    if world_size < 3:
+        pytest.skip("needs 3 or more GPUs, so that a rank holds no shard")
+    spawn_multiprocess_job(world_size, _sparse_first_transfer_job, backend="nccl")

@@ -353,4 +353,7 @@ def _materialize_owned(
             del local_sd[k]
 
     if shard0:
+        # Batched P2P that is NCCL's first call on the group needs every rank in it, and the object
+        # collective above runs on Gloo where the group has it: every rank initializes NCCL here.
+        dist.all_reduce(torch.zeros(1, device=local_sd[shard0[0]].to_local().device))
         _gather_shard0_to_owners(local_sd, shard0, owner, all_shapes, rank, world)
