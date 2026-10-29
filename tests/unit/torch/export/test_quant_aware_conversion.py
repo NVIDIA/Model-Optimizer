@@ -990,14 +990,25 @@ def test_radio_merge_that_matches_no_keys_raises():
 def test_radio_merge_that_matches_no_keys_is_recorded_for_one_ranks_share():
     """Given ``unmatched_merges``, as for one rank's share of a model, whose other ranks may hold
     the rule's keys, the refusal is recorded there instead of raised, and the rest still applies."""
-    model = types.SimpleNamespace(_weight_conversions=[_radio_qkv_conversion()])
-    state_dict = {"language_model.layers.0.weight": torch.randn(2, 2)}
+    unmatched_rule = _radio_qkv_conversion()
+    _set_scope_attr(unmatched_rule, "scope_prefix", "unused_model")
+    model = types.SimpleNamespace(_weight_conversions=[unmatched_rule, _radio_qkv_conversion()])
+    parts = [torch.full((2, 2), float(i)) for i in range(3)]
+    state_dict = {
+        "language_model.layers.0.weight": torch.randn(2, 2),
+        **{
+            f"vision_model.encoder.layer.0.attention.{part}_proj.weight": tensor
+            for part, tensor in zip("qkv", parts)
+        },
+    }
     unmatched: list = []
 
     out = revert_weight_conversion_quant_aware(model, state_dict, unmatched_merges=unmatched)
 
     assert len(unmatched) == 1 and "matched no state-dict key" in unmatched[0]
-    assert out.keys() == state_dict.keys()
+    fused = "vision_model.encoder.layer.0.attn.qkv.weight"
+    assert out.keys() == {"language_model.layers.0.weight", fused}
+    assert torch.equal(out[fused], torch.cat(parts))
 
 
 @pytest.mark.parametrize(

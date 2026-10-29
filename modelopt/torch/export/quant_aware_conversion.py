@@ -355,7 +355,8 @@ def apply_reverse_rules(
     They let a rename that would otherwise invent a name resolve to the spelling the
     checkpoint actually carries; omitting them applies the rules unchanged.
 
-    ``unmatched_merges`` is :func:`revert_weight_conversion_quant_aware`'s.
+    ``unmatched_merges``, when given, collects the refusal message of each merge rule that
+    matched no key instead of raising; see :func:`revert_weight_conversion_quant_aware`.
     """
     out = dict(state_dict)
     for rule in split_rules:
