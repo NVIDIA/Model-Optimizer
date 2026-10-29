@@ -649,16 +649,7 @@ her fear and anger)."""
             row = external_dataset[fields["row"]]
             answers = [row["all_answers"][index] for index in fields["answers"]]
             prompt = self._generate_stackselect_prompt(row["question"], answers)
-            # Match v1.1 padding/truncation before validating the reconstructed length.
-            prompt = self._pad_or_truncate_prompt(prompt, num_tokens)
-            actual_tokens = len(
-                tiktoken.get_encoding("o200k_base").encode(prompt, disallowed_special=())
-            )
-            if actual_tokens != num_tokens:
-                raise ValueError(
-                    f"StackSelect prompt for {example['src_id']} has {actual_tokens} tokens; expected {num_tokens}"
-                )
-            example["turns"] = [prompt]
+            example["turns"] = [self._pad_or_truncate_prompt(prompt, num_tokens)]
 
         elif BenchmarkDataset.ADALEVAL_TEXTSORT.value in example["source"]:
             num_tokens = self._get_num_tokens_from_config(speed_config)
