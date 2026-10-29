@@ -79,17 +79,35 @@ def test_pipeline_constant_cleanup_preserves_required_feeds(ir_version, used):
                 ),
             ],
             "legacy_constant_cleanup",
-            [_vi("x", TensorProto.FLOAT, shape)],
+            [_vi("x", TensorProto.FLOAT, shape), _vi("original_default", TensorProto.FLOAT, shape)],
             [_vi("y", TensorProto.FLOAT, shape)],
+            initializer=[
+                numpy_helper.from_array(np.full(shape, 2, np.float32), "original_default")
+            ],
         ),
         opset_imports=[helper.make_opsetid("", 13)],
         ir_version=ir_version,
     )
     feeds = {"x": np.arange(6, dtype=np.float32).reshape(shape)}
+    model.graph.input[1].doc_string = "Caller-declared optional input"
+    original_input = model.graph.input[1].SerializeToString()
+    original_default = model.graph.initializer[0].SerializeToString()
     onnx.checker.check_model(model, full_check=True)
     expected = _run_ort(model, feeds)
     transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
     onnx.checker.check_model(transformed, full_check=True)
+    assert (
+        next(
+            value for value in transformed.graph.input if value.name == "original_default"
+        ).SerializeToString()
+        == original_input
+    )
+    assert (
+        next(
+            value for value in transformed.graph.initializer if value.name == "original_default"
+        ).SerializeToString()
+        == original_default
+    )
     session = ort.InferenceSession(
         transformed.SerializeToString(), providers=["CPUExecutionProvider"]
     )

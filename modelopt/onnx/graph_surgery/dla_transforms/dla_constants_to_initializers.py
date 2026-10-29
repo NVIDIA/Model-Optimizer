@@ -65,6 +65,9 @@ def _tensor_from_constant_node(node: onnx.NodeProto) -> onnx.TensorProto:
     )
 
 
+_GENERATED_INITIALIZER_INPUT = "modelopt.dla.generated_initializer_input"
+
+
 def _add_legacy_initializer_inputs(model: onnx.ModelProto) -> None:
     """Declare initializer defaults as graph inputs for ONNX IR versions through 3."""
     if model.ir_version > 3:
@@ -74,7 +77,12 @@ def _add_legacy_initializer_inputs(model: onnx.ModelProto) -> None:
     for init in graph.initializer:
         if init.name not in input_names:
             graph.input.append(
-                helper.make_tensor_value_info(init.name, init.data_type, list(init.dims))
+                helper.make_tensor_value_info(
+                    init.name,
+                    init.data_type,
+                    list(init.dims),
+                    doc_string=_GENERATED_INITIALIZER_INPUT,
+                )
             )
             input_names.add(init.name)
 
