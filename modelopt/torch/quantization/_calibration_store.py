@@ -15,7 +15,9 @@
 
 """Atomic distributed calibration checkpoints with bounded generation retention."""
 
+import io
 import os
+import re
 import shutil
 import tempfile
 from contextlib import contextmanager
@@ -23,7 +25,7 @@ from pathlib import Path
 
 import torch.distributed as dist
 
-from modelopt.torch.utils import safe_save
+from modelopt.torch.utils import safe_load, safe_save
 
 try:
     import fcntl
@@ -31,6 +33,17 @@ except ImportError:
     fcntl = None
 
 __all__ = []
+
+
+class _LimitedWriter(io.BufferedWriter):
+    def __init__(self, stream, limit):
+        super().__init__(stream)
+        self.limit = limit
+
+    def write(self, data):
+        if self.limit is not None and self.tell() + len(data) > self.limit:
+            raise ValueError("Calibration artifact exceeds its byte limit")
+        return super().write(data)
 
 
 def _collective_check(error, signature=None):
@@ -51,6 +64,51 @@ class _CalibrationStore:
         self.candidate = candidate
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
+        self.max_artifact_bytes = None
+
+    def check_checkpoint(self, path):
+        error = None
+        try:
+            if (
+                path is not None
+                and Path(path).is_file()
+                and self.max_artifact_bytes is not None
+                and Path(path).stat().st_size > self.max_artifact_bytes
+            ):
+                raise ValueError("Calibration artifact exceeds its byte limit")
+        except (OSError, ValueError) as exc:
+            error = str(exc)
+        _collective_check(error)
+
+    def load(self, path, limit):
+        with Path(path).open("rb") as stream:
+            if limit is not None and os.fstat(stream.fileno()).st_size > limit:
+                raise ValueError("Calibration artifact exceeds its byte limit")
+            return safe_load(stream)
+
+    def _reclaim(self, destination):
+        # The destination lock excludes writers/readers of replaceable checkpoints. Reclaim
+        # only this store's private generation namespace, including interrupted publications.
+        current = destination.resolve()
+        stale = []
+        for path in destination.parent.glob("." + destination.name + "-????????"):
+            if path == current:
+                continue
+            if (
+                path.is_symlink()
+                or not path.is_dir()
+                or any(
+                    not (
+                        p.is_file() and not p.is_symlink() and re.fullmatch(r"rank\d+\.pth", p.name)
+                    )
+                    and not (p.name == "link" and p.is_symlink() and p.resolve() == path)
+                    for p in path.iterdir()
+                )
+            ):
+                raise ValueError("Refusing to reclaim an unmanaged checkpoint generation")
+            stale.append(path)
+        for path in stale:
+            shutil.rmtree(path)
 
     @contextmanager
     def exclusive(self, destination=None):
@@ -62,7 +120,9 @@ class _CalibrationStore:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 lock = path.with_name("." + path.name + ".lock").open("a")
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
+                if self.max_artifact_bytes is not None:
+                    self._reclaim(path)
+            except (OSError, ValueError) as exc:
                 error = str(exc)
         try:
             _collective_check(error, str(path))
@@ -103,7 +163,11 @@ class _CalibrationStore:
         try:
             error = None
             try:
-                safe_save(payload, Path(generation) / f"rank{self.rank}.pth")
+                with (
+                    (Path(generation) / f"rank{self.rank}.pth").open("wb") as stream,
+                    _LimitedWriter(stream, self.max_artifact_bytes) as writer,
+                ):
+                    safe_save(payload, writer)
             except Exception as exc:
                 error = str(exc)
             _collective_check(error)

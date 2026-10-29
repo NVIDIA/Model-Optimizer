@@ -51,6 +51,7 @@ from ._auto_quantize_cost import (
     get_auto_quantize_cost_model,
     normalize_auto_quantize_constraints,
 )
+from ._calibration_store import _collective_check
 from .config import QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
 from .conversion import set_quantizer_by_cfg
 from .ggml.common import offload_packed_weights, preserve_source_weights
@@ -762,7 +763,17 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         """Validate method-specific inputs before quantizing the model."""
 
     def load_search_checkpoint(self) -> bool:
-        return super().load_search_checkpoint(strict=False)
+        session = self.config.get("calibration")
+        if session is None:
+            return super().load_search_checkpoint(strict=False)
+        session.check_checkpoint(self._get_checkpoint_path())
+        error, loaded = None, False
+        try:
+            loaded = super().load_search_checkpoint(strict=False)
+        except Exception as exc:
+            error = str(exc)
+        _collective_check(error, str(loaded))
+        return loaded
 
     def save_search_checkpoint(self, verbose=False):
         if self.config.get("calibration") is not None:
@@ -1317,6 +1328,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 for hparam in quant_recipe_hparams:
                     hparam.restore_active_quantizers()
             calibration.prepare(self, search_recipes, schemas)
+            if calibration.reused_scoring_candidate:
+                return
 
         QuantRecipe.disable_folding_pqs_to_weights()
 
@@ -1388,6 +1401,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             if calibrated:
                 self.save_search_checkpoint(verbose=self.config["verbose"])
 
+        if calibration is not None and calibration.collect_scores:
+            calibration.finish_scoring(self)
+            return
         if calibration is not None and calibration.candidate is not None:
             return
 
@@ -1589,11 +1605,13 @@ class _AutoQuantizeBackwardScoringSession(ABC):
         score_modules: Sequence[nn.Module],
         is_param_grad_enabled: Callable,
         verbose: bool = False,
+        candidate_recipe: QuantRecipe | None = None,
     ) -> None:
         self.model = model
         self.score_modules = tuple(score_modules)
         self.is_param_grad_enabled = is_param_grad_enabled
         self.verbose = verbose
+        self.candidate_recipe = candidate_recipe
         self._stack = ExitStack()
         self._original_forwards: dict[nn.Module, Callable] = {}
         self._output_grad_hook_handles: set[Any] = set()
@@ -1765,7 +1783,15 @@ class _AutoQuantizeGradientScoringSession(_AutoQuantizeCandidateReplayScoringSes
             return output
 
         output_diffs = self._replay_candidates(
-            module, base, lambda hparam: hparam.choices, *args, **kwargs
+            module,
+            base,
+            lambda hparam: [
+                r
+                for r in hparam.choices
+                if self.candidate_recipe is None or r == self.candidate_recipe
+            ],
+            *args,
+            **kwargs,
         )
         self._register_candidate_score_hook(module, base, output_diffs)
         return output
@@ -1924,6 +1950,11 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBackwardScoringSearcher):
             score_modules,
             is_param_grad_enabled,
             verbose=self.config.get("verbose", False),
+            candidate_recipe=(
+                self.config["calibration"].scoring_candidate
+                if self.config.get("calibration")
+                else None
+            ),
         ) as scoring_session:
             gc.collect()
             if torch.cuda.is_available():
