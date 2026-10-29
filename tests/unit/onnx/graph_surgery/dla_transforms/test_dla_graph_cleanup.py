@@ -33,6 +33,7 @@ import copy
 
 import numpy as np
 import onnx
+import onnx_graphsurgeon as gs
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 from onnx.reference import ReferenceEvaluator
@@ -1739,3 +1740,36 @@ def test_cast_chain_broken_by_multi_consumer():
     # Both Casts should remain (chain broken by multi-consumer c1)
     cast_nodes = [n for n in tr.graph.node if n.op_type == "Cast"]
     assert len(cast_nodes) == 2
+
+
+@pytest.mark.parametrize("ir_version", [8, 9, 10])
+def test_constant_folding_preserves_ir_version(ir_version, monkeypatch):
+    """Keep the caller's IR without changing ONNX's process-wide version constant."""
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Add", ["a", "b"], ["y"])],
+            "folded_ir",
+            [],
+            [_vi("y", TensorProto.FLOAT, [2])],
+            [
+                numpy_helper.from_array(np.array([1, 2], np.float32), "a"),
+                numpy_helper.from_array(np.array([3, 4], np.float32), "b"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=ir_version,
+    )
+    global_version = onnx.IR_VERSION
+    export = gs.export_onnx
+
+    def check_global_version(*args, **kwargs):
+        """Check the export's global state while delegating to graphsurgeon."""
+        assert global_version == onnx.IR_VERSION
+        return export(*args, **kwargs)
+
+    monkeypatch.setattr(gs, "export_onnx", check_global_version)
+    result = _fold_consts(model)
+    assert result.ir_version == ir_version
+    assert global_version == onnx.IR_VERSION
+    onnx.checker.check_model(result, full_check=True)
+    np.testing.assert_array_equal(ReferenceEvaluator(result).run(None, {})[0], [4, 6])

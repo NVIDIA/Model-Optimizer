@@ -672,14 +672,9 @@ def _fold_constants(model: onnx.ModelProto) -> onnx.ModelProto:
         """Keep quantization boundaries and identity bindings out of constant folding."""
         return node.op in ("DequantizeLinear", "Identity")
 
-    prev_ir = onnx.IR_VERSION
-    onnx.IR_VERSION = model.ir_version
-    try:
-        g = gs.import_onnx(model)
-        g.fold_constants(should_exclude_node=_exclude).cleanup().toposort()
-        model2 = gs.export_onnx(g)
-    finally:
-        onnx.IR_VERSION = prev_ir
+    g = gs.import_onnx(model)
+    g.fold_constants(should_exclude_node=_exclude).cleanup().toposort()
+    model2 = gs.export_onnx(g, ir_version=model.ir_version)
 
     folded = len(model.graph.node) - len(model2.graph.node)
     if folded > 0:
