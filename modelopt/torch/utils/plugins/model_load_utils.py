@@ -1988,25 +1988,14 @@ def _ep_dense_meta_load(is_expert):
 
 
 def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, expert_modules):
-    """FSDP2-shard the meta dense part and DCP-load each rank's shard, for the EP hybrid.
+    """FSDP2-shard the meta dense part over ``fsdp_mesh`` and DCP-load each rank's shard of it.
 
-    Each rank's shard comes straight from the checkpoint, so the dense part is NEVER
-    materialized replicated. Experts are already EP-sharded (loaded by ``from_pretrained``) and left untouched. Returns
-    the number of dense layers sharded, like :func:`_fsdp2_shard_dense`.
-
-    Requires the dense ``.weight``/``.bias`` params to be on ``meta`` on entry (see
-    :func:`_ep_dense_meta_load`). Delegates the materialize + DCP load to :func:`_meta_dcp_load`, fed the
-    partially-meta model (dense meta, experts already real) and the dense param names.
+    The dense ``.weight``/``.bias`` params arrive on meta (:func:`_ep_dense_meta_load`); the experts,
+    already loaded and EP-sharded, are left as they are. Returns the number of layers sharded.
     """
-    from modelopt.torch.utils.distributed import local_rank
-
-    device = torch.device(f"cuda:{local_rank()}")
-    # FSDP2-shard the dense modules. Their params are meta plain tensors -> fully_shard makes them meta Shard
-    # DTensors; experts are passed as ignored_params and stay EP-sharded.
+    cuda = fsdp_mesh.device_type == "cuda"
+    device = torch.device(fsdp_mesh.device_type, dist.local_rank() if cuda else None)
     n_dense = _fsdp2_shard_dense(model, fsdp_mesh, expert_modules)
-    # Restrict the shared loader to the dense params (experts already materialized by from_pretrained must not
-    # be touched). It selectively materializes only the meta dense modules (experts skipped), preserves
-    # buffers across to_empty, and DCP-loads each rank's dense shard.
     dense_names = {
         n
         for n, _ in model.named_parameters()
