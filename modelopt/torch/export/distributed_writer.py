@@ -36,6 +36,7 @@ from torch.distributed.tensor import DTensor
 
 from modelopt.torch.utils.distributed import all_reduce
 
+from .moe_utils import _FUSED_PROJ, _fused_experts_prefixes, _split_local_fused_module
 from .quant_aware_conversion import (
     _QUANT_STATE_SUFFIXES,
     QuantConversionUnsupportedError,
@@ -46,8 +47,6 @@ from .unified_export_hf_streaming import _parse_shard_size
 
 # A checkpoint's files: its weights, sharded as save_pretrained names them or in one file, and index.
 _CHECKPOINT_FILES = re.compile(r"model(-\d{5}-of-\d{5})?\.safetensors(\.index\.json)?")
-
-from .moe_utils import _FUSED_PROJ, _fused_experts_prefixes, _split_local_fused_module
 
 
 def distributed_save_hf_checkpoint(
@@ -705,11 +704,7 @@ def _distributed_save_hf_checkpoint_impl(
     inference tensor in its shard. Placements the point-to-point transport does not cover are
     rejected rather than routed through an untested slower path.
     """
-    import torch.distributed as dist
     from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
-    from torch.distributed.tensor import DTensor
-
-    from modelopt.torch.utils.distributed import all_reduce
 
     from .model_utils import TiedWeightMap
     from .quant_utils import postprocess_state_dict
