@@ -463,11 +463,14 @@ def _revert_whole_sd(model: nn.Module, local_sd: dict) -> bool:
                 model, local_sd, unmatched_merges=unmatched
             )
         except Exception as exc:
-            return str(exc), []
+            # An exception may carry no message: name its type, so the warning says something.
+            return str(exc) or type(exc).__name__, []
         return None, unmatched
 
     def combine(results: list) -> list:
-        failures = [f"rank {r}: {error}" for r, (error, _) in enumerate(results) if error]
+        failures = [
+            f"rank {r}: {error}" for r, (error, _) in enumerate(results) if error is not None
+        ]
         return failures or sorted(set.intersection(*(set(unmatched) for _, unmatched in results)))
 
     failures = all_reduce("reverse weight conversion", revert, combine)

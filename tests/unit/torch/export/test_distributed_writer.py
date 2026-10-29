@@ -441,29 +441,31 @@ def test_revert_whole_sd_renames_to_hub_names_in_place():
     assert torch.equal(sd[f"{hub}.experts.0.w2.weight"], w2)
 
 
-def _one_rank_cannot_revert_job(rank, world_size):
+def _one_rank_cannot_revert_job(rank, world_size, message):
     # Rank 0's subset reverts; rank 1's fails, as a merge whose group ownership split does.
     model = AutoModelForCausalLM.from_config(_mixtral_config())
     sd = {"model.layers.0.mlp.experts.0.up_proj.weight": torch.ones(2)}
     before = dict(sd)
     failure = mock.patch(
-        f"{_WRITER}.revert_weight_conversion_quant_aware",
-        side_effect=RuntimeError("incomplete merge"),
+        f"{_WRITER}.revert_weight_conversion_quant_aware", side_effect=RuntimeError(message)
     )
     with (
         bounded_collectives(),
         failure if rank == 1 else contextlib.nullcontext(),
-        pytest.warns(UserWarning, match="rank 1: incomplete merge"),
+        pytest.warns(UserWarning, match=f"rank 1: {message or 'RuntimeError'}"),
     ):
         assert _revert_whole_sd(model, sd) is False
 
     assert sd == before
 
 
-def test_revert_whole_sd_keeps_in_memory_names_on_every_rank_when_one_fails(cpu_dist_workers):
+@pytest.mark.parametrize("message", ["incomplete merge", ""], ids=["message", "no-message"])
+def test_revert_whole_sd_keeps_in_memory_names_on_every_rank_when_one_fails(
+    cpu_dist_workers, message
+):
     """Rank 0 could revert its own subset, but a checkpoint mixing hub and in-memory names would
-    load neither way."""
-    cpu_dist_workers.run(_one_rank_cannot_revert_job)
+    load neither way. An exception with no message is a failure all the same."""
+    cpu_dist_workers.run(_one_rank_cannot_revert_job, message=message)
 
 
 def _merge_group_job(rank, world_size, case):
