@@ -173,7 +173,11 @@ def test_cached_teacher_autoquant_callback_and_ordinary_restore(example, tmp_pat
         forward_backward_step=objective.cross_entropy,
         num_calib_steps=1,
         num_score_steps=1,
-        method={"method": "gradient", "data_fingerprint": "fixture"},
+        method={
+            "method": "gradient",
+            "data_fingerprint": "fixture",
+            "preserve_candidate_weights": True,
+        },
         disabled_layers=["lm_head"],
     )
     assert state["best"]["is_satisfied"]

@@ -553,6 +553,7 @@ def main():
                 "formats": _candidate_identity(formats),
                 "seed": args.seed,
                 "scoring_objective": "shifted-token-ce-v1",
+                "preserve_candidate_weights": True,
             }
         )
         preparation_path = candidate_checkpoint.with_suffix(".json")
@@ -572,7 +573,11 @@ def main():
                 calibration,
                 objectives[0],
                 formats,
-                {"method": "gradient", "data_fingerprint": fingerprint},
+                {
+                    "method": "gradient",
+                    "data_fingerprint": fingerprint,
+                    "preserve_candidate_weights": True,
+                },
                 candidate_checkpoint,
                 16.0,
             )
@@ -637,7 +642,11 @@ def main():
                     **args.rco_options,
                 }
                 if "rco" in variant
-                else {"method": "gradient", "data_fingerprint": fingerprint}
+                else {
+                    "method": "gradient",
+                    "data_fingerprint": fingerprint,
+                    "preserve_candidate_weights": True,
+                }
             )
             try:
                 checkpoint = directory / "search.pt" if "rco" in variant else candidate_checkpoint
