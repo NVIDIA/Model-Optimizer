@@ -669,7 +669,9 @@ def split_fused_experts_state_dict(state_dict: dict) -> dict:
     checkpoints. Operates on the (already folded/quantized) tensors only -- pure slicing, no
     quantization. Non-fused-experts keys pass through unchanged. Every emitted tensor is a copy and
     the input keeps its fused tensors, so the experts are held twice until it returns: pass one
-    module's shard at a time, not a whole model's.
+    module's tensors at a time, not a whole model's. Each module's experts are numbered from 0 by
+    their row in the tensors given, which must be plain: whole ones get their global numbers, and a
+    caller splitting a rank's local shard (``to_local()``) shifts each by the shard's global offset.
 
     Per fused-experts prefix ``P`` (``...experts``), inputs are (gated shown; ungated drops the gate split):
       ``P.gate_up_proj`` ``(E, 2*I, H)`` + ``P.gate_up_proj_weight_scale`` + ``P.gate_up_proj_input_scale``
