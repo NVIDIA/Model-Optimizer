@@ -96,6 +96,7 @@ class TestMaxCalibrator:
         max_calibrator.collect(torch.rand(3, 4))
         with pytest.raises(AssertionError, match="values in amax"):
             max_calibrator.compute_amax()
+        assert max_calibrator.compute_amax() is None
 
 
 class TestHistogramCalibrator:
