@@ -940,17 +940,19 @@ def _remove_consecutive_casts(model: onnx.ModelProto, cache: GraphCache) -> onnx
     return model
 
 
-def _restore_promoted_graph_outputs(model, cache: GraphCache, original_outputs: dict) -> bool:
-    """Restore declared output ranks while retaining leading-unit promotion inside the graph."""
+def _restore_promoted_graph_outputs(
+    model, cache: GraphCache, original_outputs: dict, original_ranks: dict
+) -> bool:
+    """Restore inferred native ranks while retaining leading-unit promotion inside the graph."""
     graph = model.graph
     plans = []
     for output in graph.output:
         original = original_outputs[output.name]
         current_type = output.type.tensor_type
-        original_type = original.type.tensor_type
-        if not current_type.HasField("shape") or not original_type.HasField("shape"):
+        original_rank = original_ranks[output.name]
+        if not current_type.HasField("shape") or original_rank is None:
             continue
-        padding = len(current_type.shape.dim) - len(original_type.shape.dim)
+        padding = len(current_type.shape.dim) - original_rank
         if padding == 0:
             continue
         producer = cache.get_producer(output.name)
@@ -1000,6 +1002,14 @@ def _apply_graph_cleanup(model: onnx.ModelProto) -> onnx.ModelProto:
     """Apply seven DLA cleanup stages while retaining output signatures and rank-sensitive paths."""
     original_outputs = {output.name: copy.deepcopy(output) for output in model.graph.output}
     model = infer_shapes(model)
+    original_ranks = {
+        output.name: (
+            len(output.type.tensor_type.shape.dim)
+            if output.type.tensor_type.HasField("shape")
+            else None
+        )
+        for output in model.graph.output
+    }
     cache = GraphCache(model.graph)
 
     # Step 1 — intermediary Squeeze/Unsqueeze → 4-D Reshape
@@ -1010,7 +1020,7 @@ def _apply_graph_cleanup(model: onnx.ModelProto) -> onnx.ModelProto:
     model = _canonicalize_inputs(model, cache)
     model = infer_shapes(model)
     cache.rebuild()
-    if _restore_promoted_graph_outputs(model, cache, original_outputs):
+    if _restore_promoted_graph_outputs(model, cache, original_outputs, original_ranks):
         cache.rebuild()
 
     # Step 3 — collapse Reshape chains

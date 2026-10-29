@@ -55,6 +55,36 @@ _fold_consts = _mod._fold_constants
 _remove_unused_inits = _mod._remove_unused_initializers
 
 
+@pytest.mark.parametrize("opset", [12, 17])
+@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
+@pytest.mark.parametrize("declared_shape", [False, True])
+def test_cleanup_preserves_native_rank_with_unshaped_outputs(opset, shape, declared_shape):
+    """Infer the native rank before promotion while retaining the caller's original descriptor."""
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Relu", ["x"], ["y"])],
+            "unshaped_output",
+            [_vi("x", TensorProto.FLOAT, shape)],
+            [_vi("y", TensorProto.FLOAT, shape if declared_shape else None)],
+        ),
+        opset_imports=[helper.make_opsetid("", opset)],
+        ir_version=9,
+    )
+    onnx.checker.check_model(
+        onnx.shape_inference.infer_shapes(copy.deepcopy(model)), full_check=True
+    )
+    feeds = {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape) - 2}
+    expected = _run_ort(model, feeds)
+    signature = model.graph.output[0].SerializeToString()
+    transformed = _apply(copy.deepcopy(model))
+    assert transformed.graph.output[0].SerializeToString() == signature
+    actual = _run_ort(transformed, feeds)
+    np.testing.assert_array_equal(actual["y"], expected["y"])
+    onnx.checker.check_model(
+        onnx.shape_inference.infer_shapes(copy.deepcopy(transformed)), full_check=True
+    )
+
+
 def _canonicalize_inputs(model):
     """Canonicalize model inputs using a fresh graph cache."""
     return _mod._canonicalize_inputs(model, GraphCache(model.graph))
