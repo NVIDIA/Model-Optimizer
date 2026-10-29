@@ -35,6 +35,7 @@ from tqdm import tqdm
 from modelopt.torch.models import list_all_possible
 from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.searcher import ForwardLoop
+from modelopt.torch.quantization.gsq import gsq
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
@@ -85,6 +86,7 @@ from .utils.calib_utils import (
 __all__ = [
     "CalibratorFactory",
     "awq",
+    "gsq",
     "layerwise_calibrate",
     "local_hessian_calibrate",
     "lsq",
