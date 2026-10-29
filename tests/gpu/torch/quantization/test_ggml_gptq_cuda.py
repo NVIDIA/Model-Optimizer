@@ -321,19 +321,22 @@ def _candidate_workers_merge(rank, size, tmp_path, offload):
 
 
 @pytest.mark.parametrize(
-    ("cpu_offload", "dtype"),
+    ("cpu_offload", "dtype", "hessian_input_dtype"),
     [
-        (False, torch.bfloat16),
-        (True, torch.bfloat16),
-        (False, torch.float16),
-        (False, torch.float32),
+        (False, torch.bfloat16, "float32"),
+        (True, torch.bfloat16, "float32"),
+        (False, torch.float16, "float32"),
+        (False, torch.float32, "float32"),
+        (True, torch.bfloat16, "bfloat16"),
     ],
 )
-def test_parallel_fsdp_experts_preserve_payloads_and_outputs(dist_workers, cpu_offload, dtype):
-    dist_workers.run(_parallel_expert_agreement, cpu_offload, dtype)
+def test_parallel_fsdp_experts_preserve_payloads_and_outputs(
+    dist_workers, cpu_offload, dtype, hessian_input_dtype
+):
+    dist_workers.run(_parallel_expert_agreement, cpu_offload, dtype, hessian_input_dtype)
 
 
-def _parallel_expert_agreement(rank, size, cpu_offload, dtype):
+def _parallel_expert_agreement(rank, size, cpu_offload, dtype, hessian_input_dtype):
     assert size > 1
     for fmt in ("iq2_xxs", "iq2_xs", "iq2_s"):
         for preserve in (False, True):
@@ -369,6 +372,7 @@ def _parallel_expert_agreement(rank, size, cpu_offload, dtype):
                             "perc_damp": 0.3,
                             "importance_weighted": True,
                             "parallel_experts": parallel,
+                            "hessian_input_dtype": hessian_input_dtype,
                         },
                         forward_loop=lambda m: m(inputs),
                     )
@@ -400,7 +404,7 @@ def _parallel_expert_agreement(rank, size, cpu_offload, dtype):
 
 
 @pytest.mark.timeout(90)
-@pytest.mark.parametrize("failure", ["exception", "payload_shape"])
+@pytest.mark.parametrize("failure", ["exception", "payload_shape", "hessian_dtype"])
 def test_parallel_experts_reject_rank_disagreement_without_mutation(dist_workers, failure):
     dist_workers.run(_parallel_expert_rejection, failure)
 
@@ -445,6 +449,21 @@ def _parallel_expert_rejection(rank, size, failure):
     torch.testing.assert_close(get_quantizer_state_dict(model), before, rtol=0, atol=0)
     for quantizer in inputs_quantizers:
         quantizer.disable()
+
+    if failure == "hessian_dtype":
+        with pytest.raises(ValueError):
+            mtq.calibrate(
+                model,
+                {
+                    "method": "gptq",
+                    "block_size": 256,
+                    "parallel_experts": True,
+                    "hessian_input_dtype": "bfloat16" if rank == 0 else "float32",
+                },
+                forward_loop=refuse_forward,
+            )
+        torch.testing.assert_close(get_quantizer_state_dict(model), before, rtol=0, atol=0)
+        return
 
     # An owner failure is reported to every peer before payload broadcasts begin.
     update = GGMLGPTQHelper.update_weights

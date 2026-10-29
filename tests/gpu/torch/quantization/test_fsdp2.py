@@ -23,8 +23,7 @@ import pytest
 import torch
 import torch.nn as nn
 from _test_utils.torch.distributed.utils import synchronize_state_dict
-from torch.distributed._composable.fsdp.fully_shard import fully_shard
-from torch.distributed.fsdp import CPUOffloadPolicy
+from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 from torch.distributed.tensor import DTensor
 
 import modelopt.torch.quantization as mtq

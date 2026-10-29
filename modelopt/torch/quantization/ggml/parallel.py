@@ -32,7 +32,9 @@ from .registry import GGML_FORMAT_REGISTRY
 __all__ = []
 
 
-def _validate_parallel_experts(model, experts, projections, block_size, perc_damp, importance):
+def _validate_parallel_experts(
+    model, experts, projections, block_size, perc_damp, importance, hessian_input_dtype
+):
     if (
         not dist.is_initialized()
         or dist.get_world_size() < 2
@@ -40,7 +42,9 @@ def _validate_parallel_experts(model, experts, projections, block_size, perc_dam
     ):
         raise ValueError("Parallel GPTQ experts require multiple FSDP2 ranks with NCCL.")
     errors = []
-    contract: list = [(block_size, perc_damp, importance, preserving_source_weights())]
+    contract: list = [
+        (block_size, perc_damp, importance, preserving_source_weights(), hessian_input_dtype)
+    ]
     storage_ranges, quantizers_seen = [], set()
     if not is_fsdp2_model(model):
         errors.append("FSDP2 is required")

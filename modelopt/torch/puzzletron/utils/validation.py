@@ -132,7 +132,7 @@ def calculate_losses(
 
     try:
         num_batches = len(dataloader)
-    except:
+    except TypeError:
         num_batches = None
 
     # Adjust progress bar for resume
