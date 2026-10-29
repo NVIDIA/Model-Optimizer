@@ -30,12 +30,16 @@ class and implementation. Q/DQ means quantize then dequantize.
 | Regular attention Q/K/V | `Attention` | `q_bmm_quantizer`, `k_bmm_quantizer`, `v_bmm_quantizer` | Hooks operands before native attention. Does not expose P inside the native fused kernel. |
 | Cross-attention and encoder attention Q/K/V | `CrossAttention`, `EncoderOnlyAttention` | `q_bmm_quantizer`, `k_bmm_quantizer`, `v_bmm_quantizer` | Registered only when the installed vLLM exposes these classes. The compact attention and sparse-attention adapters do not support these layouts. |
 | Compact attention Q/K/P/V | `Attention` with `ModelOptSparseAttentionImpl` or `ModelOptSparseFlashInferImpl` | `q_bmm_quantizer`, `k_bmm_quantizer`, `p_bmm_quantizer`, `v_bmm_quantizer` | Each operand supports NVFP4 or FP8. Requires regular decoder attention, FP16/BF16 model and cache, and equal Q/K/V head dimensions divisible by 16. See the [compact worker restrictions](#compact-nvfp4-attention-worker). |
-| MLA query, compressed latent and positional key | `MLAAttention` | `q_bmm_quantizer`, `kv_c_bmm_quantizer`, `k_pe_bmm_quantizer` | Custom MLA/CSA implementations are not automatically covered. No P hook or compact attention adapter for MLA. See [MLA KV-cache configuration](#fake-quantize-the-mla-kv-cache). |
+| MLA query, compressed latent and positional key | `MLAAttention` | `q_bmm_quantizer`, `kv_c_bmm_quantizer`, `k_pe_bmm_quantizer` | Custom MLA/CSA implementations are not automatically covered. No P hook; the compact adapter does not support MLA. See [MLA KV-cache configuration](#fake-quantize-the-mla-kv-cache). |
 | DeepSeek V4 indexer query and key cache | `DeepseekV4Indexer` from `vllm.models.deepseek_v4.attention` | `indexer_q_quantizer`, `indexer_k_quantizer` | Applies Q/DQ after native FP8 quantization and requantizes to FP8, retaining the original FP8 rounding. MXFP4 indexer cache is rejected. |
 | GLM 5.3 Flash indexer query and key cache | `Indexer` from `vllm.models.glm5next.common.attention` or `vllm.models.glm5next.nvidia.attention` | `indexer_q_quantizer`, `indexer_k_quantizer` | Same FP8 round-trip restriction. Applied in the rotated basis used by the native indexer. |
 | GLM indexer scorer | GLM `Indexer` | `indexer_scorer_kwargs_quantizer` | Defaults off. Passes options to the scorer through `backend: scorer_kwargs`. Stock DeepGEMM supports `logits_dtype`; BF16 scorer reduction requires SM100. Additional options require a compatible custom backend. DeepSeek V4 rejects scorer controls. |
 | Expert-parallel dispatch and combine | `RoutedExperts` modular MoE path | `dispatch_quantizer`, `combine_quantizer` | Independent of expert GEMM quantizers. Combine needs an accessible modular finalize payload; padded backends require a constant global scale or MX format. `flashinfer_moe_ep_*` combine is rejected. Reduction and residual addition remain unquantized. |
-| DeepGEMM Mega-MoE dispatch and combine | `DeepseekV4MegaMoEExperts`, `KimiK3MegaMoEExperts` | `dispatch_quantizer`, `combine_quantizer` | Supports communication Q/DQ with `--moe-backend deep_gemm_mega_moe`, not expert weight/GEMM Q/DQ. Dispatch requires `VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION=1`. |
+| DeepGEMM Mega-MoE dispatch and combine | `DeepseekV4MegaMoEExperts`, `KimiK3MegaMoEExperts` | `dispatch_quantizer`, `combine_quantizer` | Supports communication Q/DQ with `--moe-backend deep_gemm_mega_moe`, not expert weight/GEMM Q/DQ. Dispatch requires `VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION=1`. Combine requires a calibrated (`algorithm: max`) or constant global scale, or an MX format; only `fp8xfp4` buffer layouts are supported. |
+
+Linear and expert output quantizers are omitted from this table because they default to
+disabled. Recipes can explicitly enable `output_quantizer`, `w13_output_quantizer`
+and `w2_output_quantizer` after layer conversion.
 
 ### Expert GEMM backend requirements
 
@@ -50,6 +54,10 @@ compute path; the layer class alone does not establish backend support.
 | `--moe-backend flashinfer_moe_ep_*` | Not supported by the expert GEMM hooks | The fused expert kernel is not intercepted by the Triton hooks. Dispatch Q/DQ remains available through its registered path; combine Q/DQ is rejected. |
 | Other expert compute backends | No dedicated expert GEMM fakequant integration | Their kernels are not intercepted unless execution actually falls back to the supported decomposed Triton path. |
 
+ModelOpt does not verify that the intercepted expert GEMM kernels ran, so expert input
+Q/DQ may be silently skipped. Do not rely on this path for expert activation fakequant
+with an unsupported backend.
+
 The expert compute backend is separate from the EP communication backend. DeepEP, NIXL
 or another communication backend may be used with the supported modular expert path,
 subject to the dispatch/combine restrictions above. Communication-only recipes do not
@@ -58,7 +66,8 @@ registered linear hooks rather than the routed-expert `w13_*`/`w2_*` hooks.
 
 Additional limits:
 
-- Router `ReplicatedLinear`, normalization, embeddings and LM-head layers have no dedicated
+- All `ReplicatedLinear` layers (including routers and some MLA latent projections),
+  normalization, embeddings and LM-head layers have no dedicated
   runtime quantizer registration. GDN/KDA recurrent state and decay also have no dedicated
   vLLM hooks.
 - N:M sparse softmax can combine with compact attention Q/DQ during prefill; N:M is not
@@ -605,13 +614,36 @@ python3 examples/vllm_serve/vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
 
 The installer supports both FlashInfer and FlashAttention, and the worker prints the installed adapter counts. Pass `--attention-backend FLASHINFER` or `--attention-backend FLASH_ATTN` only when an explicit override is needed.
 
-This attention-only path applies a fixed dynamic block-16 NVFP4 fakequant format to Q/K/P/V. Q is dynamic; missing K/V scales default to global scale 1.0, and P defaults to amax 1.0. Existing scalar attention amax values are preserved, but this path does not calibrate or restore them itself. It does not re-quantize realquant Linear or MoE weights. An optional checkpoint `sparse_attention_config` is still honored for N:M sparse softmax; calibrated skip-softmax groups are rejected in combination with attention quantization, because quantized Q/K/P change the score distribution the skip thresholds were calibrated on.
+This attention-only path defaults to dynamic block-16 NVFP4 Q/DQ for Q/K/P/V. Each operand
+can independently use `nvfp4` or per-tensor FP8 E4M3 through `--additional-config`.
+For example, keep Q/K in NVFP4 and select FP8 for P/V:
 
-Decode uses a fixed 32-split, 128-key-tile schedule. P QDQ consumes split-local,
-unnormalized online-softmax probabilities, so changing that schedule can change
-quantized results; split count is part of the numerical contract.
+```bash
+python3 examples/vllm_serve/vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
+  --no-enable-prefix-caching \
+  --worker-cls sparse_attn_worker.QuantSparseAttnWorker \
+  --additional-config '{"modelopt_attn_quant":{"q_format":"nvfp4","k_format":"nvfp4","p_format":"fp8","v_format":"fp8"}}'
+```
 
-K is QDQ before its cache write, while V is written pristine. Complete 16-token V groups are finalized once in cache; an incomplete tail remains pristine and is QDQ on read. P@V therefore sees uniform fakequant values without re-quantizing the tail.
+The accepted keys are `q_format`, `k_format`, `p_format` and `v_format`; omitted keys
+default to `nvfp4`. For NVFP4, Q is dynamic, missing K/V scales default to global scale
+1.0, and P defaults to amax 1.0. For FP8, missing Q/K/V amax values default to 448 and
+P to 1.0. Existing scalar attention amax values are preserved, but this worker does not
+calibrate or restore them itself.
+
+This worker does not re-quantize realquant Linear or MoE weights. Optional checkpoint
+`sparse_attention_config` metadata is honored for N:M sparse softmax. Skip-softmax groups
+are rejected with attention quantization because Q/K/P Q/DQ changes the score distribution
+used to calibrate the skip thresholds.
+
+When P or V uses NVFP4, decode uses a fixed 32-split, 128-key-tile schedule. P Q/DQ
+consumes split-local, unnormalized online-softmax probabilities, so changing that schedule
+can change quantized results. With FP8 P and V, decode uses the general paged Triton path.
+
+K is Q/DQ before its cache write. FP8 V is also Q/DQ before the cache write. NVFP4 V is
+written pristine: complete 16-token groups are finalized once in cache, while an incomplete
+tail remains pristine and is Q/DQ on read. This preserves consistent NVFP4 values for P@V
+without re-quantizing the tail.
 
 Supported configurations are regular decoder self-attention with FlashInfer or FlashAttention, fp16/bf16 model and KV cache, equal Q/K/V head dimensions that are multiples of 16, and DCP 1. The FlashInfer adapter preserves both NHD and HND cache strides and separates mixed decode/prefill launches so each phase keeps its own kernel contract. The default `FULL_AND_PIECEWISE` mode remains enabled for fixed N:M and attention-only NVFP4; checkpoints with calibrated decode `threshold_scale_factor` must use a non-`FULL` decode graph mode such as `--enforce-eager` because the live sequence length is not replayed as a Python scalar.
 
