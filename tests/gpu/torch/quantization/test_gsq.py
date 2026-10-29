@@ -23,7 +23,7 @@ from safetensors.torch import load_file
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from examples.hf_ptq.hf_gsq_rco import _reload_packed_for_validation
+from examples.hf_ptq.hf_gsq_rco import _disabled_layers, _formats, _reload_packed_for_validation
 from modelopt.torch.export.quant_utils import preprocess_linear_fusion
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
@@ -53,7 +53,12 @@ def _check_fp8_export(exported, expected):
         torch.testing.assert_close(
             exported[name + ".weight"].view(torch.uint8), codes.view(torch.uint8), rtol=0, atol=0
         )
-        torch.testing.assert_close(exported[name + ".weight_scale"], scale, rtol=0, atol=0)
+        torch.testing.assert_close(
+            exported[name + ".weight_scale"].reshape(-1).view(torch.uint8),
+            scale.reshape(-1).view(torch.uint8),
+            rtol=0,
+            atol=0,
+        )
         native = (codes.float() * scale).to(stored.dtype)
         rounding[name] = {
             "stored_mismatches": int((native != stored).sum()),
@@ -110,6 +115,12 @@ def test_gdn_shared_projection_weights_survive_native_export(
     }
     if algorithm == "autoquant_max":
         # Ordinary controls export the same hardened bank used during AutoQuant scoring.
+        cfg = _formats("max")[0 if nvfp4 else 1]
+        protected = {
+            name: module.weight.detach().clone()
+            for name, module in model.named_modules()
+            if isinstance(module, (torch.nn.Conv1d, torch.nn.Conv3d))
+        }
         search = {
             "quantization_formats": [cfg],
             "data_loader": [inputs],
@@ -117,7 +128,7 @@ def test_gdn_shared_projection_weights_survive_native_export(
             "loss_func": lambda output, x: output.logits.float().square().mean(),
             "num_calib_steps": 1,
             "num_score_steps": 1,
-            "disabled_layers": ["*visual*", "lm_head", "*in_proj_a", "*in_proj_b"],
+            "disabled_layers": _disabled_layers(model),
             "checkpoint": str(tmp_path / "candidates.pt"),
             "method": {
                 "method": "gradient",
@@ -135,6 +146,13 @@ def test_gdn_shared_projection_weights_survive_native_export(
             / bank["cost_denominator"]
         )
         model, _ = mtq.auto_quantize(model, **search, constraints={"effective_bits": minimum})
+        for name, weight in protected.items():
+            module = model.get_submodule(name)
+            assert module.weight.dtype == weight.dtype
+            torch.testing.assert_close(module.weight, weight, rtol=0, atol=0)
+            stats = next(s for s in bank["candidate_stats"].values() if s["module_names"] == [name])
+            assert len(stats["formats"]) == 1 and stats["formats"][0].is_no_quant
+            assert stats["costs"] == [weight.numel()]
     else:
         mtq.quantize(model, cfg, lambda m: m(inputs, use_cache=False))
     with torch.no_grad():

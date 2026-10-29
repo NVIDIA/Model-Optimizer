@@ -892,6 +892,62 @@ def test_auto_quantize_disable_layers():
     assert not best_model.mlp.input_quantizer.is_enabled
 
 
+@pytest.mark.parametrize("method", ["gradient", "rco"])
+@pytest.mark.parametrize("protected", [False, True])
+def test_auto_quantize_preserved_candidates_keep_protected_convolution(method, protected):
+    torch.manual_seed(7)
+    model = torch.nn.Sequential(
+        torch.nn.Conv1d(4, 4, 1, bias=False), torch.nn.Flatten(), torch.nn.Linear(8, 4, bias=False)
+    )
+    inputs = torch.randn(2, 4, 2)
+    parameter = model[0].weight
+    weight = parameter.detach().clone()
+    conv_output = model[0](inputs).detach()
+    # 16 protected convolution weights at BF16 cost + 32 eligible weights at FP8 cost.
+    minimum = 16 * (16 + 32 / 2) / (16 + 32)
+    options = {"method": method, "data_fingerprint": "fixed-protected-conv"}
+    options.update({"steps": 0} if method == "rco" else {"preserve_candidate_weights": True})
+    kwargs = {
+        "constraints": {"effective_bits": minimum},
+        "quantization_formats": [
+            {
+                "quant_cfg": [
+                    {"quantizer_name": "*", "enable": False},
+                    {
+                        "quantizer_name": "*weight_quantizer",
+                        "cfg": {"num_bits": (4, 3), "axis": None},
+                    },
+                ],
+                "algorithm": "max",
+            }
+        ],
+        "data_loader": [inputs],
+        "forward_step": lambda m, x: m(x),
+        "loss_func": lambda output, x: output.square().mean(),
+        "disabled_layers": ["0"] if protected else [],
+        "num_calib_steps": 1,
+        "num_score_steps": 1,
+        "method": options,
+        "verbose": False,
+    }
+    if not protected:
+        with pytest.raises(ValueError, match="dense 2D linear"):
+            mtq.auto_quantize(model, **kwargs)
+        torch.testing.assert_close(model[0].weight, weight, rtol=0, atol=0)
+        return
+    result, state = mtq.auto_quantize(model, **kwargs)
+    assert result[0].weight is parameter
+    assert result[0].weight.dtype == weight.dtype
+    assert not result[0].weight_quantizer.is_enabled
+    assert result[2].weight_quantizer.is_enabled
+    torch.testing.assert_close(result[0](inputs), conv_output, rtol=0, atol=0)
+    assert sum(s["uncompressed_cost"] for s in state["candidate_stats"].values()) == 48
+    stats = next(s for s in state["candidate_stats"].values() if s["module_names"] == ["0"])
+    assert stats["costs"] == [16]
+    assert len(stats["formats"]) == 1 and stats["formats"][0].is_no_quant
+    assert 16 * sum(min(s["costs"]) for s in state["candidate_stats"].values()) / 48 == minimum
+
+
 def test_auto_quantize_disabled_layers_no_poison():
     """disabled_layers must only affect the matched layers, not all subsequent layer groups."""
     model = TransformerBlock()

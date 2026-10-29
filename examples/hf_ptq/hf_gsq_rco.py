@@ -348,9 +348,10 @@ def _disabled_layers(model):
     return [
         name
         for name, module in model.named_modules()
-        if isinstance(module, torch.nn.Linear)
+        if getattr(module, "weight", None) is not None
         and (
-            module not in decoder_modules
+            not isinstance(module, torch.nn.Linear)
+            or module not in decoder_modules
             or any(fnmatch(name + ".weight_quantizer", pattern) for pattern in protected)
         )
     ]

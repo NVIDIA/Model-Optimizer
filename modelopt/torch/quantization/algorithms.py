@@ -1401,6 +1401,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         if learned_candidates:
             parameter_ids = [id(p) for _, p in self.model.named_parameters(remove_duplicate=False)]
             for hparam in quant_recipe_hparams:
+                if all(recipe.is_no_quant for recipe in hparam.solver_choices):
+                    continue
                 for module in hparam.quant_modules:
                     if not isinstance(module, nn.Linear) or module.weight.ndim != 2:
                         raise ValueError("Learned candidates require dense 2D linear weights.")
