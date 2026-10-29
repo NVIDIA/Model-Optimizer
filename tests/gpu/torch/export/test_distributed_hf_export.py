@@ -161,7 +161,7 @@ def _ptq_and_export(rank, size, *, src_dir, export_dir, quant_cfg):
         fsdp2_wrap(model)
         set_distribution_plan(
             model, DistributionPlan(size, dense="fsdp")
-        )  # wrapped by hand, so recorded here, as load_pretrained would
+        )  # wrapped by hand, so its plan is recorded by hand
         # The no-gather writer is chosen by the plan recorded above plus the opt-in below. It writes
         # each rank's FSDP2 shards, so check that fsdp2_wrap sharded the model: unsharded, the test
         # would not exercise it.
