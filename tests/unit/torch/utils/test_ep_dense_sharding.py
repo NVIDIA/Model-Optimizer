@@ -37,6 +37,7 @@ pytest.importorskip("transformers")
 import transformers.core_model_loading as core_model_loading
 import transformers.modeling_utils as modeling_utils
 from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3_moe
+from safetensors.torch import load_file, save_file
 from transformers import AutoModelForCausalLM
 
 import modelopt.torch.utils.moe as moe
@@ -413,8 +414,6 @@ def test_a_tied_head_the_checkpoint_stores_alone_reaches_both_aliases(fsdp_mesh,
     """A tied checkpoint can store the pair as ``lm_head.weight`` alone, which ``from_pretrained``
     loads into both aliases. With a tied MoE as the expert-parallel load leaves it -- the dense part
     on meta and tied, the experts loaded -- the dense load fills both aliases with it too."""
-    from safetensors.torch import load_file, save_file
-
     src = get_tiny_qwen3_moe(tie_word_embeddings=True)
     src.save_pretrained(tmp_path)
     weights = tmp_path / "model.safetensors"
