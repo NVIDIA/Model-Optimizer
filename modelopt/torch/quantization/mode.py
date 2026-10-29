@@ -311,6 +311,12 @@ class BaseCalibrateModeDescriptor(ModeDescriptor):
     # cannot run per decoder layer (e.g. needs ModeloptStateManager on the root).
     _supports_layerwise: bool = True
 
+    # Automatic search must opt into source-isolated, independent estimation.
+    # Layerwise recipes require a separately validated estimator before selection.
+    _auto_quantize_search_policy: str | None = None
+    _auto_quantize_layerwise_estimator: str | None = None
+    _requires_final_layerwise: bool = False
+
     def __init__(self, *args, **kwargs):
         """Initialize Base calibrate mode descriptor."""
         assert issubclass(self.config_class, QuantizeAlgorithmConfig), (
@@ -435,6 +441,7 @@ class MaxCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return MaxCalibConfig
 
     _calib_func = max_calibrate
+    _auto_quantize_search_policy = "same_algorithm"
 
 
 @CalibrateModeRegistry.register_mode
@@ -464,6 +471,7 @@ class MseCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return MseCalibConfig
 
     _calib_func = mse_calibrate
+    _auto_quantize_search_policy = "same_algorithm"
 
 
 @CalibrateModeRegistry.register_mode
@@ -560,6 +568,7 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
         return GPTQCalibConfig
 
     _calib_func = gptq
+    _auto_quantize_search_policy = "same_algorithm"
 
 
 @CalibrateModeRegistry.register_mode
@@ -572,6 +581,7 @@ class ImatrixModeDescriptor(BaseCalibrateModeDescriptor):
         return ImatrixCalibConfig
 
     _calib_func = imatrix_calibrate
+    _auto_quantize_search_policy = "same_algorithm"
 
 
 @CalibrateModeRegistry.register_mode
