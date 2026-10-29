@@ -30,6 +30,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
+from .distributed import all_reduce, recorded_distribution_plan
 from .logging import print_rank_0, warn_rank_0
 
 if TYPE_CHECKING:
@@ -1020,8 +1021,6 @@ def get_max_batch_size(
     the estimate does not fit, pass an explicit batch size instead. A model with no plan recorded,
     such as a Megatron model, is measured on every visible GPU, as in a single process.
     """
-    from .distributed import all_reduce, recorded_distribution_plan
-
     args = (
         model,
         max_sample_length,

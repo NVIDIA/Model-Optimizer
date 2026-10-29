@@ -26,7 +26,7 @@ import torch
 import yaml
 from _test_utils.mlflow import clean_env  # noqa: F401
 from _test_utils.torch.transformers_models import get_tiny_qwen3
-from transformers import Qwen3_5MoeConfig, Qwen3MoeConfig
+from transformers import Qwen3_5MoeConfig, Qwen3Config, Qwen3MoeConfig
 
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import (
@@ -38,6 +38,7 @@ from modelopt.recipe.presets import QUANT_CFG_CHOICES, RecipeSupersededAction
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.utils import mlflow as mlflow_lib
+from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.mlflow import describe_run, run_tags
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
@@ -483,10 +484,6 @@ def test_fsdp2_rejects_mtp_before_distributed_loading(monkeypatch, tmp_path, has
 def test_the_fsdp2_load_records_the_plan_it_loaded_by(monkeypatch, tmp_path):
     """Calibration sizes its batch, and the export writes, by the model's distribution plan, and an
     FSDP2-sharded model without one is refused rather than taken for a single process's."""
-    from transformers import Qwen3Config
-
-    from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
-
     Qwen3Config(architectures=["Qwen3ForCausalLM"]).save_pretrained(tmp_path)
     monkeypatch.setenv("RANK", "0")
     hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", str(tmp_path), "--use_fsdp2")
