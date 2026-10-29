@@ -2067,13 +2067,20 @@ def awq_clip(
                 indices, self.awq_clip.w_amax * shrink, self.awq_clip.best_clip_val
             )
 
-    def _data_parallel_mean(self, loss):
-        """``loss`` averaged over the data-parallel ranks, so every replica picks the same clip."""
-        parallel_group = self.parallel_state.data_parallel_group
-        if parallel_group.is_initialized():
-            dist.all_reduce(loss, op=dist.ReduceOp.SUM, group=parallel_group.group)
-            loss /= parallel_group.world_size()
-        return loss
+    def sync_across_dp(module):
+        """Average the clip search over the data-parallel ranks, so every replica picks one clip.
+
+        Once, after the forwards: a module's forward count, as an MoE expert's, can differ by rank.
+        """
+        group = module.parallel_state.data_parallel_group
+        if not group.is_initialized():
+            return
+        losses = torch.stack(list(module.awq_clip.loss.values()))
+        tokens = torch.tensor(module.awq_clip.num_tokens, device=losses.device)
+        for tensor in (losses, tokens):
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=group.group)
+        module.awq_clip.loss = dict(zip(module.awq_clip.loss, losses / group.world_size()))
+        module.awq_clip.num_tokens = int(tokens.item())
 
     def _clip_search(self, inputs, co_bsz=256, max_tokens=16):
         weight = self.weight
@@ -2088,7 +2095,7 @@ def awq_clip(
                 self.weight_quantizer.amax = original_amax * shrink
                 out = inputs @ self.weight_quantizer(self.weight).T
                 loss = (out - out_actual).float().pow(2).mean()
-                self.awq_clip.loss[shrink] += _data_parallel_mean(self, loss)
+                self.awq_clip.loss[shrink] += loss
         else:
             # weight  [co, ci] -> [co, 1, n_block, block_size]
             # inputs  [..., ci] -> [1, max_tokens, n_block, block_size]
@@ -2132,7 +2139,7 @@ def awq_clip(
                     cur_out = (inputs * cur_w).sum(dim=-1)  # co_bsz, max_tokens, n_block
 
                     # co_bsz, n_block
-                    loss = _data_parallel_mean(self, (cur_out - org_out).float().pow(2).mean(dim=1))
+                    loss = (cur_out - org_out).float().pow(2).mean(dim=1)
 
                     del cur_out, cur_w
                     self.awq_clip.loss[shrink][
@@ -2203,6 +2210,7 @@ def awq_clip(
 
     for name, module in model.named_modules():
         if is_quantized_linear(module) and hasattr(module, "awq_clip"):
+            sync_across_dp(module)
             if module.awq_clip.num_tokens > 0:
                 with enable_weight_access_and_writeback(module, model, names):
                     postprocess(module)
