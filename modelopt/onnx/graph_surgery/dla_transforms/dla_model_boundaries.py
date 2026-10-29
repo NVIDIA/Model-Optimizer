@@ -794,9 +794,11 @@ def _apply_fix_instancenorm_channels(model, *, prepared_consumer_ops=(), validat
     for index, node in enumerate(graph.node):
         if _is_standard_node(node, local_functions, {"InstanceNormalization"}):
             shape = _shape_before_boundary_promotion(cache, node.input[0])
+            input_info = cache.vi_map.get(node.input[0])
             if (
                 validate_only
                 and shape is None
+                and (input_info is None or not input_info.type.tensor_type.HasField("shape"))
                 and node.input[0] not in cache.graph_input_names
                 and cache.get_init(node.input[0]) is None
             ):

@@ -1161,7 +1161,7 @@ def test_input_adapters_resolve_unsqueeze_axes_against_output_rank(axes, output_
     np.testing.assert_array_equal(_checked_run(transformed, feeds)[0], expected)
 
 
-@pytest.mark.parametrize("batch", [1, 2, 3])
+@pytest.mark.parametrize("batch", [1, 2, "batch"])
 @pytest.mark.parametrize("activations", [(), ("Relu",), ("Relu", "Tanh")])
 def test_registered_normalization_preserves_native_channel_axis(batch, activations):
     """Preserve channels with direct inputs or inferable intermediate metadata."""
@@ -1184,7 +1184,8 @@ def test_registered_normalization_preserves_native_channel_axis(batch, activatio
             numpy_helper.from_array(np.asarray([-1, 0, 1], np.float32), "bias"),
         ],
     )
-    feeds = {"x": np.random.default_rng(19).standard_normal(shape).astype(np.float32)}
+    feed_shape = [2 if isinstance(batch, str) else batch, 3, 4]
+    feeds = {"x": np.random.default_rng(19).standard_normal(feed_shape).astype(np.float32)}
     expected = _checked_run(model, feeds)[0]
     transformed = _transform_make_dla_compatible(model, verbose=False)
     np.testing.assert_allclose(_checked_run(transformed, feeds)[0], expected, rtol=1e-5, atol=1e-6)
