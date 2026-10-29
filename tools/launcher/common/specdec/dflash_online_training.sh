@@ -134,6 +134,38 @@ if [ -n "${ACCELERATE_CONFIG:-}" ] && [ -f "${ACCELERATE_CONFIG}" ]; then
     echo "Using accelerate config: ${ACCELERATE_CONFIG}"
 fi
 
+# Config creation precedes serialization, so existence alone does not prove completion.
+export_complete() {
+    python3 - "$1/config.json" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1]) as f:
+        config = json.load(f)
+except (OSError, ValueError):
+    sys.exit(1)
+
+sys.exit(0 if isinstance(config, dict) and config else 1)
+PY
+}
+
+export_draft() {
+    local source=$1 destination=$2
+
+    # Callers use ||, which suppresses ERR handling inside this function.
+    rm -rf "$destination" || return 1
+    echo "=== Exporting: ${source} → ${destination} ==="
+    CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
+        --model_path "$source" \
+        --export_path "$destination" \
+        --trust_remote_code || return 1
+    if ! export_complete "$destination"; then
+        echo "ERROR: export produced an invalid config: ${destination}" >&2
+        return 1
+    fi
+}
+
 set -x
 start_time=$(date +%s)
 # The ERR trap only records a failure and lets the script go on, so test the status here:
@@ -160,28 +192,48 @@ elif [ "${SLURM_PROCID:-0}" = "0" ]; then
             [ -d "$CKPT" ] || continue
             STEP=$(basename "$CKPT" | sed 's/checkpoint-//')
             EXPORT_DIR="${OUTPUT_DIR}/exported-checkpoint-${STEP}"
-            if [ -f "${EXPORT_DIR}/config.json" ]; then
+            if export_complete "$EXPORT_DIR"; then
                 echo "Already exported: ${EXPORT_DIR}"
                 continue
             fi
-            rm -rf "${EXPORT_DIR}"
-            echo "=== Exporting: ${CKPT} → ${EXPORT_DIR} ==="
-            CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
-                --model_path "${CKPT}" \
-                --export_path "${EXPORT_DIR}" \
-                --trust_remote_code
+            if compgen -G "${CKPT}/pytorch_model_fsdp_*" >/dev/null; then
+                echo "ERROR: ${CKPT} needs re-exporting, but the HF exporter cannot load FSDP shards." >&2
+                exit 1
+            fi
+            export_draft "$CKPT" "$EXPORT_DIR" || exit 1
             EXPORTED=$((EXPORTED + 1))
         done
+
+        LATEST_CKPT=$(latest_checkpoint "$OUTPUT_DIR" checkpoint-)
+        LATEST_SAVE="${LATEST_CKPT}/trainer_state.json"
+        if [ ! -f "$LATEST_SAVE" ]; then
+            LATEST_SAVE="$LATEST_CKPT"
+        fi
+
+        FINAL_IS_CURRENT=0
+        if [ -f "${OUTPUT_DIR}/modelopt_state.pth" ] && {
+            [ -z "$LATEST_CKPT" ] ||
+            ! [ "$LATEST_SAVE" -nt "${OUTPUT_DIR}/modelopt_state.pth" ]
+        }; then
+            FINAL_IS_CURRENT=1
+        fi
+
         FINAL_EXPORT="${OUTPUT_DIR}/exported-checkpoint-final"
-        if [ -f "${OUTPUT_DIR}/modelopt_state.pth" ] && { [ ! -f "${FINAL_EXPORT}/config.json" ] || \
-            [ "${OUTPUT_DIR}/modelopt_state.pth" -nt "${FINAL_EXPORT}/config.json" ]; }; then
-            rm -rf "${FINAL_EXPORT}"
-            echo "=== Exporting: ${OUTPUT_DIR} → ${FINAL_EXPORT} ==="
-            CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
-                --model_path "${OUTPUT_DIR}" \
-                --export_path "${FINAL_EXPORT}" \
-                --trust_remote_code
-            EXPORTED=$((EXPORTED + 1))
+        if [ "$FINAL_IS_CURRENT" = 1 ]; then
+            if ! export_complete "$FINAL_EXPORT" ||
+                [ "${OUTPUT_DIR}/modelopt_state.pth" -nt "${FINAL_EXPORT}/config.json" ]; then
+                export_draft "$OUTPUT_DIR" "$FINAL_EXPORT" || exit 1
+                EXPORTED=$((EXPORTED + 1))
+            fi
+        elif [ -e "$FINAL_EXPORT" ]; then
+            # Retire an obsolete final only once its replacement is available.
+            if [ -z "$LATEST_CKPT" ] ||
+                ! export_complete "${OUTPUT_DIR}/exported-${LATEST_CKPT##*/}"; then
+                echo "ERROR: obsolete final export has no complete newest-step replacement." >&2
+                exit 1
+            fi
+            echo "Removing obsolete final export: ${FINAL_EXPORT}"
+            rm -rf "$FINAL_EXPORT" || exit 1
         fi
         if [ "$EXPORTED" -eq 0 ]; then
             echo "No new checkpoints to export in ${OUTPUT_DIR}"
