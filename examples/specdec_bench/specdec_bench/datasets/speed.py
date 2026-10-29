@@ -670,6 +670,8 @@ her fear and anger)."""
             prompt = self._generate_textsort_prompt(external_dataset_example["prompt"][0])
             # Preserve exact v1.1 reconstruction: only 100K trims Part 4, and short
             # prompts must fail rather than introduce padding absent from the benchmark.
+            # v1.1 reconstruction selects chapters[3] and locates its text verbatim;
+            # an answer order such as [4, 1, 3, 2] does not change that selection.
             example["turns"] = [
                 self._trim_textsort_prompt(
                     prompt, external_dataset_example["chapters"][0][3], num_tokens
