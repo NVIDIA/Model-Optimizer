@@ -16,7 +16,9 @@
 """Unit tests for layerwise_calibrate and LayerActivationCollector."""
 
 import copy
+import hashlib
 import json
+import sys
 from collections import deque
 
 import pytest
@@ -24,6 +26,7 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization._layerwise_checkpoint import _assignment_checkpoint
 from modelopt.torch.quantization._selected_calibration import _SelectedLayerCalibrator
 from modelopt.torch.quantization._source_estimation import _estimate_source_activations
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
@@ -1448,10 +1451,27 @@ def test_layerwise_checkpoint_mismatch_save_every_raises(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("qdq_from_prev", "estimate"), [(False, False), (True, False), (False, True)]
+    ("qdq_from_prev", "estimate", "recover"),
+    [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        pytest.param(
+            False,
+            False,
+            True,
+            marks=pytest.mark.skipif(sys.platform == "win32", reason="POSIX checkpoint leases"),
+        ),
+        pytest.param(
+            True,
+            False,
+            True,
+            marks=pytest.mark.skipif(sys.platform == "win32", reason="POSIX checkpoint leases"),
+        ),
+    ],
 )
 def test_selected_layerwise_mixed_algorithms_match_group_calibration(
-    monkeypatch, qdq_from_prev, estimate
+    monkeypatch, tmp_path, qdq_from_prev, estimate, recover
 ):
     _register_test_discoverer(monkeypatch)
     torch.manual_seed(42)
@@ -1534,7 +1554,125 @@ def test_selected_layerwise_mixed_algorithms_match_group_calibration(
             assert result["peak_activation_bytes"] <= 2**20
         else:
             callback = _SelectedLayerCalibrator(actual, order)
-            layerwise_calibrate(actual, replay(data), callback, **callback.layerwise_config)
+            if recover:
+                options = dict(
+                    callback.layerwise_config,
+                    save_every=2 if qdq_from_prev else 1,
+                    calib_mutates_weights=False,
+                )
+                directory = tmp_path / str(order_index)
+                binding = {
+                    "assignment_digest": hashlib.sha256(
+                        json.dumps(groups, sort_keys=True).encode()
+                    ).hexdigest(),
+                    "provenance": {
+                        "source": "fixture-source",
+                        "inputs": "fixture-data",
+                        "code": "fixture-code",
+                    },
+                    "num_layers": 3,
+                    "max_bytes": 2**20,
+                    "save_every": options["save_every"],
+                }
+                last_layer = actual.layers[2]
+
+                def interrupt(layer, forward_loop):
+                    if layer is last_layer:
+                        raise RuntimeError("test interruption")
+                    callback(layer, forward_loop)
+
+                with _assignment_checkpoint(directory, **binding) as checkpoint:
+                    publish = checkpoint.store._publish
+
+                    def fail_publication(destination, payload):
+                        if not qdq_from_prev and len(payload["layers"]) == 2:
+                            raise RuntimeError("test interruption")
+                        publish(destination, payload)
+
+                    monkeypatch.setattr(checkpoint.store, "_publish", fail_publication)
+                    with pytest.raises(RuntimeError, match="test interruption"):
+                        layerwise_calibrate(
+                            actual, replay(data), interrupt, _checkpoint_state=checkpoint, **options
+                        )
+                committed = 2 if qdq_from_prev else 1
+                prefix = {
+                    p: (p.stat().st_ino, p.read_bytes())
+                    for d in sorted(directory.glob("layer_*"))[:committed]
+                    for p in d.iterdir()
+                    if p.name != "next_inputs.pt"
+                }
+                with (
+                    pytest.raises(ValueError),
+                    _assignment_checkpoint(directory, **dict(binding, assignment_digest="0" * 64)),
+                ):
+                    pytest.fail("Accepted another assignment")
+                boundary_inputs = directory / f"layer_{committed - 1:04d}" / "next_inputs.pt"
+                saved_inputs = boundary_inputs.read_bytes()
+                boundary_inputs.write_bytes(saved_inputs + b"corrupt")
+                with pytest.raises(ValueError), _assignment_checkpoint(directory, **binding):
+                    pytest.fail("Accepted a corrupted activation boundary")
+                boundary_inputs.write_bytes(saved_inputs)
+                actual = mtq.quantize(copy.deepcopy(source), copy.deepcopy(config))
+                callback = _SelectedLayerCalibrator(actual, order)
+                with _assignment_checkpoint(directory, **binding) as checkpoint:
+                    assert checkpoint.start_layer == committed
+                    layerwise_calibrate(
+                        actual, replay(data), callback, _checkpoint_state=checkpoint, **options
+                    )
+                assert all(
+                    (p.stat().st_ino, p.read_bytes()) == state for p, state in prefix.items()
+                )
+                assert not list(directory.glob("layer_*/next_inputs.pt"))
+                assert len(list(directory.glob(".boundary-????????"))) == 1
+
+                def unexpected(*args):
+                    pytest.fail("Completed recovery repeated calibration or activation capture")
+
+                actual = mtq.quantize(copy.deepcopy(source), copy.deepcopy(config))
+                flags = {
+                    q: q.is_enabled for q in actual.modules() if isinstance(q, TensorQuantizer)
+                }
+                with _assignment_checkpoint(directory, **binding) as checkpoint:
+                    assert checkpoint.start_layer == 3
+                    layerwise_calibrate(
+                        actual, unexpected, unexpected, _checkpoint_state=checkpoint, **options
+                    )
+                if qdq_from_prev and order_index == 0:
+                    # A storage failure must leave a bounded, recoverable prefix.
+                    limited = tmp_path / "limited"
+                    limits = dict(binding, max_bytes=65536, calib_mutates_weights=True)
+                    settings = dict(options, calib_mutates_weights=True)
+                    actual = mtq.quantize(copy.deepcopy(source), copy.deepcopy(config))
+                    callback = _SelectedLayerCalibrator(actual, order)
+                    with (
+                        _assignment_checkpoint(limited, **limits) as checkpoint,
+                        pytest.raises((ValueError, RuntimeError)),
+                    ):
+                        layerwise_calibrate(
+                            actual,
+                            replay(data),
+                            callback,
+                            _checkpoint_state=checkpoint,
+                            **settings,
+                        )
+                    assert sum(p.stat().st_size for p in limited.rglob("*") if p.is_file()) <= 65536
+                    actual = mtq.quantize(copy.deepcopy(source), copy.deepcopy(config))
+                    flags = {
+                        q: q.is_enabled for q in actual.modules() if isinstance(q, TensorQuantizer)
+                    }
+                    callback = _SelectedLayerCalibrator(actual, order)
+                    with _assignment_checkpoint(
+                        limited, **dict(limits, max_bytes=2**20)
+                    ) as checkpoint:
+                        layerwise_calibrate(
+                            actual,
+                            replay(data),
+                            callback,
+                            _checkpoint_state=checkpoint,
+                            **settings,
+                        )
+            else:
+                layerwise_calibrate(actual, replay(data), callback, **callback.layerwise_config)
         assert flags == {q: q.is_enabled for q in flags}
         assert actual.state_dict().keys() == reference.state_dict().keys()
         for name, value in reference.state_dict().items():

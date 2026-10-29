@@ -2285,10 +2285,14 @@ def layerwise_calibrate(
     must not be used for inference afterwards.
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
+    checkpoint_state = calib_kwargs.pop("_checkpoint_state", None)
     export_dir = calib_kwargs.pop("export_dir", None)
     qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", True)
     save_every = calib_kwargs.pop("save_every", 1)
     calib_mutates_weights = calib_kwargs.pop("calib_mutates_weights", True)
+
+    if checkpoint_state is not None and (checkpoint_dir is not None or export_dir is not None):
+        raise ValueError("An internal checkpoint adapter owns its directory and final export")
 
     if forward_loop is None:
         raise ValueError(
@@ -2335,7 +2339,7 @@ def layerwise_calibrate(
         # Before calibration, so unsupported models fail in seconds not hours.
         exporter.bind(calibrated_layers=list(transformer_layers))
 
-    ckpt = _CheckpointState.from_folder(
+    ckpt = checkpoint_state or _CheckpointState.from_folder(
         checkpoint_dir,
         num_layers,
         save_every=save_every,
@@ -2343,6 +2347,18 @@ def layerwise_calibrate(
         save_layer_state=exporter is None,
     )
     start_layer = ckpt.start_layer if ckpt else 0
+
+    if checkpoint_state is not None:
+        if (
+            checkpoint_state.num_layers != num_layers
+            or checkpoint_state.save_every != save_every
+            or checkpoint_state.calib_mutates_weights != calib_mutates_weights
+            or outside_calibrator.enabled
+        ):
+            raise ValueError("Internal checkpoint adapter differs from the layer traversal")
+        if start_layer == num_layers:
+            checkpoint_state.full_restore(transformer_layers, model)
+            return
 
     if exporter is not None and _reconcile_export_with_resume(
         exporter, checkpoint_dir, start_layer, num_layers

@@ -851,6 +851,7 @@ def _save_layer_files(
     qstate: dict | None,
     quantizer_buffers: dict | None,
     output_meta: tuple,
+    save=None,
 ) -> None:
     """Write the per-layer files for layer *idx*.
 
@@ -862,17 +863,18 @@ def _save_layer_files(
     ``next_inputs.pt`` and ``manifest.json`` are deferred to window boundaries
     in :meth:`_CheckpointState.save`.
     """
+    save = save or safe_save
     d = _layer_dir(checkpoint_dir, idx)
     if os.path.isdir(d):
         shutil.rmtree(d)
     os.makedirs(d)
     if weights is not None:
-        safe_save(weights, os.path.join(d, "weights.pt"))
+        save(weights, os.path.join(d, "weights.pt"))
     elif quantizer_buffers is not None:
-        safe_save(quantizer_buffers, os.path.join(d, "quantizer_buffers.pt"))
+        save(quantizer_buffers, os.path.join(d, "quantizer_buffers.pt"))
     if qstate is not None:
-        safe_save(qstate, os.path.join(d, "quantizer_state.pt"))
-    safe_save(output_meta, os.path.join(d, "output_meta.pt"))
+        save(qstate, os.path.join(d, "quantizer_state.pt"))
+    save(output_meta, os.path.join(d, "output_meta.pt"))
 
 
 def detect_resume_point(checkpoint_dir: str) -> tuple[int, dict] | None:
@@ -1094,6 +1096,9 @@ class _CheckpointState:
             if os.path.exists(stale):
                 os.remove(stale)
 
+    def _save_file(self, payload, path):
+        safe_save(payload, path)
+
     def save(
         self,
         layer_idx: int,
@@ -1139,6 +1144,7 @@ class _CheckpointState:
             qstate,
             quantizer_buffers,
             _move_to_device(output_meta, _cpu),
+            save=self._save_file,
         )
 
         is_final = layer_idx + 1 == self.num_layers
@@ -1148,7 +1154,7 @@ class _CheckpointState:
 
         # Window boundary: write next_inputs.pt + manifest to commit the window.
         if next_layer_inputs is not None:
-            safe_save(
+            self._save_file(
                 _move_to_device(next_layer_inputs, _cpu),
                 os.path.join(_layer_dir(self.checkpoint_dir, layer_idx), "next_inputs.pt"),
             )
