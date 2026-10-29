@@ -139,10 +139,11 @@ def test_index_dtype_and_rank_conversion_preserves_selected_values(operation):
     np.testing.assert_array_equal(actual[0], expected[0])
 
 
-@pytest.mark.parametrize("direct_output", [False, True])
+@pytest.mark.parametrize("boundary", ["internal", "public", "captured"])
 @pytest.mark.parametrize("legacy_ir", [False, True])
-def test_attention_preserves_graph_boundaries_and_wraps_internal_tensors(direct_output, legacy_ir):
+def test_attention_preserves_graph_boundaries_and_wraps_internal_tensors(boundary, legacy_ir):
     """Attention preserves graph boundaries and wraps internal tensors."""
+    direct_output = boundary == "public"
     output = "attention" if direct_output else "y"
     nodes = [
         helper.make_node("Unsqueeze", ["x", "axes"], ["q4"]),
@@ -156,7 +157,22 @@ def test_attention_preserves_graph_boundaries_and_wraps_internal_tensors(direct_
             kv_num_heads=1,
         ),
     ]
-    if not direct_output:
+    if boundary == "captured":
+        branches = [
+            helper.make_graph(
+                [helper.make_node("Identity", ["attention"], ["branch_output"])],
+                name,
+                [],
+                [helper.make_tensor_value_info("branch_output", TensorProto.FLOAT16, [1, 2, 4])],
+            )
+            for name in ("then", "else")
+        ]
+        nodes.append(
+            helper.make_node(
+                "If", ["condition"], ["y"], then_branch=branches[0], else_branch=branches[1]
+            )
+        )
+    elif not direct_output:
         nodes.append(helper.make_node("Identity", ["attention"], ["y"]))
     model = helper.make_model(
         helper.make_graph(
@@ -165,13 +181,17 @@ def test_attention_preserves_graph_boundaries_and_wraps_internal_tensors(direct_
             [helper.make_tensor_value_info("x", TensorProto.FLOAT16, [1, 2, 4])],
             [
                 helper.make_tensor_value_info(
-                    output, TensorProto.FLOAT16, [1, 2, 4] if direct_output else [1, 1, 2, 4]
+                    output,
+                    TensorProto.FLOAT16,
+                    [1, 1, 2, 4] if boundary == "internal" else [1, 2, 4],
                 )
             ],
             initializer=[numpy_helper.from_array(np.array([0], dtype=np.int64), "axes")],
         ),
         opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("com.microsoft", 1)],
     )
+    if boundary == "captured":
+        model.graph.input.append(helper.make_tensor_value_info("condition", TensorProto.BOOL, []))
     if legacy_ir:
         model.ir_version = 3
         for tensor in model.graph.initializer:
@@ -185,7 +205,7 @@ def test_attention_preserves_graph_boundaries_and_wraps_internal_tensors(direct_
     assert producer[attention.input[0]].op_type == "Squeeze"
     assert list(attention.input[1:]) == ["x", "x", "", ""]
     assert producer["attention"].op_type == (
-        "GroupQueryAttention" if direct_output else "Unsqueeze"
+        "Unsqueeze" if boundary == "internal" else "GroupQueryAttention"
     )
 
 

@@ -804,6 +804,7 @@ def _apply_group_query_attention(model, *, prepared_data_ops=()):
     graph = model.graph
     cache = GraphCache(graph)
     nodes = []
+    protected_outputs = cache.graph_output_names | _subgraph_captures(graph)
     boundaries = cache.graph_input_names | cache.init_names | cache.graph_output_names
     squeezed_inputs = {}
     axes_names = {}
@@ -863,7 +864,7 @@ def _apply_group_query_attention(model, *, prepared_data_ops=()):
                 node.input[index] = squeezed
         nodes.append(node)
         for index, name in enumerate(node.output[:1]):
-            if name and name not in cache.graph_output_names:
+            if name and name not in protected_outputs:
                 axes = axes_for(name)
                 node.output[index] = cache.unique_name(name + "_squeezed")
                 nodes.append(
