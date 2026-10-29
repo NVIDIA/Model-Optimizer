@@ -36,7 +36,8 @@ from safetensors.torch import save_file
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.tensor import DTensor
 
-from modelopt.torch.utils.distributed import all_reduce
+from modelopt.torch.utils.distributed import all_reduce, distribution_plan, expert_parallel_state
+from modelopt.torch.utils.moe import _num_experts_from_config
 
 from .model_utils import TiedWeightMap
 from .moe_utils import _FUSED_PROJ, _fused_experts_prefixes, _split_local_fused_module
@@ -729,8 +730,6 @@ def _distributed_save_hf_checkpoint_impl(
     # other and the checkpoint would be quietly wrong rather than broken. The coordinate comes from
     # the routed experts' ParallelState -- the same source calibration reads, not transformers'
     # internal ``model._device_mesh``. An expert's data-parallel group is its expert-data-parallel one.
-    from modelopt.torch.utils.distributed import distribution_plan, expert_parallel_state
-
     ep_rank, dp_idx = 0, 0
     if distribution_plan(model).is_expert_parallel:
         parallel_state = expert_parallel_state(model)
@@ -747,21 +746,7 @@ def _distributed_save_hf_checkpoint_impl(
             dp_idx = edp_group.rank()
     # Total config expert count, to tell a per-EP-group expert tensor (size < total) from one that
     # spans all experts (classic DP x EP) when computing the per-expert global index offset.
-    _cfg = getattr(model, "config", None)
-
-    def _experts_of(c):
-        if c is None:
-            return 0
-        return int(
-            getattr(c, "num_experts", 0)
-            or getattr(c, "num_local_experts", 0)
-            or getattr(c, "n_routed_experts", 0)  # nemotron_h
-            or 0
-        )
-
-    # VLMs nest the text-model fields under ``config.text_config`` (the quantized backbone is
-    # ``model.language_model``), so fall back to it when the top-level config has no expert count.
-    total_experts = _experts_of(_cfg) or _experts_of(getattr(_cfg, "text_config", None))
+    total_experts = _num_experts_from_config(getattr(model, "config", None))
     # DP x EP: experts are dp-REPLICATED across the EDP group (each holds a full EP-sharded copy). Only
     # the first replica (dp_idx == 0) writes them; replica ranks (dp_idx > 0) skip the per-expert split.
     # dp_idx is the EDP-group rank resolved above -- 0 when experts are not EDP-replicated (dense /
