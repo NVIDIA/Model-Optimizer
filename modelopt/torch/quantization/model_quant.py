@@ -124,22 +124,23 @@ def calibrate(
     }
     model.eval()
 
-    with forward_with_reshard(model):
-        apply_mode(
-            model,
-            mode=get_modelike_from_algo_cfg(algorithm),
-            mode_kwargs={"forward_loop": forward_loop},
-        )
+    try:
+        with forward_with_reshard(model):
+            apply_mode(
+                model,
+                mode=get_modelike_from_algo_cfg(algorithm),
+                mode_kwargs={"forward_loop": forward_loop},
+            )
 
-    for name, module in model.named_modules():
-        if isinstance(module, TensorQuantizer):
-            for attr_name in ["_amax", "_pre_quant_scale"]:
-                module.validate_attr(attr_name=attr_name, warn_error=True, name=name)
+        for name, module in model.named_modules():
+            if isinstance(module, TensorQuantizer):
+                for attr_name in ["_amax", "_pre_quant_scale"]:
+                    module.validate_attr(attr_name=attr_name, warn_error=True, name=name)
 
-    # TODO: Re-enable when the CUDA error: unspecified launch failure is fixed.
-    # clear_cuda_cache()
-
-    _restore_training_modes(model, training_modes)
+        # TODO: Re-enable when the CUDA error: unspecified launch failure is fixed.
+        # clear_cuda_cache()
+    finally:
+        _restore_training_modes(model, training_modes)
 
     return model
 
@@ -467,6 +468,8 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
     "awq_lite",
     "awq_full",
     "awq_clip",
+    "gptq",
+    "gsq",
 }
 
 
@@ -809,9 +812,19 @@ def auto_quantize(
             with the number of candidate formats and path nodes, not with the number of whole-model
             configurations the search considers -- see
             :mod:`modelopt.torch.quantization._auto_quantize_shapley`.
+            ``"rco"`` optimizes frozen candidate assignments against the whole-model loss
+            under a strict upper cost bound. It defaults to full-vocabulary teacher KL;
+            see :class:`modelopt.torch.quantization.rco.AutoQuantizeRCOSearcher` for its
+            optimization, callback, and candidate-checkpoint options.
+            ``preserve_candidate_weights=True`` freezes export-compatible hard candidates
+            for matched ordinary controls; it defaults to False. GPTQ, GSQ, and RCO always
+            preserve candidate weights.
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step.
+            GPTQ/GSQ candidate checkpoints require a stable frozen-data identity supplied as
+            ``method={"method": "gradient", "data_fingerprint": "..."}``. Supplying this option
+            also fingerprints ordinary calibration checkpoints for compatible candidate reuse.
         module_search_spaces: Optional module-specific candidate overrides. Each entry contains
             ``module_name_patterns`` (one or more glob patterns), ``quantization_formats``, and
             optional ``allow_no_quant`` (default True). A matching entry replaces the global
@@ -1047,7 +1060,13 @@ def auto_quantize(
         fixed_cfg, fixed_name = processed_fixed_quantization_config
         fixed_recipe = QuantRecipe(fixed_cfg, name=fixed_name)
         set_quantizer_by_cfg(model, fixed_recipe.config.quant_cfg)
-    searcher.search(model, search_constraints, config=search_config)
+    try:
+        searcher.search(model, search_constraints, config=search_config)
+    except Exception:
+        searcher.restore_reference_weights()
+        raise
+    finally:
+        searcher._restore_execution_state()
 
     return model, searcher.state_dict()
 

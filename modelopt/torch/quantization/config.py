@@ -1280,6 +1280,37 @@ class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):
     )
 
 
+class GSQCalibConfig(QuantizeAlgorithmConfig):
+    """Regionwise Gumbel-Softmax weight refinement for FP8 and static block-16 NVFP4.
+
+    ``optimizer_checkpoint_dir`` stores internal optimizer/RNG state independently of
+    ``layerwise.checkpoint_dir``. Checkpoint creation and resume require a stable
+    ``data_fingerprint``.
+    """
+
+    method: Literal["gsq"] = ModeloptField("gsq")
+    initializer: Literal["max", "gptq"] = ModeloptField("max")
+    steps: int = ModeloptField(100, ge=0)
+    assignment_lr: float = ModeloptField(0.01, gt=0)
+    scale_lr: float = ModeloptField(0.001, gt=0)
+    temperature: float = ModeloptField(1.0, gt=0)
+    final_temperature: float = ModeloptField(0.1, gt=0)
+    eval_every: int = ModeloptField(10, gt=0)
+    seed: int = ModeloptField(0, ge=0)
+    optimizer_checkpoint_dir: str | None = ModeloptField(None, min_length=1)
+    resume: bool = ModeloptField(False)
+    data_fingerprint: str = ModeloptField("")
+    layerwise: LayerwiseConfig = Field(default_factory=lambda: LayerwiseConfig(enable=True))
+
+    @model_validator(mode="after")
+    def _validate_resume(self):
+        if self.resume and not self.optimizer_checkpoint_dir:
+            raise ValueError("GSQ resume requires optimizer_checkpoint_dir")
+        if self.optimizer_checkpoint_dir is not None and not self.data_fingerprint.strip():
+            raise ValueError("GSQ optimizer checkpoints require a nonempty data_fingerprint")
+        return self
+
+
 class ImatrixCalibConfig(QuantizeAlgorithmConfig):
     """The config for imatrix calibration.
 

@@ -23,6 +23,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from contextvars import ContextVar
 from functools import partial
 from typing import Any, TypeAlias
 
@@ -35,6 +36,7 @@ from tqdm import tqdm
 from modelopt.torch.models import list_all_possible
 from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.searcher import ForwardLoop
+from modelopt.torch.quantization.gsq import gsq
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
@@ -65,6 +67,7 @@ from .utils import (
     enable_fake_quant,
     enable_quant,
     enable_weight_access_and_writeback,
+    find_shared_input_groups,
     is_quantized_column_parallel_linear,
     is_quantized_linear,
     is_quantized_parallel_linear,
@@ -85,6 +88,7 @@ from .utils.calib_utils import (
 __all__ = [
     "CalibratorFactory",
     "awq",
+    "gsq",
     "layerwise_calibrate",
     "local_hessian_calibrate",
     "lsq",
@@ -208,6 +212,18 @@ def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) ->
     # Under the default patterns, verify the fusible name groups were actually synced.
     if weight_patterns == list(SHARED_PATTERNS):
         _check_grouped_weight_global_amax_synced(model)
+
+
+_EXPORT_COMPATIBLE_CALIBRATION = ContextVar("export_compatible_calibration", default=False)
+
+
+def _prepare_export_fusion(model: nn.Module) -> None:
+    # Export uses these same stock groups and scale updates before packing weights.
+    # Calibration and export import each other; defer the export dependency.
+    from modelopt.torch.export.quant_utils import preprocess_linear_fusion
+
+    for _, members in find_shared_input_groups(model, SHARED_PATTERNS):
+        preprocess_linear_fusion(members)
 
 
 CalibratorFactory: TypeAlias = Callable[
@@ -2522,6 +2538,8 @@ def gptq(
     # TODO: Add support for other scale setting strateiges like weight-mse or local-hessian
     # The Hessian pass below is GPTQ's own forward; max only runs one if activations need amax.
     max_calibrate(model, forward_loop=forward_loop, skip_forward_without_activation_calib=True)
+    if _EXPORT_COMPATIBLE_CALIBRATION.get():
+        _prepare_export_fusion(model)
 
     quantized_layers = [
         (n, m)
@@ -2626,9 +2644,8 @@ def gptq(
     finally:
         for hook in hooks:
             hook.remove()
-
-    for handle in gptq_handles.values():
-        handle.cleanup()
+        for handle in gptq_handles.values():
+            handle.cleanup()
     for handle in [*gptq_handles.values(), *expert_handles.values()]:
         handle.sync_hessian_across_dp()
 
