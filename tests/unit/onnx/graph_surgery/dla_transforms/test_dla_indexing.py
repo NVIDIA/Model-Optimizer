@@ -43,7 +43,8 @@ from modelopt.onnx.graph_surgery.make_dla_compatible import (
 @pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
 @pytest.mark.parametrize("pipeline", [False, True])
 @pytest.mark.parametrize("producer", ["Reshape", "Squeeze"])
-def test_unprepared_internal_indices_refuse_before_mutation(shape, pipeline, producer):
+@pytest.mark.parametrize("metadata", ["inferred", "omitted"])
+def test_unprepared_internal_indices_refuse_before_mutation(shape, pipeline, producer, metadata):
     """A native internal index view cannot follow data into a prepared four-dimensional layout."""
     source_shape = [1] * (4 - len(shape)) + shape
     model = _model(
@@ -74,6 +75,8 @@ def test_unprepared_internal_indices_refuse_before_mutation(shape, pipeline, pro
     np.testing.assert_array_equal(
         _execute(model, feeds)[0], np.take(feeds["x"], [0] * shape[-1], axis=-1)
     )
+    if metadata == "omitted":
+        del model.graph.value_info[:]
     if (
         pipeline
         and producer == "Reshape"

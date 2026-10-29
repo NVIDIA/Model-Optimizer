@@ -545,7 +545,7 @@ def _apply_gather_elements(model, *, prepared_data_ops=(), validate_only=False):
         if id(node) in selected_ids
         and prepared[node.input[0]]
         and node.input[1] not in cache.graph_input_names | cache.init_names
-        and _known_rank(cache, node.input[1]) in (2, 3)
+        and _known_rank(cache, node.input[1]) in (None, 2, 3)
     ]
     index_layouts = (
         _prepared_index_data(
