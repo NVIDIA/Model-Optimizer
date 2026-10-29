@@ -104,6 +104,29 @@ def test_cached_teacher_callback_matches_direct_loss_and_rejects_stale_cache(
                 parameter.grad / len(batches), expected[name], atol=1e-7, rtol=1e-4
             )
     assert model.lm_head.weight.grad is None
+    if objective_kind == "kl":
+        report = example._evaluate(model, batches, objective)
+        nll, tokens = 0.0, 0
+        with torch.no_grad():
+            for b in batches:
+                valid = b["loss_mask"][:, 1:] * b["attention_mask"][:, :-1]
+                labels = b["input_ids"].clone()
+                labels[:, 0] = -100
+                labels[:, 1:].masked_fill_(~valid.bool(), -100)
+                count = int(valid.sum())
+                loss = model(
+                    input_ids=b["input_ids"],
+                    attention_mask=b["attention_mask"],
+                    labels=labels,
+                    use_cache=False,
+                ).loss
+                nll += float(loss) * count
+                tokens += count
+        assert report["teacher_kl"] == pytest.approx(float(direct.detach()), rel=1e-5, abs=1e-7)
+        assert report["perplexity"] == pytest.approx(
+            float(torch.tensor(nll / tokens).exp()), rel=1e-5
+        )
+        assert report["prediction_tokens"] == tokens
     expected_metric = callback(model, batches[0])
     model.requires_grad_(False)
     torch.testing.assert_close(callback(model, batches[0]), expected_metric)

@@ -231,6 +231,19 @@ class CachedTeacherKL:
         device = next(model.parameters()).device
         with torch.set_grad_enabled(backward):
             student = _decoder(model)(**_inputs(batch, device), use_cache=False).last_hidden_state
+        return self._metric_from_hidden(
+            model,
+            batch,
+            student,
+            backward=backward,
+            normalizer=normalizer,
+            cross_entropy=cross_entropy,
+        )
+
+    def _metric_from_hidden(
+        self, model, batch, student, backward=False, normalizer=None, cross_entropy=False
+    ):
+        device = student.device
         mask = batch.get("loss_mask", batch["attention_mask"])
         if cross_entropy:
             student = student[:, :-1]
@@ -334,30 +347,25 @@ def _disabled_layers(model):
 
 
 @torch.no_grad()
-def _evaluate(model, batches, objective, chunk_tokens):
+def _evaluate(model, batches, objective):
     device = next(model.parameters()).device
-    kl, nll, count = 0.0, 0.0, 0
+    kl, nll, valid_tokens, count = 0.0, 0.0, 0, 0
     for batch in batches:
-        mask = batch["loss_mask"]
-        kl += float(objective.metric(model, batch)) * int(mask.sum())
-        hidden = _decoder(model)(**_inputs(batch, device), use_cache=False).last_hidden_state[
-            :, :-1
-        ]
-        labels = batch["input_ids"][:, 1:].to(device).flatten()
-        valid = (mask[:, 1:] * batch["attention_mask"][:, :-1]).to(device).flatten()
-        hidden = hidden.flatten(0, -2)
-        for start in range(0, hidden.shape[0], chunk_tokens):
-            stop = start + chunk_tokens
-            losses = F.cross_entropy(
-                model.get_output_embeddings()(hidden[start:stop]).float(),
-                labels[start:stop],
-                reduction="none",
+        hidden = _decoder(model)(**_inputs(batch, device), use_cache=False).last_hidden_state
+        mask = batch.get("loss_mask", batch["attention_mask"])
+        valid = int(mask.sum())
+        predictions = int((mask[:, 1:] * batch["attention_mask"][:, :-1]).sum())
+        kl += float(objective._metric_from_hidden(model, batch, hidden)) * valid
+        if predictions:
+            nll += (
+                float(objective._metric_from_hidden(model, batch, hidden, cross_entropy=True))
+                * predictions
             )
-            nll += float((losses * valid[start:stop]).sum())
-        count += int(valid.sum())
+        valid_tokens += valid
+        count += predictions
     return {
         "perplexity": math.exp(nll / count),
-        "teacher_kl": kl / sum(int(batch["loss_mask"].sum()) for batch in batches),
+        "teacher_kl": kl / valid_tokens,
         "prediction_tokens": count,
     }
 
@@ -525,7 +533,7 @@ def main():
         )
         for name, (batches, manifest) in zip(("calibration", "heldout"), frozen, strict=True)
     ]
-    settings["bf16"] = _evaluate(model, heldout, objectives[1], args.head_chunk_tokens)
+    settings["bf16"] = _evaluate(model, heldout, objectives[1])
     settings["preparation_seconds"] = time.perf_counter() - preparation_start
     settings["cache_bytes"] = sum(path.stat().st_size for path in args.output.rglob("*.pt"))
     (args.output / "manifest.json").write_text(json.dumps(settings, indent=2))
@@ -688,7 +696,7 @@ def main():
                 result["allocation_sha256"] = _digest(allocation)
                 result["duplicate_of"] = allocations.get((variant, result["allocation_sha256"]))
                 allocations[(variant, result["allocation_sha256"])] = f"budget_{index:02d}"
-                result["heldout"] = _evaluate(model, heldout, objectives[1], args.head_chunk_tokens)
+                result["heldout"] = _evaluate(model, heldout, objectives[1])
                 expected = _probe_logits(model, heldout[0])
                 mto.save(model, directory / "modelopt.pt")
                 export_hf_checkpoint(model, export_dir=directory / "hf")
