@@ -345,6 +345,7 @@ ignore_errors = true
 
 [tool.bandit]
 exclude_dirs = [".github/", "examples/", "noxfile.py", "tests/"]
+# ModelOpt no longer runs NVIDIA's Wheel-CI-CD bandit config, so `skips` is owned here.
 # Use of `# nosec BXXX` requires special approval
 skips = [
     "B101", # assert_used
@@ -353,7 +354,7 @@ skips = [
     "B112", # try_except_continue
     "B303", # MD2, MD4, MD5, or SHA1
     "B311", # random
-    "B614", # pytorch_load: torch>=2.6 already defaults torch.load to weights_only=True
+    "B614", # pytorch_load: weights_only defaults to True (torch>=2.6); weights_only=False is gated by CodeRabbit and review
     "B615", # huggingface_unsafe_download: model / dataset ids and their revisions come from the caller
 ]
 
