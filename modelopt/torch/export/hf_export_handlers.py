@@ -88,7 +88,10 @@ def _fsdp2_weight_window(
         return fsdp2_aware_weight_update(root, module, names=names)
     held = ctx.fsdp2_window
     if held is not None and held.unit is unit:
-        held.modules.append(module)
+        # Once per module, though a handler packing several weights asks once per weight: the
+        # window re-registers each listed module's weights with FSDP2 when it closes.
+        if not any(m is module for m in held.modules):
+            held.modules.append(module)
         return contextlib.nullcontext()
     _close_fsdp2_weight_window(ctx)
     root, names = _window_root(ctx, unit)
