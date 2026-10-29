@@ -9,6 +9,7 @@ Changelog
 *Quantization*
 
 - Per-tensor FP8 matrix and expert-stack exports now match calibrated fake-quantization arithmetic; exported scales can differ by a few float32 ulps and packed values near rounding boundaries can change.
+- AutoQuantize can search GGML IQ formats calibrated with GPTQ or imatrix alongside NVFP4, FP8, and BF16, keeping each candidate's calibrated weights isolated during search.
 
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
 - The functional quantized-weight export API now exports the KV cache: ``capture_kv_cache_export_state`` returns an attention module's ``k_scale`` / ``v_scale``, and ``build_hf_quantization_config`` takes the KV-cache formats from ``get_kv_cache_export_spec``.

@@ -18,7 +18,13 @@
 import torch
 
 from ..utils.calib_utils import ImatrixEncoder, register_imatrix_encoder
-from .common import floored_second_moments, pin_packed_weight, pinned_packed_weight, validate_weight
+from .common import (
+    floored_second_moments,
+    pin_packed_weight,
+    pinned_packed_weight,
+    preserving_source_weights,
+    validate_weight,
+)
 from .registry import GGML_FORMAT_REGISTRY
 
 __all__ = ["GGMLImatrixEncoder"]
@@ -63,6 +69,8 @@ class GGMLImatrixEncoder(ImatrixEncoder):
             **kwargs,
         )
         pin_packed_weight(quantizer, quantizer.num_bits, packed)
+        if preserving_source_weights():
+            return weight
         decoded = ggml_format.dequantize(
             packed,
             shape,

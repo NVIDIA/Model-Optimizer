@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# modelopt-schema: modelopt.recipe.config.AutoQuantizeConfig
+imports:
+  iq2_xxs: configs/numerics/iq2_xxs
+  iq2_xs: configs/numerics/iq2_xs
+  iq2_s: configs/numerics/iq2_s
+  nvfp4: configs/ptq/presets/model/nvfp4
+  fp8: configs/ptq/presets/model/fp8
+  disabled_layers: configs/auto_quantize/units/base_disabled_layers
+  cost_excluded_layers: configs/auto_quantize/units/base_cost_excluded_layers
+
+constraints:
+  effective_bits: 3.0
+  cost_model: weight
+candidate_formats:
+  - $import: nvfp4
+  - $import: fp8
+module_search_spaces:
+  - module_name_patterns: ["*mlp.experts*"]
+    candidate_formats:
+      - algorithm: &iq_calibration
+          - method: gptq
+            block_size: 256
+            perc_damp: 0.3
+            importance_weighted: true
+            layerwise: {enable: true}
+          - method: imatrix
+        quant_cfg:
+          - &disable_all {quantizer_name: "*", enable: false}
+          - quantizer_name: "*weight_quantizer"
+            cfg: {$import: iq2_xxs}
+      - algorithm: *iq_calibration
+        quant_cfg:
+          - *disable_all
+          - quantizer_name: "*weight_quantizer"
+            cfg: {$import: iq2_xs}
+      - algorithm: *iq_calibration
+        quant_cfg:
+          - *disable_all
+          - quantizer_name: "*weight_quantizer"
+            cfg: {$import: iq2_s}
+      - $import: nvfp4
+      - $import: fp8
+    allow_no_quant: true
+# Gradient scoring amortizes the format sweep; compare held-out KL before benchmark promotion.
+auto_quantize_method: gradient
+score_size: 128
+disabled_layers:
+  - $import: disabled_layers
+  # KDA reads the convolution weights directly, bypassing its quantized forward.
+  - "*self_attn.conv1d*"
+  - "*mlp.gate"
+  - "*lm_head*"
+  - "*hc_head*"
+cost_excluded_layers:
+  - $import: cost_excluded_layers
+  - "*embed*"
+  - "*lm_head*"
+  - "*hc_head*"
