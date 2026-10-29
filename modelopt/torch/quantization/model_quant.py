@@ -102,6 +102,31 @@ def _rank_local_calibrations(algorithm: QuantizeAlgoCfgType) -> list[str]:
     return found
 
 
+def _group_ranks(group: dist.DistributedProcessGroup) -> set[int]:
+    """The ranks ``group`` spans; just this rank for a group not set."""
+    if not group.is_initialized():
+        return {dist.rank()}
+    return set(
+        torch.distributed.get_process_group_ranks(group.group or torch.distributed.group.WORLD)
+    )
+
+
+def _names_the_experts_groups(
+    state: "dist.ParallelState | None", plan: dist.DistributionPlan
+) -> bool:
+    """Whether ``state`` names the groups a routed expert of ``plan`` syncs its scales over.
+
+    Its expert-parallel group of ``ep_size`` ranks, and as its data-parallel group the ``edp``
+    ranks holding the same experts, which meet the expert-parallel group, whose ranks hold the
+    others, only at this rank.
+    """
+    if state is None or not state.expert_model_parallel_group.is_initialized():
+        return False
+    ep = _group_ranks(state.expert_model_parallel_group)
+    dp = _group_ranks(state.data_parallel_group)
+    return len(ep) == plan.ep_size and len(dp) == plan.edp and ep & dp == {dist.rank()}
+
+
 def _refuse_unsupported_distributed_calibration(
     model: nn.Module, algorithm: QuantizeAlgoCfgType
 ) -> None:
@@ -142,19 +167,14 @@ def _refuse_unsupported_distributed_calibration(
             holders[name] = state
     if not holders and not any("experts" in name.split(".") for name, _ in model.named_modules()):
         return  # no routed experts here, as in a VLM's vision tower: no experts' scales to merge
-    wrong = [
-        name
-        for name, state in holders.items()
-        if state is None
-        or not state.expert_model_parallel_group.is_initialized()
-        or max(state.data_parallel_group.world_size(), 1) != plan.edp
-    ]
+    wrong = [name for name, state in holders.items() if not _names_the_experts_groups(state, plan)]
     if not holders or wrong:
         raise NotImplementedError(
             f"Calibrating a model whose experts are sharded over {plan.ep_size} ranks needs each "
-            "routed expert's ParallelState to name its expert-parallel group and, as its "
-            f"data-parallel group, the {plan.edp} rank(s) holding the same experts, or calibration "
-            "would sync their scales over the wrong ranks. "
+            f"routed expert's ParallelState to name its expert-parallel group of {plan.ep_size} "
+            f"ranks and, as its data-parallel group, the {plan.edp} rank(s) holding the same "
+            "experts, which share only this rank with that group, or calibration would sync their "
+            "scales over the wrong ranks. "
             + (
                 f"These modules do not: {wrong[:3]}."
                 if wrong

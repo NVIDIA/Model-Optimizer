@@ -41,6 +41,7 @@ from torch.utils.data import (
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as mto_dist
+from modelopt.torch.quantization.model_quant import _refuse_unsupported_distributed_calibration
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
     ParallelState,
@@ -662,6 +663,48 @@ def test_expert_parallel_calibration_needs_the_experts_expert_parallel_group(
     group at all, with one on the router alone, and with a data-parallel group spanning ranks that
     hold other experts."""
     cpu_dist_workers.run(_expert_parallel_calibration_job, layout=layout)
+
+
+# Rank 0 of four at EP 2: ranks 0 and 1 shard the experts between them, and rank 2 holds the same
+# experts as rank 0. The two-rank pool cannot build these groups, so the process group answers as a
+# four-rank launch's would.
+_FOUR_RANK_GROUPS = {"ep": [0, 1], "edp": [0, 2], "world": [0, 1, 2, 3]}
+
+
+@pytest.mark.parametrize(
+    ("ep", "dp", "seeded"),
+    [("ep", "edp", True), ("ep", "ep", False), ("world", "edp", False)],
+    ids=[
+        "seeded",
+        "data-parallel-over-the-expert-parallel-ranks",
+        "expert-parallel-over-every-rank",
+    ],
+)
+def test_the_experts_groups_are_checked_by_their_ranks(monkeypatch, ep, dp, seeded):
+    """A data-parallel group of the plan's edp ranks is not enough: over the experts'
+    expert-parallel ranks, which hold other experts, max's and GPTQ's syncs would merge different
+    experts' scales. Nor is an expert-parallel group over more ranks than the plan shards over."""
+    monkeypatch.setattr(mto_dist, "backend", lambda: "torch")
+    monkeypatch.setattr(mto_dist, "rank", lambda group=None: 0)
+    monkeypatch.setattr(
+        torch.distributed,
+        "get_world_size",
+        lambda group=None: 4 if group is None else len(_FOUR_RANK_GROUPS[group]),
+    )
+    monkeypatch.setattr(
+        torch.distributed, "get_process_group_ranks", lambda group: _FOUR_RANK_GROUPS[group]
+    )
+    model = nn.Sequential(OrderedDict(experts=nn.Linear(16, 16)))
+    model.experts._parallel_state = ParallelState(
+        data_parallel_group=dp, expert_model_parallel_group=ep
+    )
+    set_distribution_plan(model, DistributionPlan(world_size=4, ep_size=2))
+
+    if seeded:
+        _refuse_unsupported_distributed_calibration(model, "max")
+    else:
+        with pytest.raises(NotImplementedError, match="expert-parallel group of 2 ranks"):
+            _refuse_unsupported_distributed_calibration(model, "max")
 
 
 @pytest.mark.parametrize(
