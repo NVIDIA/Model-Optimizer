@@ -150,7 +150,7 @@ def test_auto_quantize_rco_candidates_survive_native_export(tmp_path, initialize
     kwargs = {
         "quantization_formats": [config],
         "data_loader": [inputs],
-        "forward_step": lambda m, x: m(x, use_cache=False).logits,
+        "forward_step": lambda m, x: m(x, use_cache=False),
         "num_calib_steps": 1,
         "num_score_steps": 1,
         "disabled_layers": ["lm_head"],
@@ -167,7 +167,8 @@ def test_auto_quantize_rco_candidates_survive_native_export(tmp_path, initialize
             "preserve_candidate_weights": True,
         },
         loss_func=lambda output, x: torch.nn.functional.cross_entropy(
-            output[:, :-1].float().reshape(-1, output.shape[-1]), x[:, 1:].reshape(-1)
+            output.logits[:, :-1].float().reshape(-1, output.logits.shape[-1]),
+            x[:, 1:].reshape(-1),
         ),
     )
     torch.testing.assert_close(baseline(inputs).logits, original(inputs).logits, rtol=0, atol=0)
