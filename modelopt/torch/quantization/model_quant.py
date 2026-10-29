@@ -93,8 +93,8 @@ def _rank_local_calibrations(algorithm: QuantizeAlgoCfgType) -> list[str]:
         config = CalibrateModeRegistry[mode].config_class.model_validate(options)
         if method in _RANK_LOCAL_CALIBRATION:
             found.append(method)
-        elif getattr(config, "distributed_sync", True) is False:
-            found.append(f"{method} with distributed_sync=False")
+        elif not getattr(config, "distributed_sync", True):  # None skips the sync too
+            found.append(f"{method} with distributed_sync={config.distributed_sync}")
         for key in ("weight_scale_algorithm", "scale_algorithm"):
             if getattr(config, key, None) is not None:
                 found += _rank_local_calibrations(getattr(config, key))

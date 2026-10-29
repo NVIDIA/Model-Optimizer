@@ -577,17 +577,33 @@ def test_forward_loop_refuses_a_batch_that_is_not_a_mapping():
             {"method": "max", "distributed_sync": "false"},
             "max with distributed_sync=False",
         ),
+        (
+            "calibrate",
+            {
+                "method": "nvfp4_act_headroom",
+                "weight_scale_algorithm": {"method": "mse", "distributed_sync": None},
+            },
+            "mse with distributed_sync=None",
+        ),
         ("auto_quantize", {"method": "awq_lite"}, "awq_lite"),
     ],
-    ids=["quantize", "calibrate", "for-the-weight-scales", "max-without-its-sync", "auto_quantize"],
+    ids=[
+        "quantize",
+        "calibrate",
+        "for-the-weight-scales",
+        "max-without-its-sync",
+        "for-the-weight-scales-without-their-sync",
+        "auto_quantize",
+    ],
 )
 def test_rank_local_calibration_is_refused_before_it_changes_a_distributed_model(
     entry, algorithm, refused
 ):
     """Each rank calibrates on its own data, and AWQ keeps what its search gathers on the rank: the
     ranks' copies of a weight would come out different. So would local_hessian, run by another
-    algorithm for its weight scales, and max told not to sync, in any spelling its schema reads as
-    off. The refusal comes before any change."""
+    algorithm for its weight scales, and max or MSE told not to sync, by False in any spelling its
+    schema reads as False, or by None, which skips the sync too. The refusal comes before any
+    change."""
     model = nn.Sequential(nn.Linear(16, 16))
     set_distribution_plan(model, DistributionPlan(world_size=2))
     if entry == "calibrate":
