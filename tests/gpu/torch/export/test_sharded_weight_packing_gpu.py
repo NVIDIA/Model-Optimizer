@@ -92,6 +92,8 @@ def _packing_job(rank, world_size):
     set_distribution_plan(model, DistributionPlan(world_size, dense="fsdp"))
     ctx = ExportContext(model=model, dtype=torch.bfloat16, keep_fused_experts=True)
 
+    # A rank left waiting in a window's unshard fails the test at pytest's per-test timeout, after
+    # which the worker pool kills its ranks.
     with handlers.held_fsdp2_weight_windows(ctx):
         for name, linear in linears:
             ExportModuleRegistry.match(linear)(name, linear, ctx)
