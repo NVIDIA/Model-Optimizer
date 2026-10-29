@@ -856,16 +856,11 @@ def _remove_unused_initializers(model: onnx.ModelProto) -> onnx.ModelProto:
     discarded = {init.name for init in graph.initializer if init.name not in used}
     removed = len(graph.initializer) - len(kept)
     if model.ir_version <= 3:
-        removed_names = {init.name for init in graph.initializer if init.name not in used}
         for index in reversed(range(len(graph.input))):
-            if graph.input[index].name in removed_names:
+            if graph.input[index].name in discarded:
                 del graph.input[index]
     graph.ClearField("initializer")
     graph.initializer.extend(kept)
-    if model.ir_version <= 3:
-        inputs = [value for value in graph.input if value.name not in discarded]
-        graph.ClearField("input")
-        graph.input.extend(inputs)
     logger.debug("remove_unused_initializers: removed %d unused initializer(s).", removed)
     return model
 

@@ -343,7 +343,7 @@ def dla_make_dla_compatible(
         model_path: Input file; external weights are loaded from its directory.
         output_path: Destination ONNX file.
         use_external_data: Store large tensor payloads in a sidecar file.
-        external_data_name: Sidecar filename; defaults to output filename plus "_data".
+        external_data_name: Relative sidecar filename; ONNX chooses a unique name by default.
         verbose: Log each transform stage.
         qdq_quantized_dtypes: Zero-point dtypes whose QDQ pairs are removed.
             Defaults to UINT16 and INT16. Accepts ONNX dtype IDs or names.
@@ -365,8 +365,6 @@ def dla_make_dla_compatible(
     if verbose:
         logger.info("Saving modified model to: %s", output_path)
     if use_external_data:
-        if external_data_name is None:
-            external_data_name = os.path.basename(output_path) + "_data"
         onnx.save(
             model,
             output_path,

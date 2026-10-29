@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+from pathlib import Path
 
 import numpy as np
 import onnx
@@ -468,9 +469,76 @@ def test_public_pipeline_saves_with_onnx(tmp_path, external_name):
     assert bool(external) == (external_name is not False)
     if external:
         assert len(external) == 2
-        expected = external_name or output.name + "_data"
+        expected = next(e.value for e in external[0].external_data if e.key == "location")
+        assert external_name is None or expected == external_name
         assert (output.parent / expected).is_file()
         assert all(
             next(e.value for e in t.external_data if e.key == "location") == expected
             for t in external
         )
+
+
+@pytest.mark.parametrize(
+    ("output_location", "occupied"),
+    [("cwd", "cwd"), ("nested", "cwd"), ("nested", "output"), ("nested", "both")],
+)
+def test_public_pipeline_repeated_default_saves_preserve_sidecars(
+    tmp_path, monkeypatch, output_location, occupied
+):
+    """Native default naming must preserve existing files and earlier conversion payloads."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    directory = cwd if output_location == "cwd" else tmp_path / "output"
+    directory.mkdir(exist_ok=True)
+    output = directory / "converted.onnx"
+    source = tmp_path / "source.onnx"
+    stale = output.name + "_data"
+    occupied_paths = set()
+    if occupied in {"cwd", "both"}:
+        occupied_paths.add(cwd / stale)
+    if occupied in {"output", "both"}:
+        occupied_paths.add(directory / stale)
+    preserved = {}
+    for path in occupied_paths:
+        path.write_bytes(b"keep this existing payload")
+        preserved[path] = path.read_bytes()
+    locations = []
+    shape = [1, 1, 1, 512]
+    feeds = {"x": np.ones(shape, np.float32)}
+    for offset in [0, 1]:
+        weight = np.arange(512, dtype=np.float32).reshape(shape) + offset
+        model = helper.make_model(
+            helper.make_graph(
+                [helper.make_node("Add", ["x", "weight"], ["y"])],
+                "repeat_native_save",
+                [_vi("x", TensorProto.FLOAT, shape)],
+                [_vi("y", TensorProto.FLOAT, shape)],
+                [numpy_helper.from_array(weight, "weight")],
+            ),
+            opset_imports=[helper.make_opsetid("", _OPSET)],
+            ir_version=_MAX_IR,
+        )
+        onnx.save(model, source)
+        _dla_pipeline.dla_make_dla_compatible(str(source), str(output), verbose=False)
+        onnx.checker.check_model(str(output), full_check=True)
+        saved = onnx.load(output, load_external_data=False)
+        tensor = next(t for t in saved.graph.initializer if t.name == "weight")
+        location = next(e.value for e in tensor.external_data if e.key == "location")
+        assert location == Path(location).name and location not in locations
+        locations.append(location)
+        for path, payload in preserved.items():
+            assert path.read_bytes() == payload
+        sidecar = directory / location
+        preserved[sidecar] = sidecar.read_bytes()
+        actual = onnx.load(output)
+        np.testing.assert_array_equal(
+            numpy_helper.to_array(next(t for t in actual.graph.initializer if t.name == "weight")),
+            weight,
+        )
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 1
+        result = ort.InferenceSession(
+            actual.SerializeToString(), options, providers=["CPUExecutionProvider"]
+        ).run(None, feeds)[0]
+        np.testing.assert_array_equal(result, feeds["x"] + weight)
