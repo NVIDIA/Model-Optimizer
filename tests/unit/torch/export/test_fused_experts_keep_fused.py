@@ -17,9 +17,10 @@
 
 The no-gather writer never splits a fused 3-D expert weight while the model is sharded:
 ``_export_fused_experts_keep_fused`` folds every expert's quantizer into the fused weight in place,
-and ``split_fused_experts_state_dict`` cuts the result into per-expert keys later. That pipeline
-must write exactly what the single-process ``_export_fused_experts`` writes, so most tests compare
-the two byte for byte on a tiny synthetic fused-experts module quantized with FP8 and NVFP4.
+and ``split_fused_experts_state_dict`` / ``_split_local_fused_module`` cut the result into
+per-expert keys later. That pipeline must write exactly what the single-process
+``_export_fused_experts`` writes, so most tests compare the two byte for byte on a tiny synthetic
+fused-experts module quantized with FP8 and NVFP4.
 Sharded cases run on a gloo process group: one rank in process, and two spawned ranks where a
 non-zero expert offset matters.
 """
@@ -50,6 +51,7 @@ from modelopt.torch.export.moe_utils import (
     _export_fused_experts,
     _export_fused_experts_keep_fused,
     _fused_experts_prefixes,
+    _split_local_fused_module,
     split_fused_experts_state_dict,
 )
 from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
@@ -566,6 +568,32 @@ def test_fused_experts_prefixes_lists_each_fused_module_once_in_order():
     ]
 
 
+@pytest.mark.parametrize(
+    ("ep_rank", "total_experts", "first_index"),
+    [
+        (0, 0, 0),
+        # This EP group's slice of a larger expert set: shift by the group base.
+        (1, 2 * LOCAL_EXPERTS, LOCAL_EXPERTS),
+        (3, 4 * LOCAL_EXPERTS, 3 * LOCAL_EXPERTS),
+        # The tensor already spans every expert, so its indices are global.
+        (1, LOCAL_EXPERTS, 0),
+        # Total unknown: the legacy per-group shift.
+        (1, 0, LOCAL_EXPERTS),
+    ],
+)
+def test_split_local_numbers_experts_globally(ep_rank, total_experts, first_index):
+    sd = _fused_state_dict(gated=True)
+    unshifted = split_fused_experts_state_dict(dict(sd))
+
+    out = _split_local_fused_module(PREFIX, sd, ep_rank=ep_rank, total_experts=total_experts)
+
+    want = {}
+    for key, value in unshifted.items():
+        expert, tail = key[len(PREFIX) + 1 :].split(".", 1)
+        want[f"{PREFIX}.{int(expert) + first_index}.{tail}"] = value
+    _assert_byte_identical(out, want)
+
+
 # ------------------------------------------------------------------ sharded (DTensor) experts
 
 
@@ -631,6 +659,22 @@ def _two_rank_fold_job(rank, world_size):
         # Gathered whole, the ranks' folds split into exactly what the per-expert export writes.
         whole = {key: _whole(value) for key, value in fused.items()}
         _assert_byte_identical(split_fused_experts_state_dict(whole), want)
+        mine = {
+            k: v
+            for k, v in want.items()
+            if offset <= int(k[len(PREFIX) + 1 :].split(".")[0]) < offset + n_local
+        }
+        assert mine, "this rank owns no experts"
+
+        _assert_byte_identical(_split_local_fused_module(PREFIX, fused), mine)
+
+        # A per-expert scale held as a plain tensor over ALL experts (as keep-fused emits it for an
+        # unsharded weight) must be cut to this rank's experts before pairing.
+        plain_scales = {
+            k: plain[k] if k.endswith(("_weight_scale", "_weight_scale_2")) else v
+            for k, v in fused.items()
+        }
+        _assert_byte_identical(_split_local_fused_module(PREFIX, plain_scales), mine)
 
     # One expert over two ranks leaves rank 1 none: both ranks refuse, rather than rank 1 alone
     # failing while rank 0 goes on to write.
@@ -686,10 +730,11 @@ def _two_rank_fold_job(rank, world_size):
 def test_two_ranks_fold_their_own_experts_under_global_indices(cpu_dist_workers):
     """Rank 1 holds experts 2-3: each must be folded with ITS quantizer at its global offset, and the
     fused tensors stay sharded on the expert axis at their global shape, an uneven shard included;
-    gathered, they split into the per-expert export. Its quantizers are every expert's (FSDP2) or,
-    under expert parallelism, its own two, and then the ranks decide on each projection's
-    quantization together. A layout that leaves a rank no expert, or quantizers that are neither,
-    is refused on every rank."""
+    gathered, they split into the per-expert export, and each rank's own split, numbered globally,
+    into its experts' part of it. Its quantizers are every expert's (FSDP2) or, under expert
+    parallelism, its own two, and then the ranks decide on each projection's quantization together.
+    A layout that leaves a rank no expert, or quantizers that are neither, is refused on every
+    rank."""
     cpu_dist_workers.run(_two_rank_fold_job)
 
 
