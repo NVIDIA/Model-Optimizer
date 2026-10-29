@@ -40,6 +40,43 @@ from modelopt.onnx.graph_surgery.make_dla_compatible import (
 )
 
 
+@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
+@pytest.mark.parametrize("pipeline", [False, True])
+def test_unprepared_internal_indices_refuse_before_mutation(shape, pipeline):
+    """A native internal index view cannot follow data into a prepared four-dimensional layout."""
+    source_shape = [1] * (4 - len(shape)) + shape
+    model = _model(
+        [
+            helper.make_node("Reshape", ["source", "target"], ["indices"]),
+            helper.make_node("GatherElements", ["x", "indices"], ["y"], axis=-1),
+        ],
+        [
+            helper.make_tensor_value_info("x", TensorProto.FLOAT, shape),
+            helper.make_tensor_value_info("source", TensorProto.INT64, source_shape),
+        ],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)],
+        [numpy_helper.from_array(np.asarray(shape, np.int64), "target")],
+    )
+    model = onnx.shape_inference.infer_shapes(model)
+    feeds = {
+        "x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape),
+        "source": np.zeros(source_shape, np.int64),
+    }
+    onnx.checker.check_model(model, full_check=True)
+    np.testing.assert_array_equal(
+        _execute(model, feeds)[0], np.take(feeds["x"], [0] * shape[-1], axis=-1)
+    )
+    if not pipeline:
+        _apply_non4d_model_inputs(model, prepared_input_ops={"GatherElements"})
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match=r"indices.*rank preparation"):
+        if pipeline:
+            _transform_make_dla_compatible(model, verbose=False)
+        else:
+            _apply_gather_elements(model)
+    assert model.SerializeToString() == before
+
+
 @pytest.mark.parametrize("operation", ["Gather", "GatherElements"])
 def test_index_dtype_and_rank_conversion_preserves_selected_values(operation):
     """Index dtype and rank conversion preserves selected values."""
