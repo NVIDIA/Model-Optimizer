@@ -29,14 +29,13 @@ from onnx import TensorProto, helper, numpy_helper
 from ...logging_config import logger
 from ..utils.graph_utils import (
     GraphCache,
-    _attribute,
     add_unique_initializers,
     add_value_info,
     batch_replace_nodes,
     pad4d,
 )
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
-from .dla_indexing import _operator_nodes
+from .dla_indexing import _operator_nodes, _prepared_index_data
 from .dla_rank_conversion import _runtime_input_names
 
 __all__ = []
@@ -70,28 +69,30 @@ def _apply_where(model: onnx.ModelProto) -> onnx.ModelProto:
     runtime = _runtime_input_names(model)
     zeros = {}
 
-    transposes = {id(node) for node in _operator_nodes(model, {"Transpose"})}
+    selections = _operator_nodes(model, {"Where"})
+    if selections:
+        for tensor in graph.initializer:
+            if tensor.name in cache.vi_map and tensor.name not in runtime:
+                cache.vi_map[tensor.name] = helper.make_tensor_value_info(
+                    tensor.name, tensor.data_type, list(tensor.dims)
+                )
+    prepared = (
+        _prepared_index_data(
+            model,
+            cache,
+            (),
+            [name for node in selections for name in node.input],
+        )
+        if selections
+        else {}
+    )
 
     def current_shape(name):
-        """Read materialized layouts while rank stages defer intermediate value-info updates."""
-        tensor = cache.get_init(name)
-        if tensor is not None and name not in runtime:
-            return list(tensor.dims)
-        producer = cache.get_producer(name)
-        if producer is not None and id(producer) in transposes:
-            perm = _attribute(producer, "perm")
-            source = cache.get_shape(producer.input[0])
-            if (
-                perm is not None
-                and sorted(perm.ints) == [0, 1, 2, 3]
-                and source is not None
-                and len(source) <= 4
-            ):
-                source = pad4d(source)
-                return [source[index] for index in perm.ints]
-        return cache.get_shape(name)
+        """Use proven leading layouts without changing metadata needed by other passes."""
+        shape = cache.get_shape(name)
+        return pad4d(shape) if shape is not None and prepared[name] else shape
 
-    for node in _operator_nodes(model, {"Where"}):
+    for node in selections:
         condition = node.input[0]
         x_name = node.input[1]  # true branch
         y_name = node.input[2]  # false branch

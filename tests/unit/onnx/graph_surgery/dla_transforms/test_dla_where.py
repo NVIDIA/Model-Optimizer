@@ -460,13 +460,15 @@ def test_where_allocates_distinct_names_and_legacy_controls(legacy):
 
 @pytest.mark.parametrize("source_kind", ["initializer", "Transpose"])
 @pytest.mark.parametrize("zero_branch", [0, 1])
-def test_registered_where_uses_materialized_promoted_shapes(source_kind, zero_branch):
+@pytest.mark.parametrize("unary", [False, True])
+def test_registered_where_uses_materialized_promoted_shapes(source_kind, zero_branch, unary):
     """Lower selections after rank preparation even when intermediate metadata is deferred."""
     nodes, inputs, feeds = [], [], {}
-    values = np.arange(1, 7, dtype=np.float32).reshape(3, 2)
+    shape = [1, 3, 2] if source_kind == "initializer" and unary else [3, 2]
+    values = np.arange(1, 7, dtype=np.float32).reshape(shape)
     initializers = [
         numpy_helper.from_array(np.array(True), "condition"),
-        numpy_helper.from_array(np.zeros((3, 2), np.float32), "zero"),
+        numpy_helper.from_array(np.zeros(shape, np.float32), "zero"),
     ]
     if source_kind == "initializer":
         initializers.append(numpy_helper.from_array(values, "data"))
@@ -474,7 +476,9 @@ def test_registered_where_uses_materialized_promoted_shapes(source_kind, zero_br
         inputs.append(_vi("x", TensorProto.FLOAT, [2, 3]))
         feeds["x"] = values.T.copy()
         nodes.append(helper.make_node("Transpose", ["x"], ["data"], perm=[1, 0]))
-    branches = ["data", "data"]
+    if unary:
+        nodes.append(helper.make_node("Relu", ["data"], ["activated"]))
+    branches = ["activated" if unary else "data"] * 2
     branches[zero_branch] = "zero"
     nodes.append(helper.make_node("Where", ["condition", *branches], ["y"]))
     model = helper.make_model(
@@ -482,9 +486,9 @@ def test_registered_where_uses_materialized_promoted_shapes(source_kind, zero_br
             nodes,
             "promoted_where",
             inputs,
-            [_vi("y", TensorProto.FLOAT, [3, 2])],
+            [_vi("y", TensorProto.FLOAT, shape)],
             initializers,
-            value_info=[_vi("data", TensorProto.FLOAT, [3, 2])],
+            value_info=[_vi("data", TensorProto.FLOAT, shape)],
         ),
         opset_imports=[helper.make_opsetid("", 17)],
         ir_version=9,
