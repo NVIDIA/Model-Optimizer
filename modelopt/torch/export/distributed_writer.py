@@ -687,7 +687,7 @@ def _distributed_save_hf_checkpoint_impl(
 
       1. Fused expert weights (when present): each rank splits its LOCAL shard into per-expert keys
          with global indices and keeps them in place -- no communication. Experts are therefore
-         already disjoint across ranks. dp-replica ranks under DP x EP skip this.
+         already disjoint across ranks.
       2. Dense / non-expert weights: each fqn is assigned to exactly ONE owner rank and moved there
          (:func:`_materialize_owned`), so every tensor becomes whole on its owner while the set stays
          spread across ranks. Replicated and plain values need no transport; dim-0 shards travel
@@ -718,37 +718,6 @@ def _distributed_save_hf_checkpoint_impl(
 
     export_dir = Path(export_dir)
     rank, world = dist.get_rank(), dist.get_world_size()
-
-    # This writer targets a FULLY FSDP2-sharded model -- no expert parallelism. FSDP2
-    # shards the fused 3-D expert weight on dim 0 (the expert axis), so fused experts are just
-    # DTensors sharded across the fsdp mesh: each per-expert key's TRUE global index comes from the
-    # DTensor's own dim-0 offset (``_split_local_fused_module`` reads it), so there is no EP block base
-    # (ep_rank=0) and no dp-replica dedup (dp_idx=0 -> every rank writes its own experts). The EP-hybrid
-    # (a2a experts) path -- which resolves ep_rank/dp_idx from the parallel-group provider -- is out of
-    # scope here.
-    ep_rank, dp_idx = 0, 0
-    # Total config expert count, to tell a per-EP-group expert tensor (size < total) from one that
-    # spans all experts (classic DP x EP) when computing the per-expert global index offset.
-    _cfg = getattr(model, "config", None)
-
-    def _experts_of(c):
-        if c is None:
-            return 0
-        return int(
-            getattr(c, "num_experts", 0)
-            or getattr(c, "num_local_experts", 0)
-            or getattr(c, "n_routed_experts", 0)  # nemotron_h
-            or 0
-        )
-
-    # VLMs nest the text-model fields under ``config.text_config`` (the quantized backbone is
-    # ``model.language_model``), so fall back to it when the top-level config has no expert count.
-    total_experts = _experts_of(_cfg) or _experts_of(getattr(_cfg, "text_config", None))
-    # DP x EP: experts are dp-REPLICATED across the EDP group (each holds a full EP-sharded copy). Only
-    # the first replica (dp_idx == 0) writes them; replica ranks (dp_idx > 0) skip the per-expert split.
-    # dp_idx is the EDP-group rank resolved above -- 0 when experts are not EDP-replicated (dense /
-    # FSDP2 / EP-without-DP), so every such rank writes.
-    write_experts = dp_idx == 0
     sharded_sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
 
     # Re-materialize every inference tensor as a NORMAL one UP FRONT. A caller in inference mode hands
@@ -822,21 +791,17 @@ def _distributed_save_hf_checkpoint_impl(
         for j, k in enumerate(in_keys):
             sharded_sd[k] = stacked[j].clone()
     # (1) Experts: split this rank's local shard into per-expert keys (global idx); stays local.
-    # Skipped on dp-replica ranks under DP x EP (their experts are written by dp group 0).
+    # FSDP2 shards a fused 3-D expert weight on dim 0, the expert axis, so each per-expert key's global
+    # index is the DTensor's own dim-0 offset, which _split_local_fused_module reads.
     local_sd: dict = {}
-    if write_experts:
-        for prefix in prefixes:
-            local_sd.update(
-                _split_local_fused_module(
-                    prefix, sharded_sd, ep_rank=ep_rank, total_experts=total_experts
-                )
-            )
-        local_sd = postprocess_state_dict(
-            local_sd, maxbound, kv_cache_format, is_modelopt_qlora, tied_map=tied_map
-        )
-        # In place: the split's tensors are its own copies, so one made contiguous replaces the old.
-        for _k in list(local_sd.keys()):
-            local_sd[_k] = local_sd[_k].detach().contiguous()
+    for prefix in prefixes:
+        local_sd.update(_split_local_fused_module(prefix, sharded_sd))
+    local_sd = postprocess_state_dict(
+        local_sd, maxbound, kv_cache_format, is_modelopt_qlora, tied_map=tied_map
+    )
+    # In place: the split's tensors are its own copies, so one made contiguous replaces the old.
+    for _k in list(local_sd.keys()):
+        local_sd[_k] = local_sd[_k].detach().contiguous()
     # At this point local_sd holds ONLY this rank's (already split, per-expert) experts -- capture the
     # set so _materialize_owned can tell disjoint experts from replicated dense.
     expert_key_set = set(local_sd)
