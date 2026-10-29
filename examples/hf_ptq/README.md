@@ -620,7 +620,7 @@ ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for 
 
 > *`nvfp4_awq_clip` still works with `--use_fsdp2` on more than one GPU: it calibrates with AWQ-Clip alone, which folds no smoothing scale into the weights, and its clip search averages each candidate clip's loss over the ranks, so every rank takes the same clip.*
 
-> *With `--use_fsdp2` on more than one GPU and `--batch_size 0`, each rank estimates the calibration batch size from one forward and the ranks use the smallest. That size is not probed for out-of-memory, since a rank that runs out of memory partway through a forward would leave the others waiting in its collectives: set `--batch_size` if calibration runs out of memory.*
+> *With `--use_fsdp2` on more than one GPU, a calibration batch that runs out of memory is not retried in smaller pieces, since a rank that runs out of memory partway through a forward would leave the others waiting in its collectives. With `--batch_size 0`, each rank estimates the batch size from one forward and the ranks use the smallest, which is not probed for out-of-memory either: set `--batch_size` if calibration runs out of memory.*
 
 ### Usage
 
