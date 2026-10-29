@@ -39,7 +39,6 @@ import transformers.modeling_utils as modeling_utils
 from _test_utils.torch.transformers_models import get_tiny_llama
 from transformers import AutoModelForCausalLM
 
-import modelopt.torch.utils.distributed as mto_dist
 import modelopt.torch.utils.moe as moe
 import modelopt.torch.utils.plugins.model_load_utils as model_load_utils
 from modelopt.torch.utils.distributed import DistributionPlan
@@ -386,8 +385,7 @@ def test_the_dense_load_shards_first_then_asks_for_exactly_the_meta_dense_params
     per-expert ``nn.Linear``s, whose ``.weight`` only the expert matcher tells from a dense one;
     and a Mamba-style ``A_log`` (no ``.weight`` / ``.bias`` suffix) loaded too. The dense layers
     are FSDP2-sharded before the shared meta+DCP loader runs, and it is asked for exactly the meta
-    dense params on this rank's GPU. That load materializes on ``cuda:<local_rank>``, so a
-    recorder stands in for it here."""
+    dense params, on the mesh's device. A recorder stands in for that load."""
     with torch.device("meta"):
         model = _MoeLM()
     for layer in model.model.layers:
@@ -400,7 +398,6 @@ def test_the_dense_load_shards_first_then_asks_for_exactly_the_meta_dense_params
         loads.append((local_dir, device, load_names, sharded))
 
     monkeypatch.setattr(model_load_utils, "_meta_dcp_load", record_load)
-    monkeypatch.setattr(mto_dist, "local_rank", lambda: 3)
 
     wrapped = _load_ep_dense_distributed(
         model, fsdp_mesh, str(tmp_path), _is_expert, model.experts()
@@ -408,5 +405,5 @@ def test_the_dense_load_shards_first_then_asks_for_exactly_the_meta_dense_params
 
     assert wrapped == 2
     meta_dense = {name for name, param in model.named_parameters() if param.is_meta}
-    assert loads == [(str(tmp_path), torch.device("cuda", 3), meta_dense, [True, True])]
+    assert loads == [(str(tmp_path), torch.device("cpu"), meta_dense, [True, True])]
     assert not any(_is_expert(name) or name.endswith("A_log") for name in meta_dense)
