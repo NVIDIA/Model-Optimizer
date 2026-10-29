@@ -1933,27 +1933,6 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     return out
 
 
-def _write_base_config(model: nn.Module, export_dir: "Path | str") -> None:
-    """Write config.json + generation_config for the no-gather distributed export path.
-
-    ``distributed_save_hf_checkpoint`` writes only the weight shards, so rank 0 emits here what
-    ``save_pretrained`` would have. The weight half of ``save_pretrained`` must NOT run: the
-    weights are already on disk and the model may still be sharded.
-    """
-    # A config's save_pretrained writes only config.json: transformers reverts weight conversions
-    # in the model's, so the patch save_non_weight_artifacts takes is not needed here.
-    model.config.save_pretrained(export_dir)
-    if model.can_generate() and getattr(model, "generation_config", None) is not None:
-        try:
-            # Same strict-validate trip as every other save site: a config carrying top_p/top_k
-            # with do_sample unset (e.g. GLM-5.3-BF16) makes save_pretrained raise, and the
-            # export would then carry the source's generation_config.json instead of this one.
-            _sanitize_generation_config_for_save(model)
-            model.generation_config.save_pretrained(export_dir)
-        except Exception as gen_err:
-            warnings.warn(f"Could not save generation_config: {gen_err}")
-
-
 def _no_gather_export_asked() -> bool:
     """Whether ``MODELOPT_FSDP2_EXPORT`` picks the no-gather writer for an FSDP2-sharded export.
 
@@ -2130,7 +2109,7 @@ def export_hf_checkpoint(
                 extra_state_dict=extra_state_dict,
             )
             if rank == 0:
-                _write_base_config(model, export_dir)
+                save_non_weight_artifacts(model, export_dir)
                 # As the streaming path below: every FSDP2 rank holds the same ModelOpt state.
                 if save_modelopt_state and ModeloptStateManager.is_converted(model):
                     torch.save(modelopt_state(model), export_dir / _MODELOPT_STATE_SAVE_NAME)
@@ -2227,9 +2206,8 @@ def export_hf_checkpoint(
         if rank == 0:
             _write_hf_export_config(model, hf_quant_config, export_dir)
             copy_off_index_safetensors(_source_checkpoint(model), export_dir)
-            if not (_offloaded or (is_fsdp2_sharded and not use_no_gather_writer)):
-                # The streaming paths already did, from save_non_weight_artifacts; the no-gather
-                # writer does not.
+            if not (_offloaded or is_fsdp2_sharded):
+                # The streaming paths already did, from save_non_weight_artifacts.
                 _copy_non_model_files_from_source(model, export_dir)
 
     except Exception as e:
