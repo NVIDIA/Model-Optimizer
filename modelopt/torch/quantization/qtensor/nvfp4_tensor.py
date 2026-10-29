@@ -16,6 +16,7 @@
 """Implements NVFP4 quantization for efficient tensor storage and computation."""
 
 import torch
+from torch.distributed.tensor import DTensor
 
 from ..backends.utils import fp4_compatible
 from ..qtensor.base_qtensor import BaseQuantizedTensor
@@ -163,8 +164,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
             # Compute scales in float
             per_block_scale_max = global_amax / E2M1_MAX
             per_block_scale = per_block_amax / E2M1_MAX
-            # torch.where, not a boolean-mask assignment: the latter lowers to aten::index_put_,
-            # which DTensor cannot dispatch, and this runs on DTensor weights during distributed export.
+            # torch.where, to match the dynamic path below, which must avoid index_put_ on a DTensor.
             per_block_scale = torch.where(per_block_scale == 0, 1.0, per_block_scale)
 
             # Reshape per_block_scale to match weight's block structure
@@ -215,10 +215,8 @@ class NVFP4QTensor(BaseQuantizedTensor):
         per_block_scale = per_block_amax / (
             E2M1_MAX * weights_scaling_factor_2.to(per_block_amax.device)
         )
-        # Set all zero values in scale to 1.0. Use torch.where rather than a boolean-mask assignment:
-        # the latter lowers to aten::index_put_, which DTensor cannot dispatch ("Cannot find device
-        # mesh from args"), and on the distributed export path this weight IS a DTensor. torch.where is
-        # pointwise, so DTensor handles it, and the result is identical for a plain tensor.
+        # Set all zero values in scale to 1.0. torch.where, not a boolean-mask assignment: that lowers
+        # to index_put_, which DTensor (a sharded weight in the distributed export) cannot dispatch.
         per_block_scale = torch.where(per_block_scale == 0, 1.0, per_block_scale)
 
         if not keep_high_precision:
@@ -253,33 +251,11 @@ class NVFP4QTensor(BaseQuantizedTensor):
     @classmethod
     def _cast_fp4(cls, weight: torch.Tensor):
         """Converts tensor to uint4."""
-        # The distributed export path packs a SHARDED weight. Every step below is elementwise over the
-        # weight, but two of them mix it with plain constants -- searchsorted against the E2M1 bound
-        # table, and the odd-bound comparison -- which DTensor refuses ("got mixed torch.Tensor and
-        # DTensor"). Run on this rank's local shard and rewrap: the result is identical elementwise, and
-        # the no-gather writer emits exactly this rank's shard anyway. Patching the ops one at a time
-        # instead just moves the failure to the next one.
-        _dtensor_meta = None
-        try:
-            from torch.distributed.tensor import DTensor as _DTensor
-
-            if isinstance(weight, _DTensor):
-                # Capture the GLOBAL shape/stride: from_local() would otherwise re-infer them as
-                # local x world, which is wrong for an UNEVEN shard (e.g. 96 rows over 64 ranks) and
-                # gives each rank a different global shape. Downstream that desynchronises the
-                # exporter's per-rank tensor classification and surfaces as a KeyError deep in the
-                # writer, long after the real mistake.
-                _dtensor_meta = (
-                    _DTensor,
-                    weight.device_mesh,
-                    weight.placements,
-                    weight.shape,
-                    weight.stride(),
-                )
-                weight = weight.to_local()
-        except ImportError:
-            pass
-
+        # A DTensor is cast on its local shard: the steps below mix it with plain tensors, which
+        # DTensor refuses. The cast is elementwise, so rewrapping the result gives the same tensor.
+        sharded = weight if isinstance(weight, DTensor) else None
+        if sharded is not None:
+            weight = sharded.to_local()
         device = weight.device
 
         # Extract sign and compute absolute values in one pass
@@ -299,17 +275,18 @@ class NVFP4QTensor(BaseQuantizedTensor):
 
         # Combine sign, ordinal, and rounding adjustment
         packed = (sign_bit << 3) + ord + equals_odd_bounds
-        if _dtensor_meta is not None:
-            _dt_cls, _mesh, _placements, _gshape, _gstride = _dtensor_meta
-            packed = _dt_cls.from_local(
-                packed,
-                _mesh,
-                _placements,
-                run_check=False,
-                shape=_gshape,
-                stride=_gstride,
-            )
-        return packed
+        if sharded is None:
+            return packed
+        # The global shape and stride as given: from_local would infer local x world, wrong for an
+        # uneven shard.
+        return DTensor.from_local(
+            packed,
+            sharded.device_mesh,
+            sharded.placements,
+            run_check=False,
+            shape=sharded.shape,
+            stride=sharded.stride(),
+        )
 
     @classmethod
     def quantize(
