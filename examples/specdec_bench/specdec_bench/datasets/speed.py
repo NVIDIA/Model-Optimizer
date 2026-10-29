@@ -546,13 +546,20 @@ her fear and anger)."""
                         dataset.to_pandas().set_index("id").to_dict("index")
                     )
                 rows = self.external_datasets["hle_by_id"]
-                example["turns"] = [
-                    self._generate_hle_prompt(
-                        rows[fields["target"]],
-                        [rows[src_id] for src_id in fields["demos"]],
-                        fields["tokens"],
+                prompt = self._generate_hle_prompt(
+                    rows[fields["target"]],
+                    [rows[src_id] for src_id in fields["demos"]],
+                    fields["tokens"],
+                )
+                num_tokens = self._get_num_tokens_from_config(speed_config)
+                actual_tokens = len(
+                    tiktoken.get_encoding("o200k_base").encode(prompt, disallowed_special=())
+                )
+                if not num_tokens - 1 <= actual_tokens <= num_tokens:
+                    raise ValueError(
+                        f"HLE prompt for {example['src_id']} has {actual_tokens} tokens; expected {num_tokens - 1} to {num_tokens}"
                     )
-                ]
+                example["turns"] = [prompt]
             else:
                 raise ValueError(f"Invalid speed_config: {speed_config}")
 
