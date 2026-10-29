@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Packing weights that are still sharded, as the no-gather export does (CPU, one gloo rank)."""
+"""Packing weights that are still sharded, as the no-gather export does (CPU, gloo, one and two ranks)."""
 
 import contextlib
 import copy
@@ -21,7 +21,9 @@ import copy
 import pytest
 import torch
 import torch.nn as nn
+from _test_utils.torch.distributed.utils import bounded_collectives
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
@@ -86,9 +88,9 @@ def test_nvfp4_cast_keeps_the_global_shape_of_an_uneven_shard(gloo_world_of_one)
 
 
 @pytest.mark.parametrize("held", [True, False], ids=["held", "per-module"])
-@pytest.mark.parametrize("root_sharded", [True, False], ids=["fsdp2", "expert-parallel"])
+@pytest.mark.parametrize("layout", ["fsdp2", "expert-parallel", "linear-units"])
 def test_quant_linear_handlers_pack_an_fsdp2_unit_in_one_weight_window(
-    monkeypatch, gloo_world_of_one, root_sharded, held
+    monkeypatch, gloo_world_of_one, layout, held
 ):
     """On the no-gather path the model is still sharded when a linear is packed.
 
@@ -98,7 +100,8 @@ def test_quant_linear_handlers_pack_an_fsdp2_unit_in_one_weight_window(
     gathers the whole unit, so within held windows it opens once for all of the unit's linears;
     any other dispatch loop gets a window per linear, closed by its handler. Either way the unit is
     sharded again afterwards, and the sharded state dict carries the packed weights, as an
-    unsharded pack has them.
+    unsharded pack has them. A linear that is a unit of its own under an unwrapped root owns its
+    weight as the window's root: its packed weight must be handed to FSDP2 all the same.
     """
     torch.manual_seed(0)
     layer = nn.Sequential(nn.Linear(32, 16, bias=False), nn.Linear(16, 8, bias=False))
@@ -109,8 +112,10 @@ def test_quant_linear_handlers_pack_an_fsdp2_unit_in_one_weight_window(
         ExportModuleRegistry.match(ref)(
             f"0.{i}", ref, ExportContext(model=ref, dtype=torch.bfloat16)
         )
-    fully_shard(layer, mesh=gloo_world_of_one)
-    if root_sharded:
+    units = list(layer) if layout == "linear-units" else [layer]
+    for unit in units:
+        fully_shard(unit, mesh=gloo_world_of_one)
+    if layout == "fsdp2":
         fully_shard(model, mesh=gloo_world_of_one)
     set_distribution_plan(model, DistributionPlan(dense="fsdp"))
     ctx = ExportContext(model=model, dtype=torch.bfloat16, keep_fused_experts=True)
@@ -124,7 +129,8 @@ def test_quant_linear_handlers_pack_an_fsdp2_unit_in_one_weight_window(
         for i, linear in enumerate(layer):
             ExportModuleRegistry.match(linear)(f"0.{i}", linear, ctx)
 
-    assert unshards == ([layer] if held else [layer, layer])
+    per_linear = [linear if layout == "linear-units" else layer for linear in layer]
+    assert unshards == (list(dict.fromkeys(per_linear)) if held else per_linear)
     assert all(isinstance(linear.weight, DTensor) for linear in layer)
     sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
     for i, ref in enumerate(refs):
@@ -161,3 +167,79 @@ def test_a_module_joins_its_units_held_window_once(gloo_world_of_one):
 
     sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
     assert torch.equal(sd["0.0.weight"].full_tensor(), ref.weight)
+
+
+class _Unit(nn.Module):
+    """An FSDP2 unit of two linears fed the same input; 17 rows shard unevenly."""
+
+    def __init__(self):
+        super().__init__()
+        self.a = nn.Linear(32, 17, bias=False)
+        self.b = nn.Linear(32, 16, bias=False)
+
+    def forward(self, x):
+        return self.a(x), self.b(x)
+
+
+class _TwoUnits(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.units = nn.ModuleList([_Unit(), _Unit()])
+
+    def forward(self, x):
+        return [unit(x) for unit in self.units]
+
+
+def _two_rank_packing_job(rank, world_size):
+    mesh = init_device_mesh("cpu", (world_size,))
+    torch.manual_seed(0)
+    # Three rows over two ranks, an all-zero block included: rank 0 packs two rows, rank 1 one.
+    weight = torch.randn(3, 32, dtype=torch.bfloat16)
+    weight[1, :16] = 0.0
+    scale_2 = (weight.abs().amax().float() / (6.0 * 448.0)).reshape(())
+    scale = NVFP4QTensor.get_weights_scaling_factor(weight, 16, scale_2)[0]
+    want = NVFP4QTensor.quantize(weight, 16, scale, scale_2)[0]._quantized_data
+    mine = slice(0, 2) if rank == 0 else slice(2, 3)
+
+    sharded = distribute_tensor(weight, mesh, [Shard(0)])
+    sharded_scale = NVFP4QTensor.get_weights_scaling_factor(sharded, 16, scale_2)[0]
+    packed = NVFP4QTensor.quantize(sharded, 16, sharded_scale, scale_2)[0]._quantized_data
+
+    assert sharded_scale.shape == scale.shape and packed.shape == want.shape
+    assert torch.equal(_raw_bytes(sharded_scale.to_local()), _raw_bytes(scale[mine]))
+    assert torch.equal(packed.full_tensor(), want)
+
+    # The handlers over two units in held windows, a 17-row weight sharded 9 + 8 among them.
+    model = _TwoUnits()
+    mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(torch.randn(4, 32)))
+    linears = [
+        (f"units.{u}.{p}", getattr(unit, p)) for u, unit in enumerate(model.units) for p in "ab"
+    ]
+    refs = copy.deepcopy(model)
+    for name, _ in linears:
+        ref = refs.get_submodule(name)
+        ExportModuleRegistry.match(ref)(name, ref, ExportContext(model=ref, dtype=torch.bfloat16))
+    for unit in model.units:
+        fully_shard(unit, mesh=mesh)
+    fully_shard(model, mesh=mesh)
+    set_distribution_plan(model, DistributionPlan(world_size, dense="fsdp"))
+    ctx = ExportContext(model=model, dtype=torch.bfloat16, keep_fused_experts=True)
+
+    with bounded_collectives(), handlers.held_fsdp2_weight_windows(ctx):
+        for name, linear in linears:
+            ExportModuleRegistry.match(linear)(name, linear, ctx)
+
+    sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
+    for name, _ in linears:
+        ref = refs.get_submodule(name)
+        assert torch.equal(sd[f"{name}.weight"].full_tensor(), ref.weight), name
+        for leaf in ("weight_scale", "weight_scale_2", "input_scale"):
+            got = _raw_bytes(sd[f"{name}.{leaf}"])
+            assert torch.equal(got, _raw_bytes(getattr(ref, leaf))), (name, leaf)
+
+
+def test_two_ranks_pack_their_shards_into_the_unsharded_bytes(cpu_dist_workers):
+    """On two ranks a shard holds other rows than the whole weight: an uneven NVFP4 pack gives the
+    plain pack's codes and scales, and the handlers, run over two units, leave the sharded state
+    dict holding what an unsharded export packs."""
+    cpu_dist_workers.run(_two_rank_packing_job)
