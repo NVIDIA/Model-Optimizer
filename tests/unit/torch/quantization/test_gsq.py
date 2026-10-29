@@ -229,3 +229,37 @@ def test_gsq_optimizer_checkpoint_requires_initial_data_identity(tmp_path, finge
     for parameter, reference in zip(model.parameters(), original.parameters()):
         assert torch.equal(parameter, reference)
     assert not (tmp_path / "manifest.pt").exists()
+
+
+def test_gsq_refuses_quantized_embedding_before_layerwise_replay():
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embedding = nn.Embedding(8, 4)
+            self.layers = nn.ModuleList([Decoder()])
+
+        def forward(self, inputs):
+            return self.layers[0](self.embedding(inputs), mask=torch.ones(4))
+
+    LayerActivationCollector.register_decoder_layer_support(
+        lambda m: isinstance(m, Model), lambda m: m.layers
+    )
+    model = Model().train()
+    model.layers[0].mlp[0].eval()
+    training_modes = {name: module.training for name, module in model.named_modules()}
+    original = copy.deepcopy(model)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        ],
+        "algorithm": {"method": "gsq", "steps": 0},
+    }
+    with pytest.raises(ValueError):
+        mtq.quantize(model, config, lambda m: m(torch.tensor([[1, 2]])))
+    for parameter, reference in zip(model.parameters(), original.parameters()):
+        assert torch.equal(parameter, reference)
+    assert not hasattr(model, "_original_forward")
+    assert not hasattr(model.layers[0], "_original_forward")
+    for name, expected in training_modes.items():
+        assert model.get_submodule(name).training is expected

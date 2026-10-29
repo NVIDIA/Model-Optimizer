@@ -124,22 +124,23 @@ def calibrate(
     }
     model.eval()
 
-    with forward_with_reshard(model):
-        apply_mode(
-            model,
-            mode=get_modelike_from_algo_cfg(algorithm),
-            mode_kwargs={"forward_loop": forward_loop},
-        )
+    try:
+        with forward_with_reshard(model):
+            apply_mode(
+                model,
+                mode=get_modelike_from_algo_cfg(algorithm),
+                mode_kwargs={"forward_loop": forward_loop},
+            )
 
-    for name, module in model.named_modules():
-        if isinstance(module, TensorQuantizer):
-            for attr_name in ["_amax", "_pre_quant_scale"]:
-                module.validate_attr(attr_name=attr_name, warn_error=True, name=name)
+        for name, module in model.named_modules():
+            if isinstance(module, TensorQuantizer):
+                for attr_name in ["_amax", "_pre_quant_scale"]:
+                    module.validate_attr(attr_name=attr_name, warn_error=True, name=name)
 
-    # TODO: Re-enable when the CUDA error: unspecified launch failure is fixed.
-    # clear_cuda_cache()
-
-    _restore_training_modes(model, training_modes)
+        # TODO: Re-enable when the CUDA error: unspecified launch failure is fixed.
+        # clear_cuda_cache()
+    finally:
+        _restore_training_modes(model, training_modes)
 
     return model
 

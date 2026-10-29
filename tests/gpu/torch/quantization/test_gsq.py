@@ -34,6 +34,8 @@ def test_gsq_region_reconstruction_and_restore(tmp_path, initializer, nvfp4):
     torch.manual_seed(17)
     model = get_tiny_llama().cuda().bfloat16().eval()
     model.config.architectures = ["LlamaForCausalLM"]
+    with torch.no_grad():
+        model.model.layers[0].self_attn.q_proj.weight[0, :16].zero_()
     pristine = copy.deepcopy(model)
     inputs = torch.randint(0, model.config.vocab_size, (1, 16), device="cuda")
     numeric = (
@@ -46,6 +48,7 @@ def test_gsq_region_reconstruction_and_restore(tmp_path, initializer, nvfp4):
             {"quantizer_name": "*", "enable": False},
             {"quantizer_name": "*weight_quantizer", "cfg": numeric},
             {"quantizer_name": "*lm_head*", "enable": False},
+            {"quantizer_name": "*", "parent_class": "nn.Embedding", "enable": False},
         ]
     }
     samples = {}
@@ -88,6 +91,7 @@ def test_gsq_region_reconstruction_and_restore(tmp_path, initializer, nvfp4):
         assert layer.gsq["mlp"]["best_loss"] <= layer.gsq["mlp"]["initial_loss"]
         assert not layer.self_attn.q_proj.input_quantizer.is_enabled
     assert torch.equal(model.lm_head.weight, pristine.lm_head.weight)
+    assert torch.equal(model.model.embed_tokens.weight, pristine.model.embed_tokens.weight)
     mto.save(model, tmp_path / "model.pt")
     restored = mto.restore(pristine, tmp_path / "model.pt")
     torch.testing.assert_close(restored(inputs).logits, result, rtol=0, atol=0)
@@ -112,3 +116,4 @@ def test_gsq_region_reconstruction_and_restore(tmp_path, initializer, nvfp4):
             exported[prefix + "weight"].float() * exported[prefix + "weight_scale"].float()
         ).to(dtype)
     torch.testing.assert_close(decoded, qdq, rtol=0, atol=0)
+    assert torch.count_nonzero(decoded[0, :16]) == 0

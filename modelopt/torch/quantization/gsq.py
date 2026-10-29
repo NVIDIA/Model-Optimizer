@@ -158,14 +158,27 @@ def _save(path, state):
     temporary.replace(path)
 
 
-@contextmanager
-def _gsq_calibration(model, config):
-    """Validate whole-model resume identity and recover weights if a later layer fails."""
-    enabled = [
+def _enabled_weight_modules(model):
+    modules = [
         (n, m)
         for n, m in model.named_modules()
         if is_quantized_linear(m) and m.weight_quantizer.is_enabled
     ]
+    allowed = {id(m.weight_quantizer) for _, m in modules}
+    if any(
+        isinstance(m, TensorQuantizer) and m.is_enabled and id(m) not in allowed
+        for m in model.modules()
+    ):
+        raise ValueError(
+            "GSQ requires only eligible linear weight quantizers; disable embeddings and activations"
+        )
+    return modules
+
+
+@contextmanager
+def _gsq_calibration(model, config):
+    """Validate whole-model resume identity and recover weights if a later layer fails."""
+    enabled = _enabled_weight_modules(model)
     if any(not _REGIONS.intersection(n.split(".")) for n, _ in enabled):
         raise ValueError("GSQ quantized weights must belong to attention/MLP regions")
     if len({m.weight.device for _, m in enabled}) > 1 or any(m.weight.is_meta for _, m in enabled):
@@ -248,15 +261,13 @@ def gsq(
         "resume": resume,
         "data_fingerprint": data_fingerprint,
     }
+    linears = _enabled_weight_modules(model)
+    if not linears:
+        return
     if LayerActivationCollector.is_supported(model):
         return layerwise_calibrate(model, forward_loop, gsq, **options)
     regions = [(n, m) for n, m in model.named_modules() if n.split(".")[-1] in _REGIONS]
     regions = [(n, m) for n, m in regions if not any(n.startswith(p + ".") for p, _ in regions)]
-    linears = [
-        (n, m)
-        for n, m in model.named_modules()
-        if is_quantized_linear(m) and m.weight_quantizer.is_enabled
-    ]
     for name, module in linears:
         q = module.weight_quantizer
         if isinstance(q, SequentialQuantizer):
@@ -282,8 +293,6 @@ def gsq(
         raise ValueError("GSQ requires disabled activation and KV-cache quantizers")
     if initializer not in {"max", "gptq"}:
         raise ValueError("GSQ initializer must be max or gptq")
-    if not linears:
-        return
     identity = getattr(getattr(model, "_layerwise_calib", None), "name", "decoder")
     path = (
         Path(optimizer_checkpoint_dir) / (identity.replace(".", "_") + ".pt")
