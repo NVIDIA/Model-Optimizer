@@ -245,6 +245,14 @@ class AcceptanceRateValidation:
 
     def __init__(self, model, tokenizer):
         """Init function to take in the model and tokenizer."""
+        # FutureWarning, not DeprecationWarning: Python hides the latter when library code raises it.
+        warnings.warn(
+            "HF acceptance-rate validation (scripts/ar_validate.py and the ar_validate_steps training "
+            "argument) is deprecated and will be removed in a future release. Measure acceptance "
+            "length on the exported checkpoint in a serving framework with examples/specdec_bench.",
+            FutureWarning,
+            stacklevel=2,
+        )
         tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")
         self.model = model
         self.tokenizer = tokenizer

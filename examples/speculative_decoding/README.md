@@ -159,13 +159,9 @@ dense hidden-state alternative, the objectives, and the cross-tokenizer vocabula
 
 ## Model Validation
 
-For online training checkpoints, we can run in-framework evaluation on MT-bench:
+Export the draft model and measure its acceptance length in a serving framework (vLLM, SGLang or TRT-LLM) with [examples/specdec_bench](../specdec_bench). That measures the drafter as it is served, for every draft-model type and for online and offline training alike.
 
-```bash
-python scripts/ar_validate.py --model_path $ONLINE_CKPT
-```
-
-**Note**: In-framework evaluation is supported only for online training. For offline training checkpoints, please export the model and evaluate it using serving frameworks.
+**Deprecated**: the in-framework MT-Bench evaluation of online checkpoints (`python scripts/ar_validate.py --model_path $ONLINE_CKPT`, and the periodic run the `ar_validate_steps` training argument enables) will be removed in a future release. It drafts with Hugging Face generation rather than the serving engine, and it skips some draft heads, such as DFlash2's candidate selector and LiLiCorr's reranker.
 
 ## Export
 

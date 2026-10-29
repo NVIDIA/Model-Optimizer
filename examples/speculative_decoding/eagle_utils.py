@@ -468,6 +468,13 @@ class EagleTrainingPlot(TrainerCallback):
 
     def __init__(self, ar_validate_steps: int = 1000, estimate_ar: bool = False):
         self.ar_validate_steps = ar_validate_steps
+        if ar_validate_steps > 0:
+            # At startup, not at the first validation thousands of steps in.
+            print_rank_0(
+                "Warning: ar_validate_steps > 0 runs HF acceptance-rate validation, which is "
+                "deprecated and will be removed in a future release. Set ar_validate_steps to 0 "
+                "and measure acceptance length on the exported checkpoint with examples/specdec_bench."
+            )
         if wandb is not None and wandb.run is not None and is_master():
             wandb.init()
         self.estimate_ar = estimate_ar
