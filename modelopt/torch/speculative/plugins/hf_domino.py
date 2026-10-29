@@ -133,10 +133,6 @@ class HFDominoModel(HFDFlashModel):
         self.dflash_lambda_base_start = config.dflash_lambda_base_start
         self.dflash_lambda_base_decay_ratio = config.dflash_lambda_base_decay_ratio
         self._lambda_base = self.dflash_lambda_base_start
-        if not getattr(self.dflash_module, "shift_label", True):
-            raise NotImplementedError(
-                "Domino currently supports shift_label=True (next-token alignment) only."
-            )
 
     def get_exporter(self):
         """Get the exporter for the Domino draft model."""
@@ -267,14 +263,6 @@ class HFDominoModel(HFDFlashModel):
         two-term loss. Eval/offline-eval is delegated to the DFlash parent.
         """
         if not self.training:
-            # Eval delegates to the DFlash backbone; the correction head is not
-            # applied yet, so warn once that acceptance rates are backbone-only.
-            if not getattr(self, "_warned_eval_head_bypass", False):
-                logger.warning(
-                    "Domino eval uses the DFlash backbone only (correction head not "
-                    "applied yet); reported acceptance rates are backbone-only."
-                )
-                self._warned_eval_head_bypass = True
             return super().forward(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -365,6 +353,13 @@ class HFDominoModel(HFDFlashModel):
         )
 
         return ModelOutput(loss=loss, logits=None, train_acc=[[accuracy]], domino_metrics=metrics)
+
+    def pseudo_speculative_generate(self, input_ids, steps=1):
+        """Refused: DFlash's decode would draft with the backbone alone, one block position off."""
+        raise NotImplementedError(
+            "Domino has no HF AR validation (pseudo_speculative_generate). Set ar_validate_steps "
+            "to 0 and measure acceptance on the exported drafter in a serving engine."
+        )
 
 
 class DominoLambdaCallback(TrainerCallback):

@@ -521,19 +521,19 @@ class DominoExporter(DFlashExporter):
         """Extend the DFlash config with the Domino head fields."""
         config = super()._export_config()
         draft_config = self.model.dflash_config
+        # Read off the built head rather than the config dict, so the export describes the
+        # head these weights belong to.
+        head = self.model.dflash_module
 
-        # Present because HFDominoModel.modify validates them at convert time.
-        emb_dim = draft_config.emb_dim
-        gru_hidden_dim = draft_config.gru_hidden_dim
         # Mirror the reference checkpoint: emb_dim also appears at the top level.
-        config["emb_dim"] = emb_dim
+        config["emb_dim"] = head.emb_dim
         config["dflash_config"].update(
             {
                 "projector_type": getattr(draft_config, "projector_type", "domino"),
-                "shift_label": getattr(draft_config, "shift_label", True),
-                "pure_draft_prefix_len": getattr(draft_config, "pure_draft_prefix_len", 1),
-                "gru_hidden_dim": gru_hidden_dim,
-                "emb_dim": emb_dim,
+                "shift_label": bool(self.model._label_shift),
+                "pure_draft_prefix_len": head.pure_draft_prefix_len,
+                "gru_hidden_dim": head.gru_hidden_dim,
+                "emb_dim": head.emb_dim,
             }
         )
         return config
@@ -615,14 +615,17 @@ class DSparkExporter(DFlashExporter):
         """Extend the DFlash config with the DSpark head fields."""
         config = super()._export_config()
         draft_config = self.model.dflash_config
+        # Read off the built head, not the config dict: DSparkModule casts markov_rank to int
+        # and lower-cases markov_head_type, and the export must describe what was trained.
+        head = self.model.dflash_module
 
         config["dflash_config"].update(
             {
                 "projector_type": getattr(draft_config, "projector_type", "dspark"),
-                "shift_label": getattr(draft_config, "shift_label", True),
-                "markov_rank": draft_config.markov_rank,
-                "markov_head_type": self.model.dflash_module.markov_head_type,
-                "use_confidence_head": bool(getattr(draft_config, "use_confidence_head", False)),
+                "shift_label": bool(self.model._label_shift),
+                "markov_rank": head.markov_rank,
+                "markov_head_type": head.markov_head_type,
+                "use_confidence_head": head.use_confidence_head,
             }
         )
         if config["dflash_config"]["markov_head_type"] == "vanilla":
@@ -634,7 +637,7 @@ class DSparkExporter(DFlashExporter):
                     "mask_token_id": config["dflash_config"]["mask_token_id"],
                     "target_layer_ids": config["dflash_config"]["target_layer_ids"],
                     "markov_rank": config["dflash_config"]["markov_rank"],
-                    "sample_from_anchor": True,
+                    "sample_from_anchor": config["dflash_config"]["shift_label"],
                     "enable_confidence_head": config["dflash_config"]["use_confidence_head"],
                     "confidence_head_with_markov": config["dflash_config"]["use_confidence_head"],
                 }
