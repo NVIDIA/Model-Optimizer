@@ -21,12 +21,16 @@ from torch import nn
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.compress import is_real_quantized
+from modelopt.torch.quantization.nn import GroupedQuantizer
 
 
-def test_compress_refuses_w4a8_weights_before_changing_the_model():
+@pytest.mark.parametrize("grouped", [False, True], ids=["linear", "grouped"])
+def test_compress_refuses_w4a8_weights_before_changing_the_model(grouped):
     """A compressed W4A8 (SequentialQuantizer) weight can neither run forward nor be restored."""
     model = nn.Sequential(nn.Linear(128, 128, bias=False))  # 128 wide for W4A8's INT4 blocks
     mtq.quantize(model, mtq.W4A8_AWQ_BETA_CFG, lambda m: m(torch.randn(2, 128)))
+    if grouped:  # one per expert, as Transformer Engine's grouped linear holds them
+        model[0].weight_quantizer = GroupedQuantizer(model[0].weight_quantizer)
 
     with pytest.raises(NotImplementedError, match="W4A8"):
         mtq.compress(model)

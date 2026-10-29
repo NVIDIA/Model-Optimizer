@@ -70,11 +70,15 @@ def compress_convert(
     Returns:
         The compressed model.
     """
-    # A compressed SequentialQuantizer weight can neither run forward nor be restored.
+    # Compressed, a SequentialQuantizer weight cannot run forward; compressed or excluded, its
+    # RealQuantLinear can neither be restored nor take a new weight.
     for name, module in model.named_modules():
-        if is_quantized_linear(module) and isinstance(module.weight_quantizer, SequentialQuantizer):
+        if is_quantized_linear(module) and any(
+            isinstance(q, SequentialQuantizer) for q in module.weight_quantizer.modules()
+        ):
             raise NotImplementedError(
-                f"{name}: compressing W4A8 (SequentialQuantizer) weights is not supported."
+                f"{name}: compressing a sequential weight quantizer (as in W4A8) is not supported, "
+                "even when the compress config excludes the layer."
             )
     for _, module in model.named_modules():
         if is_quantized_linear(module) and type(module) not in RealQuantModuleRegistry:
