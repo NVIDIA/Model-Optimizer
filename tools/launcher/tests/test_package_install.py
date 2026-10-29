@@ -23,6 +23,11 @@ the [build-system] table in pyproject.toml.
 
 import os
 
+import fiddle as fdl
+import modelopt_launcher
+from modelopt_launcher.launch import launch
+from nemo_run.cli.lazy import LazyEntrypoint
+
 _LAUNCHER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -32,6 +37,6 @@ def test_package_dir_resolves_to_checkout():
     launch.py's dev mode derives MODELOPT_ROOT from PACKAGE_DIR, so a non-editable install
     would silently stop packaging the ModelOpt source tree.
     """
-    import modelopt_launcher
-
     assert os.path.realpath(modelopt_launcher.PACKAGE_DIR) == os.path.realpath(_LAUNCHER_DIR)
+    entry = LazyEntrypoint(launch, overwrites=["user=explicit-remote-user"])
+    assert fdl.build(entry.resolve()).keywords["user"] == "explicit-remote-user"

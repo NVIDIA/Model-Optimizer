@@ -34,6 +34,7 @@ import glob
 import os
 import subprocess  # nosec B404 - required for explicit git clean command; no shell is used.
 import warnings
+from typing import Optional
 
 import modelopt_launcher as _pkg
 import nemo_run as run
@@ -127,7 +128,7 @@ def launch(
     job_dir: str = os.environ.get("SLURM_JOB_DIR", os.path.expanduser("~/experiments")),
     pipeline: SandboxPipeline = None,
     hf_local: str = None,  # noqa: RUF013
-    user: str | None = None,
+    user: Optional[str] = None,  # noqa: UP045 - NeMo CLI cannot parse PEP 604 unions.
     identity: str = None,  # noqa: RUF013
     detach: bool = False,
     clean: bool = False,

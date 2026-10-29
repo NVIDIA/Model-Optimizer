@@ -25,9 +25,11 @@ Coverage:
 """
 
 import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import core
+import fiddle as fdl
 import pytest
 from core import (
     GlobalVariables,
@@ -39,6 +41,7 @@ from core import (
     get_default_env,
     run_jobs,
 )
+from nemo_run.cli.lazy import LazyEntrypoint
 from slurm_config import SlurmConfig
 
 
@@ -201,14 +204,20 @@ class TestSandboxPipelineExtended:
         assert pipeline.tasks[0].slurm_config.container == "ubuntu:24.04"
         assert pipeline.tasks[0].slurm_config.gpus_per_node is None
 
-    def test_slurm_repair_uses_raw_yaml_keys_for_default_equal_values(self, monkeypatch, tmp_yaml):
+    @pytest.mark.parametrize("task_list", [False, True])
+    def test_slurm_repair_uses_raw_yaml_keys_for_default_equal_values(
+        self, monkeypatch, tmp_yaml, task_list
+    ):
         """Inline --yaml repair preserves explicit values equal to dataclass defaults."""
 
-        def factory():
+        def factory(**kwargs):
             return SlurmConfig(
-                host="cluster.example.com",
-                partition="factory_partition",
-                gpus_per_node=1,
+                **{
+                    "host": "cluster.example.com",
+                    "partition": "factory_partition",
+                    "gpus_per_node": 4,
+                    **kwargs,
+                }
             )
 
         yaml_path = tmp_yaml(
@@ -223,18 +232,35 @@ pipeline:
       gpus_per_node:
 """
         )
+        if task_list:
+            path = Path(yaml_path)
+            path.write_text(
+                path.read_text()
+                .replace("  task_0:", "  tasks:\n  -")
+                .replace("gpus_per_node:\n", "gpus_per_node: 1\n")
+            )
         monkeypatch.setattr(core.sys, "argv", ["launch.py", "--yaml", yaml_path])
         monkeypatch.setitem(core._FACTORY_REGISTRY, "slurm_factory", factory)
 
         task = SandboxTask0(
             script="hostname.sh",
-            slurm_config=SlurmConfig(host=None, partition="batch", gpus_per_node=None),
+            slurm_config=SlurmConfig(
+                host=None, partition="batch", gpus_per_node=1 if task_list else None
+            ),
         )
-        pipeline = SandboxPipeline(task_0=task)
+        if task_list:
+            core.set_slurm_config_type(SlurmConfig)
+
+            def build(pipeline: SandboxPipeline, job_name: str):
+                return pipeline
+
+            pipeline = fdl.build(LazyEntrypoint(build, yaml=yaml_path).resolve())()
+        else:
+            pipeline = SandboxPipeline(task_0=task)
 
         assert pipeline.tasks[0].slurm_config.host == "cluster.example.com"
         assert pipeline.tasks[0].slurm_config.partition == "batch"
-        assert pipeline.tasks[0].slurm_config.gpus_per_node is None
+        assert pipeline.tasks[0].slurm_config.gpus_per_node == (1 if task_list else None)
 
 
 class TestGitInfo:

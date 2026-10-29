@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import random
+import sys
 import time
 import warnings
 from pathlib import Path
@@ -25,6 +26,8 @@ from typing import Any
 import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
+from autoquant_export import export_pipeline
+from autoquant_pipeline import configure_pipeline_args, configure_pipeline_device, pipeline_run
 from autoquant_utils import (
     _calibration_candidates,
     _get_autoquant_memory_probe,
@@ -1139,6 +1142,9 @@ def quantize_main(
 
     if getattr(args, "auto_quantize_calibration_candidate", None) is not None:
         return
+    if getattr(args, "auto_quantize_pipeline", False):
+        export_pipeline(args, full_model)
+        return
 
     # If asked, run the closed-form MXFP4 -> NVFP4 cast: read the source MXFP4
     # *_scales tensors and pin each NVFP4 weight quantizer's scale_2 to 2^m.
@@ -1168,6 +1174,7 @@ def quantize_main(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--auto_quantize_pipeline", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--auto_quantize_calibration_dir", help="Shared independent calibration results"
     )
@@ -1195,7 +1202,7 @@ def parse_args() -> argparse.Namespace:
             "full. To skip files, download it yourself (e.g. `hf download <name> --exclude "
             "'original/*'`) and pass the local path."
         ),
-        required=True,
+        required="--auto_quantize_pipeline" not in sys.argv,
     )
     parser.add_argument(
         "--recipe",
@@ -1460,6 +1467,10 @@ def parse_args() -> argparse.Namespace:
     # Flipped by export_quantized once a checkpoint is actually on disk. The MLflow pointer
     # is gated on it rather than on --export_path existing, which proves nothing.
     args.checkpoint_exported = False
+    if args.auto_quantize_pipeline:
+        if sys.argv[1:] != ["--auto_quantize_pipeline"]:
+            parser.error("Generated pipeline tasks cannot be combined with manual CLI overrides")
+        configure_pipeline_args(args)
     if args.auto_quantize_list_calibration_candidates and (
         not _recipe_is_auto_quantize(args.recipe) or _recipe_is_kv_auto_quantize(args.recipe)
     ):
@@ -1557,6 +1568,10 @@ def main(args: argparse.Namespace):
     if not torch.cuda.is_available():
         raise OSError("GPU is required for inference.")
 
+    if getattr(args, "auto_quantize_pipeline", False):
+        configure_pipeline_device(args)
+        torch.manual_seed(RAND_SEED)
+
     random.seed(RAND_SEED)
     np.random.seed(RAND_SEED)
 
@@ -1566,7 +1581,7 @@ def main(args: argparse.Namespace):
         # Entered inside the try: opening the run is fatal by design, and skipping
         # cleanup_distributed would leave the other ranks blocked on the first collective
         # until the NCCL timeout.
-        with mlflow_run(args):
+        with pipeline_run(args), mlflow_run(args):
             # --pyt_ckpt_path stays as given. Every later step reads the local copy of the whole
             # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local
             # path.

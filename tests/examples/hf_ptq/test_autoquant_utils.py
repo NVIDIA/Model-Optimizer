@@ -17,15 +17,18 @@
 
 import copy
 import importlib
+import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+import yaml
 from _test_utils.torch.transformers_models import get_tiny_llama
 from transformers import WhisperConfig, WhisperForConditionalGeneration
 
-from modelopt.recipe import load_recipe
+from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.quantization.config import QuantizeConfig
@@ -549,7 +552,12 @@ def test_autoquant_export_guard_not_bypassed_by_effective_bits(autoquant_utils):
         autoquant_utils._mtq_inputs_from_auto_quantize_config(aq, args)
 
 
-def test_hf_candidate_worker_and_coordinator_use_public_api(autoquant_utils, tmp_path):
+@pytest.mark.parametrize("automatic", [False, True])
+@pytest.mark.skipif(sys.platform == "win32", reason="Calibration workers require POSIX locks")
+def test_hf_candidate_worker_and_coordinator_use_public_api(autoquant_utils, tmp_path, automatic):
+    if automatic:
+        tmp_path = tmp_path / "work" / "search"
+        tmp_path.mkdir(parents=True)
     torch.manual_seed(19)
     source = get_tiny_llama(num_hidden_layers=1).eval()
     inputs = torch.randint(0, source.config.vocab_size, (1, 8))
@@ -569,11 +577,32 @@ def test_hf_candidate_worker_and_coordinator_use_public_api(autoquant_utils, tmp
         auto_quantize_calibration_dir=str(tmp_path / "candidates"),
         auto_quantize_calibration_candidate=0,
     )
+    if automatic:
+        recipe = ModelOptAutoQuantizeRecipe(auto_quantize=aq)
+        payload = recipe.model_dump()
+        payload["metadata"]["recipe_type"] = recipe.recipe_type.value
+        args.recipe = str(tmp_path / "recipe.yaml")
+        Path(args.recipe).write_text(yaml.safe_dump(payload))
+        args.auto_quantize_pipeline = True
+        args.auto_quantize_resources = {
+            "candidate_bytes": 1024**2,
+            "checkpoint_bytes": 2 * 1024**2,
+            "metadata_bytes": 1024**2,
+        }
+        args.auto_quantize_assignment = str(tmp_path / "assignment.json")
     autoquant_utils.auto_quantize(args, copy.deepcopy(source), batches, aq)
     args.auto_quantize_calibration_candidate = None
     model = autoquant_utils.auto_quantize(
         args, copy.deepcopy(source), batches, aq, checkpoint=str(tmp_path / "search")
     )
     assert (tmp_path / "search" / "rank0.pth").is_file()
+    if automatic:
+        assignment = json.loads(Path(args.auto_quantize_assignment).read_text())
+        assert assignment["provenance"]["source"]
+        assert all(
+            yaml.safe_load(group["configuration_yaml"])["algorithm"] == "max"
+            for group in assignment["groups"]
+        )
+        assert not any(group["final_layerwise"] for group in assignment["groups"])
     with torch.no_grad():
         assert torch.isfinite(model(**batches[0]).logits).all()
