@@ -161,9 +161,11 @@ def _materialize_owned(
 
     Experts must come whole, plain and disjoint per rank, as the caller splits them; one still a
     DTensor is refused. Each dense key goes to one owner, largest first onto the lightest rank
-    (seeded with each rank's expert bytes), and keys this rank does not own are dropped. Each group
-    in ``together`` (the same on every rank, which is checked) goes to one owner as a unit, with any
-    group it shares a key with, since the reverse conversion merges a group only where it is whole.
+    (seeded with each rank's expert bytes), and keys this rank does not own are dropped. Ranks are
+    weighed by bytes, not free device memory: a large embedding or ``lm_head`` must fit on its owner.
+    Each group in ``together`` (the same on every rank, which is checked) goes to one owner as a
+    unit, with any group it shares a key with, since the reverse conversion merges a group only where
+    it is whole.
     Afterwards nothing is a DTensor or partial. On top of the shards it is handed, which the model
     keeps, a rank holds in each round of transfers copies of its shards of keys other ranks own plus
     the shards it receives, and then those received shards plus the tensors assembled from them.
