@@ -82,6 +82,7 @@ from modelopt.torch.utils.moe import (
     _spec_refuses_ep,
     apply_distributed_support,
     check_distributed_support,
+    config_levels,
     register_torch_a2a,
 )
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
@@ -2013,7 +2014,7 @@ def _ckpt_quant_method(cfg):
     or ``None`` if the checkpoint isn't natively quantized. Checks the top config, then a VLM's
     ``text_config`` or ``llm_config``.
     """
-    for c in (cfg, *(getattr(cfg, attr, None) for attr in _SUB_CONFIG_ATTRS)):
+    for c in config_levels(cfg):
         qc = getattr(c, "quantization_config", None)
         m = qc.get("quant_method") if isinstance(qc, dict) else getattr(qc, "quant_method", None)
         if m:
@@ -2180,16 +2181,17 @@ def load_and_prepare_ep(
             # 5.13 claims the same expert converters first. Deleted rather than set to None: before
             # 5.11 transformers takes any quantization_config attribute, None too, for a quantized
             # checkpoint. Every level _ckpt_quant_method reads is cleared.
-            for cfg in (hf_config, *(getattr(hf_config, attr, None) for attr in _SUB_CONFIG_ATTRS)):
-                if cfg is not None:
-                    vars(cfg).pop("quantization_config", None)
-                    if hasattr(cfg, "quantization_config"):
-                        # A class attribute or property, which the instance dict cannot clear.
-                        raise NotImplementedError(
-                            f"{type(cfg).__name__} keeps quantization_config off its instance, so "
-                            "this load cannot clear it, and transformers' own quantizer would "
-                            "compete with the decompressor. Decompress the checkpoint first."
-                        )
+            levels = config_levels(hf_config)
+            for cfg in levels:
+                vars(cfg).pop("quantization_config", None)
+            # Checked once every level is cleared: a property forwarding to a nested level's is gone
+            # then, while a class attribute, or a property of its own, is not.
+            if kept := [cfg for cfg in levels if hasattr(cfg, "quantization_config")]:
+                raise NotImplementedError(
+                    f"{type(kept[0]).__name__} keeps quantization_config off its instance, so this "
+                    "load cannot clear it, and transformers' own quantizer would compete with the "
+                    "decompressor. Decompress the checkpoint first."
+                )
         ep_cfg = _ep_config(hf_config)  # for VLMs the plan lives on .text_config
         ep_plan = dict(getattr(ep_cfg, "base_model_ep_plan", None) or {})
         if not ep_plan:
