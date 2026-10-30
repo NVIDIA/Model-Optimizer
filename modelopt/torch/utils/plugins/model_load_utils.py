@@ -1713,6 +1713,8 @@ def load_and_prepare_ep(
     bring-up is the launcher's job, not this loader's (hf_ptq.main() does it via ``distributed_run``).
     The expert-parallel mesh stays recoverable from the model
     (:func:`~modelopt.torch.utils.moe.expert_parallel_mesh`), once the caller has recorded the plan.
+    A refusal on any rank -- of its transformers, the config, the checkpoint, or in the load --
+    raises on every rank, so no rank is left waiting in a collective for one that already failed.
     """
     # Imported here, so looked up when the load runs: its tests stand in a process group and a
     # transformers release by patching these two modules.
@@ -1745,46 +1747,49 @@ def load_and_prepare_ep(
     if plan.world_size != size():
         raise ValueError(f"{plan!r} is for {plan.world_size} ranks, but this run has {size()}.")
     world_size, ep_degree, edp = plan.world_size, plan.ep_size, plan.edp
-    # Hard floor: below 5.6 there is no ExpertsInterface / grouped-GEMM EP styles, and
-    # enable_expert_parallel silently shards nothing (no error); 5.6 checks a model's experts
-    # implementation against the ones it ships, so from_pretrained would refuse torch_a2a.
-    require_transformers(
-        "5.7", "ModelOpt DP=EP expert-parallel PTQ (transformers MoE EP framework)"
-    )
-    if hf_config is None:
-        config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
-        if attn_implementation is not None:
-            config_kwargs["attn_implementation"] = attn_implementation
-        hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
-    quant_method = _ckpt_quant_method(hf_config)
-    if quant_method not in _EP_SOURCE_FORMATS:
-        # transformers' own quantizer would load it as stored, for PTQ to treat as plain weights.
-        dequantized = ", ".join(sorted(f for f in _EP_SOURCE_FORMATS if f))
-        raise NotImplementedError(
-            f"The expert-parallel load cannot dequantize a {quant_method!r} checkpoint: it loads "
-            f"unquantized checkpoints and dequantizes {dequantized}. Start from an unquantized copy "
-            "of the model."
+    # Each rank checks its own transformers, the config it reads or was handed, and the plan against
+    # it: one refusing fails every rank here, before the checkpoint's fetch and the meshes.
+    with _refused_together("the expert-parallel load's checks", alone=False):
+        # Hard floor: below 5.6 there is no ExpertsInterface / grouped-GEMM EP styles, and
+        # enable_expert_parallel silently shards nothing (no error); 5.6 checks a model's experts
+        # implementation against the ones it ships, so from_pretrained would refuse torch_a2a.
+        require_transformers(
+            "5.7", "ModelOpt DP=EP expert-parallel PTQ (transformers MoE EP framework)"
         )
-    # The swapped plan is this load's own: the caller's config keeps the plan its checkpoint declares.
-    hf_config = copy.deepcopy(hf_config)
-    ep_cfg = _ep_config(hf_config)  # for VLMs the plan lives on .text_config
-    ep_plan = dict(getattr(ep_cfg, "base_model_ep_plan", None) or {})
-    if not ep_plan:
-        raise ValueError("expert-parallel PTQ requires the model to declare base_model_ep_plan")
-    if not _routed_expert_keys(ep_plan):
-        raise ValueError(
-            f"base_model_ep_plan={ep_plan} styles no routed experts ({', '.join(_EXPERTS_STYLES)} "
-            "or grouped_gemm), so this load would leave them whole on every rank."
-        )
-    # The all-to-all transport finds an expert's rank by dividing its id by this rank's share of
-    # the experts, which holds only when every rank holds as many. A count the config names none of
-    # the ways this reads is checked once the experts load, from their weights.
-    num_experts = _num_experts_from_config(hf_config)
-    if num_experts % ep_degree:
-        raise ValueError(
-            f"{plan!r}: ep_size={ep_degree} must divide the {num_experts} routed experts, which the "
-            "all-to-all transport shares out equally over the expert-parallel ranks."
-        )
+        if hf_config is None:
+            config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
+            if attn_implementation is not None:
+                config_kwargs["attn_implementation"] = attn_implementation
+            hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
+        quant_method = _ckpt_quant_method(hf_config)
+        if quant_method not in _EP_SOURCE_FORMATS:
+            # transformers' own quantizer would load it as stored, for PTQ to treat as plain weights.
+            dequantized = ", ".join(sorted(f for f in _EP_SOURCE_FORMATS if f))
+            raise NotImplementedError(
+                f"The expert-parallel load cannot dequantize a {quant_method!r} checkpoint: it loads "
+                f"unquantized checkpoints and dequantizes {dequantized}. Start from an unquantized copy "
+                "of the model."
+            )
+        # The swapped plan is this load's own: the caller's config keeps the plan its checkpoint declares.
+        hf_config = copy.deepcopy(hf_config)
+        ep_cfg = _ep_config(hf_config)  # for VLMs the plan lives on .text_config
+        ep_plan = dict(getattr(ep_cfg, "base_model_ep_plan", None) or {})
+        if not ep_plan:
+            raise ValueError("expert-parallel PTQ requires the model to declare base_model_ep_plan")
+        if not _routed_expert_keys(ep_plan):
+            raise ValueError(
+                f"base_model_ep_plan={ep_plan} styles no routed experts ({', '.join(_EXPERTS_STYLES)} "
+                "or grouped_gemm), so this load would leave them whole on every rank."
+            )
+        # The all-to-all transport finds an expert's rank by dividing its id by this rank's share of
+        # the experts, which holds only when every rank holds as many. A count the config names none of
+        # the ways this reads is checked once the experts load, from their weights.
+        num_experts = _num_experts_from_config(hf_config)
+        if num_experts % ep_degree:
+            raise ValueError(
+                f"{plan!r}: ep_size={ep_degree} must divide the {num_experts} routed experts, which the "
+                "all-to-all transport shares out equally over the expert-parallel ranks."
+            )
     # transformers 5.6 on, which the floor above makes sure of.
     from torch.distributed.device_mesh import init_device_mesh
     from transformers.distributed import DistributedConfig
@@ -1792,8 +1797,10 @@ def load_and_prepare_ep(
     dtype = getattr(hf_config, "dtype", None) or torch.bfloat16
     # The weights load, and the checkpoint recorded for the export to read the unplaced tensors back
     # from, take the local snapshot: a Hub ID recorded there would leave the export nothing to read.
-    # Resolved once the plan and the config pass, so a refused load downloads nothing.
-    ckpt_path = _resolve_checkpoint_dir(ckpt_path, torch.distributed.get_rank())
+    # Resolved once the plan and the config pass, so a refused load downloads nothing. Rank 0 makes
+    # it local; a rank that cannot see where fails every rank.
+    with _refused_together("the local checkpoint", alone=False):
+        _, ckpt_path = ensure_local_checkpoint(ckpt_path)
 
     # Two INDEPENDENT meshes (NeMo-AutoModel style), named by the model part they govern -- two
     # factorizations of the same world:
@@ -1881,56 +1888,59 @@ def load_and_prepare_ep(
     ep_cfg.base_model_ep_plan = swapped_plan
     from_pretrained_kwargs["config"] = hf_config
     print_rank_0(f"[ep] ep_plan={swapped_plan} experts_implementation=torch_a2a")
-    # The class that builds the whole checkpoint -- with its lm_head where an auto class builds one,
-    # so the head is calibrated and exported and the generation preview works -- chosen as the
-    # distribution plan's decision chose it, unless the caller asked for a VLM without its head
-    # (require_lm_head=False). The per-model plugin (models/) has already installed any on-the-fly
-    # weight decompression as a transformers monkeypatch.
-    loader = _auto_class(hf_config, require_lm_head, trust_remote_code=trust_remote_code)
-    print_rank_0(f"[ep] loader={loader.__name__} (require_lm_head={require_lm_head})")
-    with _experts_sharded_over(ep_submesh):
-        model = loader.from_pretrained(ckpt_path, **from_pretrained_kwargs)
-    model.eval()
-    # The swapped styles drove the sharding, and the model keeps the plan it was sharded by
-    # (``model.tp_plan``, copied when it was built). The config it keeps goes back to the
-    # checkpoint's plan: an export writes the config out, and nothing without ModelOpt knows the
-    # torch_a2a styles.
-    kept_config = getattr(model, "config", None)
-    if kept_config is not None:
-        kept_ep_config = _ep_config(kept_config)
-        if declared_plan is None:
-            vars(kept_ep_config).pop("base_model_ep_plan", None)
-        else:
-            kept_ep_config.base_model_ep_plan = declared_plan
-    # Force the experts forward to dispatch to `torch_a2a`: from_pretrained's `experts_implementation`
-    # kwarg resolves non-fp8 impls back to "grouped_mm", but @use_experts_implementation reads
-    # `config._experts_implementation` at FORWARD time, so set it on every (sub)config now. (Without
-    # this the torch_a2a_experts style passes a 5th process_group arg to grouped_mm_experts_forward ->
-    # TypeError.) Unlike the plan it stays set, and an export still writes no torch_a2a: transformers
-    # keeps it as ``_experts_implementation_internal``, which it leaves out of a serialized config.
-    for _m in model.modules():
-        _cfg = getattr(_m, "config", None)
-        if _cfg is not None and hasattr(_cfg, "_experts_implementation"):
-            _cfg._experts_implementation = "torch_a2a"
+    # A rank failing in the load (out of memory, a file it cannot read) fails every rank here,
+    # before the warmup's collectives.
+    with _refused_together("the expert-parallel load", alone=False):
+        # The class that builds the whole checkpoint -- with its lm_head where an auto class builds one,
+        # so the head is calibrated and exported and the generation preview works -- chosen as the
+        # distribution plan's decision chose it, unless the caller asked for a VLM without its head
+        # (require_lm_head=False). The per-model plugin (models/) has already installed any on-the-fly
+        # weight decompression as a transformers monkeypatch.
+        loader = _auto_class(hf_config, require_lm_head, trust_remote_code=trust_remote_code)
+        print_rank_0(f"[ep] loader={loader.__name__} (require_lm_head={require_lm_head})")
+        with _experts_sharded_over(ep_submesh):
+            model = loader.from_pretrained(ckpt_path, **from_pretrained_kwargs)
+        model.eval()
+        # The swapped styles drove the sharding, and the model keeps the plan it was sharded by
+        # (``model.tp_plan``, copied when it was built). The config it keeps goes back to the
+        # checkpoint's plan: an export writes the config out, and nothing without ModelOpt knows the
+        # torch_a2a styles.
+        kept_config = getattr(model, "config", None)
+        if kept_config is not None:
+            kept_ep_config = _ep_config(kept_config)
+            if declared_plan is None:
+                vars(kept_ep_config).pop("base_model_ep_plan", None)
+            else:
+                kept_ep_config.base_model_ep_plan = declared_plan
+        # Force the experts forward to dispatch to `torch_a2a`: from_pretrained's `experts_implementation`
+        # kwarg resolves non-fp8 impls back to "grouped_mm", but @use_experts_implementation reads
+        # `config._experts_implementation` at FORWARD time, so set it on every (sub)config now. (Without
+        # this the torch_a2a_experts style passes a 5th process_group arg to grouped_mm_experts_forward ->
+        # TypeError.) Unlike the plan it stays set, and an export still writes no torch_a2a: transformers
+        # keeps it as ``_experts_implementation_internal``, which it leaves out of a serialized config.
+        for _m in model.modules():
+            _cfg = getattr(_m, "config", None)
+            if _cfg is not None and hasattr(_cfg, "_experts_implementation"):
+                _cfg._experts_implementation = "torch_a2a"
 
-    # The checkpoint tensors the model has no parameter for (an MTP head), worked out once, at load,
-    # for the export to carry.
-    record_unplaced_source_keys(model, ckpt_path)
+        # The checkpoint tensors the model has no parameter for (an MTP head), worked out once, at load,
+        # for the export to carry.
+        record_unplaced_source_keys(model, ckpt_path)
 
-    # DP=EP all-to-all: no FSDP. Non-experts stay replicated per rank (from_pretrained already placed
-    # them on this rank's GPU); experts stay EP-sharded on the ep submesh, which the model carries as
-    # ``_device_mesh`` for calibration to re-install the all-to-all forwards over (expert_parallel_mesh).
-    # transformers sets it from the mesh this load hands it, through internals that differ by release;
-    # set here, the model carries it on every release.
-    model._device_mesh = ep_submesh
-    if hasattr(model, "tie_weights"):
-        model.tie_weights()
-    if freeze:
-        model.requires_grad_(False)
+        # DP=EP all-to-all: no FSDP. Non-experts stay replicated per rank (from_pretrained already placed
+        # them on this rank's GPU); experts stay EP-sharded on the ep submesh, which the model carries as
+        # ``_device_mesh`` for calibration to re-install the all-to-all forwards over (expert_parallel_mesh).
+        # transformers sets it from the mesh this load hands it, through internals that differ by release;
+        # set here, the model carries it on every release.
+        model._device_mesh = ep_submesh
+        if hasattr(model, "tie_weights"):
+            model.tie_weights()
+        if freeze:
+            model.requires_grad_(False)
 
-    # The routed-expert containers, from the SAME base_model_ep_plan that drove the sharding. A MoE model
-    # loaded WITHOUT EP (dense DP) never reaches this loader, so its experts stay dense.
-    expert_modules = _routed_expert_modules(model, ep_plan)
+        # The routed-expert containers, from the SAME base_model_ep_plan that drove the sharding. A MoE model
+        # loaded WITHOUT EP (dense DP) never reaches this loader, so its experts stay dense.
+        expert_modules = _routed_expert_modules(model, ep_plan)
 
     # Each module's ParallelState for calibration's amax sync: dense modules reduce over the whole world;
     # routed experts reduce over their expert-data-parallel replicas, and share one input amax across the

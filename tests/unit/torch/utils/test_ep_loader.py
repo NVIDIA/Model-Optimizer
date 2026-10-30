@@ -24,21 +24,26 @@ CPU process.
 
 import copy
 import dataclasses
+from contextlib import ExitStack
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
+from packaging.version import Version
 from torch import nn
 
 pytest.importorskip("transformers")
 
-from transformers import FineGrainedFP8Config
+import transformers
+from transformers import FineGrainedFP8Config, Qwen3MoeConfig
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils import moe
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.moe import expert_parallel_mesh
-from modelopt.torch.utils.plugins import model_load_utils
+from modelopt.torch.utils.plugins import hf_checkpoint_utils, model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import (
     _ckpt_quant_method,
     _experts_sharded_over,
@@ -121,7 +126,7 @@ class _Mesh:
 
 
 @pytest.fixture
-def ep_world_of_two(monkeypatch):
+def ep_world_of_two(monkeypatch, gloo_world_of_one):
     """A two-rank expert-parallel world as far as the loader's checks see, and the checkpoint paths
     it resolves; nothing else is set up."""
     resolved = []
@@ -130,7 +135,7 @@ def ep_world_of_two(monkeypatch):
     monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
     monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
     monkeypatch.setattr(
-        model_load_utils, "_resolve_checkpoint_dir", lambda p, r: resolved.append(p) or p
+        model_load_utils, "ensure_local_checkpoint", lambda p, **k: resolved.append(p) or (None, p)
     )
     return resolved
 
@@ -154,7 +159,9 @@ def test_the_loader_refuses_a_plan_for_another_world(gloo_world_of_one):
         load_and_prepare_ep("unused", DistributionPlan(2, ep_size=2))
 
 
-def test_the_loader_refuses_a_transformers_that_builds_no_model_with_torch_a2a(monkeypatch):
+def test_the_loader_refuses_a_transformers_that_builds_no_model_with_torch_a2a(
+    monkeypatch, gloo_world_of_one
+):
     """transformers 5.6 checks a model's experts implementation against the ones it ships, so its
     from_pretrained would refuse torch_a2a once the load had set everything up: refused first."""
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
@@ -165,7 +172,7 @@ def test_the_loader_refuses_a_transformers_that_builds_no_model_with_torch_a2a(m
         load_and_prepare_ep("unused", DistributionPlan(2, ep_size=2), hf_config=SimpleNamespace())
 
 
-def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch):
+def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch, gloo_world_of_one):
     """The export reads the tensors the load could not place back from the checkpoint it records,
     which must be a local directory: a Hub ID there leaves the export nothing to read. The load
     resolves it once the plan and the config pass, before anything reads a weight."""
@@ -175,7 +182,7 @@ def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch):
 
     resolved = []
 
-    def resolve(path, rank):
+    def resolve(path, **hub_options):
         resolved.append(path)
         raise _ResolvedError
 
@@ -183,7 +190,7 @@ def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch):
     monkeypatch.setattr(dist, "size", lambda group=None: 2)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
     monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
-    monkeypatch.setattr(model_load_utils, "_resolve_checkpoint_dir", resolve)
+    monkeypatch.setattr(model_load_utils, "ensure_local_checkpoint", resolve)
 
     with pytest.raises(_ResolvedError):
         load_and_prepare_ep(
@@ -580,3 +587,96 @@ def test_each_load_argument_goes_where_this_transformers_takes_it(
     given = {k: v for k, v in vars(loaded["distributed_config"]).items() if v is not None}
     assert given == config
     assert loaded.get("tp_plan") == tp_plan
+
+
+# ----------------------------------------------------------------- one rank failing alone
+
+
+class _PastTheMeshesError(Exception):
+    """Raised by the meshes' stand-in: this rank got past the load's checks."""
+
+
+def _meshes_in_step(*args, **kwargs):
+    """The meshes' subgroups, as the collective they are: a rank in it waits for every peer."""
+    torch.distributed.barrier()
+    raise _PastTheMeshesError
+
+
+def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
+    path, hf_config, patches = ckpt, None, []
+    if failure != "unreadable-config":
+        hf_config = SimpleNamespace(base_model_ep_plan=dict(_EP_PLAN), num_experts=4)
+    if failure != "unseen-checkpoint":
+        local = mock.patch.object(
+            model_load_utils, "ensure_local_checkpoint", side_effect=lambda p, **k: (None, p)
+        )
+        patches.append(local)
+    fails_here = rank == failing_rank
+
+    def fail(*args, **kwargs):
+        raise (MemoryError if failure == "load" else OSError)(match)
+
+    if failure == "unreadable-config" and fails_here:
+        path = ckpt + "-not-on-this-node"
+    elif failure == "transformers" and fails_here:
+        patches.append(mock.patch("transformers.__version__", "5.6.2"))
+    elif failure == "quantized-config" and fails_here:
+        hf_config.quantization_config = {"quant_method": "gptq"}
+    elif failure == "unseen-checkpoint" and fails_here:
+        # Rank 0 makes the checkpoint local; a rank on a node without that storage cannot see it.
+        patches.append(mock.patch.object(hf_checkpoint_utils.os.path, "isdir", return_value=False))
+    if failure in ("load", "record"):
+        loaded = _model_with_decoder_at("model.")
+        load = fail if failure == "load" and fails_here else (lambda path, **kwargs: loaded)
+        loader = SimpleNamespace(__name__="Loader", from_pretrained=load)
+        record = fail if failure == "record" and fails_here else None
+        patches += [
+            mock.patch("torch.distributed.device_mesh.init_device_mesh", return_value=_Mesh()),
+            mock.patch.object(model_load_utils, "_auto_class", return_value=loader),
+            mock.patch.object(model_load_utils, "record_unplaced_source_keys", side_effect=record),
+        ]
+    else:
+        patches.append(
+            mock.patch("torch.distributed.device_mesh.init_device_mesh", _meshes_in_step)
+        )
+    refused = None
+    with bounded_collectives(), ExitStack() as stack:
+        for patch in patches:
+            stack.enter_context(patch)
+        try:  # not pytest.raises: its failure would end the pooled worker instead of the job
+            load_and_prepare_ep(path, DistributionPlan(2, ep_size=2), hf_config=hf_config)
+        except Exception as error:
+            refused = f"{type(error).__name__}: {error}"
+    # The one rank's failure on every rank, before any rank went on alone into a collective.
+    assert refused is not None and match in refused, (rank, refused)
+    assert fails_here or f"rank {failing_rank} failed" in refused, refused
+
+
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.7"), reason="the EP load needs transformers 5.7"
+)
+@pytest.mark.parametrize(
+    ("failure", "failing_rank", "match"),
+    [
+        ("unreadable-config", 1, "not-on-this-node"),
+        ("transformers", 1, "requires transformers >= 5.7, but 5.6.2"),
+        ("quantized-config", 1, "cannot dequantize a 'gptq'"),
+        ("unseen-checkpoint", 1, "which this rank cannot see"),
+        ("load", 1, "the GPU ran out of memory"),
+        ("record", 1, "a weight file this rank cannot read"),
+    ],
+)
+def test_a_load_failing_on_one_rank_fails_every_rank(
+    cpu_dist_workers, tmp_path, failure, failing_rank, match
+):
+    """One rank fails alone: reading the config, on its transformers, on its arguments, seeing the
+    checkpoint rank 0 made local, or in the load. Every rank raises that failure, rather than leave the others
+    waiting for it in the meshes (stood in by a bounded barrier) or the warmup's collectives."""
+    Qwen3MoeConfig(num_experts=4, num_hidden_layers=1, hidden_size=8).save_pretrained(tmp_path)
+    cpu_dist_workers.run(
+        _one_rank_fails_job,
+        ckpt=str(tmp_path),
+        failure=failure,
+        failing_rank=failing_rank,
+        match=match,
+    )
