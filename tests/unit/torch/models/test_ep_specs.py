@@ -18,9 +18,6 @@
 from types import SimpleNamespace
 
 import pytest
-
-transformers = pytest.importorskip("transformers")
-
 from packaging.version import Version
 
 from modelopt.torch import models
@@ -33,12 +30,18 @@ from modelopt.torch.utils.moe import (
     check_distributed_support,
 )
 
+try:
+    import transformers
+except ImportError:  # the optional [hf] extra: only the checks of its release need it
+    transformers = None
+
 EP_MODEL_TYPES = [s.model_type for s in get_specs() if s.ep_spec is not None]
 
 
+needs_transformers = pytest.mark.skipif(transformers is None, reason="needs transformers")
 # Applying a spec enforces the transformers floor the expert-parallel load needs.
 needs_ep_transformers = pytest.mark.skipif(
-    Version(transformers.__version__) < Version(_EP_MIN_TRANSFORMERS),
+    transformers is None or Version(transformers.__version__) < Version(_EP_MIN_TRANSFORMERS),
     reason=f"expert parallelism needs transformers >= {_EP_MIN_TRANSFORMERS}",
 )
 
@@ -135,6 +138,7 @@ def test_the_models_own_plan_always_wins(model_type, config):
     assert not hasattr(getattr(config, "text_config", cfg()), "base_model_ep_plan")
 
 
+@needs_transformers
 def test_a_model_without_a_spec_still_needs_the_loads_transformers(monkeypatch):
     """A plan that ships with transformers needs no spec, but its load needs the release every
     expert-parallel load does: auto picks no EP degree below it, rather than reach the load."""
@@ -284,6 +288,7 @@ def test_prepare_runs_after_the_plan_is_attached_and_its_config_is_returned(monk
     }
 
 
+@needs_transformers
 def test_the_plan_a_spec_would_supply(monkeypatch):
     """What the plan decision reads at an EP degree of 1, to refuse an MoE left whole on every rank:
     the spec's plan, or the plan it states its ``prepare`` attaches, read without running
