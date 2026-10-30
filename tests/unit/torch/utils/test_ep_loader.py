@@ -293,7 +293,7 @@ def test_a_plan_whose_expert_containers_match_no_module_is_refused(ep_world_of_t
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: None)
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
     config = SimpleNamespace(
         base_model_ep_plan={"layers.*.mlp.experts.*.gate_up_proj": "grouped_gemm"}
     )
