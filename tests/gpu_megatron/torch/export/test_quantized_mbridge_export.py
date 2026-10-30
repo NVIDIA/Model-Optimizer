@@ -101,11 +101,11 @@ def bridge_workers(request):
     [
         (partial(create_tiny_llama_dir, with_tokenizer=True), "nvfp4"),
         (partial(create_tiny_qwen3_dir, with_tokenizer=True), "fp8"),
-        # The bridge can't export quantized Mamba or GatedDeltaNet projections yet.
+        # The bridge can't export quantized Mamba projections yet.
         (partial(create_tiny_nemotron_h_dir, with_tokenizer=True), "nvfp4_mlp_only"),
-        (partial(create_tiny_qwen3_5_moe_vl_dir, with_processor=True), "nvfp4_mlp_only"),
+        (partial(create_tiny_qwen3_5_moe_vl_dir, with_processor=True), "nvfp4"),
     ],
-    ids=["llama-nvfp4", "qwen3-fp8", "nemotron_h-nvfp4_mlp_only", "qwen3_5_moe_vl-nvfp4_mlp_only"],
+    ids=["llama-nvfp4", "qwen3-fp8", "nemotron_h-nvfp4_mlp_only", "qwen3_5_moe_vl-nvfp4"],
 )
 def test_matches_megatron_exporter(
     dist_workers_size_1, bridge_workers, tmp_path, create_source, quant_cfg_name
