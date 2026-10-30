@@ -683,21 +683,32 @@ def _built_by_its_own_code():
     "private_conversion_registry", "restore_loader_hooks", "torch_a2a_unregistered"
 )
 @pytest.mark.parametrize(
-    ("ranks", "dense", "outcome"),
-    [(3, "fsdp", "fsdp2"), (3, "replicate", "refused"), (4, "replicate", "expert-parallel")],
-    ids=["fsdp2", "whole", "expert-parallel"],
+    ("ranks", "dense", "outcome", "packed"),
+    [
+        (3, "fsdp", "fsdp2", False),
+        (3, "replicate", "refused", False),
+        (4, "replicate", "expert-parallel", False),
+        (4, "replicate", "expert-parallel", True),
+    ],
+    ids=["fsdp2", "whole", "expert-parallel", "expert-parallel-packed"],
 )
 def test_only_an_expert_parallel_plan_patches_kimi_k3s_code(
-    monkeypatch, remote_checkpoint, tmp_path, ranks, dense, outcome
+    monkeypatch, remote_checkpoint, tmp_path, ranks, dense, outcome, packed
 ):
     """Deciding the plan builds Kimi-K3 as its own code builds it, importable but unpatched, and
     finds its 8 experts through the plan the spec states. Only an expert-parallel plan (4 ranks)
     then runs ``prepare``. FSDP2-sharded, or left whole on 3 ranks, which no EP degree of the 8
     experts divides (refused), the run keeps the remote MoE block, the converter registry, the
-    experts implementations, the loader and the config as read."""
+    experts implementations, the loader and the config as read. A packed checkpoint is planned
+    expert-parallel too, before ``prepare`` installs the decompressor its spec names."""
     as_read = SimpleNamespace(
         model_type="kimi_k3", text_config=SimpleNamespace(num_experts=8), auto_map=_AUTO_MAP
     )
+    installs = []
+    if packed:
+        scheme = {"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"}
+        as_read.quantization_config = as_read.text_config.quantization_config = scheme
+        monkeypatch.setattr(_onfly_decompress, "install_onfly_decompress", installs.append)
     monkeypatch.setattr(dist, "size", lambda group=None: ranks)
     monkeypatch.setattr(
         transformers.AutoConfig, "from_pretrained", lambda *a, **k: copy.deepcopy(as_read)
@@ -732,6 +743,7 @@ def test_only_an_expert_parallel_plan_patches_kimi_k3s_code(
         assert (mu.get_model_conversion_mapping, cml.spawn_materialize) == hooks
     if outcome == "fsdp2":
         assert vars(config.text_config) == {"num_experts": 8}
+    assert len(installs) == packed
 
 
 @pytest.mark.usefixtures("private_conversion_registry", "restore_loader_hooks", "remote_checkpoint")
