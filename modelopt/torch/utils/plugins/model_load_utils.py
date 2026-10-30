@@ -2026,7 +2026,11 @@ def _ep_load_refusal(hf_config, ep_plan: dict[str, str]) -> Exception | None:
     parallelism out, or the transformers release it needs, is not asked here: the plan decision and
     the load ask the spec first (:func:`~modelopt.torch.utils.moe.check_distributed_support`).
     """
-    if (method := _ckpt_quant_method(hf_config)) not in _EP_SOURCE_FORMATS:
+    # The formats it takes include those the spec's prepare, which runs only once the plan is
+    # decided, has the experts decompress as they load.
+    ep = _ep_spec(hf_config.model_type)
+    takes = _EP_SOURCE_FORMATS | frozenset(ep.decompressed_formats if ep is not None else ())
+    if (method := _ckpt_quant_method(hf_config)) not in takes:
         return NotImplementedError(
             f"The expert-parallel load cannot dequantize a {method!r} checkpoint."
         )

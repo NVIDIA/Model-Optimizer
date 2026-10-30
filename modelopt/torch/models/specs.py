@@ -228,6 +228,12 @@ class EPSpec(SpecSection):
     or stage the code (shim names transformers dropped, stage the modules it imports): it patches no
     class, config, converter or loader hook."""
 
+    decompressed_formats: tuple[str, ...] = ()
+    """The checkpoint formats (a ``quantization_config``'s ``quant_method``) whose experts
+    ``prepare`` has decompress as they load, which the expert-parallel load then takes beside
+    unquantized checkpoints. The plan decision runs before ``prepare``, and reads this to count such
+    a checkpoint one the expert-parallel load takes."""
+
     prepared_ep_plan: dict[str, str] | None = None
     """The ``base_model_ep_plan`` ``prepare`` attaches, for a model whose plan only ``prepare``
     supplies.

@@ -825,6 +825,33 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
 
 
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version(_ep_floor("kimi_k25")),
+    reason="Kimi-K2.5's expert parallelism needs a later transformers",
+)
+@pytest.mark.parametrize(
+    ("model_type", "expert_parallel"), [("kimi_k25", True), ("kimi_vl", False)]
+)
+def test_a_checkpoint_its_spec_decompresses_is_decided_expert_parallel(
+    run_as, serve, monkeypatch, tmp_path, model_type, expert_parallel
+):
+    """The decision runs before ``prepare``, which installs the decompressor. A compressed-tensors
+    checkpoint whose spec decompresses its experts as they load (Kimi-K2.5's) is planned
+    expert-parallel all the same; one whose spec does not (Kimi-VL's) is planned without it, as the
+    expert-parallel load would refuse it."""
+    spec = get_spec(model_type).ep_spec
+    monkeypatch.setattr(spec, "prepare", lambda hf_config, **kwargs: hf_config)
+    monkeypatch.setattr(spec, "make_importable", lambda: None)
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi())
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+    run_as(4)
+    scheme = {"quant_method": "compressed-tensors"}
+    text = SimpleNamespace(n_routed_experts=4, quantization_config=scheme)
+    serve(SimpleNamespace(model_type=model_type, quantization_config=scheme, text_config=text))
+
+    assert resolve_distribution_plan(str(tmp_path))[0].is_expert_parallel == expert_parallel
+
+
 def _remote_kimi():
     """A remote-code Kimi VLM as the checkpoint's own code builds it, unpatched by its spec's
     ``prepare``: each MoE layer of its language model holds its routed experts as per-expert
