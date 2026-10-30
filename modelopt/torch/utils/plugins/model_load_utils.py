@@ -2880,6 +2880,11 @@ def load_and_prepare_ep(
         # checkpoint of the model, nor a plan of its own, would load.
         check_distributed_support(hf_config.model_type)
         quant_method = _ckpt_quant_method(hf_config, ckpt_path)
+        if quant_method == "fp8":
+            # 5.8 added the hooks block-fp8 is dequantized through (Fp8Dequantize._dequantize_one,
+            # update_weight_conversions). On 5.7 the experts' converter takes their fp8 weights before
+            # the dequant can, and they would load unscaled.
+            moe.require_transformers("5.8", "Dequantizing a block-fp8 checkpoint expert-parallel")
         if plan.is_fsdp_dense and quant_method == "fp8":
             raise NotImplementedError(
                 f"{plan!r}: the dense part of a block-fp8 checkpoint cannot be sharded: Distributed "
