@@ -60,6 +60,7 @@ SCENARIOS = [
 ]
 EXCLUDED = {"interactive-container": "Provisioned outside pytest by the CI job."}
 
+
 @pytest.mark.parametrize(
     "scenario", scenario_parameters(README, SCENARIOS, excluded=EXCLUDED)
 )
@@ -237,47 +238,6 @@ activate their respective Torch or Megatron lane despite the general Markdown
 exclusion. Changes to shared test utilities activate every lane. Two-GPU Bridge
 smokes skip on the single-GPU PR runner and run on the two-GPU nightly runner;
 CLI-help scenarios still execute on the single-GPU runner.
-
-## Advisory CI agent
-
-The `README Testability Advice` workflow reviews new/updated `README*.md` and
-`readme*.md` files in PRs from owners, members, and collaborators, following the
-repository's existing Claude access convention. It uses the existing
-`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, and `CLAUDE_MODEL` configuration.
-The workflow must first land on the trusted base branch to run automatically.
-
-The assessment suggests minimal snippet IDs, scenario definitions, fixtures,
-assertions, prerequisites, and CI lane changes. It distinguishes new executable
-coverage from illustrative/interactive exclusions and does not suggest tests for
-prose-only changes that need no new coverage.
-
-Assessment has a read-only repository token and never checks out PR code. A
-separate job can only publish advisory comments; neither job has code-write
-permission. It posts one proposal per PR, updates that comment on later heads,
-and discards results if the PR head changed during assessment. An obsolete
-proposal is superseded if no further changes are needed. Advice does not add a
-required gate or relax existing tests.
-
-The proposal asks before implementation. An authorized maintainer requests the
-changes through the existing interactive workflow by posting:
-
-```text
-@claude implement the README testability proposal for commit <reviewed-head-sha>
-```
-
-That new comment authorizes the described README, test, and fixture work. The
-advisory workflow itself never implements changes. If the head changed, reassess
-against the new head before implementing the old proposal. The interactive
-workflow remains subject to its own permissions and repository instructions.
-
-The agent returns the action's documented
-[structured output](https://github.com/anthropics/claude-code-action/blob/main/action.yml).
-The deterministic publisher validates that output and asks for approval; it has
-no API path for applying code. Its offline checks run with:
-
-```bash
-node --test .github/scripts/readme_testability.test.cjs
-```
 
 ## File responsibilities
 
