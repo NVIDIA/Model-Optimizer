@@ -1,0 +1,95 @@
+# DFlash2 drafter for meta-models/Muse-Spark-Open-816B-A42B, as released in
+# nvidia/Muse-Spark-Open-816B-A42B-DFlash2. Stage 1 of 2: trained from scratch for 8
+# epochs at 4K tokens; dflash2_long_context.yaml continues its export at 12K tokens.
+# See README.md in this directory for the data, the compute and the results.
+#
+# Streaming (data.mode=streaming): vLLM serves the NVFP4 target and the trainer pulls its
+# hidden states over RDMA, so the trainer holds only the target's embedding, final norm and
+# lm_head. The launcher example
+#   tools/launcher/examples/meta-models/Muse-Spark-Open-816B-A42B/hf_streaming_dflash2.yaml
+# runs it as 14 serve + 8 trainer nodes of 4 GB300 GPUs each.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptDFlashRecipe
+metadata:
+  description: Muse-Spark-Open DFlash2 drafter, stage 1 (from scratch, 4K tokens, streaming).
+
+model:
+  model_name_or_path: <path to meta-models/Muse-Spark-Open-816B-A42B-NVFP4>
+  trust_remote_code: false
+  # The trainer needs only embed_tokens, the final norm and lm_head; the fake base also
+  # reproduces Muse-Spark's embedding norm and logit soft cap.
+  use_fake_base_for_offline: true
+
+data:
+  mode: streaming
+  # The target's own responses at temperature 1, five reasoning-effort levels, split into
+  # reasoning and answer; see README.md.
+  data_path: <path to the synthesized corpus>
+  offline_data_path:
+  # The checkpoint's own template already has {% generation %} tags, and every row
+  # carries its reasoning effort in its system turn.
+  chat_template:
+
+training:
+  output_dir:
+  num_train_epochs: 8
+  # Global batch 64 = 2 per GPU x 32 trainer GPUs.
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-3
+  warmup_ratio: 0.04
+  training_seq_len: 4096
+  logging_steps: 20
+  save_steps: 2500
+  save_total_limit: 3
+  cp_size: 1
+  dp_shard_size: 1
+  disable_tqdm: true
+  estimate_ar: false
+  ar_validate_steps: 0
+  answer_only_loss: true
+  do_eval: false
+  lr_scheduler_type: linear
+  save_strategy: steps
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  dataloader_drop_last: true
+  # A resubmitted job skips the batches it already trained on instead of replaying the
+  # head of the epoch; with a fixed data_seed that makes a resume exact.
+  ignore_data_skip: false
+  data_seed: 20261025
+  bf16: true
+  tf32: true
+  remove_unused_columns: false
+  ddp_find_unused_parameters: true
+  ddp_timeout: 1800
+  report_to: tensorboard
+
+dflash:
+  dflash_block_size: 8
+  dflash_num_anchors: 256
+  dflash_swa_window_size: 2048
+  dflash_use_torch_compile: true
+  dflash_use_flex_attention: true
+  dflash_fused_loss: true
+  # Distill from the target's logits, D-PACE position weighting.
+  dflash_self_logit_distillation: true
+  dflash_lk_loss_type: ce
+  dflash_loss_objective: dpace
+  # Muse-Spark has no mask token; 201817 is an unused id.
+  dflash_mask_token_id: 201817
+  dflash_selector_loss_alpha: 1.0
+  dflash_fp32_master_weights: true
+  dflash_architecture_config:
+    num_hidden_layers: 5
+    num_attention_heads: 128
+    num_key_value_heads: 16
+    head_dim: 64
+    intermediate_size: 24576
+    projector_type: dflash2
+    # The 62-layer target's hidden states after these layers (zero-based) feed the draft.
+    target_layer_ids: [3, 19, 31, 47, 59]
+    conv_kernel_size: 2
+    conv_group_size: 16
+    selector_rank: 256
+    selector_top_k: 16

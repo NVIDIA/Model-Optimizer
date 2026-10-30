@@ -31,6 +31,7 @@ Changelog
 - With ``training.dataloader_num_workers`` > 0, ``examples/speculative_decoding/main.py`` now yields each training batch as soon as a worker finishes it, so one slow sample, such as a slow hidden-state fetch in streaming training, no longer stalls every DDP rank. Sample order within the prefetch window is then no longer deterministic; set ``training.dataloader_in_order=true`` to restore it (context-parallel runs always keep it).
 - The ``general/speculative_decoding/dflash2`` recipe now enables ``dflash_use_torch_compile`` and ``dflash_use_flex_attention``. With PyTorch 2.9 or 2.10 its ``tf32: true`` makes Inductor fail on the first step; set ``training.tf32=false`` or ``dflash.dflash_use_torch_compile=false`` there.
 - Add ``dflash_fused_loss`` to the DFlash config. DFlash, DFlash2 and LiLiCorr training then computes its loss in row chunks fused with the frozen ``lm_head`` projection instead of materializing the draft's full-vocabulary logits, which saves time and memory on large vocabularies.
+- Add DFlash2 training recipes for ``meta-models/Muse-Spark-Open-816B-A42B`` under ``modelopt_recipes/models/meta-models/Muse-Spark-Open-816B-A42B/speculative_decoding/``, with streaming launcher examples, that reproduce the released ``nvidia/Muse-Spark-Open-816B-A42B-DFlash2`` drafter. Streaming and offline training against a Muse-Spark target now apply its embedding norm and logit soft cap, and DFlash exports record the target's ``output_multiplier`` and ``final_logit_softcapping`` for vLLM.
 
 *Megatron Framework (M-LM / M-Bridge)*
 

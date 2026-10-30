@@ -56,6 +56,7 @@ from modelopt.torch.speculative.plugins.master_weight_adamw import (
     MasterWeightAdamW,
     VerifyMasterWeightsCallback,
 )
+from modelopt.torch.speculative.plugins.modeling_fakebase import _SoftCappedLMHead
 from modelopt.torch.speculative.utils import AcceptanceRateValidation
 from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
 
@@ -1733,10 +1734,19 @@ class TestDFlashFusedLoss:
     """``dflash_fused_loss`` trains exactly what the loss on materialized logits trains."""
 
     @staticmethod
-    def _step(fused, offline, **overrides):
+    def _step(fused, offline, soft_capped_head=False, **overrides):
         """One training step's output and draft gradients, from fixed weights, data and anchors."""
         torch.manual_seed(0)
         model = get_tiny_llama(num_hidden_layers=4)
+        if soft_capped_head:  # as the fake base builds it for Muse-Spark
+            head = _SoftCappedLMHead(
+                *model.lm_head.weight.shape[::-1],
+                bias=False,
+                logits_multiplier=0.5,
+                logits_soft_cap=3.0,
+            )
+            head.weight.data.copy_(model.lm_head.weight.data)
+            model.lm_head = head
         if offline:
             model.config.num_orig_hidden_layers = 4
         config = get_dflash_config(offline=offline)
@@ -1757,17 +1767,18 @@ class TestDFlashFusedLoss:
         return out, {name: p.grad for name, p in params if p.grad is not None}
 
     @pytest.mark.parametrize(
-        ("offline", "overrides"),
+        ("offline", "soft_capped_head", "overrides"),
         [
-            (False, {}),  # KD on the base's logits, D-PACE weighting
-            (True, {"dflash_loss_objective": "decay", "dflash_loss_decay_factor": 4.0}),
-            (False, {"dflash_self_logit_distillation": False}),  # cross-entropy, D-PACE
+            (False, False, {}),  # KD on the base's logits, D-PACE weighting
+            (True, False, {"dflash_loss_objective": "decay", "dflash_loss_decay_factor": 4.0}),
+            (False, False, {"dflash_self_logit_distillation": False}),  # cross-entropy, D-PACE
+            (True, True, {}),  # KD on the base's hidden through a multiplier and soft cap
         ],
-        ids=["kd-online", "kd-offline-decay", "ce"],
+        ids=["kd-online", "kd-offline-decay", "ce", "kd-offline-soft-capped-head"],
     )
-    def test_matches_the_materialized_logits(self, offline, overrides):
-        eager, eager_grads = self._step(False, offline, **overrides)
-        fused, fused_grads = self._step(True, offline, **overrides)
+    def test_matches_the_materialized_logits(self, offline, soft_capped_head, overrides):
+        eager, eager_grads = self._step(False, offline, soft_capped_head, **overrides)
+        fused, fused_grads = self._step(True, offline, soft_capped_head, **overrides)
         torch.testing.assert_close(fused.loss, eager.loss)
         assert fused.train_acc == eager.train_acc
         assert fused_grads.keys() == eager_grads.keys()

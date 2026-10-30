@@ -104,6 +104,9 @@ _FINAL_NORM_TYPE_BY_MODEL_TYPE: dict[str, str] = {
     # use_gemma_norm flag still gets the correct flavor instead of silently dropping the +1.
     "minimax_m3_vl_text": "gemma_rmsnorm",
     "gpt_oss": "gpt_oss_rmsnorm",
+    # Muse-Spark's final norm uses its weight as stored: no (1 + weight) as in Gemma.
+    "muse_spark": "rmsnorm",
+    "muse_spark_text": "rmsnorm",
 }
 
 
