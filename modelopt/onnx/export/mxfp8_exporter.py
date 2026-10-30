@@ -25,6 +25,7 @@ from modelopt.onnx.quantization.qdq_utils import _cast_fp8, onnx_dtype_map
 from modelopt.onnx.quantization.quant_utils import compute_e8m0, get_amax
 from modelopt.onnx.utils import get_attribute, has_attribute
 
+from ._dynamo_adapter import _DYNAMO_MXFP8_NODE_PREFIX
 from .base_exporter import ONNXQuantExporter
 
 E8_M0_BIAS = 127
@@ -34,12 +35,9 @@ DEFAULT_QUANT_AXIS = -1
 
 def _get_weight_dq_nodes(graph: onnx.GraphProto) -> list[onnx.NodeProto]:
     """Get weight DequantizeLinear nodes from the graph."""
-    return [
-        node
-        for node in graph.node
-        if node.op_type == "TRT_MXFP8DequantizeLinear"
-        and any(".weight" in inp for inp in node.input)
-    ]
+    nodes = [node for node in graph.node if node.op_type == "TRT_MXFP8DequantizeLinear"]
+    dynamo_nodes = [node for node in nodes if node.name.startswith(_DYNAMO_MXFP8_NODE_PREFIX)]
+    return dynamo_nodes or [node for node in nodes if any(".weight" in inp for inp in node.input)]
 
 
 def _get_quant_params(node: onnx.NodeProto) -> tuple[int, int]:
@@ -165,6 +163,10 @@ class MXFP8QuantExporter(ONNXQuantExporter):
                     if attr.name == "approximate":
                         attr.s = b"tanh"
                         logger.debug(f"Updated GELU node {node.name} to use tanh approximation")
+
+        for node in graph.node:
+            if node.name.startswith(_DYNAMO_MXFP8_NODE_PREFIX):
+                node.name = node.name.removeprefix(_DYNAMO_MXFP8_NODE_PREFIX)
 
         # Insert cast to fp16 after Sqrt nodes
         cast_nodes_to_insert = []
