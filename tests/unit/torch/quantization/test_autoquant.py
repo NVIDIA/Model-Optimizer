@@ -868,7 +868,15 @@ def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method)
     assert torch.allclose(output_ref, output_test)
 
 
-@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+@pytest.mark.parametrize(
+    "method",
+    [
+        "gradient",
+        "kl_div",
+        {"method": "kl_div", "context": "lowest"},
+        {"method": "kl_div", "context": 1},
+    ],
+)
 def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, method):
     source = TransformerBlock()
     data = [source.get_input() for _ in range(2)]
@@ -906,9 +914,10 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
     for i, shard in enumerate(shards):
         _, state = search(shard, (i, 2), model=model if i == 0 else None)
         assert not state["best"]["recipe"]
-    # Each searched format is calibrated by one shard, o_proj's held FP8 by both.
+    # Each searched format is calibrated by one shard; o_proj's FP8 and a scoring context by both.
     calibrated = [set(safe_load(shard)["quantizer_states"]) for shard in shards]
-    assert len(calibrated[0] & calibrated[1]) == 1 and len(calibrated[0] | calibrated[1]) == 3
+    shared = calibrated[0] & calibrated[1]
+    assert len(shared) == 1 + isinstance(method, dict) and len(calibrated[0] | calibrated[1]) == 3
 
     # Scores sum over batches, so a shard scored over fewer is refused.
     fewer = tmp_path / "fewer_steps.pth"
@@ -958,6 +967,12 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
 
     for name, stats in expected["candidate_stats"].items():
         assert state["candidate_stats"][name]["raw_scores"] == pytest.approx(stats["raw_scores"])
+        if isinstance(method, dict) and len(stats["formats"]) > 1:
+            # In a quantized context BF16 is measured too, not taken as 0.
+            assert stats["raw_scores"][-1] > 0
+    if isinstance(method, dict):
+        # Context scores share a base damage; the solver must still spend the 6-bit budget.
+        assert expected["best"]["constraints"]["effective_bits"] > 5.0
     assert state["best"]["recipe"] == expected["best"]["recipe"]
 
 
