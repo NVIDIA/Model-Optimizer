@@ -78,6 +78,8 @@ from modelopt.torch.utils.moe import (
     _routed_expert_modules,
     _spec_ep_plan,
     _spec_refuses_ep,
+    apply_distributed_support,
+    check_distributed_support,
     register_torch_a2a,
 )
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
@@ -669,8 +671,6 @@ def _sharded_load_kwargs(
     hf_config = kwargs.pop("hf_config", None)
     if route == _EXPERT_PARALLEL:
         _refuse_a_rank_without_its_gpu(route, decided)
-        from modelopt.torch.utils.moe import apply_distributed_support, check_distributed_support
-
         if hf_config is None or not prepared:
             if hf_config is None:
                 hf_config = AutoConfig.from_pretrained(
@@ -1839,8 +1839,6 @@ def resolve_distribution_plan(
     that: ``ep_size=1`` with ``dense="replicate"`` (``MODELOPT_EP_DEGREE=1`` and
     ``MODELOPT_FSDP_SIZE=1``) replicates it, noting that every rank holds the whole MoE.
     """
-    from modelopt.torch.utils.moe import apply_distributed_support
-
     # Each rank reads the checkpoint for itself. One that cannot must fail every rank here, rather
     # than leave the others waiting in a broadcast below for a rank that already raised.
     read: list[tuple[str, PretrainedConfig]] = []
