@@ -20,7 +20,9 @@ modeling builds the language model from per-expert Linears, which the EP machine
 ``ep.py`` swaps in the transformers-native deepseek_v3 language model.
 
 Only the expert-parallel section is registered under ``kimi_vl``: the MoE and export sections stay
-``deepseek_v3``'s, so lookups by ``kimi_vl`` find neither yet. Sharing them is left to a follow-up.
+``deepseek_v3``'s, so lookups by ``kimi_vl`` find neither yet. Nor do ``is_moe``'s name and structure
+fallbacks recognize the native ``DeepseekV3MoE`` blocks ``prepare`` installs, so the HF export's
+MoE-block handling skips them. Sharing the sections is left to a follow-up.
 """
 
 from ..deepseek_v3.specs import BASE_MODEL_EP_PLAN
