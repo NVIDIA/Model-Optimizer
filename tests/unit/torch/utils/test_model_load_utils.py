@@ -1325,9 +1325,9 @@ def test_an_expert_parallel_plan_loads_through_the_ep_loader(
     run_as, serve, loaders, auto_class, a_gpu, tmp_path, dense
 ):
     """An EP plan loads through load_and_prepare_ep, with the plan and the Hub options the load was
-    given, and the checkpoint's config, read once for both, and through no other load. That load
-    replicates the dense part, so a plan that also FSDP2-shards it is refused before anything
-    loads, naming the ways out."""
+    given, and the checkpoint's config, read once for both, and through no other load. An option
+    passed as None asks nothing of it. That load replicates the dense part, so a plan that also
+    FSDP2-shards it is refused before anything loads, naming the ways out."""
     run_as(4)
     config = serve(_deepseek_v3(n_routed_experts=8))
     plan = DistributionPlan(4, ep_size=4, dense=dense)
@@ -1335,6 +1335,7 @@ def test_an_expert_parallel_plan_loads_through_the_ep_loader(
         "trust_remote_code": True,
         "attn_implementation": "eager",
         "freeze": False,
+        "require_lm_head": None,
         "local_files_only": True,
     }
 
@@ -1349,6 +1350,7 @@ def test_an_expert_parallel_plan_loads_through_the_ep_loader(
         assert (call["ckpt_path"], call["plan"]) == (str(tmp_path), plan)
         assert (call["trust_remote_code"], call["attn_implementation"]) == (True, "eager")
         assert call["freeze"] is False
+        assert "require_lm_head" not in call  # its default, not None read as False
         assert call["hub_options"] == {"local_files_only": True}
         assert call["hf_config"] is config
         assert distribution_plan(model) == plan
