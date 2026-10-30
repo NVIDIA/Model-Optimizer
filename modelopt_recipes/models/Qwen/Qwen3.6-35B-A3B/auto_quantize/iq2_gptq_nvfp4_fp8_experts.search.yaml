@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Shared search for the Qwen3.6-35B-A3B sub-4-bit recipes: routed experts choose IQ2_XXS, IQ2_XS,
+# IQ2_S, NVFP4, FP8 or BF16; every other linear stays BF16 and counts toward the budget.
+
+# modelopt-schema: modelopt.recipe.config.AutoQuantizeConfig
+imports:
+  iq2_xxs: configs/numerics/iq2_xxs
+  iq2_xs: configs/numerics/iq2_xs
+  iq2_s: configs/numerics/iq2_s
+  nvfp4: configs/ptq/presets/model/nvfp4
+  fp8: configs/ptq/presets/model/fp8
+
+constraints:
+  effective_bits: 3.0
+module_search_spaces:
+  - module_name_patterns: ["*mlp.experts*"]
+    candidate_formats:
+      # GPTQ on BF16 inputs (local): a layer's score must not depend on earlier layers' picks.
+      - algorithm: &local_gptq
+          - method: gptq
+            block_size: 256
+            perc_damp: 0.3
+            importance_weighted: true
+            layerwise: {enable: true, get_qdq_activations_from_prev_layer: false}
+          - method: imatrix
+        quant_cfg:
+          - &disable_all {quantizer_name: "*", enable: false}
+          - quantizer_name: "*weight_quantizer"
+            cfg: {$import: iq2_xxs}
+      - algorithm: *local_gptq
+        quant_cfg:
+          - *disable_all
+          - quantizer_name: "*weight_quantizer"
+            cfg: {$import: iq2_xs}
+      - algorithm: *local_gptq
+        quant_cfg:
+          - *disable_all
+          - quantizer_name: "*weight_quantizer"
+            cfg: {$import: iq2_s}
+      - $import: nvfp4
+      - $import: fp8
+    allow_no_quant: true
+# Score each candidate's output KL with every other expert layer at IQ2_XXS: at these budgets a
+# layer's damage compounds with the others', which BF16-context scores underrate for late layers.
+auto_quantize_method: kl_div
+method_options: {context: lowest}
+# Once the formats are frozen, sequential GPTQ calibrates each layer on its quantized predecessors.
+finalize_algorithm:
+  - method: gptq
+    block_size: 256
+    perc_damp: 0.3
+    importance_weighted: true
+    layerwise: {enable: true}
+  - method: imatrix
+cost_excluded_layers: ["*embed*", "*lm_head*", "*visual*", "*vision*"]
