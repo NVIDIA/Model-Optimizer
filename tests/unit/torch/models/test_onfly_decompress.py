@@ -560,8 +560,16 @@ def test_the_quantization_config_is_found_at_the_top_level_then_on_the_text_conf
             NotImplementedError,
             "loads in torch.float16",
         ),
+        (
+            SimpleNamespace(
+                text_config=SimpleNamespace(dtype=torch.float16),
+                quantization_config={"format": "pack-quantized"},
+            ),
+            NotImplementedError,
+            "loads in torch.float16",
+        ),
     ],
-    ids=["nothing-to-decompress", "raw-dict", "not-bf16"],
+    ids=["nothing-to-decompress", "raw-dict", "not-bf16", "not-bf16-text-config"],
 )
 def test_a_config_with_nothing_to_decompress_leaves_the_loader_alone(
     monkeypatch, config, error, match
@@ -569,7 +577,8 @@ def test_a_config_with_nothing_to_decompress_leaves_the_loader_alone(
     """By the time a bf16 checkpoint's caller sees that error, nothing may be patched yet -- and
     compressed_tensors, which such a checkpoint never needs, need not be installed. Nor for a raw
     dict, which cannot carry the mark its load would be found by, or for a load in a dtype other
-    than the bf16 the experts decompress to: the loader would set them beside the rest uncast."""
+    than the bf16 the experts decompress to, at any config level (a backbone config derived from the
+    text config keeps its dtype): the loader would set them beside the rest uncast."""
     monkeypatch.setitem(sys.modules, "compressed_tensors", None)
     hooks = (
         mu.get_model_conversion_mapping,
