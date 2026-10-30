@@ -168,11 +168,13 @@ def check_distributed_support(model_type: str) -> None:
     """
     ep = _ep_spec(model_type)
     # The FSDP2 load builds a causal LM and reads its tensors as stored, so a quantized or
-    # multimodal checkpoint (GPT-OSS's MXFP4, Llama-4's) needs a single process.
+    # multimodal checkpoint (GPT-OSS's MXFP4, Llama-4's) needs a single process, as does one with
+    # an MTP head the load cannot build (--use_fsdp2 refuses Nemotron-H's).
     without_ep = (
         "without expert parallelism: in a single process, or FSDP2-sharded (--use_fsdp2 in "
-        "examples/hf_ptq/hf_ptq.py, or MODELOPT_FSDP_SIZE=world) if the checkpoint is an "
-        "unquantized causal LM"
+        "examples/hf_ptq/hf_ptq.py, or MODELOPT_FSDP_SIZE=world) if the FSDP2 load supports the "
+        "checkpoint, which takes an unquantized causal LM with no MTP head it cannot build (such "
+        "as Nemotron-H's)"
     )
     if ep is not None and ep.unsupported:
         raise NotImplementedError(
