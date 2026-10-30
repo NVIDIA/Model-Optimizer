@@ -35,9 +35,11 @@
 #   uv run launch.py --yaml examples/meta-models/Muse-Spark-Open-816B-A42B/hf_streaming_dflash2.yaml \
 #          identity=$HOME/.ssh/id_ecdsa detach=True --yes
 #
-# A resubmitted job resumes from the latest checkpoint in training.output_dir. When it ends,
-# the final checkpoint is exported to /scratchspace/export; stage 2 starts from the export of
-# checkpoint-390000 (scripts/export_hf_checkpoint.py --model_path <output_dir>/checkpoint-390000).
+# A resubmitted job resumes from the latest checkpoint in training.output_dir. Stage 2 starts
+# from the export of checkpoint-390000, not of the last checkpoint, and the recipe keeps only
+# the last three: stop the job once checkpoint-390000 is written (the release did not use the
+# remaining 44,744 steps), or copy it out before checkpoint-397500 is written. Export it with
+#   scripts/export_hf_checkpoint.py --model_path <output_dir>/checkpoint-390000
 
 job_name: Muse-Spark-Open-816B-A42B_DFlash2_streaming
 pipeline:

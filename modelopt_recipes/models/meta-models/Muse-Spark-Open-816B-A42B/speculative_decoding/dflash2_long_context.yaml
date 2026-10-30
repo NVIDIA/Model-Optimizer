@@ -26,6 +26,9 @@ data:
 training:
   output_dir:
   num_train_epochs: 6
+  # The release's horizon, 6 epochs at global batch 64: from num_train_epochs alone,
+  # transformers rounds each epoch up to 9,918 steps (59,508 in all).
+  max_steps: 59502
   # Global batch 64 = 1 per GPU x 2 accumulation steps x 32 trainer GPUs.
   per_device_train_batch_size: 1
   gradient_accumulation_steps: 2

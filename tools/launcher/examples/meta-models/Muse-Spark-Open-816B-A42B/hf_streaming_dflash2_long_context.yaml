@@ -2,7 +2,8 @@
 # continues the stage-1 export (hf_streaming_dflash2.yaml, checkpoint-390000) at 12K tokens
 # on the corpus's long samples. The released nvidia/Muse-Spark-Open-816B-A42B-DFlash2 is
 # checkpoint-25000 of this run (~6 h on this shape); later checkpoints did not improve
-# acceptance. Export it with
+# acceptance. The recipe keeps only the last three checkpoints, so stop the job once
+# checkpoint-25000 is written, or copy it out before checkpoint-32500 is written. Export it with
 #   scripts/export_hf_checkpoint.py --model_path <output_dir>/checkpoint-25000
 #
 # Recipe:
