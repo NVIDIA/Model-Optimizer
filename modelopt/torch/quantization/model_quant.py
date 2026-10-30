@@ -43,7 +43,7 @@ from modelopt.torch.quantization.conversion import (
 from modelopt.torch.utils import atomic_print
 
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
-from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe
+from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe, _algorithm_methods
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
 from .kv_cache_auto_quant import (
@@ -612,6 +612,9 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
     "awq_lite",
     "awq_full",
     "awq_clip",
+    # Rewrite weights; AutoQuantize keeps each candidate's codes in its GGML quantizers.
+    "gptq",
+    "imatrix",
 }
 
 
@@ -1142,8 +1145,8 @@ def auto_quantize(
     ]
     for quant_cfg, name in all_processed_formats:
         algo = QuantRecipe(quant_cfg, name=name).config.algorithm
-        algo_method = algo["method"] if isinstance(algo, dict) else algo
-        if algo_method not in _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
+        if unsupported := _algorithm_methods(algo) - _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
+            algo_method = ", ".join(sorted(map(str, unsupported)))
             raise ValueError(
                 f"Algorithm '{algo_method}' in '{name}' is not supported by auto_quantize yet. "
                 "Please run auto_quantize with 'max' or 'mse' calibration and use "
