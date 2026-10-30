@@ -19,6 +19,7 @@ from unittest.mock import Mock
 
 import numpy as np
 import onnx
+import onnx_graphsurgeon as gs
 import pytest
 from _test_utils.torch.vision_models import get_tiny_resnet_and_input
 from onnx.helper import (
@@ -29,8 +30,10 @@ from onnx.helper import (
     make_tensor,
     make_tensor_value_info,
 )
+from onnx_graphsurgeon.exporters.onnx_exporter import OnnxExporter
 
 import modelopt.onnx.utils as onnx_utils
+from modelopt.onnx.quantization.gs_patching import _export_tensor_proto, _export_value_info_proto
 from modelopt.onnx.trt_utils import load_onnx_model
 from modelopt.onnx.utils import (
     clear_stale_value_info,
@@ -46,6 +49,147 @@ from modelopt.onnx.utils import (
 from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 
 
+@pytest.mark.parametrize("layout", ["flat", "local", "capture", "nested"])
+@pytest.mark.parametrize("value_type", ["sequence_type", "optional_type"])
+def test_export_onnx_large_initializer_metadata(monkeypatch, tmp_path, layout, value_type):
+    monkeypatch.setattr(OnnxExporter, "export_tensor_proto", _export_tensor_proto)
+    monkeypatch.setattr(OnnxExporter, "export_value_info_proto", _export_value_info_proto)
+    weight = gs.Constant("weight", np.arange(2048, dtype=np.float16))
+    output = gs.Variable("output", dtype=np.float16, shape=[2048])
+    weight_node = gs.Node("Identity", inputs=[weight], outputs=[output])
+    if layout == "flat":
+        graph = gs.Graph(nodes=[weight_node], outputs=[output], opset=21)
+    else:
+        condition = gs.Variable("condition", dtype=np.bool_, shape=[])
+        branch = gs.Graph(nodes=[weight_node], outputs=[output], opset=21)
+        other = branch.copy()
+        other.nodes[0].inputs[0] = weight
+        result = gs.Variable("result", dtype=np.float16, shape=[2048])
+        graph = gs.Graph(
+            nodes=[
+                gs.Node(
+                    "If",
+                    inputs=[condition],
+                    outputs=[result],
+                    attrs={"then_branch": branch, "else_branch": other},
+                )
+            ],
+            inputs=[condition],
+            outputs=[result],
+            opset=21,
+        )
+        if layout == "capture":
+            outer = gs.Variable("outer", dtype=np.float16, shape=[2048])
+            graph.nodes.insert(0, gs.Node("Identity", inputs=[weight], outputs=[outer]))
+            graph.outputs.append(outer)
+        elif layout == "nested":
+            graph.inputs.clear()  # Both levels capture the enclosing condition.
+            nested_result = gs.Variable("nested_result", dtype=np.float16, shape=[2048])
+            graph = gs.Graph(
+                nodes=[
+                    gs.Node(
+                        "If",
+                        inputs=[condition],
+                        outputs=[nested_result],
+                        attrs={"then_branch": graph, "else_branch": graph.copy()},
+                    )
+                ],
+                inputs=[condition],
+                outputs=[nested_result],
+                opset=21,
+            )
+
+    # Sequence value_info is lost by GraphSurgeon copying, even without quantization.
+    value = gs.Variable("value", dtype=np.float32, shape=[1])
+    sequence = gs.Variable("sequence", dtype=np.float32, shape=[1])
+    sequence.type = value_type
+    is_sequence = value_type == "sequence_type"
+    length = gs.Variable("length", dtype=np.int64 if is_sequence else np.bool_, shape=[])
+    graph.inputs.append(value)
+    graph.nodes.extend(
+        [
+            gs.Node(
+                "SequenceConstruct" if is_sequence else "Optional",
+                inputs=[value],
+                outputs=[sequence],
+            ),
+            gs.Node(
+                "SequenceLength" if is_sequence else "OptionalHasElement",
+                inputs=[sequence],
+                outputs=[length],
+            ),
+        ]
+    )
+    graph.outputs.append(length)
+    expected_type = onnx.helper.make_tensor_type_proto(onnx.TensorProto.FLOAT, [1])
+    wrap_type = (
+        onnx.helper.make_sequence_type_proto
+        if is_sequence
+        else onnx.helper.make_optional_type_proto
+    )
+    expected_type = wrap_type(expected_type)
+    with monkeypatch.context() as patch:
+        patch.setattr(onnx.checker, "MAXIMUM_PROTOBUF", 1024)
+        model = onnx_utils.export_onnx(graph)
+    assert next(v.type for v in model.graph.value_info if v.name == "sequence") == expected_type
+    branches = [a.g for n in model.graph.node for a in n.attribute if a.HasField("g")]
+    if layout in ("local", "nested"):
+        assert not model.graph.initializer
+        if layout == "nested":
+            assert all(not branch.initializer for branch in branches)
+            branches = [
+                a.g
+                for branch in branches
+                for n in branch.node
+                for a in n.attribute
+                if a.HasField("g")
+            ]
+        assert len(branches) == (4 if layout == "nested" else 2)
+        initializers = [b.initializer[0] for b in branches]
+    else:
+        assert all(not b.initializer for b in branches)
+        assert len(model.graph.initializer) == 1
+        initializers = list(model.graph.initializer)
+    for tensor in initializers:
+        np.testing.assert_array_equal(onnx.numpy_helper.to_array(tensor), weight.values)
+    assert sequence.type == value_type
+    assert isinstance(weight, gs.Constant)
+    path = str(tmp_path / "model.onnx")
+    onnx_utils.save_onnx(model, path, save_as_external_data=True)
+    onnx.checker.check_model(path)
+
+
+def test_export_onnx_large_initializer_explicit_dtype(monkeypatch):
+    # Exercise the real ModelOpt exporter without leaking its global patches to other tests.
+    with monkeypatch.context() as patch:
+        patch.setattr(OnnxExporter, "export_tensor_proto", _export_tensor_proto)
+        patch.setattr(OnnxExporter, "export_value_info_proto", _export_value_info_proto)
+        patch.setattr(onnx.checker, "MAXIMUM_PROTOBUF", 1024)
+        large = gs.Constant("large", np.ones(2048, dtype=np.float16))
+        small = gs.Constant("small", np.array([0x3F80], dtype=np.uint16))
+        small.explicit_dtype = onnx.TensorProto.BFLOAT16
+        out = gs.Variable("small_out", dtype=np.uint16, shape=[1])
+        out.explicit_dtype = onnx.TensorProto.BFLOAT16
+        large_out = gs.Variable("large_out", dtype=np.float16, shape=[2048])
+        graph = gs.Graph(
+            nodes=[
+                gs.Node("Identity", inputs=[large], outputs=[large_out]),
+                gs.Node("Identity", inputs=[small], outputs=[out]),
+            ],
+            outputs=[large_out, out, small],
+            opset=21,
+        )
+        model = onnx_utils.export_onnx(graph)
+    assert (
+        next(t for t in model.graph.initializer if t.name == "small").data_type
+        == onnx.TensorProto.BFLOAT16
+    )
+    assert all(
+        v.type.tensor_type.elem_type == onnx.TensorProto.BFLOAT16 for v in model.graph.output[1:]
+    )
+    onnx.checker.check_model(model)
+
+
 @pytest.mark.parametrize(
     "onnx_bytes",
     [None, b"", b"invalid onnx"],
@@ -57,6 +201,75 @@ def test_validate_onnx(onnx_bytes):
 def test_save_onnx(tmp_path):
     save_onnx_bytes_to_dir(b"test_onnx_bytes", tmp_path, "test")
     assert os.path.exists(os.path.join(tmp_path, "test.onnx"))
+
+
+@pytest.mark.parametrize("size", [991, 1023, 1024])
+def test_save_onnx_external_data_threshold(tmp_path, size):
+    weight = np.arange(size, dtype=np.uint8)
+    model = make_model(
+        make_graph(
+            [make_node("Identity", ["weight"], ["output"])],
+            "external_data_threshold",
+            [],
+            [make_tensor_value_info("output", onnx.TensorProto.UINT8, [size])],
+            initializer=[onnx.numpy_helper.from_array(weight, "weight")],
+        ),
+        opset_imports=[make_opsetid("", 21)],
+    )
+    path = tmp_path / "model.onnx"
+
+    onnx_utils.save_onnx(model, str(path), save_as_external_data=True)
+
+    saved = onnx.load(path, load_external_data=False)
+    assert onnx.external_data_helper.uses_external_data(saved.graph.initializer[0]) == (
+        size >= 1024
+    )
+    assert (tmp_path / "model.onnx_data").exists() == (size >= 1024)
+    np.testing.assert_array_equal(
+        onnx.numpy_helper.to_array(onnx.load(path).graph.initializer[0]), weight
+    )
+    onnx.checker.check_model(str(path))
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("same_cwd", [False, True])
+def test_save_onnx_preserves_unloaded_external_data(tmp_path, monkeypatch, mixed, same_cwd):
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    path = model_dir / "model.onnx"
+    sidecar = model_dir / "model.onnx_data"
+    weight = np.arange(2048, dtype=np.float32)
+    model = make_model(
+        make_graph(
+            [make_node("Identity", ["weight"], ["output"])],
+            "external_weights",
+            [],
+            [make_tensor_value_info("output", onnx.TensorProto.FLOAT, [2048])],
+            initializer=[onnx.numpy_helper.from_array(weight, "weight")],
+        ),
+        opset_imports=[make_opsetid("", 21)],
+    )
+    monkeypatch.chdir(model_dir if same_cwd else tmp_path)
+    onnx.save_model(
+        model, path, save_as_external_data=True, location=sidecar.name, size_threshold=0
+    )
+    unloaded = onnx.load(path, load_external_data=False)
+    if mixed:
+        unloaded.graph.initializer.append(onnx.numpy_helper.from_array(weight + 1, "new_weight"))
+        unloaded.graph.node.append(make_node("Identity", ["new_weight"], ["new_output"]))
+        unloaded.graph.output.append(
+            make_tensor_value_info("new_output", onnx.TensorProto.FLOAT, [2048])
+        )
+    original_graph = unloaded.graph.SerializeToString()
+
+    onnx_utils.save_onnx(unloaded, str(path), save_as_external_data=True)
+
+    onnx.checker.check_model(str(path))
+    loaded = onnx.load(path)
+    for i, tensor in enumerate(loaded.graph.initializer):
+        np.testing.assert_array_equal(onnx.numpy_helper.to_array(tensor), weight + i)
+    assert sidecar.read_bytes() == weight.tobytes() + ((weight + 1).tobytes() if mixed else b"")
+    assert unloaded.graph.SerializeToString() == original_graph
 
 
 def _make_external_initializer(

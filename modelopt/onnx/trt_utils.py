@@ -27,6 +27,7 @@ import onnx_graphsurgeon as gs
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.utils import (
+    export_onnx,
     get_dynamic_graph_inputs,
     get_tensor_by_name,
     parse_shapes_spec,
@@ -281,7 +282,7 @@ def infer_types_shapes(model: onnx.ModelProto, all_tensor_info: dict) -> onnx.Mo
     # Topologically sort graph
     graph = gs.import_onnx(model)
     graph.cleanup().toposort()
-    model = gs.export_onnx(graph)
+    model = export_onnx(graph)
 
     return model
 
@@ -307,7 +308,7 @@ def set_trt_plugin_domain(model: onnx.ModelProto, custom_ops: list[str]) -> onnx
             node.domain = trt_plugin_domain
 
     # Add TRT domain and version to the graph
-    model = gs.export_onnx(graph)
+    model = export_onnx(graph)
     model.opset_import.append(onnx.helper.make_opsetid(trt_plugin_domain, trt_plugin_version))
     logger.info(f"Added TRT plugin domain {trt_plugin_domain} version {trt_plugin_version}")
     return model
@@ -434,7 +435,7 @@ def load_onnx_model(
     # Ensure nodes are topologically sorted
     graph = gs.import_onnx(onnx_model)
     graph.toposort()
-    onnx_model = gs.export_onnx(graph)
+    onnx_model = export_onnx(graph)
 
     # Enforce IR version = 10
     ir_version_onnx_path = None

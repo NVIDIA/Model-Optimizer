@@ -600,7 +600,7 @@ class GraphSanitizer:
         """Use GraphSurgeon to cleanup unused nodes, tensors and initializers."""
         gs_graph = gs.import_onnx(self.model)
         gs_graph.cleanup()
-        self.model = gs.export_onnx(gs_graph)
+        self.model = onnx_utils.export_onnx(gs_graph)
 
     def replace_custom_domain_nodes(self):
         """Replace custom domain nodes with standard ONNX nodes."""
