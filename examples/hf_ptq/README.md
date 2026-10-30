@@ -620,7 +620,7 @@ ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for 
 
 > *`nvfp4_awq_clip` still works with `--use_fsdp2` on more than one GPU: it calibrates with AWQ-Clip alone, which folds no smoothing scale into the weights, and its clip search averages each candidate clip's loss over the ranks, so every rank takes the same clip.*
 
-> *With `--use_fsdp2` on more than one GPU, a calibration batch that runs out of memory is not retried in smaller pieces, since a rank that runs out of memory partway through a forward would leave the others waiting in its collectives. With `--batch_size 0`, each rank estimates the batch size from one forward and the ranks use the smallest, which is not probed for out-of-memory either: set `--batch_size` if calibration runs out of memory.*
+> *On more than one GPU, with `--use_fsdp2` or in any other `torchrun` launch of several ranks, a calibration batch that runs out of memory is not retried in smaller pieces, since a rank that runs out of memory partway through a forward would leave the others waiting in its collectives. With `--batch_size 0`, each rank estimates the batch size from one forward and the ranks use the smallest, which is not probed for out-of-memory either: set `--batch_size` if calibration runs out of memory.*
 
 ### Usage
 
@@ -659,6 +659,32 @@ Qwen checkpoints with `model_type` `qwen3_5` or `qwen3_5_moe` support this path 
 > *Performance Note: FSDP2 is designed for training workloads and may result in longer calibration and export times. For faster calibration, maximize the batch size based on available GPU memory and choose the right number of GPUs to avoid unnecessary communication.*
 
 > *Set `MODELOPT_FSDP2_EXPORT=nogather` to have every rank write its own shards of the checkpoint in parallel instead of gathering the full state dict on one host. It does not overwrite a checkpoint already in the export directory.*
+
+## Expert-Parallel Post-Training Quantization for MoE Models
+
+Under `torchrun`, `hf_ptq.py` shards an MoE model's routed experts across the ranks (expert parallelism) instead of loading the whole model on every GPU. Each rank holds `num_experts / ep_degree` experts and calibrates on its own shard of the calibration data. An all-to-all sends every token to the rank that owns its expert, so each expert's quantizers see the tokens routed to it from all ranks. The dense (non-expert) part is replicated on every rank, or FSDP2-sharded when it does not fit one GPU. Each rank then writes its share of the unified HF checkpoint, without gathering the model onto one GPU.
+
+A model can be expert-parallel when its config declares a `base_model_ep_plan`. transformers ships one for several MoEs, and ModelOpt supplies the plan or an adapter for others (see the `ep_spec` entries in `modelopt/torch/models/*/specs.py`). Expert parallelism needs transformers 5.7 or newer, and some models a newer release; a run that cannot be expert-parallel is refused before loading.
+
+```bash
+torchrun --nproc_per_node=<num_gpus_per_node> \
+    hf_ptq.py \
+    --pyt_ckpt_path <path_to_moe_model> \
+    --recipe general/ptq/nvfp4_default-kv_fp8 \
+    --calib_size <num_calib_samples> \
+    --export_path <export_path>
+```
+
+To run across nodes, add the `--nnodes`, `--node_rank`, `--master_addr` and `--master_port` flags shown in [Manual (run on each node)](#manual-run-on-each-node). `--calib_size` is the total over all ranks.
+
+Two environment variables override the automatic distribution plan:
+
+| Variable | Default | Effect |
+| :--- | :--- | :--- |
+| `MODELOPT_EP_DEGREE` | `auto` | Expert-parallel degree. `auto` picks the largest degree that divides both the routed-expert count and the world size, or 1 for a model whose spec refuses expert parallelism or needs a newer transformers. Below the world size, each group of `MODELOPT_EP_DEGREE` ranks holds a full set of experts, and the groups calibrate on different data. |
+| `MODELOPT_FSDP_SIZE` | `auto` | Whether to FSDP2-shard the dense part. `auto` shards it when it would take more than 60% of one GPU's memory; `world` always shards it; `1` replicates it. With `MODELOPT_EP_DEGREE` below the world size the export cannot write a sharded dense part yet, so such a run fails before loading. |
+
+A run that cannot shard the model the way the plan asks fails before loading, rather than loading the whole model on every rank. `--use_fsdp2` skips expert parallelism and uses the [FSDP2 path](#multi-node-post-training-quantization-with-fsdp2) instead. Expert parallelism refuses GPT-OSS and Llama-4: their experts are stored transposed, which the expert-parallel export cannot write yet. `--use_fsdp2` refuses their released checkpoints too (GPT-OSS's carry an MXFP4 `quantization_config`, and Llama-4's are multimodal), so quantize those in a single process (without `torchrun`), which spreads the model over the node's GPUs.
 
 ## Evaluate Accuracy
 
