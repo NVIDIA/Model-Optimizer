@@ -91,10 +91,12 @@ def test_imatrix_encodes_each_gpus_weights_at_once(need_2_gpus, monkeypatch, inf
     )
 
 
-@pytest.mark.parametrize("rows", [300, 2048, 2500], ids=["remainder", "groups", "both"])
+@pytest.mark.parametrize(
+    "rows", [300, 2048, 2500, 512 * 512 + 700], ids=["remainder", "groups", "both", "slices"]
+)
 def test_imatrix_second_moments_of_bf16_inputs_on_gpu(monkeypatch, rows):
     """On a GPU, bf16 inputs take the fused float32 reduction, over 512-row groups and the rows
-    left over, which gives the float64 statistic."""
+    left over, in slices of 512 groups, which gives the float64 statistic."""
     calls = []
     iq2_xxs = GGML_FORMAT_REGISTRY["iq2_xxs"]
 
@@ -116,12 +118,23 @@ def test_imatrix_second_moments_of_bf16_inputs_on_gpu(monkeypatch, rows):
     torch.testing.assert_close(calls[-1], expected, rtol=1e-5, atol=0)
 
 
-def test_imatrix_statistic_takes_no_input_sized_gpu_buffer():
-    """The GPU reduction's temporaries stay well below a float32 copy of 1,024 rows, the slice the
-    statistic took before; one reduction over all rows stages a 142 MiB buffer for this input."""
-    x = torch.randn(32768 + 300, 4096, device="cuda", dtype=torch.bfloat16)
-    torch.cuda.synchronize()
-    before = torch.cuda.memory_allocated()
-    torch.cuda.reset_peak_memory_stats()
-    _imatrix_sum_of_squares(x)
-    assert torch.cuda.max_memory_allocated() - before < 1024 * x.shape[1] * 4
+@pytest.mark.parametrize(
+    ("rows", "columns"), [(32768 + 300, 4096), (4 * 512 * 512 + 300, 512)], ids=["32K", "1M"]
+)
+def test_imatrix_statistic_takes_no_more_gpu_memory_than_float32_slices(rows, columns):
+    """The fused reduction's temporaries peak no higher than squaring float32 slices of 1,024 rows,
+    the statistic's previous path, so a calibration that fit before still fits: one reduction over
+    all rows exceeds them at 32K rows, and one over all 512-row groups past 512K rows."""
+    x = torch.randn(rows, columns, device="cuda", dtype=torch.bfloat16)
+
+    def peak_memory(sum_of_squares):
+        torch.cuda.synchronize()
+        before = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        sum_of_squares(x)
+        return torch.cuda.max_memory_allocated() - before
+
+    float32_slices = peak_memory(
+        lambda x: sum(r.float().square().sum(dim=0) for r in x.split(1024))
+    )
+    assert peak_memory(_imatrix_sum_of_squares) <= float32_slices

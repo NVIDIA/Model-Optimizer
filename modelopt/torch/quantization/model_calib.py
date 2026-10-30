@@ -2662,9 +2662,8 @@ def gptq(
 # Calibration rows squared at a time, bounding imatrix's float32 temporaries to this slice of an
 # input rather than twice the whole of it.
 _IMATRIX_ROW_CHUNK = 1024
-# Rows a GPU reduction sums at once. A CUDA reduction over about 1,000 rows or more stages partial
-# sums in a global buffer that grows with the input, 512 MiB for 512K x 4,096 bf16 rows; summing
-# 512-row groups first keeps the temporaries to about 1% of the input.
+# Rows, or group sums, a GPU reduction sums at once: longer CUDA reductions stage partial sums in a
+# global buffer that grows with the input.
 _IMATRIX_GPU_GROUP = 512
 
 
@@ -2674,6 +2673,9 @@ def _imatrix_sum_of_squares(x: torch.Tensor) -> torch.Tensor:
         # On a CPU vector_norm copies the whole input to float32 first, and it rejects float64,
         # so square float32 slices of the input instead.
         return sum(rows.float().square().sum(dim=0) for rows in x.split(_IMATRIX_ROW_CHUNK))
+    if x.shape[0] > _IMATRIX_GPU_GROUP**2:
+        # Bound the group sums, and the reduction over them, to _IMATRIX_GPU_GROUP rows too.
+        return sum(_imatrix_sum_of_squares(rows) for rows in x.split(_IMATRIX_GPU_GROUP**2))
     # On a GPU vector_norm squares and sums in float32 inside the kernel, without a float32 copy.
     full = x.shape[0] // _IMATRIX_GPU_GROUP * _IMATRIX_GPU_GROUP
     parts = []
