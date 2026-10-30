@@ -955,17 +955,25 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         Each expert slice passes through its own weight quantizer (collecting
         ``amax`` during calibration, fake-quantizing afterwards), matching the
         eager per-expert ``F.linear`` semantics. Returns this rank's experts untouched when every
-        quantizer would pass its slice through unchanged, so passthrough stays exact (and cheap).
+        quantizer would pass its slice through unchanged, so passthrough stays exact (and cheap):
+        a disabled quantizer, or one that only collects statistics, as in calibration.
         """
         weight = self._local_experts(weight)
-        # A disabled quantizer still applies its pre-quant scale and rotation, as on the eager path.
+        # A quantizer that is disabled, or that collects statistics without quantizing, hands its
+        # slice back unchanged, unless it applies a pre-quant scale or a rotation (a disabled one
+        # still does, as on the eager path). Then the result is the weight itself: building it
+        # slice by slice would copy every expert's weight on each calibration forward.
         if all(
             isinstance(q, TensorQuantizer)
-            and not q.is_enabled
+            and not (q.is_enabled and q._if_quant)
             and q.pre_quant_scale is None
             and not q.rotate_is_enabled
             for q in quantizers
         ):
+            if any(q.is_enabled for q in quantizers):
+                for q, w in zip(quantizers, weight, strict=True):
+                    if q.is_enabled:
+                        q(w)  # collects this expert's statistics
             return weight
         # One kernel launch for every expert where the format has one. Unlike the eager path, which
         # without autograd quantizes only the routed experts, this one quantizes every expert either

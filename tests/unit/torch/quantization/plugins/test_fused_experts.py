@@ -61,6 +61,8 @@ from modelopt.torch.quantization.conversion import _normalize_fused_experts_quan
 from modelopt.torch.quantization.model_calib import (
     _expert_slices,
     _register_weight_input_hooks,
+    enable_stats_collection,
+    finish_stats_collection,
     local_hessian_calibrate,
 )
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
@@ -2115,6 +2117,30 @@ class TestGroupedMMExperts:
         with torch.no_grad():
             expected = torch.stack([q(weight[idx]) for idx, q in enumerate(quantizers)])
         torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+    def test_calibrating_a_projection_returns_its_weight_without_a_copy(self):
+        """Weight quantizers that only collect statistics hand every slice back unchanged, so a
+        calibration forward returns the stored weight itself rather than a copy of every expert's
+        weight, and still collects each expert's statistics."""
+        model = _GroupedMoEModel("grouped_mm")
+        try:
+            mtq.quantize(model, self._quant_cfg(), self._forward_loop_all_experts)
+        finally:
+            self._cleanup_registry(_SyntheticGroupedExperts)
+        experts = model.moe.experts
+        weight, quantizers = experts.gate_up_proj, experts.gate_up_proj_weight_quantizers
+        for q in quantizers:
+            q.reset_amax()
+        enable_stats_collection(experts)
+        with torch.no_grad():
+            out = experts._quantize_grouped_weight(weight, quantizers)
+        finish_stats_collection(experts)
+
+        assert out is weight
+        for idx, q in enumerate(quantizers):
+            torch.testing.assert_close(
+                q.amax.flatten(), weight[idx].detach().abs().amax(dim=1), rtol=0, atol=0
+            )
 
     @pytest.mark.parametrize("transform", ["pre_quant_scale", "rotate"])
     def test_disabled_quantizers_keep_their_pre_quant_scale_and_rotation(
