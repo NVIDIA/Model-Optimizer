@@ -605,10 +605,16 @@ def _refuse_sharded_load_options(
         )
     other = _FSDP2 if route == _EXPERT_PARALLEL else _EXPERT_PARALLEL
     if elsewhere := sorted(passed & (_SHARDED_LOAD_OPTIONS[other] - _SHARDED_LOAD_OPTIONS[route])):
-        # Not placement: a whole model on every rank, the way out below, would refuse them too.
+        # Not placement: a whole model on every rank, the way out below, would refuse them too. An
+        # expert-parallel plan that FSDP2-shards the dense part is refused as well (_route).
+        instead = (
+            "pass a plan with ep_size > 1 to shard an MoE's routed experts"
+            if other == _EXPERT_PARALLEL
+            else "pass a plan with ep_size=1 and dense='fsdp' to shard the whole model with FSDP2"
+        )
         raise TypeError(
             f"{elsewhere} only apply to the {other} load, and the {route} load takes "
-            f"{sorted(_SHARDED_LOAD_OPTIONS[route])}."
+            f"{sorted(_SHARDED_LOAD_OPTIONS[route])}; drop them, or {instead}."
         )
     if unknown:
         raise TypeError(
