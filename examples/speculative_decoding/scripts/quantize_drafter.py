@@ -252,9 +252,10 @@ def export_quantized_state_dict(
 ) -> dict[str, torch.Tensor]:
     """Pack each quantized weight and emit it alongside its scales.
 
-    Unified-HF naming (``w.weight_scale`` etc). Untouched tensors carry through in ``dtype``.
+    Unified-HF naming (``w.weight_scale`` etc). Untouched floating-point tensors carry through in
+    ``dtype``; integer and bool tensors (e.g. EAGLE-3's ``d2t`` / ``t2d`` vocab maps) keep theirs.
     """
-    export_sd = {k: v.to(dtype) for k, v in state_dict.items()}
+    export_sd = {k: v.to(dtype) if v.is_floating_point() else v for k, v in state_dict.items()}
     for name, module in root.named_modules():
         if not is_quantized_linear(module) or not module.weight_quantizer.is_enabled:
             continue
