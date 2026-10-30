@@ -168,6 +168,7 @@ def build_engine(
     builder_optimization_level: str = "3",
     output_dir: Path | None = None,
     verbose: bool = False,
+    decomposable_attentions: bool = False,
 ) -> tuple[bytes | None, bytes]:
     """This method produces serialized TensorRT engine from an ONNX model.
 
@@ -207,6 +208,8 @@ def build_engine(
             If not provided, this process's private temporary directory is used (created on first
             use, not removed at exit).
         verbose: Set trtexec command to verbose or not.
+        decomposable_attentions: Allow TensorRT to decompose Attention layers when no dedicated
+            fused kernel supports their shape or dtype.
 
     Returns:
         The generated engine file data.
@@ -229,6 +232,9 @@ def build_engine(
 
         if dynamic_shapes:
             _update_dynamic_shapes(dynamic_shapes, cmd)
+
+        if decomposable_attentions:
+            cmd.append("--decomposableAttentions=*")
 
         if plugin_config:
             for key, plugins in plugin_config.items():

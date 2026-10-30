@@ -8,6 +8,7 @@ Changelog
 
 *Quantization*
 
+- Add opt-in Dynamo ONNX export through ``get_onnx_bytes_and_metadata(..., dynamo_export=True)`` for FP8, INT8, INT4 AWQ, MXFP8, NVFP4, and mixed FP8 plus NVFP4 AutoQuant models with canonical Linear, MatMul, or Gemm weight paths. Dynamo export defaults to opset 23; the legacy opset-20 exporter remains the default.
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
 - The functional quantized-weight export API now exports the KV cache: ``capture_kv_cache_export_state`` returns an attention module's ``k_scale`` / ``v_scale``, and ``build_hf_quantization_config`` takes the KV-cache formats from ``get_kv_cache_export_spec``.
 - Add ``use_weight_scale=False`` to ``awq_lite`` and ``awq_full`` calibration for activation-only AWQ scale search. Existing weight-and-activation scaling remains the default.

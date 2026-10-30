@@ -186,8 +186,8 @@ def install_static_extent_fix(hidden_size):
         print(f"Static-extent fix applied to {fixed} Reshape->DynamicQuantize sites")
         return onnx_graph
 
-    def quantize_weights_and_fix(model, onnx_graph):
-        return fix_reshapes(orig_quantize_weights(model, onnx_graph))
+    def quantize_weights_and_fix(model, onnx_graph, *, dynamo_export=False):
+        return fix_reshapes(orig_quantize_weights(model, onnx_graph, dynamo_export=dynamo_export))
 
     torch_onnx_utils.quantize_weights = quantize_weights_and_fix
 
