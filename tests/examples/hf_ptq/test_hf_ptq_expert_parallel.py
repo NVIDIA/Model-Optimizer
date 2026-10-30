@@ -30,6 +30,7 @@ replaced by stand-ins that record how they were called.
 import contextlib
 import importlib
 import inspect
+import warnings
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -301,6 +302,30 @@ def test_an_auto_quantize_recipe_is_refused_on_the_routes_this_script_adds(
     else:
         with pytest.raises(NotImplementedError, match="AutoQuantize"):
             hf_ptq.resolve_distribution(args)
+
+
+@pytest.mark.parametrize(
+    ("world_size", "use_fsdp2", "warns"),
+    [(2, False, True), (2, True, False), (1, False, False)],
+    ids=["replicated", "use_fsdp2", "single_process"],
+)
+def test_an_lsq_recipe_warns_on_the_routes_this_script_adds(
+    hf_ptq, monkeypatch, torchrun, world_size, use_fsdp2, warns
+):
+    """Nothing has checked LSQ's learnable scales across ranks: a replicated or expert-parallel run
+    warns before the load; --use_fsdp2 and a single process run it as before."""
+    _serve(monkeypatch, hf_ptq, LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY))
+    args = _args(
+        torchrun(world_size=world_size),
+        use_fsdp2=use_fsdp2,
+        recipe="general/qad/nvfp4_lsq-mse_init-fp8_kv",
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        hf_ptq.resolve_distribution(args)
+
+    assert any("LSQ" in str(warning.message) for warning in caught) is warns
 
 
 @pytest.mark.parametrize("world_size", [2, 1], ids=["torchrun", "single_process"])
