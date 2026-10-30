@@ -38,24 +38,23 @@ from example_utils import (
     build_quant_cfg,
     create_vlm_calibration_forward,
     create_vlm_calibration_loop,
+    exports_tensorrt_llm_checkpoint,
     generate_excludes_prompt,
     get_model,
     get_processor,
     get_tokenizer,
     is_nemotron_vl,
-    is_trtllm_enc_dec_export,
     keep_the_experts_implementation,
     layerwise_export_requested,
     mlflow_run,
     preview_generate_kwargs,
     recipe_layerwise_blocks,
+    resolve_distribution,
     run_nemotron_vl_preview,
     save_source_config,
-    validate_fsdp2_supported,
 )
 from torch.utils.data import DataLoader
 from transformers import (
-    AutoConfig,
     AutoModelForCausalLM,
     AutoProcessor,
     PreTrainedTokenizer,
@@ -117,7 +116,7 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     ensure_local_checkpoint,
 )
-from modelopt.torch.utils.plugins.model_load_utils import load_pretrained, resolve_distribution_plan
+from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
@@ -346,113 +345,10 @@ def _validate_recipe_calibration(args: argparse.Namespace, recipe) -> None:
         )
 
 
-def _resolve_distribution(args: argparse.Namespace):
-    """Decide how this run distributes the model: ``(plan, hf_config)``.
-
-    ``resolve_distribution_plan`` decides, and --use_fsdp2 asks it for FSDP2 and no expert
-    parallelism. Without --use_fsdp2 a plan that FSDP2-shards the whole model is refused: the
-    FSDP2 run is the flag's, which checks what this script cannot do with it.
-    """
-    if args.use_fsdp2:
-        # Its checks read the config alone, and come first: deciding builds the model on the meta
-        # device, which some checkpoints they refuse (VILA, multimodal, pack-quantized) cannot do.
-        validate_fsdp2_supported(
-            args,
-            AutoConfig.from_pretrained(
-                args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
-            ),
-        )
-    plan, hf_config = resolve_distribution_plan(
-        args.local_checkpoint_path,
-        trust_remote_code=args.trust_remote_code,
-        ep_size=1 if args.use_fsdp2 else None,
-        dense="fsdp" if args.use_fsdp2 else None,
-    )
-    if plan.is_fsdp_dense and not plan.is_expert_parallel and not args.use_fsdp2:
-        raise RuntimeError(
-            f"{plan!r} FSDP2-shards the model, which this script does under --use_fsdp2. Pass it, "
-            "or set MODELOPT_FSDP_SIZE=1 if the model does fit one GPU; an MoE can instead shard its "
-            "experts (MODELOPT_EP_DEGREE above 1)."
-        )
-    if plan.world_size > 1 and _exports_tensorrt_llm_checkpoint(args, hf_model_type(hf_config)):
-        # That exporter reads the process count as Megatron's training tensor parallelism. Rank 0
-        # alone waits in its barrier for ranks that never arrive, and every rank would merge
-        # whole replicas as if they were shards. Refused before the load, like the layout above.
-        raise NotImplementedError(
-            f"{plan!r}: the TensorRT-LLM checkpoint export (encoder-decoder models, "
-            "--sparsity_fmt, int8_smoothquant) runs in a single process; launch hf_ptq without "
-            "torchrun for it."
-        )
-    if (plan.is_expert_parallel or plan.is_fsdp_dense) and args.vllm_fakequant_export:
-        # That exporter writes the whole model with save_pretrained from each process it runs in,
-        # and every rank of a sharded model exports: each would write its own part into the same
-        # directory. Rank 0 alone writes a replicated model; --use_fsdp2 refuses it while parsing.
-        raise NotImplementedError(
-            f"{plan!r}: --vllm_fakequant_export writes the whole model from one process, which "
-            "holds only its own part of a sharded model; launch hf_ptq without torchrun for it."
-        )
-    if plan.is_expert_parallel and args.experts_implementation is not None:
-        # The expert-parallel load runs the routed experts through torch_a2a, whatever backend the
-        # config names, so the flag would be dropped without a word.
-        raise NotImplementedError(
-            f"{plan!r}: --experts_implementation picks the experts backend a model is loaded with, "
-            "but the expert-parallel load runs the routed experts through torch_a2a whatever it "
-            "names. Drop it, or quantize without expert parallelism: with --use_fsdp2, or in a "
-            "single process."
-        )
-    if plan.world_size > 1 and not args.use_fsdp2 and _recipe_is_auto_quantize(args.recipe):
-        # Its search scores each rank's own calibration shard and reduces no score across ranks, so
-        # the ranks can choose different formats per layer: under expert parallelism, a checkpoint
-        # of mixed formats. --use_fsdp2 keeps main's warning for it.
-        raise NotImplementedError(
-            f"{plan!r}: AutoQuantize scores each rank's own calibration data and reduces no score "
-            "across ranks, so ranks could choose different formats per layer; launch hf_ptq "
-            "without torchrun for an AutoQuantize recipe."
-        )
-    if (
-        plan.world_size > 1
-        and args.recipe is not None
-        and layerwise_export_requested(recipe_layerwise_blocks(load_recipe(args.recipe)))
-    ):
-        # Every rank would write the same per-layer shard files. The exporter refuses that too, but
-        # only once calibration binds it, after the load.
-        raise NotImplementedError(
-            f"{plan!r}: the recipe's layerwise export writes its checkpoint shards from one "
-            "process; launch hf_ptq without torchrun for it."
-        )
-    if plan.world_size > 1 and not args.use_fsdp2:
-        # These configure loading one model in a single process: compressed as it loads, or
-        # spread over the node's GPUs, CPU and disk. An expert-parallel run never reaches those
-        # loaders, and a replicated one pins each rank's copy to the rank's GPU, which none of them
-        # works with. Refused before the load rather than ignored. --max_cpu_memory_gb and
-        # --max_gpu_memory_gb come only with --offload_folder.
-        for flag, given in (
-            ("--low_memory_mode", args.low_memory_mode),
-            ("--use_seq_device_map", args.use_seq_device_map),
-            ("--offload_folder", args.offload_folder is not None),
-        ):
-            if given:
-                raise NotImplementedError(
-                    f"{plan!r}: {flag} configures loading one model in a single process, but each "
-                    "rank of this run loads its own share or copy of it onto its own GPU. Drop it, "
-                    "or launch hf_ptq without torchrun to use it."
-                )
-    return plan, hf_config
-
-
-def _exports_tensorrt_llm_checkpoint(args: argparse.Namespace, model_type: str | None) -> bool:
-    """Whether the run exports through the deprecated TensorRT-LLM checkpoint exporter."""
-    return (
-        is_trtllm_enc_dec_export(model_type)
-        or args.sparsity_fmt != "dense"
-        or "int8_smoothquant" in args.qformat
-    )
-
-
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
-    plan, hf_config = _resolve_distribution(args)
+    plan, hf_config = resolve_distribution(args)
     if plan.is_expert_parallel:
         full_model = load_pretrained(
             args.local_checkpoint_path,
@@ -860,7 +756,7 @@ def export_quantized(
                 save_source_config(args, export_path)
 
         start_time = time.time()
-        if _exports_tensorrt_llm_checkpoint(args, model_type):
+        if exports_tensorrt_llm_checkpoint(args, model_type):
             if (
                 args.inference_tensor_parallel != 1 or args.inference_pipeline_parallel != 1
             ) and args.qformat == "nvfp4_svdquant":

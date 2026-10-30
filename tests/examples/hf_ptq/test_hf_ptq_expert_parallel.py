@@ -193,7 +193,7 @@ def test_use_fsdp2_plans_fsdp2_without_expert_parallelism(hf_ptq, monkeypatch, t
     _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
     args = _args(torchrun(world_size=2), use_fsdp2=True)
 
-    assert hf_ptq._resolve_distribution(args)[0] == DistributionPlan(2, dense="fsdp")
+    assert hf_ptq.resolve_distribution(args)[0] == DistributionPlan(2, dense="fsdp")
 
 
 def test_use_fsdp2_refuses_a_checkpoint_before_building_it_to_decide(hf_ptq, monkeypatch, torchrun):
@@ -212,7 +212,7 @@ def test_use_fsdp2_refuses_a_checkpoint_before_building_it_to_decide(hf_ptq, mon
     )
 
     with pytest.raises(NotImplementedError, match="--use_fsdp2 does not support"):
-        hf_ptq._resolve_distribution(_args(torchrun(world_size=2), use_fsdp2=True))
+        hf_ptq.resolve_distribution(_args(torchrun(world_size=2), use_fsdp2=True))
 
 
 def test_dense_sharding_without_expert_parallelism_needs_use_fsdp2(hf_ptq, monkeypatch, torchrun):
@@ -223,7 +223,7 @@ def test_dense_sharding_without_expert_parallelism_needs_use_fsdp2(hf_ptq, monke
     _serve(monkeypatch, hf_ptq, LlamaConfig(**_TINY))
 
     with pytest.raises(RuntimeError, match="--use_fsdp2"):
-        hf_ptq._resolve_distribution(_args(torchrun(world_size=2)))
+        hf_ptq.resolve_distribution(_args(torchrun(world_size=2)))
 
 
 @needs_ep_transformers
@@ -240,10 +240,10 @@ def test_dense_fsdp2_within_expert_data_parallel_replicas_is_refused(
     args = _args(torchrun(world_size=4))
 
     if ep_degree == 4:
-        assert hf_ptq._resolve_distribution(args)[0] == DistributionPlan(4, ep_size=4, dense="fsdp")
+        assert hf_ptq.resolve_distribution(args)[0] == DistributionPlan(4, ep_size=4, dense="fsdp")
     else:
         with pytest.raises(NotImplementedError, match=r"MODELOPT_EP_DEGREE.*MODELOPT_FSDP_SIZE=1"):
-            hf_ptq._resolve_distribution(args)
+            hf_ptq.resolve_distribution(args)
 
 
 @pytest.mark.parametrize(
@@ -265,10 +265,10 @@ def test_a_tensorrt_llm_checkpoint_export_needs_a_single_process(
     args = _args(torchrun(world_size=world_size), **options)
 
     if world_size == 1:
-        assert hf_ptq._resolve_distribution(args)[0] == DistributionPlan(1)
+        assert hf_ptq.resolve_distribution(args)[0] == DistributionPlan(1)
     else:
         with pytest.raises(NotImplementedError, match="single process"):
-            hf_ptq._resolve_distribution(args)
+            hf_ptq.resolve_distribution(args)
 
 
 @pytest.mark.parametrize(
@@ -297,10 +297,10 @@ def test_an_auto_quantize_recipe_is_refused_on_the_routes_this_script_adds(
     )
 
     if world_size == 1 or use_fsdp2:
-        hf_ptq._resolve_distribution(args)
+        hf_ptq.resolve_distribution(args)
     else:
         with pytest.raises(NotImplementedError, match="AutoQuantize"):
-            hf_ptq._resolve_distribution(args)
+            hf_ptq.resolve_distribution(args)
 
 
 @pytest.mark.parametrize("world_size", [2, 1], ids=["torchrun", "single_process"])
@@ -317,10 +317,10 @@ def test_a_layerwise_export_recipe_is_refused_before_a_distributed_load(
     )
 
     if world_size == 1:
-        assert hf_ptq._resolve_distribution(args)[0] == DistributionPlan(1)
+        assert hf_ptq.resolve_distribution(args)[0] == DistributionPlan(1)
     else:
         with pytest.raises(NotImplementedError, match="layerwise export"):
-            hf_ptq._resolve_distribution(args)
+            hf_ptq.resolve_distribution(args)
 
 
 @pytest.mark.parametrize(
@@ -347,11 +347,11 @@ def test_the_single_process_load_options_are_refused_on_the_routes_this_script_a
     args = _args(torchrun(world_size=world_size), **option)
 
     if world_size == 1:
-        assert hf_ptq._resolve_distribution(args)[0] == DistributionPlan(1)
+        assert hf_ptq.resolve_distribution(args)[0] == DistributionPlan(1)
     else:
         (name,) = option
         with pytest.raises(NotImplementedError, match=f"--{name}"):
-            hf_ptq._resolve_distribution(args)
+            hf_ptq.resolve_distribution(args)
 
 
 @pytest.mark.parametrize(
@@ -377,9 +377,9 @@ def test_the_vllm_fakequant_export_is_refused_for_a_sharded_model(
 
     if refused:
         with pytest.raises(NotImplementedError, match="--vllm_fakequant_export"):
-            hf_ptq._resolve_distribution(args)
+            hf_ptq.resolve_distribution(args)
     else:
-        hf_ptq._resolve_distribution(args)
+        hf_ptq.resolve_distribution(args)
 
 
 @pytest.mark.parametrize(
@@ -407,9 +407,9 @@ def test_an_experts_implementation_is_refused_where_the_load_picks_the_backend(
 
     if refused:
         with pytest.raises(NotImplementedError, match="--experts_implementation"):
-            hf_ptq._resolve_distribution(args)
+            hf_ptq.resolve_distribution(args)
     else:
-        hf_ptq._resolve_distribution(args)
+        hf_ptq.resolve_distribution(args)
 
 
 # ---------------------------------------------------------------------------------- load_model
