@@ -25,6 +25,7 @@ import pytest
 import torch
 import torch.nn as nn
 from _test_utils.torch.deploy.lib_test_models import BaseDeployModel, get_deploy_models
+from onnx.reference import ReferenceEvaluator
 
 import modelopt.torch.quantization as mtq
 from modelopt.onnx.utils import get_batch_size_from_bytes, validate_batch_size
@@ -65,6 +66,21 @@ class _FP8ModelWithBuffer(nn.Sequential):
 
     def forward(self, inputs):
         return super().forward(inputs) + self.fp32_buffer
+
+
+class _PythonScalarArgs(nn.Module):
+    def forward(self, x, flag: bool = True, count: int = 2, scale: float = 1.5):
+        return x * scale + count if flag else x / scale - count
+
+
+class _LeadingPythonScalarArgs(nn.Module):
+    def forward(self, flag: bool, x):
+        return x + 1 if flag else x - 1
+
+
+class _InterleavedPythonScalarArgs(nn.Module):
+    def forward(self, flag: bool, x, count: int, y, scale: float):
+        return x + y * scale + count if flag else x - y * scale - count
 
 
 def _make_fp8_model(source_dtype, kind="fp8"):
@@ -123,22 +139,93 @@ def _export_fp8_model(source_dtype, weights_dtype):
 )
 def test_onnx_dynamo_export(skip_on_windows, model: BaseDeployModel):
     # One numeric type is enough here — numeric-type coverage is in test_onnx_export_and_inputs.
-    for active in range(1):
-        # retrieve args
-        model.get.active = active
-        model.get.set_default_counter()
-        args = model.get_args()
+    model.get.active = 0
+    model.get.set_default_counter()
+    args = model.get_args()
+    with pytest.raises(AssertionError) if model.compile_fail else nullcontext():
+        onnx_bytes, _ = get_onnx_bytes_and_metadata(model, args, dynamo_export=True)
+        model_bytes = OnnxBytes.from_bytes(onnx_bytes).get_onnx_model_file_bytes()
 
-        with pytest.raises(AssertionError) if model.compile_fail else nullcontext():
-            onnx_bytes, _ = get_onnx_bytes_and_metadata(model, args, dynamo_export=True)
-            onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
-            model_bytes = onnx_bytes_obj.get_onnx_model_file_bytes()
+    if not model.compile_fail:
+        exported = onnx.load_model_from_string(model_bytes)
+        assert next(item.version for item in exported.opset_import if item.domain == "") == 23
 
-        if model.compile_fail:
-            continue
 
-        assert model_bytes != b""
-        assert onnx.load_model_from_string(model_bytes)
+@pytest.mark.parametrize(
+    ("model", "args", "input_names"),
+    [
+        (_PythonScalarArgs(), (torch.ones(1), False, 3, 2.5), ["x"]),
+        (_LeadingPythonScalarArgs(), (True, torch.ones(1)), ["x"]),
+        (
+            _InterleavedPythonScalarArgs(),
+            (False, torch.ones(1), 3, torch.full((1,), 2.0), 2.5),
+            ["x", "y"],
+        ),
+    ],
+    ids=["trailing", "leading", "interleaved"],
+)
+def test_onnx_export_explicit_python_scalars(model, args, input_names):
+    model.eval()
+    payload, metadata = get_onnx_bytes_and_metadata(
+        model,
+        args,
+        dynamo_export=True,
+        onnx_opset=23,
+    )
+    exported = onnx.load_model_from_string(
+        OnnxBytes.from_bytes(payload).get_onnx_model_file_bytes()
+    )
+
+    onnx.checker.check_model(exported)
+    assert [value.name for value in exported.graph.input] == input_names
+    assert metadata["input_none_names"] == []
+    assert len(metadata["input_tree_spec"].names) == len(args)
+
+    inference_args = tuple(
+        value + 2 if isinstance(value, torch.Tensor) else value for value in args
+    )
+    inputs = generate_onnx_input(metadata, inference_args)
+    assert list(inputs) == input_names
+    # Older supported ORT builds reject Dynamo's opset 23.
+    session = ReferenceEvaluator(exported)
+    actual = session.run(None, {name: value.numpy() for name, value in inputs.items()})[0]
+    torch.testing.assert_close(torch.from_numpy(actual), model(*inference_args))
+
+
+def test_legacy_export_default_opset_remains_20():
+    payload, _ = get_onnx_bytes_and_metadata(nn.Identity(), (torch.ones(1),))
+    exported = onnx.load_model_from_string(
+        OnnxBytes.from_bytes(payload).get_onnx_model_file_bytes()
+    )
+
+    assert next(item.version for item in exported.opset_import if item.domain == "") == 20
+
+
+def test_load_only_ignores_export_options(tmp_path):
+    value = onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1])
+    model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            [onnx.helper.make_node("Identity", ["x"], ["out"])],
+            "load_only",
+            [value],
+            [onnx.helper.make_tensor_value_info("out", onnx.TensorProto.FLOAT, [1])],
+        ),
+        opset_imports=[onnx.helper.make_opsetid("", 20)],
+    )
+    model_path = tmp_path / "load_only.onnx"
+    onnx.save(model, model_path)
+
+    payload, _ = get_onnx_bytes_and_metadata(
+        nn.Identity(),
+        (torch.ones(1),),
+        onnx_load_path=str(model_path),
+        dynamo_export=True,
+        onnx_opset=20,
+        dynamic_axes={"x": {0: "batch"}},
+    )
+
+    loaded = onnx.load_model_from_string(OnnxBytes.from_bytes(payload).get_onnx_model_file_bytes())
+    assert next(item.version for item in loaded.opset_import if item.domain == "") == 20
 
 
 @pytest.mark.parametrize("model", deploy_benchmark_all.values(), ids=deploy_benchmark_all.keys())
@@ -216,6 +303,67 @@ def test_onnx_export_and_inputs(model: BaseDeployModel):
             torch.allclose(ot, torch.from_numpy(oo).to(ot))
             for ot, oo in zip(out_torch_flat, out_ort2_flat)
         )
+
+
+@pytest.mark.parametrize("weights_dtype", ["fp32", "fp16"])
+@pytest.mark.parametrize("excluded_conv", [False, True])
+def test_dynamo_fp8_conv_preserves_calibration_and_exclusions(weights_dtype, excluded_conv):
+    inputs = torch.ones(1, 3, 2, 2)
+    model = nn.Sequential(
+        nn.Conv2d(3, 4, 1, bias=False),
+        *([nn.Conv2d(4, 4, 1, bias=False)] if excluded_conv else []),
+    ).eval()
+    with torch.no_grad():
+        for conv in model:
+            conv.weight.fill_(1.0)
+    model = mtq.quantize(
+        model, mtq.FP8_DEFAULT_CFG, forward_loop=lambda candidate: candidate(inputs)
+    )
+    for conv in model:
+        conv.input_quantizer.disable()
+    model[0].weight_quantizer._amax.fill_(0.5)
+    if excluded_conv:
+        model[1].weight_quantizer.disable()
+    expected = model(inputs)
+
+    payload, metadata = get_onnx_bytes_and_metadata(
+        model, (inputs,), dynamo_export=True, weights_dtype=weights_dtype
+    )
+    exported = onnx.load_model_from_string(
+        OnnxBytes.from_bytes(payload).get_onnx_model_file_bytes()
+    )
+    onnx.checker.check_model(exported, full_check=True)
+    initializers = {tensor.name: tensor for tensor in exported.graph.initializer}
+    producers = {output: node for node in exported.graph.node for output in node.output}
+    convs = [node for node in exported.graph.node if node.op_type == "Conv"]
+    weight_dq = producers[convs[0].input[1]]
+    if weights_dtype == "fp16":
+        assert weight_dq.op_type == "Cast"
+        assert (
+            next(attr.i for attr in weight_dq.attribute if attr.name == "to")
+            == onnx.TensorProto.FLOAT16
+        )
+        weight_dq = producers[weight_dq.input[0]]
+    assert (weight_dq.domain, weight_dq.op_type) == ("", "DequantizeLinear")
+    packed = initializers[weight_dq.input[0]]
+    assert packed.data_type == onnx.TensorProto.FLOAT8E4M3FN
+    assert np.isfinite(onnx.numpy_helper.to_array(packed).astype(np.float32)).all()
+    scale = onnx.numpy_helper.to_array(initializers[weight_dq.input[1]])
+    np.testing.assert_allclose(scale, 0.5 / 448, rtol=1e-3)
+    if excluded_conv:
+        excluded_weight = initializers[convs[1].input[1]]
+        assert excluded_weight.data_type == (
+            onnx.TensorProto.FLOAT16 if weights_dtype == "fp16" else onnx.TensorProto.FLOAT
+        )
+        np.testing.assert_array_equal(onnx.numpy_helper.to_array(excluded_weight), 1.0)
+
+    generated = {
+        name: tensor.numpy() for name, tensor in generate_onnx_input(metadata, (inputs,)).items()
+    }
+    actual = ReferenceEvaluator(exported).run(None, generated)[0]
+    torch.testing.assert_close(
+        torch.from_numpy(actual).to(expected), expected, rtol=1e-3, atol=1e-3
+    )
 
 
 @pytest.mark.parametrize(
