@@ -2245,7 +2245,8 @@ def test_a_compressed_checkpoint_a_spec_decompresses_as_it_loads_passes(
     which would build transformers' own compressed-tensors quantizer to compete with the
     decompressor. The same checkpoint unmarked is refused, and the caller's config keeps its own.
     So is one that compresses more than its experts, by the names it stores, before it loads, and a
-    config whose class keeps quantization_config, which the load cannot clear."""
+    config whose class keeps quantization_config, which the load cannot clear; one whose class only
+    forwards its text config's loads."""
     from safetensors.torch import save_file
 
     from modelopt.torch.models import _onfly_decompress
@@ -2303,6 +2304,18 @@ def test_a_compressed_checkpoint_a_spec_decompresses_as_it_loads_passes(
     with pytest.raises(NotImplementedError, match="keeps quantization_config off its instance"):
         load_and_prepare_ep(str(tmp_path / "experts"), plan, hf_config=typed)
     assert not loaded
+
+    # One whose class forwards the text config's, as Kimi-K2.5's copies it, loads once both are gone.
+    class _Forwarding(SimpleNamespace):
+        @property
+        def quantization_config(self):
+            return self.text_config.quantization_config
+
+    text = SimpleNamespace(quantization_config=quantization_config, base_model_ep_plan=_EP_PLAN)
+    forwarding = _Forwarding(text_config=text)
+    _onfly_decompress._mark(forwarding, tuple(stored_as))
+    with pytest.raises(_LoadedError):
+        load_and_prepare_ep(str(tmp_path / "experts"), plan, hf_config=forwarding)
 
 
 @pytest.mark.parametrize("compressed", [False, True], ids=["uncompressed", "compressed"])
