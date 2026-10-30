@@ -1182,6 +1182,44 @@ def test_every_rank_fails_an_export_that_one_rank_failed_after_the_write(
     cpu_dist_workers.run(_one_rank_fails_after_the_write_job, tmp_dir=tmp_path, failure=failure)
 
 
+def _rank_0_cannot_read_the_carried_weights_job(rank, size, tmp_dir):
+    model = torch.nn.Linear(2, 2)
+    set_distribution_plan(model, DistributionPlan(size, ep_size=size))
+    read = unified_export_hf.read_unplaced_weights
+
+    def unreadable_on_rank_0(*args, **kwargs):
+        if rank == 0:
+            raise OSError("a carried shard of the source is unreadable")
+        return read(*args, **kwargs)
+
+    raised = None
+    with (
+        bounded_collectives(),
+        mock.patch.object(unified_export_hf, "read_unplaced_weights", unreadable_on_rank_0),
+        mock.patch.object(unified_export_hf, "_process_hf_model_for_export", return_value={}),
+        mock.patch.object(distributed_writer, "distributed_save_hf_checkpoint") as write,
+    ):
+        # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
+        # the shared worker down instead of failing this test alone.
+        try:
+            unified_export_hf.export_hf_checkpoint(model, export_dir=tmp_dir)
+        except (OSError, RuntimeError) as e:
+            raised = e
+    # Rank 0 raises its own error, and rank 1 one that names it, before either writes.
+    assert raised is not None and "a carried shard of the source is unreadable" in str(raised), (
+        raised
+    )
+    write.assert_not_called()
+
+
+def test_every_rank_fails_an_export_whose_carried_weights_rank_0_cannot_read(
+    cpu_dist_workers, tmp_path
+):
+    """Rank 0 alone reads the carried tensors off the source, so its failure there must fail every
+    rank, not leave the others waiting in the export's first collective."""
+    cpu_dist_workers.run(_rank_0_cannot_read_the_carried_weights_job, tmp_dir=tmp_path)
+
+
 def _one_rank_fails_processing_job(rank, size, tmp_dir):
     model = torch.nn.Linear(2, 2)
     set_distribution_plan(model, DistributionPlan(size, ep_size=size))

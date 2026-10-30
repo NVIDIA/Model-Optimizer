@@ -2131,15 +2131,28 @@ def export_hf_checkpoint(
     # then hands them to the writer, whose point-to-point protocol expects one sender, and the export
     # deadlocks with rank 0 inside the writer and the rest parked in the barrier below.
     _writes_extra = not _sharded_export or torch.distributed.get_rank() == 0
-    _carried = read_unplaced_weights(model, keys_only=not _writes_extra)
+    _carried: dict = {}
+
+    def carried_over_names() -> list[str]:
+        # Everything the export writes in original precision straight from the source, by either
+        # mechanism: tensors carried here, and the off-index weight files copied verbatim alongside.
+        # get_quant_config reads this to seed exclude_modules; recorded here because it runs before
+        # that, and because only this point knows what was actually written rather than what was
+        # merely unplaced.
+        _carried.update(read_unplaced_weights(model, keys_only=not _writes_extra))
+        return sorted({*_carried, *off_index_tensor_names(model)})
+
+    if _sharded_export:
+        # Rank 0 reads more of the source here than its peers, so a failure there alone must fail
+        # every rank rather than leave the others waiting in the export's first collective. Every
+        # rank then seeds get_quant_config with rank 0's names.
+        model._modelopt_carried_over_names = all_reduce(
+            "carried weights", carried_over_names, lambda names: names[0]
+        )
+    else:
+        model._modelopt_carried_over_names = carried_over_names()
     if _writes_extra and _carried:
         extra_state_dict = {**_carried, **(extra_state_dict or {})}
-    # Everything the export writes in original precision straight from the source, by either
-    # mechanism: tensors carried above, and the off-index weight files copied verbatim alongside.
-    # get_quant_config reads this to seed exclude_modules; recorded here because it runs before
-    # that, and because only this point knows what was actually written rather than what was
-    # merely unplaced.
-    model._modelopt_carried_over_names = sorted({*_carried, *off_index_tensor_names(model)})
 
     from .layerwise_export import LAYERWISE_EXPORTER_ATTR
 
