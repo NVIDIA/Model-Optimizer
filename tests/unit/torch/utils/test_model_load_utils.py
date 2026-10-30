@@ -25,6 +25,7 @@ tests of each part use a process group, two gloo ranks.
 import copy
 import dataclasses
 import inspect
+import json
 import math
 import os
 from contextlib import ExitStack, contextmanager
@@ -622,21 +623,41 @@ def test_what_a_rank_holds_with_the_dense_part_replicated_must_fit(
 
 
 @needs_qwen3_moe_ep_plan
+@pytest.mark.parametrize(
+    ("num_experts", "quantization_config", "ep_size", "match"),
+    [
+        (8, {"quant_method": "fp8", "weight_block_size": [128, 128]}, 4, "block-fp8"),
+        (2, None, 2, "2 expert-data-parallel replicas"),
+        (
+            2,
+            {"quant_method": "fp8", "weight_block_size": [128, 128]},
+            2,
+            "2 expert-data-parallel replicas",
+        ),
+    ],
+    ids=["block-fp8", "several-ep-groups", "block-fp8-several-ep-groups"],
+)
 def test_a_dense_part_the_expert_parallel_load_cannot_shard_is_replicated(
-    run_as, serve, gpu_memory, tmp_path
+    run_as, serve, gpu_memory, tmp_path, num_experts, quantization_config, ep_size, match
 ):
-    """The expert-parallel load cannot shard the dense part within several EP groups, which the
-    export cannot write: 2 experts over 4 ranks. Left to decide, the plan replicates it however
-    big, warning with the way out; asked to shard it, it refuses. Without expert parallelism the
-    rule does not apply."""
+    """The expert-parallel load cannot shard the dense part of a block-fp8 checkpoint, which DCP
+    cannot dequantize, nor within several EP groups, which the export cannot write. Left to decide,
+    the plan replicates it however big, warning with the way out; asked to shard it, it refuses,
+    naming the knob that replicates it, and for block FP8 no EP degree, which cannot help. Without
+    expert parallelism neither rule applies."""
     run_as(4)
-    serve(_qwen3_moe(num_experts=2))
+    config = _qwen3_moe(num_experts=num_experts)
+    if quantization_config:
+        config.quantization_config = quantization_config
+    serve(config)
     gpu_memory(1)
 
-    with pytest.warns(UserWarning, match="may run out of memory. Set MODELOPT_EP_DEGREE"):
-        assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 2)
-    with pytest.raises(NotImplementedError, match="2 expert-data-parallel replicas"):
+    with pytest.warns(UserWarning, match="may run out of memory"):
+        assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, ep_size)
+    with pytest.raises(NotImplementedError, match=f"{match}.*MODELOPT_FSDP_SIZE=1") as refused:
         resolve_distribution_plan(str(tmp_path), dense="fsdp")
+    assert ("MODELOPT_EP_DEGREE" in str(refused.value)) is (quantization_config is None)
+    assert ("unquantized copy" in str(refused.value)) is (quantization_config is not None)
     assert resolve_distribution_plan(str(tmp_path), ep_size=1)[0] == DistributionPlan(
         4, dense="fsdp"
     )
@@ -1902,6 +1923,7 @@ _EP_PLAN = {
     "layers.*.mlp.experts.down_proj": "grouped_gemm",
     "layers.*.mlp.experts": "moe_tp_experts",
 }
+_BLOCK_FP8 = {"quant_method": "fp8", "weight_block_size": [128, 128]}  # DeepSeek-V3's format
 
 
 class _Mesh:
@@ -1994,10 +2016,18 @@ def test_the_loader_refuses_a_transformers_that_builds_no_model_with_torch_a2a(
         load_and_prepare_ep("unused", DistributionPlan(2, ep_size=2), hf_config=SimpleNamespace())
 
 
-def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch, gloo_world_of_one):
+@pytest.mark.parametrize(
+    "quantization_config",
+    [None, _BLOCK_FP8],
+    ids=["unquantized", "block-fp8"],
+)
+def test_a_hub_id_is_made_local_before_the_weights_load(
+    monkeypatch, gloo_world_of_one, quantization_config
+):
     """The export reads the tensors the load could not place back from the checkpoint it records,
     which must be a local directory: a Hub ID there leaves the export nothing to read. The load
-    resolves it once the plan and the config pass, before anything reads a weight."""
+    resolves it once the plan and the config pass, before anything reads a weight: a checkpoint
+    unquantized or in a format the load dequantizes (block FP8) passes the format check."""
 
     class _ResolvedError(Exception):
         """Stops the load where it resolves the checkpoint."""
@@ -2014,12 +2044,12 @@ def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch, gloo_world_
     monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
     monkeypatch.setattr(model_load_utils, "ensure_local_checkpoint", resolve)
 
+    config = SimpleNamespace(base_model_ep_plan=_EP_PLAN)
+    if quantization_config is not None:
+        config.quantization_config = quantization_config
+
     with pytest.raises(_ResolvedError):
-        load_and_prepare_ep(
-            "org/model",
-            DistributionPlan(2, ep_size=2),
-            hf_config=SimpleNamespace(base_model_ep_plan=_EP_PLAN),
-        )
+        load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
 
     assert resolved == ["org/model"]
 
@@ -2060,6 +2090,18 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
             )
             for method in ("gptq", "modelopt", "compressed-tensors", "mxfp4")
         ),
+        (
+            SimpleNamespace(
+                quantization_config={"quant_method": "fp8", "activation_scheme": "static"}
+            ),
+            NotImplementedError,
+            "this fp8 checkpoint names none",
+        ),
+        (
+            SimpleNamespace(quantization_config=FineGrainedFP8Config()),
+            NotImplementedError,
+            "whose 128x128 block is a default",
+        ),
         (SimpleNamespace(), ValueError, "declare base_model_ep_plan"),
         (
             SimpleNamespace(base_model_ep_plan={"layers.*.self_attn.q_proj": "colwise"}),
@@ -2089,6 +2131,8 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
         "modelopt",
         "compressed-tensors",
         "mxfp4",
+        "per-tensor-fp8",
+        "fp8-config-object-of-a-hub-id",
         "no-ep-plan",
         "no-routed-experts",
         "experts-container-only",
@@ -2316,20 +2360,10 @@ def test_expert_containers_and_their_children_get_the_expert_state():
 @pytest.mark.parametrize(
     ("config", "expected"),
     [
-        (SimpleNamespace(quantization_config={"quant_method": "fp8"}), "fp8"),
+        (SimpleNamespace(quantization_config=_BLOCK_FP8), "fp8"),
         (SimpleNamespace(quantization_config=SimpleNamespace(quant_method="mxfp4")), "mxfp4"),
-        (
-            SimpleNamespace(
-                text_config=SimpleNamespace(quantization_config={"quant_method": "fp8"})
-            ),
-            "fp8",
-        ),
-        (
-            SimpleNamespace(
-                llm_config=SimpleNamespace(quantization_config={"quant_method": "fp8"})
-            ),
-            "fp8",
-        ),
+        (SimpleNamespace(text_config=SimpleNamespace(quantization_config=_BLOCK_FP8)), "fp8"),
+        (SimpleNamespace(llm_config=SimpleNamespace(quantization_config=_BLOCK_FP8)), "fp8"),
         (
             SimpleNamespace(
                 quantization_config={"quant_method": "mxfp4"},
@@ -2337,7 +2371,13 @@ def test_expert_containers_and_their_children_get_the_expert_state():
             ),
             "mxfp4",
         ),
-        (SimpleNamespace(quantization_config=FineGrainedFP8Config()), "fp8"),
+        (SimpleNamespace(quantization_config=FineGrainedFP8Config()), "fp8-unverified"),
+        (
+            SimpleNamespace(
+                quantization_config={"quant_method": "fp8", "activation_scheme": "static"}
+            ),
+            "fp8-per-tensor",
+        ),
         (SimpleNamespace(quantization_config={"weight_block_size": [128, 128]}), None),
         (SimpleNamespace(text_config=None), None),
     ],
@@ -2348,6 +2388,7 @@ def test_expert_containers_and_their_children_get_the_expert_state():
         "vlm-llm-config",
         "top-level-wins",
         "transformers-config-object",
+        "per-tensor-fp8",
         "no-method",
         "unquantized",
     ],
@@ -2355,8 +2396,32 @@ def test_expert_containers_and_their_children_get_the_expert_state():
 def test_quant_method_comes_from_the_config_or_a_vlms_text_config(config, expected):
     """The top-level config first, else a VLM's text or LLM config. A loaded model's config holds
     transformers' config object, not the JSON dict, and callers compare against ``"fp8"`` /
-    ``"mxfp4"``: it reports the plain method name, not its enum."""
+    ``"mxfp4"``: it reports the plain method name, not its enum (an FP8 object, with no checkpoint
+    to check its block against, is ``"fp8-unverified"``). ``"fp8"`` is block FP8 only: per-tensor
+    FP8 names the same method without a block size."""
     assert _ckpt_quant_method(config) == expected
+
+
+@pytest.mark.parametrize(
+    ("on_disk", "expected"),
+    [
+        ({"quant_method": "fp8", "activation_scheme": "static"}, "fp8-per-tensor"),
+        ({"quant_method": "fp8", "weight_block_size": [128, 128]}, "fp8"),
+        (None, "fp8-unverified"),
+    ],
+    ids=["per-tensor", "block", "no-config-json"],
+)
+def test_an_fp8_config_object_is_read_against_the_checkpoints_own_config(
+    tmp_path, on_disk, expected
+):
+    """transformers' FP8 config object names a 128x128 block whatever the checkpoint does, so the
+    checkpoint's own ``config.json`` says whether it names one: per-tensor FP8 handed in as an
+    object is still refused. Without that file there is no telling, which the load refuses."""
+    if on_disk is not None:
+        (tmp_path / "config.json").write_text(json.dumps({"quantization_config": on_disk}))
+    config = SimpleNamespace(quantization_config=FineGrainedFP8Config())
+
+    assert _ckpt_quant_method(config, str(tmp_path)) == expected
 
 
 def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given():
@@ -2669,17 +2734,17 @@ def test_expert_param_matcher(plan, name, expected):
 # ------------------------------------------------------------------ a block-fp8 checkpoint
 
 
-def test_a_block_fp8_checkpoint_is_refused_as_a_format_whatever_its_dense_layout(
-    monkeypatch, gloo_world_of_one
-):
-    """This load does not dequantize block-fp8 checkpoints at all, so that is the refusal a plan
-    sharding their dense part meets, not one advising to replicate it."""
+def test_a_block_fp8_checkpoints_dense_part_is_not_sharded(monkeypatch, gloo_world_of_one):
+    """DCP cannot dequantize block-fp8 dense weights, so a plan sharding them is refused before the
+    load starts, where from_pretrained would dequantize them as it replicated them."""
     monkeypatch.setattr("modelopt.torch.utils.distributed.is_initialized", lambda: True)
     monkeypatch.setattr("modelopt.torch.utils.distributed.size", lambda group=None: 2)
     monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
-    config = SimpleNamespace(quantization_config={"quant_method": "fp8"})
+    config = SimpleNamespace(
+        quantization_config={"quant_method": "fp8", "weight_block_size": [128, 128]}
+    )
 
-    with pytest.raises(NotImplementedError, match="cannot dequantize a 'fp8' checkpoint"):
+    with pytest.raises(NotImplementedError, match="block-fp8 checkpoint cannot be sharded"):
         load_and_prepare_ep("unused", DistributionPlan(2, 2, "fsdp"), hf_config=config)
 
 
