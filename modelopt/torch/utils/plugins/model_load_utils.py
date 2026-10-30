@@ -612,7 +612,7 @@ def load_pretrained(
       checkpoint's tensors as stored, so it refuses a quantized checkpoint.
     * otherwise ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
       ``AutoModelForCausalLM``), placed as ``kwargs`` say. Every rank of a distributed run gets the
-      whole model, ``device_map`` defaulting to the rank's GPU.
+      whole model, ``device_map`` defaulting to the rank's GPU when there is one.
 
     A plan with ``ep_size > 1`` raises: no load here shards the routed experts. On a distributed run
     every rank loads the plan rank 0 was handed, and a refusal on any rank, of its own arguments, of a
@@ -818,9 +818,7 @@ def load_pretrained(
                 )
                 kwargs["hf_config"] = hf_config
             model_type = getattr(hf_config or config, "model_type", None) or (
-                AutoConfig.from_pretrained(
-                    ckpt_path, trust_remote_code=trust_remote_code, **hub_options
-                ).model_type
+                _read_config(ckpt_path, auto_class, trust_remote_code, **hub_options).model_type
             )
         load_kwargs = (
             {}
@@ -832,7 +830,7 @@ def load_pretrained(
         # A sharded load finds the unplaced keys while it places the weights.
         keys = model._modelopt_unplaced_source_keys
     else:
-        if plan.world_size > 1:
+        if plan.world_size > 1 and torch.cuda.is_available():
             # Each rank takes the whole model onto its own GPU. Left to "auto", every rank's
             # accelerate could pick the same idle GPU.
             kwargs.setdefault("device_map", {"": f"cuda:{dist.local_rank()}"})
@@ -1341,7 +1339,7 @@ def _gpu_memory() -> int | None:
 
 def _dense_from_env(world_size: int) -> str:
     """``MODELOPT_FSDP_SIZE`` as a dense layout, or ``"auto"``."""
-    value = env.fsdp_size().lower()
+    value = env.fsdp_size().strip().lower()
     if value == "auto":
         return "auto"
     if value == "1":
