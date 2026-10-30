@@ -113,9 +113,60 @@ def test_fakebase_missing_lm_head_without_tying_raises(tmp_path, fake_config):
         FakeBaseModel.from_source(str(tmp_path))
 
 
-def test_load_vlm_or_llm_returns_fakebase(fake_checkpoint):
-    model = load_vlm_or_llm(str(fake_checkpoint), use_offline_training=True, use_fake_base=True)
+@pytest.mark.parametrize("scale", [1.0, 2.5, 32.0])
+@pytest.mark.parametrize("tied_source", [False, True])
+@pytest.mark.parametrize("use_fake_base", [False, True])
+def test_fakebase_scaled_embeddings_preserve_raw_head_and_reload(
+    tmp_path, fake_config, scale, tied_source, use_fake_base
+):
+    """Both offline loader routes preserve scaling, raw heads and checkpoint reloads."""
+    fake_config.tie_word_embeddings = tied_source
+    if not use_fake_base:
+        fake_config.model_type = "test_vlm"
+    weight = torch.arange(_VOCAB_SIZE * _HIDDEN_SIZE).reshape(_VOCAB_SIZE, _HIDDEN_SIZE) / 512
+    head = weight if tied_source else weight + 1
+    tensors = {"embed_tokens.weight": weight, "norm.weight": torch.ones(_HIDDEN_SIZE)}
+    if not tied_source:
+        tensors["lm_head.weight"] = head
+    safetensors.torch.save_file(tensors, tmp_path / "model.safetensors")
+
+    model = load_vlm_or_llm(
+        str(tmp_path),
+        use_offline_training=True,
+        use_fake_base=use_fake_base,
+        embedding_scale=scale,
+    )
+    dtype = model.embed_tokens.weight.dtype
+    ids = torch.tensor([1, 3, 7])
+    expected = weight.to(dtype)[ids] * scale
+    hidden = torch.linspace(-0.25, 0.25, _HIDDEN_SIZE, dtype=dtype).unsqueeze(0)
+    expected_logits = torch.nn.functional.linear(hidden, head.to(dtype))
+    torch.testing.assert_close(model.embed_tokens.weight, weight.to(dtype), rtol=0, atol=0)
+    torch.testing.assert_close(model.lm_head.weight, head.to(dtype), rtol=0, atol=0)
+    torch.testing.assert_close(model.embed_tokens(ids), expected, rtol=0, atol=0)
+    torch.testing.assert_close(model.lm_head(hidden), expected_logits)
+
+    model.save_pretrained(tmp_path / "offline")
+    loaded = FakeBaseModel.from_pretrained(tmp_path / "offline")
+    assert loaded.config.embedding_scale == scale
+    torch.testing.assert_close(
+        loaded.embed_tokens.weight, model.embed_tokens.weight, rtol=0, atol=0
+    )
+    torch.testing.assert_close(loaded.lm_head.weight, model.lm_head.weight, rtol=0, atol=0)
+    torch.testing.assert_close(loaded.embed_tokens(ids), expected, rtol=0, atol=0)
+    torch.testing.assert_close(loaded.lm_head(hidden), expected_logits)
+
+
+@pytest.mark.parametrize("use_fake_base", [False, True])
+def test_load_vlm_or_llm_returns_fakebase(fake_checkpoint, fake_config, use_fake_base):
+    """Omitting the scale retains unit scaling through either offline loader route."""
+    if not use_fake_base:
+        fake_config.model_type = "test_vlm"
+    model = load_vlm_or_llm(
+        str(fake_checkpoint), use_offline_training=True, use_fake_base=use_fake_base
+    )
     assert isinstance(model, FakeBaseModel)
+    assert model.config.embedding_scale == 1.0
 
 
 def test_load_vlm_or_llm_offline_zero_layers(monkeypatch):
