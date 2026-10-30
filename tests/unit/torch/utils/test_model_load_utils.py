@@ -1852,7 +1852,7 @@ def test_what_needs_the_group_is_refused_in_a_launch_that_sets_none_up(
 
 # ======================================================================== the expert-parallel load
 # What the expert-parallel load reads off the loaded model and its config: it takes an expert-parallel
-# plan and keeps its experts out of ModelOpt's per-expert quant wrappers, ``_seed_parallel_states``
+# plan and refuses routed experts expert-parallel PTQ would quantize wrong, ``_seed_parallel_states``
 # gives every module the parallel state its amax syncs over, and ``_ckpt_quant_method`` reads the
 # checkpoint's native quantization. Everything runs in one CPU process but the bounded two-rank tests
 # at the end.
