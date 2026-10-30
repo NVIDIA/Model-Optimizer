@@ -1800,6 +1800,22 @@ def load_and_prepare_ep(
                 "grouped_gemm, the only expert-weight style this load shards by, so every rank would "
                 "hold every expert."
             )
+        # The load drops any other style an expert weight takes, so that weight would load whole
+        # beside its sharded siblings, and the grouped forward would pair slices of different experts.
+        containers = _routed_expert_keys(ep_plan)
+        dropped = sorted(
+            name
+            for name, style in ep_plan.items()
+            if style not in ("grouped_gemm", "ep_router", *_EXPERTS_STYLES)
+            and name not in containers
+            and any(name.startswith(key + ".") for key in containers)
+        )
+        if dropped:
+            raise ValueError(
+                f"base_model_ep_plan={ep_plan} styles {', '.join(dropped)} by a style this load "
+                "drops, so those expert weights would load whole on every rank beside their sharded "
+                "siblings."
+            )
         # The all-to-all transport finds an expert's rank by dividing its id by this rank's share of
         # the experts, which holds only when every rank holds as many. A count the config names none of
         # the ways this reads is checked once the experts load, from their weights.
@@ -1958,6 +1974,12 @@ def load_and_prepare_ep(
         # The routed-expert containers, from the SAME base_model_ep_plan that drove the sharding. A MoE model
         # loaded WITHOUT EP (dense DP) never reaches this loader, so its experts stay dense.
         expert_modules = _routed_expert_modules(model, ep_plan)
+        if not expert_modules:
+            raise ValueError(
+                f"base_model_ep_plan={ep_plan} names routed-expert containers that no module of "
+                f"{type(model).__name__} matches, so calibration would reduce the experts' amax over "
+                "ranks holding different experts. Quantize the model without expert parallelism."
+            )
 
     # Each module's ParallelState for calibration's amax sync: dense modules reduce over the whole world;
     # routed experts reduce over their expert-data-parallel replicas, and share one input amax across the
