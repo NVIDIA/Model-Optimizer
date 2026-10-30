@@ -1545,9 +1545,10 @@ def test_a_model_class_of_the_callers_own_loads_whole(
     """The sharded loads build their own model class and refuse another, so with nothing asking to
     shard, a class of the caller's own loads whole on every rank, and with a knob asking to shard
     it is refused. Neither builds the model on the meta device, which the decision's own pick of
-    class may not build (an encoder-decoder loaded through AutoModel). The decision reads the
-    checkpoint's config as the class does, through its own config class, which AutoConfig need not
-    know."""
+    class may not build (an encoder-decoder loaded through AutoModel), nor applies the model's spec,
+    whose prepare could fail every rank, or patch the process, for a load that is never
+    expert-parallel. The decision reads the checkpoint's config as the class does, through its own
+    config class, which AutoConfig need not know."""
     run_as(2)
     if own_config:
         _OwnConfig(**_TINY).save_pretrained(tmp_path)
@@ -1557,6 +1558,11 @@ def test_a_model_class_of_the_callers_own_loads_whole(
     monkeypatch.setattr(
         model_load_utils, "build_meta_causal_lm", lambda *a, **k: pytest.fail("built a model")
     )
+    monkeypatch.setattr(
+        model_load_utils, "apply_distributed_support", lambda *a, **k: pytest.fail("applied a spec")
+    )
+    # As on a transformers new enough for expert parallelism, whose floor would rule it out here.
+    monkeypatch.setattr(model_load_utils, "_spec_refuses_ep", lambda model_type: False)
     if fsdp_size is None:
         model = load_pretrained(str(tmp_path), auto_class)
         assert distribution_plan(model) == DistributionPlan(2)

@@ -1847,9 +1847,10 @@ def resolve_distribution_plan(
     ``init_quantized_weights``, and nothing asking to shard, the plan loads the model whole, decided
     without a build.
 
-    Unless rank 0's knobs rule expert parallelism out (a single process, or an EP degree of 1,
-    which auto is for a model whose spec refuses expert parallelism on the installed
-    transformers), every rank applies the model's spec to a copy of the config first
+    Unless the call or rank 0's knobs rule expert parallelism out (a single process, an
+    ``auto_class`` the sharded loads refuse, or an EP degree of 1, which auto is for a model whose
+    spec refuses expert parallelism on the installed transformers), every rank applies the model's
+    spec to a copy of the config first
     (:func:`~modelopt.torch.utils.moe.apply_distributed_support`): for several models it is what
     supplies the expert-parallel plan, and an expert-parallel plan returns that copy. Any other
     plan returns the config without it, which the export would otherwise write out. A plan that
@@ -1890,10 +1891,18 @@ def resolve_distribution_plan(
     world_size = dist.size()
     # Whether the run rules expert parallelism out is rank 0's call, as the plan is: a rank that
     # skipped the spec while the others applied it would load without the expert-parallel plan
-    # they shard by, and fail once the mesh is up, leaving them waiting in a collective.
+    # they shard by, and fail once the mesh is up, leaving them waiting in a collective. A model
+    # class the sharded loads refuse rules it out too: the decision then plans the whole model on
+    # every rank, or refuses, without the spec, whose prepare could fail, or patch the process,
+    # for a load that never shards.
     prepared = [hf_config]
     if dist.broadcast_from(
-        "spec", lambda: world_size > 1 and _ep_degree(ep_size, hf_config.model_type) != 1
+        "spec",
+        lambda: (
+            world_size > 1
+            and auto_class in (None, AutoModelForCausalLM)
+            and _ep_degree(ep_size, hf_config.model_type) != 1
+        ),
     ):
         # Before deciding: deciding without the spec would read an expert-parallel MoE as dense. A
         # rank that cannot apply it fails every rank, as a checkpoint read does above.
