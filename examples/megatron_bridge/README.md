@@ -46,12 +46,12 @@ docker run \
   ${DOCKER_IMAGE} bash
 ```
 
-Some features (e.g. [`--vllm_fakequant_export`](#evaluating-a-qad-checkpoint-in-vllm-with-fake-quantization) and `--fake_quant_weight_cache`) need a newer Megatron-Bridge than the one in `nvcr.io/nvidia/nemo:26.08`. Until a NeMo container includes it, check out Megatron-Bridge at the commit ModelOpt's CI tests against, together with its Megatron-LM submodule:
+Some features (e.g. [`--vllm_fakequant_export`](#evaluating-a-qad-checkpoint-in-vllm-with-fake-quantization), `--fake_quant_weight_cache` and GLM-5.3-Flash support) need a newer Megatron-Bridge than the one in `nvcr.io/nvidia/nemo:26.08`. Until a NeMo container includes it, check out Megatron-Bridge at the commit ModelOpt's CI tests against, together with its Megatron-LM submodule:
 
 ```bash
 export MBRIDGE_DIR=${PWD}/Megatron-Bridge
 git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git ${MBRIDGE_DIR}
-git -C ${MBRIDGE_DIR} checkout 0652ea797ab629e6451c64e1c92f976501b3b8b3
+git -C ${MBRIDGE_DIR} checkout e342d93cd4daa7ef7190c005a5db8be780b3d2cc
 git -C ${MBRIDGE_DIR} submodule update --init 3rdparty/Megatron-LM
 ```
 
