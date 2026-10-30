@@ -88,15 +88,25 @@ def test_fsdp2_wrap_leaves_the_plan_to_the_load(monkeypatch):
         distribution_plan(model)
 
 
-def test_fsdp2_wrap_refuses_a_model_recorded_as_replicated(monkeypatch):
-    """A plan is recorded once, so a model recorded as replicated, as load_pretrained records a model
-    it loads whole, is refused rather than sharded behind its plan, which the export would believe."""
+@pytest.mark.parametrize(
+    ("plan", "recorded_on"),
+    [
+        (DistributionPlan(), "model"),
+        (DistributionPlan(4, dense="fsdp"), "model"),
+        (DistributionPlan(), "submodule"),
+    ],
+    ids=["replicated", "sharded", "in-a-submodule"],
+)
+def test_fsdp2_wrap_refuses_a_model_with_a_plan_recorded(monkeypatch, plan, recorded_on):
+    """A plan is recorded once, so a model that records one, as load_pretrained records one on every
+    model it loads, is refused rather than sharded behind it: a replicated model would read as
+    replicated, which the export would believe, and a sharded one would be wrapped twice."""
     model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
-    set_distribution_plan(model, DistributionPlan())
+    set_distribution_plan(model if recorded_on == "model" else model[0], plan)
     monkeypatch.setattr(
         LayerActivationCollector, "get_decoder_layers", staticmethod(lambda model: list(model))
     )
     monkeypatch.setattr(fsdp2_utils, "fully_shard", lambda *a, **k: pytest.fail("sharded"))
 
-    with pytest.raises(RuntimeError, match="which replicates it"):
+    with pytest.raises(RuntimeError, match="already recorded as distributed"):
         fsdp2_utils.fsdp2_wrap(model)
