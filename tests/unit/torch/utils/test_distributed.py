@@ -18,6 +18,7 @@ model's record of it, the collectives that fail together, and the process group'
 
 import os
 import pickle
+import sys
 from contextlib import nullcontext
 from datetime import timedelta
 
@@ -205,6 +206,16 @@ def test_fsdp2_wrap_keeps_its_old_path(monkeypatch):
 
     assert dist.fsdp2_wrap(model, shard_root=False, cpu_offload=True) == "layers"
     assert calls == [(model, {"shard_root": False, "mp_policy": None, "cpu_offload": True})]
+
+
+def test_fsdp2_wrap_names_the_extra_its_old_path_needs(monkeypatch):
+    """Without the hf extra, the old path says what it needs rather than which module is missing."""
+    monkeypatch.setitem(sys.modules, "modelopt.torch.utils.plugins.model_load_utils", None)
+
+    with pytest.raises(
+        ImportError, match=r"needs the hf extra \(pip install 'nvidia-modelopt\[hf\]'\)"
+    ):
+        dist.fsdp2_wrap(nn.Linear(2, 2))
 
 
 # ------------------------------------------------------------------------------------ collectives

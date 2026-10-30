@@ -780,8 +780,13 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
 
     It moved there with the FSDP2 load that wraps with it, so this old path needs the ``hf`` extra.
     """
-    from modelopt.torch.utils.plugins.model_load_utils import fsdp2_wrap as wrap
-
+    try:
+        from modelopt.torch.utils.plugins.model_load_utils import fsdp2_wrap as wrap
+    except ImportError as error:
+        raise ImportError(
+            "fsdp2_wrap moved to modelopt.torch.utils.plugins.model_load_utils, which needs the hf "
+            "extra (pip install 'nvidia-modelopt[hf]') to import."
+        ) from error
     return wrap(model, shard_root=shard_root, mp_policy=mp_policy, cpu_offload=cpu_offload)
 
 
