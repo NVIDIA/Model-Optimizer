@@ -13,4 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Kimi-K3 (HF model type ``kimi_k3``)."""
+"""kimi_k3 specs (HF model type ``kimi_k3``)."""
+
+from . import specs
