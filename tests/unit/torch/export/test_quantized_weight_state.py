@@ -207,9 +207,16 @@ def _capture_linear(quantization_format):
     return module
 
 
-@pytest.mark.parametrize("quantization_format", _CAPTURE_FORMAT_CONFIGS)
-def test_capture_preserves_format_state_and_detaches_tensors(quantization_format):
+@pytest.mark.parametrize(
+    ("quantization_format", "constant_amax"),
+    [(name, False) for name in _CAPTURE_FORMAT_CONFIGS] + [("mxfp4", True), ("mxfp8", True)],
+)
+def test_capture_preserves_format_state_and_detaches_tensors(quantization_format, constant_amax):
     module = _capture_linear(quantization_format)
+    if constant_amax:
+        for quantizer in (module.weight_quantizer, module.input_quantizer):
+            quantizer.set_from_attribute_config({"use_constant_amax": True})
+            assert quantizer.export_amax() is None
     cfg = _CAPTURE_FORMAT_CONFIGS[quantization_format]
     expected = {}
     if quantization_format == "fp8_pc_pt":
@@ -739,14 +746,23 @@ def _kv_attention(k_cfg, v_cfg, k_amax=896.0, v_amax=224.0) -> nn.Module:
         (_FP8_KV, _NVFP4_KV, "FP8_K_NVFP4_V", 2.0, 0.5),
     ],
 )
-@pytest.mark.parametrize("constant_amax", [False, True])
-def test_kv_cache_capture(k_cfg, v_cfg, quantization_format, k_scale, v_scale, constant_amax):
+@pytest.mark.parametrize(
+    ("constant_axes", "keep_amax"),
+    [((), False), (("k", "v"), False), (("k", "v"), True), (("k",), False), (("v",), True)],
+)
+def test_kv_cache_capture(
+    k_cfg, v_cfg, quantization_format, k_scale, v_scale, constant_axes, keep_amax
+):
     attention = _kv_attention(k_cfg, v_cfg)
-    if constant_amax:
-        for quantizer in (attention.k_bmm_quantizer, attention.v_bmm_quantizer):
-            quantizer.set_from_attribute_config({"use_constant_amax": True})
+    for axis in constant_axes:
+        quantizer = getattr(attention, f"{axis}_bmm_quantizer")
+        quantizer.set_from_attribute_config({"use_constant_amax": True})
+        if not keep_amax:
             del quantizer._amax
-        k_scale = v_scale = 1.0
+            assert quantizer.export_amax() is None
+    k_scale = 1.0 if "k" in constant_axes else k_scale
+    v_scale = 1.0 if "v" in constant_axes else v_scale
+    original_buffers = {name: value.clone() for name, value in attention.named_buffers()}
 
     state = capture_kv_cache_export_state(attention)
 
@@ -756,7 +772,10 @@ def test_kv_cache_capture(k_cfg, v_cfg, quantization_format, k_scale, v_scale, c
     assert not state.k_scale.requires_grad and state.k_scale.device.type == "cpu"
     if quantization_format == "FP8":
         unclamped = capture_kv_cache_export_state(attention, clamp_fp8_scales=False)
-        assert unclamped.v_scale.item() == (1.0 if constant_amax else 0.5)
+        assert unclamped.v_scale.item() == (1.0 if "v" in constant_axes else 0.5)
+    assert set(dict(attention.named_buffers())) == set(original_buffers)
+    for name, value in attention.named_buffers():
+        torch.testing.assert_close(value, original_buffers[name])
 
 
 def test_kv_cache_spec_rejects_what_it_cannot_export():
@@ -774,6 +793,10 @@ def test_kv_cache_spec_rejects_what_it_cannot_export():
     attention = _kv_attention({"num_bits": 8}, {"num_bits": 8})
     with pytest.raises(NotImplementedError, match="'INT8' KV cache"):
         get_kv_cache_export_spec(attention)
+
+    mx = {**_CAPTURE_FORMAT_CONFIGS["mxfp8"], "use_constant_amax": True}
+    with pytest.raises(RuntimeError, match="Missing calibrated KV-cache scales"):
+        capture_kv_cache_export_state(_kv_attention(mx, mx))
 
     affine_fp8 = {**_FP8_KV, "bias": {-2: None, -4: None, "type": "static"}}
     attention = _kv_attention(affine_fp8, affine_fp8)

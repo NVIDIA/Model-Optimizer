@@ -235,7 +235,7 @@ class TensorQuantizerTester:
         returned_amax = tq._get_amax(x)
         assert returned_amax.item() == fp8_max
         assert returned_amax.device == x.device
-        assert tq.export_amax().item() == fp8_max
+        assert tq.export_amax() is None
         assert not hasattr(tq, "_amax")
 
         # Forward pass should use the constant amax

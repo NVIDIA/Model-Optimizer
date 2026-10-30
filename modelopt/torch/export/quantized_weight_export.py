@@ -554,7 +554,13 @@ def capture_kv_cache_export_state(
     quantization_format = get_kv_cache_export_spec(attention)
     if quantization_format is None:
         return None
-    k_scale, v_scale = get_kv_cache_scaling_factor(attention, clamp_fp8_scales=clamp_fp8_scales)
+    scales = get_kv_cache_scaling_factor(attention, clamp_fp8_scales=clamp_fp8_scales)
+    for index, name in enumerate(("k_bmm_quantizer", "v_bmm_quantizer")):
+        quantizer = getattr(attention, name)
+        if quantizer._use_constant_amax and not quantizer.is_mx_format:
+            # The fixed range and deployment denominator are both 448, also for NVFP4 KV.
+            scales[index] = torch.ones(1, dtype=torch.float32, device="cpu")
+    k_scale, v_scale = scales
     if k_scale is None or v_scale is None:
         raise RuntimeError("Missing calibrated KV-cache scales")
     if cpu:
