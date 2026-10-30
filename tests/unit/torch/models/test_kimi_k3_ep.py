@@ -22,6 +22,7 @@ undone after each test.
 """
 
 import copy
+import json
 import sys
 import types
 from concurrent.futures import Future
@@ -297,6 +298,14 @@ def test_the_plan_the_conversions_and_the_fused_params_name_the_same_tensors():
 # ------------------------------------------------------------------------------------- prepare
 
 _AUTO_MAP = {"AutoModelForCausalLM": "modeling_kimi_k3.KimiK3ForConditionalGeneration"}
+_CHECKPOINT_QUANTIZED = kimi_k3._checkpoint_quantized
+
+
+@pytest.fixture(autouse=True)
+def unquantized_checkpoints_on_disk(monkeypatch):
+    """The checkpoints these tests name are stand-ins with no ``config.json``: prepare reads each as
+    an unquantized one. The test of that read puts the real one back."""
+    monkeypatch.setattr(kimi_k3, "_checkpoint_quantized", lambda ckpt_path: False)
 
 
 @pytest.fixture
@@ -602,13 +611,44 @@ def test_prepare_lets_an_error_reading_the_quant_config_through(monkeypatch, rem
     assert not any("block_sparse_moe.experts.*.w1.weight" in c.source_patterns for c in registered)
 
 
+@pytest.mark.usefixtures("private_conversion_registry", "restore_loader_hooks")
+@pytest.mark.parametrize("level", ["top", "text"])
+def test_a_config_that_lost_its_quantization_config_is_refused_by_the_checkpoints(
+    monkeypatch, remote_checkpoint, tmp_path, level
+):
+    """prepare drops the config's quantization_config, and the decompressor clears its mark at the
+    load, so a config prepared and loaded before says nothing of the compression; loaded again, its
+    experts would load newly initialized. The checkpoint's own config.json says it, at either level,
+    and the decompressor refuses the config before prepare patches anything."""
+    monkeypatch.setattr(kimi_k3, "_checkpoint_quantized", _CHECKPOINT_QUANTIZED)
+    scheme = {"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"}
+    stored = (
+        {"quantization_config": scheme}
+        if level == "top"
+        else {"text_config": {"quantization_config": scheme}}
+    )
+    (tmp_path / "config.json").write_text(json.dumps(stored))
+    config = SimpleNamespace(text_config=SimpleNamespace(), auto_map=_AUTO_MAP)
+
+    with pytest.raises(ValueError, match="no compressed-tensors quantization_config"):
+        kimi_k3.prepare(config, ckpt_path=str(tmp_path), trust_remote_code=True)
+    assert isinstance(remote_checkpoint.KimiSparseMoeBlock(_config()).experts, nn.ModuleList)
+
+
 @pytest.mark.usefixtures("private_conversion_registry", "restore_loader_hooks", "remote_checkpoint")
-def test_prepare_leaves_the_loader_alone_for_bf16_experts():
-    """Without a compressed-tensors config the experts are plain bf16: prepare completes and leaves
-    transformers' conversion mapping unwrapped, with or without ``compressed_tensors`` installed."""
+def test_prepare_leaves_the_loader_alone_for_bf16_experts(monkeypatch, tmp_path):
+    """Without a compressed-tensors config, in the config or the checkpoint's, the experts are plain
+    bf16: prepare completes and leaves transformers' conversion mapping unwrapped, with or without
+    ``compressed_tensors`` installed."""
+    monkeypatch.setattr(kimi_k3, "_checkpoint_quantized", _CHECKPOINT_QUANTIZED)
+    (tmp_path / "config.json").write_text(json.dumps({"text_config": {}}))
     stock = mu.get_model_conversion_mapping
 
-    _prepare(SimpleNamespace(text_config=SimpleNamespace(), auto_map=_AUTO_MAP))
+    kimi_k3.prepare(
+        SimpleNamespace(text_config=SimpleNamespace(), auto_map=_AUTO_MAP),
+        ckpt_path=str(tmp_path),
+        trust_remote_code=True,
+    )
 
     assert mu.get_model_conversion_mapping is stock
 
