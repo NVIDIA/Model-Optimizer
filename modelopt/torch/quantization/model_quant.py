@@ -1090,7 +1090,7 @@ def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint
     safe_save(merged, checkpoint)
 
 
-def get_auto_quantize_config(search_state, constraints=None, verbose=False):
+def get_auto_quantize_config(search_state, constraints=None, verbose=False, algorithm=None):
     """Build a flat quant config from auto_quantize search_state.
 
     Re-solves for ``constraints`` if provided, otherwise uses the stored best recipe.
@@ -1100,6 +1100,11 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         constraints: Optional dict, e.g. ``{"effective_bits": 5.5}``, to re-solve for a
             different target without re-running calibration or scoring.
         verbose: If True, prints the per-layer recipe assignments.
+        algorithm: Calibration algorithm of the returned config (default ``"max"``). A layerwise
+            algorithm such as sequential GPTQ belongs here rather than in the search: the search
+            scores each layer on its own, while sequential GPTQ makes each layer depend on the
+            formats chosen before it, so it runs once the per-layer formats are frozen, on a
+            fresh model with the source weights.
 
     Returns:
         A config dict suitable for :func:`quantize`.
@@ -1122,10 +1127,20 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
             # Or apply the same/customized config on a fresh model instance
             # fresh_model = load_model(...)
             # fresh_model = mtq.quantize(fresh_model, config, forward_loop=calibrate_loop)
+
+            # Freeze the formats, then run sequential GPTQ on the source weights
+            config = mtq.get_auto_quantize_config(
+                search_state, algorithm={"method": "gptq", "layerwise": {"enable": True}}
+            )
+            fresh_model = mtq.quantize(load_model(...), config, forward_loop=calibrate_loop)
     """
     if search_state.get("cost_model") == COST_MODEL_KV_CACHE:
+        if algorithm is not None:
+            raise ValueError("KV-cache AutoQuantize configs carry no calibration algorithm.")
         return get_kv_cache_auto_quantize_config(search_state, constraints, verbose=verbose)
-    return _get_auto_quantize_config(search_state, constraints, verbose=verbose)
+    return _get_auto_quantize_config(
+        search_state, constraints, verbose=verbose, algorithm=algorithm
+    )
 
 
 def disable_quantizer(model: nn.Module, wildcard_or_filter_func: str | Callable):

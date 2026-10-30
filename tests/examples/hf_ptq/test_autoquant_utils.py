@@ -446,6 +446,8 @@ def test_autoquant_label_free_recipe_calls_mtq(
     def fake_auto_quantize(model, **kwargs):
         captured.update(kwargs)
         assert torch.equal(kwargs["forward_step"](model, batch), batch["input_ids"] + 1)
+        # Layerwise calibration of a candidate stops the forward early and returns no output.
+        assert kwargs["forward_step"](lambda **_: None, batch) is None
         return model, {}
 
     monkeypatch.setattr(autoquant_utils.mtq, "auto_quantize", fake_auto_quantize)

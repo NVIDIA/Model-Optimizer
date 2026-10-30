@@ -2366,7 +2366,7 @@ def _get_replay_quantizer_attrs(candidate_stat: dict, module_name: str) -> tuple
     return _STD_QUANTIZER_ATTRS
 
 
-def get_auto_quantize_config(search_state, constraints=None, verbose=False):
+def get_auto_quantize_config(search_state, constraints=None, verbose=False, algorithm=None):
     """Build a flat quant config dict from auto_quantize search_state.
 
     Re-solves for ``constraints`` if provided, otherwise uses the best recipe from the search.
@@ -2375,6 +2375,7 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         search_state: The state dict returned by :func:`auto_quantize`.
         constraints: Optional dict with ``effective_bits`` key to re-solve for a new target.
         verbose: If True, prints the per-layer recipe assignments.
+        algorithm: Calibration algorithm of the returned config; ``"max"`` (with a warning) if None.
 
     Returns:
         A config dict suitable for :func:`quantize`.
@@ -2453,12 +2454,14 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
     # modules override default disables such as ``*lm_head*``.
     quant_cfg.extend(global_entries.values())
     quant_cfg.extend(per_module_entries)
-    warnings.warn(
-        "get_auto_quantize_config: returned config uses algorithm='max'. "
-        "Per-recipe calibration algorithms (e.g. smoothquant, awq) are not preserved. "
-        "Update config['algorithm'] if a different calibration algorithm is needed (e.g. 'gptq')."
-    )
-    return {"quant_cfg": quant_cfg, "algorithm": "max"}
+    if algorithm is None:
+        warnings.warn(
+            "get_auto_quantize_config: returned config uses algorithm='max'. "
+            "Per-recipe calibration algorithms (e.g. smoothquant, awq) are not preserved. "
+            "Pass `algorithm` if a different calibration algorithm is needed (e.g. 'gptq')."
+        )
+        algorithm = "max"
+    return {"quant_cfg": quant_cfg, "algorithm": algorithm}
 
 
 def _resolve_best_recipe(search_state, constraints, verbose=False):
