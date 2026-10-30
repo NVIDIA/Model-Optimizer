@@ -260,12 +260,17 @@ def _compressedify(conv, compressor, scheme, param_names):
     return new
 
 
+# Whether the load under way is one whose converters the hooks rewrote: from_pretrained asks for the
+# conversion mapping before it reads a tensor. Module state, not a context variable: the loader
+# materializes tensors in its worker threads.
+_LOAD = {"decompressing": False}
+
+
 def _install_keep_int_native():
-    """Patch ``_materialize_copy`` so an integer source tensor is never cast to a float dtype.
+    """Patch ``_materialize_copy`` so a decompressing load never casts an integer source to a float.
 
     Without a quantizer the loader casts every source to the parameter's dtype, which would destroy
-    packed weights, shapes and zero-points. Process-wide: only a compressed checkpoint loaded without
-    its quantizer asks for such a cast.
+    packed weights, shapes and zero-points. Every other load casts as before.
     """
     import transformers.core_model_loading as cml
 
@@ -277,7 +282,8 @@ def _install_keep_int_native():
     # keyword: the patch sits on every later load's copy path.
     def _materialize_copy(tensor, device=None, dtype=None, *args, **kwargs):
         t = tensor[...]
-        if dtype is not None and dtype.is_floating_point and not t.is_floating_point():
+        floating = dtype is not None and dtype.is_floating_point
+        if _LOAD["decompressing"] and floating and not t.is_floating_point():
             dtype = None  # keep packed/shape/zero-point/g_idx integers native
         return orig(t, device, dtype, *args, **kwargs)
 
@@ -369,7 +375,8 @@ def install_onfly_decompress(hf_config):
     def patched(*args, **kwargs):
         convs = orig(*args, **kwargs)
         config = getattr(args[0] if args else kwargs["model"], "config", None)
-        if not is_marked(config):
+        _LOAD["decompressing"] = is_marked(config)
+        if not _LOAD["decompressing"]:
             # Not the compressed checkpoint: rewritten, an uncompressed MoE's experts would match no
             # stored key and load newly initialized without an error.
             return convs
