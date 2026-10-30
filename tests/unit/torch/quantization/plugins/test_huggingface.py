@@ -36,10 +36,12 @@ from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, Ten
 from modelopt.torch.quantization.plugins.huggingface import (
     _QuantHFParallelLinear,
     _TransposedExpertsCalibMixin,
+    convert_hf_parallel_linears_on_the_fly,
     get_homogeneous_hf_decoder_layers,
     is_homogeneous_hf_model,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 pytest.importorskip("transformers")
 
@@ -99,6 +101,25 @@ def test_hf_parallel_weight_access_restores_dtensor_after_exception(monkeypatch)
         raise RuntimeError("test error")
 
     assert linear.weight is original_weight
+
+
+@pytest.mark.parametrize("expert_parallel", [False, True], ids=["no-plan", "expert-parallel"])
+def test_a_mesh_without_tp_sharded_linears_warns_unless_the_model_is_expert_parallel(
+    expert_parallel,
+):
+    """A transformers mesh with no TP-sharded Linear under it is worth a warning, except on a model
+    loaded expert-parallel: its mesh is the experts', and no Linear is meant to be sharded."""
+    model = nn.Sequential(nn.Linear(4, 4))
+    model._device_mesh = object()
+    if expert_parallel:
+        set_distribution_plan(model, DistributionPlan(2, ep_size=2))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        convert_hf_parallel_linears_on_the_fly(model)
+
+    warned = any("no TP-sharded linear layer" in str(w.message) for w in caught)
+    assert warned is not expert_parallel
 
 
 def test_convert_conv1d():
