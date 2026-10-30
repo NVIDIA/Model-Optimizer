@@ -212,6 +212,28 @@ def test_dequant_refuses_a_scale_grid_it_cannot_place(pre_5_10_transformers, gri
         _dequant_op((4, 4))._dequantize_one(weight, scale_inv)
 
 
+@pytest.mark.parametrize("packed_dtype", ["float4_e2m1fn_x2", "int8"])
+def test_a_weight_that_is_not_fp8_keeps_transformers_dequant(pre_5_10_transformers, packed_dtype):
+    """DeepSeek-V4 declares block FP8 but stores its routed experts as packed FP4, two values a byte,
+    with ``[1, 32]`` scales, which transformers' own dequant unpacks from 5.9. Read as fp8, a
+    (256, 512) weight would come out (256, 256) and wrong: it goes to transformers' dequant, and
+    comes out in the model dtype."""
+    stock = vars(Fp8Dequantize).get("_dequantize_one")
+    dtype = getattr(torch, packed_dtype, None)
+    if stock is None or dtype is None:
+        pytest.skip("needs transformers' own FP4 unpack (5.9 on) and torch's packed dtype")
+    gen = torch.Generator().manual_seed(0)
+    packed = torch.randint(0, 256, (256, 256), dtype=torch.uint8, generator=gen).view(dtype)
+    scales = torch.rand(256, 16, generator=gen) + 0.5  # one per 32 unpacked values
+    expected = stock(_dequant_op((128, 128)), packed, scales)
+
+    model_load_utils._patch_finegrained_fp8_dequant(torch.bfloat16)
+    out = _dequant_op((128, 128))._dequantize_one(packed, scales)
+
+    assert out.shape == (256, 512)
+    assert torch.equal(out, expected.to(torch.bfloat16))
+
+
 def test_the_expert_converter_leads_with_a_merge_that_dequantizes_each_expert(
     pre_5_10_transformers,
 ):
@@ -340,11 +362,11 @@ def test_undoing_the_patch_restores_stock_transformers(pre_5_10_transformers, mo
 def test_from_5_10_1_its_own_dequant_also_takes_partial_last_blocks(
     pre_5_10_transformers, monkeypatch, shape, grid
 ):
-    """Upstream fixed the expert converter there and decodes ue8m0 and FP4 scales, which the override
-    does not, so its dequant is kept and only wrapped. A partial last block (DeepSeek-V3's 576-row
-    kv_a_proj_with_mqa under a 5-row grid of 128-row blocks, or 192 rows that its own dequant would
-    split into two blocks of 96) is padded to whole blocks for it and cropped back; a weight of whole
-    blocks goes to it as is."""
+    """Upstream fixed the expert converter there and emits the destination dtype, so its dequant is
+    kept and only wrapped. A partial last block (DeepSeek-V3's 576-row kv_a_proj_with_mqa under a
+    5-row grid of 128-row blocks, or 192 rows that its own dequant would split into two blocks of
+    96) is padded to whole blocks for it and cropped back; a weight of whole blocks goes to it as
+    is."""
     if Version("5.10.1") > _INSTALLED_TRANSFORMERS:
         pytest.skip("needs transformers' own dequant from 5.10.1")
     monkeypatch.setattr(transformers, "__version__", "5.10.1")

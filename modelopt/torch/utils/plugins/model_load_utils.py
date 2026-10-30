@@ -1904,15 +1904,17 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
     else derived), then crop to the weight shape -- correct for both full and partial last blocks,
     2-D dense linears and (leading-dim-broadcast) per-expert tensors. Idempotent.
 
+    The override takes block-FP8 weights only. Any other weight goes to transformers' own dequant,
+    which from 5.9 unpacks packed FP4 (``float4_e2m1fn_x2``, or ``int8``) itself: DeepSeek-V4 declares
+    block FP8 but stores its routed experts that way, with ``[1, 32]`` scales.
+
     transformers >= 5.10.1 keeps its own dequant. Upstream fixed two of the show-stoppers there -- the
     loader's expert ``tensor_idx`` check became ``any(op is MergeModulelist ...)`` (bug 1) and
-    ``_dequantize_one`` gained an ``output_dtype`` the loader passes as the destination dtype (bug 3) --
-    and it added native FP4-unpack + ue8m0 (E8M0) scale decoding that our simpler override does NOT do
-    (installing it on >= 5.10.1 would BREAK ue8m0 checkpoints like DeepSeek-V4). It still derives the
-    block from the scale grid (bug 2), which a partial last block makes wrong: 576 rows under a 5-row
-    grid do not divide at all, and 448 rows under a 4-row grid divide into blocks of 112 instead of 128.
-    So there a weight whose grid is the configured block's ceil grid and that has a partial last block
-    is padded to whole blocks for it and the result cropped back.
+    ``_dequantize_one`` gained an ``output_dtype`` the loader passes as the destination dtype (bug 3).
+    It still derives the block from the scale grid (bug 2), which a partial last block makes wrong: 576
+    rows under a 5-row grid do not divide at all, and 448 rows under a 4-row grid divide into blocks of
+    112 instead of 128. So there a block-FP8 weight whose grid is the configured block's ceil grid and
+    that has a partial last block is padded to whole blocks for it and the result cropped back.
     """
     global _FINEGRAINED_FP8_PATCHED, _FP8_DEQUANT_DTYPE
     if isinstance(target_dtype, str):
@@ -1928,6 +1930,11 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
     from packaging.version import parse
     from transformers.integrations import finegrained_fp8 as _fp8
 
+    fp8_dtypes = {
+        getattr(torch, name)
+        for name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
+        if hasattr(torch, name)
+    }
     if parse(transformers.__version__) >= parse("5.10.1"):
         # Re-importing this module loses its flag, and the wrapper calls the method it replaces:
         # the class keeps a flag of its own, so the wrapper never wraps itself.
@@ -1935,11 +1942,6 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
             _FINEGRAINED_FP8_PATCHED = True
             return
         _stock_dequantize_one = _fp8.Fp8Dequantize._dequantize_one
-        fp8_dtypes = {
-            getattr(torch, name)
-            for name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
-            if hasattr(torch, name)
-        }
 
         def _dequantize_partial_blocks(self, quantized, scales, *args, **kwargs):
             if quantized.dim() < 2 or scales.dim() < 2 or quantized.dtype not in fp8_dtypes:
@@ -1967,8 +1969,22 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
         _FINEGRAINED_FP8_PATCHED = True
         return
 
+    # The release's own dequant, for the weights the override leaves to it. Releases without one
+    # (5.5) dequantize inline and never call the override.
+    stock = vars(_fp8.Fp8Dequantize).get("_dequantize_one")
+
     def _dequantize_one(self, quantized, scales, output_dtype=None):
-        # Block FP8 only: the releases this replaces have no FP4 unpack (5.10.1 added it).
+        # Emit the MODEL compute dtype (bf16), NOT the scale dtype. DeepSeek's weight_scale_inv is F32;
+        # transformers' original out_dtype logic would return F32 weights, which then run against bf16
+        # activations -> "mat1 and mat2 have the same dtype" RuntimeError in the calibration matmuls.
+        # A loader that passes the destination dtype, as transformers' does from 5.10.1, knows it best.
+        out_dtype = output_dtype or _FP8_DEQUANT_DTYPE or torch.bfloat16
+        if quantized.dtype not in fp8_dtypes:
+            # Block FP8 only: read as fp8, packed FP4 (two values a byte) would come out at half its
+            # width and wrong. transformers' own dequant unpacks it.
+            if stock is None:
+                raise ValueError(f"block-FP8 dequant: a {quantized.dtype} weight is not block FP8.")
+            return stock(self, quantized, scales).to(out_dtype)
         if quantized.dim() < 2 or scales.dim() < 2:
             raise ValueError(
                 f"block-FP8 dequant: weight {tuple(quantized.shape)} with scales "
@@ -1977,11 +1993,6 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
         q = quantized.to(torch.float32, copy=True)
         rows, cols = q.shape[-2:]
         scale_rows, scale_cols = scales.shape[-2:]
-        # Emit the MODEL compute dtype (bf16), NOT the scale dtype. DeepSeek's weight_scale_inv is F32;
-        # transformers' original out_dtype logic would return F32 weights, which then run against bf16
-        # activations -> "mat1 and mat2 have the same dtype" RuntimeError in the calibration matmuls.
-        # A loader that passes the destination dtype, as transformers' does from 5.10.1, knows it best.
-        out_dtype = output_dtype or _FP8_DEQUANT_DTYPE or torch.bfloat16
         if scale_rows == 0 or scale_cols == 0 or scales.numel() == 0:
             # Only an empty weight has no scales. A non-empty one with an empty grid was sliced
             # apart from its scales (as 5.9's expert tensor_idx bug did): emitting it unscaled would
