@@ -16,6 +16,7 @@
 """Tests for ``modelopt.torch.utils.distributed``: its pure functions, the distribution plan and a
 model's record of it, the collectives that fail together, and the process group's lifetime."""
 
+import importlib.util
 import os
 import pickle
 import sys
@@ -174,7 +175,14 @@ _HF_EXTRA = r"needs the hf extra \(pip install 'nvidia-modelopt\[hf\]'\)"
     [
         ("transformers", _HF_EXTRA),
         ("huggingface_hub", _HF_EXTRA),
-        ("transformers.conversion_mapping", "halted; None in sys.modules"),
+        pytest.param(
+            "transformers.conversion_mapping",
+            "halted; None in sys.modules",
+            # Without transformers, its own import fails first: the extra is what is missing.
+            marks=pytest.mark.skipif(
+                importlib.util.find_spec("transformers") is None, reason="needs transformers"
+            ),
+        ),
         ("modelopt.torch.utils.plugins.model_load_utils", "halted; None in sys.modules"),
     ],
     ids=["transformers", "huggingface_hub", "transformers-submodule", "another-import-error"],
