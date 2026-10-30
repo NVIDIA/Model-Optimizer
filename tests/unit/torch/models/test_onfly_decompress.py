@@ -118,18 +118,19 @@ def _load(converters, checkpoint):
 # ------------------------------------------------------------- rewriting the per-expert converters
 
 
-def test_only_weight_sources_are_rewritten_and_stored_params_need_their_weight():
-    """Only ``.weight`` sources name a compressed tensor: a converter reading another is refused
-    where it is rewritten, before any tensor is read. A stored param without its weight still
-    reaches the decompress op, which refuses it rather than hand the merge a tensor it would fuse
-    into the wrong slot."""
-    conv = WeightConverter(
-        source_patterns=["mlp.experts.*.gate_proj.weight", "mlp.experts.*.gate_proj.bias"],
-        target_patterns="mlp.experts.gate_proj",
-        operations=[MergeModulelist(dim=0)],
-    )
-    with pytest.raises(NotImplementedError, match=r"reads .*gate_proj\.bias.*weights only"):
-        onfly._compressedify(conv, _ScaledCompressor, None, PACKED)
+def test_only_expert_weight_sources_are_rewritten_and_stored_params_need_their_weight():
+    """Only the experts' ``.weight`` sources name a compressed tensor: a converter reading another --
+    an expert's bias, or a dense weight fused with the experts' -- is refused where it is rewritten,
+    before any tensor is read. A stored param without its weight still reaches the decompress op,
+    which refuses it rather than hand the merge a tensor it would fuse into the wrong slot."""
+    for other in ("mlp.experts.*.gate_proj.bias", "mlp.gate_proj.weight"):
+        conv = WeightConverter(
+            source_patterns=["mlp.experts.*.gate_proj.weight", other],
+            target_patterns="mlp.experts.gate_proj",
+            operations=[MergeModulelist(dim=0)],
+        )
+        with pytest.raises(NotImplementedError, match=r"which is no expert weight"):
+            onfly._compressedify(conv, _ScaledCompressor, None, PACKED)
 
     gate_up, _ = _stock_expert_converters()
     scales_alone = {"model.layers.0.mlp.experts.0.gate_proj.weight_scale": torch.ones(2, 2)}
@@ -640,6 +641,19 @@ def test_a_config_with_nothing_to_decompress_leaves_the_loader_alone(
     ) == hooks
 
 
+@pytest.mark.usefixtures("restore_loader_hooks")
+def test_a_transformers_below_the_floor_is_named_before_compressed_tensors(monkeypatch):
+    """On a transformers the decompression cannot run on, the first error names the release, not
+    the compressed-tensors package a user would install only to hit the release next."""
+    monkeypatch.setitem(sys.modules, "compressed_tensors", None)
+    monkeypatch.setattr(transformers, "__version__", "5.5.4")
+
+    with pytest.raises(RuntimeError, match=r"transformers >= 5\.8"):
+        onfly.install_onfly_decompress(
+            SimpleNamespace(quantization_config={"format": "pack-quantized"})
+        )
+
+
 EXPERTS = [f"model.layers.1.mlp.experts.{e}.gate_proj" for e in range(3)]
 EXPERT = EXPERTS[0]
 ATTENTION = "model.layers.1.self_attn.q_proj"
@@ -687,6 +701,7 @@ STORED_DTYPES = {  # as compressed-tensors stores them; every other tensor is bf
             [f"{EXPERT}.{n}" for n in (*PACKED, "weight_zero_point")],
             "stores 1 tensors under its compressed weights that this compressed-tensors release",
         ),
+        (PACKED, [f"{EXPERT}.{n}" for n in (*PACKED, "bias")], None),
         (
             PACKED,
             [f"{EXPERTS[e]}.{n}" for e in (0, 1) for n in ("weight_packed", "weight_shape")]
@@ -704,6 +719,7 @@ STORED_DTYPES = {  # as compressed-tensors stores them; every other tensor is bf
         "an-fp32-scale",
         "a-scale-alone",
         "a-name-this-release-does-not-know",
+        "an-expert-bias-loads-apart",
         "equal-counts-other-experts",
     ],
 )

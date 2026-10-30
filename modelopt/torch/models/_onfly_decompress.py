@@ -93,8 +93,7 @@ def _read_compression(hf_config):
 
     ``param_names`` are the keys one weight is stored under. The one config group must target the
     experts; several groups are refused. ``None`` for a config with no ``quantization_config``."""
-    # Look the config up first: with none, compressed_tensors need not even be installed. A config
-    # that fails to parse raises pydantic's ValidationError, a ValueError of its own.
+    # With no config, compressed_tensors need not even be installed.
     quantization_config = _find_quantization_config(hf_config)
     if quantization_config is None:
         return None
@@ -116,8 +115,7 @@ def _read_compression(hf_config):
             "no config groups: nothing to decompress."
         )
     if len(groups) > 1:
-        # Only the expert converters are rewritten, so another group's weights would load newly
-        # initialized, and which group holds the experts would be a guess.
+        # Only the expert converters are rewritten: which group holds the experts would be a guess.
         raise NotImplementedError(
             f"install_onfly_decompress: the checkpoint has {len(groups)} compressed-tensors config "
             f"groups ({', '.join(groups)}); on-the-fly decompression handles a single group, "
@@ -181,8 +179,6 @@ def _make_op_class(compressor, scheme, param_names):
                 anchor_list = lists[param_names[0]]
                 present = [pn for pn in param_names if pn in lists]
                 if any(len(lists[pn]) != len(anchor_list) for pn in present):
-                    # Paired by position: an expert short of one would pair every later expert's
-                    # weight with the next one's scale.
                     counts = ", ".join(f"{len(lists[pn])} {pn}" for pn in present)
                     raise ValueError(
                         f"DecompressExperts: {stem} stores {counts}, not one per expert"
@@ -196,8 +192,7 @@ def _make_op_class(compressor, scheme, param_names):
                     if anchor_list[i] is not None
                 ]
             if input_dict:
-                # A stored param without its weight: passed on, the merge would fuse it into the
-                # wrong slot or fail far from here.
+                # A stored param without its weight: the merge would fuse it into the wrong slot.
                 raise ValueError(
                     f"DecompressExperts: unconsumed checkpoint keys {sorted(input_dict)}"
                 )
@@ -234,11 +229,13 @@ def _compressedify(conv, compressor, scheme, param_names):
     by_pname = {pn: [] for pn in param_names}
     for p in conv.source_patterns:
         base = p.removesuffix("$")
-        if not base.endswith(".weight"):
-            # Only a weight is stored compressed: another source would reach the merge as stored.
+        if not base.endswith(".weight") or ".experts." not in base:
+            # Only the experts' weights are stored compressed: rewritten, a dense weight would match
+            # no stored key and load newly initialized; a bias would reach the merge as stored.
             raise NotImplementedError(
                 f"install_onfly_decompress: the per-expert converter for {conv.target_patterns} "
-                f"reads {p!r}, which is no weight; on-the-fly decompression rewrites weights only."
+                f"reads {p!r}, which is no expert weight; on-the-fly decompression rewrites the "
+                "experts' weights only."
             )
         stem = base[: -len(".weight")]
         for pn in param_names:
@@ -251,8 +248,7 @@ def _compressedify(conv, compressor, scheme, param_names):
         operations=[DecompressExperts(), *conv.operations],
     )
     new._reversible = conv
-    # What else transformers sets on a converter when it maps a model -- the sub-model scope it
-    # matches keys under, whether it loads on the CPU -- whichever of them this release has.
+    # What else transformers sets on a converter it maps, whichever of them this release has.
     for attr in ("scope_prefix", "base_model_prefix", "force_cpu"):
         if hasattr(conv, attr):
             setattr(new, attr, getattr(conv, attr))
@@ -339,8 +335,9 @@ def install_onfly_decompress(hf_config):
                 f"install_onfly_decompress: the experts decompress to bfloat16, but this config "
                 f"loads in {dtype}. Load the checkpoint in bfloat16."
             )
-    compression = _read_compression(hf_config)
+    # Before compressed-tensors is needed: a release below the floor is what to fix first.
     require_transformers("5.8", "on-the-fly compressed-tensors decompression")
+    compression = _read_compression(hf_config)
     # Imported once the release is known to have them: transformers 4 has no core_model_loading.
     import transformers.modeling_utils as mu
     from transformers.core_model_loading import WeightConverter
@@ -348,9 +345,8 @@ def install_onfly_decompress(hf_config):
     installed = getattr(mu.get_model_conversion_mapping, "_onfly_compression", None)
     if installed is not None:
         if compression is None:
-            # A config its prepare dropped quantization_config from after installing (Kimi-K3's),
-            # already marked, may be prepared again: nothing new to decompress. An unmarked one would
-            # load its experts through the stock converters, newly initialized.
+            # A marked config its prepare dropped quantization_config from (Kimi-K3's) may be prepared
+            # again; an unmarked one would load its experts newly initialized.
             if not is_marked(hf_config):
                 raise ValueError(
                     "install_onfly_decompress: config has no compressed-tensors "
@@ -395,8 +391,7 @@ def install_onfly_decompress(hf_config):
             else:
                 out.append(c)
         if not rewritten:
-            # The stock converters would read the experts' plain .weight keys, which the checkpoint
-            # does not store.
+            # The stock converters would read .weight keys the checkpoint does not store.
             raise RuntimeError(
                 "install_onfly_decompress: the model's conversion mapping has no per-expert "
                 "converter to rewrite, so its compressed experts would load newly initialized."
@@ -450,10 +445,12 @@ def check_compressed_keys(hf_config, ckpt_dir) -> None:
             "on-the-fly decompression loads the experts alone, every one compressed, so the rest "
             "would load newly initialized. Decompress the checkpoint first."
         )
-    # The names are what the installed compressed-tensors gives the scheme: one a newer release added
-    # would match no rewritten source, and the experts would decompress without it.
+    # The names are what the installed compressed-tensors gives the scheme: a weight's name a newer
+    # release added would match no rewritten source, and the experts would decompress without it. A
+    # bias loads through its own converter.
     unknown = [n for n in sorted(tensor_files) if n.rpartition(".")[0] in compressed]
     unknown = [n for n in unknown if n.rpartition(".")[2] not in stored_as]
+    unknown = [n for n in unknown if n.rpartition(".")[2].startswith("weight")]
     if unknown:
         raise NotImplementedError(
             f"The checkpoint stores {len(unknown)} tensors under its compressed weights that this "
