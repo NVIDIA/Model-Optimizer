@@ -1569,10 +1569,15 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
         monkeypatch.setattr(models_hf, "checkpoint_has_mtp", lambda *a: True)
     plan = DistributionPlan(2, ep_size=2) if expert_parallel else DistributionPlan(2, dense="fsdp")
 
-    with pytest.raises(error, match=match):
+    with pytest.raises(error, match=match) as refused:
         load_pretrained(
             str(tmp_path), change.get("auto_class"), distribution=plan, **change.get("kwargs", {})
         )
+    if "device_map" in change.get("kwargs", {}):
+        # The way to a whole model it names, for the plan handed in: an expert-parallel MoE's is a
+        # plan with an EP degree of 1.
+        whole_moe = "DistributionPlan(2, 1, 'replicate')"
+        assert (whole_moe in str(refused.value)) == expert_parallel, refused.value
     assert loaders == {}
 
 

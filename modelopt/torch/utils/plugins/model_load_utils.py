@@ -529,10 +529,19 @@ def _init_quantized_weights() -> bool:
     return getattr(AutoModelForCausalLM.from_pretrained, "_modelopt_init_quantized_weights", False)
 
 
-def _whole_instead(decided: bool) -> str:
-    """How to have every rank load the model whole: the knob counts only for a decided plan."""
-    plan = f"distribution=DistributionPlan({dist.size()}, dense='replicate')"
-    return f"MODELOPT_FSDP_SIZE=1 or {plan}" if decided else plan
+def _whole_instead(decided: bool, route: str = _FSDP2) -> str:
+    """How to have every rank load the model whole: the knob counts only for a decided plan.
+
+    Instead of the expert-parallel load it takes both knobs, as the plan decision refuses to
+    replicate an expert-parallel MoE unasked.
+    """
+    if route == _EXPERT_PARALLEL:
+        plan = f"distribution=DistributionPlan({dist.size()}, 1, 'replicate')"
+        knobs = "MODELOPT_EP_DEGREE=1 with MODELOPT_FSDP_SIZE=1"
+    else:
+        plan = f"distribution=DistributionPlan({dist.size()}, dense='replicate')"
+        knobs = "MODELOPT_FSDP_SIZE=1"
+    return f"{knobs} or {plan}" if decided else plan
 
 
 def _refuse_sharded_load_options(
@@ -555,7 +564,7 @@ def _refuse_sharded_load_options(
         raise NotImplementedError(
             f"The {route} load builds the model without from_pretrained, so it would skip "
             "init_quantized_weights' quantization; load the model whole on every rank: "
-            f"{_whole_instead(decided)}."
+            f"{_whole_instead(decided, route)}."
         )
     if auto_class not in (None, AutoModelForCausalLM):
         name = getattr(auto_class, "__name__", repr(auto_class))
@@ -575,7 +584,7 @@ def _refuse_sharded_load_options(
         raise TypeError(
             f"{unknown} do not apply to the {route} load, which places the model itself; it "
             f"takes {sorted(_SHARDED_LOAD_OPTIONS[route])}. To place the model yourself, have "
-            f"every rank load it whole: {_whole_instead(decided)}."
+            f"every rank load it whole: {_whole_instead(decided, route)}."
         )
 
 
