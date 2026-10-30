@@ -1683,7 +1683,7 @@ def test_a_load_prepares_its_config_once(
         hf_config.base_model_ep_plan = get_spec("deepseek_v3").ep_spec.base_model_ep_plan
         return hf_config
 
-    monkeypatch.setattr(moe, "apply_distributed_support", apply_distributed_support)
+    monkeypatch.setattr(model_load_utils, "apply_distributed_support", apply_distributed_support)
     kwargs = {"distribution": DistributionPlan(4, ep_size=4)} if planned else {}
     if passed_as:
         kwargs[passed_as] = config
@@ -1939,7 +1939,7 @@ def test_a_placement_warning_raised_on_one_rank_fails_every_rank(cpu_dist_worker
 
 
 def _one_rank_cannot_apply_the_spec_job(rank, size, ckpt, step):
-    apply = moe.apply_distributed_support
+    apply = model_load_utils.apply_distributed_support
 
     def apply_on_rank0_only(*args, **kwargs):
         if rank == 1:
@@ -1949,7 +1949,7 @@ def _one_rank_cannot_apply_the_spec_job(rank, size, ckpt, step):
     with ExitStack() as stack:
         stack.enter_context(bounded_collectives())
         stack.enter_context(
-            mock.patch.object(moe, "apply_distributed_support", apply_on_rank0_only)
+            mock.patch.object(model_load_utils, "apply_distributed_support", apply_on_rank0_only)
         )
         if step == "load":
             # Every rank has a GPU of its own, without which the load refuses it first.
