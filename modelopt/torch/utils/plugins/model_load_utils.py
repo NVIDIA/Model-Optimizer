@@ -474,6 +474,11 @@ _SHARDED_LOAD_OPTIONS = {
 _ASKS_NOTHING = {"cpu_offload": (False, None), "mp_policy": (None,), "broadcast_chunk_size": (8,)}
 
 
+# The options only the expert-parallel load takes, which a whole-model load would hand on to
+# from_pretrained.
+_EP_ONLY_LOAD_OPTIONS = _SHARDED_LOAD_OPTIONS[_EXPERT_PARALLEL] - _SHARDED_LOAD_OPTIONS[_FSDP2]
+
+
 def _route(plan: DistributionPlan) -> str | None:
     """The sharded load ``plan`` takes, or ``None`` when every rank loads the whole model."""
     if plan.world_size != dist.size():
@@ -882,6 +887,12 @@ def load_pretrained(
             raise TypeError(
                 f"{sharded} only apply to the FSDP2 load, but {plan!r} gives every rank the whole "
                 "model; pass a plan with dense='fsdp' to shard it."
+            )
+        # As do the options only the expert-parallel load takes.
+        if route is None and (sharded := sorted(set(kwargs) & _EP_ONLY_LOAD_OPTIONS)):
+            raise TypeError(
+                f"{sharded} only apply to the expert-parallel load, but {plan!r} gives every rank "
+                "the whole model; pass a plan with ep_size > 1 to shard an MoE's routed experts."
             )
         measured = decided and route == _FSDP2 and _dense_from_env(plan.world_size) == "auto"
         if route is not None and config is not None:
