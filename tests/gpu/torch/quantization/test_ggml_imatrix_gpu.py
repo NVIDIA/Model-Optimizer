@@ -15,6 +15,7 @@
 
 """GPU tests for imatrix calibration of the GGML formats."""
 
+import dataclasses
 import time
 
 import pytest
@@ -22,6 +23,7 @@ import torch
 from torch import nn
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.imatrix import GGMLImatrixEncoder
 
 IQ2_XXS_IMATRIX = {
@@ -86,3 +88,26 @@ def test_imatrix_encodes_each_gpus_weights_at_once(need_2_gpus, monkeypatch, inf
         for gpu_b, b_start, b_end in spans
         if gpu_a != gpu_b
     )
+
+
+def test_imatrix_second_moments_of_bf16_inputs_on_gpu(monkeypatch):
+    """On a GPU, bf16 inputs take the fused float32 reduction, which gives the float64 statistic."""
+    calls = []
+    iq2_xxs = GGML_FORMAT_REGISTRY["iq2_xxs"]
+
+    def recording_quantize(weight, **kwargs):
+        calls.append(kwargs.get("importance"))
+        return iq2_xxs.quantize(weight, **kwargs)
+
+    monkeypatch.setitem(
+        GGML_FORMAT_REGISTRY, "iq2_xxs", dataclasses.replace(iq2_xxs, quantize=recording_quantize)
+    )
+    torch.manual_seed(0)
+    scale = torch.randn(512).mul(1.5).exp()  # columns of very different scale
+    inputs = (torch.randn(2500, 512) * scale).to("cuda", torch.bfloat16)
+    model = nn.Linear(512, 8, bias=False, device="cuda", dtype=torch.bfloat16)
+    mtq.quantize(model, IQ2_XXS_IMATRIX, forward_loop=lambda m: m(inputs))
+
+    second_moments = inputs.double().square().mean(dim=0)
+    expected = second_moments.clamp_min(1e-4 * second_moments.mean()).sqrt().float()
+    torch.testing.assert_close(calls[-1], expected, rtol=1e-5, atol=0)

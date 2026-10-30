@@ -2659,6 +2659,11 @@ def gptq(
     print_rank_0(f"GPTQ time: {time.time() - total_start:.2f}s")
 
 
+# Calibration rows squared at a time, bounding imatrix's float32 temporaries to this slice of an
+# input rather than twice the whole of it.
+_IMATRIX_ROW_CHUNK = 1024
+
+
 @torch.no_grad()
 def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None):
     """Encode weights once with their inputs' per-column second moments, llama.cpp's imatrix.
@@ -2726,9 +2731,13 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
         x = inputs.detach().reshape(-1, inputs.shape[-1])
         if x.shape[0] == 0:
             return
-        # One reduction that squares and sums in float32 without copying the inputs to float32:
-        # 3-6x faster than squaring float32 slices of them, and as precise.
-        sum_sq = torch.linalg.vector_norm(x, 2, dim=0, dtype=torch.float32).square()
+        if x.is_cuda and x.dtype in (torch.bfloat16, torch.float16, torch.float32):
+            # On a GPU this squares and sums in float32 inside one kernel, without a float32 copy.
+            sum_sq = torch.linalg.vector_norm(x, 2, dim=0, dtype=torch.float32).square()
+        else:
+            # On a CPU that reduction copies the whole input to float32 first, and it rejects
+            # float64, so square float32 slices of the input instead.
+            sum_sq = sum(rows.float().square().sum(dim=0) for rows in x.split(_IMATRIX_ROW_CHUNK))
         entry[0] = sum_sq if entry[0] is None else entry[0] + sum_sq
         entry[1] += x.shape[0]
 
