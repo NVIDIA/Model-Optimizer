@@ -166,13 +166,17 @@ def test_fsdp2_wrap_keeps_its_old_path(monkeypatch):
     assert calls == [(model, {"shard_root": False, "mp_policy": None, "cpu_offload": True})]
 
 
+_HF_EXTRA = r"needs the hf extra \(pip install 'nvidia-modelopt\[hf\]'\)"
+
+
 @pytest.mark.parametrize(
     ("missing", "message"),
     [
-        ("transformers", r"needs the hf extra \(pip install 'nvidia-modelopt\[hf\]'\)"),
+        ("transformers", _HF_EXTRA),
+        ("huggingface_hub", _HF_EXTRA),
         ("modelopt.torch.utils.plugins.model_load_utils", "halted; None in sys.modules"),
     ],
-    ids=["hf-extra", "another-import-error"],
+    ids=["transformers", "huggingface_hub", "another-import-error"],
 )
 def test_fsdp2_wrap_names_the_extra_its_old_path_needs(monkeypatch, missing, message):
     """Without the hf extra, the old path says what it needs rather than which module is missing;

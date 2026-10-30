@@ -721,7 +721,8 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     try:
         from modelopt.torch.utils.plugins.model_load_utils import fsdp2_wrap as wrap
     except ModuleNotFoundError as error:
-        if (error.name or "").split(".")[0] not in ("transformers", "accelerate"):
+        missing = (error.name or "").split(".")[0]
+        if missing not in ("transformers", "accelerate", "huggingface_hub"):
             raise
         raise ImportError(
             "fsdp2_wrap moved to modelopt.torch.utils.plugins.model_load_utils, which needs the hf "
