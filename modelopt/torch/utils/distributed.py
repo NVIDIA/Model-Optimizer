@@ -356,7 +356,7 @@ def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> Non
 
     Code handed a submodule, such as a VLM's language model, then reads the same plan as code handed
     the whole model; a module added afterwards records none. ``load_pretrained`` records the plan it
-    loads by once the model is built; code that distributes a model itself records it here before
+    loaded by, once the model is built; code that distributes a model itself records it here before
     calibrating or exporting the model. The plan says how the model is placed over the run; the
     :class:`ParallelState` a quantized module holds names the process groups its collectives run on.
 

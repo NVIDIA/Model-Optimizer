@@ -1160,6 +1160,37 @@ def test_a_load_refused_on_one_rank_fails_every_rank(
     )
 
 
+class _LoadsWholeExceptOnRank1:
+    """A model class whose whole-model load fails on rank 1 alone, as an out-of-memory GPU would."""
+
+    @classmethod
+    def from_pretrained(cls, ckpt_path, **kwargs):
+        if dist.rank() == 1:
+            raise OSError("rank 1 could not load the model")
+        return torch.nn.Linear(1, 1)
+
+
+def _one_rank_fails_to_load_job(rank, size, ckpt):
+    refused = None
+    with (
+        bounded_collectives(),
+        mock.patch.object(model_load_utils, "ensure_local_checkpoint", _fetched_in_step),
+    ):
+        try:  # not pytest.raises: its failure would end the pooled worker instead of the job
+            load_pretrained(ckpt, _LoadsWholeExceptOnRank1, distribution=DistributionPlan(2))
+        except Exception as error:
+            refused = str(error)
+    # Rank 1's failure on both ranks, rather than rank 0 going on to the next collective alone.
+    assert refused is not None and "could not load the model" in refused, (rank, refused)
+
+
+def test_a_whole_load_that_fails_on_one_rank_fails_every_rank(cpu_dist_workers, tmp_path):
+    """A whole-model load runs no collective, so a rank failing in it alone would leave the others
+    to wait for it in the next one, calibration's or the export's."""
+    LlamaConfig(**_TINY).save_pretrained(tmp_path)
+    cpu_dist_workers.run(_one_rank_fails_to_load_job, ckpt=str(tmp_path))
+
+
 @pytest.mark.parametrize(
     ("change", "error", "match"),
     [
