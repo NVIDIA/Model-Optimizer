@@ -723,7 +723,8 @@ def load_pretrained(
     * ``ep_size > 1``: :func:`load_and_prepare_ep` shards an MoE's routed experts over the process
       group as they load and replicates the dense part, so a plan with ``dense="fsdp"`` as well is
       refused. It builds and places the model itself, so it takes its own options but no
-      ``auto_class``, placement or ``dtype``, and refuses a quantized checkpoint.
+      ``auto_class``, placement or ``dtype``, and refuses a quantized checkpoint. Unlike the other
+      loads, it freezes the model unless ``freeze=False``.
     * ``dense="fsdp"``: :func:`parallel_load_and_prepare_fsdp2` shards a causal LM, or a text-only
       VLM it supports, over the process group (one process needs ``torchrun --nproc_per_node=1``).
       It builds and places the model itself, so it takes its own options but no ``auto_class``,
