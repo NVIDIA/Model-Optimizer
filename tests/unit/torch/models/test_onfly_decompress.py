@@ -130,7 +130,7 @@ def test_only_expert_weight_sources_are_rewritten_and_stored_params_need_their_w
             target_patterns="mlp.experts.gate_proj",
             operations=[MergeModulelist(dim=0)],
         )
-        with pytest.raises(NotImplementedError, match=r"which is no expert weight"):
+        with pytest.raises(NotImplementedError, match=r"alongside the experts. weights"):
             onfly._compressedify(conv, _ScaledCompressor, None, PACKED)
 
     gate_up, _ = _stock_expert_converters()
