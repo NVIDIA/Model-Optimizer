@@ -897,7 +897,13 @@ def auto_class():
 
 
 @pytest.fixture
-def process_group(monkeypatch):
+def a_gpu(monkeypatch):
+    """This rank has a GPU, which the FSDP2 load shards onto; the stand-in loaders never use it."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+
+@pytest.fixture
+def process_group(monkeypatch, a_gpu):
     """Rank 1 of a 2-rank process group, as the FSDP2 load reads it."""
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(dist, "rank", lambda group=None: 1)
@@ -1117,15 +1123,18 @@ def _fetched_in_step(ckpt_path, **hub_options):
 
 
 def _loaded_in_step(*args, **kwargs):
-    """The FSDP2 load, as the collectives it runs."""
+    """The FSDP2 load, as the collectives it runs, which a rank without a GPU fails before."""
+    if not torch.cuda.is_available():
+        raise RuntimeError("no GPU to shard onto")
     torch.distributed.barrier()
     return _Loaded()
 
 
-def _one_rank_refused_job(rank, size, ckpt, refused_on_1, match):
+def _one_rank_refused_job(rank, size, ckpt, refused_on_1, gpu_on_1, match):
     refused = None
     with (
         bounded_collectives(),
+        mock.patch.object(torch.cuda, "is_available", return_value=rank == 0 or gpu_on_1),
         mock.patch.object(model_load_utils, "ensure_local_checkpoint", _fetched_in_step),
         mock.patch.object(model_load_utils, "parallel_load_and_prepare_fsdp2", _loaded_in_step),
     ):
@@ -1143,26 +1152,33 @@ def _one_rank_refused_job(rank, size, ckpt, refused_on_1, match):
 
 
 @pytest.mark.parametrize(
-    ("refused_on_1", "match"),
+    ("refused_on_1", "gpu_on_1", "match"),
     [
-        ({"config": LlamaConfig(**_TINY), "hf_config": LlamaConfig(**_TINY)}, "both name"),
-        ({"dtype": torch.float32}, "keeps their dtype"),
+        ({"config": LlamaConfig(**_TINY), "hf_config": LlamaConfig(**_TINY)}, True, "both name"),
+        ({"dtype": torch.float32}, True, "keeps their dtype"),
         (
             {"hf_config": LlamaConfig(**_TINY, quantization_config={"quant_method": "fp8"})},
+            True,
             "cannot dequantize",
         ),
+        ({}, False, "this rank has none"),
     ],
-    ids=["two-configs", "dtype", "quantized-config"],
+    ids=["two-configs", "dtype", "quantized-config", "no-gpu"],
 )
 def test_a_load_refused_on_one_rank_fails_every_rank(
-    cpu_dist_workers, tmp_path, refused_on_1, match
+    cpu_dist_workers, tmp_path, refused_on_1, gpu_on_1, match
 ):
-    """Rank 1 alone is refused, by its arguments before the checkpoint is fetched or by the config
-    it was handed before the FSDP2 load: every rank raises the refusal, rather than leave rank 0
-    waiting in the fetch's or the load's collectives, which stand-ins on a bounded group run here."""
+    """Rank 1 alone is refused, by its arguments before the checkpoint is fetched, or by the config
+    it was handed or its lack of a GPU before the FSDP2 load: every rank raises the refusal, rather
+    than leave rank 0 waiting in the fetch's or the load's collectives, which stand-ins on a bounded
+    group run here."""
     LlamaConfig(**_TINY).save_pretrained(tmp_path)
     cpu_dist_workers.run(
-        _one_rank_refused_job, ckpt=str(tmp_path), refused_on_1=refused_on_1, match=match
+        _one_rank_refused_job,
+        ckpt=str(tmp_path),
+        refused_on_1=refused_on_1,
+        gpu_on_1=gpu_on_1,
+        match=match,
     )
 
 
@@ -1382,7 +1398,7 @@ def test_a_handed_plan_is_checked_before_the_checkpoint_is_fetched(
 
 @pytest.mark.parametrize("quantized", [False, True])
 def test_a_single_process_fsdp2_load_sets_up_its_group_of_one(
-    monkeypatch, serve, loaders, tmp_path, quantized
+    monkeypatch, serve, loaders, a_gpu, tmp_path, quantized
 ):
     """FSDP2 on one rank still shards through a process group, of one, which the load sets up once
     nothing can refuse it: a refused load leaves no group behind."""

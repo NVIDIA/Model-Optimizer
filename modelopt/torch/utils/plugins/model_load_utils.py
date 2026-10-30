@@ -564,6 +564,14 @@ def _sharded_load_kwargs(route, ckpt_path, auto_class, model_type, kwargs, hub_o
             f"The {route} load shards through a process group, even on one rank, which a process "
             "started without a launcher cannot set up; launch it with `torchrun --nproc_per_node=1`."
         )
+    if not torch.cuda.is_available():
+        # Refused here, with the other ranks, rather than inside the load, where they would wait
+        # for this rank in its broadcasts.
+        raise RuntimeError(
+            f"The {route} load shards onto each rank's GPU, and this rank has none. To load it "
+            "whole on every rank, set MODELOPT_FSDP_SIZE=1 or pass "
+            f"distribution=DistributionPlan({dist.size()}, dense='replicate')."
+        )
     return {"trust_remote_code": trust_remote_code, "hf_config": hf_config, **kwargs}
 
 
