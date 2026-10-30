@@ -95,6 +95,15 @@ def _cuda(gpu, bound=True, count=1, uuid="GPU-0"):
 
 
 @pytest.fixture
+def gloo_world_of_one(gloo_world_of_one):
+    """The one-rank world, with no GPU whatever the host has (:func:`_cuda`)."""
+    with ExitStack() as stack:
+        for patch in _cuda(False):
+            stack.enter_context(patch)
+        yield gloo_world_of_one
+
+
+@pytest.fixture
 def ep_world_of_two(monkeypatch, gloo_world_of_one):
     """A two-rank expert-parallel world as far as the loader's checks see, and the checkpoint paths
     it resolves; nothing else is set up."""
