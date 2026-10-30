@@ -469,8 +469,9 @@ _SHARDED_LOAD_OPTIONS = {
     ),
     _FSDP2: _FSDP2_ONLY | {"trust_remote_code", "attn_implementation", "hf_config"},
 }
-# The FSDP2-only values that ask nothing of a whole load: the FSDP2 load's defaults, and None where
-# that leaves the option unset (a None broadcast_chunk_size asks for all of a source's layers).
+# The FSDP2-only values that ask nothing of any load but the FSDP2 one: its defaults, and None where
+# that leaves the option unset (a None broadcast_chunk_size asks for all of a source's layers). Any
+# other option asks nothing at None, from_pretrained's own default (device_map=None, say).
 _ASKS_NOTHING = {"cpu_offload": (False, None), "mp_policy": (None,), "broadcast_chunk_size": (8,)}
 
 
@@ -556,8 +557,12 @@ def _refuse_sharded_load_options(
 
     By rank 0's GPU memory for the FSDP2 load, by the model's experts for the expert-parallel one.
     """
-    # An option passed as None, from_pretrained's own default (device_map=None, say), asks nothing.
-    passed = {name for name, value in kwargs.items() if value is not None}
+    # The options that ask anything (_ASKS_NOTHING).
+    passed = {
+        name
+        for name, value in kwargs.items()
+        if (value not in _ASKS_NOTHING[name] if name in _ASKS_NOTHING else value is not None)
+    }
     unknown = sorted(passed - _SHARDED_LOAD_OPTIONS[route] - {"dtype", "torch_dtype"})
     # torch_dtype is from_pretrained's older name for dtype, and None means "auto" to it.
     dtypes = [name for name in ("dtype", "torch_dtype") if kwargs.get(name) not in (None, "auto")]
@@ -597,6 +602,13 @@ def _refuse_sharded_load_options(
         raise TypeError(
             f"The {route} load reads the checkpoint's tensors as stored and keeps their dtype, so "
             f"{name}={kwargs[name]!r} does not apply to it{computes}."
+        )
+    other = _FSDP2 if route == _EXPERT_PARALLEL else _EXPERT_PARALLEL
+    if elsewhere := sorted(passed & (_SHARDED_LOAD_OPTIONS[other] - _SHARDED_LOAD_OPTIONS[route])):
+        # Not placement: a whole model on every rank, the way out below, would refuse them too.
+        raise TypeError(
+            f"{elsewhere} only apply to the {other} load, and the {route} load takes "
+            f"{sorted(_SHARDED_LOAD_OPTIONS[route])}."
         )
     if unknown:
         raise TypeError(

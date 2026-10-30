@@ -1652,6 +1652,20 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
             TypeError,
             r"\['freeze'\] only apply to the expert-parallel load",
         ),
+        (
+            DistributionPlan(2, dense="fsdp"),
+            "causal-lm",
+            {"require_lm_head": False},
+            TypeError,
+            r"\['require_lm_head'\] only apply to the expert-parallel load, and the FSDP2 load",
+        ),
+        (
+            DistributionPlan(2, ep_size=2),
+            "causal-lm",
+            {"broadcast_chunk_size": None},
+            TypeError,
+            r"\['broadcast_chunk_size'\] only apply to the FSDP2 load, and the expert-parallel",
+        ),
     ],
     ids=[
         "another-world",
@@ -1662,6 +1676,8 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
         "hf-config-on-a-whole-load",
         "fsdp2-option-on-a-whole-load",
         "ep-option-on-a-whole-load",
+        "ep-option-on-the-fsdp2-load",
+        "fsdp2-chunking-as-none-on-the-ep-load",
     ],
 )
 def test_a_load_refuses_what_it_cannot_load(
