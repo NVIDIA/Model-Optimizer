@@ -753,8 +753,10 @@ def load_pretrained(
         _, ckpt_path = ensure_local_checkpoint(ckpt_path, **revision, **hub_options)
         if config is not None and not isinstance(config, PretrainedConfig):
             # Read as the load reads it, so the plan and the loading hook follow the config the
-            # model is built from, which need not be in the checkpoint's directory.
-            config = AutoConfig.from_pretrained(
+            # model is built from, which need not be in the checkpoint's directory. A model class
+            # of the caller's own reads it through its own config class, as from_pretrained does.
+            reader = getattr(auto_class, "config_class", None) or AutoConfig
+            config = reader.from_pretrained(
                 config, trust_remote_code=kwargs.get("trust_remote_code", False), **hub_options
             )
     subfolder = kwargs.pop("subfolder", None)
