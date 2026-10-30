@@ -2050,10 +2050,11 @@ def _declared_ep_plan(ckpt_dir: str, hf_config, ep_cfg):
     ``ep_cfg`` is ``hf_config`` or one of its nested configs, and the plan is read from the same
     place in the file. Read from the file, not the config: a plan the config carries besides is
     ModelOpt's -- the one a model spec attaches
-    (:func:`~modelopt.torch.utils.moe.apply_distributed_support`) -- or the config class's, and an
-    export must write out neither. A file this rank cannot read as a JSON object declares none, with
-    a warning on this rank, which may be the only one that cannot: what the checkpoint declared is
-    lost to its model's config then.
+    (:func:`~modelopt.torch.utils.moe.apply_distributed_support`) -- the config class's, or one set
+    on a config passed to the load, and the loaded model keeps none of them: an export writes out
+    what the checkpoint declares, if anything. A file this rank cannot read as a JSON object
+    declares none, with a warning on this rank, which may be the only one that cannot: what the
+    checkpoint declared is lost to its model's config then.
     """
     path = os.path.join(ckpt_dir, "config.json")
     keeps_none = (
