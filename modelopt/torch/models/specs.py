@@ -213,27 +213,29 @@ class EPSpec(SpecSection):
     fields above have been applied, so a ``prepare`` that returns another config than the one it
     was handed must carry over the ``base_model_ep_plan`` they attached.
 
-    It runs only once a run's plan is decided expert-parallel, on every rank, so a load of the whole
-    model, on every rank or FSDP2-sharded, never meets what it patches. It may run more than once in
-    a process."""
+    It runs only once a plan is decided expert-parallel: on every rank, in the plan decision's
+    collective "model spec prepared" step, on a copy of the config as read, so a refusal there
+    raises on every rank; or, for an expert-parallel plan handed in, in the load, after the load's
+    own checks, the GPU refusal included. It may patch the model's code, which is why nothing else
+    runs it. It may run more than once in a process."""
 
     make_importable: "Callable[[], Any] | None" = None
     """For a checkpoint carrying its own modeling code: what that code needs to import on the
     installed transformers, so the plan decision can build the model before ``prepare`` runs.
 
-    Called with no arguments, on every rank, before the plan is decided, whatever plan comes out. So
-    it may only make the code importable (shim names transformers dropped, stage the modules it
-    imports): it patches no class, config, converter or loader hook. It may run more than once."""
+    Called with no arguments, on every rank, before the plan is decided, for every plan that could
+    still be expert-parallel, whatever plan comes out. So it must be idempotent, and may only import
+    or stage the code (shim names transformers dropped, stage the modules it imports): it patches no
+    class, config, converter or loader hook."""
 
     prepared_ep_plan: dict[str, str] | None = None
     """The ``base_model_ep_plan`` ``prepare`` attaches, for a model whose plan only ``prepare``
     supplies.
 
-    Stated, not applied: ``prepare`` still attaches it. The plan decision runs before ``prepare``,
-    which only an expert-parallel plan runs, and a run that rules expert parallelism out must still
-    tell an expert-parallel MoE it would hold whole on every rank from a dense model. Both find the
-    routed experts through this plan, in the model as the checkpoint's own code builds it:
-    ``prepare`` replaces the experts in place, so the plan names their containers there too."""
+    Deciding the plan attaches it with no ``prepare`` run, so the decision counts the routed experts
+    in the model the checkpoint's own code builds. A run that rules expert parallelism out finds
+    them the same way, to tell an expert-parallel MoE it would hold whole on every rank from a dense
+    model. ``prepare`` replaces the experts in place, so the plan names their containers there too."""
 
     unsupported: str | None = None
     """Why this model cannot be quantized expert-parallel yet, when its config would route it there.
