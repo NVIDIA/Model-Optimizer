@@ -1666,13 +1666,7 @@ def register_fused_experts_on_the_fly(model):
         visited_types.add(mod_type)
 
         wrapper = _fused_experts_wrapper(module)
-        if wrapper is not None and (
-            getattr(module, "is_transposed", False)
-            # Stored `(num_experts, out_dim, in_dim)`, the first projection takes the dim down_proj
-            # puts out. A gated container's first projection is `2 * intermediate`, so its shapes
-            # give a transposed layout away whether it says so or not.
-            or getattr(module, wrapper._first_proj_attr).shape[-1] != module.down_proj.shape[1]
-        ):
+        if wrapper is not None and _transposed_experts([module]):
             # `_fused_experts_wrapper` matches on parameter SHAPE only, so it also claims a
             # transposed `(num_experts, in_dim, out_dim)` container. The fused-experts export
             # (export/moe_utils.py) then splits gate/up by slicing dim 1 at `intermediate_dim`, the
@@ -1692,6 +1686,46 @@ def register_fused_experts_on_the_fly(model):
                 f"registering with {wrapper.__name__}.\033[0m"
             )
             QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(wrapper)
+
+
+def _transposed_experts(modules) -> list[str]:
+    """Names of the expert classes in ``modules`` stored ``(num_experts, in_dim, out_dim)``.
+
+    A container may say so (``is_transposed``), and a gated fused-experts one shows it either way:
+    stored ``(num_experts, out_dim, in_dim)``, its first projection takes the dim ``down_proj`` puts
+    out, which stored transposed it never does.
+    """
+    return sorted(
+        {
+            type(module).__name__
+            for module in modules
+            if getattr(module, "is_transposed", False)
+            or (
+                (wrapper := _fused_experts_wrapper(module)) is not None
+                and getattr(module, wrapper._first_proj_attr).shape[-1] != module.down_proj.shape[1]
+            )
+        }
+    )
+
+
+def _eager_only_experts(modules) -> list[str]:
+    """Names of the expert classes in ``modules`` ModelOpt quantizes on the eager forward only.
+
+    A class with its own quantized wrapper -- GPT-OSS's quantizes down_proj's input by intercepting
+    the eager forward's bmm/matmul -- only works on the eager forward, and so does a fused-experts
+    wrapper that says so (FP8's). The registry lookup caches the dynamic class it generates, as
+    quantizing the module would. Those wrappers register when their module is imported;
+    register_fused_experts_on_the_fly, which may run after this, registers only the generic
+    wrapper, which is not eager-only.
+    """
+    return sorted(
+        {
+            type(module).__name__
+            for module in modules
+            if (wrapper := QuantModuleRegistry.get(type(module))) is not None
+            and (not issubclass(wrapper, _QuantFusedExperts) or wrapper._eager_only)
+        }
+    )
 
 
 def normalize_experts_impl_on_the_fly(model):
@@ -1733,19 +1767,8 @@ def normalize_experts_impl_on_the_fly(model):
         ("grouped_mm",) if _HAS_GROUPED_LINEAR else ()
     )
     fallback_impl = "grouped_mm" if _HAS_GROUPED_LINEAR else "eager"
-    # A class with its own quantized wrapper -- GPT-OSS's quantizes down_proj's input by intercepting
-    # the eager forward's bmm/matmul -- only works on the eager forward, and so does a fused-experts
-    # wrapper that says so (FP8's), so keep main's forced eager for such a model. Those register
-    # when their module is imported; register_fused_experts_on_the_fly, which may run after this,
-    # registers only the generic wrapper, which is not eager-only.
-    eager_only = sorted(
-        {
-            type(module).__name__
-            for module in fused_experts
-            if (wrapper := QuantModuleRegistry.get(type(module))) is not None
-            and (not issubclass(wrapper, _QuantFusedExperts) or wrapper._eager_only)
-        }
-    )
+    # Experts that quantize on the eager forward only keep main's forced eager.
+    eager_only = _eager_only_experts(fused_experts)
 
     def _configs(cfg):
         if cfg is not None:
