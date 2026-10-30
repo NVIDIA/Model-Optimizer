@@ -33,6 +33,7 @@ from torch import nn
 from torch.utils.data import (
     BatchSampler,
     DataLoader,
+    DistributedSampler,
     IterableDataset,
     RandomSampler,
     SequentialSampler,
@@ -163,6 +164,9 @@ def test_a_stream_loaded_with_workers_is_refused():
         {"batch_sampler": BatchSampler(SubsetRandomSampler(range(4)), 2, drop_last=False)},
         {"sampler": RandomSampler(range(8), num_samples=4), "batch_size": 2},
         {"sampler": RandomSampler(range(8), replacement=True), "batch_size": 2},
+        {"sampler": SequentialSampler(range(4)), "batch_size": 2},
+        {"sampler": RandomSampler(range(4)), "batch_size": 2},
+        {"sampler": DistributedSampler(range(4), num_replicas=2, rank=0), "batch_size": 2},
     ],
     ids=[
         "subset-sampler",
@@ -171,6 +175,9 @@ def test_a_stream_loaded_with_workers_is_refused():
         "subset-in-a-plain-batch-sampler",
         "random-sampler-drawing-fewer",
         "random-sampler-with-replacement",
+        "sequential-sampler-over-fewer",
+        "random-sampler-over-fewer",
+        "distributed-sampler-over-fewer",
     ],
 )
 def test_a_loader_that_picks_its_own_samples_is_refused(picker):

@@ -736,9 +736,10 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
     counts equal (else a rank exits calibration early and hangs the others on the per-step collectives),
     at the cost of the sampler repeating up to ``world_size - 1`` samples to pad the even split. It
     replaces the loader's sampler, so a shuffling one becomes the rank's unshuffled share, and one that
-    picks samples itself (a subset, a random sampler drawing its own number of samples or with
-    replacement, or a batch sampler other than a plain ``BatchSampler``) is refused rather than
-    silently widened. For streaming ``IterableDataset`` datasets (which have no ``len()``
+    picks samples itself (a subset, a sampler over another source than the loader's dataset, a
+    random sampler drawing its own number of samples or with replacement, or a batch sampler other
+    than a plain ``BatchSampler``) is refused rather than silently widened. For streaming
+    ``IterableDataset`` datasets (which have no ``len()``
     and so can't use a sampler) each rank strides its own copy of the stream via
     :class:`_StridedIterableShard`. That stream must yield the same samples in the same order on
     every rank, or the shards overlap and the ranks' step counts can differ, which hangs the
@@ -761,12 +762,19 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
             picker = batching.sampler
         else:
             picker = loader.sampler if batching is None else batching
-        # A RandomSampler drawing its own number of samples, or with replacement, picks which and how
-        # many it reads, as a subset does; one that shuffles the whole dataset does not.
-        narrowing = isinstance(picker, RandomSampler) and (
-            picker.replacement or picker.num_samples != len(picker.data_source)
+        known = type(picker) in (SequentialSampler, RandomSampler, DistributedSampler)
+        # A sampler over another source than the loader's dataset, or a RandomSampler drawing its
+        # own number of samples or with replacement, picks which and how many it reads, as a subset
+        # does; one that orders or shuffles the whole dataset does not.
+        source = getattr(picker, "data_source", getattr(picker, "dataset", None))
+        narrowing = known and (
+            len(source) != len(loader.dataset)
+            or (
+                isinstance(picker, RandomSampler)
+                and (picker.replacement or picker.num_samples != len(loader.dataset))
+            )
         )
-        if type(picker) not in (SequentialSampler, RandomSampler, DistributedSampler) or narrowing:
+        if not known or narrowing:
             raise ValueError(
                 f"shard_dataloader: the loader's {type(picker).__name__} picks which samples it "
                 "reads, and the rank's DistributedSampler would replace it; pass a loader over "
