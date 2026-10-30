@@ -1750,12 +1750,19 @@ def _decide_distribution(
         ):
             # Below the release its expert parallelism needs: an EP degree above 1 is refused too.
             # Where no EP degree could shard the experts anyway, the arms below say so instead, as
-            # upgrading would not change it.
+            # upgrading would not change it. An EP degree the caller set to 1 stays 1 after an
+            # upgrade, so it has to be raised as well.
+            degree = (
+                f" and set {knob} above 1, dividing both its {num_experts} experts and the world "
+                "size,"
+                if ep_asked
+                else ""
+            )
             raise RuntimeError(
                 f"{hf_config.model_type} can be expert-parallel, but the plan resolved to ep_size=1 "
                 f"at world_size={world_size}, so every rank would hold the whole MoE, and this "
                 "transformers cannot shard its experts. Upgrade transformers to "
-                f"{_ep_floor(hf_config.model_type)} or later to shard them, or {others}"
+                f"{_ep_floor(hf_config.model_type)} or later{degree} to shard them, or {others}"
             )
         # Name a way to shard the experts only where one exists: a count the config spells none of
         # the ways ModelOpt reads leaves no EP degree to name, as does one sharing no factor above 1
