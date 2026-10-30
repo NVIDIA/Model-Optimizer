@@ -1727,8 +1727,9 @@ def _decide_distribution(
         # The ways out besides sharding the experts, which a spec refusing EP rules out.
         others = (
             "shard the whole model with FSDP2 (--use_fsdp2 in examples/hf_ptq/hf_ptq.py, or "
-            f"{fsdp}) if the checkpoint is an unquantized causal LM, load it in a single process, "
-            f"or replicate it on every rank outright: {knob}=1 with {replicate}, or "
+            f"{fsdp}) if the FSDP2 load supports the checkpoint (an unquantized causal LM with no "
+            "MTP head it cannot build, such as Nemotron-H's), load it in a single process, or "
+            f"replicate it on every rank outright: {knob}=1 with {replicate}, or "
             f"load_pretrained(..., distribution=DistributionPlan({world_size}, 1, 'replicate'))."
         )
         ep = _ep_spec(hf_config.model_type)

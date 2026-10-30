@@ -669,7 +669,7 @@ def test_a_run_without_expert_parallelism_needs_no_spec(
 _CAN_BE_EP = "can be expert-parallel, but the plan resolved .* divid(?:es|ing) both its {} experts"
 _NO_EP_YET = (
     "cannot be quantized expert-parallel yet, and the plan replicates .* FSDP2 .* if the "
-    "checkpoint is an unquantized causal LM, load it in a single process, or replicate "
+    r"FSDP2 load supports the checkpoint \(.*\), load it in a single process, or replicate "
     r".*DistributionPlan\(2, 1, 'replicate'\)"
 )
 _NEEDS_LATER = (
