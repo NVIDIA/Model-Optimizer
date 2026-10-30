@@ -1314,7 +1314,7 @@ def test_a_load_it_decides_shards_the_experts(
 
 @pytest.mark.parametrize("dense", ["replicate", "fsdp"])
 def test_an_expert_parallel_plan_loads_through_the_ep_loader(
-    run_as, serve, loaders, auto_class, tmp_path, dense
+    run_as, serve, loaders, auto_class, a_gpu, tmp_path, dense
 ):
     """An EP plan loads through load_and_prepare_ep, with the plan and the Hub options the load was
     given, and through no other load. That load replicates the dense part, so a plan that also
@@ -1553,27 +1553,30 @@ def test_a_whole_load_that_fails_on_one_rank_fails_every_rank(cpu_dist_workers, 
             TypeError,
             "config and hf_config",
         ),
+        ({"gpus": 0}, RuntimeError, "this rank has none"),
     ],
-    ids=["placement", "dtype", "torch_dtype", "model_class", "mtp_head", "two_configs"],
+    ids=["placement", "dtype", "torch_dtype", "model_class", "mtp_head", "two_configs", "no_gpu"],
 )
 def test_a_sharded_load_refuses_what_it_cannot_honor(
     run_as, serve, loaders, process_group, monkeypatch, tmp_path, sharding, change, error, match
 ):
-    """Placement, a model class, a head only a whole model builds, two configs to load with: none
-    reaches a sharded load, which fails before it starts rather than load something other than
-    what was asked."""
+    """Placement, a model class, a head only a whole model builds, two configs to load with, a rank
+    without a GPU of its own: none reaches a sharded load, which fails before it starts rather than
+    load something other than what was asked."""
     run_as(2)
     expert_parallel = sharding == "expert-parallel"
     serve(_deepseek_v3() if expert_parallel else LlamaConfig(**_TINY))
     if change.get("mtp"):
         monkeypatch.setattr(models_hf, "checkpoint_has_mtp", lambda *a: True)
+    if "gpus" in change:  # a host that shows this rank no GPU
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: change["gpus"])
     plan = DistributionPlan(2, ep_size=2) if expert_parallel else DistributionPlan(2, dense="fsdp")
 
     with pytest.raises(error, match=match) as refused:
         load_pretrained(
             str(tmp_path), change.get("auto_class"), distribution=plan, **change.get("kwargs", {})
         )
-    if "device_map" in change.get("kwargs", {}):
+    if "device_map" in change.get("kwargs", {}) or "gpus" in change:
         # The way to a whole model it names, for the plan handed in: an expert-parallel MoE's is a
         # plan with an EP degree of 1.
         whole_moe = "DistributionPlan(2, 1, 'replicate')"
