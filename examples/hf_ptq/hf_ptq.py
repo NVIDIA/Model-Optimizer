@@ -101,7 +101,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
-from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
+from modelopt.torch.utils.distributed import DistributionPlan, abort, set_distribution_plan
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.mlflow import add_mlflow_args, resolve_mlflow_args
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
@@ -1592,6 +1592,14 @@ def main(args: argparse.Namespace):
                     tokenizer,
                     device,
                 )
+    except BaseException:
+        # A rank that fails alone, such as in a sharded model's lockstep preview, leaves the others
+        # in a collective it never reaches, and cleanup's barrier and destroy_process_group would
+        # wait on them with the traceback unprinted. abort() prints it and exits, so the launcher
+        # stops the other ranks.
+        if args.dist_state.world_size > 1:
+            abort()
+        raise
     finally:
         cleanup_distributed(args)
 
