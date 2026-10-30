@@ -589,26 +589,44 @@ def test_the_remote_modeling_is_imported_through_the_class_the_auto_map_declares
         kimi_k3._force_load_remote_modeling(config_only, "/ckpt", False)
 
 
-@pytest.mark.usefixtures("private_conversion_registry")
-def test_prepare_lets_an_error_reading_the_quant_config_through(monkeypatch, remote_checkpoint):
+@pytest.mark.usefixtures(
+    "private_conversion_registry", "restore_loader_hooks", "torch_a2a_unregistered"
+)
+@pytest.mark.parametrize(
+    ("dtype", "error", "match"),
+    [
+        (None, ValueError, "validation error"),
+        (torch.float16, NotImplementedError, "decompress to bfloat16"),
+    ],
+    ids=["unparsable-scheme", "not-bf16"],
+)
+def test_prepare_lets_an_error_reading_the_quant_config_through(
+    remote_checkpoint, dtype, error, match
+):
     """compressed_tensors raises pydantic's ValidationError, a ValueError, for a quantization_config
-    it cannot parse. Dropped after that, the config would load the experts newly initialized. The
-    refusal comes before prepare patches the remote block or registers its converters, so a process
-    that goes on after it is unchanged."""
-
-    def install(cfg):
-        raise ValueError("1 validation error for QuantizationConfig")
-
-    monkeypatch.setattr(_onfly_decompress, "install_onfly_decompress", install)
+    it cannot parse, here one with no config groups, and the experts decompress to bf16 only.
+    Dropped after that, the config would load the experts newly initialized. The refusal comes
+    before prepare changes anything, so a process that goes on after it is unchanged: the remote
+    block, the config, the converter registry, the experts implementations and the loader hooks."""
+    pytest.importorskip("compressed_tensors")
+    scheme = {"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"}
     config = SimpleNamespace(
-        text_config=SimpleNamespace(), quantization_config={"format": "new"}, auto_map=_AUTO_MAP
+        text_config=SimpleNamespace(quantization_config=scheme),
+        quantization_config=scheme,
+        auto_map=_AUTO_MAP,
+        dtype=dtype,
     )
+    before = copy.deepcopy(config)
+    hooks = (mu.get_model_conversion_mapping, cml.spawn_materialize)
 
-    with pytest.raises(ValueError, match="validation error"):
+    with pytest.raises(error, match=match):
         _prepare(config)
     assert isinstance(remote_checkpoint.KimiSparseMoeBlock(_config()).experts, nn.ModuleList)
+    assert config == before
     registered = cm.get_checkpoint_conversion_mapping("kimi_linear") or []
     assert not any("block_sparse_moe.experts.*.w1.weight" in c.source_patterns for c in registered)
+    assert "torch_a2a" not in type(ALL_EXPERTS_FUNCTIONS)._global_mapping
+    assert (mu.get_model_conversion_mapping, cml.spawn_materialize) == hooks
 
 
 @pytest.mark.usefixtures("private_conversion_registry", "restore_loader_hooks")
@@ -628,7 +646,13 @@ def test_a_config_that_lost_its_quantization_config_is_refused_by_the_checkpoint
         else {"text_config": {"quantization_config": scheme}}
     )
     (tmp_path / "config.json").write_text(json.dumps(stored))
-    config = SimpleNamespace(text_config=SimpleNamespace(), auto_map=_AUTO_MAP)
+    # What the load returns as model.config: prepared, with its scheme dropped, and the mark cleared.
+    text = SimpleNamespace(
+        quantization_config=None,
+        base_model_ep_plan=dict(kimi_k3.BASE_MODEL_EP_PLAN),
+        _experts_implementation="torch_a2a",
+    )
+    config = SimpleNamespace(text_config=text, quantization_config=None, auto_map=_AUTO_MAP)
 
     with pytest.raises(ValueError, match="no compressed-tensors quantization_config"):
         kimi_k3.prepare(config, ckpt_path=str(tmp_path), trust_remote_code=True)
