@@ -42,6 +42,7 @@ from ..utils.graph_utils import (
     insert_nodes_at_position,
     pad4d,
 )
+from .dla_constants_to_initializers import _GENERATED_INITIALIZER_INPUT
 
 # ── Internal utilities ────────────────────────────────────────────────────────
 
@@ -846,8 +847,18 @@ def _remove_unused_initializers(model: onnx.ModelProto) -> onnx.ModelProto:
     for o in graph.output:
         used.add(o.name)
 
+    used.update(
+        value.name
+        for value in graph.input
+        if model.ir_version >= 4 or value.doc_string != _GENERATED_INITIALIZER_INPUT
+    )
     kept = [init for init in graph.initializer if init.name in used]
     removed = len(graph.initializer) - len(kept)
+    if model.ir_version <= 3:
+        removed_names = {init.name for init in graph.initializer if init.name not in used}
+        for index in reversed(range(len(graph.input))):
+            if graph.input[index].name in removed_names:
+                del graph.input[index]
     graph.ClearField("initializer")
     graph.initializer.extend(kept)
     logger.debug("remove_unused_initializers: removed %d unused initializer(s).", removed)
