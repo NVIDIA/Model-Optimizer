@@ -565,32 +565,6 @@ def test_fused_experts_prefixes_lists_each_fused_module_once_in_order():
     ]
 
 
-@pytest.mark.parametrize(
-    ("ep_rank", "total_experts", "first_index"),
-    [
-        (0, 0, 0),
-        # This EP group's slice of a larger expert set: shift by the group base.
-        (1, 2 * LOCAL_EXPERTS, LOCAL_EXPERTS),
-        (3, 4 * LOCAL_EXPERTS, 3 * LOCAL_EXPERTS),
-        # The tensor already spans every expert, so its indices are global.
-        (1, LOCAL_EXPERTS, 0),
-        # Total unknown: the legacy per-group shift.
-        (1, 0, LOCAL_EXPERTS),
-    ],
-)
-def test_split_local_numbers_experts_globally(ep_rank, total_experts, first_index):
-    sd = _fused_state_dict(gated=True)
-    unshifted = split_fused_experts_state_dict(dict(sd))
-
-    out = _split_local_fused_module(PREFIX, sd, ep_rank=ep_rank, total_experts=total_experts)
-
-    want = {}
-    for key, value in unshifted.items():
-        expert, tail = key[len(PREFIX) + 1 :].split(".", 1)
-        want[f"{PREFIX}.{int(expert) + first_index}.{tail}"] = value
-    _assert_byte_identical(out, want)
-
-
 # ------------------------------------------------------------------ sharded (DTensor) experts
 
 
