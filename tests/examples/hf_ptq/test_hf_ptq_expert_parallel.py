@@ -599,8 +599,7 @@ def test_only_an_expert_parallel_run_calibrates_through_the_distributed_forward_
     loaded the experts over, image batches included: they run through the whole VLM's own forward
     there (Nemotron-H Omni calibrates on images by default). The loop re-plants over the model it is
     handed, the whole model, and text batches run through the language model. Without expert
-    parallelism there is nothing to re-plant: FSDP2 keeps the plain loop and its split-on-OOM retry,
-    as on main."""
+    parallelism there is nothing to re-plant, so FSDP2 keeps the plain loop."""
     ep_mesh, vlm_forward = object(), object()
     full_model, language_model = torch.nn.Linear(2, 2), torch.nn.Linear(2, 2)
     set_distribution_plan(full_model, plan)
