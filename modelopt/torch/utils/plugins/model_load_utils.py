@@ -679,7 +679,9 @@ def load_pretrained(
     (:func:`~modelopt.torch.utils.fsdp2_utils.fsdp2_wrap`) is one loaded with ``from_pretrained``,
     not here.
 
-    A sharded load builds the model class and places it itself. Besides its own options it takes
+    A sharded load builds the model class and places it itself: a text-only VLM through its
+    image-text class, anything else through ``AutoModelForCausalLM``, the one ``auto_class`` it
+    takes, so leave ``auto_class`` out for a VLM. Besides its own options it takes
     ``trust_remote_code``, ``attn_implementation`` and ``hf_config``, and refuses any other keyword
     rather than ignore it, but for one passed as ``None``, ``from_pretrained``'s own default, which
     asks nothing. With neither a plan nor ``MODELOPT_FSDP_SIZE``, rank 0's GPU memory
