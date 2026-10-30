@@ -149,6 +149,8 @@ def _routed_expert_modules(model: "nn.Module", ep_plan: dict[str, str]) -> "dict
 
 def _ep_spec(model_type: str):
     """``model_type``'s :class:`~modelopt.torch.models.EPSpec`, or ``None``."""
+    # Imported here: importing modelopt.torch.models registers every model spec, which importing
+    # this module should not do.
     from modelopt.torch.models import get_spec
 
     return getattr(get_spec(model_type), "ep_spec", None)
@@ -177,8 +179,6 @@ def check_distributed_support(model_type: str) -> None:
             f"{model_type} cannot be quantized expert-parallel yet: {ep.unsupported} Quantize it "
             f"{without_ep}."
         )
-    from packaging.version import parse
-
     # A model whose spec states no release, or that has no spec, still needs the load's floor: auto
     # must pick no EP degree below it, rather than reach the load and fail there.
     stated = ep.requires_transformers if ep is not None else None

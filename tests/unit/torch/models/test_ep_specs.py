@@ -50,16 +50,29 @@ def cfg(**kw):
 # --------------------------------------------------------------------------- the registered specs
 
 
+# The styles the expert-parallel load implements for a plan's entries.
+_KNOWN_STYLES = frozenset(moe._EXPERTS_STYLES) | {"grouped_gemm"}
+
+
 @pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
 def test_every_ep_plan_is_well_formed(model_type):
-    """Globs map to style names; a malformed entry matches nothing and fails silently at load."""
-    plan = get_spec(model_type).ep_spec.base_model_ep_plan
-    if plan is None:
-        return
-    assert plan, f"{model_type} declares an empty plan, which is not the same as declaring none"
-    for glob, style in plan.items():
-        assert isinstance(glob, str) and glob, f"{model_type}: bad glob {glob!r}"
-        assert isinstance(style, str) and style, f"{model_type}: bad style for {glob!r}"
+    """Every entry uses a style the expert-parallel load implements, and the plan names a
+    routed-experts container it can count and shard: a malformed plan fails silently at load."""
+    ep = get_spec(model_type).ep_spec
+    for plan in (ep.base_model_ep_plan, ep.prepared_ep_plan):
+        if plan is None:
+            continue
+        assert plan, f"{model_type} declares an empty plan, which is not the same as declaring none"
+        for glob, style in plan.items():
+            assert isinstance(glob, str) and glob, f"{model_type}: bad glob {glob!r}"
+            assert style in _KNOWN_STYLES, (
+                f"{model_type}: {glob!r} uses style {style!r}, which the expert-parallel load does "
+                f"not implement (known: {sorted(_KNOWN_STYLES)})"
+            )
+        assert moe._routed_expert_keys(plan), (
+            f"{model_type}'s plan names no routed-experts container, so the load can neither count "
+            "nor shard its experts"
+        )
 
 
 @pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
@@ -69,6 +82,14 @@ def test_a_spec_declares_a_plan_a_floor_a_prepare_or_a_refusal(model_type):
     assert ep.base_model_ep_plan or ep.requires_transformers or ep.prepare or ep.unsupported, (
         f"{model_type} has an EP section that declares nothing"
     )
+
+
+@pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
+def test_a_plan_goes_where_the_load_reads_one(model_type):
+    """A spelling the load does not read is read as no plan at all, and the MoE planned as dense."""
+    attrs = get_spec(model_type).ep_spec.plan_config_attr or ()
+    attrs = (attrs,) if isinstance(attrs, str) else attrs
+    assert not set(attrs) - set(moe._SUB_CONFIG_ATTRS), f"{model_type}: {attrs}"
 
 
 def test_the_omni_vlm_reuses_the_text_models_plan():
