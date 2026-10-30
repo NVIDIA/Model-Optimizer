@@ -233,6 +233,31 @@ def test_registered_conversions_fuse_w1_w3_into_gate_up_and_stack_w2():
     assert torch.equal(fused[prefix + "down_proj"], torch.stack(down))
 
 
+@pytest.mark.usefixtures("private_conversion_registry")
+def test_packed_experts_export_under_the_checkpoints_names():
+    """The decompressor rewrites the registered converters to read the packed experts, and the model
+    keeps the rewritten ones as the conversions its load ran. The export names the experts back
+    through them, so they reverse as the fusion they rewrote: to the checkpoint's ``w1``/``w3``/``w2``,
+    not to ModelOpt's ``gate_proj``/``up_proj``/``down_proj``."""
+    from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
+
+    kimi_k3._register_kimi_k3_conversions()
+    packed = [
+        _onfly_decompress._compressedify(conv, None, None, ("weight_packed", "weight_scale"))
+        for conv in cm.get_checkpoint_conversion_mapping("kimi_linear")
+    ]
+    expert = "model.layers.1.block_sparse_moe.experts.0."
+
+    to_checkpoint = build_reverse_name_mapper(
+        SimpleNamespace(_weight_conversions=packed), tensor_keys=True
+    )
+
+    exported = [
+        to_checkpoint(f"{expert}{part}.weight") for part in ("gate_proj", "up_proj", "down_proj")
+    ]
+    assert exported == [f"{expert}{leaf}.weight" for leaf in ("w1", "w3", "w2")]
+
+
 def test_the_registration_raises_without_the_conversion_api(monkeypatch):
     """Unregistered, the checkpoint's experts would load as MISSING: newly initialized, at full
     size on every rank. So a missing conversion API stops the load instead of warning."""
