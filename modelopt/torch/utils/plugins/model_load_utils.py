@@ -1852,7 +1852,9 @@ def resolve_distribution_plan(
     spec to a copy of the config first
     (:func:`~modelopt.torch.utils.moe.apply_distributed_support`): for several models it is what
     supplies the expert-parallel plan, and an expert-parallel plan returns that copy. Any other
-    plan returns the config without it, which the export would otherwise write out. A plan that
+    plan returns the config without it, which the export would otherwise write out; the spec's
+    ``prepare`` has run for it all the same, which its contract allows
+    (:attr:`~modelopt.torch.models.EPSpec.prepare`). A plan that
     leaves an expert-parallel MoE whole on every rank raises, unless both knobs ask for exactly
     that: ``ep_size=1`` with ``dense="replicate"`` (``MODELOPT_EP_DEGREE=1`` and
     ``MODELOPT_FSDP_SIZE=1``) replicates it, noting that every rank holds the whole MoE.
