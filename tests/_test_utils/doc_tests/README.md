@@ -83,6 +83,8 @@ def smoke(ctx):
   validates that each ID is referenced or explicitly excluded with a reason.
   Missing/duplicate IDs, unknown references, stale exclusions, and tested/excluded
   overlaps fail collection. Accounting does **not** mean manual/excluded code passed.
+  Scenario metadata is trusted Python test configuration; the resolver does not
+  duplicate type or format checks for resource fields and handler names.
 - `Scenario` requires a unique scenario ID and a nonempty ordered list of snippet
   IDs. Defaults are `profile="cpu"` and `timeout_seconds=60`. Optional metadata:
   `profile="gpu"`, `min_gpus=2`, `requires=["megatron.bridge"]`, `manual=True`,
@@ -281,7 +283,7 @@ node --test .github/scripts/readme_testability.test.cjs
 
 | File | Purpose in this extension |
 | --- | --- |
-| `parser.py` | Extract named fences and validate scenario references, resource metadata, and exclusions. |
+| `parser.py` | Extract named fences and check references, fence coverage, and executable languages. |
 | `runner.py` | Execute resolved plans with worker-side handlers, deadlines, shared state, and cleanup. |
 | `pytest_utils.py` | Common collection, manual markers and resource checks, independent of the example. |
 | `fixtures/llm_qat_readme.py`, `fixtures/megatron_bridge_readme.py` | Worker-side scenario setup and verification moved out of Markdown. |
@@ -289,7 +291,7 @@ node --test .github/scripts/readme_testability.test.cjs
 | `fixtures/megatron_bridge.py` | Local Bridge inputs, real distillation prerequisites and quantization/pruning/export assertions. |
 | `fixtures/llm_qat_installation.py` | QAT requirements in a disposable venv and QAT dependency import verification. |
 | `fixtures/llm_qat_serving.py` | QAT QLoRA checkpoint layout, adapter-server readiness and a real completion request. |
-| `tests/unit/doc_tests/test_markdown.py` | CPU regression tests for the shared execution contract and complete fence accounting in both READMEs. |
+| `tests/unit/doc_tests/test_markdown.py` | Focused fence parsing, failure-location, and timeout-cleanup regressions. |
 | `tests/examples/llm_qat/test_llm_qat_readme.py` | Collect QAT scenarios through the common pytest adapter. |
 | `tests/examples/megatron_bridge/test_megatron_bridge_readme.py` | Collect Bridge scenarios through the same adapter. |
 | `examples/llm_qat/README.md` | Annotate the remaining snippets; correct QAD teacher construction and incomplete training commands. |

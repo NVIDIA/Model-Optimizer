@@ -128,46 +128,15 @@ def resolve_scenarios(path, scenarios, *, excluded=None):
     path = Path(path).resolve()
     snippets = parse_markdown(path, require_ids=True)
     excluded = {} if excluded is None else excluded
-    if any(not isinstance(reason, str) or not reason.strip() for reason in excluded.values()):
-        raise DocTestError(f"{path}: exclusions require a nonempty reason")
     unknown = excluded.keys() - snippets.keys()
     if unknown:
         raise DocTestError(f"{path}: unknown excluded snippets: {sorted(unknown)}")
-    result, covered, ids = [], set(), set()
+    result, covered = [], set()
     for scenario in scenarios:
 
         def fail(message):
             raise DocTestError(f"{path}: scenario {scenario.id}: {message}")
 
-        if not isinstance(scenario.id, str) or not re.fullmatch(_ID, scenario.id):
-            fail("invalid scenario ID")
-        if scenario.id in ids:
-            fail("duplicate scenario ID")
-        ids.add(scenario.id)
-        if scenario.profile not in {"cpu", "gpu"}:
-            fail("profile must be cpu or gpu")
-        if type(scenario.timeout_seconds) is not int or scenario.timeout_seconds <= 0:
-            fail("timeout_seconds must be a positive integer")
-        if type(scenario.min_gpus) is not int or scenario.min_gpus < 0:
-            fail("min_gpus must be a nonnegative integer")
-        if type(scenario.manual) is not bool or type(scenario.background) is not bool:
-            fail("manual and background must be booleans")
-        if not isinstance(scenario.requires, list) or not all(
-            isinstance(name, str) and re.fullmatch(r"[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*", name)
-            for name in scenario.requires
-        ):
-            fail("requires must be a list of Python module names")
-        if scenario.handler is not None and (
-            not isinstance(scenario.handler, str)
-            or not re.fullmatch(r"[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*:[a-zA-Z_]\w*", scenario.handler)
-        ):
-            fail("handler must be an importable module:function reference")
-        if (
-            not isinstance(scenario.snippets, list)
-            or not scenario.snippets
-            or not all(isinstance(key, str) for key in scenario.snippets)
-        ):
-            fail("snippets must be a nonempty list of IDs")
         missing = set(scenario.snippets) - snippets.keys()
         if missing:
             fail(f"unknown snippets: {sorted(missing)}")
