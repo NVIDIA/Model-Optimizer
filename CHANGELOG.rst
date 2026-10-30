@@ -25,6 +25,7 @@ Changelog
 - ``hf_ptq.py`` calibrates Qwen3.8 (``qwen4_exp``) without running its QSA indexer's per-query Python loop when every visible key fits the indexer's token budget, with bit-identical results. On Qwen3.8-Flash-Next this saves about two hours of layerwise calibration.
 - Speed up Hugging Face QAT and QAD with ``QATTrainer``, ``QADTrainer`` or ``--manual_gc``: the ``gc.collect()`` run before each training step now skips the model and optimizer state, saving about 1 s per step (30%) on Qwen3-30B-A3B.
 - Add an opt-in no-gather HuggingFace export for FSDP2-sharded models: with ``MODELOPT_FSDP2_EXPORT=nogather``, ``export_hf_checkpoint`` sends each tensor to a single owner rank and every rank writes its own shards in parallel, instead of gathering the full state dict on one host. MoE experts stay sharded through the export, so each rank only materializes its own experts.
+- Add expert-parallel PTQ for HuggingFace MoE models to ``examples/hf_ptq/hf_ptq.py``: under ``torchrun``, each rank holds only its share of the routed experts, tokens reach them by all-to-all, and every rank calibrates on its own slice of the data. ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE`` override the automatic choice of expert-parallel degree and of FSDP2-sharding the dense layers, and the quantized checkpoint is written by every rank in parallel without gathering the model.
 
 *Speculative Decoding*
 
@@ -48,6 +49,7 @@ Changelog
 
 **Backward Breaking Changes**
 
+- ``examples/hf_ptq/hf_ptq.py`` launched by ``torchrun`` on more than one rank now refuses a ``--device`` other than ``cuda``, which it used to ignore: each rank runs on its own GPU, ``cuda:<local_rank>``.
 - ``examples/hf_ptq/hf_ptq.py --use_fsdp2`` on more than one GPU now refuses calibration that keeps its statistics on each rank, which calibrated the ranks' shards of a weight differently: AWQ-Lite, AWQ-Full, SVDQuant, local Hessian and imatrix, also as an AutoQuantize candidate (run them without ``--use_fsdp2``). It also raises when a calibration batch runs out of GPU memory, instead of retrying it in smaller pieces: set ``--batch_size`` to one that fits.
 - ``export_mcore_gpt_to_hf`` given a Hugging Face Hub model ID no longer writes the tokenizer, processor, generation config or remote-code files. Pass a local directory instead, e.g. from ``modelopt.torch.export.ensure_local_checkpoint``.
 - Drop support for Python 3.10, which has reached end-of-life. ModelOpt now requires Python 3.11 or later.
