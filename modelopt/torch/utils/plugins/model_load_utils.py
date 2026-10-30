@@ -907,6 +907,9 @@ def _fsdp2_wrap_modules(model: "torch.nn.Module") -> list["torch.nn.Module"]:
     the language-only calibration never runs: sharded, their weight gathers would deadlock, so they
     stay replicated. A model whose language backbone shows no blocks is refused.
     """
+    # Imported here, as fsdp2_wrap does: the export and quantization packages sit above this module,
+    # and the export package imports it.
+    from modelopt.torch.export.model_utils import get_language_model_from_vl
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
     def _boundaries(root: "torch.nn.Module") -> "list[torch.nn.Module] | None":
@@ -919,8 +922,6 @@ def _fsdp2_wrap_modules(model: "torch.nn.Module") -> list["torch.nn.Module"]:
         return list(layers) if layers is not None else None
 
     # VLM -> wrap only the language backbone's blocks (vision/audio stay replicated); else the whole model.
-    from modelopt.torch.export.model_utils import get_language_model_from_vl
-
     lineage = get_language_model_from_vl(model)
     root = lineage[-1] if lineage else model
     mods = _boundaries(root)
