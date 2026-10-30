@@ -501,7 +501,13 @@ def _read_config(path, auto_class, trust_remote_code: bool = False, **hub_option
     return AutoConfig.from_pretrained(path, trust_remote_code=trust_remote_code, **hub_options)
 
 
-def _refuse_sharded_load_options(route, auto_class, kwargs) -> None:
+def _whole_instead(decided: bool) -> str:
+    """How to have every rank load the model whole: the knob counts only for a decided plan."""
+    plan = f"distribution=DistributionPlan({dist.size()}, dense='replicate')"
+    return f"MODELOPT_FSDP_SIZE=1 or {plan}" if decided else plan
+
+
+def _refuse_sharded_load_options(route, auto_class, kwargs, decided: bool) -> None:
     """Refuse the arguments the sharded load ``route`` cannot honor: the arguments alone decide."""
     if auto_class not in (None, AutoModelForCausalLM):
         name = getattr(auto_class, "__name__", repr(auto_class))
@@ -522,8 +528,8 @@ def _refuse_sharded_load_options(route, auto_class, kwargs) -> None:
     unknown = sorted(passed - _SHARDED_LOAD_OPTIONS[route] - {"dtype", "torch_dtype"})
     if unknown:
         whole = (
-            " To place the model yourself, have every rank load it whole: MODELOPT_FSDP_SIZE=1, or "
-            f"distribution=DistributionPlan({dist.size()}, dense='replicate')."
+            " To place the model yourself, have every rank load it whole: "
+            f"{_whole_instead(decided)}."
             if route == _FSDP2
             else ""
         )
@@ -533,11 +539,13 @@ def _refuse_sharded_load_options(route, auto_class, kwargs) -> None:
         )
 
 
-def _sharded_load_kwargs(route, ckpt_path, auto_class, model_type, kwargs, hub_options) -> dict:
+def _sharded_load_kwargs(
+    route, ckpt_path, auto_class, model_type, kwargs, hub_options, decided: bool
+) -> dict:
     """What the sharded load ``route`` names takes, refusing what it cannot honor."""
     from modelopt.torch.models.hf import checkpoint_has_mtp
 
-    _refuse_sharded_load_options(route, auto_class, kwargs)
+    _refuse_sharded_load_options(route, auto_class, kwargs, decided)
     # Past the refusal, anything else is a dtype the load keeps or an option at its default, None.
     kwargs = {k: v for k, v in kwargs.items() if k in _SHARDED_LOAD_OPTIONS[route]}
     if checkpoint_has_mtp(model_type, ckpt_path):
@@ -560,13 +568,17 @@ def _sharded_load_kwargs(route, ckpt_path, auto_class, model_type, kwargs, hub_o
         raise NotImplementedError(
             f"The {route} load cannot dequantize this {model_type} checkpoint; load it unsharded."
         )
-    if _auto_class(hf_config, trust_remote_code=trust_remote_code) is not AutoModelForCausalLM:
-        # It builds through AutoModelForCausalLM, which refuses most VLMs' configs and, for some,
-        # builds the language model alone, whose other towers the export would carry unquantized.
+    # It builds as build_meta_causal_lm does: a text-only VLM it supports through its image-text
+    # class, anything else through AutoModelForCausalLM, which refuses most VLMs' configs and, for
+    # some, builds the language model alone, whose other towers the export would carry unquantized.
+    builds = (
+        AutoModelForImageTextToText if is_fsdp2_text_only_vlm(hf_config) else AutoModelForCausalLM
+    )
+    if _auto_class(hf_config, trust_remote_code=trust_remote_code) is not builds:
         raise NotImplementedError(
-            f"The {route} load builds a causal LM, which this {model_type} checkpoint is not. To load "
-            "it whole on every rank, pass its model class as auto_class, with MODELOPT_FSDP_SIZE=1 "
-            f"or distribution=DistributionPlan({dist.size()}, dense='replicate')."
+            f"The {route} load builds a causal LM, or a text-only VLM it supports, which this "
+            f"{model_type} checkpoint is not. To load it whole on every rank, pass its model class "
+            f"as auto_class, with {_whole_instead(decided)}."
         )
     if not dist.is_initialized() and "RANK" not in os.environ:
         # FSDP2 shards through a process group even on one rank.
@@ -580,8 +592,7 @@ def _sharded_load_kwargs(route, ckpt_path, auto_class, model_type, kwargs, hub_o
         raise RuntimeError(
             f"The {route} load shards onto each rank's own GPU, and this rank has none: it sees "
             f"{torch.cuda.device_count()} GPU(s) as local rank {dist.local_rank()}. To load it "
-            "whole on every rank, set MODELOPT_FSDP_SIZE=1 or pass "
-            f"distribution=DistributionPlan({dist.size()}, dense='replicate')."
+            f"whole on every rank: {_whole_instead(decided)}."
         )
     return {"trust_remote_code": trust_remote_code, "hf_config": hf_config, **kwargs}
 
@@ -620,8 +631,9 @@ def load_pretrained(
     the model over the run's ranks by. Every rank takes rank 0's, or, when rank 0 passes none,
     :func:`resolve_distribution_plan`'s. By the plan:
 
-    * ``dense="fsdp"``: a causal LM FSDP2-sharded over the whole process group, each rank reading its
-      own layers (:func:`parallel_load_and_prepare_fsdp2`, whose ``cpu_offload``, ``mp_policy`` and
+    * ``dense="fsdp"``: a causal LM, or a text-only VLM the FSDP2 load supports (Qwen3.5),
+      FSDP2-sharded over the whole process group, each rank reading its own layers
+      (:func:`parallel_load_and_prepare_fsdp2`, whose ``cpu_offload``, ``mp_policy`` and
       ``broadcast_chunk_size`` ``kwargs`` may set). A single process, or a group of one, reads no
       knob and takes this load only from a plan passed as ``distribution``; it sets a group of one up
       for it, which needs ``torchrun --nproc_per_node=1``. It reads the checkpoint's tensors as
@@ -771,6 +783,7 @@ def load_pretrained(
                     for k, v in kwargs.items()
                     if k != "subfolder" and not (k == "config" and config is not None)
                 },
+                decided=False,
             )
     # Rank 0 fetches the checkpoint, and each rank then checks it can see it: one that cannot fails
     # every rank, rather than leave the others in the load's next collective.
@@ -849,7 +862,9 @@ def load_pretrained(
         load_kwargs = (
             {}
             if route is None
-            else _sharded_load_kwargs(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
+            else _sharded_load_kwargs(
+                route, ckpt_path, auto_class, model_type, kwargs, hub_options, decided
+            )
         )
     if route is not None:
         model = _load_sharded(ckpt_path, load_kwargs)

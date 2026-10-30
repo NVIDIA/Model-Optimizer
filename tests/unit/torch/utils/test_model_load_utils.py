@@ -1022,6 +1022,40 @@ def test_an_fsdp_plan_loads_through_the_parallel_fsdp2_loader(
     assert loaders == {}
 
 
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+def test_a_text_only_vlm_the_fsdp2_load_builds_reaches_it(
+    run_as, serve, loaders, process_group, tmp_path, model_type
+):
+    """The FSDP2 load builds Qwen3.5's VLMs through their image-text class, as hf_ptq's --use_fsdp2
+    does, so a plan that shards one reaches the load rather than being refused as no causal LM."""
+    try:
+        config = serve(AutoConfig.for_model(model_type))
+    except ValueError:
+        pytest.skip("Qwen3.5 requires a recent Transformers")
+    run_as(2, rank=1)
+
+    load_pretrained(str(tmp_path), distribution=DistributionPlan(2, dense="fsdp"))
+
+    assert loaders.pop("fsdp2")["hf_config"] is config
+
+
+@pytest.mark.parametrize("handed", [True, False], ids=["handed", "decided"])
+def test_a_sharded_load_offers_the_knob_only_for_a_plan_it_decided(
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, handed
+):
+    """MODELOPT_FSDP_SIZE counts only for a plan the load decides: to keep a model whole under a
+    plan of its own, a caller passes a replicated one, which is all the refusal offers it."""
+    run_as(2, rank=1)
+    serve(LlamaConfig(**_TINY))
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    plan = {"distribution": DistributionPlan(2, dense="fsdp")} if handed else {}
+
+    with pytest.raises(TypeError, match=r"\['device_map'\] do not apply") as refused:
+        load_pretrained(str(tmp_path), device_map="auto", **plan)
+    assert ("MODELOPT_FSDP_SIZE=1" in str(refused.value)) is not handed
+    assert loaders == {}
+
+
 @pytest.mark.parametrize(
     "unset",
     [{}, {"config": None}, {"variant": None}, {"hf_config": None}],
@@ -1404,10 +1438,10 @@ def test_a_load_refuses_what_it_cannot_load(
 ):
     """Before anything loads: a plan for another world; a quantized checkpoint, which FSDP2 would
     read as stored, even when only a VLM's language model is quantized and its remote code builds it
-    as a causal LM; a VLM, which FSDP2 would build through AutoModelForCausalLM, refused or as its
-    language model alone; anything but a plan; and the sharded loads' config, or an option only the
-    FSDP2 load takes, which from_pretrained would take for a model argument and fail far from here,
-    or drop."""
+    as a causal LM; a VLM but a text-only one it supports, which FSDP2 would build through
+    AutoModelForCausalLM, refused or as its language model alone; anything but a plan; and the
+    sharded loads' config, or an option only the FSDP2 load takes, which from_pretrained would take
+    for a model argument and fail far from here, or drop."""
     run_as(2)
     config = serve(transformers.LlavaConfig() if checkpoint == "vlm" else LlamaConfig(**_TINY))
     if checkpoint == "quantized":
