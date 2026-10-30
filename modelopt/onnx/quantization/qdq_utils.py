@@ -164,7 +164,10 @@ def make_gs_quantize_output(
 
 
 def make_gs_quantize_node(
-    name: str, inputs: Sequence[gs.Tensor], outputs: Sequence[gs.Tensor]
+    name: str,
+    inputs: Sequence[gs.Tensor],
+    outputs: Sequence[gs.Tensor],
+    attributes: dict[str, Any] | None = None,
 ) -> gs.Node:
     """Create a GraphSurgeon Quantize node.
 
@@ -175,6 +178,7 @@ def make_gs_quantize_node(
         name=_q_name(name),
         inputs=inputs,
         outputs=outputs,
+        attrs=attributes,
     )
 
 
@@ -425,6 +429,7 @@ def insert_qdq_nodes(
     scales: dict[str, np.ndarray],
     weight_map: dict[str, gs.Tensor],
     layer_info: dict[str, dict] | None = None,
+    attributes: dict[str, Any] | None = None,
 ):
     """Insert scales and QDQ nodes into graph.
 
@@ -434,6 +439,7 @@ def insert_qdq_nodes(
         weight_map: A map from ONNX initializer name to graphsurgeon tensor.
         layer_info: Optional dictionary mapping tensor names to precision (old format) or
             to layer configuration dict (new format with precision, block_size, axis).
+        attributes: Quantization axis and block size for the Q/DQ nodes.
     """
     logger.debug(f"Inserting QDQ nodes for {len(scales)} weights")
 
@@ -443,6 +449,7 @@ def insert_qdq_nodes(
         scale: np.ndarray,
         q_nodes: dict[str, gs.Node],
         dq_nodes: dict[str, gs.Node],
+        attrs: dict[str, Any] | None = None,
         num_bits: int = 4,
     ):
         tensor_dtype = get_tensor_dtype(num_bits)
@@ -451,24 +458,30 @@ def insert_qdq_nodes(
         zp_tensor = make_gs_zp(name, scale.shape, tensor_dtype)
         q_out = make_gs_quantize_output(name, weight_to_quantize.shape, tensor_dtype)
         q_node = make_gs_quantize_node(
-            name, inputs=[weight_to_quantize, scale_tensor, zp_tensor], outputs=[q_out]
+            name,
+            inputs=[weight_to_quantize, scale_tensor, zp_tensor],
+            outputs=[q_out],
+            attributes=attrs,
         )
         dq_out = make_gs_dequantize_output(name, shape=weight_to_quantize.shape, dtype=scale.dtype)
         dq_node = make_gs_dequantize_node(
-            name, inputs=[q_out, scale_tensor, zp_tensor], outputs=[dq_out]
+            name, inputs=[q_out, scale_tensor, zp_tensor], outputs=[dq_out], attributes=attrs
         )
         q_nodes[name] = q_node
         dq_nodes[name] = dq_node
 
     q_nodes, dq_nodes = {}, {}
     for name, scale in scales.items():
+        num_bits = get_num_bits(layer_info, name)
+        attrs = update_attributes_for_per_channel_nodes(attributes, num_bits)
         _insert_helper(
             name,
             weight_map[name],
             scale,
             q_nodes,
             dq_nodes,
-            num_bits=get_num_bits(layer_info, name),
+            attrs=attrs,
+            num_bits=num_bits,
         )
 
     _postprocess_qdq(
