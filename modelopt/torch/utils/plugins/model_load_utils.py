@@ -1722,8 +1722,10 @@ def load_and_prepare_ep(
     A refusal on any rank -- of its transformers, the config, the checkpoint, or in the load --
     raises on every rank, so no rank is left waiting in a collective for one that already failed.
     In the load that rests on ``from_pretrained`` running no collective, as transformers'
-    expert-parallel load does not: each rank reads and slices its own experts, so the others finish
-    it and meet a rank that failed in it in the refusal's gather.
+    expert-parallel load does not on 5.7 through 5.18: before 5.16 it slices each rank's experts
+    into plain tensors, and from 5.16 it builds DTensors locally (``run_check=False``,
+    ``src_data_rank=None``). So the others finish it and meet a rank that failed in it in the
+    refusal's gather.
     Without ``hf_config`` every rank reads the checkpoint's config itself, from the Hub for a Hub ID,
     before rank 0 makes the checkpoint local: on many ranks, pass it (as ``hf_ptq`` does).
     """
