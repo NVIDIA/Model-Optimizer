@@ -284,6 +284,14 @@ Examples:
         action="store_true",
         help="Remove QDQ pairs for every dtype, matching the C++ remove-all mode",
     )
+    dla_parser.add_argument(
+        "--force-fp16-activations",
+        action="store_true",
+        help=(
+            "Use FP16 internal activations and weights with FP32 model boundaries; "
+            "L2 normalization intermediates can overflow or underflow"
+        ),
+    )
 
     # Analyze subcommand
     analyze_parser = subparsers.add_parser(
@@ -367,6 +375,7 @@ Examples:
             verbose=not args.quiet,
             qdq_quantized_dtypes=args.qdq_quantized_dtypes,
             remove_all_qdq=args.remove_all_qdq,
+            force_fp16_activations=args.force_fp16_activations,
         )
 
     elif args.command == "analyze":

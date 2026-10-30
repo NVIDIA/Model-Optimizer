@@ -30,9 +30,11 @@ from modelopt.onnx.graph_surgery.dla_transforms.dla_remove_reshapes import _appl
 def _execute(model, feeds):
     """Check and execute the actual CPU graph with native public outputs."""
     onnx.checker.check_model(model, full_check=True)
-    return ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"]).run(
-        None, feeds
-    )
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    return ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"], sess_options=options
+    ).run(None, feeds)
 
 
 @pytest.mark.parametrize("ir_version", [3, 9])

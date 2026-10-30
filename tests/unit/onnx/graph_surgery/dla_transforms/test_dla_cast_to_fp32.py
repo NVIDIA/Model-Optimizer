@@ -51,9 +51,7 @@ def _prepare_model(model: onnx.ModelProto) -> None:
     """Populate intermediate shapes when the optional ORT tool is available."""
     try:
         # The tool submodule is optional; model execution only requires ORT itself.
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
+        from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
 
         inferred = SymbolicShapeInference.infer_shapes(model)
         if inferred is not None:
@@ -66,8 +64,12 @@ def _prepare_model(model: onnx.ModelProto) -> None:
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
     """Execute a small test graph on the CPU and return named outputs."""
     _clamp_ir(model)
-    sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
-    return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    sess = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"], sess_options=options
+    )
+    return dict(zip([output.name for output in model.graph.output], sess.run(None, feeds)))
 
 
 def _cast_to_attr(model: onnx.ModelProto, cast_name: str) -> int | None:

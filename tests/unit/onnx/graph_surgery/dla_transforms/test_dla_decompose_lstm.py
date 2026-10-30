@@ -155,14 +155,12 @@ def _expect_unsupported_lstm(model: onnx.ModelProto, expected: str) -> None:
 def _run_ort(model: onnx.ModelProto, feeds: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     """Run ort."""
     _clamp_ir_version(model)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
     sess = ort.InferenceSession(
-        model.SerializeToString(),
-        providers=["CPUExecutionProvider"],
+        model.SerializeToString(), providers=["CPUExecutionProvider"], sess_options=options
     )
-    out: dict[str, np.ndarray] = {}
-    for o in model.graph.output:
-        out[o.name] = sess.run([o.name], feeds)[0]
-    return out
+    return dict(zip([output.name for output in model.graph.output], sess.run(None, feeds)))
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

@@ -60,7 +60,7 @@ from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms import dla_remove_deqlin as _mod
 
-pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
 _OPSET_VERSION = 21
 _MAX_IR_VERSION_FOR_ORT = 10
@@ -86,9 +86,7 @@ def _prepare_model(model: onnx.ModelProto) -> None:
     """Infer intermediate metadata when the optional runtime supports the graph."""
     try:
         # ONNX Runtime is optional for these execution tests.
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
+        from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
 
         inferred = SymbolicShapeInference.infer_shapes(model)
         if inferred is not None:
@@ -100,12 +98,13 @@ def _prepare_model(model: onnx.ModelProto) -> None:
 
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
     """Execute the graph outputs with the CPU runtime."""
-    # ONNX Runtime is optional for these execution tests.
-    import onnxruntime as ort  # type: ignore[import-untyped]
-
     _clamp_ir(model)
-    sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
-    return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    sess = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"], sess_options=options
+    )
+    return dict(zip([output.name for output in model.graph.output], sess.run(None, feeds)))
 
 
 def _has_dq(model: onnx.ModelProto) -> bool:

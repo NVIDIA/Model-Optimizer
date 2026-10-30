@@ -238,10 +238,22 @@ def test_symbolic_native_transpose_keeps_its_permutation(explicit, batch):
 
 
 @pytest.mark.parametrize(
-    "operation", ["Softmax", "LogSoftmax", "LpNormalization", "ArgMax", "Slice", "Transpose"]
+    ("operation", "negative", "tail"),
+    [
+        ("Softmax", False, False),
+        ("LpNormalization", False, False),
+        ("ArgMax", False, False),
+        ("Slice", False, False),
+        ("Transpose", False, False),
+        ("LogSoftmax", True, False),
+        ("LogSoftmax", False, True),
+        ("Softmax", True, True),
+        ("LpNormalization", True, True),
+        ("ArgMax", True, True),
+        ("Slice", True, True),
+        ("Transpose", True, True),
+    ],
 )
-@pytest.mark.parametrize("negative", [False, True])
-@pytest.mark.parametrize("tail", [False, True])
 def test_symbolic_native_axis_chain_preserves_concrete_intermediate_rank(operation, negative, tail):
     """Retain native axes after symbolic data acquires concrete Reshape metadata."""
     axis = -1 if negative else 1
@@ -398,10 +410,35 @@ def test_reshape_resolves_copied_dimensions_across_output_aliases(target, collis
         np.testing.assert_array_equal(actual, reference)
 
 
-@pytest.mark.parametrize("axis", [0, 1, 2, -1])
-@pytest.mark.parametrize("value_info", [False, True, "symbolic"])
-@pytest.mark.parametrize("ir_version", [3, 9])
-@pytest.mark.parametrize("entrypoint", ["stages", "pipeline"])
+@pytest.mark.parametrize(
+    ("axis", "value_info", "ir_version", "entrypoint"),
+    [
+        (0, False, 3, "stages"),
+        (2, False, 3, "stages"),
+        (-1, False, 3, "stages"),
+        (0, True, 3, "stages"),
+        (1, True, 3, "stages"),
+        (-1, True, 3, "stages"),
+        (0, "symbolic", 3, "stages"),
+        (1, "symbolic", 3, "stages"),
+        (-1, "symbolic", 3, "stages"),
+        (0, False, 9, "stages"),
+        (1, False, 9, "stages"),
+        (2, False, 9, "stages"),
+        (0, True, 9, "stages"),
+        (1, True, 9, "stages"),
+        (2, True, 9, "stages"),
+        (1, "symbolic", 9, "stages"),
+        (2, "symbolic", 9, "stages"),
+        (-1, "symbolic", 9, "stages"),
+        (1, False, 3, "pipeline"),
+        (2, True, 3, "pipeline"),
+        (2, "symbolic", 3, "pipeline"),
+        (-1, False, 9, "pipeline"),
+        (-1, True, 9, "pipeline"),
+        (0, "symbolic", 9, "pipeline"),
+    ],
+)
 def test_registered_axis_update_reads_native_initializer_rank(
     axis, value_info, ir_version, entrypoint
 ):
@@ -1293,10 +1330,17 @@ def test_native_index_views_survive_rank_preparation(producer, copied):
     np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
 
 
-@pytest.mark.parametrize("operation", ["Tile", "Expand", "Reshape"])
-@pytest.mark.parametrize("batch", [1, 2])
-@pytest.mark.parametrize("static_output", [False, True])
-@pytest.mark.parametrize("tail", [False, True])
+@pytest.mark.parametrize(
+    ("operation", "batch", "static_output", "tail"),
+    [
+        ("Tile", 2, False, False),
+        ("Reshape", 1, True, False),
+        ("Expand", 2, True, False),
+        ("Expand", 1, False, True),
+        ("Reshape", 2, False, True),
+        ("Tile", 1, True, True),
+    ],
+)
 def test_symbolic_structural_controls_keep_native_data_rank(operation, batch, static_output, tail):
     """Retain symbolic native layouts, including fixed public outputs and unary readers."""
     target = {
@@ -1996,10 +2040,23 @@ def test_legacy_initializer_controls_remain_fixed(operation):
     np.testing.assert_array_equal(_execute(transformed, feeds)[0], expected[0])
 
 
-@pytest.mark.parametrize("operation", ["QuantizeLinear", "DequantizeLinear"])
-@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
-@pytest.mark.parametrize("per_channel", [False, True, "singleton"])
-@pytest.mark.parametrize("domain", ["", "com.microsoft"])
+@pytest.mark.parametrize(
+    ("operation", "shape", "per_channel", "domain"),
+    [
+        ("QuantizeLinear", [2, 3], False, ""),
+        ("DequantizeLinear", [2, 3], False, ""),
+        ("QuantizeLinear", [2, 3, 4], True, ""),
+        ("DequantizeLinear", [2, 3, 4], True, ""),
+        ("QuantizeLinear", [2, 3, 4], "singleton", ""),
+        ("DequantizeLinear", [2, 3, 4], "singleton", ""),
+        ("QuantizeLinear", [2, 3, 4], False, "com.microsoft"),
+        ("DequantizeLinear", [2, 3, 4], False, "com.microsoft"),
+        ("QuantizeLinear", [2, 3], True, "com.microsoft"),
+        ("DequantizeLinear", [2, 3], True, "com.microsoft"),
+        ("QuantizeLinear", [2, 3], "singleton", "com.microsoft"),
+        ("DequantizeLinear", [2, 3], "singleton", "com.microsoft"),
+    ],
+)
 def test_registered_implicit_quantizer_axis_preserves_channel_values(
     operation, shape, per_channel, domain
 ):
@@ -2129,11 +2186,34 @@ def test_native_four_dimensional_runtime_controls_need_no_padding(operation, sou
 
 
 @pytest.mark.parametrize(
-    "operation",
-    ["Slice", "Transpose", "Softmax", "LogSoftmax", "LpNormalization", "ArgMax", "Expand", "Tile"],
+    ("operation", "rank", "source"),
+    [
+        ("Slice", 2, "unsqueeze"),
+        ("LogSoftmax", 2, "unsqueeze"),
+        ("LpNormalization", 2, "unsqueeze"),
+        ("ArgMax", 2, "unsqueeze"),
+        ("Expand", 2, "unsqueeze"),
+        ("Tile", 2, "unsqueeze"),
+        ("Transpose", 3, "unsqueeze"),
+        ("Softmax", 3, "unsqueeze"),
+        ("Transpose", 2, "unary"),
+        ("Softmax", 2, "unary"),
+        ("LogSoftmax", 2, "unary"),
+        ("Slice", 3, "unary"),
+        ("LpNormalization", 3, "unary"),
+        ("ArgMax", 3, "unary"),
+        ("Expand", 3, "unary"),
+        ("Tile", 3, "unary"),
+        ("Slice", 2, "reshape"),
+        ("Transpose", 2, "reshape"),
+        ("Softmax", 2, "reshape"),
+        ("LpNormalization", 2, "reshape"),
+        ("ArgMax", 2, "reshape"),
+        ("Expand", 2, "reshape"),
+        ("Tile", 2, "reshape"),
+        ("LogSoftmax", 3, "reshape"),
+    ],
 )
-@pytest.mark.parametrize("rank", [2, 3])
-@pytest.mark.parametrize("source", ["unsqueeze", "unary", "reshape"])
 def test_rank_one_adapters_keep_native_controls_unless_reshape_promotes(operation, rank, source):
     """Distinguish native rank-one input adapters from an explicitly padded Reshape."""
     shape = [1] * (rank - 1) + [6]

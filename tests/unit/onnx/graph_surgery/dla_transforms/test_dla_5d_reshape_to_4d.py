@@ -56,14 +56,12 @@ def _run_ort(model: onnx.ModelProto, feeds: dict[str, np.ndarray]) -> dict[str, 
     """Execute all graph outputs with the CPU runtime."""
     m = copy.deepcopy(model)
     _clamp_ir(m)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
     sess = ort.InferenceSession(
-        m.SerializeToString(),
-        providers=["CPUExecutionProvider"],
+        m.SerializeToString(), providers=["CPUExecutionProvider"], sess_options=options
     )
-    out = {}
-    for o in m.graph.output:
-        out[o.name] = sess.run([o.name], feeds)[0]
-    return out
+    return dict(zip([output.name for output in m.graph.output], sess.run(None, feeds)))
 
 
 def _make_reduce_min_axis4_model() -> onnx.ModelProto:

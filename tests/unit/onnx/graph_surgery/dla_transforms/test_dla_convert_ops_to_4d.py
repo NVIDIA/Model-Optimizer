@@ -127,9 +127,7 @@ def _make_model(nodes, name, inputs, outputs, inits=None, *, infer_symbolic_shap
     if infer_symbolic_shapes:
         try:
             # Shape inference is optional in partial runtime installations.
-            from onnxruntime.tools.symbolic_shape_infer import (
-                SymbolicShapeInference,  # type: ignore[import-untyped]
-            )
+            from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
 
         except ImportError:
             pass
@@ -142,8 +140,12 @@ def _make_model(nodes, name, inputs, outputs, inits=None, *, infer_symbolic_shap
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
     """Execute all public outputs on the CPU runtime."""
     _clamp_ir(model)
-    sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
-    return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    sess = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"], sess_options=options
+    )
+    return dict(zip([output.name for output in model.graph.output], sess.run(None, feeds)))
 
 
 @pytest.mark.parametrize("operation", ["Concat", "TopK"])

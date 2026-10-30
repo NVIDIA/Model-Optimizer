@@ -93,8 +93,12 @@ def _prepare_model(model: onnx.ModelProto) -> onnx.ModelProto:
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
     """Execute the test model on the CPU and return named outputs."""
     _clamp_ir(model)
-    sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
-    return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    sess = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"], sess_options=options
+    )
+    return dict(zip([output.name for output in model.graph.output], sess.run(None, feeds)))
 
 
 def _apply(model, quant_types=None, **kw):
