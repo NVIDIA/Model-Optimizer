@@ -712,3 +712,39 @@ def test_a_load_failing_on_one_rank_fails_every_rank(
         failing_rank=failing_rank,
         match=match,
     )
+
+
+def _one_gpu_per_process_job(rank, size):
+    hf_config = SimpleNamespace(base_model_ep_plan=dict(_EP_PLAN), num_experts=4)
+    reached = None
+    with bounded_collectives(), ExitStack() as stack:
+        # Each process sees one GPU and is bound to it, as cuda:0; the local ranks run 0 and 1.
+        for name, value in [
+            ("is_available", True),
+            ("is_initialized", True),
+            ("current_device", 0),
+            ("device_count", 1),
+        ]:
+            stack.enter_context(mock.patch(f"torch.cuda.{name}", return_value=value))
+        stack.enter_context(
+            mock.patch.object(
+                model_load_utils, "ensure_local_checkpoint", side_effect=lambda p, **k: (None, p)
+            )
+        )
+        stack.enter_context(
+            mock.patch("torch.distributed.device_mesh.init_device_mesh", _meshes_in_step)
+        )
+        try:  # not pytest.raises: its failure would end the pooled worker instead of the job
+            load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=hf_config)
+        except Exception as error:
+            reached = error
+    assert isinstance(reached, _PastTheMeshesError), (rank, reached)
+
+
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.7"), reason="the EP load needs transformers 5.7"
+)
+def test_one_visible_gpu_per_process_gives_every_rank_its_gpu(cpu_dist_workers):
+    """A launch that shows each process one GPU binds every rank to cuda:0, whatever its local rank:
+    every rank has its GPU, and every rank goes on to build the meshes."""
+    cpu_dist_workers.run(_one_gpu_per_process_job)
