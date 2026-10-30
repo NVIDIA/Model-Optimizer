@@ -32,6 +32,7 @@ import pytest
 import torch
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
+from torch.distributed.tensor import Shard, distribute_tensor
 
 transformers = pytest.importorskip("transformers")
 
@@ -278,8 +279,6 @@ def test_an_integer_sharded_onto_the_expert_mesh_keeps_its_dtype(tmp_path, gloo_
     reads it, and the shard op casts it to the parameter's dtype, not the copy: a decompressing load
     keeps the packed integers there too."""
     sharding_utils = pytest.importorskip("transformers.distributed.sharding_utils")
-    from torch.distributed.tensor import Shard, distribute_tensor
-
     experts = torch.zeros(2, 4, 8, dtype=torch.bfloat16)  # a fused expert param, sharded by expert
     shard = sharding_utils.DtensorShardOperation(
         distribute_tensor(experts, gloo_world_of_one, [Shard(0)])
