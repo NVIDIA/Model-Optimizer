@@ -561,7 +561,10 @@ def _refuse_sharded_load_options(
     unknown = sorted(passed - _SHARDED_LOAD_OPTIONS[route] - {"dtype", "torch_dtype"})
     # torch_dtype is from_pretrained's older name for dtype, and None means "auto" to it.
     dtypes = [name for name in ("dtype", "torch_dtype") if kwargs.get(name) not in (None, "auto")]
-    if measured and (refused := sorted({*unknown, *dtypes})):
+    # What does not apply to a sharded load: a dtype to load in, or an option neither load takes.
+    taken = _SHARDED_LOAD_OPTIONS[_FSDP2] | _SHARDED_LOAD_OPTIONS[_EXPERT_PARALLEL]
+    refused = sorted({*(passed - taken - {"dtype", "torch_dtype"}), *dtypes})
+    if measured and refused:
         # Say so, rather than refuse the options below as if the caller had asked for this load.
         chose = (
             "no plan or MODELOPT_EP_DEGREE asked for a layout, and the plan decision shards the "
