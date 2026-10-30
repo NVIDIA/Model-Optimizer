@@ -45,6 +45,7 @@ from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     DeepseekV3Config,
+    LlamaConfig,
     MixtralConfig,
     PretrainedConfig,
 )
@@ -64,9 +65,10 @@ PACKED = ("weight_packed", "weight_scale", "weight_shape")  # what pack-quantize
 
 @pytest.fixture
 def restore_loader_hooks(monkeypatch):
-    """Undo the process-wide transformers hooks the decompressor installs."""
+    """Undo the process-wide transformers hooks the decompressor installs, and its load state."""
     for owner, name in ((cml, "_materialize_copy"), (mu, "get_model_conversion_mapping")):
         monkeypatch.setattr(owner, name, getattr(owner, name))
+    monkeypatch.setattr(onfly, "_LOAD", dict(onfly._LOAD))
 
 
 class _ScaledCompressor:
@@ -235,10 +237,12 @@ def test_only_owned_experts_and_stored_siblings_reach_the_compressor():
 @pytest.mark.usefixtures("restore_loader_hooks")
 def test_integer_checkpoint_tensors_keep_their_dtype_on_load():
     """Without a quantizer the loader casts every tensor to the model's float dtype, which destroys
-    packed weights, shapes and zero-points. Integers stay integers; floats are still cast, and
-    integer-to-integer casts still happen."""
+    packed weights, shapes and zero-points. In a decompressing load integers stay integers; floats
+    are still cast, and integer-to-integer casts still happen. Any other load casts as before."""
     onfly._install_keep_int_native()
     packed = torch.tensor([[2**31 - 15, -(2**31) + 3]], dtype=torch.int32)  # not exact in bf16
+    assert cml._materialize_copy(packed, dtype=torch.bfloat16).dtype == torch.bfloat16
+    onfly._LOAD["decompressing"] = True
 
     kept = cml._materialize_copy(packed, dtype=torch.bfloat16)
 
@@ -890,3 +894,33 @@ def test_a_compressed_checkpoint_loads_exactly_and_saves_under_its_own_names(tmp
         export_name(f"model.layers.0.mlp.experts.1.{part}.weight")
         for part in ("gate_proj", "up_proj", "down_proj")
     ] == [f"{stored}.1.{hub}.weight" for hub in ("w1", "w3", "w2")]
+
+
+@pytest.mark.usefixtures("restore_loader_hooks")
+def test_a_load_the_decompressor_did_not_mark_casts_as_before(tmp_path):
+    """The hooks are process-wide, but only a decompressing load keeps an integer source integer:
+    a later load of a model no config of which was marked casts it to its float parameter."""
+    pytest.importorskip(
+        "compressed_tensors", reason="needs compressed-tensors (CI's unit session installs it)"
+    )
+    onfly.install_onfly_decompress(
+        SimpleNamespace(quantization_config=_pack_quantized(experts=_int4(True, ["Linear"])))
+    )
+    config = LlamaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        tie_word_embeddings=False,
+    )
+    AutoModelForCausalLM.from_config(config).save_pretrained(tmp_path)
+    state = load_file(str(tmp_path / "model.safetensors"))
+    state["model.norm.weight"] = torch.full_like(state["model.norm.weight"], 3, dtype=torch.int8)
+    save_file(state, str(tmp_path / "model.safetensors"), metadata={"format": "pt"})
+
+    model = AutoModelForCausalLM.from_pretrained(tmp_path, dtype=torch.bfloat16)
+
+    assert model.model.norm.weight.dtype == torch.bfloat16
+    assert torch.equal(model.model.norm.weight, torch.full_like(model.model.norm.weight, 3))
