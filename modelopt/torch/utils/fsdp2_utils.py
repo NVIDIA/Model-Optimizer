@@ -103,8 +103,10 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
 
     It records no distribution plan: a caller wrapping a model itself records one once it is wrapped
     (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`). It refuses a model whose
-    recorded plan replicates it, as the plan :func:`load_pretrained` records on a model it loads
-    whole does: a plan is recorded once, so wrap a model loaded with ``from_pretrained`` instead.
+    recorded plan replicates it, as the plan
+    :func:`~modelopt.torch.utils.plugins.model_load_utils.load_pretrained` records on a model it
+    loads whole does: a plan is recorded once, so wrap a model loaded with ``from_pretrained``
+    instead.
     """
     recorded = getattr(model, _PLAN_ATTR, None)
     if recorded is not None and not recorded.is_fsdp_dense:
