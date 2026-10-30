@@ -108,5 +108,6 @@ def test_fsdp2_wrap_refuses_a_model_with_a_plan_recorded(monkeypatch, plan, reco
     )
     monkeypatch.setattr(fsdp2_utils, "fully_shard", lambda *a, **k: pytest.fail("sharded"))
 
-    with pytest.raises(RuntimeError, match="already recorded as distributed"):
+    # A ValueError, as set_distribution_plan raises for the same record: one type to catch.
+    with pytest.raises(ValueError, match="already recorded as distributed"):
         fsdp2_utils.fsdp2_wrap(model)
