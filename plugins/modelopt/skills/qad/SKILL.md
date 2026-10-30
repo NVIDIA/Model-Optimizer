@@ -11,8 +11,9 @@ description: >-
 # ModelOpt Quantization-Aware Distillation
 
 QAD is expensive. Run it only when the user explicitly authorizes QAD for the
-target model or run, with a loop or GPU-hour budget. A Day-0, PTQ, evaluation,
-comparison, or recipe-search request alone is not authorization to start QAD.
+target model or run, with a loop or GPU-hour budget; ask for the budget when it
+is missing. A Day-0, PTQ, evaluation, comparison, or recipe-search request
+alone is not authorization to start QAD.
 The authorization covers new recipes from a recipe search only when the user
 says so.
 
@@ -72,8 +73,12 @@ For Megatron Bridge, before constructing commands, read:
    Static-block NVFP4 recipes require TP=1; use PP for memory. With PP, balance
    stages with `--num_layers_in_{first,last}_pipeline_stage` (the first and last
    stages also hold the embedding and output layer) and recompute only where
-   memory needs it (`--recompute_num_layers_per_stage`). Time a few iterations
-   of each candidate layout in the first job and keep the fastest.
+   memory needs it (`--recompute_num_layers_per_stage`). In the first job's
+   allocation, time a few iterations of each candidate layout with short
+   launches before the run starts, and keep the fastest. Give each timing
+   launch a scratch `--output_dir`: `distill.py` resumes from
+   `<output_dir>/checkpoints`, so a timing checkpoint there would become the
+   run's starting point.
 
 3. **Prepare the full capped dataset once.** Use suitable user-provided data, or
    copy `examples/megatron_bridge/data/nemotron-cascade-2-blend.yaml` as the
@@ -108,8 +113,10 @@ For Megatron Bridge, before constructing commands, read:
 ### Run policy
 
 - `train_iters` sets the cosine LR horizon and is a loop knob: with 1000, the
-  LR stays near its peak through iteration 150. Stop runs by the decisions
-  below, not by `train_iters`, and leave `exit_interval` unset.
+  LR stays near its peak through iteration 150. `distill.py` also stops
+  training there, with or without `exit_interval`. Stop runs by the decisions
+  below and leave `exit_interval` unset. A run that reaches `train_iters` while
+  the decision is still to continue ends as a Miss from under-recovery.
 - On Slurm, use initial step timing to submit only enough sequential jobs to reach
   a few checkpoints past the expected KD-loss knee; never submit through
   `train_iters` upfront. At each recovery checkpoint, submit to the next only
@@ -122,17 +129,19 @@ For Megatron Bridge, before constructing commands, read:
   At iteration 50, require the loss aggregate to be lower than at iteration 10.
 - At each recovery checkpoint, first evaluate the one to three benchmarks with
   the largest PTQ drops or that failed in earlier loops. Run the remaining
-  original PTQ suite at that checkpoint only after recovery beyond run noise.
+  original PTQ suite at that checkpoint once the targeted benchmarks are within
+  run noise of 1%, or after recovery beyond run noise.
 - Start benchmark evaluation at the knee of the KD loss curve, where its steep
   drop ends, rounded to the next checkpoint, then evaluate every checkpoint
   while the scores still change. Before the knee, use loss only to catch
   drift; after it, judge and pick checkpoints by benchmarks alone, since KD
   loss keeps falling after they peak. Between near ties, the benchmark most
   sensitive to quantization decides.
-- Run noise is 2x the standard error of a benchmark's gap to BF16: from the
-  per-sample standard errors of both sides on a single run, pooled across
-  runs once repeats exist. Repeat a benchmark only when its gap is within run
-  noise of 1%, up to 8 runs per side.
+- Run noise is 2x the standard error of a benchmark's gap to BF16: paired per
+  question when both sides score the same questions, otherwise from both
+  sides' per-sample standard errors, and pooled across runs once repeats
+  exist. Repeat a benchmark only when its gap is within run noise of 1%, up to
+  8 runs per side; the compare-results run floors still apply before a Pass.
 - Export each checkpoint to evaluate and pass the ptq skill's
   `references/checkpoint-validation.md` gate on it before evaluation. Run the
   serving canary on the run's first export only; later exports change only
@@ -154,18 +163,21 @@ For Megatron Bridge, before constructing commands, read:
 
 ### Recipe loop
 
-Each loop runs QAD on one PTQ recipe and changes one thing from the last loop.
-Start from the best PTQ recipe of the preceding PTQ evaluation or recipe
-search, and run each new recipe first with the default policy as its control.
-This loop chooses the QAD settings; the quant-recipe-search skill chooses the
-next recipe from its outcome. Stop when the QAD budget is spent and report the
-best result so far.
+Each run trains one PTQ recipe and differs from that recipe's control in one
+QAD knob. Start from the best PTQ recipe of the preceding PTQ evaluation or
+recipe search; its control uses the default policy. When GPUs allow, start
+one-knob variants as separate runs alongside the control instead of waiting
+for its miss. This loop chooses the QAD settings; the quant-recipe-search
+skill chooses the next recipe from its outcome. Stop when the QAD budget is
+spent and report the best result so far.
 
 1. **On a miss, change one QAD knob.** Read each missed benchmark against PTQ:
    worse than PTQ is drift (lower the peak LR or add matching data); better
    than PTQ but short is under-recovery (keep the LR high longer with a larger
-   `train_iters`, or train further). Knobs, in order: peak LR, `train_iters`,
-   data blend, then teacher-generated data.
+   `train_iters`). Knobs, in order of priority when GPUs are limited: peak LR,
+   `train_iters`, data blend, then teacher-generated data. A changed `train_iters` is a fresh run from PTQ, with
+   data materialized to cover it: resuming would change the decay length the
+   checkpoint's LR scheduler expects.
 2. **Compare a knob with its control at the same checkpoints** past the knee,
    on benchmark scores pooled over fresh runs. A rejection holds only for that
    PTQ recipe: rerun the control when the recipe changes.

@@ -157,19 +157,23 @@ Do not collapse the search to one dimension such as numeric format only. Read
 
 When the user has authorized QAD, a candidate is a recipe plus the QAD settings
 from the `qad` skill's recipe loop, which ends each recipe with a pass or a
-clear miss. Step the layout from that outcome:
+clear miss. A PTQ recipe that already meets the threshold counts as a pass.
+Step the layout from that outcome:
 
-- After a pass, add one module group to the passing recipe, in order of bytes
-  saved; the MTP head is its own group. A group can be a slice: its middle
-  layers with the first and last few kept, or some of its projections (such as
-  GDN `in_proj` only, or attention `linear_qkv` only). Find and evaluate the
-  new layout's best PTQ recipe, starting from the passing recipe's
-  calibration, before its QAD. When GPUs are idle, run two or three
-  single-group candidates as separate QAD runs, each with its own control.
+- After a pass, add one module group to the passing recipe, in order of
+  savings on the success metric; the MTP head is its own group. A group can be
+  a slice: its middle layers with the first and last few kept, or some of its
+  projections (such as GDN `in_proj` only, or attention `linear_qkv` only).
+  Find and evaluate the new layout's best PTQ recipe, starting from the
+  passing recipe's calibration, before its QAD. Step one layout at a time;
+  the `qad` recipe loop runs its knob variants in parallel.
 - After a clear miss, shrink the added group to a slice; if that misses too,
-  drop the group and try the next one on the last passing recipe.
+  drop the group and try the next one on the last passing recipe. If no recipe
+  has passed yet, report no QAD pass and return to the accuracy-drop steps
+  above.
 - Stop when every group has been added or dropped, or the QAD budget is spent.
-  Return the most compressed passing recipe and its QAD checkpoint.
+  Return the passing recipe that best meets the success metric, with its QAD
+  checkpoint.
 
 Maintain a recipe portfolio table with recipe name, objective, active-cost
 estimate, calibration notes, checkpoint path, eval/log references, accuracy,
