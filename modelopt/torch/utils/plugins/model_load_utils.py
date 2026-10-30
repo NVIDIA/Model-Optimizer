@@ -447,17 +447,10 @@ _SHARDED_LOAD_OPTIONS = {
         }
     ),
 }
-
-
-def _whole_load_options(kwargs) -> list[str]:
-    """The load ``kwargs`` that place a whole model, which the FSDP2 load refuses.
-
-    One passed as None, from_pretrained's own default, places nothing.
-    """
-    passed = {name for name, value in kwargs.items() if value is not None}
-    names = passed - _SHARDED_LOAD_OPTIONS[_FSDP2] - {"config", "dtype", "torch_dtype"}
-    dtypes = {name for name in ("dtype", "torch_dtype") if kwargs.get(name) not in (None, "auto")}
-    return sorted(names | dtypes)
+# The values an FSDP2-only option asks nothing of a whole load with: the FSDP2 load's own default,
+# and None where that leaves it unset. broadcast_chunk_size has none: None asks for all of a
+# source's layers at once.
+_ASKS_NOTHING = {"cpu_offload": (False, None), "mp_policy": (None,)}
 
 
 def _route(plan: DistributionPlan) -> str | None:
@@ -507,8 +500,25 @@ def _whole_instead(decided: bool) -> str:
     return f"MODELOPT_FSDP_SIZE=1 or {plan}" if decided else plan
 
 
-def _refuse_sharded_load_options(route, auto_class, kwargs, decided: bool) -> None:
-    """Refuse the arguments the sharded load ``route`` cannot honor: the arguments alone decide."""
+def _refuse_sharded_load_options(
+    route, auto_class, kwargs, decided: bool, measured: bool = False
+) -> None:
+    """Refuse the arguments the sharded load ``route`` cannot honor: the arguments alone decide.
+
+    ``measured`` says rank 0's GPU memory chose the sharded layout, which nothing asked for.
+    """
+    # An option passed as None, from_pretrained's own default (device_map=None, say), asks nothing.
+    passed = {name for name, value in kwargs.items() if value is not None}
+    unknown = sorted(passed - _SHARDED_LOAD_OPTIONS[route] - {"dtype", "torch_dtype"})
+    dtypes = [name for name in ("dtype", "torch_dtype") if kwargs.get(name) not in (None, "auto")]
+    if measured and (placed := sorted({*unknown, *dtypes})):
+        # Say so, rather than refuse the options below as if the caller had asked for this load.
+        raise TypeError(
+            f"{placed} place a whole model, but no plan or MODELOPT_FSDP_SIZE asked for a layout, "
+            f"and by rank 0's GPU memory the model does not fit one GPU, so the {route} load "
+            f"shards it. To load it whole on every rank and place it yourself: "
+            f"{_whole_instead(decided)}."
+        )
     if auto_class not in (None, AutoModelForCausalLM):
         name = getattr(auto_class, "__name__", repr(auto_class))
         raise NotImplementedError(
@@ -523,9 +533,6 @@ def _refuse_sharded_load_options(route, auto_class, kwargs, decided: bool) -> No
                 f"so {name}={value!r} does not apply to it; FSDP2's mp_policy sets the dtype it "
                 "computes in."
             )
-    # An option passed as None, from_pretrained's own default (device_map=None, say), asks nothing.
-    passed = {name for name, value in kwargs.items() if value is not None}
-    unknown = sorted(passed - _SHARDED_LOAD_OPTIONS[route] - {"dtype", "torch_dtype"})
     if unknown:
         whole = (
             " To place the model yourself, have every rank load it whole: "
@@ -540,12 +547,12 @@ def _refuse_sharded_load_options(route, auto_class, kwargs, decided: bool) -> No
 
 
 def _sharded_load_kwargs(
-    route, ckpt_path, auto_class, model_type, kwargs, hub_options, decided: bool
+    route, ckpt_path, auto_class, model_type, kwargs, hub_options, decided: bool, measured: bool
 ) -> dict:
     """What the sharded load ``route`` names takes, refusing what it cannot honor."""
     from modelopt.torch.models.hf import checkpoint_has_mtp
 
-    _refuse_sharded_load_options(route, auto_class, kwargs, decided)
+    _refuse_sharded_load_options(route, auto_class, kwargs, decided, measured)
     # Past the refusal, anything else is a dtype the load keeps or an option at its default, None.
     kwargs = {k: v for k, v in kwargs.items() if k in _SHARDED_LOAD_OPTIONS[route]}
     if checkpoint_has_mtp(model_type, ckpt_path):
@@ -821,27 +828,15 @@ def load_pretrained(
         shared = {"trust_remote_code", "attn_implementation", "hf_config"}  # hf_config: see above
         own = _SHARDED_LOAD_OPTIONS[_FSDP2] - shared
         if route is None:
-            # mp_policy or cpu_offload passed as None, their default, asks nothing of a whole load;
-            # broadcast_chunk_size=None does ask, to broadcast all of a source's layers at once.
-            for name in own - {"broadcast_chunk_size"}:
-                if name in kwargs and kwargs[name] is None:
+            for name, nothing in _ASKS_NOTHING.items():
+                if name in kwargs and kwargs[name] in nothing:
                     del kwargs[name]
         if route is None and (sharded := sorted(set(kwargs) & own)):
             raise TypeError(
                 f"{sharded} only apply to the FSDP2 load, but {plan!r} gives every rank the whole "
                 "model; pass a plan with dense='fsdp' to shard it."
             )
-        placed = _whole_load_options(kwargs)
-        if decided and route == _FSDP2 and _dense_from_env(plan.world_size) == "auto" and placed:
-            # Rank 0's GPU memory chose to shard: say so, rather than refuse the options below as
-            # if the caller had asked for the sharded load.
-            raise TypeError(
-                f"{placed} place a whole model, but no plan or MODELOPT_FSDP_SIZE asked for a "
-                f"layout, and by rank 0's GPU memory the model does not fit one GPU, so {plan!r} "
-                "shards it. To load it whole on every rank and place it yourself, set "
-                "MODELOPT_FSDP_SIZE=1 or pass "
-                f"distribution=DistributionPlan({plan.world_size}, dense='replicate')."
-            )
+        measured = decided and route == _FSDP2 and _dense_from_env(plan.world_size) == "auto"
         if route is not None and config is not None:
             # The sharded load builds from hf_config, a copy, as building writes to the config.
             del kwargs["config"]
@@ -863,7 +858,7 @@ def load_pretrained(
             {}
             if route is None
             else _sharded_load_kwargs(
-                route, ckpt_path, auto_class, model_type, kwargs, hub_options, decided
+                route, ckpt_path, auto_class, model_type, kwargs, hub_options, decided, measured
             )
         )
     if route is not None:

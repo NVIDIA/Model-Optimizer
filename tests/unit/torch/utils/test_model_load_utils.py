@@ -934,6 +934,8 @@ def process_group(monkeypatch, a_gpu):
         ({"device_map": None}, 4, {"device_map": None}),
         ({}, 1, {}),
         ({"mp_policy": None, "cpu_offload": None}, 4, {"device_map": {"": "cuda:1"}}),
+        # As hf_ptq passes --cpu_offload when it is not set: the FSDP2 load's own default.
+        ({"cpu_offload": False}, 4, {"device_map": {"": "cuda:1"}}),
     ],
     ids=[
         "defaults_to_the_rank_gpu",
@@ -941,6 +943,7 @@ def process_group(monkeypatch, a_gpu):
         "none_loads_on_the_cpu",
         "no_gpu_of_its_own",
         "fsdp2_options_at_none",
+        "cpu_offload_at_its_default",
     ],
 )
 def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
@@ -950,7 +953,8 @@ def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
     pick the same idle GPU. device_map=None is from_pretrained's own: a load on the CPU, which the
     caller places, as hf_ptq does. A rank with none of its own, on a host with fewer GPUs than
     ranks, is left to from_pretrained's placement rather than handed a device it does not have. The
-    FSDP2 load's own options at None, their default, ask nothing and do not reach from_pretrained."""
+    FSDP2 load's own options left unset or at its defaults ask nothing and do not reach
+    from_pretrained."""
     run_as(4, rank=1)
     serve(LlamaConfig(**_TINY))
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
