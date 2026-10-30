@@ -74,6 +74,7 @@ from modelopt.torch.utils.moe import (
     _SUB_CONFIG_ATTRS,
     _choose_ep_degree,
     _ep_config,
+    _ep_floor,
     _ep_spec,
     _num_experts_from_config,
     _routed_expert_keys,
@@ -1747,8 +1748,8 @@ def _decide_distribution(
             raise RuntimeError(
                 f"{hf_config.model_type} can be expert-parallel, but the plan resolved to ep_size=1 "
                 f"at world_size={world_size}, so every rank would hold the whole MoE, and this "
-                "transformers cannot shard its experts. Upgrade transformers to shard them, or "
-                f"{others}"
+                "transformers cannot shard its experts. Upgrade transformers to "
+                f"{_ep_floor(hf_config.model_type)} or later to shard them, or {others}"
             )
         # Name a way to shard the experts only where one exists: a count the config spells none of
         # the ways ModelOpt reads leaves no EP degree to name, as does one sharing no factor above 1
