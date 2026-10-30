@@ -986,14 +986,47 @@ def _attribute(node, name):
     return next((attribute for attribute in node.attribute if attribute.name == name), None)
 
 
+def _allocated_boundary_name(name, hint):
+    """Match the shared allocator's unchanged hint or numbered collision suffix."""
+    return name == hint or (name.startswith(hint + "_") and name[len(hint) + 1 :].isdigit())
+
+
 def _shape_before_boundary_promotion(cache, name):
-    """Resolve the original shape behind a generated graph-input Unsqueeze."""
+    """Recover native shapes at generated input and output boundary views."""
     producer = cache.get_producer(name)
     if producer is not None and producer.op_type == "Unsqueeze":
         original = producer.input[0]
         if original in cache.graph_input_names and name == original + "_unsqueeze_input":
             return cache.get_shape(original)
-    return cache.get_shape(name)
+    shape = cache.get_shape(name)
+    if shape is not None:
+        return shape
+    for consumer, port in cache.get_consumers(name):
+        if (
+            port != 0
+            or consumer.op_type != "Squeeze"
+            or consumer.domain not in {"", "ai.onnx"}
+            or consumer.overload
+            or consumer.output[0] not in cache.graph_output_names
+        ):
+            continue
+        original = consumer.output[0]
+        if not _allocated_boundary_name(
+            name, original + "_squeeze_input"
+        ) or not _allocated_boundary_name(consumer.name, original + "_squeeze"):
+            continue
+        shape = cache.get_shape(original)
+        axes = cache.get_init_array(consumer.input[1]) if len(consumer.input) > 1 else None
+        if (
+            shape is not None
+            and 0 < len(shape) < 4
+            and (
+                (axes is not None and axes.reshape(-1).tolist() == list(range(4 - len(shape))))
+                or (axes is None and len(shape) == 1 and shape[0] != 1)
+            )
+        ):
+            return shape
+    return None
 
 
 def is_const_dq_input(init_list, input_name, graph):
