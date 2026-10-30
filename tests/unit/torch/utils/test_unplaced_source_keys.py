@@ -414,6 +414,7 @@ def test_compressed_experts_decompressed_at_load_are_placed(tmp_path, monkeypatc
     # The decompressor's hooks are process-wide: undone after the test.
     for owner, name in ((cml, "spawn_materialize"), (mu, "get_model_conversion_mapping")):
         monkeypatch.setattr(owner, name, getattr(owner, name))
+    monkeypatch.setattr(_onfly_decompress, "_LOAD", {"decompressing": False})
     hidden, inter, experts = 64, 32, 2
     config = AutoConfig.for_model(
         "qwen3_moe",
