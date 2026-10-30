@@ -1,6 +1,6 @@
 # Post-Quantization Checkpoint Validation
 
-Before treating an exported checkpoint as ready for deployment/evaluation, verify checkpoint size/bits, quantized-weight coverage, metadata consistency, and serving readiness. This is a gate, not a guideline: do not submit evals, start a production serving job, or mark the checkpoint ready until all required checks, including the serving canary, pass and the validation report is recorded.
+Before treating an exported checkpoint as ready for deployment/evaluation, verify checkpoint size/bits, quantized-weight coverage, metadata consistency, and serving readiness. This is a gate, not a guideline: do not submit evals, start a production serving job, or mark the checkpoint ready until all required checks, including the serving canary (first export only for a QAD run), pass and the validation report is recorded.
 
 ## Required checks
 
@@ -33,8 +33,8 @@ Stop instead of proceeding if:
 - Prompting, tokenizer, generation, architecture, context-length, or special-token metadata changed unexpectedly.
 - The exact checkpoint workspace or path is missing or is not preserved for deployment and evaluation.
 - Any PTQ compatibility category is omitted instead of recording its requirements or `none`.
-- The **deployment** skill cannot start the checkpoint in the intended deployment environment from the recorded workspace/path with the recorded compatibility requirements.
-- The serving canary does not return a valid response.
+- The **deployment** skill cannot start the checkpoint in the intended deployment environment from the recorded workspace/path with the recorded compatibility requirements (first export only for a QAD run).
+- The serving canary does not return a valid response (first export only for a QAD run).
 - **VLM only:** any vision-tower weight (`model.visual.*`/`vision_tower.*`/`vision_model.*`) carries quantization scales (unless quantizing the ViT is intended). Generic `*mlp*`/`*experts*` recipes silently match the ViT MLPs → garbage image embeddings (~0% on MMMU-Pro) while text looks fine; the precision script above counts them as valid NVFP4, so run the VLM check below.
 
 ## VLM check — vision tower must stay unquantized
