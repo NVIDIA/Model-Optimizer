@@ -174,12 +174,14 @@ def _assert_grads_match_the_whole_model(model, per_batch, rank, size, ep_degree)
     group = range(rank - ep_rank, rank - ep_rank + ep_degree)
     per_rank = NUM_EXPERTS // ep_degree
     owned = slice(ep_rank * per_rank, (ep_rank + 1) * per_rank)
+    # Checked before the comparisons: full_tensor() below is a collective that a rank without the
+    # gradient would skip, leaving the others waiting in it instead of failing.
+    _fail_together(
+        [f"{name} received no gradient" for name, p in model.named_parameters() if p.grad is None]
+    )
     problems, names = [], set()
     for name, param in model.named_parameters():
         names.add(name)
-        if param.grad is None:
-            problems.append(f"{name} received no gradient")
-            continue
         if ".mlp.experts." in name:
             actual = _local(param.grad)
             expected = sum(per_batch[r][name] for r in group)[owned]
