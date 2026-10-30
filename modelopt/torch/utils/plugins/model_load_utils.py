@@ -1796,7 +1796,7 @@ def load_and_prepare_ep(
                 "or grouped_gemm), so this load would leave them whole on every rank."
             )
         # Only grouped_gemm entries shard an expert's weights here: the torch_a2a styles the
-        # containers take for the load shard nothing themselves (packed_* entries are dropped).
+        # containers take for the load shard nothing themselves (any other style is refused below).
         unsharded = sorted(
             key
             for key in _routed_expert_keys(ep_plan)
