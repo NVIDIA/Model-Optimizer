@@ -765,3 +765,21 @@ def test_collator_batches_multiple(tmp_path):
         train_len,
         HIDDEN_SIZE,
     )
+
+
+@pytest.mark.parametrize("shift_labels", [True, False])
+def test_offline_data_module_preserves_label_alignment_and_eos(tmp_path, shift_labels):
+    """The data module preserves masks and EOS supervision for each label convention."""
+    args = _make_data_args(sample_size=-1, tmp_path=tmp_path, n_files=0)
+    p = tmp_path / "sample.pt"
+    data = _make_offline_pt(p, seq_len=3)
+    data["input_ids"] = torch.tensor([1, 7, 2])
+    data["loss_mask"] = torch.tensor([0, 1, 1])
+    torch.save(data, p)
+    kwargs = {} if shift_labels else {"shift_labels": False}
+    module = make_speculative_data_module(
+        MagicMock(), args, train_len=3, answer_only_loss=True, **kwargs
+    )
+    item = module["train_dataset"][0]
+    assert item["labels"].tolist() == ([7, 2, -100] if shift_labels else [1, 7, 2])
+    assert item["loss_mask"].tolist() == [0, 1, 1]

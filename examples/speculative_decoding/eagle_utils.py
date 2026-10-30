@@ -214,6 +214,7 @@ def make_speculative_data_module(
             answer_only_loss=answer_only_loss,
             tokenizer=tokenizer,
             aux_hidden_states_optional=aux_hidden_states_optional,
+            shift_labels=shift_labels,
         )
         data_collator = EagleOfflineDataCollator(train_len=train_len)
 
