@@ -881,7 +881,7 @@ def load_pretrained(
             warnings.warn(
                 f"Rank {dist.rank()} has no GPU of its own: it sees {torch.cuda.device_count()} "
                 f"GPU(s) as local rank {dist.local_rank()}, so it loads the whole model where "
-                "from_pretrained places it, on the CPU, while ranks with one load it onto theirs.",
+                "from_pretrained places it without a device_map, on the CPU.",
                 stacklevel=2,
             )
         auto_class = auto_class or AutoModelForCausalLM
@@ -1235,7 +1235,9 @@ def parallel_load_and_prepare_fsdp2(
     pass ``None`` to broadcast all of a source's layers at once).
 
     It records no distribution plan, as :func:`~modelopt.torch.utils.fsdp2_utils.fsdp2_wrap` does
-    not; :func:`load_pretrained` does.
+    not: :func:`load_pretrained` records one, and a caller of this loader records its own
+    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`) before calibrating or
+    exporting the model.
     """
     resolved_path = _resolve_checkpoint_dir(ckpt_path, rank)
     weight_map = indexed_weight_map(resolved_path)
