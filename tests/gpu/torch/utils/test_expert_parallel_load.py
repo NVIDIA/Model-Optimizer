@@ -63,7 +63,7 @@ from modelopt.torch.utils.distributed import (
     set_distribution_plan,
 )
 from modelopt.torch.utils.moe import apply_distributed_support, expert_parallel_mesh
-from modelopt.torch.utils.plugins.model_load_utils import load_and_prepare_ep
+from modelopt.torch.utils.plugins.model_load_utils import load_and_prepare_ep, load_pretrained
 
 NUM_EXPERTS = 8
 
@@ -617,6 +617,17 @@ def _kimi_k3_expert_parallel_job(rank, size, ckpt_dir):
                 if [to_checkpoint(part) for part in parts] != leaves:
                     problems.append(f"expert {e} exports as {[to_checkpoint(p) for p in parts]}")
 
+            # The returned model's config has lost its scheme and the decompressor's mark. Passed
+            # to another load of the checkpoint, it is refused, not read as bf16 experts.
+            try:
+                load_pretrained(
+                    ckpt_dir, config=model.config, distribution=plan, trust_remote_code=True
+                )
+                problems.append("a load with the returned model.config was not refused")
+            except ValueError as e:
+                if "no compressed-tensors quantization_config" not in str(e):
+                    problems.append(f"a load with the returned model.config failed otherwise: {e}")
+
             gathered = [None] * size
             dist.all_gather_object(gathered, problems)
     finally:
@@ -632,7 +643,8 @@ def test_kimi_k3_packed_experts_load_calibrate_and_name_back_expert_parallel(
     its model spec: each rank decompresses only its own experts, the sharded model matches the whole
     one loaded on a single GPU, calibration over every rank's batch matches the whole model's, and
     the export names the experts back to the checkpoint's ``w1``/``w3``/``w2``. Each rank's
-    checks are gathered before any rank fails, so a regression fails instead of hanging."""
+    checks are gathered before any rank fails, so a regression fails instead of hanging. Passed to
+    another load, the returned model's config is refused rather than read as bf16 experts."""
     pytest.importorskip(
         "compressed_tensors",
         reason="compressed-tensors is needed: the checkpoint's experts are compressed",
