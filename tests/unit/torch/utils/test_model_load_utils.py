@@ -967,6 +967,24 @@ def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
     assert loaders == {}
 
 
+def test_a_rank_bound_to_its_one_visible_gpu_loads_onto_it(
+    run_as, serve, loaders, auto_class, monkeypatch, tmp_path
+):
+    """A launch that exposes one GPU to each process binds every rank to cuda:0, whatever its local
+    rank: each takes the whole model onto the GPU it is bound to, rather than read as having
+    none."""
+    run_as(4, rank=1)
+    serve(LlamaConfig(**_TINY))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+
+    load_pretrained(str(tmp_path), auto_class)
+
+    assert auto_class.calls == [{"device_map": {"": "cuda:0"}}]
+
+
 def test_a_rank_without_a_gpu_of_its_own_says_so(
     run_as, serve, loaders, auto_class, monkeypatch, tmp_path
 ):
@@ -1296,6 +1314,36 @@ def test_a_load_refused_on_one_rank_fails_every_rank(
         gpus_on_1=gpus_on_1,
         match=match,
     )
+
+
+def _one_visible_gpu_per_process_job(rank, size, ckpt):
+    devices = []
+
+    def load(ckpt_path, device, *args, **kwargs):
+        devices.append(device)
+        torch.distributed.barrier()
+        return _Loaded()
+
+    with (
+        bounded_collectives(),
+        # Each rank sees only its own GPU, which its process bound as cuda:0, whatever its local
+        # rank.
+        mock.patch.object(torch.cuda, "is_available", return_value=True),
+        mock.patch.object(torch.cuda, "device_count", return_value=1),
+        mock.patch.object(torch.cuda, "is_initialized", return_value=True),
+        mock.patch.object(torch.cuda, "current_device", return_value=0),
+        mock.patch.object(model_load_utils, "ensure_local_checkpoint", _fetched_in_step),
+        mock.patch.object(model_load_utils, "parallel_load_and_prepare_fsdp2", load),
+    ):
+        load_pretrained(ckpt, distribution=DistributionPlan(2, dense="fsdp"))
+    assert devices == [torch.device("cuda", 0)], (rank, devices)
+
+
+def test_one_visible_gpu_per_process_shards_on_every_rank(cpu_dist_workers, tmp_path):
+    """Two ranks, each shown only its own GPU and bound to it as cuda:0, both shard onto it: rank 1,
+    whose local rank numbers no GPU it sees, is not refused as having none."""
+    LlamaConfig(**_TINY).save_pretrained(tmp_path)
+    cpu_dist_workers.run(_one_visible_gpu_per_process_job, ckpt=str(tmp_path))
 
 
 class _LoadsWholeExceptOnRank1:
