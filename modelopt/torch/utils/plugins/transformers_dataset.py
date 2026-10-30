@@ -19,6 +19,7 @@ import copy
 import itertools
 import json
 import os
+import time
 
 import torch
 import transformers
@@ -346,6 +347,7 @@ class VisionLanguageDataCollator(LanguageDataCollator):
         self.processor = transformers.AutoProcessor.from_pretrained(processor, **processor_kwargs)
         if processor_kwargs:
             print_rank_0(f"Loaded VLM processor with {processor_kwargs}")
+        self._configure_image_processor(self.processor, processor_kwargs)
         self._configure_video_processor(self.processor, processor_kwargs)
         max_prompt_tokens = os.environ.get("VLM_MAX_PROMPT_TOKENS")
         self.max_prompt_tokens = None
@@ -372,6 +374,10 @@ class VisionLanguageDataCollator(LanguageDataCollator):
             if self.max_assistant_tokens <= 0:
                 raise ValueError("VLM_MAX_ASSISTANT_TOKENS must be a positive integer.")
         self._assistant_content_truncation_warned = False
+        self._empty_assistant_mask_warned = False
+        # Transient media-read retries; see _processor_apply.
+        self._media_retries = int(os.environ.get("VLM_MEDIA_LOAD_RETRIES", "4"))
+        self._media_retry_sleep = float(os.environ.get("VLM_MEDIA_RETRY_SLEEP", "0.5"))
         self.chat_template = chat_template
         self.local_image_path = local_image_path
         self._conversations_warned = False
@@ -386,6 +392,36 @@ class VisionLanguageDataCollator(LanguageDataCollator):
             return_labels=return_labels,
         )
         self.processor.chat_template = self.tokenizer.chat_template
+
+    @staticmethod
+    def _configure_image_processor(processor, image_pixel_bounds):
+        """Apply visual pixel bounds to the image processor's ``size``.
+
+        ``min_pixels``/``max_pixels`` are accepted as ``from_pretrained`` kwargs, but the
+        Qwen3-VL image processor reads its bounds from ``size['shortest_edge']`` /
+        ``size['longest_edge']`` and ignores the kwargs. The cap therefore applied to video
+        (which is configured through ``size``) and silently did nothing for images -- the
+        measured token count per image was identical at max_pixels 3145728, 1048576 and
+        524288. Set ``size`` here so the knob binds for both modalities.
+        """
+        image_processor = getattr(processor, "image_processor", None)
+        if image_processor is None or not image_pixel_bounds:
+            return
+        size = dict(getattr(image_processor, "size", None) or {})
+        for kwarg_name, size_key in (
+            ("min_pixels", "shortest_edge"),
+            ("max_pixels", "longest_edge"),
+        ):
+            if kwarg_name in image_pixel_bounds:
+                size[size_key] = image_pixel_bounds[kwarg_name]
+        # Only a size that carries both bounds is meaningful to the processor; a partial
+        # one would be read with whatever the checkpoint shipped for the other edge.
+        if "shortest_edge" not in size or "longest_edge" not in size:
+            return
+        if size["shortest_edge"] > size["longest_edge"]:
+            raise ValueError("VLM_MIN_PIXELS must not exceed VLM_MAX_PIXELS.")
+        image_processor.size = size
+        print_rank_0(f"Configured VLM image processor with {size}")
 
     @staticmethod
     def _configure_video_processor(processor, image_pixel_bounds):
@@ -596,17 +632,59 @@ class VisionLanguageDataCollator(LanguageDataCollator):
                     )
                     self._prompt_content_truncation_warned = True
 
+    # Messages the media loaders raise when a file does not resolve. On a shared
+    # filesystem these are usually transient, not a statement about the data.
+    _TRANSIENT_MEDIA_ERRORS = (
+        "incorrect image source",
+        "incorrect format used for video",
+        "incorrect padding",
+    )
+
+    def _processor_apply(self, examples, derive_masks_from_markers):
+        """Run the processor, retrying media loads that fail transiently.
+
+        On a parallel filesystem under many ranks, an image or video that exists and is
+        perfectly valid can still fail to open for one call. transformers then reports
+        ``Incorrect image source ... Got <path>`` or ``Incorrect format used for video``,
+        the rank raises, and every other rank in the job dies with it. Verified on the
+        failures this hit: all six reported paths existed and `file` identified them as
+        valid PNG/JPEG. Over several epochs each file is touched repeatedly, so a
+        once-in-a-million read error becomes a recurring job killer.
+
+        Retries only the message shapes above, and only a few times, so genuinely
+        undecodable data (a BMP named .jpg, say) still fails loudly instead of being
+        retried into a silent skip.
+        """
+        last_exc = None
+        for attempt in range(self._media_retries + 1):
+            try:
+                return self.processor.apply_chat_template(
+                    examples,
+                    tokenize=True,
+                    return_tensors="pt",
+                    return_dict=True,
+                    add_generation_prompt=self.add_generation_prompt,
+                    return_assistant_tokens_mask=(
+                        self.answer_only_loss and not derive_masks_from_markers
+                    ),
+                )
+            except (ValueError, TypeError, OSError) as exc:  # noqa: PERF203
+                # PERF203: the try/except IS the retry; the cost is irrelevant next to
+                # a processor call that decodes images and video.
+                text = str(exc).lower()
+                if not any(m in text for m in self._TRANSIENT_MEDIA_ERRORS):
+                    raise
+                last_exc = exc
+                if attempt < self._media_retries:
+                    time.sleep(self._media_retry_sleep * (attempt + 1))
+        raise RuntimeError(
+            f"media load failed {self._media_retries + 1} times: {last_exc}"
+        ) from last_exc
+
     def _apply_chat_template(self, examples):
         """Tokenize VLM messages without passing text-only kwargs to the processor."""
         derive_masks_from_markers = bool(self._assistant_marker_specs())
-        tokenized_messages = self.processor.apply_chat_template(
-            examples,
-            tokenize=True,
-            return_tensors="pt",
-            return_dict=True,
-            add_generation_prompt=self.add_generation_prompt,
-            return_assistant_tokens_mask=self.answer_only_loss and not derive_masks_from_markers,
-        )
+        tokenized_messages = self._processor_apply(examples, derive_masks_from_markers)
         tokenized_messages = self._pad_sequence_tensors(tokenized_messages)
         if self.answer_only_loss and derive_masks_from_markers:
             tokenized_messages["assistant_masks"] = self._build_assistant_masks(tokenized_messages)
@@ -633,6 +711,17 @@ class VisionLanguageDataCollator(LanguageDataCollator):
                     )
                 assistant_mask = tokenized_messages["assistant_masks"]
                 if not isinstance(assistant_mask, torch.Tensor) or not assistant_mask.any():
+                    # Every label in the batch becomes -100, so the step contributes no
+                    # gradient. Silently that looks like a healthy run with loss 0 and
+                    # grad_norm 0, so say it out loud once with the two things to check.
+                    if not getattr(self, "_empty_assistant_mask_warned", False):
+                        print_rank_0(
+                            "answer_only_loss produced an EMPTY assistant mask for an entire "
+                            "batch: these samples contribute no gradient. Check that the chat "
+                            "template marks assistant spans with {% generation %} tags, and "
+                            "that the records actually carry an assistant turn."
+                        )
+                        self._empty_assistant_mask_warned = True
                     labels[:] = IGNORE_TOKEN_ID
                 elif self.shift_labels:
                     labels[..., :-1][assistant_mask[..., 1:] == 0] = IGNORE_TOKEN_ID
