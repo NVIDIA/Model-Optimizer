@@ -13,110 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A stand-in for Kimi-K3's own remote modeling code: the classes and functions its adapter patches,
-with the per-expert ``nn.ModuleList`` MoE the checkpoint's code ships, for tests on tiny CPU tensors.
+"""A stand-in for Kimi-K3's own remote modeling code: the classes and functions the fixes for it
+patch, for tests on tiny CPU tensors.
 """
 
 import types
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 
-def situ(gate_up, beta, linear_beta):
-    """The stand-in ``situ`` gated activation over a full [gate; up] row."""
-    gate, up = gate_up.chunk(2, dim=-1)
-    return gate * torch.sigmoid(beta * gate) * (up + linear_beta)
-
-
 def remote_module(name="kimi_k3_remote_stub"):
-    """A stand-in for the remote modeling namespace: everything the adapter patches, as shipped."""
+    """A stand-in for the remote modeling namespace: what the fixes patch, as shipped."""
     remote = types.ModuleType(name)
     remote.calls = []
-
-    def _get_situ_activation_params(config):
-        return config.situ_beta, config.situ_linear_beta
-
-    class SituAndMul(nn.Module):
-        def __init__(self, beta, linear_beta):
-            super().__init__()
-            self.beta, self.linear_beta = beta, linear_beta
-
-        def forward(self, gate_up):
-            return situ(gate_up, self.beta, self.linear_beta)
-
-    class KimiBlockSparseMLP(nn.Module):
-        """One expert as the checkpoint stores it: w1 = gate, w3 = up, w2 = down."""
-
-        def __init__(self, config, hidden):
-            super().__init__()
-            inter = config.moe_intermediate_size
-            self.w1 = nn.Linear(hidden, inter, bias=False)
-            self.w3 = nn.Linear(hidden, inter, bias=False)
-            self.w2 = nn.Linear(inter, hidden, bias=False)
-            situ = config.hidden_act == "situ"
-            self.situ_params = _get_situ_activation_params(config) if situ else None
-
-        def forward(self, x):
-            gate, up = self.w1(x), self.w3(x)
-            if self.situ_params is None:
-                return self.w2(F.silu(gate) * up)
-            return self.w2(situ(torch.cat([gate, up], dim=-1), *self.situ_params))
-
-    class KimiMoEGate(nn.Module):
-        def __init__(self, config):
-            super().__init__()
-            self.top_k = config.num_experts_per_token
-            self.weight = nn.Parameter(torch.randn(config.num_experts, config.hidden_size))
-
-        def forward(self, hidden_states):
-            flat = hidden_states.reshape(-1, hidden_states.shape[-1])
-            weights, idx = torch.topk(torch.sigmoid(flat @ self.weight.t()), self.top_k, dim=-1)
-            return idx, weights
-
-    class KimiSparseMoeBlock(nn.Module):
-        """Latent projections around a per-expert Python loop, plus always-on shared experts."""
-
-        def __init__(self, config):
-            super().__init__()
-            self.config = config
-            # Kimi-K3's config has no use_latent_moe field: the block derives it, as vLLM does.
-            self.use_latent_moe = config.routed_expert_hidden_size is not None
-            self.latent_moe_use_norm = config.latent_moe_use_norm
-            hidden = config.hidden_size
-            width = config.routed_expert_hidden_size if self.use_latent_moe else hidden
-            self.experts = nn.ModuleList(
-                KimiBlockSparseMLP(config, width) for _ in range(config.num_experts)
-            )
-            self.gate = KimiMoEGate(config)
-            if self.use_latent_moe:
-                self.routed_expert_down_proj = nn.Linear(hidden, width, bias=False)
-                self.routed_expert_up_proj = nn.Linear(width, hidden, bias=False)
-                if config.latent_moe_use_norm:
-                    self.routed_expert_norm = nn.LayerNorm(width)
-            if config.num_shared_experts is not None:
-                self.shared_experts = KimiBlockSparseMLP(config, hidden)
-
-        def forward(self, hidden_states):
-            idx, weights = self.gate(hidden_states)
-            x = hidden_states.reshape(-1, hidden_states.shape[-1])
-            if self.use_latent_moe:
-                x = self.routed_expert_down_proj(x)
-            y = torch.stack(
-                [
-                    sum(w * self.experts[int(e)](token) for e, w in zip(top_e, top_w))
-                    for token, top_e, top_w in zip(x, idx, weights)
-                ]
-            )
-            if self.use_latent_moe:
-                if self.latent_moe_use_norm:
-                    y = self.routed_expert_norm(y)
-                y = self.routed_expert_up_proj(y)
-            y = y.reshape(hidden_states.shape)
-            if self.config.num_shared_experts is not None:
-                y = y + self.shared_experts(hidden_states)
-            return y
 
     class KimiDeltaAttention(nn.Module):
         def __init__(self, num_heads, head_dim):
@@ -160,11 +70,6 @@ def remote_module(name="kimi_k3_remote_stub"):
             return "tied"
 
     for obj in (
-        _get_situ_activation_params,
-        SituAndMul,
-        KimiBlockSparseMLP,
-        KimiMoEGate,
-        KimiSparseMoeBlock,
         KimiDeltaAttention,
         chunk_kda,
         fused_recurrent_kda,
