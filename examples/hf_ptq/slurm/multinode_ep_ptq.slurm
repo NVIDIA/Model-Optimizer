@@ -75,8 +75,10 @@ srun --container-image="${CONTAINER_IMAGE}" \
     set -euo pipefail
     export PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     # ModelOpt + its HF deps (transformers/accelerate/datasets/...) from the mounted source, then example extras.
-    pip install -q -e "/modelopt[hf]" --no-build-isolation
+    # Expert parallelism needs transformers 5.7 or newer, which the image may not ship.
+    pip install -q -e "/modelopt[hf]" "transformers>=5.7" --no-build-isolation
     pip install -q -r requirements.txt
+    python -c "import transformers as t; print(t.__name__, t.__version__)"
 
     torchrun \
       --nnodes="${SLURM_NNODES}" \
