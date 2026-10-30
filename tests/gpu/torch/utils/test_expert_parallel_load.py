@@ -170,7 +170,7 @@ def _compressed_experts_load_on_their_own_ranks(rank, size, dense_dir, packed_di
     device = torch.device(f"cuda:{rank}")
     problems = []
     # The decompressor's hooks are process-wide, and the workers outlive the job.
-    hooks = (mu.get_model_conversion_mapping, cml._materialize_copy)
+    hooks = (mu.get_model_conversion_mapping, cml.spawn_materialize)
     try:
         with bounded_collectives(seconds=120):
             config = AutoConfig.from_pretrained(packed_dir)
@@ -207,7 +207,7 @@ def _compressed_experts_load_on_their_own_ranks(rank, size, dense_dir, packed_di
             gathered = [None] * size
             dist.all_gather_object(gathered, problems)
     finally:
-        mu.get_model_conversion_mapping, cml._materialize_copy = hooks
+        mu.get_model_conversion_mapping, cml.spawn_materialize = hooks
     found = [problem for rank_problems in gathered for problem in rank_problems]
     assert not found, "\n".join(found[:20])
 
@@ -220,7 +220,10 @@ def test_compressed_experts_load_expert_parallel_each_rank_decompressing_its_own
     on-the-fly decompressor: each rank holds exactly the dense model's weights for its own experts,
     every stored tensor is placed, and the sharded model matches the dense one loaded whole. Each
     rank's checks are gathered before any rank fails, so a regression fails instead of hanging."""
-    pytest.importorskip("compressed_tensors", reason="the checkpoint's experts are compressed")
+    pytest.importorskip(
+        "compressed_tensors",
+        reason="compressed-tensors is needed: the checkpoint's experts are compressed",
+    )
     if Version(transformers.__version__) < Version("5.8"):
         pytest.skip("the on-the-fly decompression needs transformers 5.8")
     if NUM_EXPERTS % dist_workers.world_size:
