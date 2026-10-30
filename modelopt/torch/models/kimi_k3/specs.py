@@ -20,7 +20,7 @@ decompressed at load.
 """
 
 from ..specs import EPSpec, ModelSpec, register
-from .ep import BASE_MODEL_EP_PLAN, prepare
+from .ep import BASE_MODEL_EP_PLAN, make_importable, prepare
 
 __all__: list[str] = []
 
@@ -31,6 +31,8 @@ register(
         ep_spec=EPSpec(
             prepare=prepare,
             prepared_ep_plan=BASE_MODEL_EP_PLAN,
+            plan_config_attr="text_config",
+            make_importable=make_importable,
             # prepare's patches to the checkpoint's remote code were validated on this release.
             requires_transformers="5.13",
         ),
