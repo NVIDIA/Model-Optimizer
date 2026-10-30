@@ -118,6 +118,10 @@ from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 RAND_SEED = 1234
 # Most tokens per calibration batch when layerwise calibration picks the batch size (64 x 512).
 LAYERWISE_CALIB_TOKENS = 32768
+_PREVIEW_STOPS_THE_RUN = (
+    "The preview after quantization failed, which stops the run before the export, so no "
+    "checkpoint is written; --skip_generate exports without the preview."
+)
 
 
 def _layerwise_calib_batch_size(calib_seq: int, num_samples: int) -> int:
@@ -880,6 +884,10 @@ def post_quantize(
                     **lockstep,
                 )
         except Exception as e:
+            if lockstep:
+                # The ranks decode in lockstep: a rank that skipped the preview would go on to the
+                # export's collectives while the others still wait in generate's, so the run stops.
+                raise RuntimeError(_PREVIEW_STOPS_THE_RUN) from e
             warnings.warn(f"Post-quantization generation sanity check failed, skipping it: {e}")
     elif is_nemotron_vl_model and tokenizer is not None:
         generated_ids_after_ptq = run_nemotron_vl_preview(
