@@ -62,6 +62,7 @@ def _stage_only_the_module(monkeypatch, ckpt, stage):
     """Stand in for transformers' staging of the module itself, without its imports."""
 
     def stage_only_the_module(path, module_file, *args, **kwargs):
+        (stage / module_file).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(ckpt / module_file, stage / module_file)
         return str(stage / module_file)
 
@@ -115,6 +116,32 @@ def test_a_staged_module_that_differs_from_the_checkpoints_is_staged_again(monke
     dmu.get_cached_module_file(str(ckpt), "a.py")
 
     assert (stage / "b.py").read_text() == "B = 2\n"
+
+
+@pytest.mark.parametrize("layout", ["glob-metacharacters", "package-marker", "module-in-subdir"])
+def test_the_modules_staged_are_the_ones_beside_the_module(monkeypatch, tmp_path, layout):
+    """Wherever the module is and whatever its path holds, the modules staged with it are the ones
+    in its own directory, and never the checkpoint's ``__init__.py``: the stage dir's package
+    marker is transformers', and a checkpoint's own would run as the package of every staged
+    module."""
+    ckpt = tmp_path / ("ckpt[v2]" if layout == "glob-metacharacters" else "ckpt")
+    stage = tmp_path / "stage"
+    module = "sub/a.py" if layout == "module-in-subdir" else "a.py"
+    (ckpt / "sub").mkdir(parents=True)
+    stage.mkdir()
+    (stage / "__init__.py").write_text("")
+    (ckpt / "__init__.py").write_text("import a_module_only_the_checkpoint_has\n")
+    (ckpt / "a.py").write_text("from .b import B\n")
+    (ckpt / "b.py").write_text("B = 1\n")
+    (ckpt / "sub" / "a.py").write_text("from .b import B\n")
+    (ckpt / "sub" / "b.py").write_text("B = 2\n")
+
+    _stage_only_the_module(monkeypatch, ckpt, stage)
+    dmu.get_cached_module_file(str(ckpt), module)
+
+    staged_b = stage / module.replace("a.py", "b.py")
+    assert staged_b.read_text() == (ckpt / module.replace("a.py", "b.py")).read_text()
+    assert (stage / "__init__.py").read_text() == ""
 
 
 def test_a_module_staged_after_its_dir_was_imported_from_is_found(monkeypatch, tmp_path):

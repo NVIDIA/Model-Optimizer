@@ -27,6 +27,8 @@ import warnings
 from collections.abc import Callable
 from types import ModuleType
 
+from modelopt.torch.utils import distributed as dist
+
 
 def stage_full_remote_closure() -> None:
     """Make transformers stage every top-level module of a local checkpoint's remote code.
@@ -39,14 +41,14 @@ def stage_full_remote_closure() -> None:
     ``get_class_from_dynamic_module`` and ``from_pretrained`` alike.
 
     Wrap ``get_cached_module_file`` so that, loading from a local checkpoint dir, it copies every
-    sibling ``*.py`` into the stage dir it just populated, as transformers copies its own: again
-    when the staged copy differs from the checkpoint's, then invalidating the import system's
-    caches. Modules in a subdirectory of the checkpoint are not copied. A copy that fails only
-    warns, since only a deeper import needs the file, and the other modules are still staged.
-    Idempotent.
+    sibling ``*.py`` of the module into the stage dir it just populated, as transformers copies its
+    own: again when the staged copy differs from the checkpoint's, then invalidating the import
+    system's caches. The package marker ``__init__.py`` stays transformers', and modules in other
+    directories of the checkpoint are not copied. A copy that fails only warns, since only a
+    deeper import needs the file, and the other modules are still staged. Idempotent.
     """
+    # transformers is optional: imported once a helper runs.
     import transformers.dynamic_module_utils as dmu
-    from transformers.utils import HF_MODULES_CACHE
 
     if getattr(dmu.get_cached_module_file, "_modelopt_full_closure", False):
         return
@@ -58,10 +60,14 @@ def stage_full_remote_closure() -> None:
         if os.path.isdir(src):
             staged = str(resolved)
             if not os.path.isabs(staged):
-                staged = os.path.join(HF_MODULES_CACHE, staged)
+                staged = os.path.join(dmu.HF_MODULES_CACHE, staged)
             stage_dir = os.path.dirname(staged)
+            # The module's own dir, which a module_file naming a subdirectory moves off the root.
+            src_dir = os.path.dirname(os.path.join(src, str(module_file)))
             copied = False
-            for py in sorted(glob.glob(os.path.join(src, "*.py"))):
+            for py in sorted(glob.glob(os.path.join(glob.escape(src_dir), "*.py"))):
+                if os.path.basename(py) == "__init__.py":
+                    continue  # the stage dir's package marker, which transformers writes
                 dst = os.path.join(stage_dir, os.path.basename(py))
                 try:
                     if os.path.exists(dst) and filecmp.cmp(py, dst, shallow=False):
@@ -104,23 +110,20 @@ def _copy_into_place(src: str, dst: str) -> None:
 _KEPT_PATCHES: dict[str, Callable[[ModuleType], bool]] = {}
 
 
-def _is_remote(name: str, suffix: str) -> bool:
-    """Whether the module ``name`` is remote code named ``*<suffix>``.
+def _apply(suffix: str, patch: Callable[[ModuleType], bool]) -> dict[str, bool]:
+    """Apply ``patch`` to every loaded remote module named ``*<suffix>``: whether it changed each.
 
-    transformers' own port of a model can share the remote module's name, as
+    Only remote code: transformers' own port of a model can share the remote module's name, as
     transformers.models.kimi_k25.modeling_kimi_k25 does from 5.13.
     """
+    # transformers is optional: imported once a helper runs.
     import transformers.dynamic_module_utils as dmu
 
-    return name.startswith(f"{dmu.TRANSFORMERS_DYNAMIC_MODULE_NAME}.") and name.endswith(suffix)
-
-
-def _apply(suffix: str, patch: Callable[[ModuleType], bool]) -> dict[str, bool]:
-    """Apply ``patch`` to every loaded remote module named ``*<suffix>``: whether it changed each."""
+    remote = f"{dmu.TRANSFORMERS_DYNAMIC_MODULE_NAME}."
     return {
         name: patch(module)
         for name, module in list(sys.modules.items())
-        if module is not None and _is_remote(name, suffix)
+        if module is not None and name.startswith(remote) and name.endswith(suffix)
     }
 
 
@@ -137,9 +140,12 @@ def keep_patched(suffix: str, patch: Callable[[ModuleType], bool]) -> list[str]:
     the module; a re-application that did is reported on the rank it happened on. Returns the names
     of the modules patched now. Installs nothing in the loader unless it patched a module: a patch
     that raises, or no module to patch, leaves transformers' loader as it was, so a later load in the
-    process is not refused by it. A patch that raises on one of several matching modules leaves those
-    it already patched patched. Idempotent per suffix.
+    process is not refused by it. Once installed, a patch that raises on a module fails the class
+    resolution that meets it, rather than let a model build from code the patch refused. A patch
+    that raises on one of several matching modules leaves those it already patched patched.
+    Idempotent per suffix.
     """
+    # transformers is optional: imported once a helper runs.
     import transformers.dynamic_module_utils as dmu
 
     patched = list(_apply(suffix, patch))
@@ -161,8 +167,6 @@ def keep_patched(suffix: str, patch: Callable[[ModuleType], bool]) -> list[str]:
             ]
             if not repatched:
                 return cls
-            from modelopt.torch.utils import distributed as dist
-
             for name in repatched:
                 print(
                     f"[rank {dist.rank()}] re-patched {name}, which transformers loaded again after "
