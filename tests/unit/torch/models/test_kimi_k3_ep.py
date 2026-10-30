@@ -47,6 +47,7 @@ import transformers.utils.generic as hf_generic
 from transformers.core_model_loading import WeightConverter, build_glob_alternation
 from transformers.integrations.moe import ALL_EXPERTS_FUNCTIONS
 
+from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
 from modelopt.torch.models import _onfly_decompress, get_spec
 from modelopt.torch.models.kimi_k3 import ep as kimi_k3
 from modelopt.torch.utils import moe
@@ -241,8 +242,6 @@ def test_packed_experts_export_under_the_checkpoints_names():
     keeps the rewritten ones as the conversions its load ran. The export names the experts back
     through them, so they reverse as the fusion they rewrote: to the checkpoint's ``w1``/``w3``/``w2``,
     not to ModelOpt's ``gate_proj``/``up_proj``/``down_proj``."""
-    from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
-
     kimi_k3._register_kimi_k3_conversions()
     packed = [
         _onfly_decompress._compressedify(conv, None, None, ("weight_packed", "weight_scale"))
