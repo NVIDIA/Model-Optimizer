@@ -192,6 +192,40 @@ temporary `HF_HOME`; no token belongs in Markdown. Real-data training needs
 requires `MLFLOW_TRACKING_URI`; generation requires `PRUNED_CHECKPOINT`.
 Manual tests can run for hours and are never enabled by the example CI command.
 
+## CPU CLI drift checks
+
+`test_readme_cli_options` compares the flag names in README Python script commands
+against each script's `--help`. It checks direct `python`/`python3` commands and
+extracts the script arguments after `torchrun` or `accelerate launch` options.
+Help runs once per script per pytest process, with a 60-second timeout and CUDA
+visibility disabled. Missing scripts, failed help commands and unknown flags
+report the README path, snippet ID and command line number.
+
+Only existing ID-marked fences are inspected; these checks add no README markers
+and do not enforce fence coverage. The checks run in the installed example environment but do not launch training,
+models or distributed workers. Imports still require the example dependencies.
+The QAT evaluation and Bridge vLLM scripts need their optional manual environments;
+their CLI checks use `--run-manual`. Values, config contents, launcher flags,
+non-Python commands and general shell control flow are outside this check's scope.
+Existing execution scenarios continue to validate behavior and output artifacts.
+
+CI runs the CLI test module first and starts the example suite only if it passes.
+A failed preflight preserves the failure status and skips the suite. The main run
+excludes the CLI module, so help checks do not run twice. Direct pytest invocations
+remain independent; use `&&` locally to apply the same gate:
+
+```bash
+python -m pytest tests/examples/llm_qat/test_llm_qat_readme_cli.py --no-cov -x && \
+  python -m pytest tests/examples/llm_qat/test_llm_qat_readme.py --no-cov -v -rs
+```
+
+Use the corresponding `megatron_bridge` paths in the Bridge container.
+
+```bash
+python -m pytest tests/examples/llm_qat/test_llm_qat_readme_cli.py -k cli_options --no-cov -rs
+python -m pytest tests/examples/megatron_bridge/test_megatron_bridge_readme_cli.py -k cli_options --no-cov -rs
+```
+
 ## CI triggers
 
 Both README test modules are collected by the existing example jobs. The
