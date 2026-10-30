@@ -74,11 +74,13 @@ def private_conversion_registry(monkeypatch):
 
 @pytest.fixture
 def restore_loader_hooks(monkeypatch):
-    """Undo the process-wide transformers hooks the on-the-fly decompressor installs."""
+    """Undo the process-wide transformers hooks the on-the-fly decompressor installs, whichever of
+    them its release patches: the copy, or the spawn that also covers the shard path."""
     for owner, name in (
         (WeightConverter, "add_tensor"),
         (WeightConverter, "materialize_tensors"),
         (cml, "_materialize_copy"),
+        (cml, "spawn_materialize"),
         (mu, "get_model_conversion_mapping"),
     ):
         monkeypatch.setattr(owner, name, getattr(owner, name))

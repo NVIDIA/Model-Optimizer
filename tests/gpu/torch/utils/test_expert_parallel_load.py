@@ -31,7 +31,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.distributed as dist
-from _test_utils.torch import kimi_k3_tiny_modeling
 from _test_utils.torch.distributed.utils import bounded_collectives
 from packaging.version import Version
 from safetensors.torch import load_file, save_file
@@ -42,7 +41,7 @@ if Version(transformers.__version__) < Version("5.7"):
 
 import transformers.core_model_loading as cml
 import transformers.modeling_utils as mu
-from _test_utils.torch import kimi_vl_tiny_modeling
+from _test_utils.torch import kimi_k3_tiny_modeling, kimi_vl_tiny_modeling
 from torch.distributed.tensor import DTensor
 from transformers import (
     AutoConfig,
@@ -550,7 +549,7 @@ def _kimi_k3_expert_parallel_job(rank, size, ckpt_dir):
     owned = range(rank * per_rank, (rank + 1) * per_rank)
     problems = []
     # The decompressor's hooks are process-wide, and the workers outlive the job.
-    hooks = (mu.get_model_conversion_mapping, cml._materialize_copy)
+    hooks = (mu.get_model_conversion_mapping, cml._materialize_copy, cml.spawn_materialize)
     try:
         with bounded_collectives(seconds=120):
             config = AutoConfig.from_pretrained(ckpt_dir, trust_remote_code=True)
@@ -621,7 +620,7 @@ def _kimi_k3_expert_parallel_job(rank, size, ckpt_dir):
             gathered = [None] * size
             dist.all_gather_object(gathered, problems)
     finally:
-        mu.get_model_conversion_mapping, cml._materialize_copy = hooks
+        mu.get_model_conversion_mapping, cml._materialize_copy, cml.spawn_materialize = hooks
     found = [problem for rank_problems in gathered for problem in rank_problems]
     assert not found, "\n".join(found[:20])
 
@@ -634,7 +633,10 @@ def test_kimi_k3_packed_experts_load_calibrate_and_name_back_expert_parallel(
     one loaded on a single GPU, calibration over every rank's batch matches the whole model's, and
     the export names the experts back to the checkpoint's ``w1``/``w3``/``w2``. Each rank's
     checks are gathered before any rank fails, so a regression fails instead of hanging."""
-    pytest.importorskip("compressed_tensors", reason="the checkpoint's experts are compressed")
+    pytest.importorskip(
+        "compressed_tensors",
+        reason="compressed-tensors is needed: the checkpoint's experts are compressed",
+    )
     if Version(transformers.__version__) < Version("5.16"):
         pytest.skip("the torch_a2a forward wrappers are pre-hooks below transformers 5.16")
     if KIMI_K3_EXPERTS % dist_workers.world_size:
