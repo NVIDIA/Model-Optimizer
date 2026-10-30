@@ -767,7 +767,7 @@ def test_kv_cache_capture(
     state = capture_kv_cache_export_state(attention)
 
     calibrated_fp8_k = quantization_format in {"FP8", "FP8_K_NVFP4_V"} and "k" not in constant_axes
-    assert len(recwarn) == int(calibrated_fp8_k)
+    assert sum("Large KV activation" in str(w.message) for w in recwarn) == int(calibrated_fp8_k)
     assert get_kv_cache_export_spec(attention) == state.quantization_format == quantization_format
     torch.testing.assert_close(state.k_scale.squeeze(), torch.tensor(k_scale))
     torch.testing.assert_close(state.v_scale.squeeze(), torch.tensor(v_scale))

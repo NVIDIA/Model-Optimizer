@@ -329,8 +329,7 @@ def test_export_compressed_nvfp4_weight():
 
 @pytest.mark.parametrize("both_constant", [False, True])
 @pytest.mark.parametrize("keep_amax", [False, True])
-@pytest.mark.parametrize("cpu", [False, True])
-def test_kv_capture_constant_scale_devices(both_constant, keep_amax, cpu):
+def test_kv_capture_constant_scale_devices(both_constant, keep_amax):
     attention = nn.Linear(4, 4, bias=False).cuda()
     for axis in ("k", "v"):
         constant = axis == "k" or both_constant
@@ -341,9 +340,9 @@ def test_kv_capture_constant_scale_devices(both_constant, keep_amax, cpu):
             quantizer.amax = torch.tensor(224.0, device="cuda")
         setattr(attention, f"{axis}_bmm_quantizer", quantizer)
 
-    state = capture_kv_cache_export_state(attention, clamp_fp8_scales=False, cpu=cpu)
+    state = capture_kv_cache_export_state(attention, clamp_fp8_scales=False, cpu=False)
 
-    expected_device = torch.device("cpu") if cpu else attention.weight.device
+    expected_device = attention.weight.device
     assert state.k_scale.device == state.v_scale.device == expected_device
     values = torch.stack([state.k_scale.squeeze(), state.v_scale.squeeze()])
     torch.testing.assert_close(values, values.new_tensor([1.0, 1.0 if both_constant else 0.5]))

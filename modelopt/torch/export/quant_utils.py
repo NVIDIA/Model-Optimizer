@@ -19,6 +19,7 @@ import fnmatch
 import logging
 from collections import defaultdict
 from collections.abc import Generator
+from itertools import chain
 from typing import Any
 from warnings import warn
 
@@ -46,7 +47,6 @@ from modelopt.torch.quantization.utils import (
     representative_weight_quantizer,
     weight_attr_names,
 )
-from modelopt.torch.quantization.utils.numeric_utils import E4M3_MAX
 from modelopt.torch.utils import clear_cuda_cache
 
 from ..quantization.nn import NVFP4StaticQuantizer, SequentialQuantizer, TensorQuantizer
@@ -303,14 +303,14 @@ def get_kv_cache_scaling_factor(
     self_attention_module: nn.Module,
     clamp_fp8_scales: bool = True,
     *,
-    use_constant_amax: bool = False,
+    resolve_constant_amax: bool = False,
 ) -> list[torch.Tensor | None]:
     """Get the K and V BMM scaling factors for the self attention module.
 
     Args:
         self_attention_module: The self attention module to get the K and V BMM scaling factors from.
         clamp_fp8_scales: Whether to clamp FP8 KV cache scaling factors to at least 1.0.
-        use_constant_amax: Resolve fixed forward ranges for functional capture. Defaults to
+        resolve_constant_amax: Resolve fixed forward ranges for functional capture. Defaults to
             False to preserve legacy exporters' omission of stateless scales.
 
     Returns:
@@ -325,11 +325,28 @@ def get_kv_cache_scaling_factor(
     # vLLM / TensorRT-LLM read them.
     scaling_factors = []
     quantizers = [self_attention_module.k_bmm_quantizer, self_attention_module.v_bmm_quantizer]
+    reference = None
+    if resolve_constant_amax:
+        reference = next(
+            (
+                quantizer.amax
+                for quantizer in quantizers
+                if quantizer.is_enabled
+                and not quantizer._use_constant_amax
+                and quantizer.amax is not None
+            ),
+            None,
+        )
+        if reference is None:
+            reference = next(
+                chain(self_attention_module.parameters(), self_attention_module.buffers()),
+                torch.empty(0),
+            )
     for quantizer in quantizers:
         if not quantizer.is_enabled:
             amax = None
-        elif use_constant_amax and quantizer._use_constant_amax and not quantizer.is_mx_format:
-            amax = torch.tensor([E4M3_MAX], dtype=torch.float32, device="cpu")
+        elif resolve_constant_amax and quantizer._use_constant_amax and not quantizer.is_mx_format:
+            amax = quantizer._get_amax(reference).reshape(1)
         else:
             amax = quantizer.export_amax()
         scaling_factors.append(None if amax is None else amax.float() / 448.0)
@@ -349,9 +366,9 @@ def get_kv_cache_scaling_factor(
         factor = scaling_factors[i]
         if factor is None:
             continue
-        if not (use_constant_amax and quantizers[i]._use_constant_amax) and _has_large_fp8_scale(
-            factor
-        ):
+        if not (
+            resolve_constant_amax and quantizers[i]._use_constant_amax
+        ) and _has_large_fp8_scale(factor):
             warn(
                 "Warning: Large KV activation detected. "
                 "Quantized KV cache may lead to higher accuracy drop."
