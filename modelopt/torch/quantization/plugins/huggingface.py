@@ -1068,10 +1068,10 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
                 quantizers = (
                     self.down_proj_weight_quantizers if self._down_proj_linear else first_weight_qs
                 )
-                if self._down_proj_linear:
-                    input = self.down_proj_input_quantizer(input)
-                else:
-                    input = first_input_q(input)
+                input_quantizer = (
+                    self.down_proj_input_quantizer if self._down_proj_linear else first_input_q
+                )
+                input = self._quantize_grouped_input(input, offs, input_quantizer)
                 weight = self._quantize_grouped_weight(weight, quantizers)
                 self._down_proj_linear = not self._down_proj_linear
                 return _orig_grouped_linear(
@@ -1081,6 +1081,24 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             replacements.append((_transformers_moe, "_grouped_linear", _quantized_grouped_linear))
 
         return replacements
+
+    @staticmethod
+    def _quantize_grouped_input(input, offs, quantizer):
+        """Quantize a grouped projection's input, collecting statistics on the rows it computes only.
+
+        Rows past ``offs[-1]`` belong to no expert of this module: under transformers' own expert
+        parallelism they are the rows routed to other ranks' experts, sorted to the tail, which the
+        grouped GEMM neither reads nor writes. Before transformers 5.17 the down projection's input
+        holds them uninitialized, so a calibrating quantizer sees only the rows before them; the tail
+        passes through unread. Finding where it starts costs a host sync, so it is skipped while the
+        quantizer collects nothing.
+        """
+        if getattr(quantizer, "is_enabled", False) and getattr(quantizer, "_if_calib", False):
+            routed = int(offs[-1]) if offs.numel() else 0
+            if routed < input.shape[0]:
+                computed = quantizer(input[:routed])
+                return torch.cat([computed, input[routed:].to(computed.dtype)])
+        return quantizer(input)
 
     def _quantized_weight(self, name, quantizers, idx, dtype):
         """Expert ``idx``'s ``name`` projection, fake-quantized by its own weight quantizer.

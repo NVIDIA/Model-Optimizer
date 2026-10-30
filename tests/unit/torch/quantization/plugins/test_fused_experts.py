@@ -399,6 +399,29 @@ class _SyntheticGroupedExperts(nn.Module):
         return self._eager_forward(hidden_states, top_k_index, top_k_weights)
 
 
+class _SentinelTailExperts(_SyntheticGroupedExperts):
+    """A grouped forward as transformers' own expert parallelism runs it before 5.17.
+
+    The rows routed to other ranks' experts are sorted past ``offs[-1]``, where the grouped GEMM
+    neither reads nor writes: its input carries ``tail`` such rows, and the down projection's input
+    keeps the up projection's tail rows uninitialized, here ``fill`` (the CPU fallback zeroes them).
+    """
+
+    tail = 0
+    fill = float("nan")
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        rows = hidden_states.shape[0]
+        offs = torch.arange(1, self.num_experts + 1, dtype=torch.int32) * (rows // self.num_experts)
+        garbage = hidden_states.new_full((self.tail, hidden_states.shape[1]), self.fill)
+        up = _moe_integration._grouped_linear(
+            torch.cat([hidden_states, garbage]), self.gate_up_proj, offs
+        )
+        up[rows:] = self.fill
+        down = _moe_integration._grouped_linear(self._apply_gate(up), self.down_proj, offs)
+        return down[:rows]
+
+
 class _GroupedSparseMoeBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -2148,6 +2171,33 @@ class TestGroupedMMExperts:
                 torch.testing.assert_close(
                     q.amax.flatten(), weight[idx].detach().abs().amax(dim=1), rtol=0, atol=0
                 )
+
+    @pytest.mark.parametrize("fill", [float("nan"), 1e6], ids=["nan", "finite"])
+    def test_rows_past_the_offsets_do_not_reach_the_input_statistics(self, fill):
+        """Under transformers' own expert parallelism before 5.17, rows past ``offs[-1]`` reach the
+        grouped projections uncomputed, the down projection's uninitialized: calibrating on them
+        would set its input scale from garbage, silently when it is finite. The input quantizers
+        collect statistics on the computed rows only, so such a tail changes no amax."""
+        torch.manual_seed(0)
+        base = _SentinelTailExperts(_ExpertsConfig("grouped_mm"))
+        hidden = torch.randn(8, HIDDEN_DIM)
+        routing = (torch.zeros(8, TOP_K, dtype=torch.long), torch.ones(8, TOP_K))
+        amaxes = []
+        try:
+            for tail in (0, 3):
+                model = _ExpertsHolder(copy.deepcopy(base))
+                model.experts.tail, model.experts.fill = tail, fill
+                mtq.quantize(model, self._quant_cfg(), lambda m: m(hidden, *routing))
+                amaxes.append(
+                    [
+                        model.experts.gate_up_proj_input_quantizer.amax,
+                        model.experts.down_proj_input_quantizer.amax,
+                    ]
+                )
+        finally:
+            self._cleanup_registry(_SentinelTailExperts)
+        for with_tail, without in zip(amaxes[1], amaxes[0], strict=True):
+            torch.testing.assert_close(with_tail, without, rtol=0, atol=0)
 
     @pytest.mark.parametrize("transform", ["pre_quant_scale", "rotate"])
     def test_disabled_quantizers_keep_their_pre_quant_scale_and_rotation(
