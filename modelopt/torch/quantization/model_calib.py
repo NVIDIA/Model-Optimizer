@@ -2655,11 +2655,14 @@ def gptq(
                 for weight, quantizer in module.iter_weights_for_calibration()
                 if id(quantizer) in expert_handles
             ]
+            updated = len(work)
             unreached = sum(handle.n_samples == 0 for handle, _ in work)
             update_expert_weights(work, block_size, perc_damp)
-        if work:
+            # Its weight slices would keep this module's onloaded weights alive past the window.
+            del work
+        if updated:
             print_rank_0(
-                f"[{name}] GPTQ updated {len(work)} expert weights, {unreached} of them never "
+                f"[{name}] GPTQ updated {updated} expert weights, {unreached} of them never "
                 "reached by calibration"
             )
     del gptq_handles, expert_handles

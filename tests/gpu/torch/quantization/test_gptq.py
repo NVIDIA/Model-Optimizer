@@ -18,7 +18,7 @@ import time
 
 import pytest
 import torch
-from _test_utils.torch.quantization.models import TOY_MOE_HIDDEN, ToyFusedExperts, ToyMoE
+from _test_utils.torch.quantization.models import ToyFusedExperts, ToyMoE
 from _test_utils.torch.transformers_models import get_tiny_llama
 from conftest import requires_triton
 
@@ -65,12 +65,14 @@ def test_hessian_of_a_full_gpu_goes_to_an_idle_gpu(need_2_gpus, monkeypatch):
     torch.testing.assert_close(helper.hessian.to("cuda:0"), reference)
 
 
-def test_expert_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch):
-    """GGML expert updates spread over two GPUs give the one-GPU weights and codes, pinned at home."""
+@pytest.mark.parametrize("inference_mode", [False, True])
+def test_expert_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, inference_mode):
+    """GGML expert updates spread over two GPUs give the one-GPU weights and codes, pinned at home,
+    also on inference tensors under the caller's inference mode, which worker threads do not inherit.
+    """
     pytest.importorskip("transformers")  # the fused-experts quant wrapper is the HF plugin's
-    torch.manual_seed(RAND_SEED)
-    reference = ToyMoE().cuda()
-    inputs = torch.randn(96, TOY_MOE_HIDDEN, device="cuda")
+    # Two GGML groups per expert input, so the Hessian carries the first group's error to the next.
+    width = 512
     shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
     config = {
         "quant_cfg": [
@@ -92,11 +94,14 @@ def test_expert_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch):
     monkeypatch.setattr(GGMLGPTQHelper, "update_weights", recording_update_weights)
     experts = []
     try:
-        for gpus in ([0], [0, 1]):
-            monkeypatch.setattr(calib_utils, "get_process_gpus", lambda gpus=gpus: gpus)
-            model = copy.deepcopy(reference)
-            mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
-            experts.append(model.mlp.experts)
+        with torch.inference_mode(inference_mode):
+            inputs = torch.randn(96, width, device="cuda")
+            for gpus in ([0], [0, 1]):
+                monkeypatch.setattr(calib_utils, "get_process_gpus", lambda gpus=gpus: gpus)
+                torch.manual_seed(RAND_SEED)
+                model = ToyMoE(width, width).cuda()
+                mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+                experts.append(model.mlp.experts)
     finally:
         QuantModuleRegistry.unregister(ToyFusedExperts)
 

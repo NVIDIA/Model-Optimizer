@@ -14,9 +14,11 @@
 # limitations under the License.
 """GPTQ for GGML block formats: the group update, the helper, and the payload pin."""
 
+import contextlib
 import copy
 import dataclasses
 import io
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +29,7 @@ from _test_utils.torch.quantization.models import TOY_MOE_EXPERTS, TOY_MOE_HIDDE
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
+from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import _row_keys, pinned_packed_weight
 from modelopt.torch.quantization.ggml.gptq import gptq_group_update
@@ -289,6 +292,31 @@ def test_layerwise_gptq_calibrates_fused_experts_on_the_earlier_layers_output(mo
     assert same(single_pass[0], layerwise[0])
     # Layer 1's see layer 0's quantized experts only when layerwise.
     assert not same(single_pass[1], layerwise[1])
+
+
+def test_gptq_drops_each_fused_experts_weights_before_the_next_window(monkeypatch, moe):
+    """No expert weight GPTQ updates outlives its module's weight window: under offload it would
+    keep that module's onloaded weights on the GPU while the next module's are onloaded."""
+    updated = []
+    update_expert_weights = model_calib.update_expert_weights
+    window = model_calib.enable_weight_access_and_writeback
+
+    def recording_update_expert_weights(work, *args):
+        updated.extend(weakref.ref(weight) for _, weight in work)
+        update_expert_weights(work, *args)
+
+    @contextlib.contextmanager
+    def checked_window(*args, **kwargs):
+        assert all(ref() is None for ref in updated)
+        with window(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(model_calib, "update_expert_weights", recording_update_expert_weights)
+    monkeypatch.setattr(model_calib, "enable_weight_access_and_writeback", checked_window)
+    inputs = _inputs()[:96, :TOY_MOE_HIDDEN]
+    mtq.quantize(_MoEStack(moe, ToyMoE()), _int4_config(GPTQ), forward_loop=lambda m: m(inputs))
+
+    assert updated
 
 
 def test_pin_outlives_the_weight_tensor():

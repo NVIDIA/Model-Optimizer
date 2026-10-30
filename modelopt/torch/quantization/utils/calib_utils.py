@@ -131,8 +131,11 @@ def update_expert_weights(work, block_size, perc_damp):
     their weight's device.
     """
     movable = [(h, w) for h, w in work if h.UPDATES_ON_ANY_DEVICE and w.is_cuda]
-    # A worker holds one expert at a time: its weight, Hessian, inverse and their temporaries.
-    room = 8 * max((4 * h.hessian.numel() for h, _ in movable), default=0)
+    # A worker holds one expert at a time: its Hessian, the inverse and their temporaries, the
+    # float32 copy of its weight with a dtype-conversion temporary (a projection much wider than
+    # its input makes the weight the larger part), and the codec's tables and scratch, about
+    # 35 MiB on a GPU's first update.
+    room = 2**26 + max((4 * (8 * h.hessian.numel() + 2 * w.numel()) for h, w in movable), default=0)
     gpus = [gpu for gpu in _own_gpus() if get_available_gpu_memory(gpu) > room]
     if len(gpus) < 2 or len(movable) < 2:
         movable = []
@@ -152,18 +155,20 @@ def update_expert_weights(work, block_size, perc_damp):
     pending: queue.SimpleQueue = queue.SimpleQueue()
     for item in movable[1:]:
         pending.put(item)
+    inference = torch.is_inference_mode_enabled()
 
-    @torch.no_grad()  # grad mode is per thread, like the current device
     def worker(gpu):
+        # The device, grad mode and inference mode are per thread: take the caller's.
         torch.cuda.set_device(gpu)
         device = torch.device("cuda", gpu)
-        while True:
-            try:
-                helper, weight = pending.get_nowait()
-            except queue.Empty:
-                break
-            helper.update_weights(block_size, perc_damp, weight, device=device)
-            helper.free()
+        with torch.inference_mode() if inference else torch.no_grad():
+            while True:
+                try:
+                    helper, weight = pending.get_nowait()
+                except queue.Empty:
+                    break
+                helper.update_weights(block_size, perc_damp, weight, device=device)
+                helper.free()
         torch.cuda.synchronize(device)
 
     with ThreadPoolExecutor(len(gpus)) as pool:
