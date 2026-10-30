@@ -731,7 +731,8 @@ def _distributed_save_hf_checkpoint_impl(
     # the routed experts' ParallelState -- the same source calibration reads, not transformers'
     # internal ``model._device_mesh``. An expert's data-parallel group is its expert-data-parallel one.
     ep_rank, dp_idx = 0, 0
-    if distribution_plan(model).is_expert_parallel:
+    plan = distribution_plan(model)
+    if plan.is_expert_parallel:
         parallel_state = expert_parallel_state(model)
         if parallel_state is None:
             raise RuntimeError(
@@ -739,8 +740,21 @@ def _distributed_save_hf_checkpoint_impl(
                 "group: load it with an expert-parallel loader, which seeds each routed expert's "
                 "ParallelState."
             )
-        ep_rank = parallel_state.expert_model_parallel_group.rank()
+        ep_group = parallel_state.expert_model_parallel_group
         edp_group = parallel_state.data_parallel_group
+        # The coordinates index the plan's own groups. A ParallelState left with its default
+        # data-parallel group holds the whole world there: taken as the replica index, it would leave
+        # every rank but global rank 0 out of the expert write, with no error. The groups have the
+        # same sizes on every rank, so every rank refuses alike.
+        edp_size = edp_group.world_size() if edp_group.is_initialized() else 1
+        if ep_group.world_size() != plan.ep_size or edp_size != plan.edp:
+            raise RuntimeError(
+                f"The routed experts' expert-parallel group holds {ep_group.world_size()} ranks and "
+                f"their data-parallel group {edp_size}, but the model's plan has "
+                f"ep_size={plan.ep_size} and edp={plan.edp}, so the writer cannot tell which rank "
+                "writes which experts."
+            )
+        ep_rank = ep_group.rank()
         if edp_group.is_initialized():
             # Experts are replicated across EDP, so only the first replica writes them.
             dp_idx = edp_group.rank()
