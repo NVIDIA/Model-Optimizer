@@ -585,7 +585,8 @@ def test_a_config_with_nothing_to_decompress_leaves_the_loader_alone(
     ) == hooks
 
 
-EXPERT = "model.layers.1.mlp.experts.0.gate_proj"
+EXPERTS = [f"model.layers.1.mlp.experts.{e}.gate_proj" for e in range(3)]
+EXPERT = EXPERTS[0]
 ATTENTION = "model.layers.1.self_attn.q_proj"
 SHARED_EXPERT = "model.layers.1.mlp.shared_experts.up_proj"  # a dense MLP, not the routed experts
 STORED_DTYPES = {  # as compressed-tensors stores them; every other tensor is bf16 here
@@ -621,6 +622,17 @@ STORED_DTYPES = {  # as compressed-tensors stores them; every other tensor is bf
             [f"{EXPERT}.{n}" for n in (*PACKED, "weight_global_scale")],
             r"store weight_global_scale \(F32\), which bf16 cannot hold exactly",
         ),
+        (
+            PACKED,
+            [f"{EXPERT}.{n}" for n in PACKED] + [f"{EXPERTS[1]}.weight_scale"],
+            "stores weight_packed for some compressed weights but not for 1 others",
+        ),
+        (
+            PACKED,
+            [f"{EXPERTS[e]}.{n}" for e in (0, 1) for n in ("weight_packed", "weight_shape")]
+            + [f"{EXPERTS[e]}.weight_scale" for e in (1, 2)],
+            "stores weight_packed for some compressed weights but not for 1 others",
+        ),
     ],
     ids=[
         "experts-alone",
@@ -630,13 +642,17 @@ STORED_DTYPES = {  # as compressed-tensors stores them; every other tensor is bf
         "an-expert-left-uncompressed",
         "nothing-compressed",
         "an-fp32-scale",
+        "a-scale-alone",
+        "equal-counts-other-experts",
     ],
 )
 def test_a_checkpoint_must_compress_its_experts_and_nothing_else(tmp_path, stored_as, names, match):
     """The config cannot say which modules a class target such as Linear compressed, so the names
     the checkpoint stores decide: anything else compressed, or an expert stored uncompressed, would
     load newly initialized, without a quantizer to load it or a converter that reads it. A float
-    stored for the experts must be one bf16 holds exactly: the load may cast it to bf16 first."""
+    stored for the experts must be one bf16 holds exactly: the load may cast it to bf16 first. And
+    every compressed weight stores the same names: the load pairs them by position, not by expert,
+    so a scale stored for other experts in equal number would pair with the wrong weights."""
     tensors = {
         name: torch.zeros(1, dtype=STORED_DTYPES.get(name.rpartition(".")[2], torch.bfloat16))
         for name in names

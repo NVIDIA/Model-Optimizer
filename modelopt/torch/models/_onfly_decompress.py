@@ -423,8 +423,11 @@ def check_compressed_keys(hf_config, ckpt_dir) -> None:
     tensor_files = checkpoint_tensor_files(ckpt_dir)
     compressed: set[str] = set()
     expert_weights: set[str] = set()
+    stems_storing: dict[str, set[str]] = {}
     for name in tensor_files:
         stem, _, stored = name.rpartition(".")
+        if stored in stored_as:
+            stems_storing.setdefault(stored, set()).add(stem)
         if stored in stored_as and stored != "weight":
             compressed.add(stem)
         elif stored == "weight" and ".experts." in name:
@@ -437,6 +440,22 @@ def check_compressed_keys(hf_config, ckpt_dir) -> None:
             f"experts {outside[:1]}, and stores {len(plain)} expert weights uncompressed {plain[:1]}: "
             "on-the-fly decompression loads the experts alone, every one compressed, so the rest "
             "would load newly initialized. Decompress the checkpoint first."
+        )
+    # The load hands the decompression each expert's stored tensors by the order it collects them,
+    # not by expert id, so every compressed weight must store the same names: one missing a scale
+    # would pair a later expert's weight with an earlier one's scale. A name no weight stores
+    # (Kimi-K3's weight_global_scale) is simply not read.
+    unpaired = sorted(
+        (stored, sorted(compressed - stems))
+        for stored, stems in stems_storing.items()
+        if stems & compressed and compressed - stems
+    )
+    if unpaired:
+        stored, missing = unpaired[0]
+        raise NotImplementedError(
+            f"The checkpoint stores {stored} for some compressed weights but not for {len(missing)} "
+            f"others {missing[:1]}: the decompression pairs each expert's stored tensors by position, "
+            "so every compressed weight must store the same names. Decompress the checkpoint first."
         )
     by_file: dict[str, list[str]] = {}
     for name, file in tensor_files.items():
