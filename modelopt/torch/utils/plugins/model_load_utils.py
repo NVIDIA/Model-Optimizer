@@ -1829,17 +1829,21 @@ def load_and_prepare_ep(
             )
     # Each rank builds the meshes below on its own GPU. A live process group (gloo, say) does not
     # give every rank one, and a rank without it would fail building them while the others wait in
-    # their subgroups' creation: refused on every rank first. A run in which no rank has one fails
-    # building them on every rank alike.
-    some_rank_has_one = dist.all_reduce("each rank's GPU", _has_own_gpu, combine=any)
-    with _refused_together("this rank's GPU", alone=False):
-        if some_rank_has_one and not _has_own_gpu():
-            raise RuntimeError(
-                "The expert-parallel load builds its meshes on each rank's own GPU, and this rank "
-                f"has none, though other ranks have theirs: it sees {torch.cuda.device_count()} "
-                f"GPU(s) as local rank {dist.local_rank()}. Run one process per GPU, as "
-                "torchrun --nproc_per_node=<GPUs per node> does."
-            )
+    # their subgroups' creation: every rank learns which ranks have theirs, from one gather, and a
+    # run in which some do and some do not is refused on every rank alike. A run in which none does
+    # fails building the meshes on every rank alike.
+    own_gpu = dist.all_reduce(
+        "each rank's GPU",
+        lambda: [_has_own_gpu()],
+        combine=lambda ranks: [has for flags in ranks for has in flags],
+    )
+    if any(own_gpu) and not all(own_gpu):
+        without = [rank for rank, has in enumerate(own_gpu) if not has]
+        raise RuntimeError(
+            "The expert-parallel load builds its meshes on each rank's own GPU, and rank(s) "
+            f"{without} have none while the others have theirs. Run one process per GPU, as "
+            "torchrun --nproc_per_node=<GPUs per node> does."
+        )
     dtype = getattr(hf_config, "dtype", None) or torch.bfloat16
     # The weights load, and the checkpoint recorded for the export to read the unplaced tensors back
     # from, take the local snapshot: a Hub ID recorded there would leave the export nothing to read.
