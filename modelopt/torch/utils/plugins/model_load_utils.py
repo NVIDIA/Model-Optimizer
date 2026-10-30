@@ -1837,18 +1837,26 @@ def load_and_prepare_ep(
                 f"{plan!r}: ep_size={ep_degree} must divide the {num_experts} routed experts, which the "
                 "all-to-all transport shares out equally over the expert-parallel ranks."
             )
-    # Each rank builds the meshes below on its own GPU. A live process group (gloo, say) does not
-    # give every rank one, and a rank without it would fail building them while the others wait in
-    # their subgroups' creation: every rank learns which ranks have theirs, from one gather, and a
-    # run in which some do and some do not is refused on every rank alike. A run in which none does
-    # fails building the meshes on every rank alike.
-    own_gpu = dist.all_reduce(
+    # Each rank builds the meshes below on the GPU it is bound to. DeviceMesh binds a rank that sees
+    # CUDA but is bound to none yet (a gloo group leaves it so) by its local rank, a GPU that a launch
+    # showing each process one does not have; and a rank without a GPU fails building the meshes.
+    # Either fails alone while the others wait in their subgroups' creation, so every rank learns
+    # from one gather which ranks are bound and which have a GPU, and all refuse alike. A run in
+    # which none has a GPU fails building the meshes on every rank alike.
+    gpus = dist.all_reduce(
         "each rank's GPU",
-        lambda: [_has_own_gpu()],
-        combine=lambda ranks: [has for flags in ranks for has in flags],
+        lambda: [(_has_own_gpu(), torch.cuda.is_available() and not torch.cuda.is_initialized())],
+        combine=lambda ranks: [gpu for flags in ranks for gpu in flags],
     )
-    if any(own_gpu) and not all(own_gpu):
-        without = [rank for rank, has in enumerate(own_gpu) if not has]
+    unbound = [rank for rank, (_, waits) in enumerate(gpus) if waits]
+    if unbound:
+        raise RuntimeError(
+            "The expert-parallel load builds its meshes on the GPU each rank is bound to, and rank(s) "
+            f"{unbound} are bound to none yet. Bind each rank to its GPU before the load "
+            "(torch.cuda.set_device), as distributed_run() does."
+        )
+    without = [rank for rank, (has, _) in enumerate(gpus) if not has]
+    if without and len(without) < len(gpus):
         raise RuntimeError(
             "The expert-parallel load builds its meshes on each rank's own GPU, and rank(s) "
             f"{without} have none while the others have theirs. Run one process per GPU, as "

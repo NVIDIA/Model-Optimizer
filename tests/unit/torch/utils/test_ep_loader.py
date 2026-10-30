@@ -714,14 +714,14 @@ def test_a_load_failing_on_one_rank_fails_every_rank(
     )
 
 
-def _one_gpu_per_process_job(rank, size):
+def _one_gpu_per_process_job(rank, size, bound):
     hf_config = SimpleNamespace(base_model_ep_plan=dict(_EP_PLAN), num_experts=4)
     reached = None
     with bounded_collectives(), ExitStack() as stack:
-        # Each process sees one GPU and is bound to it, as cuda:0; the local ranks run 0 and 1.
+        # Each process sees one GPU, cuda:0, bound to it or not yet; the local ranks run 0 and 1.
         for name, value in [
             ("is_available", True),
-            ("is_initialized", True),
+            ("is_initialized", bound),
             ("current_device", 0),
             ("device_count", 1),
         ]:
@@ -738,13 +738,19 @@ def _one_gpu_per_process_job(rank, size):
             load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=hf_config)
         except Exception as error:
             reached = error
-    assert isinstance(reached, _PastTheMeshesError), (rank, reached)
+    if bound:
+        assert isinstance(reached, _PastTheMeshesError), (rank, reached)
+    else:
+        assert "rank(s) [0, 1] are bound to none yet" in str(reached), (rank, reached)
 
 
 @pytest.mark.skipif(
     Version(transformers.__version__) < Version("5.7"), reason="the EP load needs transformers 5.7"
 )
-def test_one_visible_gpu_per_process_gives_every_rank_its_gpu(cpu_dist_workers):
+@pytest.mark.parametrize("bound", [True, False], ids=["bound", "not-yet-bound"])
+def test_one_visible_gpu_per_process_needs_each_rank_bound_to_it(cpu_dist_workers, bound):
     """A launch that shows each process one GPU binds every rank to cuda:0, whatever its local rank:
-    every rank has its GPU, and every rank goes on to build the meshes."""
-    cpu_dist_workers.run(_one_gpu_per_process_job)
+    every rank has its GPU, and every rank goes on to build the meshes. Not yet bound, DeviceMesh
+    would bind each by its local rank, a GPU rank 1 does not see: every rank is refused, told to
+    bind first."""
+    cpu_dist_workers.run(_one_gpu_per_process_job, bound=bound)
