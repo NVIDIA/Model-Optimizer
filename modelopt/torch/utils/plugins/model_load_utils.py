@@ -472,28 +472,21 @@ def _route(plan: DistributionPlan) -> str | None:
 
 @contextmanager
 def _refused_together(label: str, alone: bool):
-    """Raise on every rank if the block raises on any, through :func:`dist.all_reduce`.
-
-    A rank refusing a load alone would leave the others waiting in the load's next collective (the
-    checkpoint's fetch, the sharded load). A process of a launch that set no group up (``alone``) has
-    no peers to tell.
-    """
+    """Raise on every rank if the block raises on any, so no rank waits for one that refused."""
     error = None
     try:
         yield
-    # A SystemExit too: the others would wait for this rank all the same.
-    except BaseException as e:
+    except BaseException as e:  # A SystemExit too: the others would wait for this rank as well.
         error = e
-    if alone:
-        if error is not None:
-            raise error
-        return
 
     def refuse() -> None:
         if error is not None:
             raise error
 
-    dist.all_reduce(label, refuse, combine=lambda _: None)
+    if alone:  # A process of a launch that set no group up has no peers to tell.
+        refuse()
+    else:
+        dist.all_reduce(label, refuse, combine=lambda _: None)
 
 
 def _read_config(path, auto_class, trust_remote_code: bool = False, **hub_options):
@@ -566,8 +559,7 @@ def _sharded_load_kwargs(route, ckpt_path, auto_class, model_type, kwargs, hub_o
             f"or distribution=DistributionPlan({dist.size()}, dense='replicate')."
         )
     if not dist.is_initialized() and "RANK" not in os.environ:
-        # FSDP2 shards through a process group even on one rank; a launch without its group was
-        # refused before the load.
+        # FSDP2 shards through a process group even on one rank.
         raise RuntimeError(
             f"The {route} load shards through a process group, even on one rank, which a process "
             "started without a launcher cannot set up; launch it with `torchrun --nproc_per_node=1`."
@@ -605,11 +597,9 @@ def load_pretrained(
 
     * ``dense="fsdp"``: a causal LM FSDP2-sharded over the whole process group, each rank reading its
       own layers (:func:`parallel_load_and_prepare_fsdp2`, whose ``cpu_offload``, ``mp_policy`` and
-      ``broadcast_chunk_size`` ``kwargs`` may set). A single process launched with
-      ``torchrun --nproc_per_node=1`` has no group to shard through, so the load sets up one of one
-      rank, which :func:`~modelopt.torch.utils.distributed.distributed_run` destroys with the run; a
-      process started without a launcher cannot set one up and is refused. It reads the
-      checkpoint's tensors as stored, so it refuses a quantized checkpoint.
+      ``broadcast_chunk_size`` ``kwargs`` may set). A single process sets a group of one up for it,
+      which needs ``torchrun --nproc_per_node=1``. It reads the checkpoint's tensors as stored, so it
+      refuses a quantized checkpoint.
     * otherwise ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
       ``AutoModelForCausalLM``), placed as ``kwargs`` say. Every rank of a distributed run gets the
       whole model, ``device_map`` defaulting to the rank's GPU when there is one.
@@ -661,8 +651,7 @@ def load_pretrained(
     from modelopt.torch.models.hf import prepare_model_for_loading
 
     # A launcher can start several processes that set no process group up (hf_ptq without
-    # --use_fsdp2, say): each then loads as a single process does, the whole model with no plan to
-    # agree on, as before plans existed. A plan for several ranks needs the group.
+    # --use_fsdp2, say): each loads as a single process does, the whole model with no plan.
     alone = dist.is_distributed_launch() and not dist.is_initialized()
     if alone and isinstance(distribution, DistributionPlan) and distribution.world_size > 1:
         raise RuntimeError(
@@ -704,11 +693,8 @@ def load_pretrained(
         _route(distribution)
         return distribution
 
-    # Every rank takes rank 0's distribution, a plan or none, so every rank runs the same load and
-    # its collectives: a rank going by its own could wait in collectives the others never join, and
-    # ranks loading different plans would build mismatched meshes. Rank 0 checks it before it sends,
-    # so one it refuses raises on every rank instead of leaving them in the broadcast, and before
-    # the checkpoint is fetched.
+    # Every rank takes rank 0's distribution, so every rank runs the same load and collectives;
+    # rank 0 checks it before it sends, so one it refuses raises on every rank, before the fetch.
     plan = handed() if alone else dist.broadcast_from("distribution", handed)
     hub_options = {
         k: kwargs.pop(k) for k in ("token", "cache_dir", "local_files_only") if k in kwargs
@@ -740,9 +726,8 @@ def load_pretrained(
                 "plan decided from your config."
             )
         if plan is not None and _route(plan) is not None:
-            # A handed plan names its load before anything is fetched, and the arguments alone
-            # decide what that load refuses. A config passed for it becomes its hf_config;
-            # subfolder is where the checkpoint is.
+            # A handed plan's arguments alone decide what its load refuses, before the fetch; a
+            # config passed for it becomes its hf_config, and subfolder is where the checkpoint is.
             _refuse_sharded_load_options(
                 _route(plan),
                 auto_class,
@@ -793,7 +778,7 @@ def load_pretrained(
                 "model; pass a plan with dense='fsdp' to shard it."
             )
         placed = _whole_load_options(kwargs)
-        if decided and route == _FSDP2 and env.fsdp_size().lower() == "auto" and placed:
+        if decided and route == _FSDP2 and _dense_from_env(plan.world_size) == "auto" and placed:
             # Rank 0's GPU memory chose to shard: say so, rather than refuse the options below as
             # if the caller had asked for the sharded load.
             raise TypeError(
@@ -804,8 +789,7 @@ def load_pretrained(
                 f"distribution=DistributionPlan({plan.world_size}, dense='replicate')."
             )
         if route is not None and config is not None:
-            # The sharded load builds the model from hf_config: the plan's copy of this one, or a
-            # copy of it, since building writes to the config.
+            # The sharded load builds from hf_config, a copy, as building writes to the config.
             del kwargs["config"]
             if "hf_config" not in kwargs:
                 kwargs["hf_config"] = copy.deepcopy(config)
