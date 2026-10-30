@@ -53,6 +53,18 @@ from .dla_transforms.dla_model_boundaries import (
     _BoundaryPreflightError,
     _require_output_rank_conversion,
 )
+from .dla_transforms.dla_rank_conversion import (
+    _apply_argmax,
+    _apply_flatten,
+    _apply_non4d_expand,
+    _apply_non4d_initializers,
+    _apply_non4d_lpnorm,
+    _apply_non4d_reshape,
+    _apply_non4d_slice_axis,
+    _apply_non4d_tile,
+    _apply_non4d_transpose,
+    _apply_update_axis,
+)
 from .dla_transforms.dla_remove_deqlin import _apply_remove_deqlin
 from .dla_transforms.dla_remove_qdq import _remove_qdq_from_model
 from .dla_transforms.dla_reorder_nodes import _apply_reorder_nodes
@@ -99,6 +111,7 @@ DLA_TRANSFORMS = (
     ("ReshapeTransposeReshape", _apply_reshape_transpose_reshape),
     ("ReshapeQDQReduceSum", _apply_reshape_qdq_reduce_sum),
     ("ReshapeReduceSum", _apply_reshape_reduce_sum),
+    ("Non4dSliceAxis", _apply_non4d_slice_axis),
     ("Gather", _apply_gather),
     ("DecomposeLstm", partial(_apply_decompose_lstm, defer_rank_conversion=True)),
     (
@@ -107,6 +120,8 @@ DLA_TRANSFORMS = (
     ),
     ("Non4dModelInputs", _apply_non4d_model_inputs),
     ("Non4dModelOutputs", partial(_apply_non4d_model_outputs, defer_rank_conversion=True)),
+    ("Non4DReshape", _apply_non4d_reshape),
+    ("ArgMax", _apply_argmax),
     ("StandaloneReduceOperations", _apply_standalone_reduce_operations),
     (
         "RemoveIntermediarySqueezeAndUnsqueeze",
@@ -114,7 +129,14 @@ DLA_TRANSFORMS = (
     ),
     ("GroupQueryAttention", _apply_group_query_attention),
     ("GatherElements", _apply_gather_elements),
+    ("Non4dInitializers", _apply_non4d_initializers),
+    ("Non4DExpand", _apply_non4d_expand),
+    ("Non4DTile", _apply_non4d_tile),
+    ("Flatten", _apply_flatten),
+    ("Non4DTranspose", _apply_non4d_transpose),
+    ("Non4DLpNorm", _apply_non4d_lpnorm),
     ("FixInstanceNormChannelMismatch", _apply_fix_instancenorm_channels),
+    ("UpdateAxis", _apply_update_axis),
     ("ShapeInference", infer_shapes),
     ("RemoveUnusedInitializers", _remove_unused_initializers),
 )
@@ -135,9 +157,20 @@ def _boundary_stage_options(name, quant_types, verbose, prepared_input_ops, prep
     if name == "Non4dModelInputs":
         return {"prepared_input_ops": prepared_input_ops}
     if name == "Non4dModelOutputs":
-        return {"prepared_output_ops": prepared_output_ops}
+        return {"prepared_output_ops": prepared_output_ops, "prepared_data_ops": prepared_input_ops}
     if name == "RemoveIntermediarySqueezeAndUnsqueeze":
         return {"prepared_consumer_ops": prepared_input_ops}
+    if name in {
+        "Non4dSliceAxis",
+        "Non4DTranspose",
+        "Non4DLpNorm",
+        "ArgMax",
+        "Flatten",
+        "UpdateAxis",
+        "Non4DExpand",
+        "Non4DTile",
+    }:
+        return {"prepared_data_ops": prepared_input_ops}
     if name == "FixInstanceNormChannelMismatch":
         return {"prepared_consumer_ops": prepared_input_ops}
     return {}
@@ -178,6 +211,7 @@ def _validate_boundary_contract(
         model,
         defer_rank_conversion=True,
         prepared_output_ops=prepared_output_ops,
+        prepared_data_ops=prepared_input_ops,
         validate_only=True,
     )
     if "RemoveIntermediarySqueezeAndUnsqueeze" in prepared_input_ops:

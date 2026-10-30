@@ -37,7 +37,21 @@ class _BoundaryPreflightError(ValueError):
     """Prerequisite lowering cannot freeze an exposed runtime control."""
 
 
-_RANK_FLOW_OPS = _RANK_AGNOSTIC_OPS | {"Slice", "Transpose", "Reshape", "Expand", "Tile"}
+_RANK_FLOW_OPS = _RANK_AGNOSTIC_OPS | {
+    "Slice",
+    "Transpose",
+    "Reshape",
+    "Expand",
+    "Tile",
+    "Softmax",
+    "LogSoftmax",
+    "LpNormalization",
+    "ArgMax",
+    "QuantizeLinear",
+    "DequantizeLinear",
+    "TopK",
+    "Split",
+}
 _REDUCTION_OPS = frozenset({"ReduceSum", "ReduceMean", "ReduceMin", "ReduceMax"})
 
 
@@ -114,10 +128,14 @@ def _output_rank_source(cache, node, local_functions, sources):
     return node
 
 
-def _has_native_symbolic_data(cache, name, local_functions):
+def _has_native_symbolic_data(cache, name, local_functions, sources=None):
     """Prove a low-rank symbolic data path was left native by boundary promotion."""
     seen = set()
+    sources = {} if sources is None else sources
     while name not in seen:
+        if name in sources:
+            result = sources[name]
+            break
         seen.add(name)
         info = cache.vi_map.get(name)
         rank = (
@@ -125,19 +143,25 @@ def _has_native_symbolic_data(cache, name, local_functions):
             if info is not None and info.type.tensor_type.HasField("shape")
             else None
         )
-        if cache.get_shape(name) is not None or (rank is not None and rank >= 4):
-            return False
+        if rank is not None and rank >= 4:
+            result = False
+            break
         if name in cache.graph_input_names:
-            return rank is not None and rank < 4
+            result = cache.get_shape(name) is None and rank is not None and rank < 4
+            break
         node = cache.get_producer(name)
         if (
             node is None
             or not _is_standard_node(node, local_functions, _RANK_FLOW_OPS)
             or not node.input
         ):
-            return False
+            result = False
+            break
         name = node.input[0]
-    raise ValueError("Cyclic data path while planning native symbolic controls")
+    else:
+        raise ValueError("Cyclic data path while planning native symbolic controls")
+    sources.update(dict.fromkeys(seen, result))
+    return result
 
 
 def _require_adapter_opset(model):
@@ -194,6 +218,7 @@ def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=Fal
     unsqueezed_shapes = {}
     normalization_axes = {}
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    native_sources = {}
     contrib_ops = _boundary_contrib_ops(model)
     opset = next(
         (entry.version for entry in model.opset_import if entry.domain in {"", "ai.onnx"}), 1
@@ -214,6 +239,16 @@ def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=Fal
             )
             and node.op_type not in {"InstanceNormalization", "Gemm"}
             and not _native_conv1d(node, cache)
+            and not (
+                node.op_type in _RANK_AGNOSTIC_OPS - {"Clip"}
+                and len(node.input) > 1
+                and any(
+                    name != value.name
+                    and _has_native_symbolic_data(cache, name, local_functions, native_sources)
+                    for name in node.input
+                    if name
+                )
+            )
         ]
         if not consumers:
             continue
@@ -367,45 +402,73 @@ def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=Fal
 
 
 def _apply_non4d_model_outputs(
-    model, *, defer_rank_conversion=False, prepared_output_ops=(), validate_only=False
+    model,
+    *,
+    defer_rank_conversion=False,
+    prepared_output_ops=(),
+    prepared_data_ops=None,
+    validate_only=False,
 ):
     """Restore outputs or only validate producer rank availability before shape inference."""
+    # Rank stages import the boundary predicates; defer their shared proof to avoid the cycle.
+    from .dla_rank_conversion import _rank_preparation_proofs
+
     graph = model.graph
     cache = GraphCache(graph)
+    prepared = (
+        _rank_preparation_proofs(model, cache, prepared_data_ops, restoring_outputs=True)
+        if defer_rank_conversion
+        else {}
+    )
     captured = _subgraph_captures(graph)
     boundary_names = cache.graph_input_names | cache.init_names
     append = []
     plans = []
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
-    native_broadcasts = set()
-    if defer_rank_conversion and "Non4dInitializers" not in prepared_output_ops:
-        live_ranks = {
-            name: len(shape)
-            for name in boundary_names
-            if (shape := cache.get_shape(name)) is not None
-        }
-        for node in graph.node:
-            if (
-                _is_standard_node(node, local_functions, _RANK_AGNOSTIC_OPS)
-                and node.input
-                and all(name in live_ranks for name in node.input)
-            ):
-                rank = max(live_ranks[name] for name in node.input)
-                live_ranks.update(dict.fromkeys(node.output, rank))
-                if rank < 4 and (
-                    len(node.input) > 1 or any(name in native_broadcasts for name in node.input)
-                ):
-                    native_broadcasts.update(node.output)
     rank_sources = {}
     contrib_ops = _boundary_contrib_ops(model)
+    native_sources = {}
+    inputs_promotable = all(
+        cache.get_shape(value.name) is not None
+        for value in graph.input
+        if value.name not in cache.init_names
+    )
     for value in graph.output:
-        shape = cache.get_shape(value.name)
+        shape: list | None = cache.get_shape(value.name)
+        symbolic_output = shape is None
+        if (
+            shape is None
+            and defer_rank_conversion
+            and inputs_promotable
+            and value.type.tensor_type.HasField("shape")
+        ):
+            shape = [
+                dim.dim_value if dim.HasField("dim_value") else dim.dim_param or None
+                for dim in value.type.tensor_type.shape.dim
+            ]
         if shape is None or len(shape) >= 4 or value.name in boundary_names:
-            continue
-        if value.name in native_broadcasts:
             continue
         producer = cache.get_producer(value.name)
         source = _output_rank_source(cache, producer, local_functions, rank_sources)
+        if symbolic_output:
+            if source is None or not _is_standard_node(source, local_functions, _RANK_FLOW_OPS):
+                continue
+            native_shape = _shape_before_boundary_promotion(cache, source.input[0])
+            info = cache.vi_map.get(source.input[0])
+            rank = (
+                len(native_shape)
+                if native_shape is not None
+                else (
+                    len(info.type.tensor_type.shape.dim)
+                    if info is not None and info.type.tensor_type.HasField("shape")
+                    else None
+                )
+            )
+            target = cache.get_init(source.input[1]) if source.op_type == "Reshape" else None
+            if rank not in (2, 3) and not (
+                target is not None and len(target.dims) == 1 and target.dims[0] < 4
+            ):
+                continue
         if source is None and len(shape) == 1:
             continue
         if source is not None:
@@ -419,8 +482,10 @@ def _apply_non4d_model_outputs(
                 source, local_functions, {source.op_type}, contrib_ops=contrib_ops
             ):
                 continue
-            if _is_standard_node(source, local_functions, {"Reshape", "Expand", "Tile"}):
-                if _has_native_symbolic_data(cache, source.input[0], local_functions):
+            if _is_standard_node(source, local_functions, _RANK_FLOW_OPS):
+                if _has_native_symbolic_data(
+                    cache, source.input[0], local_functions, native_sources
+                ):
                     continue
                 target = cache.get_shape(source.input[1]) if source.op_type == "Reshape" else None
                 if (
@@ -472,6 +537,8 @@ def _apply_non4d_model_outputs(
         if delta < 0:
             raise ValueError(f"Output Squeeze input rank exceeds 4 for {value.name!r}")
         axes = list(range(delta)) + [axis + delta if axis >= 0 else axis for axis in axes]
+        if defer_rank_conversion and not prepared[value.name]:
+            continue
         plans.append((value, shape, existing, axes))
     if plans:
         _require_adapter_opset(model)
@@ -479,7 +546,7 @@ def _apply_non4d_model_outputs(
         return model
     for value, shape, existing, axes in plans:
         axes_name = None
-        if len(shape) > 1 or shape == [1]:
+        if len(shape) > 1 or shape == [1] or any(not isinstance(dim, int) for dim in shape):
             axes_name = add_initializer(
                 graph,
                 cache.unique_name(value.name + "_squeeze_axes"),

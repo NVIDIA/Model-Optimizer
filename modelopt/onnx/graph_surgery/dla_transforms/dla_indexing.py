@@ -144,7 +144,9 @@ def _gather_layout_reinterpreted(cache, name, supported, captured):
     return True
 
 
-def _prepared_index_data(model, cache, prepared_ops, data_names, *, before_boundary=False):
+def _prepared_index_data(
+    model, cache, prepared_ops, data_names, *, before_boundary=False, restoring_outputs=False
+):
     """Prove leading-4D data from actual layouts and registered rank stages without mutation."""
     standard = {id(node) for node in _operator_nodes(model, {n.op_type for n in model.graph.node})}
     if any(op.domain == "com.microsoft" and op.version == 1 for op in model.opset_import):
@@ -203,6 +205,8 @@ def _prepared_index_data(model, cache, prepared_ops, data_names, *, before_bound
         ):
             return True
         tensor = cache.get_init(name)
+        if tensor is not None and len(tensor.dims) == 4:
+            return True
         if name in cache.graph_input_names and (model.ir_version > 3 or tensor is None):
             return False
         if tensor is not None:
@@ -239,19 +243,41 @@ def _prepared_index_data(model, cache, prepared_ops, data_names, *, before_bound
                 and target[0] in (1, 2, 3, 5)
                 and not _has_native_symbolic_data(cache, node.input[0], local_functions)
             )
+        if node.op_type == "Expand":
+            target = cache.get_shape(node.input[1])
+            return target == [4] or (
+                "Expand" in prepared_ops
+                and target is not None
+                and len(target) == 1
+                and 0 < target[0] < 4
+                and not _has_native_symbolic_data(cache, node.input[0], local_functions)
+            )
         if node.op_type == "Flatten":
             return node.op_type in prepared_ops
         if node.op_type in {"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"}:
             return [node.input[0]] if node.op_type in prepared_ops else False
         if node.op_type == "InstanceNormalization":
-            return "FixInstanceNormChannelMismatch" in prepared_ops
+            return (
+                "FixInstanceNormChannelMismatch" in prepared_ops
+                or "RemoveIntermediarySqueezeAndUnsqueeze" in prepared_ops
+            )
         if node.op_type == "GroupQueryAttention":
             return "GroupQueryAttention" in prepared_ops
         if node.op_type == "Conv":
-            kernel = cache.get_shape(node.input[1])
-            return kernel is not None and len(kernel) == 4
-        if not before_boundary and node.op_type == "MatMul":
-            if name in cache.graph_output_names | captured:
+            weight = cache.get_init(node.input[1])
+            if weight is not None:
+                return len(weight.dims) == 4
+            kernel_rank = _known_rank(cache, node.input[1])
+            if kernel_rank is not None:
+                return kernel_rank == 4
+            return [node.input[1]]
+        if node.op_type == "MatMul" and (
+            not before_boundary
+            or restoring_outputs
+            or {"MatMulToTransposeConvTranspose", "RemoveIntermediarySqueezeAndUnsqueeze"}
+            <= set(prepared_ops)
+        ):
+            if not restoring_outputs and name in cache.graph_output_names | captured:
                 return False
             ranks = [matrix_rank(value) for value in node.input[:2]]
             return (
@@ -270,7 +296,9 @@ def _prepared_index_data(model, cache, prepared_ops, data_names, *, before_bound
             if "RemoveIntermediarySqueezeAndUnsqueeze" not in prepared_ops:
                 return False
             source = node.input[0]
-            if source in captured or name in captured | cache.graph_output_names:
+            if source in captured or (
+                not restoring_outputs and name in captured | cache.graph_output_names
+            ):
                 return False
             if source in cache.graph_input_names:
                 original = cache.get_shape(source)
@@ -300,6 +328,8 @@ def _prepared_index_data(model, cache, prepared_ops, data_names, *, before_bound
                 [node.input[0]]
                 if not before_boundary
                 or value < 0
+                or "axis_updated" in node.name
+                or "RemoveIntermediarySqueezeAndUnsqueeze" in prepared_ops
                 or node.op_type in prepared_ops
                 or node.input[0] in cache.graph_input_names
                 else False
