@@ -1883,6 +1883,25 @@ def load_and_prepare_ep(
             # Minus "weight": a float format's anchor is .weight itself, and an unplaced plain weight
             # is what the export has always carried as stored.
             compressed_names = set(_onfly_decompress.stored_names(hf_config)) - {"weight"}
+            # An MTP layer is stored past the decoder layers the model builds, so its compressed
+            # experts would be refused only after the whole load, by the check that follows it.
+            # Refused here instead, before anything loads; that check stays for any other shape.
+            built = getattr(ep_cfg, "num_hidden_layers", None)
+            past = sorted(
+                name
+                for name in checkpoint_tensor_files(ckpt_path)
+                if name.rpartition(".")[2] in compressed_names
+                and (layer := re.search(r"(?:^|\.)layers\.(\d+)\.", name))
+                and built is not None
+                and int(layer[1]) >= built
+            )
+            if past:
+                raise NotImplementedError(
+                    f"The checkpoint stores {len(past)} compressed tensors past the model's {built} "
+                    f"decoder layers, such as {past[0]} (an MTP layer): the model has no parameter "
+                    "for them, and the export would copy them as stored, with no quantization_config "
+                    "to read them. Decompress the checkpoint first."
+                )
 
     # Experts are sharded over ``ep`` and replicated over ``edp``; the dense part is replicated over
     # the whole world (``dp``).

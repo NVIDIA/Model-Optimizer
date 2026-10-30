@@ -2318,14 +2318,19 @@ def test_a_compressed_checkpoint_a_spec_decompresses_as_it_loads_passes(
         load_and_prepare_ep(str(tmp_path / "experts"), plan, hf_config=forwarding)
 
 
-@pytest.mark.parametrize("compressed", [False, True], ids=["uncompressed", "compressed"])
+@pytest.mark.parametrize(
+    ("compressed", "layers"),
+    [(False, 3), (True, 3), (True, 2)],
+    ids=["uncompressed", "compressed", "compressed-past-the-layers"],
+)
 def test_a_decompressed_load_refuses_compressed_tensors_its_model_does_not_place(
-    ep_world_of_two, monkeypatch, tmp_path, compressed
+    ep_world_of_two, monkeypatch, tmp_path, compressed, layers
 ):
     """The export copies the tensors the model has no parameter for as stored, and this load dropped
     the quantization_config that reads a compressed one: an unplaced tensor under a stored name the
     mark holds (an MTP layer's compressed experts) is refused, one under the plain ``weight`` name is
-    not. Which keys go unplaced is stood in for here; a real decompressed load's are pinned in
+    not. Compressed experts stored past the config's decoder layers are refused before anything
+    loads. Which keys go unplaced is stood in for here; a real decompressed load's are pinned in
     test_unplaced_source_keys.py."""
     from safetensors.torch import save_file
 
@@ -2338,14 +2343,16 @@ def test_a_decompressed_load_refuses_compressed_tensors_its_model_does_not_place
         raise _PastError
 
     model = model_with_decoder_at("model.")
+    loads = []
 
     class _Loader:
         @staticmethod
         def from_pretrained(path, config, **kwargs):
+            loads.append(path)
             model.config = copy.deepcopy(config)
             return model
 
-    mtp = "model.layers.2.mlp.experts.0.up_proj"  # past the model's two layers
+    mtp = "model.layers.2.mlp.experts.0.up_proj"  # unplaced, as an MTP layer's are
     stored_as = {"weight_packed": torch.int32, "weight_scale": torch.bfloat16}
     names = list(stored_as) if compressed else ["weight"]
     stored = {f"{m}.{n}": torch.ones(1, dtype=d) for m in (mtp,) for n, d in stored_as.items()}
@@ -2360,6 +2367,7 @@ def test_a_decompressed_load_refuses_compressed_tensors_its_model_does_not_place
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
     config = SimpleNamespace(
         num_experts=8,
+        num_hidden_layers=layers,
         base_model_ep_plan=dict(_EP_PLAN),
         quantization_config={"quant_method": "compressed-tensors"},
     )
@@ -2367,7 +2375,12 @@ def test_a_decompressed_load_refuses_compressed_tensors_its_model_does_not_place
 
     with pytest.raises(NotImplementedError if compressed else _PastError) as refused:
         load_and_prepare_ep(str(tmp_path), DistributionPlan(2, ep_size=2), hf_config=config)
-    if compressed:
+    if layers == 2:
+        assert not loads
+        assert f"2 compressed tensors past the model's 2 decoder layers, such as {mtp}." in str(
+            refused.value
+        )
+    elif compressed:
         assert f"2 compressed tensors the model has no parameter for, such as {mtp}" in str(
             refused.value
         )
