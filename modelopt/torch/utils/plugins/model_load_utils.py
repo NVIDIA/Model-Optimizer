@@ -610,11 +610,12 @@ def _sharded_load_kwargs(
         # The head is built on a whole model only; carried over, it would export unquantized.
         raise NotImplementedError(
             f"The {route} load cannot build the MTP head this {model_type} checkpoint carries. To "
-            f"load it whole on every rank: {_whole_instead(decided)}."
+            f"load it whole on every rank: {_whole_instead(decided, route)}."
         )
     trust_remote_code = kwargs.pop("trust_remote_code", False)
     hf_config = kwargs.pop("hf_config", None)
     if route == _EXPERT_PARALLEL:
+        _refuse_a_rank_without_its_gpu(route, decided)
         return {
             "plan": plan,
             "trust_remote_code": trust_remote_code,
@@ -650,14 +651,21 @@ def _sharded_load_kwargs(
             f"The {route} load shards through a process group, even on one rank, which a process "
             "started without a launcher cannot set up; launch it with `torchrun --nproc_per_node=1`."
         )
+    _refuse_a_rank_without_its_gpu(route, decided)
+    return {"trust_remote_code": trust_remote_code, "hf_config": hf_config, **kwargs}
+
+
+def _refuse_a_rank_without_its_gpu(route, decided: bool) -> None:
+    """Refuse a rank without a GPU of its own before the ``route`` load, with the other ranks.
+
+    Inside the load, the others would wait for this rank in its collectives.
+    """
     if not _has_own_gpu():
-        # Refused with the other ranks, not inside the load, where they would wait for this one.
         raise RuntimeError(
             f"The {route} load shards onto each rank's own GPU, and this rank has none: it sees "
             f"{torch.cuda.device_count()} GPU(s) as local rank {dist.local_rank()}. To load it "
-            f"whole on every rank: {_whole_instead(decided)}."
+            f"whole on every rank: {_whole_instead(decided, route)}."
         )
-    return {"trust_remote_code": trust_remote_code, "hf_config": hf_config, **kwargs}
 
 
 def _own_gpu_index() -> int | None:
