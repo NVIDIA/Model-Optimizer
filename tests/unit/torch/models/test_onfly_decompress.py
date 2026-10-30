@@ -17,18 +17,20 @@
 
 The tests drive transformers' own weight-loading objects the way its loader does --
 ``rename_source_key`` routes a checkpoint key, ``add_tensor`` collects it, ``convert`` fuses it --
-with a stand-in compressor, so they need neither a checkpoint nor ``compressed_tensors``. The two
-tests that use the real ``compressed_tensors`` registry skip when it cannot be imported.
+with a stand-in compressor, so they need neither a checkpoint nor ``compressed_tensors``. The tests
+that use the real ``compressed_tensors`` registry, among them real ``from_pretrained`` loads of tiny
+compressed checkpoints, skip when it cannot be imported.
 """
 
 import copy
+import json
 import sys
 from concurrent.futures import Future
 from types import SimpleNamespace
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 transformers = pytest.importorskip("transformers")
 
@@ -39,7 +41,13 @@ if Version(transformers.__version__) < Version("5.8"):
 
 import transformers.core_model_loading as cml
 import transformers.modeling_utils as mu
-from transformers import DeepseekV3Config, PretrainedConfig
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    DeepseekV3Config,
+    MixtralConfig,
+    PretrainedConfig,
+)
 from transformers.conversion_mapping import get_checkpoint_conversion_mapping
 from transformers.core_model_loading import (
     Chunk,
@@ -775,29 +783,94 @@ def test_the_format_is_the_one_group_s_own_and_must_have_a_compressor(top, group
             onfly._read_compression(config)
 
 
-def test_real_pack_quantized_experts_round_trip_exactly():
-    """With the real compressed_tensors INT4 compressor, packed experts come back out of the fused
-    converter as the original weights (chosen to be exact in INT4 x 0.5 and in bf16)."""
+# The compressions the published Kimi checkpoints use: INT4 (Kimi-K2.5) and MXFP4 (Kimi-K3), each
+# with the values its format holds exactly, and a scale it holds exactly.
+_INT4 = {"num_bits": 4, "type": "int", "symmetric": True, "strategy": "group", "group_size": 32}
+_FP4_E2M1 = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6])
+_FORMATS = {
+    "pack-quantized": (_INT4, torch.arange(-8, 8) * 0.5, 0.5),
+    "mxfp4-pack-quantized": (
+        {**_INT4, "type": "float", "scale_dtype": "torch.uint8"},
+        torch.cat([_FP4_E2M1, -_FP4_E2M1[1:]]),
+        1.0,
+    ),
+}
+
+
+def _compressed_mixtral(path, fmt):
+    """Save a tiny Mixtral whose experts ``fmt`` compresses; return its config and dense experts.
+
+    Mixtral's checkpoint names its experts ``w1``/``w3``/``w2``, which the model fuses and the export
+    names back: names a save gets wrong would show.
+    """
+    weights, values, scale = _FORMATS[fmt]
+    config = MixtralConfig(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_local_experts=2,
+        num_experts_per_tok=1,
+        tie_word_embeddings=False,
+    )
+    AutoModelForCausalLM.from_config(config).to(torch.bfloat16).save_pretrained(path)
+    quantization_config = {
+        "quant_method": "compressed-tensors",
+        "format": fmt,
+        "config_groups": {"experts": {"targets": ["Linear"], "weights": weights, "format": fmt}},
+    }
+    compressor, scheme, _, _ = onfly._read_compression(
+        SimpleNamespace(quantization_config=quantization_config)
+    )
+    state = load_file(str(path / "model.safetensors"))
+    gen = torch.Generator().manual_seed(0)
+    dense = {}
+    for key in sorted(k for k in list(state) if ".experts." in k):  # ...experts.<e>.w1.weight
+        rows, cols = state.pop(key).shape
+        dense[key] = values[torch.randint(0, len(values), (rows, cols), generator=gen)]
+        scales = torch.full((rows, cols // 32), scale)
+        stored = compressor.compress({"weight": dense[key], "weight_scale": scales}, scheme)
+        for name, tensor in stored.items():  # floats as bf16, as the Kimi checkpoints store them
+            state[key.removesuffix("weight") + name] = (
+                tensor.bfloat16() if tensor.is_floating_point() else tensor
+            )
+    save_file(state, str(path / "model.safetensors"), metadata={"format": "pt"})
+    config_json = json.loads((path / "config.json").read_text())
+    config_json["quantization_config"] = quantization_config
+    (path / "config.json").write_text(json.dumps(config_json))
+    return AutoConfig.from_pretrained(path), dense
+
+
+@pytest.mark.usefixtures("restore_loader_hooks")
+@pytest.mark.parametrize("fmt", sorted(_FORMATS))
+def test_a_compressed_checkpoint_loads_exactly_and_saves_under_its_own_names(tmp_path, fmt):
+    """A real ``from_pretrained`` through the installed decompressor: the fused experts hold the
+    checkpoint's weights exactly. The converters the load kept reverse as the original fusion, so a
+    save writes the experts back as the checkpoint's own ``w1``/``w3``/``w2`` weights, decompressed,
+    and the export names its expanded experts after them."""
     pytest.importorskip(
         "compressed_tensors", reason="needs compressed-tensors (CI's unit session installs it)"
     )
-    config = SimpleNamespace(quantization_config=_pack_quantized(experts=_int4(True, ["Linear"])))
-    compressor, scheme, names, _ = onfly._read_compression(config)
-    n_experts, inter, hidden = 3, 4, 64
-    gen = torch.Generator().manual_seed(0)
-    dense, checkpoint = {}, {}
-    for e in range(n_experts):
-        for proj in ("gate", "up"):
-            dense[proj, e] = torch.randint(-8, 8, (inter, hidden), generator=gen).float() * 0.5
-            scale = torch.full((inter, hidden // 32), 0.5)
-            stored = compressor.compress({"weight": dense[proj, e], "weight_scale": scale}, scheme)
-            key = f"model.layers.0.mlp.experts.{e}.{proj}_proj."
-            checkpoint |= {key + name: stored[name] for name in names}
-    gate_up, _ = _stock_expert_converters()
+    from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
 
-    fused = _load([onfly._compressedify(gate_up, compressor, scheme, names)], checkpoint)
+    config, dense = _compressed_mixtral(tmp_path, fmt)
+    onfly.install_onfly_decompress(config)
+    del config.quantization_config  # as the expert-parallel load does: no quantizer competes
 
-    expected = [torch.cat([dense["gate", e], dense["up", e]]) for e in range(n_experts)]
-    assert torch.equal(
-        fused["model.layers.0.mlp.experts.gate_up_proj"], torch.stack(expected).bfloat16()
-    )
+    model = AutoModelForCausalLM.from_pretrained(tmp_path, config=config, dtype=torch.bfloat16)
+
+    experts, stored = model.model.layers[0].mlp.experts, "model.layers.0.block_sparse_moe.experts"
+    for e in range(2):
+        gate_up = torch.cat([dense[f"{stored}.{e}.w1.weight"], dense[f"{stored}.{e}.w3.weight"]])
+        assert torch.equal(experts.gate_up_proj[e], gate_up.bfloat16())
+        assert torch.equal(experts.down_proj[e], dense[f"{stored}.{e}.w2.weight"].bfloat16())
+    saved = cml.revert_weight_conversion(model, model.state_dict())
+    for key, weight in dense.items():
+        assert torch.equal(saved[key], weight.bfloat16())
+    export_name = build_reverse_name_mapper(model, tensor_keys=True)
+    assert [
+        export_name(f"model.layers.0.mlp.experts.1.{part}.weight")
+        for part in ("gate_proj", "up_proj", "down_proj")
+    ] == [f"{stored}.1.{hub}.weight" for hub in ("w1", "w3", "w2")]
