@@ -1721,6 +1721,9 @@ def load_and_prepare_ep(
     (:func:`~modelopt.torch.utils.moe.expert_parallel_mesh`), once the caller has recorded the plan.
     A refusal on any rank -- of its transformers, the config, the checkpoint, or in the load --
     raises on every rank, so no rank is left waiting in a collective for one that already failed.
+    In the load that rests on ``from_pretrained`` running no collective, as transformers'
+    expert-parallel load does not: each rank reads and slices its own experts, so the others finish
+    it and meet a rank that failed in it in the refusal's gather.
     Without ``hf_config`` every rank reads the checkpoint's config itself, from the Hub for a Hub ID,
     before rank 0 makes the checkpoint local: on many ranks, pass it (as ``hf_ptq`` does).
     """
@@ -1928,7 +1931,9 @@ def load_and_prepare_ep(
     from_pretrained_kwargs["config"] = hf_config
     print_rank_0(f"[ep] ep_plan={swapped_plan} experts_implementation=torch_a2a")
     # A rank failing in the load (out of memory, a file it cannot read) fails every rank here,
-    # before the warmup's collectives.
+    # before the warmup's collectives. from_pretrained runs no collective (transformers shards each
+    # rank's experts locally, and builds no mesh but the one handed to it), so the other ranks finish
+    # it and meet the failed one in this guard's gather.
     with _refused_together("the expert-parallel load", alone=False):
         # The class that builds the whole checkpoint -- with its lm_head where an auto class builds one,
         # so the head is calibrated and exported and the generation preview works -- chosen as the
