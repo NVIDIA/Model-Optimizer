@@ -67,11 +67,13 @@ except ImportError:
     HAS_DIFFUSERS = False
 
 try:
-    from transformers import PreTrainedModel
+    from transformers import PretrainedConfig, PreTrainedModel
 
     _TRANSFORMERS_MODEL_TYPES: tuple[type, ...] = (PreTrainedModel,)
+    _TRANSFORMERS_CONFIG_TYPES: tuple[type, ...] = (PretrainedConfig,)
 except ImportError:
     _TRANSFORMERS_MODEL_TYPES = ()
+    _TRANSFORMERS_CONFIG_TYPES = ()
 
 
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
@@ -1985,8 +1987,6 @@ def _source_distributed_config_attrs(model: nn.Module):
     that cannot be read counts as having none. The run's values come back on exit, since the
     sharded model still reads them (transformers' ``tp_plan`` checks ``distributed_config``).
     """
-    from transformers import PretrainedConfig
-
     source: Any = {}
     ckpt = _source_checkpoint(model)
     if ckpt and Path(ckpt, "config.json").is_file():
@@ -2006,7 +2006,7 @@ def _source_distributed_config_attrs(model: nn.Module):
                 elif attr in vars(config):
                     delattr(config, attr)
         for key, sub_config in list(vars(config).items()):
-            if isinstance(sub_config, PretrainedConfig):
+            if isinstance(sub_config, _TRANSFORMERS_CONFIG_TYPES):
                 use_source(sub_config, source.get(key))
 
     try:
