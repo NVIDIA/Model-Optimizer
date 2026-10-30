@@ -2125,7 +2125,7 @@ def test_the_model_keeps_the_plan_its_checkpoint_declares(
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: None)
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
 
     class _Config(SimpleNamespace):
@@ -2179,7 +2179,7 @@ def test_a_loaded_model_keeps_its_sharding_styles_out_of_its_saved_config(
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: mesh
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: None)
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
     config = Qwen3MoeConfig(
         hidden_size=16,
