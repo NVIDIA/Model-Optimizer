@@ -1620,10 +1620,13 @@ def test_an_expert_parallel_plan_loads_through_the_ep_loader(
     """Decided automatically, an EP plan loads through load_and_prepare_ep -- with the plan, the
     spec-prepared config and the Hub options the load was given -- and through no other load. It
     returns the model unfrozen, as the other loads do, and an option passed as None asks nothing
-    of it. That load replicates the dense part, so a plan that also FSDP2-shards it is refused
-    before anything loads, naming the ways out. A launch that shows each process one GPU, bound to
-    cuda:0, gives a rank of any local rank a GPU of its own."""
+    of it. That load replicates the dense part, so a plan that asks for expert parallelism and
+    FSDP2-shards the dense part too is refused before anything loads, naming the ways out. A launch
+    that shows each process one GPU, bound to cuda:0, gives a rank of any local rank a GPU of its
+    own."""
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", {"replicate": "1", "fsdp": "world"}[dense])
+    if dense == "fsdp":  # left to the decision, the EP degree would give way to FSDP2
+        monkeypatch.setenv("MODELOPT_EP_DEGREE", "4")
     run_as(4, rank=1 if one_gpu_per_process else 0)
     if one_gpu_per_process:
         monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
