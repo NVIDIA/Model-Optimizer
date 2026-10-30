@@ -2137,7 +2137,7 @@ def test_routed_experts_without_experts_in_their_names_are_refused(ep_world_of_t
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: None)
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
     config = SimpleNamespace(
         base_model_ep_plan={
             "layers.*.mlp.routed": "moe_tp_experts",
@@ -2218,7 +2218,7 @@ def test_an_expert_count_the_config_does_not_name_is_read_off_the_loaded_experts
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: None)
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
     monkeypatch.setattr(model_load_utils, "_refuse_unquantizable_experts", next_check)
     config = SimpleNamespace(
         base_model_ep_plan=_EP_PLAN, **({"num_experts": named} if named else {})
