@@ -406,8 +406,12 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         self._state_dict.update({prefix + name: value for name, value in state.items()})
 
     @staticmethod
-    def _fakequant_weight(weight, weight_quantizer, dtype):
-        """Return a CPU QDQ weight while preserving the quantizer's device."""
+    def _fakequant_weight(weight, weight_quantizer, dtype, unquantized_rows=None):
+        """Return a CPU QDQ weight while preserving the quantizer's device.
+
+        ``unquantized_rows`` skip the QDQ but keep the quantizer's scaling / rotation, as in the
+        fake-quant forward (GatedDeltaNet's beta / alpha gates).
+        """
         weight = weight.to(dtype)
         # Fold the weight_quantizer into the weight by applying fake-quantization
         # (quantize then dequantize). The weight_quantizer amax is not exported;
@@ -431,7 +435,17 @@ class VllmFqGPTModelExporter(GPTModelExporter):
                 if need_move:
                     weight_quantizer.to(quant_device)
                 try:
-                    weight = weight_quantizer(weight.to(quant_device)).to(dtype)
+                    weight = weight.to(quant_device)
+                    qweight = weight_quantizer(weight)
+                    if unquantized_rows is not None:
+                        qweight = torch.cat(
+                            [
+                                qweight[: unquantized_rows.start],
+                                apply_without_qdq(weight_quantizer, weight[unquantized_rows]),
+                                qweight[unquantized_rows.stop :],
+                            ]
+                        )
+                    weight = qweight.to(dtype)
                 finally:
                     if need_move:
                         weight_quantizer.to(wq_dev)
@@ -478,15 +492,12 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         name_to_value = self._get_weight_bias(module, dtype, name_to_value, keep_weight_device=True)
         # Grouped slicing reads QDQ weights from the hooked module.state_dict().
         if "weight" in name_to_value and module not in self._grouped_fq_modules:
-            weight = name_to_value["weight"]
-            weight_quantizer = getattr(module, "weight_quantizer", None)
-            name_to_value["weight"] = self._fakequant_weight(weight, weight_quantizer, dtype)
-            # Rows the fake-quant forward leaves unquantized (GatedDeltaNet's beta / alpha gates).
-            rows = getattr(module, "_modelopt_unquantized_output_rows", None)
-            if rows is not None and weight_quantizer is not None:
-                with torch.no_grad():
-                    row_weight = apply_without_qdq(weight_quantizer, weight[rows])
-                name_to_value["weight"][rows] = row_weight.to(dtype).cpu()
+            name_to_value["weight"] = self._fakequant_weight(
+                name_to_value["weight"],
+                getattr(module, "weight_quantizer", None),
+                dtype,
+                getattr(module, "_modelopt_unquantized_output_rows", None),
+            )
 
         # Save activation ranges; weight quantizers are folded into the weights above.
         for name, quantizer in module.named_modules():

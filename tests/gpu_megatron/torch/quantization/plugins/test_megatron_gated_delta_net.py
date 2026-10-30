@@ -240,9 +240,11 @@ def _test_in_proj_gates_unquantized_helper(rank, size):
     assert not torch.equal(in_proj.weight[: gates.start], scaled_weight[: gates.start])
 
 
-@pytest.mark.parametrize("tp_size", [1, 2])  # TP stays <= 2, the number of value heads
-def test_in_proj_keeps_gates_unquantized(request, tp_size):
+def test_in_proj_keeps_gates_unquantized(dist_workers_size_1):
     """The beta / alpha rows of the fused in_proj stay BF16 in fake quant, as in every export."""
-    request.getfixturevalue(f"dist_workers_size_{tp_size}").run(
-        _test_in_proj_gates_unquantized_helper
-    )
+    dist_workers_size_1.run(_test_in_proj_gates_unquantized_helper)
+
+
+def test_in_proj_keeps_gates_unquantized_tp2(dist_workers_size_2):
+    """Same with each rank holding its own gate rows (TP <= 2, the number of value heads)."""
+    dist_workers_size_2.run(_test_in_proj_gates_unquantized_helper)

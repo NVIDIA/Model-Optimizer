@@ -30,7 +30,7 @@ from _test_utils.torch.transformers_models import (
     create_tiny_gpt_oss_dir,
     create_tiny_llama_dir,
     create_tiny_nemotron_h_dir,
-    create_tiny_qwen3_5_vl_dir,
+    get_tiny_qwen3_5_vl_offline,
 )
 from megatron.core.parallel_state import is_pipeline_last_stage
 from safetensors import safe_open
@@ -47,6 +47,7 @@ from modelopt.torch.export.plugins.vllm_fakequant_megatron import (
     gather_mcore_vllm_fq_quantizer_recipe,
 )
 from modelopt.torch.quantization.nn import GroupedQuantizer, SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.utils.core_utils import apply_without_qdq
 
 
 def _assert_exported_quantizers(export_dir, expected_names, amax=1.001, disabled_names=()):
@@ -441,18 +442,28 @@ def _test_mcore_vllm_export_gdn(source, tmp_path, rank, size):
             run_mcore_inference(model, torch.randint(0, 32, (1, 32), device="cuda"))
 
     model = mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop)
+    gdn = model.decoder.layers[0].self_attention
+    weight_quantizer = gdn.in_proj.weight_quantizer
+    if find_spec("fast_hadamard_transform") is not None:
+        # A CUDA-only transform that the gate rows keep: the export must stage them onto CUDA.
+        weight_quantizer.set_from_attribute_config(
+            {"rotate": {"enable": True, "mode": "rotate_back"}}
+        )
+    with torch.no_grad():
+        weight = gdn.in_proj.weight.to(torch.bfloat16)
+        transformed = apply_without_qdq(weight_quantizer, weight).cpu()
+        weight = weight.cpu()
+    model.cpu()  # CPU-offloaded weights
     export_dir = tmp_path / "gdn_export"
     export_mcore_gpt_to_hf_vllm_fq(
         model, str(source), dtype=torch.bfloat16, export_dir=str(export_dir)
     )
 
-    gdn = model.decoder.layers[0].self_attention
-    weight = gdn.in_proj.weight.detach().to(torch.bfloat16).cpu()
     sections = dict(zip(gdn.in_proj_split_names, gdn.in_proj_split_sections))
     qkvz_rows = sum(sections[name] for name in ("query", "key", "value", "z"))
     gate_rows = {
-        "in_proj_b": weight[qkvz_rows : qkvz_rows + sections["beta"]],
-        "in_proj_a": weight[qkvz_rows + sections["beta"] :],
+        "in_proj_b": transformed[qkvz_rows : qkvz_rows + sections["beta"]],
+        "in_proj_a": transformed[qkvz_rows + sections["beta"] :],
     }
     prefix = "model.language_model.layers.0.linear_attn."
     state = torch.load(export_dir / "quantizer_state.pth", weights_only=True, map_location="cpu")
@@ -474,7 +485,9 @@ def _test_mcore_vllm_export_gdn(source, tmp_path, rank, size):
 
 def test_mcore_vllm_export_gdn(dist_workers_size_1, tmp_path):
     """GatedDeltaNet's beta / alpha gates export unquantized, with no quantizers of their own."""
-    source = create_tiny_qwen3_5_vl_dir(tmp_path, with_processor=True)
+    pytest.importorskip("fla")  # Megatron-Core GatedDeltaNet needs the optional fla
+    source = tmp_path / "tiny_qwen3_5_vl"
+    get_tiny_qwen3_5_vl_offline().save_pretrained(source)
     dist_workers_size_1.run(partial(_test_mcore_vllm_export_gdn, source, tmp_path))
 
 
