@@ -79,6 +79,9 @@ class KimiK3Config(PretrainedConfig):
         if isinstance(text_config, dict):
             text_config = KimiLinearConfig(**text_config)
         self.text_config = text_config if text_config is not None else KimiLinearConfig()
+        # As Kimi-K3's own config class: its language model's scheme is the checkpoint's too.
+        if getattr(self.text_config, "quantization_config", None) is not None:
+            self.quantization_config = self.text_config.quantization_config
         kwargs.setdefault("tie_word_embeddings", False)
         super().__init__(**kwargs)
 
