@@ -75,6 +75,8 @@ from .dla_transforms.dla_reshape_patterns import (
     _apply_reshape_reduce_sum,
     _apply_reshape_transpose_reshape,
 )
+from .dla_transforms.dla_topk import _apply_topk
+from .dla_transforms.dla_unsqueeze import _apply_unsqueeze
 from .dla_transforms.dla_where import _apply_where
 from .utils.graph_utils import (
     DEFAULT_QDQ_REMOVE_QUANT_TYPES,
@@ -142,14 +144,18 @@ DLA_TRANSFORMS = (
     ("UpdateAxis", _apply_update_axis),
     ("Where", _apply_where),
     ("Not", _apply_not),
+    ("Unsqueeze", _apply_unsqueeze),
     ("Greater", _apply_greater),
     ("ShapeInference", infer_shapes),
+    ("TopK", partial(_apply_topk, rank_converted=True)),
     ("RemoveUnusedInitializers", _remove_unused_initializers),
 )
 
 
 def _boundary_stage_options(name, quant_types, verbose, prepared_input_ops, prepared_output_ops):
     """Share stage options between the prerequisite probe and the actual ordered pipeline."""
+    if name == "Cast":
+        return {"preserve_topk_indices": "TopK" in prepared_output_ops}
     if name in {"Gather", "GatherElements", "StandaloneReduceOperations", "GroupQueryAttention"}:
         return {"prepared_data_ops": prepared_input_ops}
     if name == "RemoveQDQ":

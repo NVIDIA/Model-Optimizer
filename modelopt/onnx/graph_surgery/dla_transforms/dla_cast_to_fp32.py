@@ -27,10 +27,11 @@ import onnx
 from onnx import TensorProto
 
 from ...logging_config import logger
-from ..utils.graph_utils import _captured_names
+from ..utils.graph_utils import GraphCache, _captured_names
+from .dla_topk import _topk_plans
 
 
-def _fp32_cast_outputs(model: onnx.ModelProto) -> set[str]:
+def _fp32_cast_outputs(model: onnx.ModelProto, *, preserve_topk_indices: bool = False) -> set[str]:
     """Find tensor type groups that can become FP32 without changing fixed operands."""
     graph = model.graph
     candidates = {
@@ -55,6 +56,11 @@ def _fp32_cast_outputs(model: onnx.ModelProto) -> set[str]:
         return name
 
     blocked: set[str] = set()
+    if preserve_topk_indices and any(node.op_type == "TopK" for node in graph.node):
+        blocked.update(
+            cast.output[0]
+            for _, cast, *_ in _topk_plans(model, GraphCache(graph), rank_converted=True)
+        )
     types = {
         value.name: value.type.tensor_type.elem_type
         for value in (*graph.input, *graph.value_info, *graph.output)
@@ -153,14 +159,16 @@ def _fp32_cast_outputs(model: onnx.ModelProto) -> set[str]:
     return {name for name in parents if find(name) in promoted_roots}
 
 
-def _apply_cast_to_fp32(model: onnx.ModelProto) -> onnx.ModelProto:
+def _apply_cast_to_fp32(
+    model: onnx.ModelProto, *, preserve_topk_indices: bool = False
+) -> onnx.ModelProto:
     """Change every eligible Cast node's ``to`` attribute to FLOAT (float32).
 
     Preserve connected type requirements, custom operations and subgraph captures.
     Update intermediate and graph-output descriptors for converted type groups.
     """
     graph = model.graph
-    promoted = _fp32_cast_outputs(model)
+    promoted = _fp32_cast_outputs(model, preserve_topk_indices=preserve_topk_indices)
     value_info_by_name = {}
     for value_info in graph.value_info:
         value_info_by_name.setdefault(value_info.name, value_info)
