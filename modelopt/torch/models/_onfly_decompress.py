@@ -351,6 +351,14 @@ def install_onfly_decompress(hf_config):
     if isinstance(hf_config, dict):
         # The load finds the hooks by a mark on the config object, which a dict cannot carry.
         raise TypeError("install_onfly_decompress: pass the model's config object, not a dict")
+    dtype = getattr(hf_config, "dtype", None)
+    if dtype is not None and str(dtype).removeprefix("torch.") not in ("bfloat16", "auto"):
+        # The experts would load in bf16 beside the rest in this dtype: the loader sets each
+        # parameter from what the conversion hands it, without a cast.
+        raise NotImplementedError(
+            f"install_onfly_decompress: the experts decompress to bfloat16, but this config "
+            f"loads in {dtype}. Load the checkpoint in bfloat16."
+        )
     compression = _read_compression(hf_config)
     require_transformers("5.8", "on-the-fly compressed-tensors decompression")
     # Imported once the release is known to have them: transformers 4 has no core_model_loading.
