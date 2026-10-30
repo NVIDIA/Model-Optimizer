@@ -37,7 +37,9 @@ from torch import nn
 pytest.importorskip("transformers")
 
 import transformers
-from transformers import FineGrainedFP8Config, Qwen3MoeConfig
+import transformers.distributed as hf_distributed
+from transformers import FineGrainedFP8Config, PreTrainedModel, Qwen3MoeConfig, Qwen3MoeForCausalLM
+from transformers.distributed import DistributedConfig
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils import moe
@@ -378,9 +380,6 @@ def test_a_loaded_model_keeps_its_sharding_styles_out_of_its_saved_config(
     from_pretrained does not set; while its config goes back to the checkpoint's plan; and the experts
     implementation its forwards dispatch on, torch_a2a, stays out of the config it serializes,
     which an export writes."""
-    from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
-    from transformers.distributed import DistributedConfig
-
     if not Qwen3MoeConfig.base_model_ep_plan:
         pytest.skip("this transformers ships no expert-parallel plan for Qwen3-MoE")
 
@@ -574,13 +573,9 @@ def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given():
     """Newer transformers ignores ``from_pretrained``'s ``device_mesh`` and builds a world-sized one,
     which shards the experts over every rank when EP is below the world size. During the load it gets
     the EP mesh instead, and its own builder is back afterwards, even when the load raises."""
-    pytest.importorskip("transformers")
     mixin = _transformers_mesh_builder()
     if mixin is None:
         pytest.skip("this transformers honors from_pretrained's device_mesh")
-    from transformers import PreTrainedModel
-    from transformers.distributed import DistributedConfig
-
     builder = mixin.initialize_distributed_mesh
     ep_mesh = SimpleNamespace(device_type="cpu")
     config = DistributedConfig(enable_expert_parallel=True, tp_plan="auto", tp_size=2)
@@ -641,8 +636,6 @@ def test_each_load_argument_goes_where_this_transformers_takes_it(
         def from_pretrained(path, **kwargs):
             loaded.update(kwargs)
             raise _LoadedError
-
-    import transformers.distributed as hf_distributed
 
     distributed_config = dataclasses.make_dataclass(
         "DistributedConfig", [(name, object, dataclasses.field(default=None)) for name in fields]

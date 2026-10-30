@@ -30,10 +30,12 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
+import transformers.distributed as hf_distributed
 from huggingface_hub import snapshot_download
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+from torch.distributed import device_mesh
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.fsdp import FSDPModule
@@ -51,9 +53,10 @@ from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
 
 from modelopt.torch.utils import distributed as dist
-from modelopt.torch.utils import env
+from modelopt.torch.utils import env, moe
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
+    ParallelState,
     barrier,
     broadcast_state_dict,
     is_initialized,
@@ -62,11 +65,13 @@ from modelopt.torch.utils.distributed import (
 from modelopt.torch.utils.fsdp2_utils import fsdp2_wrap
 from modelopt.torch.utils.logging import print_rank_0, warn_rank_0
 from modelopt.torch.utils.moe import (
+    _EXPERTS_STYLES,
     _choose_ep_degree,
     _ep_config,
     _num_experts_from_config,
     _routed_expert_keys,
     _routed_expert_modules,
+    register_torch_a2a,
 )
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     checkpoint_tensor_files,
@@ -1719,19 +1724,6 @@ def load_and_prepare_ep(
     Without ``hf_config`` every rank reads the checkpoint's config itself, from the Hub for a Hub ID,
     before rank 0 makes the checkpoint local: on many ranks, pass it (as ``hf_ptq`` does).
     """
-    # Imported here, so looked up when the load runs: its tests stand in a process group and a
-    # transformers release by patching these two modules.
-    from modelopt.torch.utils.distributed import ParallelState, is_initialized, size
-    from modelopt.torch.utils.moe import (
-        _EXPERTS_STYLES,
-        _ep_config,
-        _num_experts_from_config,
-        _routed_expert_keys,
-        _routed_expert_modules,
-        register_torch_a2a,
-        require_transformers,
-    )
-
     if not plan.is_expert_parallel:
         raise ValueError(f"{plan!r} shards no routed experts, which is what this load is for.")
     if plan.is_fsdp_dense:
@@ -1742,13 +1734,15 @@ def load_and_prepare_ep(
     # the load. A live, device-bound PG is required here so the mesh subgroups built below create their
     # NCCL comms eagerly (the synchronized warmup all-reduce per subgroup further down) instead of lazily
     # on first collective (which deadlocks at DP>1 because ranks reach the lazy init in different phases).
-    if not is_initialized():
+    if not dist.is_initialized():
         raise RuntimeError(
             "load_and_prepare_ep requires a live, device-bound process group; set it up first, e.g. "
             "with modelopt.torch.utils.distributed.distributed_run() under torchrun."
         )
-    if plan.world_size != size():
-        raise ValueError(f"{plan!r} is for {plan.world_size} ranks, but this run has {size()}.")
+    if plan.world_size != dist.size():
+        raise ValueError(
+            f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}."
+        )
     world_size, ep_degree, edp = plan.world_size, plan.ep_size, plan.edp
     # Each rank checks its own transformers, the config it reads or was handed, and the plan against
     # it: one refusing fails every rank here, before the checkpoint's fetch and the meshes.
@@ -1756,7 +1750,7 @@ def load_and_prepare_ep(
         # Hard floor: below 5.6 there is no ExpertsInterface / grouped-GEMM EP styles, and
         # enable_expert_parallel silently shards nothing (no error); 5.6 checks a model's experts
         # implementation against the ones it ships, so from_pretrained would refuse torch_a2a.
-        require_transformers(
+        moe.require_transformers(
             "5.7", "ModelOpt DP=EP expert-parallel PTQ (transformers MoE EP framework)"
         )
         if hf_config is None:
@@ -1839,10 +1833,6 @@ def load_and_prepare_ep(
                 f"GPU(s) as local rank {dist.local_rank()}. Run one process per GPU, as "
                 "torchrun --nproc_per_node=<GPUs per node> does."
             )
-    # transformers 5.6 on, which the floor above makes sure of.
-    from torch.distributed.device_mesh import init_device_mesh
-    from transformers.distributed import DistributedConfig
-
     dtype = getattr(hf_config, "dtype", None) or torch.bfloat16
     # The weights load, and the checkpoint recorded for the export to read the unplaced tensors back
     # from, take the local snapshot: a Hub ID recorded there would leave the export nothing to read.
@@ -1858,8 +1848,10 @@ def load_and_prepare_ep(
     #   dense_mesh = (dp,): dense/non-expert params are data-parallel-REPLICATED over the WHOLE world.
     # This subsumes the old a2a-vs-partial split: a2a is simply edp == 1, and dense amax
     # always reduces over the whole world (fixing the DP>1 case, where the old dp submesh missed the ep dim).
-    sparse_moe_mesh = init_device_mesh("cuda", (edp, ep_degree), mesh_dim_names=("edp", "ep"))
-    dense_mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp",))
+    sparse_moe_mesh = device_mesh.init_device_mesh(
+        "cuda", (edp, ep_degree), mesh_dim_names=("edp", "ep")
+    )
+    dense_mesh = device_mesh.init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp",))
     ep_submesh = sparse_moe_mesh["ep"]
 
     # NO TENSOR PARALLELISM IS REQUESTED HERE, despite the name. transformers implements expert
@@ -1878,7 +1870,7 @@ def load_and_prepare_ep(
     # DistributedConfig(tp_plan=..., tp_size=...) and DROPS enable_expert_parallel, silently losing
     # EP. So each argument goes on DistributedConfig where it has a field for it, and tp_plan
     # otherwise to from_pretrained: the dataclass fields tell them apart on any release.
-    _dc_fields = {f.name for f in dataclasses.fields(DistributedConfig)}
+    _dc_fields = {f.name for f in dataclasses.fields(hf_distributed.DistributedConfig)}
     _dc_has_tp_plan = "tp_plan" in _dc_fields
     dc_kwargs: dict[str, Any] = {"enable_expert_parallel": True}
     if _dc_has_tp_plan:
@@ -1886,7 +1878,7 @@ def load_and_prepare_ep(
     if _transformers_mesh_builder() is not None and "tp_size" in _dc_fields:
         # This release sizes its own mesh from tp_size; _experts_sharded_over swaps in the EP mesh.
         dc_kwargs["tp_size"] = ep_degree
-    distributed_config = DistributedConfig(**dc_kwargs)
+    distributed_config = hf_distributed.DistributedConfig(**dc_kwargs)
     from_pretrained_kwargs: dict[str, Any] = {
         "dtype": dtype,
         "device_mesh": ep_submesh,
