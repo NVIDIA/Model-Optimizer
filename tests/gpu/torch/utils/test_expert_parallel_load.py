@@ -549,7 +549,7 @@ def _kimi_k3_expert_parallel_job(rank, size, ckpt_dir):
     owned = range(rank * per_rank, (rank + 1) * per_rank)
     problems = []
     # The decompressor's hooks are process-wide, and the workers outlive the job.
-    hooks = (mu.get_model_conversion_mapping, cml._materialize_copy, cml.spawn_materialize)
+    hooks = (mu.get_model_conversion_mapping, cml.spawn_materialize)
     try:
         with bounded_collectives(seconds=120):
             config = AutoConfig.from_pretrained(ckpt_dir, trust_remote_code=True)
@@ -620,7 +620,7 @@ def _kimi_k3_expert_parallel_job(rank, size, ckpt_dir):
             gathered = [None] * size
             dist.all_gather_object(gathered, problems)
     finally:
-        mu.get_model_conversion_mapping, cml._materialize_copy, cml.spawn_materialize = hooks
+        mu.get_model_conversion_mapping, cml.spawn_materialize = hooks
     found = [problem for rank_problems in gathered for problem in rank_problems]
     assert not found, "\n".join(found[:20])
 
