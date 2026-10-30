@@ -124,10 +124,8 @@ def _read_compression(hf_config):
             "compressing only the experts. Decompress the checkpoint first."
         )
     [scheme] = groups.values()
-    # A group of regex targets alone must name the experts, or it leaves them stored as plain weights
-    # the rewritten converters would not find. A class target such as Linear does not say which
-    # modules it compressed (the experts, and any Linear the ignore list leaves): the expert-parallel
-    # load checks the names the checkpoint stores instead (check_compressed_keys).
+    # Regex targets alone must name the experts. A class target such as Linear does not say which
+    # modules it compressed: check_compressed_keys checks the names the checkpoint stores instead.
     if not any(not t.startswith("re:") or "experts" in t for t in scheme.targets):
         raise NotImplementedError(
             f"install_onfly_decompress: the checkpoint's compressed-tensors config group targets "
@@ -198,8 +196,8 @@ def _make_op_class(compressor, scheme, param_names):
                     if anchor_list[i] is not None
                 ]
             if input_dict:
-                # A stored param without its weight, or a source that is no weight: passed on, the
-                # merge would fuse it into the wrong slot or fail far from here.
+                # A stored param without its weight: passed on, the merge would fuse it into the
+                # wrong slot or fail far from here.
                 raise ValueError(
                     f"DecompressExperts: unconsumed checkpoint keys {sorted(input_dict)}"
                 )
@@ -214,13 +212,9 @@ def _decompressing_converter_class():
     from transformers.core_model_loading import WeightConverter
 
     class DecompressingConverter(WeightConverter):
-        """Reads the stored keys, and reverses as the converter it rewrote.
-
-        A save reverses the converters ``from_pretrained`` kept as ``model._weight_conversions``
-        (transformers' ``save_pretrained``, and ModelOpt's export naming the experts back after
-        the checkpoint): the decompression is load-only, so the experts go back under their
-        checkpoint's ``.weight`` names, as the original fusion has them.
-        """
+        """Reads the stored keys, and reverses as the converter it rewrote: the decompression is
+        load-only, so a save (``save_pretrained``, ModelOpt's export) names the experts back after
+        the checkpoint's ``.weight`` keys."""
 
         __slots__ = ("_reversible",)
 
@@ -240,12 +234,15 @@ def _compressedify(conv, compressor, scheme, param_names):
     by_pname = {pn: [] for pn in param_names}
     for p in conv.source_patterns:
         base = p.removesuffix("$")
-        if base.endswith(".weight"):
-            stem = base[: -len(".weight")]
-            for pn in param_names:
-                by_pname[pn].append(stem + "." + pn + "$")
-        else:
-            by_pname[param_names[0]].append(p)  # DecompressExperts refuses it (none expected)
+        if not base.endswith(".weight"):
+            # Only a weight is stored compressed: another source would reach the merge as stored.
+            raise NotImplementedError(
+                f"install_onfly_decompress: the per-expert converter for {conv.target_patterns} "
+                f"reads {p!r}, which is no weight; on-the-fly decompression rewrites weights only."
+            )
+        stem = base[: -len(".weight")]
+        for pn in param_names:
+            by_pname[pn].append(stem + "." + pn + "$")
     new_sources = [s for pn in param_names for s in by_pname[pn]]
     tgt = getattr(conv, "_original_target_patterns", conv.target_patterns)
     new = _decompressing_converter_class()(
@@ -262,9 +259,8 @@ def _compressedify(conv, compressor, scheme, param_names):
     return new
 
 
-# Whether the load under way is one whose converters the hooks rewrote: from_pretrained asks for the
-# conversion mapping before it reads a tensor. Module state, not a context variable: the loader
-# materializes tensors in its worker threads.
+# Whether the load under way is one whose converters the hooks rewrote (from_pretrained asks for the
+# mapping before it reads a tensor). Module state: the loader materializes in worker threads.
 _LOAD = {"decompressing": False}
 
 
@@ -310,7 +306,7 @@ def is_marked(hf_config) -> bool:
 
 
 def stored_names(hf_config) -> tuple[str, ...]:
-    """The names each compressed weight of ``hf_config``'s checkpoint is stored under, from its mark."""
+    """The names the installed compressed-tensors stores each weight under for ``hf_config``'s scheme."""
     for c in _config_levels(hf_config):
         if (stored_as := getattr(c, _MARK, None)) is not None:
             return stored_as
@@ -327,9 +323,8 @@ def install_onfly_decompress(hf_config):
     if isinstance(hf_config, dict):
         # The load finds the hooks by a mark on the config object, which a dict cannot carry.
         raise TypeError("install_onfly_decompress: pass the model's config object, not a dict")
-    # The experts would load in bf16 beside the rest in another dtype: the loader sets each
-    # parameter from what the conversion hands it, without a cast. Every level counts: a backbone
-    # config derived from the text config (to_native_backbone_config) keeps its dtype.
+    # The loader sets each parameter from what the conversion hands it, uncast. Every level counts:
+    # a backbone config derived from the text config (to_native_backbone_config) keeps its dtype.
     for level in _config_levels(hf_config):
         dtype = getattr(level, "dtype", None)
         if dtype is not None and str(dtype).removeprefix("torch.") != "bfloat16":
@@ -448,10 +443,19 @@ def check_compressed_keys(hf_config, ckpt_dir) -> None:
             "on-the-fly decompression loads the experts alone, every one compressed, so the rest "
             "would load newly initialized. Decompress the checkpoint first."
         )
-    # The load hands the decompression each expert's stored tensors by the order it collects them,
-    # not by expert id, so every compressed weight must store the same names: one missing a scale
-    # would pair a later expert's weight with an earlier one's scale. A name no weight stores
-    # (Kimi-K3's weight_global_scale) is simply not read.
+    # The names are what the installed compressed-tensors gives the scheme: one a newer release added
+    # would match no rewritten source, and the experts would decompress without it.
+    unknown = [n for n in sorted(tensor_files) if n.rpartition(".")[0] in compressed]
+    unknown = [n for n in unknown if n.rpartition(".")[2] not in stored_as]
+    if unknown:
+        raise NotImplementedError(
+            f"The checkpoint stores {len(unknown)} tensors under its compressed weights that this "
+            f"compressed-tensors release does not name for the scheme {unknown[:1]}: the decompression "
+            f"reads only {list(stored_as)}. Upgrade compressed-tensors, or decompress it first."
+        )
+    # The load pairs each expert's stored tensors by the order it collects them, not by expert id: one
+    # missing a scale would pair a later expert's weight with an earlier one's scale. A name no weight
+    # stores (Kimi-K3's weight_global_scale) is simply not read.
     unpaired = sorted(
         (stored, sorted(compressed - stems))
         for stored, stems in stems_storing.items()

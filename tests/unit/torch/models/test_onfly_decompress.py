@@ -117,21 +117,23 @@ def _load(converters, checkpoint):
 # ------------------------------------------------------------- rewriting the per-expert converters
 
 
-def test_a_source_the_decompression_does_not_consume_fails_the_load():
-    """Only ``.weight`` sources name a compressed tensor. Another source still reaches the
-    decompress op, which refuses it rather than hand the merge a tensor it would fuse into the wrong
-    slot."""
+def test_only_weight_sources_are_rewritten_and_stored_params_need_their_weight():
+    """Only ``.weight`` sources name a compressed tensor: a converter reading another is refused
+    where it is rewritten, before any tensor is read. A stored param without its weight still
+    reaches the decompress op, which refuses it rather than hand the merge a tensor it would fuse
+    into the wrong slot."""
     conv = WeightConverter(
         source_patterns=["mlp.experts.*.gate_proj.weight", "mlp.experts.*.gate_proj.bias"],
         target_patterns="mlp.experts.gate_proj",
         operations=[MergeModulelist(dim=0)],
     )
-    key = "model.layers.0.mlp.experts.0.gate_proj."
-    checkpoint = {key + name: torch.ones(2, 2, dtype=torch.int32) for name in PACKED}
-    checkpoint[key + "bias"] = torch.ones(2)
+    with pytest.raises(NotImplementedError, match=r"reads .*gate_proj\.bias.*weights only"):
+        onfly._compressedify(conv, _ScaledCompressor, None, PACKED)
 
-    with pytest.raises(ValueError, match=r"unconsumed checkpoint keys .*gate_proj\.bias"):
-        _load([onfly._compressedify(conv, _ScaledCompressor, None, PACKED)], checkpoint)
+    gate_up, _ = _stock_expert_converters()
+    scales_alone = {"model.layers.0.mlp.experts.0.gate_proj.weight_scale": torch.ones(2, 2)}
+    with pytest.raises(ValueError, match=r"unconsumed checkpoint keys .*gate_proj\.weight_scale"):
+        _load([onfly._compressedify(gate_up, _ScaledCompressor, None, PACKED)], scales_alone)
 
 
 def test_a_rewritten_converter_keeps_the_scope_transformers_set_on_it():
@@ -642,6 +644,11 @@ STORED_DTYPES = {  # as compressed-tensors stores them; every other tensor is bf
         ),
         (
             PACKED,
+            [f"{EXPERT}.{n}" for n in (*PACKED, "weight_zero_point")],
+            "stores 1 tensors under its compressed weights that this compressed-tensors release",
+        ),
+        (
+            PACKED,
             [f"{EXPERTS[e]}.{n}" for e in (0, 1) for n in ("weight_packed", "weight_shape")]
             + [f"{EXPERTS[e]}.weight_scale" for e in (1, 2)],
             "stores weight_packed for some compressed weights but not for 1 others",
@@ -656,6 +663,7 @@ STORED_DTYPES = {  # as compressed-tensors stores them; every other tensor is bf
         "nothing-compressed",
         "an-fp32-scale",
         "a-scale-alone",
+        "a-name-this-release-does-not-know",
         "equal-counts-other-experts",
     ],
 )
@@ -664,8 +672,10 @@ def test_a_checkpoint_must_compress_its_experts_and_nothing_else(tmp_path, store
     the checkpoint stores decide: anything else compressed, or an expert stored uncompressed, would
     load newly initialized, without a quantizer to load it or a converter that reads it. A float
     stored for the experts must be one bf16 holds exactly: the load may cast it to bf16 first. And
-    every compressed weight stores the same names: the load pairs them by position, not by expert,
-    so a scale stored for other experts in equal number would pair with the wrong weights."""
+    every compressed weight stores the same names, all of them names the installed compressed-tensors
+    gives the scheme: the load pairs them by position, not by expert, so a scale stored for other
+    experts in equal number would pair with the wrong weights, and a name it does not know would be
+    left out of the decompression."""
     tensors = {
         name: torch.zeros(1, dtype=STORED_DTYPES.get(name.rpartition(".")[2], torch.bfloat16))
         for name in names
