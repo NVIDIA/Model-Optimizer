@@ -60,8 +60,6 @@ from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
 
 from modelopt.torch.export.model_utils import get_language_model_from_vl
-from modelopt.torch.quantization.model_calib import _is_routed_expert
-from modelopt.torch.quantization.plugins.huggingface import _eager_only_experts, _transposed_experts
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import env, moe
@@ -2160,6 +2158,13 @@ def _refuse_unquantizable_experts(expert_modules) -> None:
     fused-experts wrapper that quantizes on the eager forward only, like FP8's, is refused: the
     transport runs the grouped GEMM.
     """
+    # Imported here: the HF quantization plugin loads under import_plugin, so a release it cannot
+    # load leaves this module's other loaders working; only this refusal needs it.
+    from modelopt.torch.quantization.plugins.huggingface import (
+        _eager_only_experts,
+        _transposed_experts,
+    )
+
     # Quantization's own rules: it leaves transposed experts unquantized, and its torch_a2a check
     # refuses eager-only ones. This refuses both at load.
     transposed = _transposed_experts(expert_modules)
@@ -2857,7 +2862,10 @@ def load_and_prepare_ep(
                 "ranks holding different experts. Quantize the model without expert parallelism."
             )
         # Calibration tells routed experts by their names, and reduces any other module's weight amax
-        # over the expert-parallel group, which would merge the scales of different experts.
+        # over the expert-parallel group, which would merge the scales of different experts. Imported
+        # here, as fsdp2_wrap does: the quantization package sits above this module.
+        from modelopt.torch.quantization.model_calib import _is_routed_expert
+
         unnamed = [name for name in expert_modules if not _is_routed_expert(name)]
         if unnamed:
             raise NotImplementedError(
