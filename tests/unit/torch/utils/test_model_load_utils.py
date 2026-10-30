@@ -749,6 +749,8 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
 
     with pytest.raises((RuntimeError, ValueError), match=refusal) as refused:
         resolve_distribution_plan(str(tmp_path), **arguments)
+    if refusal is _NO_EP_YET:  # as the load refuses the same spec
+        assert refused.type is NotImplementedError
     if "divid" in refusal:  # the decision's refusal of what its inputs resolve to
         assert refused.type is ValueError, refused.type
     if arguments:  # a knob the arguments override would lead straight back here
