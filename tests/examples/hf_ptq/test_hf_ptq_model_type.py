@@ -93,7 +93,8 @@ def test_pre_quantize_preview_removes_padding(hf_ptq, ids, mask):
     ],
 )
 def test_is_trtllm_enc_dec_export(hf_ptq, model_type: str, expected: bool):
-    assert hf_ptq.is_trtllm_enc_dec_export(model_type) is expected
+    example_utils = importlib.import_module("example_utils")  # imported with hf_ptq
+    assert example_utils.is_trtllm_enc_dec_export(model_type) is expected
 
 
 def _config(model_type: str, is_encoder_decoder: bool) -> SimpleNamespace:
