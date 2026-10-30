@@ -2234,6 +2234,8 @@ def _config_json_quantization(ckpt_path: str | None) -> dict | None:
             raw = json.load(f)
     except (OSError, ValueError):
         return None
+    if not isinstance(raw, dict):  # valid JSON, but no config
+        return None
     for c in (raw, raw.get("text_config"), raw.get("llm_config")):
         qc = c.get("quantization_config") if isinstance(c, dict) else None
         if isinstance(qc, dict):

@@ -2424,20 +2424,25 @@ def test_quant_method_comes_from_the_config_or_a_vlms_text_config(config, expect
 @pytest.mark.parametrize(
     ("on_disk", "expected"),
     [
-        ({"quant_method": "fp8", "activation_scheme": "static"}, "fp8-per-tensor"),
-        ({"quant_method": "fp8", "weight_block_size": [128, 128]}, "fp8"),
+        (
+            {"quantization_config": {"quant_method": "fp8", "activation_scheme": "static"}},
+            "fp8-per-tensor",
+        ),
+        ({"quantization_config": {"quant_method": "fp8", "weight_block_size": [128, 128]}}, "fp8"),
         (None, "fp8-unverified"),
+        ([], "fp8-unverified"),
     ],
-    ids=["per-tensor", "block", "no-config-json"],
+    ids=["per-tensor", "block", "no-config-json", "config-json-not-an-object"],
 )
 def test_an_fp8_config_object_is_read_against_the_checkpoints_own_config(
     tmp_path, on_disk, expected
 ):
     """transformers' FP8 config object names a 128x128 block whatever the checkpoint does, so the
     checkpoint's own ``config.json`` says whether it names one: per-tensor FP8 handed in as an
-    object is still refused. Without that file there is no telling, which the load refuses."""
+    object is still refused. Without that file, or with one that holds no JSON object, there is no
+    telling, which the load refuses."""
     if on_disk is not None:
-        (tmp_path / "config.json").write_text(json.dumps({"quantization_config": on_disk}))
+        (tmp_path / "config.json").write_text(json.dumps(on_disk))
     config = SimpleNamespace(quantization_config=FineGrainedFP8Config())
 
     assert _ckpt_quant_method(config, str(tmp_path)) == expected
