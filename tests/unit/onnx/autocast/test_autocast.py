@@ -22,6 +22,8 @@ import onnx_graphsurgeon as gs
 import pytest
 from _test_utils.onnx.lib_test_models import build_conv_isinf_model, build_conv_resize_model
 
+import modelopt.onnx.autocast.convert as convert
+import modelopt.onnx.autocast.graphsanitizer as graphsanitizer
 import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast import convert_to_mixed_precision
@@ -388,3 +390,56 @@ def test_convert_to_f16_falls_back_on_unresolvable_op(weakly_typed_topk_model):
 
     onnx.checker.check_model(converted_model)
     assert any(n.op_type == "TopK" for n in converted_model.graph.node)
+
+
+@pytest.fixture
+def custom_op_model_path(tmp_path):
+    """A model whose second node is in a non-standard domain, so custom ops are detected."""
+    x = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, [2])
+    y = onnx.helper.make_tensor_value_info("Y", onnx.TensorProto.FLOAT, [2])
+    nodes = [
+        onnx.helper.make_node("Identity", ["X"], ["t"], name="identity"),
+        onnx.helper.make_node("MyPlugin", ["t"], ["Y"], name="plugin", domain="custom.ops"),
+    ]
+    graph = onnx.helper.make_graph(nodes, "custom_op_graph", [x], [y])
+    model = onnx.helper.make_model(
+        graph,
+        opset_imports=[
+            onnx.helper.make_opsetid("", 19),
+            onnx.helper.make_opsetid("custom.ops", 1),
+        ],
+    )
+    path = tmp_path / "custom_op.onnx"
+    onnx.save(model, path)
+    return str(path)
+
+
+def test_custom_ops_trt_does_not_leak_into_provider_lists(
+    custom_op_model_path, temp_model_path, monkeypatch
+):
+    """Adding 'trt' for custom ops must not mutate the default providers or a caller's list."""
+    # Reading custom layers needs a TensorRT network, which the `onnx` extra does not install.
+    monkeypatch.setattr(graphsanitizer, "get_custom_layers", lambda *args, **kwargs: ({}, {}))
+    monkeypatch.setattr(
+        graphsanitizer, "infer_types_shapes_tensorrt", lambda model, *args, **kwargs: model
+    )
+
+    seen_providers = []
+
+    class RecordingReferenceRunner:
+        def __init__(self, model, providers, trt_plugins):
+            seen_providers.append(list(providers))
+
+        def run(self, calibration_data):
+            return {}
+
+    monkeypatch.setattr(convert, "ReferenceRunner", RecordingReferenceRunner)
+
+    convert_to_mixed_precision(onnx_path=custom_op_model_path)
+    convert_to_mixed_precision(onnx_path=temp_model_path)
+    assert seen_providers == [["trt", "cpu"], ["cpu"]]
+
+    mine = ["cpu"]
+    convert_to_mixed_precision(onnx_path=custom_op_model_path, providers=mine)
+    assert seen_providers[-1] == ["trt", "cpu"]
+    assert mine == ["cpu"]
