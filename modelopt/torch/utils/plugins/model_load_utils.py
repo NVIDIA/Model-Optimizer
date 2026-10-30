@@ -2027,14 +2027,21 @@ def _declared_ep_plan(ckpt_dir: str, hf_config, ep_cfg):
     place in the file. Read from the file, not the config: a plan the config carries besides is
     ModelOpt's -- the one a model spec attaches
     (:func:`~modelopt.torch.utils.moe.apply_distributed_support`) -- or the config class's, and an
-    export must write out neither. A file this rank cannot read as a JSON object declares none.
+    export must write out neither. A file this rank cannot read as a JSON object declares none, with
+    a warning: what the checkpoint declared is lost to the export then.
     """
+    path = os.path.join(ckpt_dir, "config.json")
+    keeps_none = (
+        "so the loaded model keeps no expert-parallel plan of its own, and an export writes none"
+    )
     try:
-        with open(os.path.join(ckpt_dir, "config.json")) as f:
+        with open(path) as f:
             source = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        warn_rank_0(f"Cannot read {path} ({e}), {keeps_none}.")
         return _UNDECLARED
     if not isinstance(source, dict):
+        warn_rank_0(f"{path} is not a JSON object, {keeps_none}.")
         return _UNDECLARED
     if ep_cfg is not hf_config:
         attr = next((a for a in _SUB_CONFIG_ATTRS if getattr(hf_config, a, None) is ep_cfg), None)
@@ -2263,8 +2270,9 @@ def load_and_prepare_ep(
     # A rank failing in the load fails every rank here, before the warmup's collectives:
     # from_pretrained runs no collective, so the others finish it and meet the failure in the gather.
     with _refused_together("the expert-parallel load", alone=False):
-        # The checkpoint's own plan, for the config the model keeps (below): read from disk, so
-        # inside this block, where a rank failing to read it cannot leave the others in the load.
+        # The checkpoint's own plan, for the config the model keeps (below). The read raises on no
+        # failure of the file's, but sits in this block regardless: a rank failing there alone
+        # would leave the others in the load.
         declared_plan = _declared_ep_plan(ckpt_path, hf_config, ep_cfg)
         # The class the plan's decision chose, with its LM head where an auto class builds one.
         loader = _auto_class(hf_config, require_lm_head, trust_remote_code=trust_remote_code)

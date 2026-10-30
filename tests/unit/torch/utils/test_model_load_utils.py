@@ -28,7 +28,7 @@ import inspect
 import json
 import math
 import os
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest import mock
 
@@ -2684,18 +2684,25 @@ def test_a_plan_whose_expert_containers_match_no_module_is_refused(ep_world_of_t
 
 
 @pytest.mark.parametrize(
-    ("declared", "on_the_config"),
-    [(True, True), (False, False), (False, True)],
-    ids=["by-its-checkpoint", "a-class-default", "attached-by-its-spec"],
+    ("source", "on_the_config"),
+    [
+        ({"base_model_ep_plan": _EP_PLAN}, True),
+        ({}, False),
+        ({}, True),
+        ('{"base_model_ep_plan": ', True),
+    ],
+    ids=["by-its-checkpoint", "a-class-default", "attached-by-its-spec", "in-an-unreadable-file"],
 )
 def test_the_model_keeps_the_plan_its_checkpoint_declares(
-    ep_world_of_two, gloo_world_of_one, monkeypatch, tmp_path, declared, on_the_config
+    ep_world_of_two, gloo_world_of_one, monkeypatch, tmp_path, source, on_the_config
 ):
     """The load shards by the torch_a2a styles, but the config the model keeps goes back to the
     plan its checkpoint's config.json declares: an export writes it out, and nothing without
     ModelOpt knows those styles. A plan the config class ships (transformers' own, e.g.
     Qwen3-MoE's) stays off the instance, and so does one the model's spec attached to the config,
-    which names styles only ModelOpt registers (Nemotron-H's nemotron_experts_ep)."""
+    which names styles only ModelOpt registers (Nemotron-H's nemotron_experts_ep). A config.json
+    the load cannot read declares none, with a warning, since an export then loses the plan."""
+    declared = isinstance(source, dict) and "base_model_ep_plan" in source
 
     class _PastError(Exception):
         """Raised by the load's next check."""
@@ -2722,14 +2729,14 @@ def test_the_model_keeps_the_plan_its_checkpoint_declares(
         model_type = "_probe"
         base_model_ep_plan = _EP_PLAN
 
-    (tmp_path / "config.json").write_text(
-        json.dumps({"base_model_ep_plan": _EP_PLAN} if declared else {})
-    )
+    unreadable = isinstance(source, str)
+    (tmp_path / "config.json").write_text(source if unreadable else json.dumps(source))
     # 8 experts over 2 ranks: the stand-in model holds this rank's 4.
     plan = {"base_model_ep_plan": dict(_EP_PLAN)} if on_the_config else {}
     config = _Config(num_experts=8, **plan)
 
-    with pytest.raises(_PastError):
+    warns = pytest.warns(UserWarning, match="config.json") if unreadable else nullcontext()
+    with warns, pytest.raises(_PastError):
         load_and_prepare_ep(str(tmp_path), DistributionPlan(2, ep_size=2), hf_config=config)
 
     assert model.config.base_model_ep_plan == _EP_PLAN
