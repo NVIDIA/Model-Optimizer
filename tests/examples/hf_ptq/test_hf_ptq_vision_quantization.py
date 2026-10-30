@@ -68,9 +68,7 @@ def test_image_calibration_model_target_follows_recipe(
 
     monkeypatch.setattr(hf_ptq, "get_model", lambda *args, **kwargs: full_model)
     # A single process's plan, decided without reading the "dummy" checkpoint.
-    monkeypatch.setattr(
-        hf_ptq, "resolve_distribution_plan", lambda *args, **kwargs: (DistributionPlan(), None)
-    )
+    monkeypatch.setattr(hf_ptq, "resolve_distribution", lambda args: (DistributionPlan(), None))
     # A VLM's extracted language model reports its own sub-config type; hf_ptq must keep the root's.
     monkeypatch.setattr(
         hf_ptq,

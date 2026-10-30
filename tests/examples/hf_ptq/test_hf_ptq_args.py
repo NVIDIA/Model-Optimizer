@@ -1135,7 +1135,6 @@ def test_tensorrt_llm_export_copies_non_model_files_from_the_local_copy(monkeypa
     copies = []
     monkeypatch.setattr(hf_ptq, "has_spec_opt", lambda model: False)
     monkeypatch.setattr(hf_ptq, "is_multimodal_model", lambda model: False)
-    monkeypatch.setattr(hf_ptq, "is_trtllm_enc_dec_export", lambda model_type: False)
     monkeypatch.setattr(hf_ptq, "remove_hook_from_module", lambda *args, **kwargs: None)
     monkeypatch.setattr(hf_ptq, "export_tensorrt_llm_checkpoint", lambda *args, **kwargs: None)
     monkeypatch.setattr(hf_ptq, "copy_non_model_files", lambda *args: copies.append(args))
