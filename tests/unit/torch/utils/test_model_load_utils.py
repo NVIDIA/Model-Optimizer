@@ -1325,16 +1325,16 @@ def test_an_expert_parallel_plan_loads_through_the_ep_loader(
     run_as, serve, loaders, auto_class, a_gpu, tmp_path, dense
 ):
     """An EP plan loads through load_and_prepare_ep, with the plan and the Hub options the load was
-    given, and the checkpoint's config, read once for both, and through no other load. An option
-    passed as None asks nothing of it. That load replicates the dense part, so a plan that also
-    FSDP2-shards it is refused before anything loads, naming the ways out."""
+    given, and the checkpoint's config, read once for both, and through no other load. It returns
+    the model unfrozen, as the other loads do, and an option passed as None asks nothing of it. That
+    load replicates the dense part, so a plan that also FSDP2-shards it is refused before anything
+    loads, naming the ways out."""
     run_as(4)
     config = serve(_deepseek_v3(n_routed_experts=8))
     plan = DistributionPlan(4, ep_size=4, dense=dense)
     options = {
         "trust_remote_code": True,
         "attn_implementation": "eager",
-        "freeze": False,
         "require_lm_head": None,
         "local_files_only": True,
     }

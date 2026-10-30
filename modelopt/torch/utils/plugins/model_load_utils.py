@@ -621,6 +621,8 @@ def _sharded_load_kwargs(
     hf_config = kwargs.pop("hf_config", None)
     if route == _EXPERT_PARALLEL:
         _refuse_a_rank_without_its_gpu(route, decided)
+        # Unfrozen unless asked, as the other loads return the model: which load runs is decided.
+        kwargs.setdefault("freeze", False)
         return {
             "plan": plan,
             "trust_remote_code": trust_remote_code,
@@ -723,8 +725,8 @@ def load_pretrained(
     * ``ep_size > 1``: :func:`load_and_prepare_ep` shards an MoE's routed experts over the process
       group as they load and replicates the dense part, so a plan with ``dense="fsdp"`` as well is
       refused. It builds and places the model itself, so it takes its own options but no
-      ``auto_class``, placement or ``dtype``, and refuses a quantized checkpoint. Unlike the other
-      loads, it freezes the model unless ``freeze=False``.
+      ``auto_class``, placement or ``dtype``, and refuses a quantized checkpoint. Here it leaves the
+      model unfrozen, as the other loads do, unless ``freeze=True``.
     * ``dense="fsdp"``: :func:`parallel_load_and_prepare_fsdp2` shards a causal LM, or a text-only
       VLM it supports, over the process group (one process needs ``torchrun --nproc_per_node=1``).
       It builds and places the model itself, so it takes its own options but no ``auto_class``,
