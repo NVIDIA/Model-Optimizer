@@ -177,13 +177,10 @@ def _fuse_layers(rank, size, quant_config, bias):
         def calib_fn(x):
             return x(calib_data)
 
-        # Shard model
-        fully_shard(model)
-        torch.distributed.barrier()
-
-        # Quantize model
+        # Quantize, then shard: AWQ calibration of a model sharded over several ranks is refused.
         mtq.quantize(model, quant_config, calib_fn)
         mtq.quantize(non_fsdp_model, quant_config, calib_fn)
+        fully_shard(model)
 
         torch.distributed.barrier()
 
@@ -217,13 +214,10 @@ def _export_quantized_weight_test(rank, size, quant_config, bias):
         def calib_fn(x):
             return x(calib_data)
 
-        # Shard model
-        fully_shard(model)
-        torch.distributed.barrier()
-
-        # Quantize model
+        # Quantize, then shard: AWQ calibration of a model sharded over several ranks is refused.
         mtq.quantize(model, quant_config, calib_fn)
         mtq.quantize(non_fsdp_model, quant_config, calib_fn)
+        fully_shard(model)
 
         torch.distributed.barrier()
 

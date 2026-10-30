@@ -137,6 +137,8 @@ def test_fsdp_simple_linear(dist_workers):
     "quant_cfg", [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_SMOOTHQUANT_CFG, mtq.INT4_AWQ_CFG]
 )
 def test_nested_fsdp2_backward(quant_cfg, dist_workers):
+    if quant_cfg is mtq.INT4_AWQ_CFG and torch.cuda.device_count() > 1:
+        pytest.skip("AWQ calibration of an FSDP2 model sharded over several ranks is refused")
     dist_workers.run(partial(_test_nested_fsdp2_backward, quant_cfg=quant_cfg))
 
 

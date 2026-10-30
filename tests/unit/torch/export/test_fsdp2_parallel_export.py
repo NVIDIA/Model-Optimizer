@@ -95,17 +95,17 @@ def test_streaming_export_matches_resident_path(tmp_path):
 
 
 def test_streaming_export_of_a_sharded_w4a8_model(tmp_path, gloo_world_of_one):
-    """An FSDP2 model quantized with W4A8 exports what the unsharded model does.
+    """An FSDP2 model calibrated with W4A8 AWQ on one rank exports what the unsharded model does.
 
     W4A8's weight quantizer is a ``SequentialQuantizer``, which the weight-update window the AWQ
-    resmooth opens on each sharded layer must handle.
+    resmooth opens on each sharded layer must handle. AWQ calibration of an FSDP2 model is refused
+    only over several ranks.
     """
     # 128 wide, so that W4A8's 128-wide INT4 blocks tile every weight.
-    model = _tiny_quantized_llama(mtq.W4A8_AWQ_BETA_CFG, hidden_size=128)
-    ref, _ = _export_transformers_checkpoint(copy.deepcopy(model), torch.bfloat16)
-    for layer in model.model.layers:
-        fully_shard(layer, mesh=gloo_world_of_one)
-    fully_shard(model, mesh=gloo_world_of_one)
+    ref_model = _tiny_quantized_llama(mtq.W4A8_AWQ_BETA_CFG, hidden_size=128)
+    ref, _ = _export_transformers_checkpoint(ref_model, torch.bfloat16)
+    # Sharded before it is calibrated, as hf_ptq --use_fsdp2 does on one GPU.
+    model = _tiny_quantized_llama(mtq.W4A8_AWQ_BETA_CFG, hidden_size=128, mesh=gloo_world_of_one)
 
     _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=tmp_path)
 

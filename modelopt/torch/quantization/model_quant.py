@@ -70,6 +70,25 @@ __all__ = [
 ]
 
 
+def _refuse_awq_on_a_sharded_fsdp2_model(model: nn.Module, algorithm: QuantizeAlgoCfgType) -> None:
+    """Refuse AWQ calibration of an FSDP2 model sharded over several ranks, before it starts.
+
+    Each rank calibrates on its own data and folds the AWQ scale it picks into its own weight
+    shard, so the shards would not match. Every rank decides alike, from the run and the model.
+    """
+    if dist.size() == 1 or not dist.is_fsdp2_model(model):
+        return
+    methods = [mode.removesuffix("_calibrate") for mode, _ in get_modelike_from_algo_cfg(algorithm)]
+    awq = [method for method in methods if method in ("awq_lite", "awq_full")]
+    if awq:
+        raise NotImplementedError(
+            f"Calibrating with {', '.join(awq)} is not supported yet on an FSDP2 model sharded over "
+            f"{dist.size()} ranks: each rank calibrates on its own data and folds the AWQ scale it "
+            "picks into its own weight shard, so the shards would not match. Calibrate in a single "
+            "process, or with an algorithm other than AWQ."
+        )
+
+
 # TODO: Descriptors for the supported algorithms
 def calibrate(
     model: nn.Module,
@@ -99,6 +118,7 @@ def calibrate(
 
     Returns: The calibrated pytorch model.
     """
+    _refuse_awq_on_a_sharded_fsdp2_model(model, algorithm)
     if forward_loop is not None:
         # get the number of arguments of forward_loop
         num_args = len(inspect.signature(forward_loop).parameters)
@@ -439,6 +459,7 @@ def quantize(
     Returns: A pytorch model which has been quantized and calibrated.
     """
     quantize_config = QuantizeConfig(**dict(config))
+    _refuse_awq_on_a_sharded_fsdp2_model(model, config.get("algorithm"))
     if not is_quantized(model):
         model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
     else:
