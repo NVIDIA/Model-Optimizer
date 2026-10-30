@@ -954,11 +954,13 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
         Each expert slice passes through its own weight quantizer (collecting
         ``amax`` during calibration, fake-quantizing afterwards), matching the
-        eager per-expert ``F.linear`` semantics. Returns this rank's experts untouched when every
+        eager per-expert ``F.linear`` semantics. Returns the weight untouched when every
         quantizer would pass its slice through unchanged, so passthrough stays exact (and cheap):
         a disabled quantizer, or one that only collects statistics, as in calibration.
+
+        Reached only inside the experts forward, around which transformers swaps an expert-parallel
+        DTensor weight for this rank's local shard, so the weight is already indexed by local expert.
         """
-        weight = self._local_experts(weight)
         # A quantizer that is disabled, or that collects statistics without quantizing, hands its
         # slice back unchanged, unless it applies a pre-quant scale or a rotation (a disabled one
         # still does, as on the eager path). Then the result is the weight itself: building it
