@@ -51,7 +51,6 @@ Changelog
 - Bump minimum required PyTorch version to 2.10.
 - Bump minimum required ``diffusers`` version to 0.37, ``peft`` to 0.18.1, ``accelerate`` to 1.6 and ``nltk`` to 3.9 for the ``[hf]`` extra.
 - Drop support for Transformer Engine 1.x. Quantizing Transformer Engine modules now requires Transformer Engine 2.0 or later.
-- ``modelopt.torch.utils.distributed.fsdp2_wrap`` moved to ``modelopt.torch.utils.plugins.model_load_utils``, with the other loaders. The old import path still works, but calling it now needs the ``hf`` extra.
 - Diffusion HF exports now omit attention quantizer buffers by default, except for FLUX.1, which retains enabled Q/K/V ``_amax`` keys for runtime compatibility; other consumers of those keys can opt in with ``export_attention_quantizers=True`` (CLI: ``--extra-param export_attention_quantizers=true``). Disabled attention quantizers remain excluded, and diffusion components, including LTX-2, no longer emit KV-cache quantization metadata.
 - ``hf_quant_config.json`` of an INT4 or W4A8 AWQ checkpoint now sets ``pre_quant_scale`` per layer, only for layers that have the tensor. A model whose fused-MoE experts have none (AWQ never applies to them) is now exported as ``MIXED_PRECISION`` with per-layer entries instead of a uniform algorithm.
 - The Windows FVD example rejects I3D checkpoints requiring unrestricted pickle loading. Custom TorchScript archives now require ``--weights-sha256`` with a trusted checksum; tensor state dictionaries continue to load directly.

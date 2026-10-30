@@ -714,20 +714,10 @@ def is_fsdp2_model(model) -> bool:
 
 
 def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):
-    """Forward to :func:`~modelopt.torch.utils.plugins.model_load_utils.fsdp2_wrap`.
+    """Forward to :func:`~modelopt.torch.utils.fsdp2_utils.fsdp2_wrap`, where it moved."""
+    # Lazy import: fsdp2_utils imports modelopt.torch.utils.logging, which imports this module.
+    from modelopt.torch.utils.fsdp2_utils import fsdp2_wrap as wrap
 
-    It moved there with the FSDP2 load that wraps with it, so this old path needs the ``hf`` extra.
-    """
-    try:
-        from modelopt.torch.utils.plugins.model_load_utils import fsdp2_wrap as wrap
-    except ModuleNotFoundError as error:
-        # A module missing from an installed package is a version mismatch, not a missing extra.
-        if error.name not in ("transformers", "accelerate", "huggingface_hub"):
-            raise
-        raise ImportError(
-            "fsdp2_wrap moved to modelopt.torch.utils.plugins.model_load_utils, which needs the hf "
-            "extra (pip install 'nvidia-modelopt[hf]') to import."
-        ) from error
     return wrap(model, shard_root=shard_root, mp_policy=mp_policy, cpu_offload=cpu_offload)
 
 
