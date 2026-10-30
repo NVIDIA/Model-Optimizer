@@ -17,22 +17,26 @@
 
 import torch
 
+from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.network import bind_forward_method
 
 __all__ = ["prepare_for_calibration"]
 
 
-def _forward(self, hidden_states, position_embeddings, attention_mask, past_key_values):
+def _forward(
+    self, hidden_states, position_embeddings, attention_mask, past_key_values, *args, **kwargs
+):
     """Transformers' indexer, short-circuited when every visible key fits the token budget.
 
     The reference loops in Python over every (sample, query) pair. A query keeps its
     ``block_topk`` best complete key blocks plus the incomplete tail, so when the keys hold no
     more blocks than that, it keeps every visible token: the selection is the visibility mask the
-    indexer was given, which this returns directly.
+    indexer was given, which this returns directly. A call with arguments this does not know,
+    from a newer Transformers, goes to the reference too.
     """
-    if attention_mask.shape[-1] // self.compress_ratio > self.block_topk:
+    if args or kwargs or attention_mask.shape[-1] // self.compress_ratio > self.block_topk:
         return self._modelopt_reference_forward(
-            hidden_states, position_embeddings, attention_mask, past_key_values
+            hidden_states, position_embeddings, attention_mask, past_key_values, *args, **kwargs
         )
     # The reference runs the projection on every forward, so a quantizer on it gets calibrated.
     qk = self.index_qk_proj(hidden_states)
@@ -67,4 +71,10 @@ def prepare_for_calibration(model) -> bool:
         if not hasattr(module, "_modelopt_reference_forward"):
             # Keeps an Accelerate hook already on the indexer, such as device_map's, around the fast path.
             bind_forward_method(module, _forward, "_modelopt_reference_forward")
+    if not found:
+        warn_rank_0(
+            "No Qwen4ExpTextQSAIndexer found in this Qwen3.8 model, so calibration runs "
+            "Transformers' QSA indexer loop, which can take hours. If Transformers renamed the "
+            "class, update modelopt/torch/models/qwen4_exp/qsa_indexer.py."
+        )
     return found

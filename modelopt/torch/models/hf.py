@@ -26,8 +26,10 @@ __all__ = [
 ]
 
 # Keep modeling dependencies lazy: importing model specs must not import calibration code.
-# A plugin defines any of prepare_for_loading, has_mtp_weights, prefers_bundled_code and
-# prepare_for_calibration.
+# A plugin defines any of these hooks and lists exactly those in its __all__ (see README.md).
+_HOOKS = frozenset(
+    {"prepare_for_loading", "has_mtp_weights", "prefers_bundled_code", "prepare_for_calibration"}
+)
 _PLUGINS = {
     "nemotron_h": "nemotron_h.mtp",
     "nemotron_h_omni": "nemotron_h.mtp",
@@ -39,7 +41,16 @@ _PLUGINS = {
 def _get_plugin(model_type):
     """Return the optional ModelOpt support plugin for a Hugging Face model type."""
     name = _PLUGINS.get(model_type)
-    return None if name is None else importlib.import_module(f".{name}", __package__)
+    if name is None:
+        return None
+    plugin = importlib.import_module(f".{name}", __package__)
+    # Hooks are optional, so a misspelled one would be skipped silently: refuse it instead.
+    unknown = set(getattr(plugin, "__all__", ())) - _HOOKS
+    if unknown:
+        raise ValueError(
+            f"{plugin.__name__} exports {sorted(unknown)}, not hooks of {sorted(_HOOKS)}"
+        )
+    return plugin
 
 
 def prepare_model_for_loading(

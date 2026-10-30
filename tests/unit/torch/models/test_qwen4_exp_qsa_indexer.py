@@ -16,6 +16,7 @@
 """Qwen3.8's QSA indexer fast path against Transformers' reference loop."""
 
 import copy
+import sys
 import types
 
 import pytest
@@ -26,6 +27,7 @@ modeling = pytest.importorskip("transformers.models.qwen4_exp.modeling_qwen4_exp
 from transformers.cache_utils import Cache, DynamicIndexedLayer
 from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
 
+from modelopt.torch.models import hf
 from modelopt.torch.models.hf import (
     checkpoint_has_mtp,
     prefers_bundled_code,
@@ -178,3 +180,41 @@ def test_loading_hooks_the_plugin_lacks_keep_their_defaults(model_type):
     """The Qwen3.8 plugin only has a calibration hook; the loading hooks fall back to the defaults."""
     assert not prefers_bundled_code(model_type, None, "ckpt", {})
     assert not checkpoint_has_mtp(model_type, "ckpt")
+
+
+def test_qsa_indexer_hands_unknown_arguments_to_the_reference():
+    """A newer Transformers may pass the indexer an argument the fast path does not know; the call
+    goes to the reference forward with it instead of raising ``TypeError``."""
+    model, config = _model(64)
+    hidden, rope = _inputs(config, 1, 64)
+    prepare_model_for_calibration(model)
+    calls = []
+    model.indexer._modelopt_reference_forward = lambda *a, **kw: calls.append(kw) or "reference"
+
+    mask = _mask([("right", 0)], False, 64)
+    assert model.indexer(hidden, rope, mask, None, new_argument=1) == "reference"
+    assert calls == [{"new_argument": 1}]
+
+
+def test_a_qwen3_8_model_without_a_known_indexer_warns():
+    """If Transformers renames the indexer class, calibration warns rather than silently running
+    the loop."""
+    model = nn.Module()
+    model.config = types.SimpleNamespace(model_type="qwen4_exp")
+    model.layer = nn.Linear(4, 4)
+    with pytest.warns(UserWarning, match="Qwen4ExpTextQSAIndexer"):
+        prepare_model_for_calibration(model)
+
+
+def test_a_plugin_exporting_an_unknown_hook_is_refused(monkeypatch):
+    """Hooks are optional, so a misspelled one in a plugin's ``__all__`` raises instead of being
+    skipped."""
+    plugin = types.ModuleType("modelopt.torch.models.misspelled_plugin")
+    plugin.__all__ = ["prepare_for_calibraton"]
+    plugin.prepare_for_calibraton = lambda model: None
+    monkeypatch.setitem(sys.modules, plugin.__name__, plugin)
+    monkeypatch.setitem(hf._PLUGINS, "misspelled", "misspelled_plugin")
+    model = nn.Module()
+    model.config = types.SimpleNamespace(model_type="misspelled")
+    with pytest.raises(ValueError, match="prepare_for_calibraton"):
+        prepare_model_for_calibration(model)
