@@ -36,6 +36,7 @@ from _test_utils.torch.transformers_models import (
 from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM, GenerationMixin, LlamaConfig
 
+from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 
@@ -774,3 +775,103 @@ class _Recipe:
 def test_recipe_layerwise_blocks(recipe, expected):
     """Both recipe shapes normalize to dicts, so callers need no shape-aware access."""
     assert example_utils.recipe_layerwise_blocks(recipe) == expected
+
+
+# Small enough that the dense part fits any GPU.
+_TINY = {
+    "hidden_size": 16,
+    "intermediate_size": 32,
+    "num_hidden_layers": 1,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "vocab_size": 32,
+}
+
+
+@pytest.mark.parametrize(
+    ("device", "world_size", "device_map"),
+    [
+        ("cuda:1", 4, {"": "cuda:1"}),
+        (torch.device("cuda:1"), 4, {"": "cuda:1"}),
+        ("cuda:1", 1, "auto"),
+        (torch.device("cpu"), 1, "cpu"),
+    ],
+    ids=["str", "torch_device", "single_process", "cpu"],
+)
+def test_a_rank_device_pins_the_whole_model_to_it(
+    monkeypatch, tmp_path, device, world_size, device_map
+):
+    """Under torchrun each rank asks for its own cuda:<local_rank>; "auto" would let every rank's
+    accelerate pick the same idle GPU. A single process spreads the model over the GPUs, whatever
+    GPU it names, and keeps it on a CPU it names, as the torch.device hf_ptq's run hands in. Only a
+    single process's load is held to a memory limit sized over the node's GPUs: the pinned map would
+    ignore one."""
+    LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
+    # No GPU on the node holds the model, so sizing it over the node limits its memory.
+    monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 0, "cpu": 1 << 40})
+    placed = []
+
+    plan = DistributionPlan(world_size)
+
+    def load_pretrained(ckpt_path, auto_class, **kwargs):
+        assert kwargs["distribution"] == plan
+        placed.append((kwargs["device_map"], "max_memory" in kwargs))
+        return torch.nn.Linear(1, 1)
+
+    monkeypatch.setattr(example_utils, "load_pretrained", load_pretrained)
+
+    example_utils.get_model(str(tmp_path), device=device, distribution=plan)
+
+    assert placed == [(device_map, world_size == 1)]
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    ["pack-quantized", "mxfp4", "diffusion-gemma"],
+)
+def test_every_load_path_keeps_the_rank_pin(monkeypatch, tmp_path, checkpoint):
+    """A pack-quantized or MXFP4 checkpoint loads through a path of its own, and DiffusionGemma asks
+    for a sequential map on a multi-GPU node; each would otherwise place every rank's copy over the
+    same GPUs."""
+    quantization_config = {
+        "pack-quantized": {"quant_method": "compressed-tensors", "format": "pack-quantized"},
+        "mxfp4": {"quant_method": "mxfp4"},
+    }.get(checkpoint)
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"], quantization_config=quantization_config, **_TINY
+    ).save_pretrained(tmp_path)
+    if checkpoint == "diffusion-gemma":
+        monkeypatch.setattr(example_utils, "is_diffusion_gemma", lambda config: True)
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(example_utils, "_unpack_compressed_linear_weights", lambda *args: None)
+    placed = []
+
+    def load_pretrained(ckpt_path, auto_class, **kwargs):
+        placed.append(kwargs["device_map"])
+        return torch.nn.Linear(1, 1)
+
+    monkeypatch.setattr(example_utils, "load_pretrained", load_pretrained)
+
+    example_utils.get_model(str(tmp_path), device="cuda:1", distribution=DistributionPlan(4))
+
+    assert placed == [{"": "cuda:1"}]
+
+
+@pytest.mark.parametrize(
+    ("device", "kwargs", "match"),
+    [
+        ("cuda:1", {"use_seq_device_map": True}, "--use_seq_device_map"),
+        # "auto" would let every rank's accelerate pick the same idle GPU.
+        ("cuda", {}, "names no GPU"),
+    ],
+    ids=["sequential_map", "unindexed_device"],
+)
+def test_a_placement_over_shared_gpus_is_refused_where_each_rank_holds_its_own_copy(
+    tmp_path, device, kwargs, match
+):
+    LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
+
+    with pytest.raises(ValueError, match=match):
+        example_utils.get_model(
+            str(tmp_path), device=device, distribution=DistributionPlan(4), **kwargs
+        )
