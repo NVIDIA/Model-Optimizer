@@ -37,11 +37,22 @@ class _TinyModel(nn.Module):
         return {"loss": loss, "logits": logits}
 
 
-def test_model_is_freed_after_train_with_manual_gc(tmp_path):
-    """``manual_gc`` freezes what lives through training; ``train()`` must unfreeze it.
+class _FreezeCounts(transformers.TrainerCallback):
+    def __init__(self):
+        self.after_step = {}
 
-    A frozen object in a reference cycle is never collected, so the model would outlive the trainer.
+    def on_step_end(self, args, state, control, **kwargs):
+        self.after_step[state.global_step] = gc.get_freeze_count()
+
+
+def test_manual_gc_freezes_during_train_and_unfreezes_after(tmp_path):
+    """``manual_gc`` freezes what lives through training and ``train()`` unfreezes it.
+
+    Collections skip frozen objects, which is the speed-up. A frozen object in a reference cycle is
+    never collected, so without the unfreeze the model would outlive the trainer.
     """
+    frozen_before = gc.get_freeze_count()  # Python itself starts with a few hundred frozen objects
+    freeze_counts = _FreezeCounts()
     model = _TinyModel()
     model.__dict__["_cycle"] = [model]  # only the cycle collector can free it
     model_ref = weakref.ref(model)
@@ -61,9 +72,14 @@ def test_model_is_freed_after_train_with_manual_gc(tmp_path):
         args=args,
         trainer_args=ModelOptTrainerArguments(manual_gc=True),
         train_dataset=dataset,
+        callbacks=[freeze_counts],
     )
     try:
         trainer.train()
+        # The collection before the second step freezes the model and optimizer state.
+        assert all(freeze_counts.after_step[step] > frozen_before for step in (2, 3))
+        # gc.unfreeze() also returns the objects frozen before training.
+        assert gc.get_freeze_count() == 0
         del trainer, model
         gc.collect()
         assert model_ref() is None
