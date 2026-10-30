@@ -24,9 +24,11 @@ tests of each part use a process group, two gloo ranks.
 
 import copy
 import dataclasses
+import importlib
 import inspect
 import math
 import os
+import sys
 from contextlib import ExitStack, contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest import mock
@@ -74,6 +76,7 @@ import modelopt.torch.utils.moe as moe
 from modelopt.torch.quantization.plugins import accelerate as accelerate_plugin
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.utils import plugins
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.plugins import hf_checkpoint_utils, model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import (
@@ -2442,6 +2445,17 @@ def test_transposed_experts_are_refused(layout):
 
     with refused if layout != "standard" else nullcontext():
         _refuse_unquantizable_experts(experts)
+
+
+def test_the_loaders_import_without_the_hf_quantization_plugin(monkeypatch):
+    """The HF quantization plugin loads under import_plugin's guard, so a release it cannot load is
+    a warning; only the expert-parallel refusals need it, so the loaders still import without it."""
+    monkeypatch.setitem(sys.modules, "modelopt.torch.quantization.plugins.huggingface", None)
+    # Re-imported below: put the module and its package attribute back afterwards.
+    monkeypatch.delitem(sys.modules, model_load_utils.__name__)
+    monkeypatch.setattr(plugins, "model_load_utils", model_load_utils)
+
+    assert importlib.import_module(model_load_utils.__name__).load_pretrained
 
 
 # ----------------------------------------------------------------------- _seed_parallel_states
