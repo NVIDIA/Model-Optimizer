@@ -19,6 +19,7 @@ import re
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import chain
 from types import SimpleNamespace
 from typing import Any
 
@@ -550,16 +551,34 @@ def capture_kv_cache_export_state(
     """Capture the ``k_scale`` / ``v_scale`` of one attention module, or ``None`` when not quantized.
 
     ``clamp_fp8_scales`` raises FP8 cache scales to at least 1.0, as the other exporters do.
+    With ``cpu=False``, constants follow a calibrated peer or attention tensor's device;
+    a stateless, parameterless attention module with no buffers falls back to CPU.
     """
     quantization_format = get_kv_cache_export_spec(attention)
     if quantization_format is None:
         return None
-    scales = get_kv_cache_scaling_factor(attention, clamp_fp8_scales=clamp_fp8_scales)
-    for index, name in enumerate(("k_bmm_quantizer", "v_bmm_quantizer")):
-        quantizer = getattr(attention, name)
-        if quantizer._use_constant_amax and not quantizer.is_mx_format:
-            # The fixed range and deployment denominator are both 448, also for NVFP4 KV.
-            scales[index] = torch.ones(1, dtype=torch.float32, device="cpu")
+    scales = get_kv_cache_scaling_factor(
+        attention, clamp_fp8_scales=clamp_fp8_scales, use_constant_amax=True
+    )
+    constant = [
+        quantizer._use_constant_amax and not quantizer.is_mx_format
+        for quantizer in (attention.k_bmm_quantizer, attention.v_bmm_quantizer)
+    ]
+    if not cpu and any(constant):
+        reference = next(
+            (
+                scale
+                for scale, fixed in zip(scales, constant, strict=True)
+                if not fixed and scale is not None
+            ),
+            None,
+        )
+        if reference is None:
+            reference = next(chain(attention.parameters(), attention.buffers()), None)
+        device = reference.device if reference is not None else torch.device("cpu")
+        for index, (scale, fixed) in enumerate(zip(scales, constant, strict=True)):
+            if fixed and scale is not None:
+                scales[index] = scale.to(device)
     k_scale, v_scale = scales
     if k_scale is None or v_scale is None:
         raise RuntimeError("Missing calibrated KV-cache scales")

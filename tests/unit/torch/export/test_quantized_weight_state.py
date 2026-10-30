@@ -778,6 +778,17 @@ def test_kv_cache_capture(
         torch.testing.assert_close(value, original_buffers[name])
 
 
+def test_kv_cache_capture_ignores_stale_dynamic_constant_amax():
+    cfg = {**_FP8_KV, "type": "dynamic", "use_constant_amax": True}
+    attention = _kv_attention(cfg, _FP8_KV)
+
+    state = capture_kv_cache_export_state(attention, clamp_fp8_scales=False)
+
+    assert state.k_scale.item() == 1.0
+    assert state.v_scale.item() == 0.5
+    assert attention.k_bmm_quantizer._amax.item() == 896.0
+
+
 def test_kv_cache_spec_rejects_what_it_cannot_export():
     attention = _kv_attention(_FP8_KV, _FP8_KV)
     attention.k_bmm_quantizer.disable()
