@@ -194,23 +194,43 @@ def test_an_option_it_cannot_honor_is_refused_before_anything_loads(option, refu
         load_pretrained("no/such/checkpoint", **option)
 
 
+class _OwnConfig(LlamaConfig):
+    """A config class of the caller's own, which AutoConfig has no mapping for."""
+
+    model_type = "modelopt_test_own_llama"
+
+
+class _OwnModel(LlamaForCausalLM):
+    config_class = _OwnConfig
+
+
 @pytest.mark.parametrize(
-    ("as_path", "model_type"),
-    [(False, None), (True, None), (True, "llama")],
-    ids=["config", "config-path", "config-path-and-model-type"],
+    ("as_path", "model_type", "model_class"),
+    [
+        (False, None, None),
+        (True, None, LlamaForCausalLM),
+        (True, "llama", LlamaForCausalLM),
+        (True, None, _OwnModel),
+    ],
+    ids=["config", "config-path", "config-path-and-model-type", "own-config-class-path"],
 )
-def test_a_config_passed_for_the_load_needs_none_on_disk(tmp_path, as_path, model_type):
+def test_a_config_passed_for_the_load_needs_none_on_disk(
+    tmp_path, as_path, model_type, model_class
+):
     """The load uses the config it is passed, or reads it from the directory it is passed, as
-    ``from_pretrained`` does, and so do its plan and the choice of its loading hook: a checkpoint
-    directory without a config.json loads, through a model class of the caller's own too."""
+    ``from_pretrained`` does, through the model class's own config class, and so do its plan and the
+    choice of its loading hook: a checkpoint directory without a config.json loads, through a model
+    class of the caller's own too."""
     config = _tiny_llama_config()
+    if model_class is _OwnModel:
+        config = _OwnConfig(**config.to_diff_dict())
     weights = tmp_path / "weights"
     weights.mkdir()
     _save(weights, config, {**LlamaForCausalLM(config).state_dict(), STRAY: torch.ones(32)})
     if as_path:
         (tmp_path / "config").mkdir()
         (weights / "config.json").rename(tmp_path / "config" / "config.json")
-        passed = {"auto_class": LlamaForCausalLM, "config": str(tmp_path / "config")}
+        passed = {"auto_class": model_class, "config": str(tmp_path / "config")}
     else:
         (weights / "config.json").unlink()
         passed = {"config": config}
