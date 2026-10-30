@@ -143,13 +143,20 @@ def _no_plan_on_several_ranks_job(rank, size):
     assert distribution_plan(model) is plan
     model = _plan_model()
     set_distribution_plan(model, DistributionPlan(world_size=size))
+    fully_shard(model, mesh=init_device_mesh("cpu", (size,)))
+    _, error = _outcome(lambda: distribution_plan(model))
+    assert isinstance(error, RuntimeError), error
+    assert "sharded after its plan was recorded" in str(error), error
+    model = _plan_model()
+    set_distribution_plan(model, DistributionPlan(world_size=size))
     model.add_module("added", nn.Linear(2, 2))
     _, error = _outcome(lambda: distribution_plan(model.added))
     assert isinstance(error, RuntimeError), error
 
 
 def test_a_model_with_no_plan_raises_in_a_run_of_several_ranks(cpu_dist_workers):
-    """On two ranks a model needs a recorded plan, whole, FSDP2-sharded or added to later."""
+    """On two ranks a model needs a recorded plan, whole, FSDP2-sharded or added to later, and one
+    sharded after its plan was recorded is refused rather than read as replicated."""
     cpu_dist_workers.run(_no_plan_on_several_ranks_job)
 
 
