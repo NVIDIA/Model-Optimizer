@@ -376,6 +376,18 @@ def test_freeze_student_params():
     }
 
 
+def test_expert_fc_only_keeps_only_the_decoder_final_norm():
+    model = _ToyMoeStudent()
+    model.mtp = torch.nn.ModuleDict({"final_layernorm": torch.nn.LayerNorm(2)})
+    model.language_model = torch.nn.Module()
+    model.language_model.decoder = torch.nn.ModuleDict({"final_norm": torch.nn.LayerNorm(2)})
+    _freeze_student_params(model, freeze_router=False, expert_fc_only=True, check_layout=True)
+    names = _trainable_names(model)
+    assert "decoder.final_layernorm.weight" in names
+    assert "language_model.decoder.final_norm.weight" in names
+    assert not any(n.startswith("mtp.") for n in names)
+
+
 def test_freeze_student_params_fails_loudly():
     with pytest.raises(ValueError, match="no trainable dense parameter"):
         _freeze_student_params(
