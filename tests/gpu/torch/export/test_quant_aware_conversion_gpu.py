@@ -31,6 +31,7 @@ import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_mixtral
 from safetensors import safe_open
+from transformers.core_model_loading import revert_weight_conversion
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_checkpoint
@@ -55,14 +56,6 @@ def _tiny_mixtral():
 
 
 def test_export_tensor_names_match_hub_after_conversion_reverse():
-    try:
-        from transformers.conversion_mapping import get_checkpoint_conversion_mapping
-        from transformers.core_model_loading import revert_weight_conversion
-    except ImportError:
-        pytest.skip("transformers build has no conversion_mapping API")
-    if not get_checkpoint_conversion_mapping("mixtral"):
-        pytest.skip("transformers build has no mixtral conversion_mapping")
-
     # Canonical hub names: transformers' own reverse on the unquantized reference.
     ref = _tiny_mixtral()
     hub_names = set(revert_weight_conversion(ref, ref.state_dict()).keys())

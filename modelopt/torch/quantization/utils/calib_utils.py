@@ -38,54 +38,98 @@
 
 """GPTQ helper and Hessian utilities for calibration."""
 
+import functools
+from contextlib import contextmanager
+
 import torch
 import torch.distributed as dist
 
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import (
+    get_available_gpu_memory,
+    get_process_gpus,
+    print_rank_0,
+    warn_rank_0,
+)
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
-from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
-# Used fraction of a GPU's memory above which GPTQ keeps new Hessians off it.
-_HESSIAN_GPU_MEM_LIMIT = 0.65
+# A GPU takes a new Hessian only if enough memory stays available after it for the calibration
+# forward that follows. Until GPTQ has measured that forward on the GPU, keep this share free.
+_HESSIAN_UNMEASURED_RESERVE = 0.35
+# Once measured, keep this multiple of the most a calibration forward added on the GPU, and at
+# least this share of the GPU.
+_HESSIAN_RESERVE_MARGIN = 1.5
+_HESSIAN_MIN_RESERVE = 0.1
+# The most memory a GPTQ calibration forward has added on each GPU, by device index.
+_calib_forward_peak: dict[int, int] = {}
 
 
-def _gpu_is_full(device) -> bool:
-    return get_used_gpu_mem_fraction(device) > _HESSIAN_GPU_MEM_LIMIT
+def _gpu_has_room(gpu: int, nbytes: int) -> bool:
+    """Whether ``nbytes`` more on ``gpu`` leaves the calibration forward the memory it needs."""
+    total = torch.cuda.get_device_properties(gpu).total_memory
+    peak = _calib_forward_peak.get(gpu)
+    if peak is None:
+        reserve = _HESSIAN_UNMEASURED_RESERVE * total
+    else:
+        reserve = max(_HESSIAN_MIN_RESERVE * total, _HESSIAN_RESERVE_MARGIN * peak)
+    return get_available_gpu_memory(gpu) - nbytes >= reserve
+
+
+def reset_calib_forward_memory():
+    """Forget measured calibration forwards; a new run, maybe of another model, measures afresh."""
+    _calib_forward_peak.clear()
+
+
+@contextmanager
+def track_calib_forward_memory():
+    """Record the memory the enclosed calibration forward adds on each GPU, for Hessian placement.
+
+    PyTorch's peak counters are reset first: otherwise an earlier peak, such as the previous
+    layer's Hessians and GPTQ updates, would count as forward memory and send Hessians to the CPU
+    for nothing.
+    """
+    gpus = get_process_gpus() if torch.cuda.is_available() else []
+    allocated = {}
+    for gpu in gpus:
+        torch.cuda.reset_peak_memory_stats(gpu)
+        allocated[gpu] = torch.cuda.memory_allocated(gpu)
+    yield
+    for gpu in gpus:
+        added = torch.cuda.max_memory_allocated(gpu) - allocated[gpu]
+        _calib_forward_peak[gpu] = max(_calib_forward_peak.get(gpu, 0), added)
 
 
 def _hessian_offload_device(nbytes: int) -> torch.device:
-    """Where a Hessian goes when its weight's GPU is full: the emptiest GPU with room, else CPU.
+    """Where a Hessian goes when its weight's GPU lacks room: the emptiest GPU with room, else CPU.
 
     A model sharded over several GPUs leaves the ones not holding the current layer idle, and a
     Hessian there costs a device-to-device copy per update instead of a host copy and a CPU
     rescale of the whole matrix. Only GPUs this process already holds memory on are candidates,
-    and only outside distributed runs, so no other job's or rank's GPU is touched. A candidate
-    must also have the Hessian's ``nbytes`` free.
+    and only outside distributed runs, so no other job's or rank's GPU is touched.
     """
     if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
-        gpus = [i for i in range(torch.cuda.device_count()) if torch.cuda.memory_reserved(i)]
-        for gpu in sorted(gpus, key=get_used_gpu_mem_fraction):
-            if _gpu_is_full(gpu):
-                break
-            if torch.cuda.mem_get_info(gpu)[0] > nbytes:
+        for gpu in sorted(get_process_gpus(), key=get_available_gpu_memory, reverse=True):
+            if _gpu_has_room(gpu, nbytes):
                 return torch.device("cuda", gpu)
     return torch.device("cpu")
 
 
-def update_hessian(input, hessian, n_samples):
+def update_hessian(input, hessian, n_samples, input_dtype=torch.float32):
     """Update hessian matrix with new input samples using incremental formula.
 
     Args:
         input: Input tensor (batch_size, ..., features)
         hessian: Current Hessian matrix to update in-place
         n_samples: Number of samples already processed
+        input_dtype: The dtype the GEMM reads ``input`` in: ``torch.float32``, or
+            ``torch.bfloat16`` for a tensor-core GEMM that accumulates in float32.
+
     Returns:
         Tuple of (updated_hessian, new_sample_count)
 
     Note: input must be non-empty (batch_size > 0); a zero-sized input causes division by zero.
     """
     # Flatten to 2D (total_tokens, features) first, so batch_size counts tokens
-    input_flat = input.reshape(-1, input.shape[-1]).float()
+    input_flat = input.reshape(-1, input.shape[-1])
     batch_size = input_flat.shape[0]
 
     if batch_size == 0:  # in MOEs some experts receive no tokens
@@ -95,14 +139,69 @@ def update_hessian(input, hessian, n_samples):
     # once per expert per forward, and separate scale and add passes each rewrite all of H.
     scale = n_samples / (n_samples + batch_size)
     n_samples += batch_size
+    alpha = 2 / n_samples
+    if bfloat16_hessian_gemm(input_dtype, input_flat):
+        # BF16 products are exact in float32, so a tensor-core GEMM writing float32 differs from a
+        # float32 GEMM only in how it rounds the sums: up to ~3e-5 of the Hessian's diagonal at 32K
+        # tokens per batch. It is 9-16x faster on GB300 and needs no float32 copy of the inputs.
+        input_flat = input_flat.to(torch.bfloat16)
+        if hessian.device == input_flat.device:
+            torch.addmm(
+                hessian,
+                input_flat.t(),
+                input_flat,
+                beta=scale,
+                alpha=alpha,
+                out_dtype=torch.float32,
+                out=hessian,
+            )
+        else:
+            gram = torch.mm(input_flat.t(), input_flat, out_dtype=torch.float32)
+            hessian.mul_(scale).add_(gram.to(hessian.device), alpha=alpha)
+        return hessian, n_samples
+
+    input_flat = input_flat.float()
     if hessian.device == input_flat.device:
-        hessian.addmm_(input_flat.t(), input_flat, beta=scale, alpha=2 / n_samples)
+        hessian.addmm_(input_flat.t(), input_flat, beta=scale, alpha=alpha)
     else:
-        hessian.mul_(scale).add_(
-            (input_flat.t() @ input_flat).to(hessian.device), alpha=2 / n_samples
-        )
+        hessian.mul_(scale).add_((input_flat.t() @ input_flat).to(hessian.device), alpha=alpha)
 
     return hessian, n_samples
+
+
+def bfloat16_hessian_gemm(input_dtype: torch.dtype, inputs: torch.Tensor) -> bool:
+    """Whether a Hessian GEMM over ``inputs`` runs on bfloat16 with float32 output.
+
+    True when ``input_dtype`` asks for bfloat16 and the inputs' GPU has such GEMMs; when they are
+    missing, warns once per device and returns False, so the caller computes in float32.
+    """
+    if input_dtype != torch.bfloat16:
+        return False
+    if inputs.is_cuda and _has_float32_out_gemm(inputs.device):
+        return True
+    _warn_bfloat16_hessian_unavailable(inputs.device)
+    return False
+
+
+@functools.cache
+def _has_float32_out_gemm(device: torch.device) -> bool:
+    """Whether GEMMs on CUDA ``device`` take bfloat16 inputs and write float32 (``out_dtype``)."""
+    try:
+        x = torch.zeros(1, 1, device=device, dtype=torch.bfloat16)
+        h = torch.mm(x, x, out_dtype=torch.float32)
+        torch.addmm(h, x, x, out_dtype=torch.float32, out=h)
+        torch.bmm(x[None], x[None], out_dtype=torch.float32)
+    except (TypeError, RuntimeError):
+        return False
+    return True
+
+
+@functools.cache
+def _warn_bfloat16_hessian_unavailable(device: torch.device) -> None:
+    warn_rank_0(
+        f"hessian_input_dtype='bfloat16' needs CUDA GEMMs that take out_dtype, which {device} lacks "
+        "with this torch; computing its Hessians in float32."
+    )
 
 
 def compute_hessian_inverse(hessian, weight, perc_damp):
@@ -167,6 +266,7 @@ class GPTQHelper:
         weight_quantizer=None,
         weight=None,
         log_mse=True,
+        hessian_input_dtype="float32",
     ):
         """Initialize GPTQHelper with module state and Hessian storage.
 
@@ -174,11 +274,13 @@ class GPTQHelper:
         one expert's slice of an HF fused-MoE parameter; by default the helper owns
         ``module.weight`` and ``module.weight_quantizer``. ``log_mse=False`` skips the logged
         Hessian-weighted error, which costs two weight-by-Hessian matmuls.
+        ``hessian_input_dtype`` is the dtype the Hessian GEMM reads the inputs in, by name.
         """
         self.module = module
         self.name = name
         self.fused = fused
         self.importance_weighted = importance_weighted
+        self.hessian_input_dtype = getattr(torch, hessian_input_dtype)
         self._weight_quantizer = weight_quantizer
         self.log_mse = log_mse
         weight = module.weight if weight is None else weight
@@ -186,8 +288,10 @@ class GPTQHelper:
         device = weight.device
         if device.type == "meta":
             device = torch.device("cpu")
-        elif offload_to_cpu and device.type == "cuda" and _gpu_is_full(device):
-            device = _hessian_offload_device(4 * in_features**2)
+        elif offload_to_cpu and device.type == "cuda":
+            index = torch.cuda.current_device() if device.index is None else device.index
+            if not _gpu_has_room(index, 4 * in_features**2):
+                device = _hessian_offload_device(4 * in_features**2)
         self.hessian = torch.zeros(in_features, in_features, dtype=torch.float32, device=device)
         self.n_samples = 0
         # Set by update_weights(); listed here for documentation.
@@ -222,7 +326,9 @@ class GPTQHelper:
     def accumulate(self, inputs):
         """Add a batch of this weight's inputs, after input quantization, to the Hessian."""
         inputs = inputs.to_local() if hasattr(inputs, "to_local") else inputs
-        self.hessian, self.n_samples = update_hessian(inputs, self.hessian, self.n_samples)
+        self.hessian, self.n_samples = update_hessian(
+            inputs, self.hessian, self.n_samples, self.hessian_input_dtype
+        )
 
     def cleanup(self):
         """Unpatch the module's forward method."""

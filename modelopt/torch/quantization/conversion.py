@@ -45,7 +45,7 @@ from .nn import (
     TensorQuantizer,
 )
 from .utils import is_quantized, is_quantized_linear
-from .utils.shared_input import SharedWeightGlobalAmaxState
+from .utils.shared_input import MLA_DOWN_PROJ_PATTERN, SharedWeightGlobalAmaxState
 
 __all__ = [
     "preserve_quantizer_attributes_context",
@@ -115,11 +115,17 @@ def _restore_shared_quant_state_aliases(
     """Rebuild shared-state ties before checkpoint tensor values are loaded."""
     if not metadata.get("shared_quant_states"):
         return
-    # max / mse / local_hessian all carry ``shared_states`` (via _SharedStatesConfig) and use
-    # the same grouping; resolve the patterns that were in effect at save and rebuild the ties.
-    patterns = SharedWeightGlobalAmaxState.resolve_patterns(
-        shared_states=getattr(config, "shared_states", None)
-    )
+    patterns = metadata.get("shared_quant_patterns")
+    if patterns is None:
+        # Saved before the patterns were recorded, when the MLA down projections were not grouped:
+        # tying them now would load both members' ranges into one buffer.
+        patterns = [
+            pattern
+            for pattern in SharedWeightGlobalAmaxState.resolve_patterns(
+                shared_states=getattr(config, "shared_states", None)
+            )
+            if pattern != MLA_DOWN_PROJ_PATTERN
+        ]
     SharedWeightGlobalAmaxState.restore(model, patterns=patterns)
 
 
@@ -206,8 +212,12 @@ def update_quantize_metadata(
     metadata["quantizer_state"] = quantizer_state(model)
     if shared_state_metadata := SharedWeightGlobalAmaxState.metadata(model):
         metadata["shared_quant_states"] = shared_state_metadata
+        # Record the patterns calibration grouped with, so restore ties the same groups; ``config``
+        # need not be the calibration algorithm's (e.g. LoRA and AutoQuantize pass a default one).
+        metadata["shared_quant_patterns"] = SharedWeightGlobalAmaxState.grouping_patterns(model)
     else:
         metadata.pop("shared_quant_states", None)
+        metadata.pop("shared_quant_patterns", None)
 
 
 def _linear_attention_modules(model):

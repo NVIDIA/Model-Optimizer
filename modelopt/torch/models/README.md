@@ -105,5 +105,17 @@ only; subsystem logic stays in the subsystem.
 Keep architecture-specific loading and calibration helpers alongside the model's
 `specs.py` (for example, `nemotron_h/mtp.py`). The `hf.py` dispatcher loads these
 helpers on demand; examples call its loading context and calibration hook.
+
+A helper module registered in `hf.py`'s `_PLUGINS` defines any of these hooks, all
+optional, and lists exactly the ones it defines in `__all__`. The dispatcher rejects any
+other name there, so a misspelled hook fails instead of being skipped.
+
+| Hook | Called by | Default without it |
+|---|---|---|
+| `prepare_for_loading(checkpoint_path, trust_remote_code, *, model_class)` | `prepare_model_for_loading` | no context |
+| `has_mtp_weights(checkpoint_path)` | `checkpoint_has_mtp` | `False` |
+| `prefers_bundled_code(hf_config, checkpoint_path, config_kwargs)` | `prefers_bundled_code` | `False` |
+| `prepare_for_calibration(model)` | `prepare_model_for_calibration` | nothing |
+
 Do not import runtime helpers from a model package's `__init__.py`: registering
 specs must remain independent of optional Transformers and calibration imports.

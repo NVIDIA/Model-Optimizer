@@ -24,8 +24,6 @@ The parity comparison against the FastGen reference extract is bit-exact
 floating-point arithmetic.
 """
 
-from __future__ import annotations
-
 from types import SimpleNamespace
 
 import pytest

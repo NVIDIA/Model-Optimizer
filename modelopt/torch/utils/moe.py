@@ -15,7 +15,8 @@
 
 """HuggingFace-coupled MoE expert-parallel (EP) helpers.
 
-The DP=EP all-to-all expert transport (``torch_a2a``).
+Finding a model's routed experts, choosing the EP degree they are sharded over, and the DP=EP
+all-to-all expert transport (``torch_a2a``).
 
 The all-to-all transport is plain ``torch.distributed.all_to_all_single`` (NCCL) wrapped around
 transformers' ``_grouped_linear``. ``register_torch_a2a()`` registers it into
@@ -24,10 +25,122 @@ transformers-``ExpertsInterface`` side effect.
 """
 
 import warnings
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+from packaging.version import parse
 from torch.distributed.nn.functional import all_to_all_single as autograd_all_to_all_single
+
+if TYPE_CHECKING:
+    from torch import nn
+
+
+def require_transformers(min_version: str, feature: str) -> None:
+    """Fail loudly if the installed transformers is older than ``min_version`` (the floor for ``feature``).
+
+    Callers enforce the version where the needed APIs first exist, so a too-old transformers errors
+    clearly instead of silently mis-behaving (e.g. transformers 5.5 silently shards nothing for EP).
+    A pre-release of the floor release (``5.7.0.dev0`` for ``5.7``) is refused too: it can predate
+    the feature the floor stands for.
+    """
+    # Imported here: this module imports without transformers.
+    import transformers
+
+    have = transformers.__version__
+    if parse(have) < parse(min_version):
+        raise RuntimeError(
+            f"{feature} requires transformers >= {min_version}, but {have} is installed. "
+            f"Upgrade with: pip install -U 'transformers>={min_version}'."
+        )
+
+
+def _ep_config(hf_config):
+    """Return the config that carries the EP plan / expert count.
+
+    For a plain MoE causal LM this is the root config. For a VLM whose nested text submodel
+    is the MoE (e.g. ``KimiK25.text_config`` -> deepseek_v3, or ``NemotronH_Omni.llm_config``
+    -> nemotron_h), this is that nested config.
+    """
+    if getattr(hf_config, "base_model_ep_plan", None):
+        return hf_config
+    for _attr in ("text_config", "llm_config"):
+        sub = getattr(hf_config, _attr, None)
+        if sub is not None and getattr(sub, "base_model_ep_plan", None):
+            return sub
+    # Fall through: no plan anywhere; let callers decide.
+    return hf_config
+
+
+def _num_experts_from_config(hf_config) -> int:
+    """Return the MoE expert count from an HF config (0 if the model is not MoE).
+
+    Recurses into ``.text_config`` / ``.llm_config`` so VLMs whose nested text submodel is the MoE
+    (Kimi-K2.7, Llama-4 multimodal, NemotronH-Omni, ...) report the LM's expert count.
+    """
+    for cfg in (
+        hf_config,
+        getattr(hf_config, "text_config", None),
+        getattr(hf_config, "llm_config", None),
+    ):
+        if cfg is None:
+            continue
+        for attr in ("num_experts", "num_local_experts", "n_routed_experts", "num_routed_experts"):
+            value = getattr(cfg, attr, None)
+            if value:
+                return int(value)
+    return 0
+
+
+def _choose_ep_degree(world_size: int, num_experts: int) -> int:
+    """The largest EP degree dividing both ``world_size`` and ``num_experts``; ``1`` if none does.
+
+    EP must divide ``num_experts`` (whole experts per rank) and ``world_size`` (a valid mesh
+    factorization). Each expert shard is then replicated over the remaining ranks
+    (``DistributionPlan.edp``). The largest degree holds the fewest experts per rank, which leaves
+    the most memory for activations, i.e. for calibration batches; any degree above 1 pays the same
+    two all-to-alls per MoE layer. Heuristic -- callers may override.
+    """
+    if num_experts <= 0:
+        return 1
+    return next(
+        (ep for ep in range(world_size, 0, -1) if world_size % ep == 0 and num_experts % ep == 0),
+        1,
+    )
+
+
+# The styles a base_model_ep_plan gives a layer's routed-experts container. A plan that styles the
+# experts' grouped-GEMM parameters names the containers through their parents too, so a plan that
+# styles some containers one way and others the other names them all.
+_EXPERTS_STYLES = ("moe_tp_experts", "nemotron_experts_ep")
+
+
+def _routed_expert_keys(ep_plan: dict[str, str]) -> set[str]:
+    """The keys of ``ep_plan``, a ``base_model_ep_plan``, that name a routed-experts container."""
+    return {key for key, style in ep_plan.items() if style in _EXPERTS_STYLES} | {
+        key.rsplit(".", 1)[0] for key, style in ep_plan.items() if style == "grouped_gemm"
+    }
+
+
+def _routed_expert_modules(model: "nn.Module", ep_plan: dict[str, str]) -> "dict[str, nn.Module]":
+    """``model``'s routed-expert containers, ``{name: module}``, as its ``base_model_ep_plan`` names them.
+
+    A module is one when its name, with layer indices wildcarded as transformers does, is a container
+    key or ends with one: the keys are relative to the base model, so they omit the ``model.`` or
+    ``language_model.model.`` a causal LM or a VLM puts in front. Deciding a model's distribution and
+    loading it expert-parallel both find the experts this way, so the two cannot disagree.
+    """
+    # Local: transformers is the optional [hf] extra, and this module must import without it.
+    from transformers.integrations.tensor_parallel import replace_layer_number_by_wildcard
+
+    keys = _routed_expert_keys(ep_plan)
+    found = {}
+    for name, module in model.named_modules():
+        generic = replace_layer_number_by_wildcard(name)
+        if any(generic == key or generic.endswith("." + key) for key in keys):
+            found[name] = module
+    return found
+
 
 # ---------------------------------------------------------------------------------------------------
 # DP=EP all-to-all expert transport (`torch_a2a`)
@@ -292,8 +405,7 @@ def register_torch_a2a():
     These two styles are functionally transformers' ``megamoe_router`` / ``megamoe_experts`` (added
     in 5.10.4 for DeepGEMM Mega-MoE), reimplemented here so the transport works below 5.10.4 too.
     The base classes (``RouterParallel``, ``TensorParallelLayer``) are stock wherever the EP infra
-    exists (transformers >= 5.6, the framework floor enforced in ``load_and_prepare_ep``), so this
-    works on any such version; ``grouped_gemm`` (expert weight sharding) is stock too.
+    exists (transformers >= 5.6); ``grouped_gemm`` (expert weight sharding) is stock too.
     """
     global _TORCH_A2A_REGISTERED
     if _TORCH_A2A_REGISTERED:

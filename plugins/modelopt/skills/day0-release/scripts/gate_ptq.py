@@ -58,8 +58,6 @@ Validation summary shape:
     }
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import sys
@@ -237,8 +235,10 @@ def evaluate_checkpoint(summary):
             failures.append(
                 (
                     "MODEL_UNSUPPORTED",
-                    f"recipe {recipe} targets {expected_bucket} but 0 layers covered "
-                    "(wildcard likely missed the module names)",
+                    (
+                        f"recipe {recipe} targets {expected_bucket} but 0 layers covered "
+                        "(wildcard likely missed the module names)"
+                    ),
                 )
             )
         if unexpected > 0:

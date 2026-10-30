@@ -43,7 +43,7 @@ jobs:
       diffusers: ${{ steps.lanes.outputs.diffusers }}
       onnx: ${{ steps.lanes.outputs.onnx }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - if: startsWith(github.ref, 'refs/heads/pull-request/')

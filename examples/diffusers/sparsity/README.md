@@ -65,10 +65,9 @@ python wan22_skip_softmax.py \
 
 `--export-dir` writes a Hugging Face checkpoint with the calibrated
 `threshold_scale_factor` block embedded in each component's `config.json`
-(under the `sparse_attention_config` key). TRT-LLM's
-`SkipSoftmaxAttentionConfig.resolve_for_target_sparsity` reads the
-`(a, b)` directly via `coeffs['a'] * math.exp(coeffs['b'] * sparsity)` —
-no extra conversion needed downstream.
+(under the `sparse_attention_config` key), in the schema TRT-LLM VisualGen
+loads: `(a, b)` under `threshold_scale_factor.coefficients` and a scalar
+`target_sparsity`. No extra conversion is needed downstream.
 
 ## Threshold Modes
 

@@ -1,4 +1,4 @@
-# IFBench eval for Qwen3.6-35B-A3B. See README section 5 for the task/metric table.
+# MMMU-Pro eval for Qwen3.6-35B-A3B. See README.md in this directory for the task/metric table.
 #
 # Set `execution.hostname`, `execution.account` and `deployment.checkpoint_path` (BF16, W4A4 PTQ or QAD)
 # before running. Serves BF16 and NVFP4 unchanged: vLLM reads the FP8 KV-cache setting from the
@@ -10,7 +10,7 @@
 #
 #   pip install "nemo-evaluator-launcher[all]==0.2.6"
 #   export HF_TOKEN=<token>; export SLURM_JOB_DIR=<dir>; export HF_HOME=<cache>
-#   nemo-evaluator-launcher run --config eval_configs/ifbench.yaml
+#   nemo-evaluator-launcher run --config evaluation/mmmu_pro.yaml
 defaults:
   - execution: slurm/default
   - deployment: vllm
@@ -26,7 +26,7 @@ execution:
   ntasks_per_node: 1
   gpus_per_node: 4
   gres: "gpu:4"
-  walltime: 01:30:00
+  walltime: 02:30:00
   output_dir: ${oc.env:SLURM_JOB_DIR}
   mode: sequential
   mounts:
@@ -86,7 +86,7 @@ evaluation:
             chat_template_kwargs:
               enable_thinking: true
   tasks:
-    - name: ns_ifbench
+    - name: ns_mmmu_pro
       nemo_evaluator_config:
         config:
           params:

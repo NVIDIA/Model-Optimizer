@@ -568,8 +568,10 @@ def test_runner_is_invoked_in_process(tmp_path, monkeypatch):
     assert launched == [
         [
             "--nks",
-            "64,32,model.layers.*.self_attn.q_proj|model.layers.*.self_attn.k_proj"
-            "|model.layers.*.self_attn.v_proj",
+            (
+                "64,32,model.layers.*.self_attn.q_proj|model.layers.*.self_attn.k_proj"
+                "|model.layers.*.self_attn.v_proj"
+            ),
             "32,32,model.layers.*.self_attn.o_proj",
             "128,32,model.layers.*.mlp.gate_proj|model.layers.*.mlp.up_proj",
             "32,64,model.layers.*.mlp.down_proj",

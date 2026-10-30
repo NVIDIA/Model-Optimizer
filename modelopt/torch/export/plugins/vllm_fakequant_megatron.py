@@ -33,6 +33,7 @@ from modelopt.torch.export.plugins.vllm_fakequant_hf import (
 from modelopt.torch.export.quant_format import QUANTIZATION_NONE
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.nn import GroupedQuantizer, SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.utils.core_utils import apply_without_qdq
 from modelopt.torch.utils import get_unwrapped_name
 from modelopt.torch.utils.distributed import DistributedProcessGroup, is_master
 
@@ -405,8 +406,12 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         self._state_dict.update({prefix + name: value for name, value in state.items()})
 
     @staticmethod
-    def _fakequant_weight(weight, weight_quantizer, dtype):
-        """Return a CPU QDQ weight while preserving the quantizer's device."""
+    def _fakequant_weight(weight, weight_quantizer, dtype, unquantized_rows=None):
+        """Return a CPU QDQ weight while preserving the quantizer's device.
+
+        ``unquantized_rows`` skip the QDQ but keep the quantizer's scaling / rotation, as in the
+        fake-quant forward (GatedDeltaNet's beta / alpha gates).
+        """
         weight = weight.to(dtype)
         # Fold the weight_quantizer into the weight by applying fake-quantization
         # (quantize then dequantize). The weight_quantizer amax is not exported;
@@ -430,7 +435,17 @@ class VllmFqGPTModelExporter(GPTModelExporter):
                 if need_move:
                     weight_quantizer.to(quant_device)
                 try:
-                    weight = weight_quantizer(weight.to(quant_device)).to(dtype)
+                    weight = weight.to(quant_device)
+                    qweight = weight_quantizer(weight)
+                    if unquantized_rows is not None:
+                        qweight = torch.cat(
+                            [
+                                qweight[: unquantized_rows.start],
+                                apply_without_qdq(weight_quantizer, weight[unquantized_rows]),
+                                qweight[unquantized_rows.stop :],
+                            ]
+                        )
+                    weight = qweight.to(dtype)
                 finally:
                     if need_move:
                         weight_quantizer.to(wq_dev)
@@ -478,7 +493,10 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         # Grouped slicing reads QDQ weights from the hooked module.state_dict().
         if "weight" in name_to_value and module not in self._grouped_fq_modules:
             name_to_value["weight"] = self._fakequant_weight(
-                name_to_value["weight"], getattr(module, "weight_quantizer", None), dtype
+                name_to_value["weight"],
+                getattr(module, "weight_quantizer", None),
+                dtype,
+                getattr(module, "_modelopt_unquantized_output_rows", None),
             )
 
         # Save activation ranges; weight quantizers are folded into the weights above.
