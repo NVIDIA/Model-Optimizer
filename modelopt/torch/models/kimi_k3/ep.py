@@ -70,6 +70,8 @@ with flash-linear-attention (FLA) 0.5.0, which the remote code's KDA layers need
 import torch
 import torch.nn as nn
 
+from modelopt.torch.utils import print_rank_0
+
 from .. import _onfly_decompress
 from .._remote_code import stage_full_remote_closure
 from ._remote_fixes import (
@@ -185,8 +187,6 @@ def _patch_kimi_moe_block(kmod) -> None:
     shared experts around the fused call). A block built before the patch keeps its per-expert experts,
     and so its own forward. Idempotent.
     """
-    from modelopt.torch.utils import print_rank_0
-
     Block = kmod.KimiSparseMoeBlock  # noqa: N806 (a class, keeping its own name)
     if getattr(Block, "_kimi_k3_ep_patched", False):
         return
@@ -274,8 +274,6 @@ def _register_kimi_k3_conversions() -> None:
     # load without it would leave the experts MISSING, so an ImportError here must stop the load.
     from transformers.conversion_mapping import register_checkpoint_conversion_mapping
     from transformers.core_model_loading import Concatenate, MergeModulelist, WeightConverter
-
-    from modelopt.torch.utils import print_rank_0
 
     def _mapping():
         return [
