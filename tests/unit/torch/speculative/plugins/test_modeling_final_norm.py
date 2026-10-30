@@ -40,6 +40,8 @@ _HIDDEN_SIZE = 16
         ("deepseek_v3", "rmsnorm"),
         ("kimi_k2", "rmsnorm"),
         ("kimi_k25", "rmsnorm"),
+        ("muse_glimmer_text", "rmsnorm"),
+        ("muse_glimmer", "rmsnorm"),
         ("gpt_oss", "gpt_oss_rmsnorm"),
         ("gemma", None),  # unlisted model
         ("", None),
