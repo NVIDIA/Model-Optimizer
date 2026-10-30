@@ -194,15 +194,29 @@ def test_an_option_it_cannot_honor_is_refused_before_anything_loads(option, refu
         load_pretrained("no/such/checkpoint", **option)
 
 
-def test_a_config_passed_for_the_load_needs_none_on_disk(tmp_path):
-    """The load uses the config it is passed, as ``from_pretrained`` does, and so does the choice of
-    its loading hook: a directory without a config.json loads."""
+@pytest.mark.parametrize(
+    ("as_path", "model_type"),
+    [(False, None), (True, None), (True, "llama")],
+    ids=["config", "config-path", "config-path-and-model-type"],
+)
+def test_a_config_passed_for_the_load_needs_none_on_disk(tmp_path, as_path, model_type):
+    """The load uses the config it is passed, or reads it from the directory it is passed, as
+    ``from_pretrained`` does, and so do its plan and the choice of its loading hook: a checkpoint
+    directory without a config.json loads, through a model class of the caller's own too."""
     config = _tiny_llama_config()
-    _save(tmp_path, config, {**LlamaForCausalLM(config).state_dict(), STRAY: torch.ones(32)})
-    (tmp_path / "config.json").unlink()
-    (tmp_path / "generation_config.json").write_text("{}")  # from_pretrained reads it instead
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    _save(weights, config, {**LlamaForCausalLM(config).state_dict(), STRAY: torch.ones(32)})
+    if as_path:
+        (tmp_path / "config").mkdir()
+        (weights / "config.json").rename(tmp_path / "config" / "config.json")
+        passed = {"auto_class": LlamaForCausalLM, "config": str(tmp_path / "config")}
+    else:
+        (weights / "config.json").unlink()
+        passed = {"config": config}
+    (weights / "generation_config.json").write_text("{}")  # from_pretrained reads it instead
 
-    model = _load(tmp_path, config=config)
+    model = _load(weights, model_type=model_type, **passed)
 
     assert model._modelopt_unplaced_source_keys == [STRAY]
 

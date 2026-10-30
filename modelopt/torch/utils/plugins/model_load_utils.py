@@ -626,8 +626,9 @@ def load_pretrained(
     dtype (its config's, else bfloat16), not one the load asks for: hand a load that widens it,
     ``dtype=torch.float32`` say, its plan. ``hf_config`` is the config
     :func:`resolve_distribution_plan` returned with the plan handed in as ``distribution``: the load
-    builds from it as given, so without that plan it is refused. A ``config`` passed for the load is
-    the one the plan is decided from, and a sharded load takes it as its ``hf_config``.
+    builds from it as given, so without that plan it is refused. A ``config`` passed for the load, or
+    a path to one as ``from_pretrained`` takes, is the one the plan is decided from, and a sharded
+    load takes it as its ``hf_config``.
 
     Whatever the placement:
 
@@ -686,8 +687,9 @@ def load_pretrained(
                 f"{os.environ['WORLD_SIZE']}-rank launch, whose process group is not set up; load "
                 "inside distributed_run(), which sets it up."
             )
+    # The config to load with, or, as from_pretrained also takes it, a path to read it from.
     config = kwargs.get("config")
-    config = config if isinstance(config, PretrainedConfig) else None
+    config = config if isinstance(config, (PretrainedConfig, str, os.PathLike)) else None
 
     def handed() -> DistributionPlan | None:
         if distribution is None:
@@ -749,6 +751,12 @@ def load_pretrained(
     # every rank, rather than leave the others in the load's next collective.
     with _refused_together("checkpoint fetch", alone):
         _, ckpt_path = ensure_local_checkpoint(ckpt_path, **revision, **hub_options)
+        if config is not None and not isinstance(config, PretrainedConfig):
+            # Read as the load reads it, so the plan and the loading hook follow the config the
+            # model is built from, which need not be in the checkpoint's directory.
+            config = AutoConfig.from_pretrained(
+                config, trust_remote_code=kwargs.get("trust_remote_code", False), **hub_options
+            )
     subfolder = kwargs.pop("subfolder", None)
     if subfolder:
         ckpt_path = os.path.join(ckpt_path, subfolder)
