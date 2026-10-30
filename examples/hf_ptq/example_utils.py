@@ -655,8 +655,11 @@ def get_model(
     distribution: DistributionPlan | None = None,
 ):
     print(f"Initializing model from {ckpt_path}")
-    # The plan to load the whole model by on every rank; a single process's by default.
+    # The plan to load the whole model by on every rank; a single process's by default. Only a plan
+    # the caller gave reaches load_pretrained: without one it decides itself as before, and refuses
+    # MODELOPT_* knobs asking to shard over a launch whose process group is not set up.
     plan = distribution or DistributionPlan()
+    routing = {} if distribution is None else {"distribution": distribution}
 
     _disk_offload = offload_folder is not None
     if _disk_offload and max_cpu_memory_gb is None:
@@ -790,7 +793,7 @@ def get_model(
             ckpt_path,
             AutoModelForCausalLM,
             model_type=hf_config.model_type,
-            distribution=plan,
+            **routing,
             device_map=device_map,
             **model_kwargs,
         )
@@ -802,7 +805,7 @@ def get_model(
                 ckpt_path,
                 AutoModelForCausalLM,
                 model_type=hf_config.model_type,
-                distribution=plan,
+                **routing,
                 device_map=pinned or "auto",
                 trust_remote_code=trust_remote_code,
                 dtype="auto",
@@ -830,7 +833,7 @@ def get_model(
             ckpt_path,
             AutoModelForCausalLM,
             model_type=hf_config.model_type,
-            distribution=plan,
+            **routing,
             device_map="cpu" if on_cpu else pinned or "sequential",
             **model_kwargs,
         )
@@ -941,7 +944,7 @@ def get_model(
             ckpt_path,
             auto_model_module,
             model_type=hf_config.model_type,
-            distribution=plan,
+            **routing,
             device_map=device_map,
             **model_kwargs2,
         )
