@@ -2020,6 +2020,21 @@ def test_the_loader_refuses_a_transformers_that_builds_no_model_with_torch_a2a(
         load_and_prepare_ep("unused", DistributionPlan(2, ep_size=2), hf_config=SimpleNamespace())
 
 
+def test_a_block_fp8_checkpoint_needs_the_transformers_that_dequantizes_its_experts(
+    monkeypatch, gloo_world_of_one
+):
+    """transformers 5.8 added the hooks block-fp8 is dequantized through (``_dequantize_one``,
+    ``update_weight_conversions``). On 5.7 the experts' converter takes their fp8 weights before the
+    dequant can, so they would load unscaled: refused before anything loads."""
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "size", lambda group=None: 2)
+    monkeypatch.setattr("transformers.__version__", "5.7.0")
+    config = SimpleNamespace(base_model_ep_plan=_EP_PLAN, quantization_config=_BLOCK_FP8)
+
+    with pytest.raises(RuntimeError, match=r"requires transformers >= 5\.8, but 5\.7\.0"):
+        load_and_prepare_ep("unused", DistributionPlan(2, ep_size=2), hf_config=config)
+
+
 @pytest.mark.parametrize(
     "quantization_config",
     [None, _BLOCK_FP8],
