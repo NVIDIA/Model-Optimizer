@@ -609,9 +609,10 @@ def test_arguments_override_the_env_knobs(run_as, serve, monkeypatch, tmp_path):
         ("4", "fsdp"),
         ("WORLD", "fsdp"),
         ("", "fsdp"),
+        (" world ", "fsdp"),
         ("2", None),
     ],
-    ids=["1", "4", "WORLD", "exported-empty", "part-of-the-world"],
+    ids=["1", "4", "WORLD", "exported-empty", "padded", "part-of-the-world"],
 )
 def test_the_dense_knob_replicates_or_shards_over_the_whole_world(
     run_as, serve, gpu_memory, monkeypatch, tmp_path, value, dense
@@ -1067,11 +1068,11 @@ def test_an_expert_parallel_plan_is_refused(run_as, serve, loaders, auto_class, 
     assert auto_class.calls == []
 
 
-def _every_rank_loads_rank0s_plan_job(rank, size, ckpt, handed):
+def _every_rank_loads_rank0s_plan_job(rank, size, ckpt, handed, placed):
     model, refused = None, None
     with bounded_collectives():
         try:  # not pytest.raises: its failure would end the pooled worker instead of the job
-            model = load_pretrained(ckpt, distribution=handed[rank], device_map="cpu")
+            model = load_pretrained(ckpt, distribution=handed[rank], **placed)
         except Exception as error:
             refused = str(error)
     if isinstance(handed[0], DistributionPlan):
@@ -1082,20 +1083,24 @@ def _every_rank_loads_rank0s_plan_job(rank, size, ckpt, handed):
 
 
 @pytest.mark.parametrize(
-    "handed",
+    ("handed", "placed"),
     [
-        (DistributionPlan(2), DistributionPlan(2, dense="fsdp")),
-        (DistributionPlan(2), None),
-        ("fsdp2", DistributionPlan(2)),
+        ((DistributionPlan(2), DistributionPlan(2, dense="fsdp")), {"device_map": "cpu"}),
+        ((DistributionPlan(2), None), {"device_map": "cpu"}),
+        (("fsdp2", DistributionPlan(2)), {"device_map": "cpu"}),
+        ((DistributionPlan(2), DistributionPlan(2)), {}),
     ],
-    ids=["another-plan", "none", "not-a-plan"],
+    ids=["another-plan", "none", "not-a-plan", "placed-by-default"],
 )
-def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path, handed):
+def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path, handed, placed):
     """Over a real broadcast, whatever rank 1 was handed. Ranks loading different plans would build
     mismatched meshes, and one handed none would decide a plan through collectives the others never
-    join: both would hang. A distribution rank 0 refuses fails every rank."""
+    join: both would hang. A distribution rank 0 refuses fails every rank. Placed by default, each
+    rank takes the model onto its GPU, and a run without GPUs, as these ranks are, loads it whole."""
     LlamaForCausalLM(LlamaConfig(**_TINY)).save_pretrained(tmp_path)
-    cpu_dist_workers.run(_every_rank_loads_rank0s_plan_job, ckpt=str(tmp_path), handed=handed)
+    cpu_dist_workers.run(
+        _every_rank_loads_rank0s_plan_job, ckpt=str(tmp_path), handed=handed, placed=placed
+    )
 
 
 def _fetched_in_step(ckpt_path, **hub_options):
