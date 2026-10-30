@@ -16,12 +16,13 @@
 """Tests for ``modelopt.torch.utils.distributed``: its pure functions, the distribution plan and a
 model's record of it, the collectives that fail together, and the process group's lifetime."""
 
-import importlib.util
 import os
 import pickle
 import sys
 from contextlib import nullcontext
 from datetime import timedelta
+from functools import partial
+from unittest import mock
 
 import pytest
 import torch
@@ -29,7 +30,7 @@ import torch.distributed
 import torch.nn as nn
 from _test_utils.torch.distributed.utils import bounded_collectives
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp import FSDPModule, fully_shard
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.nas.hparams.container import DepthHparam
@@ -153,12 +154,10 @@ def test_a_model_with_no_plan_raises_in_a_run_of_several_ranks(cpu_dist_workers)
 
 
 def test_fsdp2_wrap_keeps_its_old_path(monkeypatch):
-    """fsdp2_wrap lives with the loaders that wrap with it; callers of the old path still reach it."""
-    model_load_utils = pytest.importorskip("modelopt.torch.utils.plugins.model_load_utils")
+    """fsdp2_wrap moved to fsdp2_utils; callers of the old path still reach it."""
     calls = []
     monkeypatch.setattr(
-        model_load_utils,
-        "fsdp2_wrap",
+        "modelopt.torch.utils.fsdp2_utils.fsdp2_wrap",
         lambda model, **kwargs: calls.append((model, kwargs)) or "layers",
     )
     model = nn.Linear(2, 2)
@@ -167,35 +166,50 @@ def test_fsdp2_wrap_keeps_its_old_path(monkeypatch):
     assert calls == [(model, {"shard_root": False, "mp_policy": None, "cpu_offload": True})]
 
 
-_HF_EXTRA = r"needs the hf extra \(pip install 'nvidia-modelopt\[hf\]'\)"
+class _Decoder(nn.Module):
+    """Decoder layers of plain PyTorch, which no Hugging Face plugin knows."""
+
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.ModuleList([nn.Linear(4, 4), nn.Linear(4, 4)])
 
 
-@pytest.mark.parametrize(
-    ("missing", "message"),
-    [
-        ("transformers", _HF_EXTRA),
-        ("huggingface_hub", _HF_EXTRA),
-        pytest.param(
-            "transformers.conversion_mapping",
-            "halted; None in sys.modules",
-            # Without transformers, its own import fails first: the extra is what is missing.
-            marks=pytest.mark.skipif(
-                importlib.util.find_spec("transformers") is None, reason="needs transformers"
-            ),
-        ),
-        ("modelopt.torch.utils.plugins.model_load_utils", "halted; None in sys.modules"),
-    ],
-    ids=["transformers", "huggingface_hub", "transformers-submodule", "another-import-error"],
-)
-def test_fsdp2_wrap_names_the_extra_its_old_path_needs(monkeypatch, missing, message):
-    """Without the hf extra, the old path says what it needs rather than which module is missing;
-    any other import error, such as a module an installed transformers lacks, reaches the caller as
-    it is."""
-    monkeypatch.delitem(sys.modules, "modelopt.torch.utils.plugins.model_load_utils", raising=False)
-    monkeypatch.setitem(sys.modules, missing, None)
+# As an install without the hf extra has them: importing any of them fails.
+_HUGGING_FACE = ("transformers", "huggingface_hub", "accelerate")
 
-    with pytest.raises(ImportError, match=message):
-        dist.fsdp2_wrap(nn.Linear(2, 2))
+
+def _wraps_without_hugging_face_job(rank, size):
+    # Imported while the Hugging Face packages are there, as the pooled worker keeps them.
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+    from modelopt.torch.utils import fsdp2_utils
+
+    model, mesh = _Decoder(), init_device_mesh("cpu", (size,))
+    hidden = (*_HUGGING_FACE, "modelopt.torch.utils.plugins.model_load_utils")
+    saved = {name: sys.modules.pop(name) for name in hidden if name in sys.modules}
+    sys.modules.update(dict.fromkeys(_HUGGING_FACE))
+    try:
+        with (
+            mock.patch.object(LayerActivationCollector, "_decoder_layer_support", []),
+            # A CPU mesh, whatever accelerator the host has.
+            mock.patch.object(fsdp2_utils, "fully_shard", partial(fully_shard, mesh=mesh)),
+        ):
+            LayerActivationCollector.register_decoder_layer_support(
+                lambda model: isinstance(model, _Decoder), lambda model: model.layers
+            )
+            layers = dist.fsdp2_wrap(model, shard_root=False)
+    finally:
+        for name in hidden:
+            sys.modules.pop(name, None)
+        sys.modules.update(saved)
+    assert layers is model.layers
+    assert all(isinstance(layer, FSDPModule) for layer in layers)
+    assert not isinstance(model, FSDPModule)
+
+
+def test_fsdp2_wrap_needs_no_hugging_face(cpu_dist_workers):
+    """The old path wraps a model whose decoder layers are registered, with no Hugging Face package
+    to import and the loaders unimportable, as it did before fsdp2_wrap moved."""
+    cpu_dist_workers.run(_wraps_without_hugging_face_job)
 
 
 # ------------------------------------------------------------------------------------ collectives
