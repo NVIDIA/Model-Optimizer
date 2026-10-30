@@ -681,6 +681,42 @@ def test_expert_parallel_calibration_needs_the_experts_expert_parallel_group(
     cpu_dist_workers.run(_expert_parallel_calibration_job, layout=layout)
 
 
+def _expert_parallel_auto_quantize_job(rank, size):
+    model = nn.Sequential(OrderedDict(gate=nn.Linear(16, 16), experts=nn.Linear(16, 16)))
+    dp, ep = _EXPERT_LAYOUTS["seeded"]["experts"]
+    model.experts._parallel_state = ParallelState(
+        data_parallel_group=dp, expert_model_parallel_group=ep
+    )
+    set_distribution_plan(model, DistributionPlan(world_size=size, ep_size=size))
+    modules = [type(module) for module in model.modules()]
+    state = {name: tensor.clone() for name, tensor in model.state_dict().items()}
+    raised = None
+    with bounded_collectives():
+        try:  # not pytest.raises, as in _expert_parallel_calibration_job
+            mtq.auto_quantize(
+                model,
+                constraints={"effective_bits": 8.0},
+                quantization_formats=[(mtq.INT8_DEFAULT_CFG, "int8")],
+                data_loader=[torch.randn(2, 16)],
+                forward_step=lambda m, batch: m(batch),
+                loss_func=lambda output, batch: output.sum(),
+            )
+        except NotImplementedError as e:
+            raised = str(e)
+    assert raised is not None and f"experts are sharded over {size} ranks" in raised, raised
+    assert [type(module) for module in model.modules()] == modules
+    after = model.state_dict()
+    assert after.keys() == state.keys()
+    assert all(torch.equal(after[name], tensor) for name, tensor in state.items())
+
+
+def test_auto_quantize_refuses_an_expert_parallel_model_before_changing_it(cpu_dist_workers):
+    """auto_quantize's forwards would run the experts without the expert-parallel forwards that
+    quantization replaces, which distributed_forward_loop restores. So it refuses such a model, with
+    its experts seeded and a candidate every rank syncs, before it converts anything."""
+    cpu_dist_workers.run(_expert_parallel_auto_quantize_job)
+
+
 # Rank 0 of four at EP 2, in the (edp, ep) = (2, 2) mesh: ranks 0 and 1 shard the experts between
 # them, ranks 2 and 3 do the same, and rank 2 holds the same shard as rank 0. The two-rank pool cannot
 # build these groups, so the process group answers as a four-rank launch's would.
