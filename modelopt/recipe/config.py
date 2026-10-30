@@ -22,7 +22,7 @@ from typing import Any, ClassVar, Literal, Self
 from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
-from modelopt.torch.quantization.config import QuantizeConfig
+from modelopt.torch.quantization.config import QuantizeAlgoCfgType, QuantizeConfig
 from modelopt.torch.speculative.config import (
     DFlashConfig,
     EagleConfig,
@@ -322,6 +322,23 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         description="QuantizeConfig applied as a uniform post-step; falls back to "
         "the --kv_cache_qformat CLI flag when omitted.",
     )
+    finalize_algorithm: QuantizeAlgoCfgType = ModeloptField(
+        default=None,
+        title="Calibration of the frozen assignment (optional)",
+        description="If set, the search only scores and saves its checkpoint; a run that finds "
+        "the scores in the checkpoint re-solves for the constraints and quantizes the source "
+        "weights with the selected per-layer formats and this algorithm. Use it for layerwise "
+        "algorithms such as sequential GPTQ, whose result for a layer depends on the formats "
+        "chosen for earlier layers; candidates are searched with their own (e.g. local) "
+        "algorithms.",
+    )
+
+    @field_validator("finalize_algorithm")
+    @classmethod
+    def _validate_finalize_algorithm(cls, v):
+        if v is not None:
+            QuantizeConfig(quant_cfg=[], algorithm=v)
+        return v
 
     @property
     def uses_predicted_damage_target(self) -> bool:
