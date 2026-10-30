@@ -243,7 +243,7 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
                 NotImplementedError,
                 f"cannot dequantize a '{method}'",
             )
-            for method in ("gptq", "modelopt", "compressed-tensors")
+            for method in ("gptq", "modelopt", "compressed-tensors", "mxfp4")
         ),
         (SimpleNamespace(), ValueError, "declare base_model_ep_plan"),
         (
@@ -273,6 +273,7 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
         "gptq",
         "modelopt",
         "compressed-tensors",
+        "mxfp4",
         "no-ep-plan",
         "no-routed-experts",
         "experts-container-only",
@@ -284,7 +285,8 @@ def test_a_config_the_load_cannot_take_is_refused_before_anything_loads(
     ep_world_of_two, config, error, match
 ):
     """A format transformers' own quantizer would load as stored, for PTQ to treat as plain weights,
-    or a plan that leaves the experts whole on every rank: one naming no routed experts, or none of
+    or, MXFP4, dequantize into GPT-OSS's transposed expert layout whatever the model's, or a plan
+    that leaves the experts whole on every rank: one naming no routed experts, or none of
     whose entries shards their weights by grouped_gemm, the only expert-weight style the load
     shards by, or one that styles some of their weights otherwise. The load refuses each before it
     reads anything."""
