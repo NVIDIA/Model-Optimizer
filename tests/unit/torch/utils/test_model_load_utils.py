@@ -1320,16 +1320,25 @@ def test_a_load_it_decides_shards_the_experts(
     assert distribution_plan(model) == DistributionPlan(4, ep_size=4)
 
 
-@pytest.mark.parametrize("dense", ["replicate", "fsdp"])
+@pytest.mark.parametrize(
+    ("dense", "one_gpu_per_process"),
+    [("replicate", False), ("fsdp", False), ("replicate", True)],
+    ids=["replicate", "fsdp", "one-gpu-per-process"],
+)
 def test_an_expert_parallel_plan_loads_through_the_ep_loader(
-    run_as, serve, loaders, auto_class, a_gpu, tmp_path, dense
+    run_as, serve, loaders, auto_class, a_gpu, monkeypatch, tmp_path, dense, one_gpu_per_process
 ):
     """An EP plan loads through load_and_prepare_ep, with the plan and the Hub options the load was
     given, and the checkpoint's config, read once for both, and through no other load. It returns
     the model unfrozen, as the other loads do, and an option passed as None asks nothing of it. That
     load replicates the dense part, so a plan that also FSDP2-shards it is refused before anything
-    loads, naming the ways out."""
-    run_as(4)
+    loads, naming the ways out. A launch that shows each process one GPU, bound to cuda:0, gives a
+    rank of any local rank a GPU of its own."""
+    run_as(4, rank=1 if one_gpu_per_process else 0)
+    if one_gpu_per_process:
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+        monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+        monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     config = serve(_deepseek_v3(n_routed_experts=8))
     plan = DistributionPlan(4, ep_size=4, dense=dense)
     options = {
