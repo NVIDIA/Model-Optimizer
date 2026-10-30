@@ -766,7 +766,7 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
         # A sampler over another source than the loader's dataset, or a RandomSampler drawing its
         # own number of samples or with replacement, picks which and how many it reads, as a subset
         # does; one that orders or shuffles the whole dataset does not.
-        source = getattr(picker, "data_source", getattr(picker, "dataset", None))
+        source = getattr(picker, "data_source", getattr(picker, "dataset", ()))
         narrowing = known and (
             len(source) != len(loader.dataset)
             or (
