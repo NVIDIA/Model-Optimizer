@@ -395,19 +395,8 @@ def distribution_plan(model: torch.nn.Module) -> DistributionPlan:
     model it was added to, so read the plan off that model. A run is its live process group: before
     a launch sets its group up, each of its processes runs alone with a model of its own, so a model
     with no plan reads as a single process's there.
-
-    A model FSDP2-sharded under a plan that replicates its dense part raises too: it was sharded
-    after its plan was recorded, so the plan no longer says how it is placed.
     """
     plan = getattr(model, _PLAN_ATTR, None)
-    if plan is not None and not plan.is_fsdp_dense and is_fsdp2_model(model):
-        raise RuntimeError(
-            f"{type(model).__name__} is FSDP2-sharded, but its recorded plan, {plan!r}, "
-            "replicates it: it was sharded after its plan was recorded, and a plan is recorded "
-            "once. To shard a model yourself, load it with from_pretrained rather than "
-            "load_pretrained, which records the plan it loaded by, then record yours with "
-            "set_distribution_plan() once it is sharded."
-        )
     if plan is not None:
         return plan
     sharded = is_fsdp2_model(model)

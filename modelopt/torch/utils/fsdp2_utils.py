@@ -26,6 +26,7 @@ import torch
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 from torch.distributed.tensor import DTensor
 
+from modelopt.torch.utils.distributed import _PLAN_ATTR
 from modelopt.torch.utils.logging import warn_rank_0
 
 __all__ = ["fsdp2_wrap"]
@@ -101,10 +102,19 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     params it ignores.
 
     It records no distribution plan: a caller wrapping a model itself records one once it is wrapped
-    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`). Wrap a model loaded with
-    ``from_pretrained``, not one :func:`load_pretrained` returned: that one has the plan it was
-    loaded by recorded already, and a plan is recorded once.
+    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`). It refuses a model whose
+    recorded plan replicates it, as the plan :func:`load_pretrained` records on a model it loads
+    whole does: a plan is recorded once, so wrap a model loaded with ``from_pretrained`` instead.
     """
+    recorded = getattr(model, _PLAN_ATTR, None)
+    if recorded is not None and not recorded.is_fsdp_dense:
+        # Sharded, the model would read as replicated: the export would gather it as if it were.
+        raise RuntimeError(
+            f"{type(model).__name__} is recorded as distributed by {recorded!r}, which replicates "
+            "it, and a plan is recorded once. To shard a model yourself, load it with "
+            "from_pretrained rather than load_pretrained, which records the plan it loaded by, "
+            "then record yours with set_distribution_plan() once it is wrapped."
+        )
     # Importing the quantization package registers every mode and plugin; only a wrap needs it.
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
