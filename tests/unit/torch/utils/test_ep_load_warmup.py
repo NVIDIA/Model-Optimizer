@@ -164,7 +164,7 @@ def test_a_tp_planned_dense_param_keeps_its_tp_share_while_the_rest_stays_on_met
 def test_an_error_while_sizing_falls_back_to_the_stock_sizing(monkeypatch):
     """The warmup only sizes an allocator reservation, so whatever the EP-aware sizing cannot
     handle gets transformers' own number instead of failing the load, with whatever else a later
-    release passes the hook."""
+    release passes the hook, and a warning: that number can reserve most of the device."""
     stock_calls = []
 
     def stock_sizing(model, accelerator_device_map, hf_quantizer=None, *args, **kwargs):
@@ -180,7 +180,8 @@ def test_an_error_while_sizing_falls_back_to_the_stock_sizing(monkeypatch):
     device_map = model.device_map()
 
     with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN):
-        sizing = modeling_utils.get_total_byte_count(model, device_map, quantizer, 1, flag=True)
+        with pytest.warns(UserWarning, match="EP-aware warmup sizing failed"):
+            sizing = modeling_utils.get_total_byte_count(model, device_map, quantizer, 1, flag=True)
         assert sizing == {_GPU: 123}
 
     assert stock_calls == [(model, device_map, quantizer, (1,), {"flag": True})]
