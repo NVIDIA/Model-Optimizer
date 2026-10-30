@@ -18,6 +18,7 @@
 import contextlib
 import copy
 import dataclasses
+import json
 import logging
 import math
 import os
@@ -70,6 +71,7 @@ from modelopt.torch.utils.logging import print_rank_0, warn_rank_0
 from modelopt.torch.utils.moe import (
     _EP_MIN_TRANSFORMERS,
     _EXPERTS_STYLES,
+    _SUB_CONFIG_ATTRS,
     _choose_ep_degree,
     _ep_config,
     _ep_spec,
@@ -2015,6 +2017,31 @@ def _ckpt_quant_method(cfg):
     return None
 
 
+_UNDECLARED = object()
+
+
+def _declared_ep_plan(ckpt_dir: str, hf_config, ep_cfg):
+    """The plan the checkpoint's ``config.json`` declares for ``ep_cfg``, or ``_UNDECLARED``.
+
+    ``ep_cfg`` is ``hf_config`` or one of its nested configs, and the plan is read from the same
+    place in the file. Read from the file, not the config: a plan the config carries besides is
+    ModelOpt's -- the one a model spec attaches
+    (:func:`~modelopt.torch.utils.moe.apply_distributed_support`) -- or the config class's, and an
+    export must write out neither.
+    """
+    try:
+        with open(os.path.join(ckpt_dir, "config.json")) as f:
+            source = json.load(f)
+    except (OSError, ValueError):
+        return _UNDECLARED
+    if ep_cfg is not hf_config:
+        attr = next((a for a in _SUB_CONFIG_ATTRS if getattr(hf_config, a, None) is ep_cfg), None)
+        source = source.get(attr) if attr else None
+    if isinstance(source, dict) and "base_model_ep_plan" in source:
+        return source["base_model_ep_plan"]
+    return _UNDECLARED
+
+
 def _transformers_mesh_builder():
     """The module whose ``initialize_distributed_mesh`` ``from_pretrained`` calls, or ``None``.
 
@@ -2228,8 +2255,8 @@ def load_and_prepare_ep(
     # some plans style only their parameters, grouped_gemm.
     swapped_plan.update(dict.fromkeys(_routed_expert_keys(ep_plan), "torch_a2a_experts"))
     from_pretrained_kwargs["experts_implementation"] = "torch_a2a"
-    # The checkpoint's own plan, for the config the model keeps (below); None: a class default.
-    declared_plan = vars(ep_cfg).get("base_model_ep_plan")
+    # The checkpoint's own plan, for the config the model keeps (below).
+    declared_plan = _declared_ep_plan(ckpt_path, hf_config, ep_cfg)
     ep_cfg.base_model_ep_plan = swapped_plan
     from_pretrained_kwargs["config"] = hf_config
     print_rank_0(f"[ep] ep_plan={swapped_plan} experts_implementation=torch_a2a")
@@ -2247,7 +2274,7 @@ def load_and_prepare_ep(
         kept_config = getattr(model, "config", None)
         if kept_config is not None:
             kept_ep_config = _ep_config(kept_config)
-            if declared_plan is None:
+            if declared_plan is _UNDECLARED:
                 vars(kept_ep_config).pop("base_model_ep_plan", None)
             else:
                 kept_ep_config.base_model_ep_plan = declared_plan

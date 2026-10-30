@@ -25,6 +25,7 @@ tests of each part use a process group, two gloo ranks.
 import copy
 import dataclasses
 import inspect
+import json
 import math
 import os
 from contextlib import ExitStack, contextmanager
@@ -2682,13 +2683,19 @@ def test_a_plan_whose_expert_containers_match_no_module_is_refused(ep_world_of_t
         load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
 
 
-@pytest.mark.parametrize("declared", [True, False], ids=["on-the-config", "a-class-default"])
+@pytest.mark.parametrize(
+    ("declared", "on_the_config"),
+    [(True, True), (False, False), (False, True)],
+    ids=["by-its-checkpoint", "a-class-default", "attached-by-its-spec"],
+)
 def test_the_model_keeps_the_plan_its_checkpoint_declares(
-    ep_world_of_two, gloo_world_of_one, monkeypatch, declared
+    ep_world_of_two, gloo_world_of_one, monkeypatch, tmp_path, declared, on_the_config
 ):
     """The load shards by the torch_a2a styles, but the config the model keeps goes back to the
-    checkpoint's plan: an export writes it out, and nothing without ModelOpt knows those styles. A
-    plan the config class ships (transformers' own, e.g. Qwen3-MoE's) stays off the instance."""
+    plan its checkpoint's config.json declares: an export writes it out, and nothing without
+    ModelOpt knows those styles. A plan the config class ships (transformers' own, e.g.
+    Qwen3-MoE's) stays off the instance, and so does one the model's spec attached to the config,
+    which names styles only ModelOpt registers (Nemotron-H's nemotron_experts_ep)."""
 
     class _PastError(Exception):
         """Raised by the load's next check."""
@@ -2711,18 +2718,25 @@ def test_the_model_keeps_the_plan_its_checkpoint_declares(
     monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: None)
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
 
-    class _Config(SimpleNamespace):
-        model_type = _NO_SPEC
+    class _Config(transformers.PretrainedConfig):
+        model_type = "_probe"
         base_model_ep_plan = _EP_PLAN
 
+    (tmp_path / "config.json").write_text(
+        json.dumps({"base_model_ep_plan": _EP_PLAN} if declared else {})
+    )
     # 8 experts over 2 ranks: the stand-in model holds this rank's 4.
-    config = _Config(num_experts=8, **({"base_model_ep_plan": dict(_EP_PLAN)} if declared else {}))
+    plan = {"base_model_ep_plan": dict(_EP_PLAN)} if on_the_config else {}
+    config = _Config(num_experts=8, **plan)
 
     with pytest.raises(_PastError):
-        load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
+        load_and_prepare_ep(str(tmp_path), DistributionPlan(2, ep_size=2), hf_config=config)
 
     assert model.config.base_model_ep_plan == _EP_PLAN
     assert ("base_model_ep_plan" in vars(model.config)) is declared
+    model.config.save_pretrained(tmp_path / "saved")
+    written = json.loads((tmp_path / "saved" / "config.json").read_text())
+    assert ("base_model_ep_plan" in written) is declared
 
 
 def test_a_loaded_model_keeps_its_sharding_styles_out_of_its_saved_config(
