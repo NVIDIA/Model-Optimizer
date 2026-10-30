@@ -18,6 +18,7 @@
 import contextlib
 import copy
 import dataclasses
+import inspect
 import logging
 import os
 import re
@@ -62,7 +63,7 @@ from modelopt.torch.utils.distributed import (
     is_initialized,
     set_distribution_plan,
 )
-from modelopt.torch.utils.fsdp2_utils import fsdp2_wrap
+from modelopt.torch.utils.fsdp2_utils import _off_dtype_params, fsdp2_wrap
 from modelopt.torch.utils.logging import print_rank_0, warn_rank_0
 from modelopt.torch.utils.moe import (
     _EXPERTS_STYLES,
@@ -891,6 +892,47 @@ def load_pretrained(
     return model
 
 
+def _fsdp2_wrap_modules(model: "torch.nn.Module") -> list["torch.nn.Module"]:
+    """Return the transformer-block modules to FSDP2 ``fully_shard`` individually.
+
+    Uses HuggingFace's own ``_no_split_modules`` -- the class names of the atomic blocks that must not be
+    split across devices (what ``device_map="auto"`` wraps at) -- falling back to modelopt's decoder-layer
+    auto-detection.
+
+    For a VLM, this looks at the LANGUAGE backbone's boundaries, NOT the top-level VLM wrapper's
+    ``_no_split_modules`` (which for some VLMs -- e.g. Qwen2.5-VL -- ALSO lists the VISION block classes).
+    FSDP-sharding the vision blocks makes the calibration weight-access all-gather on those sharded vision
+    weights DEADLOCK; keeping the vision/audio towers REPLICATED (plain) -- the language-only calibration
+    never runs them and they are small enough to fit -- avoids that. This also covers VLMs whose top-level
+    wrapper exposes no ``_no_split_modules`` at all (e.g. Nemotron-Nano-VL). A VLM whose language
+    backbone shows no blocks is refused rather than wrapped by the wrapper's list.
+    """
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+
+    def _boundaries(root: "torch.nn.Module") -> "list[torch.nn.Module] | None":
+        ns = set(getattr(root, "_no_split_modules", None) or [])
+        if ns:
+            mods = [m for m in root.modules() if type(m).__name__ in ns]
+            if mods:
+                return mods
+        layers = LayerActivationCollector.get_decoder_layers(root)
+        return list(layers) if layers is not None else None
+
+    # VLM -> wrap only the language backbone's blocks (vision/audio stay replicated); else the whole model.
+    from modelopt.torch.export.model_utils import get_language_model_from_vl
+
+    lineage = get_language_model_from_vl(model)
+    root = lineage[-1] if lineage else model
+    mods = _boundaries(root)
+    if mods:
+        return mods
+    raise RuntimeError(
+        f"Could not determine FSDP2 wrap boundaries: {type(root).__name__} exposes no "
+        "`_no_split_modules` and modelopt's decoder-layer auto-detection did not match. Provide a "
+        "standard HF causal-LM / VLM checkpoint, or replicate the dense part (MODELOPT_FSDP_SIZE=1)."
+    )
+
+
 def _map_ckpt_keys_to_model(model: "torch.nn.Module", ckpt_keys, model_keys) -> dict:
     """Map each checkpoint key to the model ``state_dict`` key it feeds.
 
@@ -1492,6 +1534,18 @@ def _decide_distribution(
             f"{knob}={ep_size} must divide the routed experts {hf_config.model_type} shards "
             f"({num_experts})."
         )
+    # Why the expert-parallel load cannot shard the dense part, if it cannot: the export cannot write
+    # it sharded within several expert-data-parallel replicas.
+    unshardable, remedy = None, ""
+    if ep_size > 1 and world_size // ep_size > 1:
+        unshardable = (
+            f"within each of its {world_size // ep_size} expert-data-parallel replicas, a layout "
+            "the export cannot write yet"
+        )
+        remedy = (
+            " Set MODELOPT_EP_DEGREE to the world size if it divides the expert count, or "
+            "MODELOPT_FSDP_SIZE=1 if the dense part fits one GPU."
+        )
     if dense == "auto":
         # A rank holds a whole copy of what expert parallelism does not shard, and its 1/ep_size
         # share of the routed experts it does.
@@ -1504,7 +1558,17 @@ def _decide_distribution(
         )
         memory = _gpu_memory()
         too_big = memory is not None and held > _REPLICATED_SHARE * memory
-        dense = "fsdp" if too_big else "replicate"
+        if too_big and unshardable:
+            warn_rank_0(
+                f"{hf_config.model_type}: a rank holding the dense part whole would take more than "
+                f"{_REPLICATED_SHARE:.0%} of a GPU, but it cannot be sharded {unshardable}; "
+                f"replicating it, which may run out of memory.{remedy}"
+            )
+        dense = "fsdp" if too_big and not unshardable else "replicate"
+    elif dense == "fsdp" and unshardable:
+        raise NotImplementedError(
+            f"The dense part of {hf_config.model_type} cannot be sharded {unshardable}.{remedy}"
+        )
     return DistributionPlan(world_size, ep_size, dense)
 
 
@@ -1604,6 +1668,160 @@ def resolve_distribution_plan(
     return plan, hf_config
 
 
+def _make_expert_param_matcher(ep_plan: dict[str, Any]):
+    """Build ``is_expert(param_name) -> bool`` from the model's ``base_model_ep_plan``.
+
+    That plan is what drives EP sharding, so it replaces a fragile ``"expert" in name`` heuristic.
+
+    A param is EP-sharded (only its ``1/ep_degree`` shard resides on this rank) iff its name, with layer
+    indices wildcarded exactly as HuggingFace does (``replace_layer_number_by_wildcard``) and any trailing
+    ``.weight`` / ``.bias`` stripped, contains an expert plan key as a run of whole dot-separated
+    segments. That one test covers a key equal to the name, a suffix of it (the base-relative plan keys
+    omit the ``model.`` / ``language_model.model.`` prefixes) and a container the name nests under, so
+    both per-parameter shard keys (``...experts.gate_up_proj: grouped_gemm``) and experts-container
+    keys (``...experts: torch_a2a_experts`` / ``nemotron_experts_ep``) match. Router entries
+    (``ep_router`` / ``torch_a2a_router``) are REPLICATED, not sharded, so they're excluded. If the plan is
+    empty the matcher is always ``False`` (-> no EP credit -> stock warmup sizing).
+    """
+    from transformers.integrations.tensor_parallel import replace_layer_number_by_wildcard
+
+    _router_styles = {"ep_router", "torch_a2a_router"}
+    keys = [k for k, v in (ep_plan or {}).items() if v not in _router_styles]
+
+    def is_expert(pname: str) -> bool:
+        generic = replace_layer_number_by_wildcard(pname)
+        for suffix in (".weight", ".bias"):
+            if generic.endswith(suffix):
+                generic = generic[: -len(suffix)]
+                break
+        padded = "." + generic + "."
+        return any(("." + k + ".") in padded for k in keys)
+
+    return is_expert
+
+
+@contextlib.contextmanager
+def _ep_aware_caching_allocator_warmup(
+    ep_degree: int, ep_plan: dict[str, Any], dense_on_meta: bool = False
+):
+    """Make transformers' ``caching_allocator_warmup`` EP-aware for the duration of ``from_pretrained``.
+
+    transformers sizes the load-time allocator warmup via ``get_total_byte_count``, which credits the
+    ``// world_size`` sharding division only to params matched in ``model._tp_plan``. Under the EP load
+    (``device_mesh`` + ``enable_expert_parallel``; sharding driven by ``base_model_ep_plan``) no expert
+    param is in ``_tp_plan``, so every one of them -- experts are ~95% of a large MoE -- is counted at
+    FULL global size. The
+    warmup then pre-allocates one ``torch.empty`` clamped to ``device_total - 1.2 GiB`` (~the whole GPU)
+    on every rank; torch keeps that as reserved cache, which later starves the NCCL a2a comm buffers.
+
+    This temporarily replaces ``get_total_byte_count`` with a version that additionally credits EP-sharded
+    expert params their per-rank shard (``// ep_degree``), identifying them from ``ep_plan`` (the model's
+    ``base_model_ep_plan``), sizing the warmup to the real per-rank footprint (e.g. ~91 GiB instead of
+    ~275 GiB for Nemotron-3-Ultra-550B EP32) -- keeping the warmup's load-speed benefit without the
+    ~device-max transient.
+
+    Always on (no disable knob): it only *sizes* an allocator pre-reservation, never model correctness; it
+    falls back to stock sizing on any incompatibility (a hook whose leading parameters differ is left in
+    place, and an error while sizing returns the stock number); and a mis-estimate only nudges load
+    speed (an over-credit under-sizes -> the allocator just grows during load; an under-credit sizes up to
+    the same device-max clamp as stock) -- so it can never OOM worse than, or load differently from, stock.
+    No-op when ``ep_degree <= 1``.
+    """
+    if ep_degree <= 1:
+        yield
+        return
+    try:
+        import transformers.modeling_utils as _mu
+    except Exception:
+        yield
+        return
+    orig = getattr(_mu, "get_total_byte_count", None)
+    if orig is None:
+        yield
+        return
+    try:
+        params = list(inspect.signature(orig).parameters)
+    except (TypeError, ValueError):
+        params = []
+    # A release whose hook takes other leading parameters calls it in a way this replacement cannot
+    # know, so it keeps the stock sizing rather than fail the load at transformers' call site.
+    if params[:3] != ["model", "accelerator_device_map", "hf_quantizer"]:
+        yield
+        return
+
+    is_expert = _make_expert_param_matcher(ep_plan)
+
+    def _ep_aware(model, accelerator_device_map, hf_quantizer=None, *args, **kwargs):
+        try:
+            from collections import defaultdict
+
+            try:  # where current transformers keeps it (5.18); older releases, under integrations
+                from transformers.distributed.tensor_parallel import _get_parameter_tp_plan
+            except ImportError:
+                try:
+                    from transformers.integrations.tensor_parallel import _get_parameter_tp_plan
+                except ImportError:
+                    _get_parameter_tp_plan = None
+            ws = (
+                torch.distributed.get_world_size()
+                if torch.distributed.is_available() and torch.distributed.is_initialized()
+                else 1
+            )
+            tp_plan = (getattr(model, "_tp_plan", None) or {}) if ws > 1 else {}
+            tied = set(getattr(model, "all_tied_weights_keys", {}) or {})
+            total: dict = defaultdict(int)
+            for pname, dev in accelerator_device_map.items():
+                if pname in tied:
+                    continue
+                try:
+                    p = model.get_parameter_or_buffer(pname)
+                except Exception:
+                    continue
+                dsize = (
+                    hf_quantizer.param_element_size(model, pname, p)
+                    if hf_quantizer is not None
+                    else p.element_size()
+                )
+                nb = p.numel() * dsize
+                if is_expert(pname):
+                    nb //= ep_degree  # EP-sharded across the ep submesh: only the local shard resides here
+                elif (
+                    tp_plan
+                    and _get_parameter_tp_plan is not None
+                    and _get_parameter_tp_plan(pname, tp_plan, is_weight=True) is not None
+                ):
+                    # Placed by transformers' TP branch, which never asks where the dense part goes, so
+                    # it is on the device at its share even when the rest of the dense part is on meta.
+                    # That branch shards over from_pretrained's device_mesh, the ep submesh.
+                    nb //= ep_degree
+                elif dense_on_meta and pname.endswith((".weight", ".bias")):
+                    # A sharded dense part: _ep_dense_meta_load forces every dense .weight/.bias to
+                    # materialize on META during from_pretrained (they are FSDP2-sharded + DCP-loaded
+                    # afterwards), so they occupy NO device memory in the window this warmup sizes.
+                    # Counting them at full global size is what pushed Kimi-K3 (EP64, dense=fsdp) to a
+                    # 185.8 GiB estimate on a 184.31 GiB card -- over the device, so the warmup fell back
+                    # to the device-max clamp it exists to avoid. Persistent buffers are NOT forced to
+                    # meta by that context, so they keep their full credit here.
+                    continue
+                total[dev] += nb
+            gib = 1024**3
+            sizes = ", ".join(f"{d}: {b / gib:.1f} GiB" for d, b in total.items())
+            print_rank_0(
+                f"[MEM] EP-aware warmup sizing (experts // ep_degree={ep_degree}"
+                f"{', dense on meta -> uncounted' if dense_on_meta else ''}) -> {sizes} "
+                f"(was full-model ~device-max; EP-aware plan-driven sizing)"
+            )
+            return total
+        except Exception:
+            return orig(model, accelerator_device_map, hf_quantizer, *args, **kwargs)
+
+    try:
+        _mu.get_total_byte_count = _ep_aware
+        yield
+    finally:
+        _mu.get_total_byte_count = orig
+
+
 def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_state) -> None:
     """Seed every module's ``_parallel_state`` for calibration's amax sync.
 
@@ -1617,6 +1835,102 @@ def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_st
         module._parallel_state = (
             expert_state if prefixes and (name + ".").startswith(prefixes) else dense_state
         )
+
+
+def _fsdp2_shard_dense(model: nn.Module, fsdp_mesh, expert_modules) -> int:
+    """FSDP2-shard the model's dense modules, leaving the routed experts to EP.
+
+    FSDP2 ``fully_shard`` the model's DENSE (non-expert) modules over ``fsdp_mesh``, leaving the routed
+    experts (already EP-sharded on ``ep`` + the a2a transport) untouched -- the "FSDP2 dense + EP MoE"
+    hybrid. ``fsdp_mesh`` is the FULL world (dense shards over every rank, the same ranks the experts are
+    EP-sharded over).
+
+    Wraps at the DECODER-LAYER boundary (:func:`_fsdp2_wrap_modules`: the language backbone's HF
+    ``_no_split_modules`` blocks, else the decoder-layer detection the pure-FSDP2 path uses) and passes
+    the routed-expert params as ``ignored_params`` so FSDP shards
+    the layer's dense params (attention, layernorms, router) while leaving the experts EP-sharded on
+    the ``ep`` mesh + a2a transport. As there, a param off the model's dtype (an fp32 router) stays
+    replicated: FSDP2 shards one dtype per group. Wrapping
+    the whole layer (not ``self_attn`` or individual leaves) is essential: ``fully_shard`` swaps a wrapped
+    module's class (``Foo`` -> ``FSDPFoo``), and modelopt inspects classes by name/source -- wrapping
+    ``self_attn`` breaks ``mtq``'s KV-cache AST registration (``inspect.getsource`` on the synthetic
+    class), and wrapping the leaf ``QuantLinear``s breaks the export's name-based ``is_quantlinear``.
+    Wrapping only the LAYER leaves ``self_attn`` and the q/k/v/o ``QuantLinear``s PLAIN, while
+    ``_get_enclosing_fsdp_module`` still finds the layer FSDP wrapper for the weight-access/writeback
+    contexts. The root (embed/lm_head/final norm) is intentionally NOT wrapped: those stay replicated
+    (and unswizzled, so their quantization-exclude still applies), matching the dense-replicated baseline.
+
+    Returns the number of layers wrapped.
+    """
+    from torch.distributed.fsdp import fully_shard
+
+    # Every routed-expert param is EP-sharded on the ``ep`` mesh; FSDP must IGNORE them so it never tries
+    # to reshard them onto ``fsdp_mesh``. Ignored params not present in a given layer are simply no-ops.
+    ignored_params = _off_dtype_params(model)
+    for em in expert_modules:
+        ignored_params.update(em.parameters(recurse=True))
+
+    from torch.distributed.tensor import DTensor, Replicate
+
+    ignored_param_ids = {id(p) for p in ignored_params}  # id-based: Tensor.__eq__ is elementwise
+
+    # Wrap only the OUTERMOST _no_split_modules. Some models (e.g. Kimi's MoonViT VLM) list BOTH a
+    # container (the vision model) and its blocks in ``_no_split_modules``; ``fully_shard`` on the parent
+    # already shards the children, so wrapping a child afterward hits ``DeviceMesh._concatenate`` ("Cannot
+    # concatenate overlapping meshes"). Drop any wrap module nested under another.
+    wrap_modules = _fsdp2_wrap_modules(model)
+    wrap_ids = {id(m) for m in wrap_modules}
+    nested_ids: set = set()
+    for m in wrap_modules:
+        for c in m.modules():
+            if id(c) != id(m) and id(c) in wrap_ids:
+                nested_ids.add(id(c))
+    wrap_modules = [m for m in wrap_modules if id(m) not in nested_ids]
+
+    n = 0
+    for layer in wrap_modules:
+        layer_ignored = set(ignored_params)  # experts + any pre-sharded dense (below)
+        has_shardable = False
+        for name, p in list(layer.named_parameters(recurse=True)):
+            if id(p) in ignored_param_ids:
+                continue
+            if isinstance(p.data, DTensor):
+                if all(isinstance(pl, Replicate) for pl in p.data.placements):
+                    # Replicate -> plain (a free view, no gather), re-registered as a plain Parameter:
+                    # assigning .data would keep the DTensor parameter, which fully_shard then tries
+                    # to place on both its own mesh and the FSDP one.
+                    owner_name, _, leaf = name.rpartition(".")
+                    owner = layer.get_submodule(owner_name) if owner_name else layer
+                    setattr(
+                        owner,
+                        leaf,
+                        nn.Parameter(p.data.to_local(), requires_grad=p.requires_grad),
+                    )
+                else:
+                    layer_ignored.add(
+                        p
+                    )  # already sharded by the loader (TP) -> leave it distributed
+                    continue
+            has_shardable = True
+        if not has_shardable:
+            continue  # nothing left to FSDP-shard in this layer (all expert / already-sharded)
+        fully_shard(
+            layer,
+            mesh=fsdp_mesh,
+            reshard_after_forward=True,
+            ignored_params=layer_ignored,
+        )
+        n += 1
+    if not n:
+        # The dense params were forced to meta for this sharding; with nothing sharded, the load would
+        # materialize the whole dense part on every rank, which the plan shards it to avoid.
+        raise RuntimeError(
+            f"Sharding the dense part found {len(wrap_modules)} block(s) but no dense parameter to "
+            "shard in any of them (each is a routed expert's, already sharded, or off the model's "
+            "dominant dtype), so every rank would hold the whole dense part. Replicate the dense "
+            "part instead (MODELOPT_FSDP_SIZE=1)."
+        )
+    return n
 
 
 # The checkpoint formats load_and_prepare_ep dequantizes as it loads, beside unquantized ones (None).
@@ -1675,6 +1989,99 @@ def _experts_sharded_over(ep_mesh):
         mixin.initialize_distributed_mesh = original
 
 
+@contextlib.contextmanager
+def _ep_dense_meta_load(is_expert):
+    """Keep the dense part off the GPU during ``from_pretrained``, for the EP hybrid.
+
+    Force every non-expert weight/bias to materialize on ``meta`` (i.e. NOT on the GPU) by making
+    transformers' per-param ``get_device`` return ``"meta"`` for dense keys.
+
+    transformers 5.x's ``convert_and_load_state_dict_in_model`` places EXPERT params via the tp /
+    ``distributed_operation`` branch (which fuses + EP-shards them and never consults ``get_device``), and
+    every OTHER (dense) param via ``param_device = get_device(device_map, key)`` -> ``spawn_materialize``.
+    Returning ``"meta"`` there leaves dense params unmaterialized while experts still EP-shard normally. The
+    skipped dense params are then FSDP2-sharded + DCP-loaded (:func:`_load_ep_dense_distributed`), so dense is
+    never replicated per rank. Only ``.weight``/``.bias`` are forced meta -- persistent buffers (small) load
+    normally. Patches ``get_device`` on both ``transformers.modeling_utils`` and the module that actually
+    defines the loader (it's looked up as a module global there).
+    """
+    import sys as _sys
+
+    import transformers.modeling_utils as _mu
+
+    loader = getattr(_mu, "convert_and_load_state_dict_in_model", None)
+    mods = {_mu}
+    loader_module = getattr(loader, "__module__", None)
+    dm = _sys.modules.get(loader_module) if loader_module else None
+    if dm is not None:
+        mods.add(dm)
+    targets = [m for m in mods if hasattr(m, "get_device")]
+    if not targets:
+        import transformers
+
+        raise RuntimeError(
+            "Sharding the dense part keeps it off the device during from_pretrained through "
+            f"transformers' get_device, which none of {sorted(m.__name__ for m in mods)} has on "
+            f"transformers {transformers.__version__}. Set MODELOPT_FSDP_SIZE=1 if the dense part "
+            "fits one GPU."
+        )
+
+    def _dense_weight(key) -> bool:
+        k = str(key)
+        return k.endswith((".weight", ".bias")) and not is_expert(k)
+
+    saved = [(m, m.get_device) for m in targets]
+
+    def _make(orig):
+        def patched(device_map, key, *args, **kwargs):
+            if _dense_weight(key):
+                return "meta"
+            return orig(device_map, key, *args, **kwargs)
+
+        return patched
+
+    try:
+        for m, orig in saved:
+            m.get_device = _make(orig)
+        yield
+    finally:
+        for m, orig in saved:
+            m.get_device = orig
+
+
+def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, expert_modules):
+    """FSDP2-shard the meta dense part and DCP-load each rank's shard, for the EP hybrid.
+
+    Each rank's shard comes straight from the checkpoint, so the dense part is NEVER
+    materialized replicated. Experts are already EP-sharded (loaded by ``from_pretrained``) and left untouched. Returns
+    the number of dense layers sharded, like :func:`_fsdp2_shard_dense`.
+
+    Requires the dense ``.weight``/``.bias`` params to be on ``meta`` on entry (see
+    :func:`_ep_dense_meta_load`). Delegates the materialize + DCP load to :func:`_meta_dcp_load`, fed the
+    partially-meta model (dense meta, experts already real) and the dense param names.
+    """
+    from modelopt.torch.utils.distributed import local_rank
+
+    device = torch.device(f"cuda:{local_rank()}")
+    # FSDP2-shard the dense modules. Their params are meta plain tensors -> fully_shard makes them meta Shard
+    # DTensors; experts are passed as ignored_params and stay EP-sharded.
+    n_dense = _fsdp2_shard_dense(model, fsdp_mesh, expert_modules)
+    # Restrict the shared loader to the dense params (experts already materialized by from_pretrained must not
+    # be touched). It selectively materializes only the meta dense modules (experts skipped), preserves
+    # buffers across to_empty, and DCP-loads each rank's dense shard.
+    dense_names = {
+        n
+        for n, _ in model.named_parameters()
+        if n.endswith((".weight", ".bias")) and not is_expert(n)
+    }
+    print_rank_0(
+        f"[ep] dense-distributed load: FSDP2-sharded {n_dense} dense module(s); "
+        f"meta+DCP-loading {len(dense_names)} dense param(s) (experts left EP-sharded)"
+    )
+    _meta_dcp_load(model, local_dir, device, load_names=dense_names)
+    return n_dense
+
+
 def load_and_prepare_ep(
     ckpt_path: str,
     plan: DistributionPlan,
@@ -1698,6 +2105,9 @@ def load_and_prepare_ep(
     the load that rests on ``from_pretrained`` running no collective, as transformers'
     expert-parallel load does not on 5.7 through 5.18.
 
+    With ``plan.dense == "fsdp"`` the dense part is FSDP2-sharded over the ``ep`` group instead,
+    each rank loading only its shard: for a model whose dense part does not fit one GPU.
+
     The model builds with its LM head where an auto class builds one; ``require_lm_head=False``
     builds a VLM without it. Without ``hf_config`` every rank reads the checkpoint's config itself;
     on many ranks, pass it. The caller records the plan on the model
@@ -1706,8 +2116,14 @@ def load_and_prepare_ep(
     """
     if not plan.is_expert_parallel:
         raise ValueError(f"{plan!r} shards no routed experts, which is what this load is for.")
-    if plan.is_fsdp_dense:
-        raise NotImplementedError(f"{plan!r}: this load replicates the dense part on every rank.")
+    if plan.is_fsdp_dense and plan.edp > 1:
+        # Refused before the load: the export, after the whole calibration, is what cannot write it.
+        raise NotImplementedError(
+            f"{plan!r} FSDP2-shards the dense part within each of {plan.edp} expert-data-parallel "
+            "replicas, a layout the export cannot write yet. Set MODELOPT_EP_DEGREE to the world "
+            "size if it divides the expert count, or MODELOPT_FSDP_SIZE=1 if the dense part fits "
+            "one GPU."
+        )
     # Bringing the group up is the launcher's job; this load needs it live and device-bound.
     if not dist.is_initialized():
         raise RuntimeError(
@@ -1891,13 +2307,32 @@ def load_and_prepare_ep(
     ep_cfg.base_model_ep_plan = swapped_plan
     from_pretrained_kwargs["config"] = hf_config
     print_rank_0(f"[ep] ep_plan={swapped_plan} experts_implementation=torch_a2a")
-    # A rank failing in the load fails every rank here, before the warmup's collectives:
+    # Size the load-time caching-allocator warmup to the real per-rank (EP-sharded) footprint instead of
+    # the full model -- otherwise transformers pre-allocates ~device-max on every rank and torch holds it
+    # as reserved cache, starving the NCCL a2a buffers. Expert params are identified from `swapped_plan`
+    # (the actual EP plan). Always on: falls back to stock sizing on any issue and a mis-size only nudges
+    # load speed, never correctness. (See _ep_aware_caching_allocator_warmup.)
+    is_expert_fn = _make_expert_param_matcher(swapped_plan)
+    # The plan places the DENSE (non-expert) modules; the experts are always EP-sharded by from_pretrained.
+    # A replicated dense part loads with them, on every rank. A sharded one is left on meta during
+    # from_pretrained (get_device->meta via _ep_dense_meta_load), then FSDP2-sharded + DCP-loaded, so it
+    # is never replicated anywhere.
+    _dense_ctx = (
+        _ep_dense_meta_load(is_expert_fn) if plan.is_fsdp_dense else contextlib.nullcontext()
+    )
+    # A rank failing in the load fails every rank here, before the collectives below:
     # from_pretrained runs no collective, so the others finish it and meet the failure in the gather.
     with _refused_together("the expert-parallel load", alone=False):
         # The class the plan's decision chose, with its LM head where an auto class builds one.
         loader = _auto_class(hf_config, require_lm_head, trust_remote_code=trust_remote_code)
         print_rank_0(f"[ep] loader={loader.__name__} (require_lm_head={require_lm_head})")
-        with _experts_sharded_over(ep_submesh):
+        with (
+            _ep_aware_caching_allocator_warmup(
+                ep_degree, swapped_plan, dense_on_meta=plan.is_fsdp_dense
+            ),
+            _dense_ctx,
+            _experts_sharded_over(ep_submesh),
+        ):
             model = loader.from_pretrained(ckpt_path, **from_pretrained_kwargs)
         model.eval()
         # The config the model keeps goes back to the checkpoint's plan, as an export writes it out
@@ -1909,6 +2344,15 @@ def load_and_prepare_ep(
                 vars(kept_ep_config).pop("base_model_ep_plan", None)
             else:
                 kept_ep_config.base_model_ep_plan = declared_plan
+        if plan.is_fsdp_dense and dist.is_master():
+            _nmeta = [n for n, p in model.named_parameters() if p.is_meta]
+            _dense_meta = [n for n in _nmeta if not is_expert_fn(n)]
+            print(
+                f"[ep] dense-meta load: {len(_nmeta)} meta param(s) after from_pretrained "
+                f"({len(_dense_meta)} dense, {len(_nmeta) - len(_dense_meta)} expert); experts materialized. "
+                f"e.g. dense-meta {_dense_meta[:3]}",
+                flush=True,
+            )
         # The experts forward reads the implementation from the config when it runs, which
         # from_pretrained left on grouped_mm: torch_a2a on every (sub)config. An export writes none.
         for _m in model.modules():
@@ -1936,6 +2380,27 @@ def load_and_prepare_ep(
                 f"{type(model).__name__} matches, so calibration would reduce the experts' amax over "
                 "ranks holding different experts. Quantize the model without expert parallelism."
             )
+
+    # "FSDP2 dense + EP MoE" hybrid: experts are EP-sharded over ``ep`` and the DENSE (non-expert) modules
+    # are FSDP2-sharded over the same ranks, the whole world: a dense part sharded within several
+    # expert-parallel groups is refused above. Dense all-gather then expert a2a run sequentially within a
+    # forward (same ranks), so there is no concurrent-collective deadlock. Weight amax is computed on the
+    # FSDP-gathered full weight (identical per rank); activation amax syncs over the whole world via the
+    # dense ``dp`` group registered below.
+    #
+    # A replicated dense part stays data-parallel and needs no post-load step.
+    if plan.is_fsdp_dense:
+        # Fully-distributed dense: dense was left on meta during from_pretrained; FSDP2-shard it over the
+        # full-world mesh and DCP-load each rank's shard directly (never replicated anywhere).
+        dense_fsdp_mesh = dense_mesh["dp"]
+        n_dense = _load_ep_dense_distributed(
+            model, dense_fsdp_mesh, ckpt_path, is_expert_fn, expert_modules.values()
+        )
+        print_rank_0(
+            f"[ep] dense sharded: FSDP2-sharded {n_dense} dense module(s) over the whole world, "
+            f"mesh {dense_fsdp_mesh.mesh_dim_names}={tuple(dense_fsdp_mesh.shape)}; experts "
+            "EP-sharded on ep"
+        )
 
     # Each module's ParallelState for calibration's amax sync: dense modules reduce over the whole world;
     # routed experts reduce over their expert-data-parallel replicas, and share one input amax across the
