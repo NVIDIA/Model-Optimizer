@@ -26,7 +26,7 @@ import torch
 from safetensors import safe_open
 
 from modelopt.torch.utils import print_rank_0
-from modelopt.torch.utils.moe import _SUB_CONFIG_ATTRS, require_transformers
+from modelopt.torch.utils.moe import config_levels, require_transformers
 
 
 def to_native_backbone_config(
@@ -60,19 +60,13 @@ def to_native_backbone_config(
     return native
 
 
-def _config_levels(hf_config) -> list:
-    """``hf_config`` and the nested language-model configs the expert-parallel load reads."""
-    nested = (getattr(hf_config, attr, None) for attr in _SUB_CONFIG_ATTRS)
-    return [c for c in (hf_config, *nested) if c is not None]
-
-
 def _find_quantization_config(hf_config):
     """Locate the compressed-tensors ``quantization_config`` (top-level, else on the nested
     language-model config) and return it as a plain dict, or ``None`` for a config without one."""
     qc = next(
         (
             found
-            for c in _config_levels(hf_config)
+            for c in config_levels(hf_config)
             if (found := getattr(c, "quantization_config", None)) is not None
         ),
         None,
@@ -300,12 +294,12 @@ def _mark(hf_config, stored_as):
 def is_marked(hf_config) -> bool:
     """Whether :func:`install_onfly_decompress` marked ``hf_config``, or its nested language-model
     config, for its hooks."""
-    return any(getattr(c, _MARK, None) is not None for c in _config_levels(hf_config))
+    return any(getattr(c, _MARK, None) is not None for c in config_levels(hf_config))
 
 
 def stored_names(hf_config) -> tuple[str, ...]:
     """The names the installed compressed-tensors stores each weight under for ``hf_config``'s scheme."""
-    for c in _config_levels(hf_config):
+    for c in config_levels(hf_config):
         if (stored_as := getattr(c, _MARK, None)) is not None:
             return stored_as
     raise ValueError("The config is not marked for on-the-fly decompression: install it first.")
@@ -323,7 +317,7 @@ def install_onfly_decompress(hf_config):
         raise TypeError("install_onfly_decompress: pass the model's config object, not a dict")
     # The loader sets each parameter from what the conversion hands it, uncast. Every level counts:
     # a backbone config derived from the text config (to_native_backbone_config) keeps its dtype.
-    for level in _config_levels(hf_config):
+    for level in config_levels(hf_config):
         dtype = getattr(level, "dtype", None)
         if dtype is not None and str(dtype).removeprefix("torch.") != "bfloat16":
             raise NotImplementedError(
@@ -393,7 +387,7 @@ def install_onfly_decompress(hf_config):
             )
         # from_pretrained loads from a copy of the marked config; the mark must not reach the config
         # a later save writes, at any level. Cleared once the experts' converters are rewritten.
-        for c in _config_levels(config):
+        for c in config_levels(config):
             if hasattr(c, _MARK):
                 delattr(c, _MARK)
         return out
