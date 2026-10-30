@@ -875,3 +875,17 @@ def test_a_placement_over_shared_gpus_is_refused_where_each_rank_holds_its_own_c
         example_utils.get_model(
             str(tmp_path), device=device, distribution=DistributionPlan(4), **kwargs
         )
+
+
+def test_without_a_plan_the_load_decides_and_refuses_sharding_knobs_it_cannot_honor(
+    monkeypatch, tmp_path
+):
+    """get_model hands load_pretrained only a plan its caller gave. Without one the load decides
+    as before, so a MODELOPT_* knob asking to shard over a launch whose process group is not set up
+    is refused, rather than ignored for a one-rank plan."""
+    LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+
+    with pytest.raises(RuntimeError, match="MODELOPT_FSDP_SIZE=world ask to shard"):
+        example_utils.get_model(str(tmp_path), device="cuda:0")
