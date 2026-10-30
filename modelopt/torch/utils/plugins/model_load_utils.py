@@ -905,9 +905,11 @@ def load_pretrained(
 def _fsdp2_wrap_modules(model: "torch.nn.Module") -> list["torch.nn.Module"]:
     """The blocks to FSDP2-wrap one by one: the language backbone's ``_no_split_modules`` blocks.
 
-    Falls back to modelopt's decoder-layer detection. A VLM's own list can name vision blocks, which
-    the language-only calibration never runs: sharded, their weight gathers would deadlock, so they
-    stay replicated. A model whose language backbone shows no blocks is refused.
+    Falls back to modelopt's decoder-layer detection. A VLM :func:`get_language_model_from_vl`
+    recognizes is searched from its language backbone, so its vision blocks, which the language-only
+    calibration never runs, are not wrapped; any other model is searched whole, so an unrecognized
+    VLM's listed vision blocks are wrapped too. A model whose language backbone shows no blocks is
+    refused.
     """
 
     def _boundaries(root: "torch.nn.Module") -> "list[torch.nn.Module] | None":
@@ -919,7 +921,7 @@ def _fsdp2_wrap_modules(model: "torch.nn.Module") -> list["torch.nn.Module"]:
         layers = LayerActivationCollector.get_decoder_layers(root)
         return list(layers) if layers is not None else None
 
-    # VLM -> wrap only the language backbone's blocks (vision/audio stay replicated); else the whole model.
+    # A recognized VLM -> only its language backbone's blocks (vision/audio unwrapped); else the whole model.
     lineage = get_language_model_from_vl(model)
     root = lineage[-1] if lineage else model
     mods = _boundaries(root)
@@ -1987,8 +1989,9 @@ def _ep_dense_meta_load(is_expert):
 
     transformers places expert params through its TP branch, which never asks ``get_device``, and every
     other param where ``get_device`` says: ``"meta"`` for a dense key leaves it for
-    :func:`_load_ep_dense_distributed` to shard and load. Buffers load as usual. ``get_device`` is
-    patched in every module the loader looks it up in.
+    :func:`_load_ep_dense_distributed` to shard and load. Buffers load as usual unless named
+    ``.weight``/``.bias``, which no supported MoE has: such a buffer would go to ``meta`` too, where
+    the meta+DCP load refuses it. ``get_device`` is patched in every module the loader looks it up in.
     """
     loader = getattr(hf_modeling_utils, "convert_and_load_state_dict_in_model", None)
     mods = {hf_modeling_utils}
