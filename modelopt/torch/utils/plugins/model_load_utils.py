@@ -56,6 +56,8 @@ from transformers import (
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
 
+from modelopt.torch.export.model_utils import get_language_model_from_vl
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import env, moe
 from modelopt.torch.utils.distributed import (
@@ -907,10 +909,6 @@ def _fsdp2_wrap_modules(model: "torch.nn.Module") -> list["torch.nn.Module"]:
     the language-only calibration never runs: sharded, their weight gathers would deadlock, so they
     stay replicated. A model whose language backbone shows no blocks is refused.
     """
-    # Imported here, as fsdp2_wrap does: the export and quantization packages sit above this module,
-    # and the export package imports it.
-    from modelopt.torch.export.model_utils import get_language_model_from_vl
-    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
     def _boundaries(root: "torch.nn.Module") -> "list[torch.nn.Module] | None":
         ns = set(getattr(root, "_no_split_modules", None) or [])
