@@ -726,9 +726,10 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
             load_and_prepare_ep(path, DistributionPlan(2, ep_size=2), hf_config=hf_config)
         except Exception as error:
             refused = f"{type(error).__name__}: {error}"
-    # The one rank's failure on every rank, before any rank went on alone into a collective.
+    # The one rank's failure on every rank, before any rank went on alone into a collective. The GPU
+    # check decides on every rank at once, from one gather, so no rank relays another's failure.
     assert refused is not None and match in refused, (rank, refused)
-    assert fails_here or f"rank {failing_rank} failed" in refused, refused
+    assert fails_here or failure == "no-gpu" or f"rank {failing_rank} failed" in refused, refused
 
 
 @pytest.mark.skipif(
@@ -741,7 +742,7 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
         ("transformers", 1, "requires transformers >= 5.7, but 5.6.2"),
         ("quantized-config", 1, "cannot dequantize a 'gptq'"),
         ("unseen-checkpoint", 1, "which this rank cannot see"),
-        ("no-gpu", 1, "this rank has none, though other ranks have theirs"),
+        ("no-gpu", 1, "rank(s) [1] have none while the others have theirs"),
         ("load", 1, "the GPU ran out of memory"),
         ("record", 1, "a weight file this rank cannot read"),
     ],
