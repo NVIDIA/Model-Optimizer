@@ -27,7 +27,7 @@ import dataclasses
 import inspect
 import math
 import os
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest import mock
 
@@ -82,6 +82,7 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _conversion_plan,
     _convert_keys,
     _experts_sharded_over,
+    _refuse_unquantizable_experts,
     _resolve_target,
     _seed_parallel_states,
     _transformers_mesh_builder,
@@ -1848,9 +1849,27 @@ def test_what_needs_the_group_is_refused_in_a_launch_that_sets_none_up(
 
 # ======================================================================== the expert-parallel load
 # What the expert-parallel load reads off the loaded model and its config: it takes an expert-parallel
-# plan, ``_seed_parallel_states`` gives every module the parallel state its amax syncs over, and
-# ``_ckpt_quant_method`` reads the checkpoint's native quantization. Everything runs in one CPU process
-# but the bounded two-rank tests at the end.
+# plan and keeps its experts out of ModelOpt's per-expert quant wrappers, ``_seed_parallel_states``
+# gives every module the parallel state its amax syncs over, and ``_ckpt_quant_method`` reads the
+# checkpoint's native quantization. Everything runs in one CPU process but the bounded two-rank tests
+# at the end.
+
+# ------------------------------------------------------------------------- expert classes
+
+
+class _Experts(nn.Module):
+    """A layer's routed experts, of a class of their own as a model's are: quantization's registry
+    and the load's refusals go by it."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate_up_proj = nn.Parameter(torch.zeros(4, 4, 2))
+        self.down_proj = nn.Parameter(torch.zeros(4, 2, 2))
+
+
+class _SharedExperts(nn.Module):
+    """The shared experts' class, which the all-to-all transport does not manage."""
+
 
 # ------------------------------------------------------------------------------- the plan
 
@@ -2099,6 +2118,120 @@ def test_a_plan_whose_expert_containers_match_no_module_is_refused(ep_world_of_t
         load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
 
 
+def test_routed_experts_without_experts_in_their_names_are_refused(ep_world_of_two, monkeypatch):
+    """Calibration tells routed experts by an ``experts`` in their names, and reduces the weight amax
+    of any other module over the expert-parallel group, merging the scales of different experts."""
+    model = model_with_decoder_at("model.")
+    for layer in model.model.layers:
+        layer.mlp.routed = _Experts()
+
+    class _Loader:
+        @staticmethod
+        def from_pretrained(path, **kwargs):
+            return model
+
+    monkeypatch.setattr(
+        "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
+    )
+    monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: None)
+    config = SimpleNamespace(
+        base_model_ep_plan={"layers.*.mlp.routed": "moe_tp_experts"}, num_experts=4
+    )
+
+    with pytest.raises(
+        NotImplementedError, match=r"2 routed-expert .*model\.layers\.0\.mlp\.routed:"
+    ):
+        load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
+
+
+@pytest.mark.parametrize(
+    ("loaded", "held", "named"),
+    [(4, 2, None), (3, 3, None), (None, None, None), (4, 4, None), (None, None, 4), (None, 0, 4)],
+    ids=[
+        "dividing",
+        "not-dividing",
+        "not-shown",
+        "sharded-over-another-mesh",
+        "never-sharded",
+        "owning-no-weights",
+    ],
+)
+def test_an_expert_count_the_config_does_not_name_is_read_off_the_loaded_experts(
+    ep_world_of_two, gloo_world_of_one, monkeypatch, loaded, held, named
+):
+    """A config that names its expert count none of the ways the loader reads is checked against the
+    loaded experts' weights: transformers keeps the whole count on the DTensors it shards them into,
+    and 5.16.0 splits a count ep_size does not divide without an error. A count neither shows is
+    refused, as the distribution plan's decision refuses it. So is a rank holding another share of
+    the experts than ``ep_size`` gives it: sharded over another mesh than its EP group, or never
+    sharded, which plain weights show against the count the config names. Experts whose container
+    owns no weights itself (each expert's in a child module) show no share at all, and are refused
+    rather than passed unchecked."""
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.tensor import DTensor, Shard
+
+    class _PastError(Exception):
+        """Raised by the load's next check: the experts' count passed."""
+
+    model = model_with_decoder_at("model.")
+    if held == 0:
+        for layer in model.model.layers:
+            experts, weights = layer.mlp.experts, nn.Module()
+            for name, param in list(experts.named_parameters(recurse=False)):
+                delattr(experts, name)
+                weights.register_parameter(name, param)
+            experts.add_module("weights", weights)
+    if loaded is not None:
+        mesh = init_device_mesh("cpu", (1,))
+        for layer in model.model.layers:
+            experts = layer.mlp.experts
+            for name, param in list(experts.named_parameters(recurse=False)):
+                whole = torch.zeros(loaded, *param.shape[1:])
+                # This rank's share of a count sharded over two ranks, or of another split.
+                shard = DTensor.from_local(
+                    whole[:held],
+                    mesh,
+                    [Shard(0)],
+                    run_check=False,
+                    shape=whole.shape,
+                    stride=whole.stride(),
+                )
+                setattr(experts, name, nn.Parameter(shard))
+
+    class _Loader:
+        @staticmethod
+        def from_pretrained(path, **kwargs):
+            return model
+
+    def next_check(experts):
+        raise _PastError
+
+    monkeypatch.setattr(
+        "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
+    )
+    monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: None)
+    monkeypatch.setattr(model_load_utils, "_refuse_unquantizable_experts", next_check)
+    config = SimpleNamespace(
+        base_model_ep_plan=_EP_PLAN, **({"num_experts": named} if named else {})
+    )
+    if (loaded, held) == (4, 2):
+        outcome = pytest.raises(_PastError)
+    elif held == 0:
+        outcome = pytest.raises(RuntimeError, match="no routed-expert weight shows how")
+    elif loaded == 4 or named:
+        outcome = pytest.raises(
+            RuntimeError, match="holds 4 of a routed-expert container's 4 experts"
+        )
+    else:
+        shown = r"\[3\]" if loaded == 3 else "none"
+        outcome = pytest.raises(ValueError, match=f"weights show {shown}")
+
+    with outcome:
+        load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
+
+
 @pytest.mark.parametrize("declared", [True, False], ids=["on-the-config", "a-class-default"])
 def test_the_model_keeps_the_plan_its_checkpoint_declares(
     ep_world_of_two, gloo_world_of_one, monkeypatch, declared
@@ -2235,6 +2368,80 @@ def test_the_weights_load_in_the_checkpoints_dtype_through_its_class(ep_world_of
         )
     assert loaded["dtype"] is torch.float16
     assert classes == [True]
+
+
+# ------------------------------------------------------------------------ quant wrappers
+
+
+@pytest.fixture
+def quant_wrappers():
+    """ModelOpt quant wrappers registered for the experts' and the shared experts' classes."""
+    from modelopt.torch.quantization.nn.modules.quant_module import QuantModule, QuantModuleRegistry
+
+    class _PerExpertQuantWrapper(QuantModule):
+        pass
+
+    classes = (_Experts, _SharedExperts)
+    QuantModuleRegistry.register({cls: f"test.{cls.__name__}" for cls in classes})(
+        _PerExpertQuantWrapper
+    )
+    yield QuantModuleRegistry
+    for cls in classes:
+        QuantModuleRegistry.unregister(cls)
+
+
+def test_routed_experts_with_a_quant_wrapper_of_their_own_are_refused(quant_wrappers):
+    """Quantization would convert them to it, whose forward drops the process group the all-to-all
+    transport passes in. The registry serves every model in the process, so no registration is
+    added or removed; the shared experts, which the transport does not manage, may keep a wrapper."""
+    with pytest.raises(NotImplementedError, match=r"cannot quantize _Experts: ModelOpt quantizes"):
+        _refuse_unquantizable_experts([_Experts(), _Experts()])
+
+    assert _Experts in quant_wrappers
+    assert _SharedExperts in quant_wrappers
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "outcome"),
+    [
+        ("_QuantFusedExperts", nullcontext()),
+        ("_QuantFP8Experts", pytest.raises(NotImplementedError, match="on their eager forward")),
+    ],
+    ids=["grouped-gemm", "eager-only"],
+)
+def test_routed_experts_under_a_fused_experts_wrapper(wrapper, outcome):
+    """mtq.quantize registers the generic fused-experts wrapper, for the whole process, for every
+    fused-experts class it meets, and that wrapper quantizes through the grouped GEMM: a second
+    expert-parallel load of the same class is not refused for it. FP8's applies its block scales on
+    the eager forward only, which the all-to-all transport does not run: refused."""
+    from modelopt.torch.quantization.nn.modules.quant_module import QuantModuleRegistry
+    from modelopt.torch.quantization.plugins import huggingface
+
+    QuantModuleRegistry.register({_Experts: "test._Experts"})(getattr(huggingface, wrapper))
+    try:
+        with outcome:
+            _refuse_unquantizable_experts([_Experts(), _Experts()])
+    finally:
+        QuantModuleRegistry.unregister(_Experts)
+
+
+@pytest.mark.parametrize("layout", ["says-so", "by-its-shapes", "standard"])
+def test_transposed_experts_are_refused(layout):
+    """The grouped quantization leaves experts stored transposed (GPT-OSS's) unquantized: the model
+    would be quantized everywhere but its experts. Quantization tells them by their flag or, for
+    gated experts that do not say so, by their shapes; so does the load."""
+    experts = [_Experts(), _Experts()]
+    for module in experts:
+        if layout == "says-so":
+            module.is_transposed = True
+        else:  # a fused-experts container: 4 experts, gate and up 2 x 2 wide, on hidden size 2
+            module.num_experts = 4
+            if layout == "by-its-shapes":  # (num_experts, in_dim, out_dim)
+                module.gate_up_proj = nn.Parameter(torch.zeros(4, 2, 4))
+    refused = pytest.raises(NotImplementedError, match="cannot quantize _Experts: these experts")
+
+    with refused if layout != "standard" else nullcontext():
+        _refuse_unquantizable_experts(experts)
 
 
 # ----------------------------------------------------------------------- _seed_parallel_states
@@ -2422,7 +2629,8 @@ def _meshes_in_step(*args, **kwargs):
 def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
     path, hf_config, patches = ckpt, None, []
     if failure != "unreadable-config":
-        hf_config = SimpleNamespace(base_model_ep_plan=dict(_EP_PLAN), num_experts=4)
+        # 8 experts over 2 ranks: the stand-in model holds this rank's 4.
+        hf_config = SimpleNamespace(base_model_ep_plan=dict(_EP_PLAN), num_experts=8)
     if failure != "unseen-checkpoint":
         local = mock.patch.object(
             model_load_utils, "ensure_local_checkpoint", side_effect=lambda p, **k: (None, p)
@@ -2444,8 +2652,12 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
     elif failure == "unseen-checkpoint" and fails_here:
         # Rank 0 makes the checkpoint local; a rank on a node without that storage cannot see it.
         patches.append(mock.patch.object(hf_checkpoint_utils.os.path, "isdir", return_value=False))
-    if failure in ("load", "record"):
+    if failure in ("load", "record", "share"):
         loaded = model_with_decoder_at("model.")
+        if failure == "share" and fails_here:
+            for layer in loaded.model.layers:  # 2 of the 8 experts here, not 4
+                layer.mlp.experts.gate_up_proj = nn.Parameter(torch.zeros(2, 4, 2))
+                layer.mlp.experts.down_proj = nn.Parameter(torch.zeros(2, 2, 2))
         load = fail if failure == "load" and fails_here else (lambda path, **kwargs: loaded)
         loader = SimpleNamespace(__name__="Loader", from_pretrained=load)
         record = fail if failure == "record" and fails_here else None
@@ -2485,15 +2697,17 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
         ("no-gpu", 1, "rank(s) [1] have none while the others have theirs"),
         ("load", 1, "the GPU ran out of memory"),
         ("record", 1, "a weight file this rank cannot read"),
+        ("share", 1, "this rank holds 2 of a routed-expert container's 8 experts"),
     ],
 )
 def test_a_load_failing_on_one_rank_fails_every_rank(
     cpu_dist_workers, tmp_path, failure, failing_rank, match
 ):
     """One rank fails alone: reading the config, on its transformers, on its arguments, seeing the
-    checkpoint rank 0 made local, without a GPU of its own where the others have theirs, or in the
-    load. Every rank raises that failure, rather than leave the others waiting for it in the meshes
-    (stood in by a bounded barrier) or the warmup's collectives."""
+    checkpoint rank 0 made local, without a GPU of its own where the others have theirs, in the
+    load, or holding another share of the experts. Every rank raises that failure, rather than leave
+    the others waiting for it in the meshes (stood in by a bounded barrier) or the warmup's
+    collectives."""
     Qwen3MoeConfig(num_experts=4, num_hidden_layers=1, hidden_size=8).save_pretrained(tmp_path)
     cpu_dist_workers.run(
         _one_rank_fails_job,
