@@ -717,6 +717,13 @@ _NEEDS_LATER = (
             None,
             id="explicit_degree_one_as_an_argument",
         ),
+        pytest.param(
+            _deepseek_v3(n_routed_experts=3),
+            None,
+            _CAN_BE_EP.format(3),
+            "5.6.2",
+            id="below_the_ep_floor_no_degree",
+        ),
     ],
 )
 def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
@@ -731,13 +738,14 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
     way out (FSDP2 only for an unquantized causal LM); the spec's own refusal, a
     NotImplementedError and so a RuntimeError too, words it differently. Below the transformers
     release expert parallelism needs, no EP degree is offered, since none would load: upgrading
-    is. The ways out are named as the caller set the plan, so arguments, which override the knobs,
-    are named."""
+    is, where an EP degree divides the experts; where none does, upgrading would not shard them.
+    The ways out are named as the caller set the plan, so arguments, which override the knobs, are
+    named."""
     if version is not None:
         monkeypatch.setattr(transformers, "__version__", version)
-    if refusal.startswith("can be") and Version(transformers.__version__) < Version(
-        _EP_MIN_TRANSFORMERS
-    ):
+    experts = getattr(config, "n_routed_experts", None) or getattr(config, "num_experts", 0)
+    below = Version(transformers.__version__) < Version(_EP_MIN_TRANSFORMERS)
+    if refusal.startswith("can be") and below and experts % 2 == 0:  # an EP degree divides them
         refusal = _NEEDS_LATER
     if ep_degree is not None:
         if config.model_type == "qwen3_moe" and Version(transformers.__version__) < Version("5.7"):
