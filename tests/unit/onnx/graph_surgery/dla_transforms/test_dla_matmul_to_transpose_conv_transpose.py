@@ -122,9 +122,7 @@ def _make_model(nodes, graph_name, inputs, outputs, initializers=None):
     _clamp_ir_version(model)
     try:
         # Optional runtime tools may be absent without preventing test collection.
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
+        from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
 
         model = SymbolicShapeInference.infer_shapes(model, auto_merge=True) or model
     except ImportError:

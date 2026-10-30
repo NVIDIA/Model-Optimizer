@@ -86,9 +86,7 @@ def _prepare_model(model: onnx.ModelProto) -> None:
     """Infer intermediate metadata when the optional runtime supports the graph."""
     try:
         # ONNX Runtime is optional for these execution tests.
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
+        from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
 
         inferred = SymbolicShapeInference.infer_shapes(model)
         if inferred is not None:

@@ -127,9 +127,7 @@ def _make_model(nodes, name, inputs, outputs, inits=None, *, infer_symbolic_shap
     if infer_symbolic_shapes:
         try:
             # Shape inference is optional in partial runtime installations.
-            from onnxruntime.tools.symbolic_shape_infer import (
-                SymbolicShapeInference,  # type: ignore[import-untyped]
-            )
+            from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
 
         except ImportError:
             pass

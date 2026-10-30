@@ -51,9 +51,7 @@ def _prepare_model(model: onnx.ModelProto) -> None:
     """Populate intermediate shapes when the optional ORT tool is available."""
     try:
         # The tool submodule is optional; model execution only requires ORT itself.
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
+        from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
 
         inferred = SymbolicShapeInference.infer_shapes(model)
         if inferred is not None:
