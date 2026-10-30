@@ -447,10 +447,10 @@ _SHARDED_LOAD_OPTIONS = {
         }
     ),
 }
-# The values an FSDP2-only option asks nothing of a whole load with: the FSDP2 load's own default,
-# and None where that leaves it unset. broadcast_chunk_size has none: None asks for all of a
-# source's layers at once.
-_ASKS_NOTHING = {"cpu_offload": (False, None), "mp_policy": (None,)}
+# The values an FSDP2-only option asks nothing of a whole load with: the FSDP2 load's own default
+# (parallel_load_and_prepare_fsdp2's), and None where that leaves it unset. A None
+# broadcast_chunk_size asks for something: all of a source's layers at once.
+_ASKS_NOTHING = {"cpu_offload": (False, None), "mp_policy": (None,), "broadcast_chunk_size": (8,)}
 
 
 def _route(plan: DistributionPlan) -> str | None:
@@ -666,7 +666,8 @@ def load_pretrained(
       numbers) when it has one and no ``device_map`` is passed; ``device_map=None``,
       ``from_pretrained``'s own, loads it on the CPU for the caller to place.
 
-    A plan with ``ep_size > 1`` raises: no load here shards the routed experts. On a distributed run
+    A plan with ``ep_size > 1`` raises: no load here shards the routed experts, so it decides an EP
+    degree left to it as 1, and refuses one ``MODELOPT_EP_DEGREE`` asks for. On a distributed run
     every rank loads the plan rank 0 was handed, and a refusal on any rank, of its own arguments, of a
     checkpoint it cannot see or of the config it reads, raises on every rank. A launch whose processes
     set no process group up (a launcher that only exports ``WORLD_SIZE``) has each process load as a
@@ -691,8 +692,10 @@ def load_pretrained(
     builds from it as given, so without that plan it is refused. A ``config`` passed for the load, or
     a path to one as ``from_pretrained`` takes, is the one the plan is decided from, and a sharded
     load takes it as its ``hf_config``. A whole-model load refuses the options only the FSDP2 load
-    takes, but for ``cpu_offload`` at ``False`` or ``None`` and ``mp_policy`` at ``None``, which ask
-    nothing of it; ``broadcast_chunk_size=None`` asks for all of a source's layers at once.
+    takes, but at the FSDP2 load's own defaults (``cpu_offload=False``, ``mp_policy=None``,
+    ``broadcast_chunk_size=8``) or ``cpu_offload=None``, which ask nothing of it, so a caller can
+    forward them whatever the plan; ``broadcast_chunk_size=None`` asks for all of a source's layers
+    at once.
 
     Whatever the placement:
 
@@ -831,6 +834,10 @@ def load_pretrained(
             config=config,
             auto_class=auto_class,
             trust_remote_code=trust_remote_code,
+            # No load here shards the routed experts yet: an EP degree left to the decision is 1,
+            # rather than a layout this function would refuse; one MODELOPT_EP_DEGREE asks for, as
+            # a plan handed in, is still refused.
+            ep_size=1 if _ep_degree(None) == "auto" else None,
             **hub_options,
         )
         if _route(plan) is not None:

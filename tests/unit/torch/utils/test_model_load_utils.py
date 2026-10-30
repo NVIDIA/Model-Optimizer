@@ -936,6 +936,7 @@ def process_group(monkeypatch, a_gpu):
         ({"mp_policy": None, "cpu_offload": None}, 4, {"device_map": {"": "cuda:1"}}),
         # As hf_ptq passes --cpu_offload when it is not set: the FSDP2 load's own default.
         ({"cpu_offload": False}, 4, {"device_map": {"": "cuda:1"}}),
+        ({"broadcast_chunk_size": 8}, 4, {"device_map": {"": "cuda:1"}}),
     ],
     ids=[
         "defaults_to_the_rank_gpu",
@@ -944,6 +945,7 @@ def process_group(monkeypatch, a_gpu):
         "no_gpu_of_its_own",
         "fsdp2_options_at_none",
         "cpu_offload_at_its_default",
+        "broadcast_chunk_size_at_its_default",
     ],
 )
 def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
@@ -1194,6 +1196,31 @@ def test_a_model_class_given_by_name_is_refused_by_name(
     with pytest.raises(NotImplementedError, match="auto_class='AutoModelForCausalLM'"):
         load_pretrained(str(tmp_path), "AutoModelForCausalLM", **plan)
     assert loaders == {}
+
+
+@needs_qwen3_moe_ep_plan
+@pytest.mark.parametrize("knob", [None, "4"], ids=["left-to-decide", "asked-for"])
+def test_a_load_it_decides_keeps_the_experts_whole(
+    run_as, serve, loaders, monkeypatch, tmp_path, knob
+):
+    """No load here shards the routed experts yet, so an MoE whose EP degree is left to the decision
+    is decided without expert parallelism and loads, where an automatic degree would be one the
+    load refuses; a degree MODELOPT_EP_DEGREE asks for is still refused, not ignored."""
+    run_as(4)
+    serve(_qwen3_moe())
+    if knob is not None:
+        monkeypatch.setenv("MODELOPT_EP_DEGREE", knob)
+    monkeypatch.setattr(
+        transformers.AutoModelForCausalLM,
+        "from_pretrained",
+        classmethod(lambda cls, *a, **k: torch.nn.Linear(1, 1)),
+    )
+
+    if knob is not None:
+        with pytest.raises(NotImplementedError, match=r"ep_size=4.*MODELOPT_EP_DEGREE=1"):
+            load_pretrained(str(tmp_path))
+        return
+    assert distribution_plan(load_pretrained(str(tmp_path))) == DistributionPlan(4)
 
 
 def test_an_expert_parallel_plan_is_refused(run_as, serve, loaders, auto_class, tmp_path):
