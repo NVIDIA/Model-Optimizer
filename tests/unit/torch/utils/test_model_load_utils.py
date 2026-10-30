@@ -2300,8 +2300,10 @@ def test_a_decompressed_load_refuses_compressed_tensors_its_model_does_not_place
     ep_world_of_two, monkeypatch, tmp_path, compressed
 ):
     """The export copies the tensors the model has no parameter for as stored, and this load dropped
-    the quantization_config that reads a compressed one: an MTP layer's compressed experts are
-    refused, its uncompressed weights carried as before."""
+    the quantization_config that reads a compressed one: an unplaced tensor under a stored name the
+    mark holds (an MTP layer's compressed experts) is refused, one under the plain ``weight`` name is
+    not. Which keys go unplaced is stood in for here; a real decompressed load's are pinned in
+    test_unplaced_source_keys.py."""
     from safetensors.torch import save_file
 
     from modelopt.torch.models import _onfly_decompress

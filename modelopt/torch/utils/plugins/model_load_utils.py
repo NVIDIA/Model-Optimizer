@@ -1627,6 +1627,7 @@ _EP_SOURCE_FORMATS: frozenset[str | None] = frozenset({None})
 
 def _decompressed_as_loaded(cfg) -> bool:
     """Whether a model spec installed the on-the-fly decompressor for this config's checkpoint."""
+    # Importing modelopt.torch.models registers every model spec; only expert-parallel loads need them.
     from modelopt.torch.models import _onfly_decompress
 
     return _onfly_decompress.is_marked(cfg)
@@ -1867,7 +1868,7 @@ def load_and_prepare_ep(
         if _decompressed_as_loaded(hf_config):
             # Only the experts decompress as they load, and the config cannot say what else the
             # checkpoint compressed, or in which dtypes: what it stores is checked before anything
-            # loads.
+            # loads. Imported here for the reason _decompressed_as_loaded gives.
             from modelopt.torch.models import _onfly_decompress
 
             _onfly_decompress.check_compressed_keys(hf_config, ckpt_path)
