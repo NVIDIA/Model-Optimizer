@@ -41,7 +41,8 @@ def require_transformers(min_version: str, feature: str) -> None:
 
     Callers enforce the version where the needed APIs first exist, so a too-old transformers errors
     clearly instead of silently mis-behaving (e.g. transformers 5.5 silently shards nothing for EP).
-    See each call site for the empirically-determined floor.
+    A pre-release of the floor release (``5.7.0.dev0`` for ``5.7``) is refused too: it can predate
+    the feature the floor stands for.
     """
     # Imported here: this module imports without transformers.
     import transformers
