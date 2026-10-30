@@ -75,7 +75,7 @@ import modelopt.torch.models.hf as models_hf
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 import modelopt.torch.utils.moe as moe
-from modelopt.torch.models import get_spec
+from modelopt.torch.models import _onfly_decompress, get_spec
 from modelopt.torch.quantization.plugins import accelerate as accelerate_plugin
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -946,6 +946,38 @@ def test_a_remote_kimi_k3_whose_prepare_attaches_its_plan_left_whole_is_an_error
         match="can be expert-parallel, but the plan resolved",
     ):
         resolve_distribution_plan(str(tmp_path))
+
+
+def test_a_packed_kimi_k3_loaded_through_another_class_is_planned_without_its_spec(
+    run_as, serve, monkeypatch, tmp_path
+):
+    """A model class the sharded loads refuse is planned whole on every rank, never expert-parallel,
+    so a packed Kimi-K3 loaded through one (``AutoModel``) gets no ``prepare``, which patches the
+    checkpoint's own code for the process and marks only its copy of the config for the experts'
+    decompression. The whole load then reads the config as the checkpoint holds it: unmarked, and
+    with the compressed-tensors scheme transformers' own quantizer loads the experts by."""
+    monkeypatch.setattr(
+        get_spec("kimi_k3").ep_spec, "prepare", lambda *a, **k: pytest.fail("ran prepare")
+    )
+    monkeypatch.setattr(
+        model_load_utils, "build_meta_causal_lm", lambda *a, **k: pytest.fail("built a model")
+    )
+    # As on a transformers new enough for Kimi-K3's expert parallelism, which would rule it out here.
+    monkeypatch.setattr(model_load_utils, "_spec_refuses_ep", lambda model_type: False)
+    run_as(4)
+    scheme = {"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"}
+    text = SimpleNamespace(num_experts=8, quantization_config=scheme)
+    # Kimi-K3's own config class copies its language model's scheme to the top level.
+    config = serve(
+        SimpleNamespace(model_type="kimi_k3", text_config=text, quantization_config=scheme)
+    )
+
+    plan, planned = resolve_distribution_plan(str(tmp_path), auto_class=AutoModel)
+
+    assert plan == DistributionPlan(4)
+    assert planned is config and not _onfly_decompress.is_marked(planned)
+    assert planned.quantization_config is scheme
+    assert planned.text_config.quantization_config is scheme
 
 
 @needs_qwen3_moe_ep_plan
