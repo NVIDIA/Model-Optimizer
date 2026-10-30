@@ -683,6 +683,11 @@ def load_pretrained(
                 f"{os.environ['WORLD_SIZE']}-rank launch, whose process group is not set up; load "
                 "inside distributed_run(), which sets it up."
             )
+    # None is these options' own default, so passed explicitly it is no option: the sharded loads
+    # refuse the options they do not take, and would refuse it.
+    for name in ("config", "variant", "hf_config"):
+        if name in kwargs and kwargs[name] is None:
+            del kwargs[name]
     # The config to load with, or, as from_pretrained also takes it, a path to read it from.
     config = kwargs.get("config")
     config = config if isinstance(config, (PretrainedConfig, str, os.PathLike)) else None

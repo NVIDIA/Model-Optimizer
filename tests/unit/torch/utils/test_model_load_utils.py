@@ -962,10 +962,16 @@ def test_an_fsdp_plan_loads_through_the_parallel_fsdp2_loader(
     assert loaders == {}
 
 
+@pytest.mark.parametrize(
+    "unset",
+    [{}, {"config": None}, {"variant": None}, {"hf_config": None}],
+    ids=["none_passed", "config_none", "variant_none", "hf_config_none"],
+)
 def test_a_load_it_decides_reads_the_config_once(
-    run_as, loaders, process_group, monkeypatch, tmp_path
+    run_as, loaders, process_group, monkeypatch, tmp_path, unset
 ):
-    """The config the plan was decided from is the one the FSDP2 load gets, not a second read."""
+    """The config the plan was decided from is the one the FSDP2 load gets, not a second read. An
+    option passed as None, its default, is as if not passed, not one the FSDP2 load refuses."""
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
     run_as(2, rank=1)
     config, reads = LlamaConfig(**_TINY), []
@@ -973,7 +979,7 @@ def test_a_load_it_decides_reads_the_config_once(
         transformers.AutoConfig, "from_pretrained", lambda *a, **k: reads.append(a) or config
     )
 
-    model = load_pretrained(str(tmp_path))
+    model = load_pretrained(str(tmp_path), **unset)
 
     assert len(reads) == 1
     assert loaders["fsdp2"]["hf_config"] is config
