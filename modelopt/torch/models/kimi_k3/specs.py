@@ -33,6 +33,7 @@ register(
             prepared_ep_plan=BASE_MODEL_EP_PLAN,
             plan_config_attr="text_config",
             make_importable=make_importable,
+            decompressed_formats=("compressed-tensors",),
             # prepare's patches to the checkpoint's remote code were validated on this release.
             requires_transformers="5.13",
         ),
