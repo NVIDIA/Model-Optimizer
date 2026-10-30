@@ -638,6 +638,15 @@ def test_a_checkpoint_must_compress_its_experts_and_nothing_else(tmp_path, store
             onfly.check_compressed_keys(config, tmp_path)
 
 
+def test_an_unmarked_config_has_no_stored_names_to_check(tmp_path):
+    """The check reads what the checkpoint stores by the names the mark holds, so a config the
+    decompressor never marked is refused, by name, rather than with a bare StopIteration."""
+    save_file({f"{EXPERT}.weight_packed": torch.zeros(1)}, str(tmp_path / "model.safetensors"))
+
+    with pytest.raises(ValueError, match="not marked for on-the-fly decompression"):
+        onfly.check_compressed_keys(SimpleNamespace(text_config=SimpleNamespace()), tmp_path)
+
+
 class _RemoteTextConfig(PretrainedConfig):
     """Stands in for the remote-code DeepSeek-V3 config a VLM bundles as its ``text_config``."""
 
