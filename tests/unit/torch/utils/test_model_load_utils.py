@@ -1764,20 +1764,30 @@ def test_a_sharded_load_is_refused_inside_init_quantized_weights(
 
 
 @needs_qwen3_moe_ep_plan
+@pytest.mark.parametrize(
+    "options",
+    [{"device_map": "auto"}, {"freeze": True, "require_lm_head": False}],
+    ids=["placement", "its-own-options"],
+)
 def test_an_automatic_expert_parallel_layout_says_so_when_it_refuses_a_placement(
-    run_as, serve, loaders, process_group, monkeypatch, tmp_path
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, options
 ):
     """With neither a plan nor MODELOPT_EP_DEGREE, the decision shards an MoE's experts, and the
     expert-parallel load refuses options that place a whole model. The refusal says the layout was
-    decided rather than asked for, and how to keep the load whole."""
+    decided rather than asked for, and how to keep the load whole. The load's own options place
+    nothing, and reach it."""
     run_as(2, rank=1)
     serve(_qwen3_moe(num_experts=8))
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
 
+    if "device_map" not in options:
+        load_pretrained(str(tmp_path), **options)
+        assert {name: loaders["ep"][name] for name in options} == options
+        return
     with pytest.raises(
         TypeError, match=r"\['device_map'\] do not apply.*no plan or MODELOPT_EP_DEGREE"
     ):
-        load_pretrained(str(tmp_path), device_map="auto")
+        load_pretrained(str(tmp_path), **options)
     assert loaders == {}
 
 
