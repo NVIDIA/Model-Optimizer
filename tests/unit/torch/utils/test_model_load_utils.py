@@ -501,6 +501,16 @@ def test_an_ep_degree_that_does_not_divide_the_world_names_where_it_came_from(
         resolve_distribution_plan(str(tmp_path), **arguments)
 
 
+@pytest.mark.parametrize("value", [[2], 2.9], ids=["a-list", "a-fraction"])
+def test_an_ep_size_that_is_no_whole_number_is_refused(run_as, serve, tmp_path, value):
+    """An argument int() fails on with a TypeError, or would truncate, is no degree either."""
+    run_as(4)
+    serve(LlamaConfig(**_TINY))
+
+    with pytest.raises(ValueError, match=r"ep_size=.*: expected auto, 0 \(auto\) or an EP degree"):
+        resolve_distribution_plan(str(tmp_path), ep_size=value)
+
+
 @pytest.mark.parametrize("value", ["world", "-2"], ids=["word", "below-1"])
 @pytest.mark.parametrize(
     ("world_size", "source"),
@@ -898,8 +908,10 @@ def auto_class():
 
 @pytest.fixture
 def a_gpu(monkeypatch):
-    """This rank has a GPU, which the FSDP2 load shards onto; the stand-in loaders never use it."""
+    """This rank has a GPU of its own, which the FSDP2 load shards onto; the stand-in loaders never
+    use it."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 8)
 
 
 @pytest.fixture
@@ -915,23 +927,29 @@ def process_group(monkeypatch, a_gpu):
 
 
 @pytest.mark.parametrize(
-    ("device_map", "placed"),
-    [(None, {"": "cuda:1"}), ("cpu", "cpu")],
-    ids=["defaults_to_the_rank_gpu", "caller_placement_wins"],
+    ("device_map", "gpus", "placed"),
+    [
+        (None, 4, {"device_map": {"": "cuda:1"}}),
+        ("cpu", 4, {"device_map": "cpu"}),
+        (None, 1, {}),
+    ],
+    ids=["defaults_to_the_rank_gpu", "caller_placement_wins", "no_gpu_of_its_own"],
 )
 def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
-    run_as, serve, loaders, auto_class, monkeypatch, tmp_path, device_map, placed
+    run_as, serve, loaders, auto_class, monkeypatch, tmp_path, device_map, gpus, placed
 ):
     """Each rank takes the whole model onto its own GPU; "auto" would let every rank's accelerate
-    pick the same idle GPU."""
+    pick the same idle GPU. A rank with none of its own, on a host with fewer GPUs than ranks, is
+    left to from_pretrained's placement rather than handed a device it does not have."""
     run_as(4, rank=1)
     serve(LlamaConfig(**_TINY))
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)  # each rank has a GPU
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: gpus)
     kwargs = {} if device_map is None else {"device_map": device_map}
 
     model = load_pretrained(str(tmp_path), auto_class, **kwargs)
 
-    assert auto_class.calls == [{"device_map": placed}]
+    assert auto_class.calls == [placed]
     assert distribution_plan(model) == DistributionPlan(4)
     assert loaders == {}
 
@@ -1070,6 +1088,22 @@ def test_a_model_class_of_the_callers_own_loads_whole(
     assert loaders == {}
 
 
+@pytest.mark.parametrize("handed", [True, False], ids=["handed", "decided"])
+def test_a_model_class_given_by_name_is_refused_by_name(
+    run_as, serve, loaders, monkeypatch, tmp_path, handed
+):
+    """A sharded load refuses a model class it does not build, given by name too, rather than fail
+    on the name having no __name__ of its own."""
+    run_as(2)
+    serve(LlamaConfig(**_TINY))
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    plan = {"distribution": DistributionPlan(2, dense="fsdp")} if handed else {}
+
+    with pytest.raises(NotImplementedError, match="auto_class='AutoModelForCausalLM'"):
+        load_pretrained(str(tmp_path), "AutoModelForCausalLM", **plan)
+    assert loaders == {}
+
+
 def test_an_expert_parallel_plan_is_refused(run_as, serve, loaders, auto_class, tmp_path):
     """No load here shards the routed experts: an EP plan fails before anything loads."""
     run_as(2)
@@ -1083,7 +1117,8 @@ def test_an_expert_parallel_plan_is_refused(run_as, serve, loaders, auto_class, 
 
 def _every_rank_loads_rank0s_plan_job(rank, size, ckpt, handed, placed):
     model, refused = None, None
-    with bounded_collectives():
+    # Ranks without GPUs, whatever the host has: the pooled workers keep no CUDA context.
+    with bounded_collectives(), mock.patch.object(torch.cuda, "is_available", return_value=False):
         try:  # not pytest.raises: its failure would end the pooled worker instead of the job
             model = load_pretrained(ckpt, distribution=handed[rank], **placed)
         except Exception as error:
@@ -1124,17 +1159,19 @@ def _fetched_in_step(ckpt_path, **hub_options):
 
 def _loaded_in_step(*args, **kwargs):
     """The FSDP2 load, as the collectives it runs, which a rank without a GPU fails before."""
-    if not torch.cuda.is_available():
+    if dist.local_rank() >= torch.cuda.device_count():
         raise RuntimeError("no GPU to shard onto")
     torch.distributed.barrier()
     return _Loaded()
 
 
-def _one_rank_refused_job(rank, size, ckpt, refused_on_1, gpu_on_1, match):
+def _one_rank_refused_job(rank, size, ckpt, refused_on_1, gpus_on_1, match):
     refused = None
+    gpus = size if rank == 0 else gpus_on_1  # what this rank's host shows it
     with (
         bounded_collectives(),
-        mock.patch.object(torch.cuda, "is_available", return_value=rank == 0 or gpu_on_1),
+        mock.patch.object(torch.cuda, "is_available", return_value=gpus > 0),
+        mock.patch.object(torch.cuda, "device_count", return_value=gpus),
         mock.patch.object(model_load_utils, "ensure_local_checkpoint", _fetched_in_step),
         mock.patch.object(model_load_utils, "parallel_load_and_prepare_fsdp2", _loaded_in_step),
     ):
@@ -1152,21 +1189,22 @@ def _one_rank_refused_job(rank, size, ckpt, refused_on_1, gpu_on_1, match):
 
 
 @pytest.mark.parametrize(
-    ("refused_on_1", "gpu_on_1", "match"),
+    ("refused_on_1", "gpus_on_1", "match"),
     [
-        ({"config": LlamaConfig(**_TINY), "hf_config": LlamaConfig(**_TINY)}, True, "both name"),
-        ({"dtype": torch.float32}, True, "keeps their dtype"),
+        ({"config": LlamaConfig(**_TINY), "hf_config": LlamaConfig(**_TINY)}, 2, "both name"),
+        ({"dtype": torch.float32}, 2, "keeps their dtype"),
         (
             {"hf_config": LlamaConfig(**_TINY, quantization_config={"quant_method": "fp8"})},
-            True,
+            2,
             "cannot dequantize",
         ),
-        ({}, False, "this rank has none"),
+        ({}, 0, "this rank has none"),
+        ({}, 1, "this rank has none"),
     ],
-    ids=["two-configs", "dtype", "quantized-config", "no-gpu"],
+    ids=["two-configs", "dtype", "quantized-config", "no-gpu", "fewer-gpus-than-ranks"],
 )
 def test_a_load_refused_on_one_rank_fails_every_rank(
-    cpu_dist_workers, tmp_path, refused_on_1, gpu_on_1, match
+    cpu_dist_workers, tmp_path, refused_on_1, gpus_on_1, match
 ):
     """Rank 1 alone is refused, by its arguments before the checkpoint is fetched, or by the config
     it was handed or its lack of a GPU before the FSDP2 load: every rank raises the refusal, rather
@@ -1177,7 +1215,7 @@ def test_a_load_refused_on_one_rank_fails_every_rank(
         _one_rank_refused_job,
         ckpt=str(tmp_path),
         refused_on_1=refused_on_1,
-        gpu_on_1=gpu_on_1,
+        gpus_on_1=gpus_on_1,
         match=match,
     )
 
