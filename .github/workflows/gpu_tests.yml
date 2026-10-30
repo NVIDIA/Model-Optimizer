@@ -45,27 +45,21 @@ jobs:
         include:
           - example: gpu
             timeout: 60
-            # Pinned to 26.05: benchmark.py uses trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH,
-            # which newer TensorRT (26.06) removed. Bump once the source is updated for TensorRT 10.
-            container_image: nvcr.io/nvidia/pytorch:26.05-py3
+            container_image: nvcr.io/nvidia/pytorch:26.09-py3
           - example: gpu_megatron
-            timeout: 60
+            timeout: 75
             container_image: nvcr.io/nvidia/nemo:26.08
           - example: gpu_trtllm
             timeout: 15
             container_image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
-          # Covers the RoutedExperts layout (0.24+)
           - example: gpu_vllm
-            timeout: 15
-            container_image: docker.io/vllm/vllm-openai:v0.26.0
-          # Covers the legacy FusedMoE / SharedFusedMoE registration branches (vLLM < 0.24)
-          - example: gpu_vllm
-            timeout: 15
-            container_image: docker.io/vllm/vllm-openai:v0.20.0
+            timeout: 30
+            container_image: docker.io/vllm/vllm-openai:v0.30.0@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
     runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
     timeout-minutes: ${{ matrix.timeout }}
     container:
       image: ${{ matrix.container_image }}
+      options: --shm-size=2gb # vLLM TP>1 tests on the 2-GPU runner need more than the default 64 MB
       env:
         GIT_DEPTH: 1000 # For correct version
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
@@ -78,23 +72,66 @@ jobs:
         # setuptools-scm version) and for the Codecov upload below.
         if: matrix.example == 'gpu_vllm'
         run: apt-get update && apt-get install -y git
-      - uses: actions/checkout@v6
-      - uses: nv-gha-runners/setup-proxy-cache@main
-      - uses: ./.github/actions/cache-extensions
+      - uses: actions/checkout@v7
+      - uses: nv-gha-runners/setup-proxy-cache@eadc57871cde0c92a223d0f486ab669a2360f978 # main
+      - name: Restore JIT caches
+        id: jit-caches
+        uses: ./.github/actions/restore-jit-caches
         with:
-          cache-key: rtxpro6000-${{ matrix.container_image }}
+          # Per job: jobs sharing an image build different extensions, and the first to save wins the key.
+          env-key: rtxpro6000-${{ matrix.example }}-${{ matrix.container_image }}
+      - name: Restore wheels built from source
+        # mamba_ssm and fast-hadamard-transform take ~10 min to compile (see noxfile.py `gpu`)
+        id: wheelhouse
+        if: matrix.example == 'gpu'
+        uses: actions/cache/restore@v6
+        with:
+          path: /root/.cache/wheelhouse
+          key: wheelhouse-${{ matrix.container_image }}-${{ hashFiles('noxfile.py') }}
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+      - if: contains(matrix.container_image, 'nvidia/nemo:')
+        uses: ./.github/actions/megatron-from-source
       - name: Run gpu tests
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
+          # Explicit: HOME is /github/home in container jobs, not the /root the cache steps use
+          MODELOPT_WHEELHOUSE: /root/.cache/wheelhouse
+          # sys.monitoring records the same lines as the default C tracer at a fraction of the
+          # overhead on import-heavy worker processes. Needs Python 3.12+.
+          COVERAGE_CORE: sysmon
+          # Tests marked `manual` (real-weight downloads and the like) or `nightly` run on nightly and
+          # on-demand runs, as in the unit tests, not on pull requests (copy-pr-bot runs those as `push`).
+          PYTEST_ADDOPTS: ${{ github.event_name != 'push' && '--run-manual --run-nightly' || '' }}
         run: |
           # Use `python3` (the vllm image has no `python` on PATH)
           python3 -m pip install nox && nox -s ${{ matrix.example }}
+      - name: Save JIT caches
+        # Not tied to the tests passing, see the action description
+        if: always()
+        uses: ./.github/actions/save-jit-caches
+        with:
+          torch-ext-key: ${{ steps.jit-caches.outputs.torch-ext-key }}
+          torch-ext-hit: ${{ steps.jit-caches.outputs.torch-ext-hit }}
+          triton-key: ${{ steps.jit-caches.outputs.triton-key }}
+          triton-hit: ${{ steps.jit-caches.outputs.triton-hit }}
+      - name: Check the wheelhouse is complete
+        id: wheelhouse-complete
+        if: always() && matrix.example == 'gpu'
+        run: test -f /root/.cache/wheelhouse/.complete && echo "complete=true" >> "$GITHUB_OUTPUT" || true
+      - name: Save wheels built from source
+        # Not tied to the tests passing, but only once every wheel is built (see noxfile.py `gpu`).
+        if: >-
+          always() && matrix.example == 'gpu' && steps.wheelhouse.outputs.cache-hit != 'true'
+          && steps.wheelhouse-complete.outputs.complete == 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: /root/.cache/wheelhouse
+          key: wheelhouse-${{ matrix.container_image }}-${{ hashFiles('noxfile.py') }}
       - name: Upload GPU coverage to Codecov
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
@@ -106,8 +143,13 @@ jobs:
     # Run even if gpu-tests is skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
     needs: [pr-gate, gpu-tests]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
+      - name: Stacked PR, GPU tests deferred
+        if: needs.pr-gate.outputs.stacked == 'true'
+        run: |
+          echo "::error::This PR targets another PR's branch, so GPU tests are deferred until it targets main. After retargeting, push or use 'Re-run all jobs'."
+          exit 1
       - name: Required GPU tests did not succeed
         if: ${{ needs.pr-gate.result != 'success' || (needs.pr-gate.outputs.any_changed == 'true' && needs.gpu-tests.result != 'success') }}
         run: exit 1

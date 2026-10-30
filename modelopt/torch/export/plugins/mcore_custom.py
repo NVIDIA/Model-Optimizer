@@ -72,18 +72,21 @@ class CustomModuleMapping:
     """A custom module mapping from Megatron Core to its HF counter part."""
 
     def __init__(
-        self, func_name: str = "", target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}
+        self,
+        func_name: str = "",
+        target_name_or_prefix: str = "",
+        func_kwargs: dict[str, Any] | None = None,
     ):
         """Create a custom module mapping."""
         self.func_name = func_name
         self.target_name_or_prefix = target_name_or_prefix
-        self.func_kwargs = func_kwargs
+        self.func_kwargs = {} if func_kwargs is None else func_kwargs
 
 
 class NameRemapping(CustomModuleMapping):
     """A custom module mapping that renames of the modules."""
 
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] | None = None):
         """Create a custom module mapping that renames of the modules."""
         super().__init__(
             func_name="name_remapping",
@@ -95,7 +98,7 @@ class NameRemapping(CustomModuleMapping):
 class QKVMerging(CustomModuleMapping):
     """A custom module mapping that merges Q, K, V."""
 
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] | None = None):
         """Create a custom module mapping that merges Q, K, V."""
         super().__init__(
             func_name="qkv_merging",
@@ -107,7 +110,7 @@ class QKVMerging(CustomModuleMapping):
 class GroupedMLPMerging(CustomModuleMapping):
     """A custom module mapping that merges up_proj and down_proj for Grouped MLP."""
 
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] | None = None):
         """Create a custom module mapping that merges up_proj and down_proj for Grouped MLP."""
         super().__init__(
             func_name="grouped_mlp_merging",
@@ -119,7 +122,7 @@ class GroupedMLPMerging(CustomModuleMapping):
 class GroupedMLPSlicing(CustomModuleMapping):
     """A custom module mapping that slices fused grouped MLP weights into per-expert weights."""
 
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] | None = None):
         """Create a custom module mapping that slices grouped MLP weights for export."""
         super().__init__(
             func_name="grouped_mlp_slicing",
@@ -131,19 +134,23 @@ class GroupedMLPSlicing(CustomModuleMapping):
 class GroupedGatedMLPSlicing(CustomModuleMapping):
     """A custom module mapping that slices grouped MLP weights per expert and splits gate/up."""
 
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] | None = None):
         """Create a custom module mapping that slices grouped gated MLP weights for export."""
         super().__init__(
             func_name="grouped_mlp_slicing",
             target_name_or_prefix=target_name_or_prefix,
-            func_kwargs={"gate_proj_name": "gate_proj", "up_proj_name": "up_proj", **func_kwargs},
+            func_kwargs={
+                "gate_proj_name": "gate_proj",
+                "up_proj_name": "up_proj",
+                **(func_kwargs or {}),
+            },
         )
 
 
 class GatedMLPMerging(CustomModuleMapping):
     """A custom module mapping that merges gate_proj and up_proj."""
 
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] | None = None):
         """Create a custom module mapping that merges gate_proj and up_proj."""
         super().__init__(
             func_name="gated_mlp_merging",
@@ -155,7 +162,7 @@ class GatedMLPMerging(CustomModuleMapping):
 class QKVSlicing(CustomModuleMapping):
     """A custom module mapping that slices Q, K, V."""
 
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] | None = None):
         """Create a custom module mapping that slices Q, K, V."""
         super().__init__(
             func_name="qkv_slicing",
@@ -167,7 +174,7 @@ class QKVSlicing(CustomModuleMapping):
 class SelfAttentionScaling(CustomModuleMapping):
     """A custom module mapping that scales self attention."""
 
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] | None = None):
         """Create a custom module mapping that scales self attention."""
         super().__init__(
             func_name="self_attention_scaling",
@@ -179,7 +186,7 @@ class SelfAttentionScaling(CustomModuleMapping):
 class GatedMLPSlicing(CustomModuleMapping):
     """A custom module mapping that slices gate_proj and up_proj."""
 
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] | None = None):
         """Create a custom module mapping that slices gate_proj and up_proj."""
         super().__init__(
             func_name="gated_mlp_slicing",
@@ -191,7 +198,7 @@ class GatedMLPSlicing(CustomModuleMapping):
 class GatedDeltaNetSlicing(CustomModuleMapping):
     """A custom module mapping that splits GatedDeltaNet's fused ``in_proj``."""
 
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] | None = None):
         """Create a custom module mapping that splits the fused GatedDeltaNet input projection."""
         super().__init__(
             func_name="gated_delta_net_slicing",
@@ -203,7 +210,7 @@ class GatedDeltaNetSlicing(CustomModuleMapping):
 class PackNameRemapping(CustomModuleMapping):
     """A custom module mapping that packs module after name remapping."""
 
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] | None = None):
         """Create a custom module mapping that packs and renames module."""
         super().__init__(
             func_name="pack_name_remapping",
@@ -215,7 +222,7 @@ class PackNameRemapping(CustomModuleMapping):
 class UnpackNameRemapping(CustomModuleMapping):
     """A custom module mapping that unpacks module after name remapping."""
 
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] | None = None):
         """Create a custom module mapping that unpacks module after name remapping."""
         super().__init__(
             func_name="unpack_name_remapping",
@@ -227,7 +234,7 @@ class UnpackNameRemapping(CustomModuleMapping):
 class PackNameRemappingGPT(CustomModuleMapping):
     """A custom module mapping that packs module after name remapping."""
 
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] | None = None):
         """Create a custom module mapping that packs and renames module."""
         super().__init__(
             func_name="pack_name_remapping_gpt_oss",
@@ -239,7 +246,7 @@ class PackNameRemappingGPT(CustomModuleMapping):
 class UnpackNameRemappingGPT(CustomModuleMapping):
     """A custom module mapping that unpacks module after name remapping."""
 
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] | None = None):
         """Create a custom module mapping that unpacks module after name remapping."""
         super().__init__(
             func_name="unpack_name_remapping_gpt_oss",
@@ -255,16 +262,22 @@ LLAVA_VISION_PREFIXES = ("multi_modal_projector", "vision_model")
 
 def with_language_model_prefix(
     mapping: dict[str, CustomModuleMapping],
+    old_prefix: str = "model.",
+    new_prefix: str = "model.language_model.",
 ) -> dict[str, CustomModuleMapping]:
-    """Nest a text-model mapping under ``model.language_model.``; other prefixes are unchanged."""
+    """Nest a text-model mapping under the VLM's language-model prefix.
+
+    Targets starting with ``old_prefix`` have it replaced by ``new_prefix``; other targets are
+    unchanged. ``old_prefix=""`` matches every target, prefixing the whole mapping.
+    """
     result = {}
     for key, m in mapping.items():
         if not isinstance(m, CustomModuleMapping):
             result[key] = m  # plain flags such as ``use_packed_local_experts``
             continue
         prefix = m.target_name_or_prefix
-        if prefix.startswith("model."):
-            prefix = "model.language_model." + prefix[len("model.") :]
+        if prefix.startswith(old_prefix):
+            prefix = new_prefix + prefix[len(old_prefix) :]
         result[key] = type(m)(
             target_name_or_prefix=prefix, func_kwargs=copy.deepcopy(m.func_kwargs)
         )
@@ -388,10 +401,15 @@ def save_safetensors_by_layer_index(
         }
         for layer_index in range(total_layers):
             meta_filename = name_template.format(layer_index + 1, total_layers) + ".json"
-            with open(save_directory + "/" + meta_filename) as f:
-                shard = json.load(f)
-            safetensor_index["metadata"]["total_size"] += shard["metadata"]["total_size"]
-            safetensor_index["weight_map"].update(shard["weight_map"])
+            # Plus the expert shards that EP ranks other than 0 write beside the layer's own.
+            ep_shards = sorted(
+                Path(save_directory).glob(meta_filename[: -len(".json")] + "-ep*.json")
+            )
+            for shard_file in [Path(save_directory) / meta_filename, *ep_shards]:
+                with open(shard_file) as f:
+                    shard = json.load(f)
+                safetensor_index["metadata"]["total_size"] += shard["metadata"]["total_size"]
+                safetensor_index["weight_map"].update(shard["weight_map"])
 
         with open(save_directory + "/model.safetensors.index.json", "w") as f:
             json.dump(safetensor_index, f, indent=4)

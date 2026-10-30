@@ -38,6 +38,7 @@ from .config import (
     AWQLiteCalibConfig,
     CompressConfig,
     GPTQCalibConfig,
+    ImatrixCalibConfig,
     LocalHessianCalibConfig,
     LSQConfig,
     MaxCalibConfig,
@@ -62,6 +63,7 @@ from .conversion import (
 from .model_calib import (
     awq,
     gptq,
+    imatrix_calibrate,
     layerwise_calibrate,
     local_hessian_calibrate,
     lsq,
@@ -71,6 +73,7 @@ from .model_calib import (
     smoothquant,
     svdquant,
 )
+from .utils.calib_utils import reset_calib_forward_memory
 
 __all__ = ["BaseCalibrateModeDescriptor"]
 
@@ -248,6 +251,7 @@ def wrapped_calib_func(
                 module._moe_calib_experts_ratio = moe_calib_experts_ratio
 
     if func is not None:
+        reset_calib_forward_memory()
         if layerwise:
             # All currently implemented PTQ algorithms support layerwise calibration;
             # future algorithms that need full-model context must add a guard here.
@@ -556,6 +560,18 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
         return GPTQCalibConfig
 
     _calib_func = gptq
+
+
+@CalibrateModeRegistry.register_mode
+class ImatrixModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for imatrix calibration algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return ImatrixCalibConfig
+
+    _calib_func = imatrix_calibrate
 
 
 @CalibrateModeRegistry.register_mode

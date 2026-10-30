@@ -15,14 +15,19 @@
 
 """Qwen3-MoE specs (HF model type ``qwen3_moe``)."""
 
-from ..specs import ExportSpec, ModelSpec, MoESpec, register
+from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, register
 
 __all__: list[str] = []
 
 register(
     ModelSpec(
         model_type="qwen3_moe",
-        min_transformers_version="4.57",
+        min_transformers_version="5.5",
+        ep_spec=EPSpec(
+            # No plan here: qwen3_moe's own base_model_ep_plan ships in transformers, and it is
+            # the architecture the all-to-all path was built around. Its plan lands in 5.7.
+            requires_transformers="5.7",
+        ),
         moe_spec=MoESpec(
             block_names=("Qwen3MoeSparseMoeBlock",),
             expert_linear_names=("gate_proj", "down_proj", "up_proj"),

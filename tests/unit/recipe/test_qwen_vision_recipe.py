@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import pytest
-import transformers
 from _test_utils.torch import transformers_models
 
 import modelopt.torch.quantization as mtq
@@ -27,8 +26,6 @@ _JOINT_RECIPE = "fp8_vision_lm-kv_fp8_cast"
 def _get_tiny_qwen_vlm(model_type):
     if model_type == "qwen3_vl":
         return transformers_models.get_tiny_qwen3vl()
-    if not all(hasattr(transformers, name) for name in ("Qwen3_5Config", "Qwen3_5MoeConfig")):
-        pytest.skip("Qwen3.5-VL requires a newer Transformers release")
     return transformers_models.get_tiny_qwen3_5_vl_offline()
 
 
@@ -52,14 +49,6 @@ def test_qwen_vision_recipes_select_expected_quantizers(
     enabled = {name for name, module in modules.items() if getattr(module, "is_enabled", False)}
 
     expected_visual_suffixes = {
-        "blocks.0.attn.qkv.weight_quantizer",
-        "blocks.0.attn.qkv.input_quantizer",
-        "blocks.0.attn.proj.weight_quantizer",
-        "blocks.0.attn.proj.input_quantizer",
-        "blocks.0.mlp.linear_fc1.weight_quantizer",
-        "blocks.0.mlp.linear_fc1.input_quantizer",
-        "blocks.0.mlp.linear_fc2.weight_quantizer",
-        "blocks.0.mlp.linear_fc2.input_quantizer",
         "merger.linear_fc1.weight_quantizer",
         "merger.linear_fc1.input_quantizer",
         "merger.linear_fc2.weight_quantizer",
@@ -74,11 +63,11 @@ def test_qwen_vision_recipes_select_expected_quantizers(
                 "deepstack_merger_list.0.linear_fc2.input_quantizer",
             }
         )
-    assert {f"model.visual.{suffix}" for suffix in expected_visual_suffixes} <= enabled
-    assert not any("patch_embed" in name for name in enabled)
+    visual_quantizers = {name for name in enabled if name.startswith("model.visual.")}
+    assert visual_quantizers == {f"model.visual.{suffix}" for suffix in expected_visual_suffixes}
 
-    vision_weight = modules["model.visual.blocks.0.attn.qkv.weight_quantizer"]
-    vision_input = modules["model.visual.blocks.0.attn.qkv.input_quantizer"]
+    vision_weight = modules["model.visual.merger.linear_fc1.weight_quantizer"]
+    vision_input = modules["model.visual.merger.linear_fc1.input_quantizer"]
     assert vision_weight.num_bits == (4, 3)
     assert vision_input.num_bits == (4, 3)
 

@@ -1,5 +1,5 @@
 name: Ubuntu runner setup
-description: Standard setup for ubuntu-latest runners (setup Python, cleanup disk space)
+description: Standard setup for ubuntu-24.04 runners (setup Python, cleanup disk space)
 
 inputs:
   python-version:

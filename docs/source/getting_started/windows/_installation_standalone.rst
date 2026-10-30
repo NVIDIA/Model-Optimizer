@@ -11,7 +11,7 @@ The Model Optimizer - Windows (ModelOpt-Windows) can be installed as a standalon
 Before using ModelOpt-Windows, the following components must be installed:
 
       - NVIDIA GPU and Graphics Driver
-      - Python version >= 3.10 and < 3.14
+      - Python version >= 3.11 and < 3.14
       - Visual Studio 2022 / MSVC / C/C++ Build Tools
       - CUDA Toolkit and matching CuDNN for using CUDA path during calibration (e.g. for calibration of ONNX models using `onnxruntime-gpu` or CUDA EP)
 

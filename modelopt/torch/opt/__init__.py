@@ -22,7 +22,7 @@
 * export a model back to a regular pytorch model after optimization;
 * save, restore, and manage checkpoints from which the model modifications can be resumed.
 
-Please refer to each individual sub-module to learn more about the various concepts wihin
+Please refer to each individual sub-module to learn more about the various concepts within
 ``modelopt.torch.opt`` and how to use them to implement a model optimization algorithm.
 """
 

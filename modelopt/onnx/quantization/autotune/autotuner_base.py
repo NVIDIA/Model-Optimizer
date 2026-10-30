@@ -29,7 +29,7 @@ import functools
 import os
 import random
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import onnx
 import onnx_graphsurgeon as gs
@@ -675,7 +675,7 @@ class QDQAutotunerBase:
 
         scheme.latency_ms = latency_ms
         scheme.error = not success
-        scheme.profile_timestamp = datetime.now(timezone.utc).isoformat()
+        scheme.profile_timestamp = datetime.now(UTC).isoformat()
         display_index = scheme_index + 1
 
         if not success:
@@ -737,7 +737,7 @@ class QDQAutotunerBase:
             "patterns": [pattern_schemes.to_dict() for pattern_schemes in self.profiled_patterns],
         }
 
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             yaml.dump(state, f, default_flow_style=False, sort_keys=False)
 
         num_patterns = len(self.profiled_patterns)
@@ -775,7 +775,7 @@ class QDQAutotunerBase:
             AutotunerNotInitializedError: If initialize() hasn't been called
             FileNotFoundError: If the input_path doesn't exist
         """
-        with open(input_path) as f:
+        with open(input_path, encoding="utf-8") as f:
             state = yaml.safe_load(f)
 
         if state.get("baseline_latency_ms") is not None:
@@ -807,7 +807,7 @@ class QDQAutotunerBase:
                             f"Skipped empty pattern {pattern_schemes.pattern_signature[:16]}..."
                         )
 
-                except (KeyError, TypeError, ValueError) as exc:  # noqa: PERF203
+                except (KeyError, TypeError, ValueError) as exc:
                     logger.warning("Failed to load pattern: %s", exc)
                     continue
 

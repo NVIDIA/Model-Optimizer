@@ -23,6 +23,7 @@
 | `--criterion` | `str` | `"logits_loss"` | Distillation loss criterion. Currently only 'logits_loss' is supported. |
 | `--temperature` | `float` | `1.0` | Softmax temperature for softening logits in KD loss. Used by both standard and Liger KD loss. |
 | `--liger_jsd_beta` | `float` | `0.0` | JSD beta coefficient in [0, 1]. 0=forward KL, 1=reverse KL. Only used when --use_liger_kernel is enabled. |
+| `--kd_loss_alpha` | `float` | `1.0` | Weight for KD loss in the combined training loss. The CE (cross-entropy) loss weight is (1 - kd_loss_alpha). Set to 1.0 (default) for pure KD loss. Set to a value in (0, 1) to blend KD and CE losses, e.g. 0.7 for 70% KD loss + 30% CE loss. |
 
 ## DataArguments
 
@@ -64,6 +65,6 @@ Extends [HuggingFace TrainingArguments](https://huggingface.co/docs/transformers
 | `--trainable_params` | `list[str]` | `None` | Glob patterns (fnmatch) for parameters that should be trainable. All other parameters will be frozen. Mutually exclusive with frozen_params. |
 | `--frozen_params` | `list[str]` | `None` | Glob patterns (fnmatch) for parameters that should be frozen. Mutually exclusive with trainable_params. |
 | `--lr_config` | `str` | `None` | Path to a YAML file mapping fnmatch patterns to optimizer kwargs (e.g. lr, weight_decay). First matching pattern wins per parameter. See examples/llm_qat/configs/train/lr/lr_config_example.yaml. |
-| `--manual_gc` | `bool` | `False` | Run `gc.collect()` before each training/prediction step to work around GPU memory leaks during QAT/distillation. |
+| `--manual_gc` | `bool` | `False` | Run `gc.collect()` before each training/prediction step to work around GPU memory leaks during QAT/distillation. After the first optimizer step, objects that live until `train()` returns are frozen (`gc.freeze()`) so these collections skip them. |
 | `--liger_ce_label_smoothing` | `float` | `0.0` | Label smoothing for Liger fused CE loss. Only used when --use_liger_kernel is enabled. |
 | `--lora` | `bool` | `False` | Whether to add LoRA (Low-Rank Adaptation) adapter before training. When using real quantization, the LoRA adapter must be set, as quantized weights will be frozen during training. |

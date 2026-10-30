@@ -1,7 +1,6 @@
 # NEL 0.2.6 Launcher Workflow
 
-Read the sections needed for the current stage; existing configs can start at
-Step 8. nel-next uses its own workflow, but shares the deployment guidance in
+Read the sections needed for the current stage. nel-next uses its own workflow, but shares the deployment guidance in
 Step 3 and registry authentication in Step 7.5. All file paths below are relative
 to the evaluation skill root, and step numbers match `SKILL.md`.
 
@@ -29,7 +28,7 @@ to the evaluation skill root, and step numbers match `SKILL.md`.
 > needs `registry#path:tag` for non-DockerHub images or it prepends `docker.io` and 404s; NEL rejects
 > **file** mounts ("Mount paths must be directories") — put file overrides in `pre_cmd`.
 
-Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`. If user has an existing config, skip to Step 8 (optionally review for `???` and quantization flags first).
+Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 
 **Set up `.env` now (not Step 8).** The working `.env` lives at the **workspace root** — the directory you run `nel` from — matching `modelopttools:eval-config`'s convention; do **not** create it under the skill dir. (NEL does not discover `.env` by path: it reads secrets from the shell env via the `host:` prefix after you `source`, so the location is purely *which file you source* before `nel run`. Keeping the single `.env` at the workspace root avoids a stale duplicate under the symlinked, shared `.agents/` skill tree.) For judge-scored / user-sim tasks (HLE, AA-LCR, Tau2), seed it from the template if absent — the template ships under the skill dir, the working `.env` does not: `[ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env`. Then try `modelopttools:eval-config` (if available) to fill the judge `model_id`/`url` rows (user adds the secret key). Needed before Step 5, which substitutes those values into task `<VAR>` placeholders.
 
@@ -65,7 +64,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 Ask the 5 questions via AskUserQuestion (categories must match `nel skills build-config --help` — **run that first** to confirm the current option names; CLI options override this list).
 
 1. **Execution:** Local / SLURM
-2. **Deployment:** None (External) / vLLM / SGLang / NIM / TRT-LLM. Prefer vLLM unless the user/card says otherwise.
+2. **Deployment:** NEL-managed vLLM / SGLang / NIM / TRT-LLM (prefer vLLM unless the user/card says otherwise). None (External) only per [Step 3's serving-handoff check](#step-3--configure-deployment).
 3. **Auto-export:** None / MLflow / wandb
 4. **Model type:** Base / Chat / Reasoning
 5. **Benchmarks** (multi-select): standard / code / math_reasoning / safety / multilingual
@@ -81,6 +80,10 @@ nel skills build-config --execution <...> --deployment <...> --model_type <...> 
 ---
 
 ### Step 3 — Configure deployment
+
+**Serving-handoff check (including existing configs).** Use NEL-managed serving unless the user explicitly authorizes an external model-under-test endpoint; record an external target's lifetime/availability dependency. Judge/user-simulator endpoints are unaffected. Temporary PTQ smoke tests and isolated deployment debugging remain allowed, but never reuse their endpoints for evaluation; permission to keep a smoke server running is not evaluation authorization.
+
+For a smoke-tested checkpoint, map its compatibility inventory into NEL: pin the serving image; preserve flags in `deployment.command`, environment in `deployment.env_vars`, directory mounts in the execution config, and patches/dependency setup in `deployment.pre_cmd` or a pinned custom image. Keep the checkpoint unchanged. Review generated dry-run artifacts against the smoke-test launch evidence for omissions; require the NEL canary to validate loading and generation before the full run. Carry serving-debug fixes back through this same check.
 
 **Model path.** Checkpoint path (`/`, `./`, `../`, `~`, or exists on disk) → set `deployment.checkpoint_path`, leave `hf_model_handle: null`. Else HF handle (one `/`, not on disk) → set `deployment.hf_model_handle`, leave `checkpoint_path: null`.
 
@@ -211,6 +214,8 @@ Silence is not contradiction. Drop/override only when the recipe sets a differen
 
 #### Evaluation params template (top-level params)
 
+**Before choosing sampling values or an output budget, read [Model Card Research](model-card-research.md), including its [token-budget rule](model-card-research.md#max_new_tokens--mandatory-model-card-lookup).**
+
 The top-level `nemo_evaluator_config.config.params` must contain **exactly these six fields** — no `top_k` / `presence_penalty` / `repetition_penalty` / `min_p`:
 
 ```yaml
@@ -220,14 +225,12 @@ nemo_evaluator_config:
       parallelism: ???    # Required — size per references/parallelism.md (bounded by total request count vs GPU serving capacity); ask user in Step 4 if still unclear
       request_timeout: 3600
       max_retries: 10
-      max_new_tokens: 65536  # see rule below
+      max_new_tokens: 65536  # see model-card-research.md's token-budget rule
       temperature: 1.0    # from model card (reasoning); adjust
       top_p: 0.95         # from model card (reasoning); adjust
 ```
 
 Per-task `max_new_tokens` overrides are forbidden — set one top-level ceiling everywhere.
-
-**Cross-check `temperature` / `top_p` / `max_new_tokens` against `references/nvfp4-modelcard-sampling.md`** — the published settings for the 2026 NVFP4 checkpoints under `huggingface.co/nvidia` that disclose them (older releases and cards that publish nothing are absent — for those, read the card; `-DSpark` / `-DFlash` spec-decode variants share their base checkpoint's row, since spec decoding does not change the target's output distribution). **The card is the source of truth; this file is a reference, not a constraint** — use it to confirm a value you read, to fill a gap when the card is silent or ambiguous, and to catch a misreading. Worth consulting whenever the model is an NVFP4 checkpoint **or shares a family with one** (Qwen3.x, GLM-4.7/5.x, Kimi K2.x/K3, MiniMax M2.x/M3, DeepSeek V3.x/V4/R1, Gemma 4, Nemotron 3/3.5, Llama-Nemotron, Mistral Medium 3.5), and especially when you are unsure. It is a dated snapshot, so for anything newer than it, trust the card. See that file's "Lookup" section.
 
 **`temperature` / `top_p` are different: per-task overrides ARE allowed and often required.** Cards often specify sampling per scenario — DeepSeek-V4-Pro-0813 gives `top_p = 0.95` for agentic scenarios and `1.0` otherwise, so a single top-level `0.95` is wrong for every non-agentic task.
 Set the top-level value for the majority case, override only the tasks the card calls out, and apply
@@ -235,15 +238,11 @@ the split identically to baseline and candidate. **The `export.mlflow` tags reco
 top-level values**, so note any per-task override in the run `description` — otherwise the
 overridden task is reported under sampling params it did not use.
 
-#### `max_new_tokens` — mandatory model-card lookup
+#### Output-context checks
 
-1. **Fetch the HF model card before writing the value.** Not optional.
-2. Scan for any `max_tokens` / `max_new_tokens` / "output length" recommendation. Pick the **highest** value the card mentions (Qwen3.6: 32768 general + 81920 math-coding → use **81920**). Annotate with a citing comment.
-   **Card figures are SINGLE-TURN.** On multi-turn / agentic benchmarks the model's own answer is fed back in, so the cap must satisfy `n_turns × max_new_tokens + prompt < max_model_len`. Taking a card's headline "384K output" literally lost SciCode samples to HTTP 400; 65536 was clean. (`references/run-validation.md` already covers checking `finish_reason: length` after a run.)
-3. **Consult `references/nvfp4-modelcard-sampling.md` as a reference.** Listed and in agreement → proceed with confidence. Listed and different → **the card wins**; re-read it, then note the discrepancy for the user rather than auto-correcting either way. Not listed, or the card is silent or ambiguous → take the nearest same-family rows as the value, a far better prior than the generic fallback below. Its `max_num_tokens` column records the card's *headline* cap, so rule 2 above still governs: when a card names more than one cap, the highest wins even if that exceeds the row.
-4. If the card is genuinely silent after a thorough read **and** the family table offers no usable pattern, fall back to: **65536** (reasoning), **16384** (non-reasoning); surface the silence to the user.
-5. **Forbidden:** writing `max_new_tokens: <generic_default>` with a "card not yet checked" comment. Either fetch and apply, or fetch and confirm silence.
-6. **A higher cap doesn't fix runaway reasoning.** On hard tasks (e.g. HLE) a non-terminating model just rambles to the larger cap (~80% length-capped at 131072), and the cap only helps if deployment `--max-model-len > prompt + max_new_tokens` (else generation is silently clipped — AA-LCR's ~120K input leaves little room). Treat such tasks as low-confidence.
+**Card figures are SINGLE-TURN.** On multi-turn / agentic benchmarks the model's own answer is fed back in, so the cap must satisfy `n_turns × max_new_tokens + prompt < max_model_len`. Taking a card's headline "384K output" literally lost SciCode samples to HTTP 400; 65536 was clean. (`references/run-validation.md` already covers checking `finish_reason: length` after a run.)
+
+**A higher cap doesn't fix runaway reasoning.** On hard tasks (e.g. HLE) a non-terminating model just rambles to the larger cap (~80% length-capped at 131072), and the cap only helps if deployment `--max-model-len > prompt + max_new_tokens` (else generation is silently clipped — AA-LCR's ~120K input leaves little room). Treat such tasks as low-confidence.
 
 #### Quantization-aware benchmark defaults
 

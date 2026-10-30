@@ -40,4 +40,6 @@ Source the facts from the repo rather than from memory:
 Then add a row to the algorithm table in `../../SKILL.md`.
 
 Every algorithm with a recipe in
-`modelopt_recipes/general/speculative_decoding/` currently has a sheet.
+`modelopt_recipes/general/speculative_decoding/` currently has a sheet. Where two
+recipes are the same algorithm under different settings — `lilicorr.yaml` and
+`lilicorr_conv.yaml` — one sheet covers both, with the delta in its own section.
