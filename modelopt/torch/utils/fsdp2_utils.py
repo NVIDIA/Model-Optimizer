@@ -102,19 +102,23 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     params it ignores.
 
     It records no distribution plan: a caller wrapping a model itself records one once it is wrapped
-    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`). It refuses a model whose
-    recorded plan replicates it, as the plan ``load_pretrained`` records on a model it loads whole
-    does: a plan is recorded once, so wrap a model loaded with ``from_pretrained`` instead.
+    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`). It refuses a model that, or
+    any of whose submodules, already records a plan, as a model ``load_pretrained`` returned does: a
+    plan is recorded once, so wrap a model loaded with ``from_pretrained`` instead.
     """
-    recorded = getattr(model, _PLAN_ATTR, None)
-    if recorded is not None and not recorded.is_fsdp_dense:
-        # Sharded, the model would read as replicated: the export would gather it as if it were.
-        raise RuntimeError(
-            f"{type(model).__name__} is recorded as distributed by {recorded!r}, which replicates "
-            "it, and a plan is recorded once. To shard a model yourself, load it with "
-            "from_pretrained rather than load_pretrained, which records the plan it loaded by, "
-            "then record yours with set_distribution_plan() once it is wrapped."
-        )
+    for name, module in model.named_modules():
+        recorded = getattr(module, _PLAN_ATTR, None)
+        if recorded is not None:
+            # The record would no longer hold: a model recorded as replicated would read as
+            # replicated while sharded, which the export would believe, and one recorded as sharded
+            # is wrapped already.
+            where = f"{type(module).__name__} {name!r}" if name else type(module).__name__
+            raise RuntimeError(
+                f"{where} is already recorded as distributed by {recorded!r}, and a plan is "
+                "recorded once. To shard a model yourself, load it with from_pretrained rather "
+                "than load_pretrained, which records the plan it loaded by, then record yours with "
+                "set_distribution_plan() once it is wrapped."
+            )
     # Importing the quantization package registers every mode and plugin; only a wrap needs it.
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
