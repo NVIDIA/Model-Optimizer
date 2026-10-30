@@ -1335,6 +1335,13 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
         ),
         (
             DistributionPlan(2, dense="fsdp"),
+            "quantized-language-model",
+            {"trust_remote_code": True},
+            NotImplementedError,
+            "dequantize",
+        ),
+        (
+            DistributionPlan(2, dense="fsdp"),
             "vlm",
             None,
             NotImplementedError,
@@ -1359,6 +1366,7 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
     ids=[
         "another-world",
         "quantized-checkpoint",
+        "quantized-language-model",
         "vlm-checkpoint",
         "not-a-plan",
         "hf-config-on-a-whole-load",
@@ -1379,14 +1387,18 @@ def test_a_load_refuses_what_it_cannot_load(
     match,
 ):
     """Before anything loads: a plan for another world; a quantized checkpoint, which FSDP2 would
-    read as stored; a VLM, which FSDP2 would build through AutoModelForCausalLM, refused or as its
-    language model alone; anything but a plan; and the sharded loads' config, or an option only the
-    FSDP2 load takes, which from_pretrained would take for a model argument and fail far from here,
-    or drop."""
+    read as stored, a VLM's whose remote code builds it as a causal LM with its language model
+    quantized included; a VLM, which FSDP2 would build through AutoModelForCausalLM, refused or as
+    its language model alone; anything but a plan; and the sharded loads' config, or an option only
+    the FSDP2 load takes, which from_pretrained would take for a model argument and fail far from
+    here, or drop."""
     run_as(2)
     config = serve(transformers.LlavaConfig() if checkpoint == "vlm" else LlamaConfig(**_TINY))
     if checkpoint == "quantized":
         config.quantization_config = {"quant_method": "fp8"}
+    if checkpoint == "quantized-language-model":  # Kimi-K2.5's layout
+        config.auto_map = _REMOTE_VLM
+        config.text_config = LlamaConfig(**_TINY, quantization_config={"quant_method": "fp8"})
     if options == "hf_config":
         options = {"auto_class": auto_class, "hf_config": config}
 
