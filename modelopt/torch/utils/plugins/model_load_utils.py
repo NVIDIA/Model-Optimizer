@@ -2081,7 +2081,7 @@ def resolve_distribution_plan(
     # load that is refused, without the spec, whose prepare could fail, or patch the process, for a
     # load that never shards. An EP degree asked for under init_quantized_weights still takes the
     # spec, for the decision to find the experts the load then refuses to shard.
-    prepared = [hf_config]
+    stated = [hf_config]
     if dist.broadcast_from(
         "spec",
         lambda: (
@@ -2091,28 +2091,45 @@ def resolve_distribution_plan(
             and not (ep == "auto" and _init_quantized_weights())
         ),
     ):
-        # Before deciding: deciding without the spec would read an expert-parallel MoE as dense. A
-        # rank that cannot apply it fails every rank, as a checkpoint read does above.
-        def spec_applied() -> bool:
-            prepared[0] = apply_distributed_support(
+        # Before deciding: deciding without the spec would read an expert-parallel MoE as dense. Its
+        # plan only: its prepare, which may patch the process, runs for an expert-parallel plan
+        # alone. A rank that cannot apply it fails every rank, as a checkpoint read does above.
+        def spec_stated() -> bool:
+            stated[0] = apply_distributed_support(
                 hf_config.model_type,
                 copy.deepcopy(hf_config),
                 ckpt_path=ckpt_path,
                 trust_remote_code=trust_remote_code,
+                prepare=False,
             )
             return True
 
-        dist.all_reduce("model spec", spec_applied, all)
+        dist.all_reduce("model spec", spec_stated, all)
     plan = dist.broadcast_from(
         "plan",
         lambda: _decide_distribution(
-            ckpt_path, prepared[0], world_size, ep_size, dense, trust_remote_code, auto_class
+            ckpt_path, stated[0], world_size, ep_size, dense, trust_remote_code, auto_class
         ),
     )
     if plan != DistributionPlan():
         print_rank_0(f"Distribution: {plan!r}")
-    # Only the expert-parallel load shards by the plan the spec attached.
-    return plan, prepared[0] if plan.is_expert_parallel else hf_config
+    if not plan.is_expert_parallel:
+        return plan, hf_config
+    # Only the expert-parallel load shards by the plan the spec attached, and only it gets the spec
+    # prepared, on every rank.
+    prepared = [hf_config]
+
+    def spec_applied() -> bool:
+        prepared[0] = apply_distributed_support(
+            hf_config.model_type,
+            copy.deepcopy(hf_config),
+            ckpt_path=ckpt_path,
+            trust_remote_code=trust_remote_code,
+        )
+        return True
+
+    dist.all_reduce("model spec prepared", spec_applied, all)
+    return plan, prepared[0]
 
 
 def _make_expert_param_matcher(ep_plan: dict[str, Any]):
