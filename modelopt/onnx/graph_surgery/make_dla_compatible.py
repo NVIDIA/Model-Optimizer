@@ -24,6 +24,7 @@ to adjust axes.
 from __future__ import annotations
 
 import copy
+import os
 import time
 from functools import partial
 from typing import TYPE_CHECKING
@@ -69,6 +70,7 @@ from .dla_transforms.dla_rank_conversion import (
 )
 from .dla_transforms.dla_remove_deqlin import _apply_remove_deqlin
 from .dla_transforms.dla_remove_qdq import _remove_qdq_from_model
+from .dla_transforms.dla_remove_reshapes import _apply_remove_reshapes
 from .dla_transforms.dla_reorder_nodes import _apply_reorder_nodes
 from .dla_transforms.dla_reshape_patterns import (
     _apply_reshape_qdq_reduce_sum,
@@ -87,7 +89,8 @@ from .utils.graph_utils import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-__all__ = []
+
+__all__ = ["DLA_TRANSFORMS", "dla_make_dla_compatible"]
 
 
 def _remove_deqlin_and_unused_initializers(model):
@@ -148,6 +151,7 @@ DLA_TRANSFORMS = (
     ("Greater", _apply_greater),
     ("ShapeInference", infer_shapes),
     ("TopK", partial(_apply_topk, rank_converted=True)),
+    ("RemoveReshapes", _apply_remove_reshapes),
     ("RemoveUnusedInitializers", _remove_unused_initializers),
 )
 
@@ -315,4 +319,60 @@ def _transform_make_dla_compatible(
     onnx.checker.check_model(model)
     if verbose:
         logger.info("[DLA pipeline] Done (%.1fs).", time.perf_counter() - started)
+    return model
+
+
+def dla_make_dla_compatible(
+    model_path: str,
+    output_path: str,
+    *,
+    use_external_data: bool = True,
+    external_data_name: str | None = None,
+    verbose: bool = True,
+    qdq_quantized_dtypes: Iterable[int | str] | None = None,
+    remove_all_qdq: bool = False,
+) -> onnx.ModelProto:
+    """Load an ONNX model, apply the ordered DLA transforms, and save the result.
+
+    Arithmetic lowering of zero-branch ``Where`` assumes finite FP32 branch tensors.
+    NaN and infinity values at those nodes are outside the supported input contract.
+    Masked multiplication can change the sign of zero even for finite inputs; validate
+    sign-sensitive downstream operations before using this conversion.
+
+    Args:
+        model_path: Input file; external weights are loaded from its directory.
+        output_path: Destination ONNX file.
+        use_external_data: Store large tensor payloads in a sidecar file.
+        external_data_name: Relative sidecar filename; ONNX chooses a unique name by default.
+        verbose: Log each transform stage.
+        qdq_quantized_dtypes: Zero-point dtypes whose QDQ pairs are removed.
+            Defaults to UINT16 and INT16. Accepts ONNX dtype IDs or names.
+        remove_all_qdq: Remove QDQ pairs for every dtype, matching the C++ flag.
+            Cannot be combined with qdq_quantized_dtypes.
+
+    Returns:
+        The transformed model. Invalid models and failed transformations raise.
+    """
+    model = _transform_make_dla_compatible(
+        onnx.load(model_path, load_external_data=True),
+        verbose=verbose,
+        qdq_quantized_dtypes=qdq_quantized_dtypes,
+        remove_all_qdq=remove_all_qdq,
+    )
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    if verbose:
+        logger.info("Saving modified model to: %s", output_path)
+    if use_external_data:
+        onnx.save(
+            model,
+            output_path,
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location=external_data_name,
+            size_threshold=1024,
+        )
+    else:
+        onnx.save(model, output_path)
     return model

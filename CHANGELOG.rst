@@ -41,6 +41,8 @@ Changelog
 *Misc*
 
 - The ``evaluation`` agent skill can stop looping ("doom loop") reasoning early: ask it to avoid doom loops and it adds vLLM's ``repetition_detection`` request field (vLLM 0.17.0 or later) to every task, ending a request once its output repeats. Use the same setting for baseline and candidate runs.
+- Add the ordered DLA compatibility pipeline through the ``modelopt.onnx.graph_surgery.make_dla_compatible``
+  API and ``make-dla-compatible`` CLI command. Use ``--remove-all-qdq`` to remove Q/DQ pairs of every dtype.
 
 **Backward Breaking Changes**
 

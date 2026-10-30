@@ -50,6 +50,12 @@ Transpose DequantizeLinear weights (column-major optimization)::
         --input model_quantized.onnx \
         --output model_quantized_transposed.onnx
 
+Make a model compatible with the NVIDIA DLA accelerator::
+
+    python -m modelopt.onnx.graph_surgery make-dla-compatible \
+        --input model.onnx \
+        --output model_dla.onnx
+
 Analyze attention pattern::
 
     python -m modelopt.onnx.graph_surgery analyze \
@@ -83,6 +89,9 @@ Examples:
 
   Transpose DequantizeLinear weights:
     python -m modelopt.onnx.graph_surgery transpose-dq -i model_quantized.onnx -o model_transposed.onnx
+
+  Make a model DLA-compatible:
+    python -m modelopt.onnx.graph_surgery make-dla-compatible -i model.onnx -o model_dla.onnx
 
   Analyze attention pattern:
     python -m modelopt.onnx.graph_surgery analyze -i model.onnx --layer 0
@@ -235,6 +244,47 @@ Examples:
         "-q", "--quiet", action="store_true", help="Suppress progress messages"
     )
 
+    # Make DLA compatible subcommand
+    dla_parser = subparsers.add_parser(
+        "make-dla-compatible",
+        help="Make a model compatible with the NVIDIA DLA accelerator",
+        description=(
+            "Apply the ordered DLA graph transforms and validate the resulting ONNX model. "
+            "Where lowering assumes finite FP32 branches and may change the sign of zero."
+        ),
+    )
+    dla_parser.add_argument("-i", "--input", required=True, help="Input ONNX model path")
+    dla_parser.add_argument("-o", "--output", required=True, help="Output ONNX model path")
+    dla_parser.add_argument(
+        "--no-external-data",
+        action="store_true",
+        help="Don't save weights as external data",
+    )
+    dla_parser.add_argument(
+        "--external-data-name",
+        type=str,
+        default=None,
+        help="Name for external data file",
+    )
+    qdq_group = dla_parser.add_mutually_exclusive_group()
+    qdq_group.add_argument(
+        "--qdq-quantized-dtypes",
+        nargs="+",
+        default=None,
+        metavar="DTYPE",
+        help=(
+            "Zero-point storage dtypes whose Q/DQ pairs are stripped in the early "
+            "QDQ-removal step (e.g. uint16 int16). Accepts TensorProto names or ints. "
+            "Default: UINT16 and INT16."
+        ),
+    )
+    dla_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress messages")
+    qdq_group.add_argument(
+        "--remove-all-qdq",
+        action="store_true",
+        help="Remove QDQ pairs for every dtype, matching the C++ remove-all mode",
+    )
+
     # Analyze subcommand
     analyze_parser = subparsers.add_parser(
         "analyze",
@@ -303,6 +353,20 @@ Examples:
             use_external_data=not args.no_external_data,
             external_data_name=args.external_data_name,
             verbose=not args.quiet,
+        )
+
+    elif args.command == "make-dla-compatible":
+        from . import run_graph_surgery
+
+        run_graph_surgery(
+            "make-dla-compatible",
+            model_path=args.input,
+            output_path=args.output,
+            use_external_data=not args.no_external_data,
+            external_data_name=args.external_data_name,
+            verbose=not args.quiet,
+            qdq_quantized_dtypes=args.qdq_quantized_dtypes,
+            remove_all_qdq=args.remove_all_qdq,
         )
 
     elif args.command == "analyze":
