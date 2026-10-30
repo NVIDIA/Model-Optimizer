@@ -615,7 +615,8 @@ ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for 
 > *Nemotron-H checkpoints containing MTP weights are not supported with `--use_fsdp2` and are rejected before distributed model loading. Remove `--use_fsdp2` to load and calibrate the MTP modules; the distributed loader does not construct them.*
 
 > *AWQ calibration (`awq_lite`, `awq_full`), as the AWQ formats and recipes use, AutoQuantize candidates included, is not supported with `--use_fsdp2` on more than one rank and is rejected before distributed model loading: each rank would fold its own smoothing scale into its weight shard. Drop `--use_fsdp2` (the single-process `device_map` still spreads the model over all the GPUs), run on one rank, or use a non-AWQ format.*
-> *`nvfp4_awq_clip` works with `--use_fsdp2` on more than one GPU: its clip search averages each candidate clip's loss over the ranks, so every rank takes the same clip.*
+
+> *`nvfp4_awq_clip` still works with `--use_fsdp2` on more than one GPU: it calibrates with AWQ-Clip alone, which folds no smoothing scale into the weights, and its clip search averages each candidate clip's loss over the ranks, so every rank takes the same clip.*
 
 ### Usage
 
