@@ -55,6 +55,7 @@ from modelopt.torch.models.hf import (
 from modelopt.torch.quantization.mode import get_modelike_from_algo_cfg
 from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
+from modelopt.torch.utils.logging import warn_rank_0
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
 from modelopt.torch.utils.plugins.model_load_utils import (
     is_fsdp2_text_only_vlm,
@@ -67,8 +68,8 @@ logger = logging.getLogger(__name__)
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 
-def _awq_calibrations(args) -> set[str]:
-    """The AWQ calibrations (``awq_lite``, ``awq_full``) the run's --recipe or --qformat uses."""
+def _calibration_methods(args) -> set[str]:
+    """The calibration methods (``max``, ``awq_lite``, ...) the run's --recipe or --qformat uses."""
     if getattr(args, "recipe", None) is not None:
         recipe = load_recipe(args.recipe)
         configs = [getattr(recipe, "quantize", None)]
@@ -80,12 +81,16 @@ def _awq_calibrations(args) -> set[str]:
     else:
         preset = QUANT_CFG_CHOICES.get(getattr(args, "qformat", None) or "")
         algorithms = [preset.get("algorithm")] if preset is not None else []
-    methods = {
+    return {
         mode.removesuffix("_calibrate")
         for algorithm in algorithms
         for mode, _ in get_modelike_from_algo_cfg(algorithm)
     }
-    return methods & {"awq_lite", "awq_full"}
+
+
+def _awq_calibrations(args) -> set[str]:
+    """The AWQ calibrations (``awq_lite``, ``awq_full``) the run's --recipe or --qformat uses."""
+    return _calibration_methods(args) & {"awq_lite", "awq_full"}
 
 
 def validate_fsdp2_supported(args, config):
@@ -193,6 +198,13 @@ def resolve_distribution(args) -> tuple[DistributionPlan, Any]:
             f"{plan!r}: AutoQuantize scores each rank's own calibration data and reduces no score "
             "across ranks, so ranks could choose different formats per layer; launch hf_ptq "
             "without torchrun for an AutoQuantize recipe."
+        )
+    if plan.world_size > 1 and not args.use_fsdp2 and "lsq" in _calibration_methods(args):
+        # Its scale calibration is the algorithm it runs first, synced or refused as that one is,
+        # but nothing has checked its learnable scales across ranks yet.
+        warn_rank_0(
+            f"{plan!r}: LSQ has not been validated on a run of several ranks: nothing checks that "
+            "the ranks' learnable scales match. Launch hf_ptq without torchrun for the tested path."
         )
     if (
         plan.world_size > 1
