@@ -131,14 +131,34 @@ def _drop_tie_weights_kwargs(orig_tie):
     return _tie_weights
 
 
+def _native_for_the_prepared_config(own_class, native_class):
+    """The ``DeepseekV3ForCausalLM`` the patched module builds its language model with.
+
+    transformers' native class for the native ``DeepseekV3Config`` ``prepare`` puts on
+    ``text_config``, and the checkpoint's own class for its own config. Deciding the plan prepares a
+    copy of the config before the plan is known, and the patch outlives that copy: a load the plan
+    keeps off expert parallelism builds from the config as read, and so gets the checkpoint's own
+    language model, as it would with no patch.
+    """
+    from transformers import DeepseekV3Config
+
+    def build(config, *args, **kwargs):
+        built = native_class if isinstance(config, DeepseekV3Config) else own_class
+        return built(config, *args, **kwargs)
+
+    setattr(build, "_kimi_native_swap", True)
+    return build
+
+
 def patch_language_model_to_native(
     label: str, modeling: str, vlm_class: str, ckpt_path: str, trust_remote_code: bool
 ) -> None:
     """Point the checkpoint's ``modeling`` module's ``DeepseekV3ForCausalLM`` at the native class.
 
-    Loads the checkpoint's remote ``modeling`` module and replaces its ``DeepseekV3ForCausalLM`` with
-    transformers' native class, so ``vlm_class.__init__`` builds the EP-capable native deepseek_v3
-    for ``self.language_model`` instead of the per-expert Linears version.
+    Loads the checkpoint's remote ``modeling`` module and replaces its ``DeepseekV3ForCausalLM``, so
+    ``vlm_class.__init__`` builds the EP-capable native deepseek_v3 for ``self.language_model``
+    instead of the per-expert Linears version, from the config ``prepare`` made
+    (:func:`_native_for_the_prepared_config`).
     """
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
     from transformers.models.deepseek_v3 import DeepseekV3ForCausalLM as NativeDeepseekV3ForCausalLM
@@ -159,9 +179,11 @@ def patch_language_model_to_native(
                 f"{label}: {module.__name__} defines no module-level DeepseekV3ForCausalLM to swap "
                 "for the transformers-native class; the checkpoint's modeling code changed."
             )
-        if current is NativeDeepseekV3ForCausalLM:
+        if getattr(current, "_kimi_native_swap", False):
             return False
-        module.DeepseekV3ForCausalLM = NativeDeepseekV3ForCausalLM
+        module.DeepseekV3ForCausalLM = _native_for_the_prepared_config(
+            current, NativeDeepseekV3ForCausalLM
+        )
         # The remote tie_weights() takes no kwargs, but transformers' post_init and load call
         # tie_weights(recompute_mapping=False) -> TypeError.
         kimi_cls = getattr(module, vlm_class, None)
