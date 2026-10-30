@@ -1837,30 +1837,44 @@ def load_and_prepare_ep(
                 f"{plan!r}: ep_size={ep_degree} must divide the {num_experts} routed experts, which the "
                 "all-to-all transport shares out equally over the expert-parallel ranks."
             )
-    # Each rank builds the meshes below on the GPU it is bound to. DeviceMesh binds a rank that sees
-    # CUDA but is bound to none yet (a gloo group leaves it so) by its local rank, a GPU that a launch
-    # showing each process one does not have; and a rank without a GPU fails building the meshes.
-    # Either fails alone while the others wait in their subgroups' creation, so every rank learns
-    # from one gather which ranks are bound and which have a GPU, and all refuse alike. A run in
-    # which none has a GPU fails building the meshes on every rank alike.
+
+    # Each rank builds the meshes on the GPU it is bound to, and DeviceMesh binds one not bound yet
+    # by its local rank. A rank that would so end up on no GPU, or on one another rank is on (as an
+    # import that initializes CUDA leaves every rank of a launch that binds none), fails alone in the
+    # meshes while the others wait: every rank decides from one gather, and all refuse alike.
+    def gpu() -> tuple[bool, bool, str | None]:
+        """Whether this rank has a GPU, whether it waits to be bound to one, and the bound one's UUID."""
+        if not torch.cuda.is_initialized():
+            return _has_own_gpu(), torch.cuda.is_available(), None
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        return _has_own_gpu(), False, str(props.uuid)
+
     gpus = dist.all_reduce(
         "each rank's GPU",
-        lambda: [(_has_own_gpu(), torch.cuda.is_available() and not torch.cuda.is_initialized())],
-        combine=lambda ranks: [gpu for flags in ranks for gpu in flags],
+        lambda: [gpu()],
+        combine=lambda ranks: [g for facts in ranks for g in facts],
     )
-    unbound = [rank for rank, (_, waits) in enumerate(gpus) if waits]
+    unbound = [rank for rank, (has, waits, _) in enumerate(gpus) if waits and not has]
     if unbound:
         raise RuntimeError(
             "The expert-parallel load builds its meshes on the GPU each rank is bound to, and rank(s) "
-            f"{unbound} are bound to none yet. Bind each rank to its GPU before the load "
-            "(torch.cuda.set_device), as distributed_run() does."
+            f"{unbound} are bound to none yet, nor does their local rank name one they see. Bind each "
+            "rank to its GPU before the load (torch.cuda.set_device), as distributed_run() does."
         )
-    without = [rank for rank, (has, _) in enumerate(gpus) if not has]
+    without = [rank for rank, (has, _, _) in enumerate(gpus) if not has]
     if without and len(without) < len(gpus):
         raise RuntimeError(
             "The expert-parallel load builds its meshes on each rank's own GPU, and rank(s) "
             f"{without} have none while the others have theirs. Run one process per GPU, as "
             "torchrun --nproc_per_node=<GPUs per node> does."
+        )
+    uuids = [uuid for _, _, uuid in gpus]
+    shared = [rank for rank, uuid in enumerate(uuids) if uuid is not None and uuids.count(uuid) > 1]
+    if shared:
+        raise RuntimeError(
+            "The expert-parallel load builds its meshes on the GPU each rank is bound to, and rank(s) "
+            f"{shared} are bound to the same one. Bind each rank to its own GPU before the load "
+            "(torch.cuda.set_device), as distributed_run() does."
         )
     dtype = getattr(hf_config, "dtype", None) or torch.bfloat16
     # The weights load, and the checkpoint recorded for the export to read the unplaced tensors back

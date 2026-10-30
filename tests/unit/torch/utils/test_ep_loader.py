@@ -80,6 +80,20 @@ class _Mesh:
         return -1
 
 
+def _cuda(gpu, bound=True, count=1, uuid="GPU-0"):
+    """Patches pinning the CUDA state the GPU check reads: ``count`` visible GPUs and this rank on
+    cuda:0, the one named ``uuid``, bound to it or not yet; or, without ``gpu``, none. The check then
+    reads the case, not the host the test runs on, whose visible GPU no test binds."""
+    state = {
+        "is_available": gpu,
+        "is_initialized": gpu and bound,
+        "current_device": 0,
+        "device_count": count if gpu else 0,
+        "get_device_properties": SimpleNamespace(uuid=uuid),
+    }
+    return [mock.patch(f"torch.cuda.{name}", return_value=value) for name, value in state.items()]
+
+
 @pytest.fixture
 def ep_world_of_two(monkeypatch, gloo_world_of_one):
     """A two-rank expert-parallel world as far as the loader's checks see, and the checkpoint paths
@@ -628,19 +642,6 @@ def _meshes_in_step(*args, **kwargs):
     raise _PastTheMeshesError
 
 
-def _cuda(gpu, bound=True):
-    """Patches pinning the CUDA state the GPU check reads: one visible GPU, cuda:0, bound to it or
-    not yet; or, without ``gpu``, none. The check then reads the case, not the host the test runs
-    on (the gloo workers bind no GPU, so a host's visible one would read as unbound)."""
-    state = {
-        "is_available": gpu,
-        "is_initialized": gpu and bound,
-        "current_device": 0,
-        "device_count": int(gpu),
-    }
-    return [mock.patch(f"torch.cuda.{name}", return_value=value) for name, value in state.items()]
-
-
 def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
     path, hf_config, patches = ckpt, None, []
     if failure != "unreadable-config":
@@ -652,7 +653,7 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
         patches.append(local)
     fails_here = rank == failing_rank
     # No rank has a GPU, but in the no-gpu row every rank other than the failing one has its own.
-    patches += _cuda(failure == "no-gpu" and not fails_here)
+    patches += _cuda(failure == "no-gpu" and not fails_here, uuid=f"GPU-{rank}")
 
     def fail(*args, **kwargs):
         raise (MemoryError if failure == "load" else OSError)(match)
@@ -726,12 +727,12 @@ def test_a_load_failing_on_one_rank_fails_every_rank(
     )
 
 
-def _one_gpu_per_process_job(rank, size, bound):
+def _gpu_layout_job(rank, size, visible, bound, shared, refused):
     hf_config = SimpleNamespace(base_model_ep_plan=dict(_EP_PLAN), num_experts=4)
     reached = None
     with bounded_collectives(), ExitStack() as stack:
-        # Each process sees one GPU, cuda:0, bound to it or not yet; the local ranks run 0 and 1.
-        for patch in _cuda(True, bound):
+        # This rank is on cuda:0, bound to it or not yet; the local ranks run 0 and 1.
+        for patch in _cuda(True, bound, visible, "GPU-0" if shared else f"GPU-{rank}"):
             stack.enter_context(patch)
         stack.enter_context(
             mock.patch.object(
@@ -745,19 +746,38 @@ def _one_gpu_per_process_job(rank, size, bound):
             load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=hf_config)
         except Exception as error:
             reached = error
-    if bound:
+    if refused is None:
         assert isinstance(reached, _PastTheMeshesError), (rank, reached)
     else:
-        assert "rank(s) [0, 1] are bound to none yet" in str(reached), (rank, reached)
+        assert isinstance(reached, RuntimeError) and refused in str(reached), (rank, reached)
 
 
 @pytest.mark.skipif(
     Version(transformers.__version__) < Version("5.7"), reason="the EP load needs transformers 5.7"
 )
-@pytest.mark.parametrize("bound", [True, False], ids=["bound", "not-yet-bound"])
-def test_one_visible_gpu_per_process_needs_each_rank_bound_to_it(cpu_dist_workers, bound):
-    """A launch that shows each process one GPU binds every rank to cuda:0, whatever its local rank:
-    every rank has its GPU, and every rank goes on to build the meshes. Not yet bound, DeviceMesh
-    would bind each by its local rank, a GPU rank 1 does not see: every rank is refused, told to
-    bind first."""
-    cpu_dist_workers.run(_one_gpu_per_process_job, bound=bound)
+@pytest.mark.parametrize(
+    ("visible", "bound", "shared", "refused"),
+    [
+        (1, True, False, None),
+        (1, False, False, "rank(s) [1] are bound to none yet"),
+        (2, False, False, None),
+        (2, True, True, "rank(s) [0, 1] are bound to the same one"),
+    ],
+    ids=[
+        "one-gpu-each-bound",
+        "one-gpu-each-not-yet",
+        "every-gpu-not-yet",
+        "every-gpu-all-on-cuda-0",
+    ],
+)
+def test_each_rank_builds_the_meshes_on_a_gpu_of_its_own(
+    cpu_dist_workers, visible, bound, shared, refused
+):
+    """Each rank builds the meshes on the GPU it is bound to, and DeviceMesh binds one not bound yet
+    by its local rank. Shown one GPU each, every rank bound to cuda:0 goes on; not yet bound, rank 1's
+    local rank names no GPU it sees. Shown every GPU and not yet bound, DeviceMesh binds each to its
+    own. Every rank left on cuda:0, as an import that initializes CUDA leaves a launch that binds
+    none, shares one GPU. A refusal comes on every rank, from one gather."""
+    cpu_dist_workers.run(
+        _gpu_layout_job, visible=visible, bound=bound, shared=shared, refused=refused
+    )
