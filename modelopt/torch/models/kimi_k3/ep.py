@@ -1,3 +1,20 @@
+# Adapted from https://github.com/huggingface/transformers/blob/a906d3c/src/transformers/models/minimax_m3_vl/modeling_minimax_m3_vl.py
+# (``MiniMaxM3VLExperts``: the fused expert parameters and the eager ``forward`` loop of ``KimiK3Experts``),
+# modified for Kimi-K3's ``situ`` gate and latent expert width.
+# Copyright 2026 the MiniMax AI Team and HuggingFace Team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -151,8 +168,8 @@ def _build_fused_experts_class(kmod):
 
         def forward(self, hidden_states, top_k_index, top_k_weights):
             # Fallback (non-EP / eager) dense per-expert loop; the EP-PTQ path replaces this with the
-            # torch_a2a experts forward via config._experts_implementation. Mirrors the native
-            # DeepseekV3Experts/MiniMaxM3VLExperts reference loop, with situ gating.
+            # torch_a2a experts forward via config._experts_implementation. Adapted from transformers'
+            # MiniMaxM3VLExperts.forward (see the header), with situ gating.
             final = torch.zeros_like(hidden_states)
             with torch.no_grad():
                 # One class past the experts: the id a router gives a token routed to no local expert.
