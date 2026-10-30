@@ -2662,8 +2662,8 @@ def gptq(
 # Calibration rows squared at a time, bounding imatrix's float32 temporaries to this slice of an
 # input rather than twice the whole of it.
 _IMATRIX_ROW_CHUNK = 1024
-# Rows, or group sums, a GPU reduction sums at once: longer CUDA reductions stage partial sums in a
-# global buffer that grows with the input.
+# CUDA reductions over about 1,024 rows or more stage partial sums in a global buffer that grows
+# with the input, so longer GPU inputs are reduced in groups of this many rows.
 _IMATRIX_GPU_GROUP = 512
 
 
@@ -2677,15 +2677,16 @@ def _imatrix_sum_of_squares(x: torch.Tensor) -> torch.Tensor:
         # Bound the group sums, and the reduction over them, to _IMATRIX_GPU_GROUP rows too.
         return sum(_imatrix_sum_of_squares(rows) for rows in x.split(_IMATRIX_GPU_GROUP**2))
     # On a GPU vector_norm squares and sums in float32 inside the kernel, without a float32 copy.
+    if x.shape[0] <= 3 * _IMATRIX_GPU_GROUP:
+        # Launches dominate at this size, so one reduction is fastest, and up to here it stages no
+        # more than squaring float32 slices would.
+        return torch.linalg.vector_norm(x, 2, dim=0, dtype=torch.float32).square_()
     full = x.shape[0] // _IMATRIX_GPU_GROUP * _IMATRIX_GPU_GROUP
-    parts = []
-    if full:
-        groups = x[:full].reshape(-1, _IMATRIX_GPU_GROUP, x.shape[1])
-        group_sums = torch.linalg.vector_norm(groups, 2, dim=1, dtype=torch.float32).square_()
-        parts.append(group_sums.sum(dim=0))
+    groups = x[:full].reshape(-1, _IMATRIX_GPU_GROUP, x.shape[1])
+    sum_sq = torch.linalg.vector_norm(groups, 2, dim=1, dtype=torch.float32).square_().sum(dim=0)
     if full < x.shape[0]:
-        parts.append(torch.linalg.vector_norm(x[full:], 2, dim=0, dtype=torch.float32).square_())
-    return sum(parts[1:], parts[0])
+        sum_sq += torch.linalg.vector_norm(x[full:], 2, dim=0, dtype=torch.float32).square_()
+    return sum_sq
 
 
 @torch.no_grad()

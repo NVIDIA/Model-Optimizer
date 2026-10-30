@@ -92,11 +92,12 @@ def test_imatrix_encodes_each_gpus_weights_at_once(need_2_gpus, monkeypatch, inf
 
 
 @pytest.mark.parametrize(
-    "rows", [300, 2048, 2500, 512 * 512 + 700], ids=["remainder", "groups", "both", "slices"]
+    "rows", [1500, 2048, 2500, 512 * 512 + 700], ids=["one", "groups", "leftover", "slices"]
 )
 def test_imatrix_second_moments_of_bf16_inputs_on_gpu(monkeypatch, rows):
-    """On a GPU, bf16 inputs take the fused float32 reduction, over 512-row groups and the rows
-    left over, in slices of 512 groups, which gives the float64 statistic."""
+    """On a GPU, bf16 inputs take the fused float32 reduction: in one call up to 1,536 rows, else
+    over 512-row groups and the rows left over, in slices of 512 groups. Each gives the float64
+    statistic."""
     calls = []
     iq2_xxs = GGML_FORMAT_REGISTRY["iq2_xxs"]
 
@@ -119,7 +120,9 @@ def test_imatrix_second_moments_of_bf16_inputs_on_gpu(monkeypatch, rows):
 
 
 @pytest.mark.parametrize(
-    ("rows", "columns"), [(32768 + 300, 4096), (4 * 512 * 512 + 300, 512)], ids=["32K", "1M"]
+    ("rows", "columns"),
+    [(1536, 4096), (2048, 4096), (32768 + 300, 4096), (4 * 512 * 512 + 300, 512)],
+    ids=["1.5K", "2K", "32K", "1M"],
 )
 def test_imatrix_statistic_takes_no_more_gpu_memory_than_float32_slices(rows, columns):
     """The fused reduction's temporaries peak no higher than squaring float32 slices of 1,024 rows,
