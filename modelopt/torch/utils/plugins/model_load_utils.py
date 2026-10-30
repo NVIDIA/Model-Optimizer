@@ -681,11 +681,9 @@ def load_pretrained(
         )
     if alone and distribution is None:
         # The knobs ask to shard over the launch, rather than leave each process the whole model. A
-        # value that is not an EP degree is refused, as the plan decision refuses it.
-        ep, world = env.ep_degree().strip(), int(os.environ["WORLD_SIZE"])
-        if ep.lower() not in ("auto", "0") and not ep.isdigit():
-            raise ValueError(f"MODELOPT_EP_DEGREE={ep!r}: expected auto, 0 (auto) or an EP degree.")
-        asked = [f"MODELOPT_EP_DEGREE={ep}"] if ep.isdigit() and int(ep) > 1 else []
+        # value that is not an EP degree is refused, by the plan decision's own parse.
+        ep, world = _ep_degree(None), int(os.environ["WORLD_SIZE"])
+        asked = [f"MODELOPT_EP_DEGREE={env.ep_degree()}"] if ep != "auto" and ep > 1 else []
         if _dense_from_env(world) == "fsdp":
             asked.append(f"MODELOPT_FSDP_SIZE={env.fsdp_size()}")
         if asked:
@@ -786,6 +784,14 @@ def load_pretrained(
     # Each rank reads the checkpoint's config itself, so a refusal of what it reads, or of its own
     # arguments, fails every rank before the load's collectives.
     with _refused_together("load checks", alone):
+        # Options only the FSDP2 load takes would reach from_pretrained, which has no use for them.
+        shared = {"trust_remote_code", "attn_implementation", "hf_config"}  # hf_config: see above
+        own = _SHARDED_LOAD_OPTIONS[_FSDP2] - shared
+        if route is None and (sharded := sorted(set(kwargs) & own)):
+            raise TypeError(
+                f"{sharded} only apply to the FSDP2 load, but {plan!r} gives every rank the whole "
+                "model; pass a plan with dense='fsdp' to shard it."
+            )
         placed = _whole_load_options(kwargs)
         if decided and route == _FSDP2 and env.fsdp_size().lower() == "auto" and placed:
             # Rank 0's GPU memory chose to shard: say so, rather than refuse the options below as
@@ -1351,13 +1357,16 @@ def _dense_from_env(world_size: int) -> str:
 def _ep_degree(ep_size) -> int | str:
     """``ep_size`` as an EP degree or ``"auto"``; ``None`` reads ``MODELOPT_EP_DEGREE``."""
     value = env.ep_degree() if ep_size is None else ep_size
-    if str(value).lower() in ("auto", "0"):
+    if str(value).strip().lower() in ("auto", "0"):
         return "auto"
     try:
-        return int(value)
+        degree = int(value)
     except ValueError:
+        degree = 0
+    if degree < 1:
         name = "MODELOPT_EP_DEGREE" if ep_size is None else "ep_size"
-        raise ValueError(f"{name}={value!r}: expected auto, 0 (auto) or an EP degree.") from None
+        raise ValueError(f"{name}={value!r}: expected auto, 0 (auto) or an EP degree.")
+    return degree
 
 
 def _decide_distribution(
