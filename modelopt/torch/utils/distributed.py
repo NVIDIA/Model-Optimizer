@@ -720,7 +720,9 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     """
     try:
         from modelopt.torch.utils.plugins.model_load_utils import fsdp2_wrap as wrap
-    except ImportError as error:
+    except ModuleNotFoundError as error:
+        if (error.name or "").split(".")[0] not in ("transformers", "accelerate"):
+            raise
         raise ImportError(
             "fsdp2_wrap moved to modelopt.torch.utils.plugins.model_load_utils, which needs the hf "
             "extra (pip install 'nvidia-modelopt[hf]') to import."
