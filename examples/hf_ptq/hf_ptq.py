@@ -26,6 +26,7 @@ import torch
 from accelerate.hooks import remove_hook_from_module
 from autoquant_utils import (
     _get_autoquant_memory_probe,
+    _mtq_inputs_from_auto_quantize_config,
     _quantize_config_explicitly_enables_kv,
     _recipe_is_auto_quantize,
     auto_quantize,
@@ -92,7 +93,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import print_rank_0, safe_load
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
@@ -589,12 +590,51 @@ def _run_auto_quantize_recipe(
     calibration_only: bool,
     calib_dataloader: DataLoader,
     is_nemotron_vl_model: bool,
-) -> None:
-    """Run the recipe's fixed PTQ, weight search, and KV search in order."""
+) -> bool:
+    """Run the recipe's fixed PTQ, weight search, and KV search in order.
+
+    Returns whether the model is quantized and ready to export: a format shard, and a search
+    whose recipe defers calibration to ``finalize_algorithm``, only save their checkpoint.
+    """
     primary = recipe.auto_quantize
     followup_kv = recipe.kv_auto_quantize
     primary_is_kv = primary.constraints.cost_model == "kv_cache"
     fixed_quantize_config = recipe.quantize
+    finalize = primary.finalize_algorithm is not None
+    if finalize and (primary_is_kv or followup_kv is not None or not args.auto_quantize_checkpoint):
+        raise ValueError(
+            "auto_quantize.finalize_algorithm needs a weight search without a KV-cache search "
+            "and --auto_quantize_checkpoint to hand the scores to the finalizing run."
+        )
+    if args.auto_quantize_merge_shards and not os.path.exists(args.auto_quantize_checkpoint):
+        mtq.merge_auto_quantize_checkpoints(
+            args.auto_quantize_merge_shards.split(","), args.auto_quantize_checkpoint
+        )
+    if finalize and args.auto_quantize_format_shard is None:
+        search_state = _scored_auto_quantize_state(args.auto_quantize_checkpoint)
+        if search_state is not None:
+            # Freeze the per-layer formats for this budget and calibrate the source weights.
+            quant_cfg = mtq.get_auto_quantize_config(
+                search_state,
+                {"effective_bits": primary.constraints.effective_bits},
+                algorithm=primary.finalize_algorithm,
+            )
+            kv_cfg = _mtq_inputs_from_auto_quantize_config(
+                primary, args, fixed_quantize_config=fixed_quantize_config
+            )["kv_cache_quant_cfg"]
+            if kv_cfg is not None:
+                quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(quant_cfg, kv_cfg["quant_cfg"])
+            mono_quantize(
+                args,
+                _prepare_quant_cfg(args, quant_cfg, full_model),
+                full_model,
+                language_model,
+                model_type,
+                calibration_only,
+                calib_dataloader,
+                is_nemotron_vl_model,
+            )
+            return True
 
     if fixed_quantize_config is not None and (primary_is_kv or followup_kv is not None):
         if _quantize_config_explicitly_enables_kv(fixed_quantize_config.model_dump()):
@@ -644,6 +684,26 @@ def _run_auto_quantize_recipe(
             # never use the KV-primary legacy fallback and collide with the weight state.
             checkpoint=args.kv_auto_quantize_checkpoint,
         )
+    if args.auto_quantize_format_shard is not None:
+        print(f"Saved format shard {args.auto_quantize_format_shard}; merge every shard to solve.")
+        return False
+    if finalize:
+        print("Saved the AutoQuantize scores; rerun the same command to finalize and export.")
+        return False
+    return True
+
+
+def _scored_auto_quantize_state(checkpoint: str) -> dict | None:
+    """The single-process search state at ``checkpoint`` if it holds every format's scores."""
+    if os.path.isdir(checkpoint) or not os.path.splitext(checkpoint)[1]:
+        checkpoint = os.path.join(checkpoint, "rank0.pth")
+    if not os.path.isfile(checkpoint):
+        return None
+    state = safe_load(checkpoint)
+    stats = state.get("candidate_stats") or {}
+    if state.get("format_shard") is not None or not stats:
+        return None
+    return state
 
 
 def export_quantized(
@@ -1073,7 +1133,7 @@ def quantize_main(
 
     if aq_config is not None:
         assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
-        _run_auto_quantize_recipe(
+        if not _run_auto_quantize_recipe(
             args,
             recipe,
             full_model,
@@ -1082,7 +1142,8 @@ def quantize_main(
             calibration_only,
             calib_dataloader,
             is_nemotron_vl_model,
-        )
+        ):
+            return
 
     else:
         # mono quantization
@@ -1356,6 +1417,26 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--auto_quantize_format_shard",
+        type=str,
+        default=None,
+        help=(
+            "INDEX/COUNT: calibrate and score only this shard of the searched formats and save "
+            "it to --auto_quantize_checkpoint, without solving or exporting. Run every shard "
+            "0..COUNT-1 (e.g. one per GPU), then merge with --auto_quantize_merge_shards."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_merge_shards",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated format-shard checkpoints to merge into --auto_quantize_checkpoint "
+            "(if it does not exist yet) before the search, which then restores every format's "
+            "calibration and scores instead of computing them."
+        ),
+    )
+    parser.add_argument(
         "--kv_auto_quantize_checkpoint",
         type=str,
         default=None,
@@ -1436,6 +1517,21 @@ def parse_args() -> argparse.Namespace:
     args.checkpoint_exported = False
     resolve_mlflow_args(args, parser, HF_PTQ)
 
+    if args.auto_quantize_format_shard is not None:
+        try:
+            index, count = (int(v) for v in args.auto_quantize_format_shard.split("/"))
+        except ValueError:
+            parser.error("--auto_quantize_format_shard must be INDEX/COUNT, e.g. 0/5.")
+        args.auto_quantize_format_shard = (index, count)
+    if (args.auto_quantize_format_shard is not None or args.auto_quantize_merge_shards) and not (
+        args.auto_quantize_checkpoint and _recipe_is_auto_quantize(args.recipe)
+    ):
+        parser.error(
+            "--auto_quantize_format_shard and --auto_quantize_merge_shards need a weight "
+            "AutoQuantize --recipe and --auto_quantize_checkpoint."
+        )
+    if args.auto_quantize_format_shard is not None and args.auto_quantize_merge_shards:
+        parser.error("A format shard cannot also merge shards.")
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
 
