@@ -613,7 +613,8 @@ def load_pretrained(
     plan for several ranks and a sharded load need the group, so there they are refused: set it up
     first, with :func:`~modelopt.torch.utils.distributed.distributed_run`. The plan is recorded on
     the model (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), where calibration
-    and export read it back.
+    and export read it back. It is recorded once, so a model to shard yourself (:func:`fsdp2_wrap`)
+    is one loaded with ``from_pretrained``, not here.
 
     A sharded load builds the model class and places it itself. Besides its own options it takes
     ``trust_remote_code``, ``attn_implementation`` and ``hf_config``, and refuses any other keyword
