@@ -38,7 +38,7 @@ if Version(transformers.__version__) < Version("5.8"):
     )
 
 import transformers.dynamic_module_utils as dmu
-from transformers import DeepseekV3Config, DeepseekV3ForCausalLM, PretrainedConfig
+from transformers import DeepseekV3Config, PretrainedConfig
 
 from modelopt.torch.models import _kimi, _onfly_decompress, _remote_code, get_spec
 from modelopt.torch.models.kimi_k25 import ep as kimi_k25
@@ -137,12 +137,10 @@ def test_prepare_rebuilds_the_language_model_config_as_native_deepseek_v3(
     assert dmu.get_cached_module_file is not staging
 
 
-def test_prepare_with_a_checkpoint_points_the_remote_modeling_at_native_deepseek_v3(
-    monkeypatch, remote
-):
-    """``KimiK25ForConditionalGeneration.__init__`` builds ``DeepseekV3ForCausalLM(text_config)``
-    from its own module's namespace; that name must now be transformers' native class, so the
-    language model gets fused, EP-capable experts. Other remote modules keep their own class."""
+def test_the_swap_leaves_a_sibling_remote_module_alone(monkeypatch, remote):
+    """Kimi-K2.5's ``modeling_kimi_k25`` imports ``modeling_deepseek``, which defines a
+    ``DeepseekV3ForCausalLM`` of its own; the swap, scoped to ``modeling_kimi_k25``, must not reach
+    it. The swap itself is the shared adapter tests'."""
     monkeypatch.setattr(_onfly_decompress, "install_onfly_decompress", lambda cfg: None)
     bystander = types.ModuleType(f"{REMOTE}.modeling_deepseek")
     remote_lm = bystander.DeepseekV3ForCausalLM = type("DeepseekV3ForCausalLM", (), {})
@@ -150,10 +148,6 @@ def test_prepare_with_a_checkpoint_points_the_remote_modeling_at_native_deepseek
 
     kimi_k25.prepare(_vlm_config(), ckpt_path="/ckpt", trust_remote_code=True)
 
-    assert remote.loads == [
-        ("modeling_kimi_k25.KimiK25ForConditionalGeneration", "/ckpt", {"trust_remote_code": True})
-    ]
-    assert remote.DeepseekV3ForCausalLM is DeepseekV3ForCausalLM
     assert bystander.DeepseekV3ForCausalLM is remote_lm
 
 
