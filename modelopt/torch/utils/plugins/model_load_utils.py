@@ -652,13 +652,14 @@ def _sharded_load_kwargs(
     hub_options,
     decided: bool,
     measured: bool,
-    prepared: bool = True,
+    prepared: bool = False,
 ) -> dict:
     """What the sharded load ``route`` names takes, refusing what it cannot honor.
 
     ``prepared`` is whether an ``hf_config`` in ``kwargs`` is prepared by the model's spec already:
     one the caller or the plan decision handed in is; the checkpoint's own config read for the load,
-    or a copy of a ``config`` passed for it, is not.
+    or a copy of a ``config`` passed for it, is not. Left out, it is taken as not, as preparing
+    again is harmless (:attr:`~modelopt.torch.models.EPSpec.prepare`) and skipping it is not.
     """
     from modelopt.torch.models.hf import checkpoint_has_mtp
 
