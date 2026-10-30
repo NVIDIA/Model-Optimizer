@@ -601,6 +601,27 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
 
 
 @needs_qwen3_moe_ep_plan
+@pytest.mark.parametrize("refused_by", ["its-plan", "its-format"])
+def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
+    run_as, serve, monkeypatch, tmp_path, refused_by
+):
+    """Left to the decision, an MoE the expert-parallel load would refuse, by a plan that shards no
+    expert weights through grouped_gemm or a checkpoint format it does not load, is planned without
+    expert parallelism rather than committed to a load that refuses it, for some reasons only after
+    the download. Nor is it refused for being left whole: it cannot be expert-parallel here."""
+    run_as(2)
+    config = _qwen3_moe(num_experts=8)
+    if refused_by == "its-plan":
+        config.base_model_ep_plan = {"layers.*.mlp.experts": "moe_tp_experts"}
+    else:
+        config.quantization_config = {"quant_method": "fp8"}
+    serve(config)
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+
+    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
+
+
+@needs_qwen3_moe_ep_plan
 def test_an_ep_capable_moe_may_be_fsdp2_sharded_instead(run_as, serve, monkeypatch, tmp_path):
     """Asked for no expert parallelism but for dense sharding, the MoE is sharded whole by FSDP2,
     which is not the waste of a replica on every rank."""
@@ -782,9 +803,12 @@ def test_the_expert_count_is_read_from_the_config_holding_the_plan(
 ):
     """A VLM whose nested config holds the MoE and its plan counts the experts there, not by an
     expert-ish field on its root config."""
-    text = SimpleNamespace(
-        base_model_ep_plan={"layers.*.mlp.experts": "moe_tp_experts"}, num_experts=8
-    )
+    plan = {
+        "layers.*.mlp.experts": "moe_tp_experts",
+        "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+        "layers.*.mlp.experts.down_proj": "grouped_gemm",
+    }
+    text = SimpleNamespace(base_model_ep_plan=plan, num_experts=8)
     serve(SimpleNamespace(model_type="vlm", architectures=[], text_config=text, num_experts=3))
     built = model_with_decoder_at("model.")
     built.tie_weights = lambda: None  # a PreTrainedModel's; nothing here is tied

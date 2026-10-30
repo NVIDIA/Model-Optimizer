@@ -1611,8 +1611,16 @@ def _decide_distribution(
             f"{replicate} to load it without expert parallelism, whole on every rank."
         )
     chosen = ep_size == "auto"  # an EP degree no knob or argument set
+    loadable = True  # whether the expert-parallel load takes this model
     if ep_size == "auto":
         ep_size = _choose_ep_degree(world_size, num_experts)
+        if ep_size > 1 and (
+            _ckpt_quant_method(hf_config) not in _EP_SOURCE_FORMATS
+            or _ep_plan_refusal(ep_plan) is not None
+        ):
+            # The expert-parallel load would refuse this model, for some reasons only after the
+            # checkpoint's download: with nothing asking for expert parallelism, plan without it.
+            ep_size, loadable = 1, False
     elif ep_size > 1 and world_size % ep_size:
         raise ValueError(f"{knob}={ep_size} must divide the world size ({world_size}).")
     elif ep_size > 1 and (num_experts == 0 or num_experts % ep_size):
@@ -1642,7 +1650,7 @@ def _decide_distribution(
             f"{hf_config.model_type}: ep_size=1 and dense='replicate' as asked, so every rank "
             "holds the whole MoE."
         )
-    elif experts and ep_size == 1 and dense == "replicate":
+    elif experts and loadable and ep_size == 1 and dense == "replicate":
         # Name a way to shard the experts only where one exists: a count the config spells none of
         # the ways ModelOpt reads leaves no EP degree to name, as does one sharing no factor above 1
         # with the world size.
@@ -1792,6 +1800,57 @@ def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_st
 # Not MXFP4: transformers dequantizes it into GPT-OSS's transposed expert layout, whatever the model's.
 _EP_SOURCE_FORMATS: frozenset[str | None] = frozenset({None})
 
+# The ep_plan styles the expert-parallel load swaps for its torch_a2a styles. It keeps these and
+# grouped_gemm, and drops any other.
+_EP_STYLE_SWAP = {
+    "ep_router": "torch_a2a_router",
+    "moe_tp_experts": "torch_a2a_experts",
+    "nemotron_experts_ep": "torch_a2a_experts",
+}
+
+
+def _ep_plan_refusal(ep_plan: dict[str, str]) -> str | None:
+    """Why the expert-parallel load refuses ``ep_plan``'s styles, or ``None``: by the plan alone."""
+    if not _routed_expert_keys(ep_plan):
+        return (
+            f"base_model_ep_plan={ep_plan} styles no routed experts ({', '.join(_EXPERTS_STYLES)} "
+            "or grouped_gemm), so this load would leave them whole on every rank."
+        )
+    # Only grouped_gemm entries shard an expert's weights here: the torch_a2a styles the
+    # containers take for the load shard nothing themselves (any other style is refused below).
+    unsharded = sorted(
+        key
+        for key in _routed_expert_keys(ep_plan)
+        if not any(
+            style == "grouped_gemm" and name.startswith(key + ".")
+            for name, style in ep_plan.items()
+        )
+    )
+    if unsharded:
+        return (
+            f"base_model_ep_plan={ep_plan} shards no weights of {', '.join(unsharded)} through "
+            "grouped_gemm, the only expert-weight style this load shards by, so every rank would "
+            "hold every expert."
+        )
+    # The load drops any other style an expert weight takes, so that weight would load whole
+    # beside its sharded siblings, and the grouped forward would pair slices of different experts.
+    containers = _routed_expert_keys(ep_plan)
+    kept_styles = {"grouped_gemm", *_EP_STYLE_SWAP}
+    dropped = sorted(
+        name
+        for name, style in ep_plan.items()
+        if style not in kept_styles
+        and name not in containers
+        and any(name.startswith(key + ".") for key in containers)
+    )
+    if dropped:
+        return (
+            f"base_model_ep_plan={ep_plan} styles {', '.join(dropped)} by a style this load "
+            "drops, so those expert weights would load whole on every rank beside their sharded "
+            "siblings."
+        )
+    return None
+
 
 def _ckpt_quant_method(cfg):
     """Return the checkpoint's native quantization method, or ``None``.
@@ -1892,14 +1951,7 @@ def load_and_prepare_ep(
         )
     world_size, ep_degree, edp = plan.world_size, plan.ep_size, plan.edp
     hub_options = dict(hub_options or {})
-    # The ep_plan styles this load keeps: grouped_gemm, and those it swaps for its torch_a2a styles.
-    # The checks and the swapped plan both read it.
-    swap = {
-        "ep_router": "torch_a2a_router",
-        "moe_tp_experts": "torch_a2a_experts",
-        "nemotron_experts_ep": "torch_a2a_experts",
-    }
-    kept_styles = {"grouped_gemm", *swap}
+    swap, kept_styles = _EP_STYLE_SWAP, {"grouped_gemm", *_EP_STYLE_SWAP}
     # Each rank checks its own transformers, the config it reads or was handed, and the plan against
     # it: one refusing fails every rank here, before the checkpoint's fetch and the meshes.
     with _refused_together("the expert-parallel load's checks", alone=False):
@@ -1929,43 +1981,8 @@ def load_and_prepare_ep(
         ep_plan = dict(getattr(ep_cfg, "base_model_ep_plan", None) or {})
         if not ep_plan:
             raise ValueError("expert-parallel PTQ requires the model to declare base_model_ep_plan")
-        if not _routed_expert_keys(ep_plan):
-            raise ValueError(
-                f"base_model_ep_plan={ep_plan} styles no routed experts ({', '.join(_EXPERTS_STYLES)} "
-                "or grouped_gemm), so this load would leave them whole on every rank."
-            )
-        # Only grouped_gemm entries shard an expert's weights here: the torch_a2a styles the
-        # containers take for the load shard nothing themselves (any other style is refused below).
-        unsharded = sorted(
-            key
-            for key in _routed_expert_keys(ep_plan)
-            if not any(
-                style == "grouped_gemm" and name.startswith(key + ".")
-                for name, style in ep_plan.items()
-            )
-        )
-        if unsharded:
-            raise ValueError(
-                f"base_model_ep_plan={ep_plan} shards no weights of {', '.join(unsharded)} through "
-                "grouped_gemm, the only expert-weight style this load shards by, so every rank would "
-                "hold every expert."
-            )
-        # The load drops any other style an expert weight takes, so that weight would load whole
-        # beside its sharded siblings, and the grouped forward would pair slices of different experts.
-        containers = _routed_expert_keys(ep_plan)
-        dropped = sorted(
-            name
-            for name, style in ep_plan.items()
-            if style not in kept_styles
-            and name not in containers
-            and any(name.startswith(key + ".") for key in containers)
-        )
-        if dropped:
-            raise ValueError(
-                f"base_model_ep_plan={ep_plan} styles {', '.join(dropped)} by a style this load "
-                "drops, so those expert weights would load whole on every rank beside their sharded "
-                "siblings."
-            )
+        if (refusal := _ep_plan_refusal(ep_plan)) is not None:
+            raise ValueError(refusal)
         # The all-to-all transport needs every rank to hold as many experts, counted as the plan's
         # decision counts them; a count the config does not name is checked once the experts load.
         num_experts = _num_experts_from_config(ep_cfg)
