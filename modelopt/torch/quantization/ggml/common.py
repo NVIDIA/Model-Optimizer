@@ -154,6 +154,12 @@ def pinned_packed_weight(quantizer, format_name: str) -> torch.Tensor | None:
     return getattr(quantizer, _pin_name(format_name), None)
 
 
+# Quantizer attribute that makes its pinned payload stand in for whatever weight it is handed.
+# AutoQuantize sets it while it keeps the source weight for other candidates, so a candidate whose
+# calibration rewrote the weight (GPTQ) still replays its own codes.
+PIN_OVERRIDES_WEIGHT = "_ggml_pin_overrides_weight"
+
+
 # Prefix of the buffer holding a pinned payload; checkpoint code keeps buffers with it.
 PINNED_PAYLOAD_PREFIX = "_ggml_pinned_"
 
@@ -365,6 +371,10 @@ class GGMLFormat:
         ):
             return None
         pinned = pinned.to(weight.device).reshape(-1, width, self.block_bytes)
+        if getattr(quantizer, PIN_OVERRIDES_WEIGHT, False) and pinned.numel() == (
+            weight.numel() // self.block_size * self.block_bytes
+        ):
+            return pinned.reshape(*weight.shape[:-1], width, self.block_bytes)
         shape = torch.tensor((pinned.shape[0], weight.shape[-1]))
         rows = weight.reshape(-1, weight.shape[-1])
         storage_dtypes = [weight.dtype]
@@ -387,6 +397,19 @@ class GGMLFormat:
             if index is not None:
                 return pinned[index].reshape(*weight.shape[:-1], width, self.block_bytes)
         return None
+
+    def decode_pinned(self, quantizer, weight: torch.Tensor) -> torch.Tensor:
+        """``weight`` as its pinned payload decodes, rounded once to its dtype as GPTQ wrote it."""
+        pinned = pinned_packed_weight(quantizer, self.name)
+        if pinned is None or pinned.numel() != weight.numel() // self.block_size * self.block_bytes:
+            raise ValueError(
+                f"No {self.name.upper()} payload pinned for a {tuple(weight.shape)} weight"
+            )
+        return self.dequantize(
+            pinned.to(weight.device).reshape(-1, self.block_bytes),
+            torch.tensor(weight.shape),
+            dtype=weight.dtype,
+        )
 
 
 def dequantize_blocks(
