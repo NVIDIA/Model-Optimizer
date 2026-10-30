@@ -412,7 +412,7 @@ def test_a_dense_part_from_pretrained_did_not_leave_on_meta_is_refused(
     )
     monkeypatch.setattr(model_load_utils, "ensure_local_checkpoint", lambda p, **k: (None, p))
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: None)
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
     monkeypatch.setattr(model_load_utils, "_load_ep_dense_distributed", dense_load)
     config = SimpleNamespace(
         base_model_ep_plan={
