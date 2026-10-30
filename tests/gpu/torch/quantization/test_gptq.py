@@ -72,6 +72,7 @@ def test_expert_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, i
     also on inference tensors under the caller's inference mode, which worker threads do not inherit.
     """
     pytest.importorskip("transformers")  # the fused-experts quant wrapper is the HF plugin's
+    get_cuda_ext_ggml(raise_if_failed=True)  # updates move only with the CUDA encoders
     # Two GGML groups per expert input, so the Hessian carries the first group's error to the next.
     width = 512
     shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
@@ -133,7 +134,9 @@ def test_an_update_that_may_move_fits_its_room(
     need_2_gpus, monkeypatch, num_bits, shape, cuda_extension
 ):
     """An expert update that may run on another GPU peaks there within the room it is admitted with."""
-    if not cuda_extension:
+    if cuda_extension:
+        get_cuda_ext_ggml(raise_if_failed=True)  # without it, no update may move to check
+    else:
         monkeypatch.setattr(get_cuda_ext_ggml, "extension", None, raising=False)
     out_features, in_features = shape
     torch.manual_seed(RAND_SEED)
