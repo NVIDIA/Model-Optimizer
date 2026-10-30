@@ -628,6 +628,19 @@ def _meshes_in_step(*args, **kwargs):
     raise _PastTheMeshesError
 
 
+def _cuda(gpu, bound=True):
+    """Patches pinning the CUDA state the GPU check reads: one visible GPU, cuda:0, bound to it or
+    not yet; or, without ``gpu``, none. The check then reads the case, not the host the test runs
+    on (the gloo workers bind no GPU, so a host's visible one would read as unbound)."""
+    state = {
+        "is_available": gpu,
+        "is_initialized": gpu and bound,
+        "current_device": 0,
+        "device_count": int(gpu),
+    }
+    return [mock.patch(f"torch.cuda.{name}", return_value=value) for name, value in state.items()]
+
+
 def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
     path, hf_config, patches = ckpt, None, []
     if failure != "unreadable-config":
@@ -638,6 +651,8 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
         )
         patches.append(local)
     fails_here = rank == failing_rank
+    # No rank has a GPU, but in the no-gpu row every rank other than the failing one has its own.
+    patches += _cuda(failure == "no-gpu" and not fails_here)
 
     def fail(*args, **kwargs):
         raise (MemoryError if failure == "load" else OSError)(match)
@@ -651,9 +666,6 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
     elif failure == "unseen-checkpoint" and fails_here:
         # Rank 0 makes the checkpoint local; a rank on a node without that storage cannot see it.
         patches.append(mock.patch.object(hf_checkpoint_utils.os.path, "isdir", return_value=False))
-    elif failure == "no-gpu" and not fails_here:
-        # No rank has a GPU here: the others are given theirs.
-        patches.append(mock.patch.object(model_load_utils, "_has_own_gpu", return_value=True))
     if failure in ("load", "record"):
         loaded = model_with_decoder_at("model.")
         load = fail if failure == "load" and fails_here else (lambda path, **kwargs: loaded)
@@ -719,13 +731,8 @@ def _one_gpu_per_process_job(rank, size, bound):
     reached = None
     with bounded_collectives(), ExitStack() as stack:
         # Each process sees one GPU, cuda:0, bound to it or not yet; the local ranks run 0 and 1.
-        for name, value in [
-            ("is_available", True),
-            ("is_initialized", bound),
-            ("current_device", 0),
-            ("device_count", 1),
-        ]:
-            stack.enter_context(mock.patch(f"torch.cuda.{name}", return_value=value))
+        for patch in _cuda(True, bound):
+            stack.enter_context(patch)
         stack.enter_context(
             mock.patch.object(
                 model_load_utils, "ensure_local_checkpoint", side_effect=lambda p, **k: (None, p)
