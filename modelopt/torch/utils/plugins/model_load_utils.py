@@ -1684,61 +1684,31 @@ def load_and_prepare_ep(
     hf_config=None,
     require_lm_head: bool = True,
 ) -> nn.Module:
-    """Load + shard a MoE causal LM for expert-parallel PTQ via the DP=EP all-to-all transport.
+    """Load a MoE causal LM expert-parallel for PTQ: each rank holds its share of the routed experts.
 
-    ``plan`` is the expert-parallel :class:`~modelopt.torch.utils.distributed.DistributionPlan` to load
-    by (``ep_size > 1``), for the whole process group. It records no plan on the model: the caller
-    does (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), as
-    :func:`load_pretrained` does for every load. The model builds with its LM head where an auto
-    class builds one; ``require_lm_head=False`` builds a VLM without it, through ``AutoModel`` (a
-    causal LM always keeps its head).
+    Collective: every rank of the process group calls it with the same ``plan``, an expert-parallel
+    :class:`~modelopt.torch.utils.distributed.DistributionPlan` for the whole group. The caller sets
+    the group up and binds each rank to its own GPU first, as
+    :func:`~modelopt.torch.utils.distributed.distributed_run` does. Each rank holds
+    ``num_experts / ep_size`` routed experts and a replica of the dense part, and tokens reach their
+    experts' ranks by all-to-all, so every rank must calibrate on data of its own.
 
-    Builds an ``(edp, ep)`` device mesh and loads experts EP-sharded over the ``ep`` submesh
-    (``enable_expert_parallel=True`` -- each rank owns ``num_experts / ep`` experts as grouped-GEMM
-    shards), while ATTENTION and dense params stay REPLICATED (so EP has no KV-head-divisibility cap).
-    The model's ``base_model_ep_plan`` is swapped to the ``torch_a2a`` styles: the router emits GLOBAL
-    unmasked expert ids and the experts forward routes each token to its expert-owning rank by a NCCL
-    all-to-all (dispatch) -> quantizable ``_grouped_linear`` -> all-to-all (combine), rather than every
-    rank computing all tokens followed by an EP all-reduce. Every rank is data-parallel (sees DIFFERENT
-    tokens), so calibration MUST shard the data per-rank.
+    It loads unquantized checkpoints, on transformers 5.7 or later. A refusal on any rank -- of its
+    transformers, the config, the checkpoint, its GPU, or in the load -- raises on every rank. In
+    the load that rests on ``from_pretrained`` running no collective, as transformers'
+    expert-parallel load does not on 5.7 through 5.18.
 
-    The ``edp`` dimension (present when ``plan.ep_size < world_size``) is additional data parallelism
-    across EP groups: non-expert params stay REPLICATED per rank and each EP group calibrates on
-    different data; experts stay EP-sharded (resident). No FSDP and no concurrent ``edp``/``ep``
-    collectives -> no deadlock by construction. Costs more per-rank memory (non-experts + experts
-    replicated across edp) but is the reliable path at scale.
-
-    EP CANNOT be applied to a meta-init model (transformers' ``GroupedGemmParallel.shard_tensor``
-    slices materialized tensors), so this loads real weights via ``from_pretrained`` over the ``ep``
-    submesh. Requires transformers >= 5.7: the MoE EP framework (ExpertsInterface / grouped-GEMM EP
-    styles / enable_expert_parallel) is in 5.6, but 5.6 builds a model only with the experts
-    implementations it ships, never ``torch_a2a``. (A model whose expert-parallel support landed
-    later states the release it needs in its spec.)
-
-    Assumes the caller has already initialized (and device-bound) the process group -- distributed
-    bring-up is the launcher's job, not this loader's (hf_ptq.main() does it via ``distributed_run``).
-    The expert-parallel mesh stays recoverable from the model
-    (:func:`~modelopt.torch.utils.moe.expert_parallel_mesh`), once the caller has recorded the plan.
-    A refusal on any rank -- of its transformers, the config, the checkpoint, or in the load --
-    raises on every rank, so no rank is left waiting in a collective for one that already failed.
-    In the load that rests on ``from_pretrained`` running no collective, as transformers'
-    expert-parallel load does not on 5.7 through 5.18: before 5.16 it slices each rank's experts
-    into plain tensors, and from 5.16 it builds DTensors locally (``run_check=False``,
-    ``src_data_rank=None``). So the others finish it and meet a rank that failed in it in the
-    refusal's gather.
-    Without ``hf_config`` every rank reads the checkpoint's config itself, from the Hub for a Hub ID,
-    before rank 0 makes the checkpoint local: on many ranks, pass it (as ``hf_ptq`` does).
+    The model builds with its LM head where an auto class builds one; ``require_lm_head=False``
+    builds a VLM without it. Without ``hf_config`` every rank reads the checkpoint's config itself;
+    on many ranks, pass it. The caller records the plan on the model
+    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), as :func:`load_pretrained`
+    does; :func:`~modelopt.torch.utils.moe.expert_parallel_mesh` then finds its mesh.
     """
     if not plan.is_expert_parallel:
         raise ValueError(f"{plan!r} shards no routed experts, which is what this load is for.")
     if plan.is_fsdp_dense:
         raise NotImplementedError(f"{plan!r}: this load replicates the dense part on every rank.")
-    # This loader assumes the caller has ALREADY initialized (and device-bound) the process group --
-    # distributed bring-up belongs to the launcher, not this library function. The example launcher does
-    # it in hf_ptq.main() via distributed_run() -> modelopt.torch.utils.distributed.setup() before
-    # the load. A live, device-bound PG is required here so the mesh subgroups built below create their
-    # NCCL comms eagerly (the synchronized warmup all-reduce per subgroup further down) instead of lazily
-    # on first collective (which deadlocks at DP>1 because ranks reach the lazy init in different phases).
+    # Bringing the group up is the launcher's job; this load needs it live and device-bound.
     if not dist.is_initialized():
         raise RuntimeError(
             "load_and_prepare_ep requires a live, device-bound process group; set it up first, e.g. "
@@ -1749,10 +1719,8 @@ def load_and_prepare_ep(
             f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}."
         )
     world_size, ep_degree, edp = plan.world_size, plan.ep_size, plan.edp
-    # The ep_plan styles this load keeps: grouped_gemm, and those it swaps for its torch_a2a styles
-    # (torch_a2a_router emits GLOBAL ids unmasked; torch_a2a_experts injects the EP process_group +
-    # skips the all-reduce). nemotron_h's logits-only gate has no ep_router entry, so its
-    # nemotron_experts_ep also maps to torch_a2a_experts. The checks and the swapped plan both read it.
+    # The ep_plan styles this load keeps: grouped_gemm, and those it swaps for its torch_a2a styles.
+    # The checks and the swapped plan both read it.
     swap = {
         "ep_router": "torch_a2a_router",
         "moe_tp_experts": "torch_a2a_experts",
@@ -1762,9 +1730,7 @@ def load_and_prepare_ep(
     # Each rank checks its own transformers, the config it reads or was handed, and the plan against
     # it: one refusing fails every rank here, before the checkpoint's fetch and the meshes.
     with _refused_together("the expert-parallel load's checks", alone=False):
-        # Hard floor: below 5.6 there is no ExpertsInterface / grouped-GEMM EP styles, and
-        # enable_expert_parallel silently shards nothing (no error); 5.6 checks a model's experts
-        # implementation against the ones it ships, so from_pretrained would refuse torch_a2a.
+        # 5.7 is the first release that builds a model with the torch_a2a experts.
         moe.require_transformers(
             "5.7", "ModelOpt DP=EP expert-parallel PTQ (transformers MoE EP framework)"
         )
@@ -1827,10 +1793,8 @@ def load_and_prepare_ep(
                 "drops, so those expert weights would load whole on every rank beside their sharded "
                 "siblings."
             )
-        # The all-to-all transport finds an expert's rank by dividing its id by this rank's share of
-        # the experts, which holds only when every rank holds as many. Counted in the config that holds
-        # the plan, as the distribution plan's decision counts them. A count the config names none of
-        # the ways this reads is checked once the experts load, from their weights.
+        # The all-to-all transport needs every rank to hold as many experts, counted as the plan's
+        # decision counts them; a count the config does not name is checked once the experts load.
         num_experts = _num_experts_from_config(ep_cfg)
         if num_experts % ep_degree:
             raise ValueError(
@@ -1877,42 +1841,22 @@ def load_and_prepare_ep(
             "(torch.cuda.set_device), as distributed_run() does."
         )
     dtype = getattr(hf_config, "dtype", None) or torch.bfloat16
-    # The weights load, and the checkpoint recorded for the export to read the unplaced tensors back
-    # from, take the local snapshot: a Hub ID recorded there would leave the export nothing to read.
-    # Resolved once the plan and the config pass, so a refused load downloads nothing. Rank 0 makes
-    # it local; a rank that cannot see where fails every rank.
+    # The load and the export both read the local snapshot, made only once the checks pass, so a
+    # refused load downloads nothing.
     with _refused_together("the local checkpoint", alone=False):
         _, ckpt_path = ensure_local_checkpoint(ckpt_path)
 
-    # Two INDEPENDENT meshes (NeMo-AutoModel style), named by the model part they govern -- two
-    # factorizations of the same world:
-    #   sparse_moe_mesh = (edp, ep): experts are SHARDED over the ``ep`` axis and REPLICATED over ``edp``;
-    #       the ``ep`` submesh also drives from_pretrained's expert sharding + the a2a transport.
-    #   dense_mesh = (dp,): dense/non-expert params are data-parallel-REPLICATED over the WHOLE world.
-    # This subsumes the old a2a-vs-partial split: a2a is simply edp == 1, and dense amax
-    # always reduces over the whole world (fixing the DP>1 case, where the old dp submesh missed the ep dim).
+    # Experts are sharded over ``ep`` and replicated over ``edp``; the dense part is replicated over
+    # the whole world (``dp``).
     sparse_moe_mesh = device_mesh.init_device_mesh(
         "cuda", (edp, ep_degree), mesh_dim_names=("edp", "ep")
     )
     dense_mesh = device_mesh.init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp",))
     ep_submesh = sparse_moe_mesh["ep"]
 
-    # NO TENSOR PARALLELISM IS REQUESTED HERE, despite the name. transformers implements expert
-    # parallelism THROUGH the TP application path: with enable_expert_parallel=True the model's
-    # ``tp_plan`` PROPERTY returns ``_ep_plan`` (distributed/mixin.py), so what actually gets applied
-    # is the expert plan. ``tp_plan="auto"`` is only the SWITCH that makes ``tp_size > 1`` in
-    # DistributedConfig.__post_init__ and therefore reaches ``apply_tensor_parallelism`` at all --
-    # drop it and __post_init__ early-returns with tp_size=None, which then TypeErrors on
-    # ``tp_size > 1`` in prepare_distribute_model. Dense params stay REPLICATED (= our DP) because
-    # ``swapped_plan`` below keeps only expert entries; attention/embeds match no plan key.
-    #
-    # WHERE it goes is version-dependent: from transformers 5.17 from_pretrained refuses tp_plan
-    # beside distributed_config ("Set tensor-parallel options on DistributedConfig when using it"),
-    # while DistributedConfig has no tp_plan field before 5.10, nor in 5.11 and 5.12. Passing
-    # tp_plan ALONE is not an option either -- the 5.17+ back-compat path rebuilds the config as
-    # DistributedConfig(tp_plan=..., tp_size=...) and DROPS enable_expert_parallel, silently losing
-    # EP. So each argument goes on DistributedConfig where it has a field for it, and tp_plan
-    # otherwise to from_pretrained: the dataclass fields tell them apart on any release.
+    # No tensor parallelism: tp_plan="auto" only switches on the path through which transformers
+    # applies the expert plan, and the swapped plan holds expert entries only. Each argument goes on
+    # DistributedConfig where this release has a field for it, else to from_pretrained.
     _dc_fields = {f.name for f in dataclasses.fields(hf_distributed.DistributedConfig)}
     _dc_has_tp_plan = "tp_plan" in _dc_fields
     dc_kwargs: dict[str, Any] = {"enable_expert_parallel": True}
@@ -1932,17 +1876,14 @@ def load_and_prepare_ep(
         from_pretrained_kwargs["tp_plan"] = "auto"
     if attn_implementation is not None:
         from_pretrained_kwargs["attn_implementation"] = attn_implementation
-    # DP=EP all-to-all: swap the ep_plan to our torch_a2a styles (``swap`` above) and select the
-    # `torch_a2a` experts forward (NCCL all-to-all dispatch/combine around the quantizable
-    # _grouped_linear). Tokens are routed to the expert-owning rank by all-to-all instead of every rank
-    # computing all tokens + all-reduce. Requires per-rank (data-parallel) calib data.
+    # Swap the plan to the torch_a2a styles and select the torch_a2a experts forward: tokens reach
+    # their experts' ranks by all-to-all around the quantizable grouped GEMM.
     register_torch_a2a()  # idempotent; register the experts forward + the two styles, right before use
     # Keep expert-related entries (grouped_gemm expert params + the router/experts styles); DROP the TP
     # styles (a2a builds no TP group for them -> would shard attention across the wrong mesh).
     swapped_plan = {k: swap.get(v, v) for k, v in ep_plan.items() if v in kept_styles}
-    # Tag every routed-experts CONTAINER torch_a2a_experts (injects the EP process_group + marks the
-    # routed expert), found as the distribution plan's decision finds them: some plans tag only the
-    # expert PARAMS grouped_gemm, and name the container through their parents.
+    # Tag every routed-experts container torch_a2a_experts, found as the plan's decision finds them:
+    # some plans style only their parameters, grouped_gemm.
     swapped_plan.update(dict.fromkeys(_routed_expert_keys(ep_plan), "torch_a2a_experts"))
     from_pretrained_kwargs["experts_implementation"] = "torch_a2a"
     # The checkpoint's own plan, for the config the model keeps (below); None: a class default.
@@ -1950,25 +1891,17 @@ def load_and_prepare_ep(
     ep_cfg.base_model_ep_plan = swapped_plan
     from_pretrained_kwargs["config"] = hf_config
     print_rank_0(f"[ep] ep_plan={swapped_plan} experts_implementation=torch_a2a")
-    # A rank failing in the load (out of memory, a file it cannot read) fails every rank here,
-    # before the warmup's collectives. from_pretrained runs no collective (transformers shards each
-    # rank's experts locally, and builds no mesh but the one handed to it), so the other ranks finish
-    # it and meet the failed one in this guard's gather.
+    # A rank failing in the load fails every rank here, before the warmup's collectives:
+    # from_pretrained runs no collective, so the others finish it and meet the failure in the gather.
     with _refused_together("the expert-parallel load", alone=False):
-        # The class that builds the whole checkpoint -- with its lm_head where an auto class builds one,
-        # so the head is calibrated and exported and the generation preview works -- chosen as the
-        # distribution plan's decision chose it, unless the caller asked for a VLM without its head
-        # (require_lm_head=False). The per-model plugin (models/) has already installed any on-the-fly
-        # weight decompression as a transformers monkeypatch.
+        # The class the plan's decision chose, with its LM head where an auto class builds one.
         loader = _auto_class(hf_config, require_lm_head, trust_remote_code=trust_remote_code)
         print_rank_0(f"[ep] loader={loader.__name__} (require_lm_head={require_lm_head})")
         with _experts_sharded_over(ep_submesh):
             model = loader.from_pretrained(ckpt_path, **from_pretrained_kwargs)
         model.eval()
-        # The swapped styles drove the sharding, and the model keeps the plan it was sharded by
-        # (``model.tp_plan``, copied when it was built). The config it keeps goes back to the
-        # checkpoint's plan: an export writes the config out, and nothing without ModelOpt knows the
-        # torch_a2a styles.
+        # The config the model keeps goes back to the checkpoint's plan, as an export writes it out
+        # and nothing without ModelOpt knows the torch_a2a styles.
         kept_config = getattr(model, "config", None)
         if kept_config is not None:
             kept_ep_config = _ep_config(kept_config)
@@ -1976,12 +1909,8 @@ def load_and_prepare_ep(
                 vars(kept_ep_config).pop("base_model_ep_plan", None)
             else:
                 kept_ep_config.base_model_ep_plan = declared_plan
-        # Force the experts forward to dispatch to `torch_a2a`: from_pretrained's `experts_implementation`
-        # kwarg resolves non-fp8 impls back to "grouped_mm", but @use_experts_implementation reads
-        # `config._experts_implementation` at FORWARD time, so set it on every (sub)config now. (Without
-        # this the torch_a2a_experts style passes a 5th process_group arg to grouped_mm_experts_forward ->
-        # TypeError.) Unlike the plan it stays set, and an export still writes no torch_a2a: transformers
-        # keeps it as ``_experts_implementation_internal``, which it leaves out of a serialized config.
+        # The experts forward reads the implementation from the config when it runs, which
+        # from_pretrained left on grouped_mm: torch_a2a on every (sub)config. An export writes none.
         for _m in model.modules():
             _cfg = getattr(_m, "config", None)
             if _cfg is not None and hasattr(_cfg, "_experts_implementation"):
@@ -1991,19 +1920,15 @@ def load_and_prepare_ep(
         # for the export to carry.
         record_unplaced_source_keys(model, ckpt_path)
 
-        # DP=EP all-to-all: no FSDP. Non-experts stay replicated per rank (from_pretrained already placed
-        # them on this rank's GPU); experts stay EP-sharded on the ep submesh, which the model carries as
-        # ``_device_mesh`` for calibration to re-install the all-to-all forwards over (expert_parallel_mesh).
-        # transformers sets it from the mesh this load hands it, through internals that differ by release;
-        # set here, the model carries it on every release.
+        # The model carries the ep submesh, for calibration to re-install the all-to-all forwards
+        # over (expert_parallel_mesh); transformers sets it differently by release.
         model._device_mesh = ep_submesh
         if hasattr(model, "tie_weights"):
             model.tie_weights()
         if freeze:
             model.requires_grad_(False)
 
-        # The routed-expert containers, from the SAME base_model_ep_plan that drove the sharding. A MoE model
-        # loaded WITHOUT EP (dense DP) never reaches this loader, so its experts stay dense.
+        # The routed-expert containers, from the plan that drove the sharding.
         expert_modules = _routed_expert_modules(model, ep_plan)
         if not expert_modules:
             raise ValueError(
@@ -2031,12 +1956,8 @@ def load_and_prepare_ep(
         f"[ep] seeded the expert-parallel state of {len(expert_modules)} routed-expert "
         "module(s) from base_model_ep_plan"
     )
-    # Eagerly create each amax collective's NCCL comm in a globally-consistent order (barrier around
-    # each), so the sub-communicators are built in lockstep rather than lazily mid-calibration -- which
-    # deadlocks when submesh groups are phase-skewed at DP>1. NO forward warmup (variable per-group time
-    # would desync ranks before comm creation). Skip size-1 axes (no collective). The EP group is already
-    # live from from_pretrained's expert sharding; re-warming it is a harmless redundant all-reduce. Same
-    # order on every rank -> lockstep.
+    # Build each amax collective's NCCL comm now, in the same order on every rank, rather than lazily
+    # mid-calibration, where subgroups phase-skewed at DP>1 deadlock. Size-1 axes run none.
     warm_device = next(model.parameters()).device
     for _sub in (dense_mesh["dp"], sparse_moe_mesh["ep"], sparse_moe_mesh["edp"]):
         if _sub.size() <= 1:
