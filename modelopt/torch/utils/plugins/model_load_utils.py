@@ -1743,8 +1743,14 @@ def _decide_distribution(
                 f"replicates it at world_size={world_size}, so every rank would hold the whole "
                 f"MoE. Instead, {others}"
             )
-        if _spec_refuses_ep(hf_config.model_type):
+        if (
+            _spec_refuses_ep(hf_config.model_type)
+            and num_experts
+            and math.gcd(num_experts, world_size) > 1
+        ):
             # Below the release its expert parallelism needs: an EP degree above 1 is refused too.
+            # Where no EP degree could shard the experts anyway, the arms below say so instead, as
+            # upgrading would not change it.
             raise RuntimeError(
                 f"{hf_config.model_type} can be expert-parallel, but the plan resolved to ep_size=1 "
                 f"at world_size={world_size}, so every rank would hold the whole MoE, and this "
