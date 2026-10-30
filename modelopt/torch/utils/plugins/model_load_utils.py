@@ -523,7 +523,9 @@ def _refuse_sharded_load_options(
     if auto_class not in (None, AutoModelForCausalLM):
         name = getattr(auto_class, "__name__", repr(auto_class))
         raise NotImplementedError(
-            f"The {route} load builds its model class itself; auto_class={name} does not apply to it."
+            f"The {route} load builds its model class itself, a causal LM's or a text-only VLM's "
+            f"image-text class, so it takes no auto_class={name}: leave it out to have the load "
+            f"pick, or load the model whole with it: {_whole_instead(decided)}."
         )
     if dtypes:  # A sharded load keeps the checkpoint's dtype.
         name = dtypes[0]
@@ -745,14 +747,21 @@ def load_pretrained(
         # The knobs ask to shard over the launch, rather than leave each process the whole model. A
         # value that is not an EP degree is refused, by the plan decision's own parse.
         ep, world = _ep_degree(None), int(os.environ["WORLD_SIZE"])
-        asked = [f"MODELOPT_EP_DEGREE={env.ep_degree()}"] if ep != "auto" and ep > 1 else []
+        experts = ep != "auto" and ep > 1
+        asked = [f"MODELOPT_EP_DEGREE={env.ep_degree()}"] if experts else []
         if _dense_from_env(world) == "fsdp":
             asked.append(f"MODELOPT_FSDP_SIZE={env.fsdp_size()}")
         if asked:
+            # The group alone would not do for the EP knob: no load here shards the experts.
             raise RuntimeError(
                 f"{' and '.join(asked)} ask to shard the model over this "
                 f"{os.environ['WORLD_SIZE']}-rank launch, whose process group is not set up; load "
-                "inside distributed_run(), which sets it up."
+                "inside distributed_run(), which sets it up"
+                + (
+                    ", with MODELOPT_EP_DEGREE=1: no load here shards the routed experts."
+                    if experts
+                    else "."
+                )
             )
     # None is these options' own default, so passed explicitly it is no option: the sharded loads
     # refuse the options they do not take, and would refuse it.
@@ -1480,10 +1489,10 @@ def _decide_distribution(
         # than build the model of the decision's own pick of class, which may not build at all.
         name = getattr(auto_class, "__name__", repr(auto_class))
         raise NotImplementedError(
-            f"A sharded load builds its model class itself, so auto_class={name} "
-            f"does not apply to it, and ep_size={ep_size!r}, dense={dense!r} ask to shard. To give "
-            "every rank the whole model, plan ep_size=1 and dense='replicate' "
-            "(MODELOPT_EP_DEGREE=1, MODELOPT_FSDP_SIZE=1)."
+            f"A sharded load builds its model class itself, a causal LM's or a text-only VLM's "
+            f"image-text class, so it takes no auto_class={name} while ep_size={ep_size!r}, "
+            f"dense={dense!r} ask to shard. To give every rank the whole model, plan ep_size=1 and "
+            "dense='replicate' (MODELOPT_EP_DEGREE=1, MODELOPT_FSDP_SIZE=1)."
         )
     # Building writes to the config it builds from, and only rank 0 decides: build from a copy, so
     # the config returned with the plan, which a sharded load builds from, is alike on every rank.
