@@ -231,11 +231,13 @@ def _compressedify(conv, compressor, scheme, param_names):
         base = p.removesuffix("$")
         if not base.endswith(".weight") or ".experts." not in base:
             # Only the experts' weights are stored compressed: rewritten, a dense weight would match
-            # no stored key and load newly initialized; a bias would reach the merge as stored.
+            # no stored key and load newly initialized. A bias is expected in a converter of its own
+            # (check_compressed_keys lets one through); grouped with the weight, the merge takes it.
             raise NotImplementedError(
                 f"install_onfly_decompress: the per-expert converter for {conv.target_patterns} "
-                f"reads {p!r}, which is no expert weight; on-the-fly decompression rewrites the "
-                "experts' weights only."
+                f"reads {p!r} alongside the experts' weights, which is no compressed tensor; "
+                "on-the-fly decompression rewrites a converter that reads the experts' weights only. "
+                "Decompress the checkpoint first."
             )
         stem = base[: -len(".weight")]
         for pn in param_names:
@@ -446,8 +448,9 @@ def check_compressed_keys(hf_config, ckpt_dir) -> None:
             "would load newly initialized. Decompress the checkpoint first."
         )
     # The names are what the installed compressed-tensors gives the scheme: a weight's name a newer
-    # release added would match no rewritten source, and the experts would decompress without it. A
-    # bias loads through its own converter.
+    # release added would match no rewritten source, and the experts would decompress without it.
+    # Only weight* names are checked (every compressor's today), so an expert's bias, which loads
+    # through its own converter, is not refused.
     unknown = [n for n in sorted(tensor_files) if n.rpartition(".")[0] in compressed]
     unknown = [n for n in unknown if n.rpartition(".")[2] not in stored_as]
     unknown = [n for n in unknown if n.rpartition(".")[2].startswith("weight")]
