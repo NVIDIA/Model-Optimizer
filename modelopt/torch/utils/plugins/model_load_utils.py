@@ -496,6 +496,17 @@ def _refused_together(label: str, alone: bool):
     dist.all_reduce(label, refuse, combine=lambda _: None)
 
 
+def _read_config(path, auto_class, trust_remote_code: bool = False, **hub_options):
+    """``path``'s config, read as ``auto_class.from_pretrained`` reads it.
+
+    A model class reads it through its own config class, an auto class, which has none, through
+    ``AutoConfig``.
+    """
+    if (reader := getattr(auto_class, "config_class", None)) is not None:
+        return reader.from_pretrained(path, **hub_options)
+    return AutoConfig.from_pretrained(path, trust_remote_code=trust_remote_code, **hub_options)
+
+
 def _refuse_sharded_load_options(route, auto_class, kwargs) -> None:
     """Refuse the arguments the sharded load ``route`` cannot honor: the arguments alone decide."""
     if auto_class not in (None, AutoModelForCausalLM):
@@ -753,28 +764,16 @@ def load_pretrained(
         _, ckpt_path = ensure_local_checkpoint(ckpt_path, **revision, **hub_options)
         if config is not None and not isinstance(config, PretrainedConfig):
             # Read as the load reads it, so the plan and the loading hook follow the config the
-            # model is built from, which need not be in the checkpoint's directory. A model class
-            # of the caller's own reads it through its own config class, as from_pretrained does.
-            reader = getattr(auto_class, "config_class", None)
-            config = (
-                reader.from_pretrained(config, **hub_options)
-                if reader is not None
-                else AutoConfig.from_pretrained(
-                    config, trust_remote_code=kwargs.get("trust_remote_code", False), **hub_options
-                )
-            )
+            # model is built from, which need not be in the checkpoint's directory.
+            trust = kwargs.get("trust_remote_code", False)
+            config = _read_config(config, auto_class, trust, **hub_options)
     subfolder = kwargs.pop("subfolder", None)
     if subfolder:
         ckpt_path = os.path.join(ckpt_path, subfolder)
     trust_remote_code = kwargs.get("trust_remote_code", False)
     hf_config = kwargs.get("hf_config")
-    # A process alone, without a group or in a group of one, holds the whole model, as the decision
-    # rules for one rank whatever the model: nothing to decide, nor a config to read for it, which a
-    # model class of the caller's own reads through its own config class.
     decided = plan is None and dist.size() > 1
-    if plan is None and not decided:
-        plan = DistributionPlan()
-    elif plan is None:
+    if decided:
         plan, hf_config = resolve_distribution_plan(
             ckpt_path,
             config=config,
@@ -784,6 +783,10 @@ def load_pretrained(
         )
         if _route(plan) is not None:
             kwargs.setdefault("hf_config", hf_config)
+    elif plan is None:
+        # A process alone, without a group or in a group of one, holds the whole model, as the
+        # decision rules for one rank whatever the model: nothing to decide, nor a config to read.
+        plan = DistributionPlan()
     route = _route(plan)
     # Each rank reads the checkpoint's config itself, so a refusal of what it reads, or of its own
     # arguments, fails every rank before the load's collectives.
@@ -1540,8 +1543,9 @@ def resolve_distribution_plan(
         if config is not None:
             read.append((local_path, copy.deepcopy(config)))
             return True
-        hf_config = AutoConfig.from_pretrained(
+        hf_config = _read_config(
             local_path,
+            auto_class,
             trust_remote_code=trust_remote_code,
             token=token,
             cache_dir=cache_dir,

@@ -1012,16 +1012,32 @@ def test_hf_config_is_refused_without_the_plan_it_came_with(
     assert loaders == {}
 
 
-@pytest.mark.parametrize("fsdp_size", [None, "world"], ids=["no-knob", "knob-shards"])
+class _OwnConfig(LlamaConfig):
+    """A config class of the caller's own, which AutoConfig has no mapping for."""
+
+    model_type = "modelopt_test_own_llama"
+
+
+@pytest.mark.parametrize(
+    ("fsdp_size", "own_config"),
+    [(None, False), ("world", False), (None, True)],
+    ids=["no-knob", "knob-shards", "own-config-class"],
+)
 def test_a_model_class_of_the_callers_own_loads_whole(
-    run_as, serve, loaders, auto_class, monkeypatch, tmp_path, fsdp_size
+    run_as, serve, loaders, auto_class, monkeypatch, tmp_path, fsdp_size, own_config
 ):
     """The sharded loads build their own model class and refuse another, so with nothing asking to
     shard, a class of the caller's own loads whole on every rank, and with a knob asking to shard
     it is refused. Neither builds the model on the meta device, which the decision's own pick of
-    class may not build (an encoder-decoder loaded through AutoModel)."""
+    class may not build (an encoder-decoder loaded through AutoModel). The decision reads the
+    checkpoint's config as the class does, through its own config class, which AutoConfig need not
+    know."""
     run_as(2)
-    serve(LlamaConfig(**_TINY))
+    if own_config:
+        _OwnConfig(**_TINY).save_pretrained(tmp_path)
+        auto_class.config_class = _OwnConfig
+    else:
+        serve(LlamaConfig(**_TINY))
     monkeypatch.setattr(
         model_load_utils, "build_meta_causal_lm", lambda *a, **k: pytest.fail("built a model")
     )
