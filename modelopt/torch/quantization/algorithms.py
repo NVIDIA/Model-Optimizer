@@ -448,6 +448,8 @@ class QuantRecipeHparam(Hparam):
         self.cost_weight = cost_weight
         self.allow_no_quant = allow_no_quant
         self.is_fixed = fixed_recipe is not None
+        # A format shard scores only its own formats; None scores every choice.
+        self._scored_recipes: set | None = None
 
         # Module hashes depend on object identity, so sets can produce different orders per rank.
         self.quant_modules = list(dict.fromkeys(quant_modules or []))
@@ -544,6 +546,13 @@ class QuantRecipeHparam(Hparam):
         active = self.active
         assert isinstance(active, QuantRecipe)
         self._apply_quantizer_choice(active)
+
+    @property
+    def scored_choices(self) -> list[QuantRecipe]:
+        """Choices whose sensitivity this process scores."""
+        if self._scored_recipes is None:
+            return self.choices
+        return [recipe for recipe in self.choices if recipe in self._scored_recipes]
 
     @property
     def solver_choices(self) -> list[QuantRecipe]:
@@ -738,6 +747,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost_model": COST_MODEL_WEIGHT,
             "cost": {},
             "active_moe_expert_ratio": None,
+            "format_shard": None,
         }
 
     @property
@@ -757,6 +767,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "disabled_layers": None,
             "candidate_stats": defaultdict(dict),
             "quantizer_states": {},
+            "format_shard": None,
             "best": {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False},
         }
 
@@ -770,6 +781,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         assert config["forward_step"] is not None, (
             "`forward_step` must be provided for `auto_quantize`."
         )
+        if config["format_shard"] is not None:
+            index, count = config["format_shard"]
+            if not (isinstance(index, int) and isinstance(count, int) and 0 <= index < count):
+                raise ValueError("format_shard must be (index, count) with 0 <= index < count.")
+            if self.method_name not in ("gradient", "kl_div"):
+                raise ValueError("format_shard supports method='gradient' or 'kl_div'.")
+            if config["checkpoint"] is None:
+                raise ValueError("format_shard needs a checkpoint to save the shard's scores.")
+            config["format_shard"] = (index, count)
         return config
 
     def validate_search_input(self, constraints, config) -> None:
@@ -1123,18 +1143,14 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 continue
 
             formats, raw_scores, scores, costs = [], [], [], []
-            prev_score = float("inf")
+            scored = set(hparam.scored_choices)
             for recipe in hparam.solver_choices:
                 formats.append(recipe)
-
-                score = hparam.get_score(recipe)
-                cost = hparam.get_cost(recipe)
-
-                raw_scores.append(score)
-                score = min(score, prev_score)  # TODO: Should we get rid of this?
-                scores.append(score)
-                costs.append(cost)
-                prev_score = score
+                # A format shard leaves other shards' formats unscored; their merge fills them.
+                unscored = recipe not in scored and not recipe.is_no_quant
+                raw_scores.append(None if unscored else hparam.get_score(recipe))
+                costs.append(hparam.get_cost(recipe))
+            scores = _monotone_scores(raw_scores)
 
             self.candidate_stats[name]["formats"] = formats
             self.candidate_stats[name]["scores"] = scores
@@ -1156,6 +1172,30 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             total=num_iters,
         ):
             func(self.model, data)
+
+    def _owned_recipes(self, quant_recipe_hparams, search_recipes):
+        """The searched formats this format shard calibrates and scores; None without sharding.
+
+        Formats are dealt round-robin in canonical (compression, then config) order. The fixed
+        recipe is calibrated by every shard because it shapes the scoring reference.
+        """
+        if self.format_shard is None:
+            return None
+        index, count = self.format_shard
+        configurable = [hparam for hparam in quant_recipe_hparams if hparam.is_configurable]
+        searched = [
+            recipe
+            for recipe in search_recipes
+            if not recipe.is_no_quant and any(recipe in hparam.choices for hparam in configurable)
+        ]
+        if count > len(searched):
+            raise ValueError(
+                f"format_shard count {count} exceeds {len(searched)} searched formats."
+            )
+        owned = set(searched[index::count])
+        for hparam in configurable:
+            hparam._scored_recipes = owned
+        return owned
 
     @staticmethod
     def _snapshot_source_weights(quant_recipe_hparams, search_recipes):
@@ -1390,14 +1430,35 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.resolved_search_setup_signature = resolved_search_setup_signature
         self._verify_resolved_constraint(quant_recipe_hparams)
 
+        format_shard = self.config["format_shard"]
+        restored_format_shard = self.format_shard
+        if restored_format_shard is not None:
+            restored_format_shard = tuple(restored_format_shard)
+        if has_restored_calibration_or_scores and restored_format_shard != format_shard:
+            raise ValueError(
+                f"Checkpoint holds format shard {restored_format_shard}, not {format_shard}. "
+                "Combine shard checkpoints with merge_auto_quantize_checkpoints() first."
+            )
+        self.format_shard = format_shard
+        owned_recipes = self._owned_recipes(quant_recipe_hparams, search_recipes)
+
         QuantRecipe.disable_folding_pqs_to_weights()
-        source_weights = self._snapshot_source_weights(quant_recipe_hparams, search_recipes)
+        source_weights = self._snapshot_source_weights(
+            quant_recipe_hparams,
+            [
+                r
+                for r in search_recipes
+                if owned_recipes is None or r in {*owned_recipes, fixed_recipe}
+            ],
+        )
 
         # Iterate over the search recipes and calibrate the quantizers for each recipe
         calibrated_new = False
         try:
             for recipe in search_recipes:
                 if recipe == QuantRecipe(quant_cfg=None):  # No-quant format
+                    continue
+                if owned_recipes is not None and recipe not in {*owned_recipes, fixed_recipe}:
                     continue
 
                 for hparam in quant_recipe_hparams:
@@ -1556,6 +1617,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     def run_search(self):
         """Search for the best per-layer quantization configuration and return the best model and configuration."""
         verbose = self.config["verbose"]
+        if self.format_shard is not None:
+            if verbose:
+                print_rank_0(
+                    f"AutoQuantize: format shard {self.format_shard} scored; merge the shard "
+                    "checkpoints with merge_auto_quantize_checkpoints() to solve."
+                )
+            return
         assert "effective_bits" in self.constraints and (
             set(self.constraints) <= AUTO_QUANTIZE_CONSTRAINT_KEYS
         ), (
@@ -1619,6 +1687,66 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
         self._write_selected_codes_to_weights()
         QuantRecipe.fold_pqs_to_weights(self.model)
+
+
+def _monotone_scores(raw_scores):
+    """Scores never increasing with compression; formats left unscored (None) stay None."""
+    scores, prev_score = [], float("inf")
+    for score in raw_scores:
+        if score is not None:
+            score = min(score, prev_score)  # TODO: Should we get rid of this?
+            prev_score = score
+        scores.append(score)
+    return scores
+
+
+_SHARD_INVARIANT_STATE = (
+    "method",
+    "cost_model",
+    "cost",
+    "active_moe_expert_ratio",
+    "quantization_formats_signature",
+    "fixed_quantization_config_signature",
+    "module_search_space_signature",
+    "resolved_search_setup_signature",
+)
+
+
+def merge_auto_quantize_shards(shard_states: Sequence[dict]) -> dict:
+    """Combine the states of every format shard of one search into an unsharded search state."""
+    ids = [tuple(state.get("format_shard") or ()) for state in shard_states]
+    if sorted(ids) != [(index, len(ids)) for index in range(len(ids))]:
+        raise ValueError(
+            f"Merge needs one checkpoint per format shard (0..count-1, count), got {ids}."
+        )
+    shards = [state for _, state in sorted(zip(ids, shard_states), key=lambda pair: pair[0])]
+    merged = copy.deepcopy(shards[0])
+    for state in shards[1:]:
+        for key in _SHARD_INVARIANT_STATE:
+            if state.get(key) != merged.get(key):
+                raise ValueError(f"Format shards were run with different search setups ({key}).")
+        if state["candidate_stats"].keys() != merged["candidate_stats"].keys():
+            raise ValueError("Format shards were run with different quantization groups.")
+        merged["quantizer_states"].update(state["quantizer_states"])
+        for name, stats in state["candidate_stats"].items():
+            target = merged["candidate_stats"][name]
+            if [str(f) for f in stats["formats"]] != [str(f) for f in target["formats"]]:
+                raise ValueError(f"Format shards list different formats for {name}.")
+            for i, score in enumerate(stats["raw_scores"]):
+                current = target["raw_scores"][i]
+                if score is None or current == score:
+                    continue
+                # Every shard scores BF16 and fixed groups alike (0); a sharded format only once.
+                if current is not None:
+                    raise ValueError(f"Two format shards scored {target['formats'][i]} for {name}.")
+                target["raw_scores"][i] = score
+    for name, stats in merged["candidate_stats"].items():
+        if any(score is None for score in stats["raw_scores"]):
+            raise ValueError(f"No format shard scored every format of {name}.")
+        stats["scores"] = _monotone_scores(stats["raw_scores"])
+    merged["format_shard"] = None
+    merged["best"] = {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False}
+    return merged
 
 
 def _get_auto_quantize_score(grad_output, output_diff):
@@ -1811,7 +1939,7 @@ class _AutoQuantizeGradientScoringSession(_AutoQuantizeCandidateReplayScoringSes
             return output
 
         output_diffs = self._replay_candidates(
-            module, base, lambda hparam: hparam.choices, *args, **kwargs
+            module, base, lambda hparam: hparam.scored_choices, *args, **kwargs
         )
         self._register_candidate_score_hook(module, base, output_diffs)
         return output
@@ -2102,7 +2230,7 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
             ):
                 if not isinstance(hparam, QuantRecipeHparam):
                     continue
-                for recipe in hparam.choices:
+                for recipe in hparam.scored_choices:
                     if recipe == QuantRecipe(quant_cfg=None):
                         continue
                     hparam.active = recipe
