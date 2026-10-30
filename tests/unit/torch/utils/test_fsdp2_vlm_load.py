@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -124,3 +124,18 @@ def test_unsourced_parameter_raises(tmp_path, gloo_group):
     _tiny_llava_checkpoint(tmp_path, drop=("model.multi_modal_projector.",))
     with pytest.raises(RuntimeError, match="get no tensor from the checkpoint"):
         _fsdp2_load(tmp_path)
+
+
+@pytest.mark.skipif(
+    torch.cuda.is_available(), reason="with a GPU, FSDP2 gathers the CPU-loaded root onto it"
+)
+def test_nemotron_vl_dummy_forward_gathers_the_root(tmp_path, gloo_group):
+    """The Nemotron-VL export forward calls the language model submodule, which skips the FSDP2
+    root's pre-forward unshard; the root's own parameters (embed_tokens) must be gathered for it."""
+    from modelopt.torch.export.unified_export_hf import _llm_dummy_forward
+
+    _tiny_llava_checkpoint(tmp_path)
+    model = _fsdp2_load(tmp_path)
+    model.config.architectures = ["NemotronTestVL"]  # takes the Nemotron-VL branch
+    _llm_dummy_forward(model)
+    assert all(isinstance(p, DTensor) for p in model.model.language_model.embed_tokens.parameters())

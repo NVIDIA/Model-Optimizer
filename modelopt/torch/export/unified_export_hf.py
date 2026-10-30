@@ -95,7 +95,7 @@ from modelopt.torch.quantization.utils import (
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
-from modelopt.torch.utils.distributed import is_fsdp2_model
+from modelopt.torch.utils.distributed import fsdp2_root_unsharded, is_fsdp2_model
 from modelopt.torch.utils.perf import maybe_clear_cuda_cache
 
 try:
@@ -520,15 +520,13 @@ def _llm_dummy_forward(model: torch.nn.Module) -> None:
 
         if language_model_lineage is not None:
             language_model = language_model_lineage[-1]
-            if is_fsdp2_model(model):
-                # Calling a submodule skips the FSDP2 root's unshard hook and leaves the root's
-                # params (embed_tokens) sharded; the root forward is text-only safe.
-                language_model = model
             print(
                 f"Running optimization on language model with fake_input shape: {fake_input.shape}"
             )
-            # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
-            language_model(fake_input, use_cache=False)
+            # Calling the submodule skips the FSDP2 root's pre-forward; gather the root's params.
+            with fsdp2_root_unsharded(model):
+                # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
+                language_model(fake_input, use_cache=False)
         else:
             raise ValueError(
                 f"Cannot extract language_model from Nemotron VL model ({type(model).__name__}). "
