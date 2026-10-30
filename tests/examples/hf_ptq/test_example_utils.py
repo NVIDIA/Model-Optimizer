@@ -21,16 +21,20 @@ recording path, checkpoint-path resolution, and the sidecar copy.
 """
 
 import warnings
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
-from _test_utils.torch.transformers_models import create_tiny_qwen3_moe_dir, get_tiny_nemotron_h
+from _test_utils.torch.transformers_models import (
+    create_tiny_qwen3_moe_dir,
+    get_tiny_llama,
+    get_tiny_nemotron_h,
+)
 from safetensors.torch import save_file
-from transformers import AutoModelForCausalLM, LlamaConfig
+from transformers import AutoModelForCausalLM, GenerationMixin, LlamaConfig
 
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
@@ -190,6 +194,60 @@ def test_get_model_preserves_preparation_error(monkeypatch, tmp_path, failure_at
 def test_build_quant_cfg_sets_moe_calib_experts_ratio_on_every_algorithm(algorithm, expected):
     quant_cfg = example_utils.build_quant_cfg({"quant_cfg": [], "algorithm": algorithm}, None, 0.5)
     assert quant_cfg["algorithm"] == expected
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["the-model", "a-model-around-it"])
+def test_a_preview_keeps_generate_from_switching_the_experts_implementation(monkeypatch, wrapped):
+    """On a GPU, ``generate`` switches a ``grouped_mm`` MoE's experts to ``batched_mm`` for decoding,
+    which ModelOpt's quantizers do not intercept (the preview after PTQ decodes unquantized experts)
+    and which Transformers refuses for an FSDP2-wrapped class (``FSDPQwen3MoeForCausalLM does not
+    support setting experts implementation``). The hook ``generate`` enters is out of the way for the
+    preview, and back after it, also when the previewed model generates through a submodule, as a
+    Nemotron-VL model's ``chat`` generates through its language model."""
+    entered = []
+
+    @contextmanager
+    def switch(self):
+        entered.append(type(self).__name__)
+        raise ValueError(f"{type(self).__name__} does not support setting experts implementation.")
+        yield
+
+    monkeypatch.setattr(GenerationMixin, "_optimize_model_for_decode", switch)
+    model = get_tiny_llama()
+    # The model around it has no hook of its own; the preview generates through the inner one.
+    previewed = torch.nn.ModuleDict({"language_model": model}) if wrapped else model
+    input_ids = torch.tensor([[1, 2, 3]])
+
+    # Some releases enter the hook only for the decode steps after the first token.
+    with pytest.raises(ValueError, match="does not support setting experts implementation"):
+        model.generate(input_ids, max_new_tokens=3)
+    with example_utils.keep_the_experts_implementation(previewed):
+        model.generate(input_ids, max_new_tokens=3)
+
+    assert entered == ["LlamaForCausalLM"]  # only the first, unprotected call reached the hook
+    assert "_optimize_model_for_decode" not in vars(model)
+
+
+def test_a_model_without_the_decode_hook_is_previewed_as_it_is():
+    model = torch.nn.Linear(1, 1)
+
+    with example_utils.keep_the_experts_implementation(model):
+        assert "_optimize_model_for_decode" not in vars(model)
+    assert not hasattr(model, "_optimize_model_for_decode")
+
+
+def test_a_decode_hook_on_the_model_itself_is_put_back_and_previews_nest():
+    """A hook bound on the model instance is restored rather than dropped, and a preview inside
+    another leaves the outer one's stand-in in place."""
+    model = torch.nn.Linear(1, 1)
+    own = model._optimize_model_for_decode = object()
+
+    with example_utils.keep_the_experts_implementation(model):
+        with example_utils.keep_the_experts_implementation(model):
+            pass
+        assert model._optimize_model_for_decode is nullcontext
+
+    assert model._optimize_model_for_decode is own
 
 
 def test_get_original_hf_quant_method_mxfp4_dict():
