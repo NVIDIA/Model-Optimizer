@@ -34,6 +34,8 @@ import os
 
 import torch
 
+from modelopt.torch.utils.moe import _SUB_CONFIG_ATTRS
+
 
 def to_native_backbone_config(
     vlm_config,
@@ -75,8 +77,6 @@ def to_native_backbone_config(
 
 def _config_levels(hf_config) -> list:
     """``hf_config`` and the nested language-model configs the expert-parallel load reads."""
-    from modelopt.torch.utils.moe import _SUB_CONFIG_ATTRS
-
     nested = (getattr(hf_config, attr, None) for attr in _SUB_CONFIG_ATTRS)
     return [c for c in (hf_config, *nested) if c is not None]
 
