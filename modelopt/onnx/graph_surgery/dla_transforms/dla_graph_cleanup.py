@@ -32,8 +32,9 @@ from onnx import helper, numpy_helper
 from ...logging_config import logger
 from ..utils.graph_utils import (
     GraphCache,
-    _captured_names,
     _node_inputs,
+    _set_axes,
+    _subgraph_captures,
     add_unique_initializers,
     add_value_info,
     batch_replace_nodes,
@@ -42,102 +43,9 @@ from ..utils.graph_utils import (
     insert_nodes_at_position,
     pad4d,
 )
+from .dla_utils import _RANK_AGNOSTIC_OPS
 
 # ── Internal utilities ────────────────────────────────────────────────────────
-
-
-_RANK_AGNOSTIC_OPS = frozenset(
-    {
-        "Abs",
-        "Acos",
-        "Acosh",
-        "Add",
-        "And",
-        "Asin",
-        "Asinh",
-        "Atan",
-        "Atanh",
-        "Cast",
-        "Ceil",
-        "Clip",
-        "Cos",
-        "Cosh",
-        "Div",
-        "Elu",
-        "Equal",
-        "Erf",
-        "Exp",
-        "Floor",
-        "Greater",
-        "GreaterOrEqual",
-        "HardSigmoid",
-        "HardSwish",
-        "Identity",
-        "IsInf",
-        "IsNaN",
-        "LeakyRelu",
-        "Less",
-        "LessOrEqual",
-        "Log",
-        "Max",
-        "Mean",
-        "Min",
-        "Mod",
-        "Mul",
-        "Neg",
-        "Not",
-        "Or",
-        "PRelu",
-        "Pow",
-        "Reciprocal",
-        "Relu",
-        "Round",
-        "Selu",
-        "Sigmoid",
-        "Sign",
-        "Sin",
-        "Sinh",
-        "Softplus",
-        "Softsign",
-        "Sqrt",
-        "Sub",
-        "Sum",
-        "Tan",
-        "Tanh",
-        "ThresholdedRelu",
-        "Where",
-        "Xor",
-    }
-)
-
-
-def _set_axes(model, cache: GraphCache, node: onnx.NodeProto, axes, preferred_name: str) -> None:
-    """Attach axes using the model's default-domain Squeeze/Unsqueeze schema."""
-    versions = {o.domain: o.version for o in model.opset_import}
-    opset = versions.get("", versions.get("ai.onnx", 1))
-    if opset < 13:
-        node.attribute.append(
-            helper.make_attribute("axes", list(axes), attr_type=onnx.AttributeProto.INTS)
-        )
-    else:
-        axes_name = cache.unique_name(preferred_name)
-        model.graph.initializer.append(
-            numpy_helper.from_array(np.asarray(axes, dtype=np.int64), name=axes_name)
-        )
-        node.input.append(axes_name)
-
-
-def _subgraph_captures(graph: onnx.GraphProto) -> set[str]:
-    """Collect outer-scope values referenced inside this graph's nested subgraphs."""
-    captured: set[str] = set()
-    for node in graph.node:
-        for attribute in node.attribute:
-            if attribute.type == onnx.AttributeProto.GRAPH:
-                captured.update(_captured_names(attribute.g))
-            elif attribute.type == onnx.AttributeProto.GRAPHS:
-                for subgraph in attribute.graphs:
-                    captured.update(_captured_names(subgraph))
-    return captured
 
 
 def _rank_sensitive_consumers(
