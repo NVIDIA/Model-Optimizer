@@ -1657,14 +1657,20 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
             "causal-lm",
             {"require_lm_head": False},
             TypeError,
-            r"\['require_lm_head'\] only apply to the expert-parallel load, and the FSDP2 load",
+            (
+                r"\['require_lm_head'\] only apply to the expert-parallel load, and the FSDP2 "
+                r"load .*; drop them, or pass a plan with ep_size > 1"
+            ),
         ),
         (
             DistributionPlan(2, ep_size=2),
             "causal-lm",
             {"broadcast_chunk_size": None},
             TypeError,
-            r"\['broadcast_chunk_size'\] only apply to the FSDP2 load, and the expert-parallel",
+            (
+                r"\['broadcast_chunk_size'\] only apply to the FSDP2 load, and the "
+                r"expert-parallel load .*; drop them, or pass a plan with ep_size=1 and dense='fsdp'"
+            ),
         ),
     ],
     ids=[
