@@ -447,6 +447,17 @@ def test_get_dataset_samples_with_unsupported_dataset(make_toy_hf_dataset):
     assert all(isinstance(s, str) and len(s) > 0 for s in samples)
 
 
+def test_registered_dataset_paths_are_namespaced():
+    # huggingface_hub>=1.16 rejects un-namespaced dataset IDs, and the legacy ones such
+    # as "c4" redirect to script-based repos that datasets>=4 cannot load.
+    bare = [
+        name
+        for name, entry in dataset_utils.SUPPORTED_DATASET_CONFIG.items()
+        if "/" not in entry["config"]["path"]
+    ]
+    assert not bare, f"Registered datasets without an org/name Hub ID: {bare}"
+
+
 # ---------------------------------------------------------------------------
 # Local JSONL loading — must flow through the same auto-preprocess path as a
 # downloaded HF dataset, so chat / prompt / text columns are all handled.

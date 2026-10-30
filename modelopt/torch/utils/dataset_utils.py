@@ -278,19 +278,15 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
         "preprocess": lambda sample: sample["article"],
     },
     "pile": {
-        "config": {"path": "monology/pile-uncopyrighted", "name": "v1.0", "split": ["train"]},
-        "preprocess": lambda sample: sample["text"],
-    },
-    "pg19": {
-        "config": {"path": "pg19", "name": "v1.0", "split": ["train"]},
+        "config": {"path": "monology/pile-uncopyrighted", "split": ["train"]},
         "preprocess": lambda sample: sample["text"],
     },
     "wikipedia": {
-        "config": {"path": "wikipedia", "name": "20220301.en", "split": ["train"]},
+        "config": {"path": "wikimedia/wikipedia", "name": "20231101.en", "split": ["train"]},
         "preprocess": lambda sample: sample["text"],
     },
     "c4": {
-        "config": {"path": "c4", "name": "en", "split": ["train"]},
+        "config": {"path": "allenai/c4", "name": "en", "split": ["train"]},
         "preprocess": lambda sample: sample["text"],
     },
     "wikitext": {
