@@ -317,6 +317,14 @@ def is_marked(hf_config) -> bool:
     return any(getattr(c, _MARK, None) is not None for c in _config_levels(hf_config))
 
 
+def stored_names(hf_config) -> tuple[str, ...]:
+    """The names each compressed weight of ``hf_config``'s checkpoint is stored under, from its mark."""
+    for c in _config_levels(hf_config):
+        if (stored_as := getattr(c, _MARK, None)) is not None:
+            return stored_as
+    raise ValueError("The config is not marked for on-the-fly decompression: install it first.")
+
+
 def install_onfly_decompress(hf_config):
     """Monkeypatch get_model_conversion_mapping so the fused-MoE per-expert converters decompress the
     checkpoint's compressed-tensors weights on the fly, in whatever ``format`` the checkpoint declares.
@@ -433,9 +441,7 @@ def check_compressed_keys(hf_config, ckpt_dir) -> None:
 
     from modelopt.torch.utils.plugins.hf_checkpoint_utils import checkpoint_tensor_files
 
-    stored_as = next(
-        getattr(c, _MARK) for c in _config_levels(hf_config) if getattr(c, _MARK, None) is not None
-    )
+    stored_as = stored_names(hf_config)
     tensor_files = checkpoint_tensor_files(ckpt_dir)
     compressed: set[str] = set()
     expert_weights: set[str] = set()
