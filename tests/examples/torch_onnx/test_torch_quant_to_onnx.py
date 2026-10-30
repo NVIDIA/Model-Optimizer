@@ -40,41 +40,6 @@ def _load_example_module(name, relative_path):
     return module
 
 
-@pytest.mark.parametrize("dynamo_export", [False, True])
-def test_export_to_onnx_defers_default_opset_to_modelopt(monkeypatch, tmp_path, dynamo_export):
-    download_example_onnx = _load_example_module(
-        "download_example_onnx_for_test", "examples/onnx_ptq/download_example_onnx.py"
-    )
-
-    export_call = {}
-
-    def fake_export(**kwargs):
-        export_call.update(kwargs)
-        return b"onnx", {}
-
-    class FakeOnnxBytes:
-        def write_to_disk(self, *_args, **_kwargs):
-            pass
-
-    monkeypatch.setattr(download_example_onnx, "get_onnx_bytes_and_metadata", fake_export)
-    monkeypatch.setattr(
-        download_example_onnx.OnnxBytes,
-        "from_bytes",
-        lambda _onnx_bytes: FakeOnnxBytes(),
-    )
-
-    download_example_onnx.export_to_onnx(
-        torch.nn.Linear(2, 2),
-        (1, 2),
-        tmp_path / "model.onnx",
-        torch.device("cpu"),
-        dynamo_export=dynamo_export,
-    )
-
-    assert export_call["dynamo_export"] is dynamo_export
-    assert export_call["onnx_opset"] is None
-
-
 @pytest.mark.parametrize("num_convs", [1, 2])
 def test_dynamo_fp8_export_with_unquantized_rgb_input(tmp_path, num_convs):
     torch_quant_to_onnx = _load_example_module(

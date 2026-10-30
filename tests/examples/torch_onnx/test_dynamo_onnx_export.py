@@ -118,12 +118,20 @@ def test_quantized_dynamo_onnx_executes_with_tensorrt(
 
 @minimum_sm(89)
 @pytest.mark.parametrize("weights_dtype", ["fp32", "fp16"])
-def test_small_fp16_fp8_weights_execute_with_tensorrt(weights_dtype):
-    inputs = torch.ones(2, 16, device="cuda", dtype=torch.float16)
+@pytest.mark.parametrize(
+    ("weight", "calibration_value", "inference_value"),
+    [(1e-5, 1.0, 1.0), (1.0, 0.0, 2.0)],
+    ids=["small-weights", "zero-activation-calibration"],
+)
+def test_fp16_fp8_calibration_executes_with_tensorrt(
+    weights_dtype, weight, calibration_value, inference_value
+):
+    inputs = torch.full((2, 16), calibration_value, device="cuda", dtype=torch.float16)
     model = nn.Linear(16, 16, bias=False, device="cuda", dtype=torch.float16).eval()
     with torch.no_grad():
-        model.weight.fill_(1e-5)
+        model.weight.fill_(weight)
     model = _quantize(model, inputs, mtq.FP8_DEFAULT_CFG)
+    inputs.fill_(inference_value)
     assert torch.count_nonzero(model(inputs)) == inputs.numel()
     _compile_and_compare(model, (inputs,), rtol=1e-3, atol=1e-7, weights_dtype=weights_dtype)
 

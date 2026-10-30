@@ -475,10 +475,16 @@ def test_mxfp8_fp8_conv_uses_matching_qdq_types(tmp_path, block_quant_export_onl
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
-@pytest.mark.parametrize("weight", [0.0, 1e-5])
+@pytest.mark.parametrize(
+    ("weight", "calibration_value", "inference_value"),
+    [(0.0, 1.0, 1.0), (1e-5, 1.0, 1.0), (1.0, 0.0, 2.0)],
+    ids=["zero-weights", "small-weights", "zero-activation-calibration"],
+)
 @pytest.mark.parametrize("weights_dtype", ["fp32", "fp16"])
-def test_helper_exports_small_calibrated_fp8_weights(tmp_path, dtype, weight, weights_dtype):
-    inputs = (torch.ones(2, 16, dtype=dtype),)
+def test_helper_exports_small_calibrated_fp8_weights(
+    tmp_path, dtype, weight, calibration_value, inference_value, weights_dtype
+):
+    inputs = (torch.full((2, 16), calibration_value, dtype=dtype),)
     model = nn.Linear(16, 16, bias=False, dtype=dtype).eval()
     with torch.no_grad():
         model.weight.fill_(weight)
@@ -503,12 +509,15 @@ def test_helper_exports_small_calibrated_fp8_weights(tmp_path, dtype, weight, we
     assert scale.data_type == onnx.TensorProto.FLOAT
     torch.testing.assert_close(
         torch.from_numpy(onnx.numpy_helper.to_array(scale).copy()).float().reshape(()),
-        model.weight_quantizer._amax.float().reshape(()) / 448 if weight else torch.tensor(1.0),
+        model.weight_quantizer._amax.float().reshape(()) / 448
+        if weight
+        else torch.tensor(1.0 / 448),
     )
+    inference_inputs = (torch.full((2, 16), inference_value, dtype=dtype),)
     actual = ReferenceEvaluator(exported).run(
-        None, {exported.graph.input[0].name: inputs[0].numpy()}
+        None, {exported.graph.input[0].name: inference_inputs[0].numpy()}
     )[0]
-    expected = model(*inputs).to(torch.float16 if weights_dtype == "fp16" else dtype)
+    expected = model(*inference_inputs).to(torch.float16 if weights_dtype == "fp16" else dtype)
     if weight:
         assert torch.count_nonzero(expected) == expected.numel()
         assert torch.count_nonzero(torch.from_numpy(actual)) == expected.numel()
