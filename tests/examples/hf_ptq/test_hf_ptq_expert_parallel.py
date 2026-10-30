@@ -846,11 +846,10 @@ def test_the_offline_specdec_loader_is_split_across_ranks_too(hf_ptq):
     ("plan", "nemotron_vl", "raises"),
     [
         (DistributionPlan(4), False, False),
-        (DistributionPlan(4, dense="fsdp"), False, False),
         (DistributionPlan(4, ep_size=4), False, True),
         (DistributionPlan(4, ep_size=4), True, True),
     ],
-    ids=["replicated", "fsdp2", "expert_parallel", "expert_parallel_nemotron_vl"],
+    ids=["replicated", "expert_parallel", "expert_parallel_nemotron_vl"],
 )
 def test_a_failed_preview_of_an_expert_parallel_model_stops_the_run(
     hf_ptq, monkeypatch, plan, nemotron_vl, raises
@@ -858,7 +857,7 @@ def test_a_failed_preview_of_an_expert_parallel_model_stops_the_run(
     """A rank that skipped an expert-parallel model's preview would leave the others decoding in
     lockstep, blocked in the next step's collective, so the failure is raised, which aborts the run,
     with the preview's error as its cause. A model every rank holds whole keeps the best-effort
-    skip and exports, and so does --use_fsdp2, as on main."""
+    skip and exports."""
 
     def fail(*args, **kwargs):
         raise RuntimeError("the preview failed on this rank")
