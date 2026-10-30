@@ -151,8 +151,14 @@ def _read_compression(hf_config):
             f"{scheme.targets}, not the experts; on-the-fly decompression handles a checkpoint "
             "whose experts are what it compresses. Decompress the checkpoint first."
         )
-    fmt = qconfig.format
+    # A group's own format wins: the config's top level then says "mixed-precision".
+    fmt = getattr(scheme, "format", None) or qconfig.format
     fmt = fmt.value if hasattr(fmt, "value") else str(fmt)
+    if fmt not in BaseCompressor.registered_names():
+        raise NotImplementedError(
+            f"install_onfly_decompress: compressed-tensors registers no compressor for the format "
+            f"{fmt!r}, so on-the-fly decompression cannot read it. Decompress the checkpoint first."
+        )
     compressor = BaseCompressor.get_value_from_registry(fmt)
     param_names = tuple(compressor.compression_param_names(scheme))
     return compressor, scheme, param_names, fmt
