@@ -937,7 +937,7 @@ def test_a_remote_kimi_k3_whose_prepare_attaches_its_plan_left_whole_is_an_error
     )
     monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi_k3())
     run_as(4)
-    serve(SimpleNamespace(model_type="kimi_k3", text_config=SimpleNamespace(n_routed_experts=8)))
+    serve(SimpleNamespace(model_type="kimi_k3", text_config=SimpleNamespace(num_experts=8)))
 
     with pytest.raises(RuntimeError, match="can be expert-parallel, but the plan resolved"):
         resolve_distribution_plan(str(tmp_path))
