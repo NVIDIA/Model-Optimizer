@@ -31,6 +31,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.distributed as dist
+from _test_utils.torch import kimi_k3_tiny_modeling
 from _test_utils.torch.distributed.utils import bounded_collectives
 from packaging.version import Version
 from safetensors.torch import load_file, save_file
@@ -51,9 +52,14 @@ from transformers import (
     Qwen3MoeConfig,
 )
 
+import modelopt.torch.quantization as mtq
+from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
 from modelopt.torch.models import _onfly_decompress
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
+    ParallelState,
+    distributed_forward_loop,
     distribution_plan,
     set_distribution_plan,
 )
@@ -399,3 +405,239 @@ def test_kimi_vl_loads_expert_parallel_and_matches_the_whole_model(
         pytest.skip(f"{NUM_EXPERTS} experts do not shard over {dist_workers.world_size} GPUs")
     _save_tiny_kimi_vl(tmp_path)
     dist_workers.run(_kimi_vl_expert_parallel_job, ckpt_dir=str(tmp_path))
+
+
+# ------------------------------------------------------------------------------------- Kimi-K3
+
+# A tiny Kimi-K3: a dense first layer, then one MoE layer of 8 routed experts, run in a 32-wide latent
+# space, as Kimi-K3's own code builds it (remote code, ``kimi_k3_tiny_modeling``).
+KIMI_K3_DIMS = {
+    "vocab_size": 64,
+    "hidden_size": 64,
+    "intermediate_size": 64,
+    "routed_expert_hidden_size": 32,
+    "moe_intermediate_size": 32,
+    "num_experts": 8,
+    "num_experts_per_token": 2,
+    "num_hidden_layers": 2,
+    "first_k_dense_replace": 1,
+    "num_shared_experts": 1,
+}
+KIMI_K3_EXPERTS = KIMI_K3_DIMS["num_experts"]
+KIMI_K3_MOE = "language_model.model.layers.1.block_sparse_moe.experts."
+# Kimi-K3's own compression: MXFP4 routed experts, everything else bf16.
+KIMI_K3_MXFP4 = {
+    "quant_method": "compressed-tensors",
+    "format": "mxfp4-pack-quantized",
+    "quantization_status": "compressed",
+    "config_groups": {
+        "group_0": {
+            "format": "mxfp4-pack-quantized",
+            "targets": ["Linear"],
+            "weights": {
+                "num_bits": 4,
+                "type": "float",
+                "symmetric": True,
+                "strategy": "group",
+                "group_size": 32,
+                "scale_dtype": "torch.uint8",
+                "dynamic": False,
+                "observer": "minmax",
+            },
+        }
+    },
+    "ignore": [
+        "re:.*self_attn.*",
+        "re:.*shared_experts.*",
+        "re:.*mlp\\.(gate|up|gate_up|down)_proj.*",
+        "re:.*lm_head.*",
+    ],
+}
+
+
+def _kimi_k3_expert(expert):
+    """Expert ``expert``'s ``w1``/``w3``/``w2``, the same on every rank."""
+    gen = torch.Generator().manual_seed(expert)
+
+    def draw(rows, cols):
+        # MXFP4 (e2m1) values at a scale of 1/16: packed at that power-of-two scale, they decompress
+        # exactly, and bf16 holds them exactly.
+        values = _E2M1[torch.randint(0, len(_E2M1), (rows, cols), generator=gen)] / 16
+        return values * torch.where(torch.rand(rows, cols, generator=gen) < 0.5, -1.0, 1.0)
+
+    inter, latent = KIMI_K3_DIMS["moe_intermediate_size"], KIMI_K3_DIMS["routed_expert_hidden_size"]
+    return {"w1": draw(inter, latent), "w3": draw(inter, latent), "w2": draw(latent, inter)}
+
+
+def _save_tiny_kimi_k3(ckpt_dir):
+    """A tiny Kimi-K3-shaped remote checkpoint whose routed experts are packed MXFP4, as Kimi-K3's are."""
+    ckpt_dir = Path(ckpt_dir)
+    shutil.copy(kimi_k3_tiny_modeling.__file__, ckpt_dir / "modeling_kimi_k3.py")
+    remote = "modeling_kimi_k3.KimiK3ForConditionalGeneration"
+    config = {
+        "model_type": "kimi_k3",
+        "architectures": ["KimiK3ForConditionalGeneration"],
+        "auto_map": {
+            "AutoConfig": "modeling_kimi_k3.KimiK3Config",
+            "AutoModel": remote,
+            "AutoModelForCausalLM": remote,
+        },
+        "torch_dtype": "bfloat16",
+        "tie_word_embeddings": False,
+        # As Kimi-K3's: the scheme sits on the language model's config only.
+        "text_config": {
+            "model_type": "kimi_linear",
+            **KIMI_K3_DIMS,
+            "quantization_config": KIMI_K3_MXFP4,
+        },
+    }
+    (ckpt_dir / "config.json").write_text(json.dumps(config))
+
+    compressor, scheme, stored_as, _ = _onfly_decompress._read_compression(
+        SimpleNamespace(quantization_config=KIMI_K3_MXFP4)
+    )
+    with torch.device("meta"):
+        shapes = kimi_k3_tiny_modeling.KimiK3ForConditionalGeneration(
+            kimi_k3_tiny_modeling.KimiK3Config(text_config=dict(KIMI_K3_DIMS))
+        ).state_dict()
+    gen = torch.Generator().manual_seed(0)
+    tensors = {}
+    for name, meta in shapes.items():
+        if name.startswith(KIMI_K3_MOE):
+            continue
+        dense = torch.randn(meta.shape, generator=gen) * 0.1
+        tensors[name] = (1 + dense if name.endswith("norm.weight") else dense).to(torch.bfloat16)
+    for e in range(KIMI_K3_EXPERTS):
+        for leaf, weight in _kimi_k3_expert(e).items():
+            scale = torch.full((weight.shape[0], weight.shape[1] // 32), 1 / 16)
+            packed = compressor.compress({"weight": weight, "weight_scale": scale}, scheme)
+            for stored in stored_as:
+                tensors[f"{KIMI_K3_MOE}{e}.{leaf}.{stored}"] = packed[stored]
+    save_file(tensors, str(ckpt_dir / "model.safetensors"), metadata={"format": "pt"})
+
+
+def _whole_kimi_k3(ckpt_dir, config, device):
+    """The single-rank load: the whole model on one device, its experts decompressed as it loads."""
+    prepared = apply_distributed_support(
+        "kimi_k3", copy.deepcopy(config), ckpt_path=ckpt_dir, trust_remote_code=True
+    )
+    whole = AutoModelForCausalLM.from_pretrained(
+        ckpt_dir, config=prepared, trust_remote_code=True, dtype=torch.bfloat16
+    )
+    for module in whole.modules():  # the experts forward reads it at forward time
+        if hasattr(getattr(module, "config", None), "_experts_implementation"):
+            module.config._experts_implementation = "eager"
+    return whole.to(device).eval()
+
+
+def _calibrated(model):
+    return {
+        name: module.amax.float().cpu()
+        for name, module in model.named_modules()
+        if isinstance(module, TensorQuantizer) and module.is_enabled and module.amax is not None
+    }
+
+
+def _kimi_k3_expert_parallel_job(rank, size, ckpt_dir):
+    device = torch.device("cuda", rank)
+    batches = [
+        torch.randint(
+            0, KIMI_K3_DIMS["vocab_size"], (2, 16), generator=torch.Generator().manual_seed(r)
+        )
+        for r in range(size)
+    ]
+    per_rank = KIMI_K3_EXPERTS // size
+    owned = range(rank * per_rank, (rank + 1) * per_rank)
+    problems = []
+    # The decompressor's hooks are process-wide, and the workers outlive the job.
+    hooks = (mu.get_model_conversion_mapping, cml._materialize_copy)
+    try:
+        with bounded_collectives(seconds=120):
+            config = AutoConfig.from_pretrained(ckpt_dir, trust_remote_code=True)
+            plan = DistributionPlan(size, ep_size=size)
+            prepared = apply_distributed_support(
+                "kimi_k3", copy.deepcopy(config), ckpt_path=ckpt_dir, trust_remote_code=True
+            )
+            model = load_and_prepare_ep(
+                ckpt_dir, plan, trust_remote_code=True, hf_config=prepared
+            ).eval()
+            set_distribution_plan(model, plan)
+            whole = _whole_kimi_k3(ckpt_dir, config, device)
+            for module in whole.modules():
+                module._parallel_state = ParallelState(data_parallel_group=-1)
+
+            # This rank's experts, decompressed as they loaded, and only those.
+            experts = model.language_model.model.layers[1].block_sparse_moe.experts
+            want = [_kimi_k3_expert(e) for e in owned]
+            gate_up = torch.stack([torch.cat([w["w1"], w["w3"]]) for w in want])
+            down = torch.stack([w["w2"] for w in want])
+            for name, expected in (("gate_up_proj", gate_up), ("down_proj", down)):
+                local = _local(getattr(experts, name)).float().cpu()
+                if not torch.equal(local, expected):
+                    problems.append(f"{name}: rank {rank}'s experts {list(owned)} differ")
+
+            # Each rank its own batch through the experts, against the whole model on that batch.
+            with torch.no_grad():
+                sharded = model(batches[rank].to(device)).logits.float()
+                reference = whole(batches[rank].to(device)).logits.float()
+            if not torch.allclose(sharded, reference, atol=2e-2, rtol=2e-2):
+                problems.append(f"logits differ by {(sharded - reference).abs().max().item():.3g}")
+
+            # Calibrated over every rank's batch: each rank on its own, the whole model on all.
+            forward_loop = distributed_forward_loop(
+                model,
+                [{"input_ids": batches[rank]}],
+                device=device,
+                ep_mesh=expert_parallel_mesh(model),
+            )
+            mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop)
+            mtq.quantize(whole, mtq.FP8_DEFAULT_CFG, lambda m: [m(b.to(device)) for b in batches])
+            sharded_amax, reference_amax = _calibrated(model), _calibrated(whole)
+            if not any("_weight_quantizers." in name for name in sharded_amax):
+                problems.append("no expert weight quantizer was calibrated")
+            for name, amax in sharded_amax.items():
+                if "_weight_quantizers." in name:  # this rank's local expert -> the global one
+                    prefix, index = name.rsplit(".", 1)
+                    name = f"{prefix}.{rank * per_rank + int(index)}"
+                expected_amax = reference_amax.get(name)
+                if expected_amax is None:
+                    problems.append(f"{name} is calibrated here but not in the whole model")
+                    continue
+                # bf16 activations, summed in another order: compare by relative norm.
+                error = (amax - expected_amax).norm() / expected_amax.norm().clamp_min(1e-12)
+                if not error < 2e-2:
+                    problems.append(f"{name}: amax off by {error.item():.3g} (relative)")
+
+            # The export names each expert back to the checkpoint's w1/w3/w2.
+            to_checkpoint = build_reverse_name_mapper(model, tensor_keys=True)
+            for e in owned:
+                parts = [
+                    f"{KIMI_K3_MOE}{e}.{p}.weight" for p in ("gate_proj", "up_proj", "down_proj")
+                ]
+                leaves = [f"{KIMI_K3_MOE}{e}.{leaf}.weight" for leaf in ("w1", "w3", "w2")]
+                if [to_checkpoint(part) for part in parts] != leaves:
+                    problems.append(f"expert {e} exports as {[to_checkpoint(p) for p in parts]}")
+
+            gathered = [None] * size
+            dist.all_gather_object(gathered, problems)
+    finally:
+        mu.get_model_conversion_mapping, cml._materialize_copy = hooks
+    found = [problem for rank_problems in gathered for problem in rank_problems]
+    assert not found, "\n".join(found[:20])
+
+
+def test_kimi_k3_packed_experts_load_calibrate_and_name_back_expert_parallel(
+    need_2_gpus, dist_workers, tmp_path
+):
+    """A Kimi-K3-shaped remote checkpoint with packed MXFP4 experts, loaded expert-parallel through
+    its model spec: each rank decompresses only its own experts, the sharded model matches the whole
+    one loaded on a single GPU, calibration over every rank's batch matches the whole model's, and
+    the export names the experts back to the checkpoint's ``w1``/``w3``/``w2``. Each rank's
+    checks are gathered before any rank fails, so a regression fails instead of hanging."""
+    pytest.importorskip("compressed_tensors", reason="the checkpoint's experts are compressed")
+    if Version(transformers.__version__) < Version("5.16"):
+        pytest.skip("the torch_a2a forward wrappers are pre-hooks below transformers 5.16")
+    if KIMI_K3_EXPERTS % dist_workers.world_size:
+        pytest.skip(f"{KIMI_K3_EXPERTS} experts do not shard over {dist_workers.world_size} GPUs")
+    _save_tiny_kimi_k3(tmp_path)
+    dist_workers.run(_kimi_k3_expert_parallel_job, ckpt_dir=str(tmp_path))
