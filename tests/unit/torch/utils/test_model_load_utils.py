@@ -1594,7 +1594,7 @@ def test_a_whole_load_that_fails_on_one_rank_fails_every_rank(cpu_dist_workers, 
         (
             {"auto_class": AutoModel},
             NotImplementedError,
-            r"auto_class=AutoModel: leave it out.*DistributionPlan\(2, dense='replicate'\)",
+            r"auto_class=AutoModel: leave it out.*DistributionPlan\(2, (1, |dense=)'replicate'\)",
         ),
         ({"mtp": True}, NotImplementedError, "MTP head"),
         (
@@ -2015,12 +2015,7 @@ def test_a_launch_that_sets_no_group_up_loads_whole_on_each_process(
             RuntimeError,
             "MODELOPT_FSDP_SIZE=world",
         ),
-        (
-            None,
-            {"MODELOPT_EP_DEGREE": "4"},
-            RuntimeError,
-            r"MODELOPT_EP_DEGREE=4 .*distributed_run\(\).*MODELOPT_EP_DEGREE=1",
-        ),
+        (None, {"MODELOPT_EP_DEGREE": "4"}, RuntimeError, "MODELOPT_EP_DEGREE=4"),
         (None, {"MODELOPT_EP_DEGREE": "eigth"}, ValueError, "MODELOPT_EP_DEGREE='eigth'"),
     ],
     ids=["several-ranks", "sharded", "fsdp-knob", "ep-knob", "ep-knob-not-a-degree"],
