@@ -437,9 +437,9 @@ def test_the_class_that_builds_the_whole_model(
 def test_a_single_process_holds_the_whole_model(
     run_as, serve, monkeypatch, tmp_path, world_size, knob
 ):
-    """With no ranks to shard over, even an MoE loads whole, and no model is built to decide it. A
-    shell still exporting a multi-GPU run's knobs must not reshape that: only the caller's own
-    arguments ask for FSDP2 on one rank."""
+    """With no ranks to shard over, even an MoE loads whole, and no model is built, nor its spec
+    consulted, to decide it. A shell still exporting a multi-GPU run's knobs must not reshape that:
+    only the caller's own arguments ask for FSDP2 on one rank."""
     if world_size is not None:
         run_as(world_size)
     if knob is not None:
@@ -448,8 +448,12 @@ def test_a_single_process_holds_the_whole_model(
     monkeypatch.setattr(
         model_load_utils, "build_meta_causal_lm", lambda *a, **k: pytest.fail("built a model")
     )
+    monkeypatch.setattr(
+        model_load_utils, "_spec_refuses_ep", lambda *a: pytest.fail("consulted the spec")
+    )
 
     assert resolve_distribution_plan(str(tmp_path)) == (DistributionPlan(), served)
+    assert resolve_distribution_plan(str(tmp_path), ep_size="auto")[0] == DistributionPlan()
     assert resolve_distribution_plan(str(tmp_path), dense="fsdp")[0] == DistributionPlan(
         dense="fsdp"
     )
