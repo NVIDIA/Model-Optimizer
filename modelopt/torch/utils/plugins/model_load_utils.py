@@ -1590,7 +1590,7 @@ def _decide_distribution(
         # Nothing to shard over, so nothing about the model matters, nor do the knobs: a shell still
         # exporting a multi-GPU run's would otherwise reshape a single process's load. The caller's
         # own arguments still count, as dense="fsdp" for FSDP2 on one rank.
-        single = 1 if ep_size is None else _ep_degree(ep_size, hf_config.model_type)
+        single = 1 if ep_size is None else _ep_degree(ep_size)
         return DistributionPlan(
             ep_size=single if isinstance(single, int) else 1,
             dense="replicate" if dense in (None, "auto") else dense,
