@@ -265,28 +265,35 @@ _LOAD = {"decompressing": False}
 
 
 def _install_keep_int_native():
-    """Patch ``_materialize_copy`` so a decompressing load never casts an integer source to a float.
+    """Patch ``spawn_materialize`` so a decompressing load never casts an integer source to a float.
 
-    Without a quantizer the loader casts every source to the parameter's dtype, which would destroy
-    packed weights, shapes and zero-points. Every other load casts as before.
+    Without a quantizer the loader casts every source to the parameter's dtype as it reads it: in its
+    copy, or, from transformers 5.14, in ``DtensorShardOperation.shard_tensor`` as it shards it onto
+    the expert-parallel mesh. Either would destroy packed weights, shapes and zero-points, so the
+    dtype is dropped where both start. Every other load casts as before.
     """
     import transformers.core_model_loading as cml
 
-    if getattr(cml._materialize_copy, "_onfly_patched", False):
+    if getattr(cml.spawn_materialize, "_onfly_patched", False):
         return
-    orig = cml._materialize_copy
+    orig = cml.spawn_materialize
 
-    # Any other argument passes through, positionally as the loader passes the ones it has, or by
-    # keyword: the patch sits on every later load's copy path.
-    def _materialize_copy(tensor, device=None, dtype=None, *args, **kwargs):
-        t = tensor[...]
+    # Any other argument passes through, positionally or by keyword: a release may add some.
+    def spawn_materialize(thread_pool, tensor, device=None, dtype=None, *args, **kwargs):
         floating = dtype is not None and dtype.is_floating_point
-        if _LOAD["decompressing"] and floating and not t.is_floating_point():
+        if _LOAD["decompressing"] and floating and not _stores_floats(tensor):
             dtype = None  # keep packed/shape/zero-point/g_idx integers native
-        return orig(t, device, dtype, *args, **kwargs)
+        return orig(thread_pool, tensor, device, dtype, *args, **kwargs)
 
-    setattr(_materialize_copy, "_onfly_patched", True)
-    cml._materialize_copy = _materialize_copy
+    setattr(spawn_materialize, "_onfly_patched", True)
+    cml.spawn_materialize = spawn_materialize
+
+
+def _stores_floats(tensor) -> bool:
+    """Whether a checkpoint tensor holds floats; a safetensors slice is judged without reading it."""
+    if hasattr(tensor, "get_dtype"):
+        return tensor.get_dtype().startswith(("F", "BF"))
+    return tensor.is_floating_point()
 
 
 # Marks a config whose model's converters the installed hooks rewrite (holds the names each
