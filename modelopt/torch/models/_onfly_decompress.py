@@ -21,6 +21,7 @@ driven by the checkpoint's ``quantization_config``. Needs transformers 5.8: earl
 ``Concatenate`` looks up the sibling keys the decompression consumed.
 """
 
+import functools
 import os
 
 import torch
@@ -205,14 +206,34 @@ def _make_op_class(compressor, scheme, param_names):
     return DecompressExperts
 
 
+@functools.cache
+def _decompressing_converter_class():
+    """The ``WeightConverter`` subclass a rewritten converter is, reversing as the one it rewrote."""
+    from transformers.core_model_loading import WeightConverter
+
+    class DecompressingConverter(WeightConverter):
+        """Reads the stored keys, and reverses as the converter it rewrote.
+
+        A save reverses the converters ``from_pretrained`` kept as ``model._weight_conversions``
+        (transformers' ``save_pretrained``, and ModelOpt's export naming the experts back after
+        the checkpoint): the decompression is load-only, so the experts go back under their
+        checkpoint's ``.weight`` names, as the original fusion has them.
+        """
+
+        __slots__ = ("_reversible",)
+
+        def reverse_transform(self):
+            return self._reversible.reverse_transform()
+
+    return DecompressingConverter
+
+
 def _compressedify(conv, compressor, scheme, param_names):
     """Rewrite a per-expert converter to read the stored keys, with ``DecompressExperts`` first.
 
     Each ``.weight`` source becomes its stored keys, grouped by key with the anchor first, which
-    keeps gate before up for the merge.
+    keeps gate before up for the merge. The rewritten converter reverses as ``conv`` does.
     """
-    from transformers.core_model_loading import WeightConverter
-
     DecompressExperts = _make_op_class(compressor, scheme, param_names)  # noqa: N806 (a class, keeping its own name)
     by_pname = {pn: [] for pn in param_names}
     for p in conv.source_patterns:
@@ -225,11 +246,12 @@ def _compressedify(conv, compressor, scheme, param_names):
             by_pname[param_names[0]].append(p)  # DecompressExperts refuses it (none expected)
     new_sources = [s for pn in param_names for s in by_pname[pn]]
     tgt = getattr(conv, "_original_target_patterns", conv.target_patterns)
-    new = WeightConverter(
+    new = _decompressing_converter_class()(
         source_patterns=new_sources,
         target_patterns=tgt,
         operations=[DecompressExperts(), *conv.operations],
     )
+    new._reversible = conv
     # What else transformers sets on a converter when it maps a model -- the sub-model scope it
     # matches keys under, whether it loads on the CPU -- whichever of them this release has.
     for attr in ("scope_prefix", "base_model_prefix", "force_cpu"):
