@@ -42,12 +42,18 @@ def validate_two_precision(state_quantizer, read_quantizer):
     return "s32_rs"
 
 
-def _native_replay(state, read_mode, read_rounding="nearest", *, key_heads=None):
+def _native_replay(
+    state, read_mode, read_rounding="nearest", *, key_heads=None, record_rounding=False
+):
     # Triton is optional until the CUDA replay path is selected.
     from modelopt.torch.kernels.quantization.linear_attention.replayssm_cache import _GDNReplay
 
     return _GDNReplay(
-        state, state.shape[0] if key_heads is None else key_heads, read_mode, read_rounding
+        state,
+        state.shape[0] if key_heads is None else key_heads,
+        read_mode,
+        read_rounding,
+        record_rounding=record_rounding,
     )
 
 
@@ -56,12 +62,14 @@ class _TwoPrecision(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, g, beta, state, gate_inputs, read_mode, read_rounding):
-        runner = _native_replay(state, read_mode, read_rounding)
+        record_rounding = any(ctx.needs_input_grad[:6])
+        runner = _native_replay(state, read_mode, read_rounding, record_rounding=record_rounding)
         raw_g, raw_beta, rate, bias = gate_inputs
         operands = torch.cat([x.flatten(1) for x in (q, k, v)], -1).to(torch.bfloat16)
         raw_g, raw_beta = (x.bfloat16().float().contiguous() for x in (raw_g, raw_beta))
         rate, bias = (x.reshape(-1).float().contiguous() for x in (rate, bias))
         outputs, anchors, reads = [], [], []
+        roundings = [[], [], [], []]
         for t in range(len(q)):
             if t % 16 == 0:
                 anchors.append(runner.state_hi[0].clone())
@@ -74,13 +82,26 @@ class _TwoPrecision(torch.autograd.Function):
                 reads.append(
                     (runner.state_hi if read_mode == "s32_rs" else runner.state_lo)[0].clone()
                 )
-        ctx.save_for_backward(q, k, v, g, beta, torch.stack(anchors), torch.stack(reads))
+            if record_rounding and ((t + 1) % 16 == 0 or t + 1 == len(q)):
+                # Recomputing these casts in Torch can cross different rounding boundaries.
+                for saved, value in zip(roundings, (*runner.rounding, runner.cache.updates)):
+                    saved.append(value[0].clone())
+        ctx.save_for_backward(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            torch.stack(anchors),
+            torch.stack(reads),
+            *(torch.stack(values) for values in roundings if values),
+        )
         return torch.stack(outputs)
 
     @staticmethod
     @once_differentiable
     def backward(ctx, grad_output):
-        q, k, v, g, beta, anchors, reads = ctx.saved_tensors
+        q, k, v, g, beta, anchors, reads, *roundings = ctx.saved_tensors
         inputs = (q, k, v, g, beta)
         gradients = [torch.empty_like(x) for x in inputs]
         grad_anchor = torch.zeros_like(anchors[0])
@@ -91,9 +112,8 @@ class _TwoPrecision(torch.autograd.Function):
                 xs = [x[start:end].detach().requires_grad_() for x in inputs]
                 anchor = anchors[window].detach().requires_grad_()
                 read = forward_value(anchor, reads[window])
-                output, final = _window_forward(
-                    xs[0], xs[1], xs[2], xs[3], xs[4], anchor, read, seed=window == 0
-                )
+                args = (*xs, anchor, read, *(values[window] for values in roundings))
+                output, final = _window_forward(*args, seed=window == 0)
                 grads = torch.autograd.grad(
                     (output, final), (*xs, anchor), (grad_output[start:end], grad_anchor)
                 )
@@ -112,7 +132,21 @@ def _rounded(x, dtype=torch.bfloat16):
     return forward_value(x, x.to(dtype))
 
 
-def _window_forward(q, k, v, g, beta, anchor, read, *, seed):
+def _window_forward(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    anchor,
+    read,
+    rounded_keys=None,
+    residuals=None,
+    weighted_updates=None,
+    read_updates=None,
+    *,
+    seed,
+):
     """Differentiate checkpoint reads and the raw-input triangular solve at a flush.
 
     States are value-first [H,V,K]. Cached updates affect reads only; the flush
@@ -134,11 +168,20 @@ def _window_forward(q, k, v, g, beta, anchor, read, *, seed):
         weights = (cumulative[t] - cumulative[: t + 1]).exp()
         kq = (keys[: t + 1] * queries[t]).sum(-1)
         if t == 15:
-            # Rebuild the 16 residuals independently of the read-side update ring.
-            key_matrix = _rounded(keys).transpose(0, 1)
+            # Rebuild all residuals independently of the read-side update ring.
+            key_matrix = (
+                _rounded(keys).transpose(0, 1)
+                if rounded_keys is None
+                else forward_value(keys.transpose(0, 1), rounded_keys)
+            )
             gram = key_matrix @ key_matrix.transpose(-1, -2)
             projected = (_rounded(anchor) @ key_matrix.transpose(-1, -2)).permute(2, 0, 1)
-            residual = _rounded(v - cumulative.exp().unsqueeze(-1) * projected)
+            residual = v - cumulative.exp().unsqueeze(-1) * projected
+            residual = (
+                _rounded(residual)
+                if residuals is None
+                else forward_value(residual, residuals.transpose(0, 1))
+            )
             solved = []
             for j in range(16):
                 previous = 0
@@ -149,7 +192,12 @@ def _window_forward(q, k, v, g, beta, anchor, read, *, seed):
             solved = torch.stack(solved)
             output = cumulative[t].exp().unsqueeze(-1) * cq
             output = output + (solved * (weights * kq).unsqueeze(-1)).sum(0)
-            weighted = _rounded(solved * weights.unsqueeze(-1)).permute(1, 2, 0)
+            weighted = solved * weights.unsqueeze(-1)
+            weighted = (
+                _rounded(weighted).permute(1, 2, 0)
+                if weighted_updates is None
+                else forward_value(weighted.permute(1, 2, 0), weighted_updates.transpose(-1, -2))
+            )
             final = cumulative[t].exp()[:, None, None] * anchor + weighted @ key_matrix
         else:
             ck = (checkpoint * k[t].unsqueeze(-2)).sum(-1)
@@ -163,7 +211,11 @@ def _window_forward(q, k, v, g, beta, anchor, read, *, seed):
                 output = output + (cached * (weights[:t] * kq[:t]).unsqueeze(-1)).sum(0)
             update = beta[t].unsqueeze(-1) * (v[t] - sk)
             output = output + update * kq[t].unsqueeze(-1)
-            updates.append(_rounded(update, torch.float16))
+            updates.append(
+                _rounded(update, torch.float16)
+                if read_updates is None
+                else forward_value(update, read_updates[:, t])
+            )
             final = anchor
         outputs.append(output)
     return torch.stack(outputs), final

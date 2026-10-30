@@ -121,7 +121,7 @@ class _GDNReplayCache:
             self.amax.index_fill_(0, indices.long(), 0)
 
     @torch.no_grad()
-    def step(self, qkv, a, b, rate, bias, indices, output):
+    def step(self, qkv, a, b, rate, bias, indices, output, rounding=None):
         """Run one native token per active slot, then advance only those counters.
 
         QKV and raw gate projections must be BF16. Output is [batch,Hv,V], in
@@ -163,6 +163,7 @@ class _GDNReplayCache:
             positions,
             windows,
             output,
+            rounding,
             128**-0.5,
             tuple(
                 x.stride(0)
@@ -181,6 +182,7 @@ class _GDNReplayCache:
             values,
             self.read_mode,
             self.null,
+            RECORD_ROUNDING=rounding is not None,
         )
         if self.read_mode == "tp4_hi32":
             refresh_nvfp4_read(
@@ -199,7 +201,7 @@ class _GDNReplayCache:
 class _GDNReplay:
     """Allocate one sequence's training buffers and use the indexed serving backend."""
 
-    def __init__(self, state, key_heads, read_mode, read_rounding):
+    def __init__(self, state, key_heads, read_mode, read_rounding, *, record_rounding=False):
         heads, keys, values = state.shape
         spec = _gdn_replay_state_spec(key_heads, heads, values, read_mode=read_mode)
         buffers = [
@@ -214,7 +216,17 @@ class _GDNReplay:
         self.state_hi, self.state_lo = self.cache.anchor, self.cache.read
         self.steps, self.read_seeds = self.cache.steps, self.cache.read_seeds
         self.output = state.new_empty((1, heads, values))
+        self.rounding = (
+            tuple(
+                torch.zeros((1, heads, 16, width), dtype=torch.bfloat16, device=state.device)
+                for width in (keys, values, values)
+            )
+            if record_rounding
+            else None
+        )
 
     def step(self, qkv, a, b, rate, bias):
-        self.cache.step(qkv, a.bfloat16(), b.bfloat16(), rate, bias, self.indices, self.output)
+        self.cache.step(
+            qkv, a.bfloat16(), b.bfloat16(), rate, bias, self.indices, self.output, self.rounding
+        )
         return self.output

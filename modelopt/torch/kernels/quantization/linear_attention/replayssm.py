@@ -46,7 +46,7 @@ def _flush(anchor, raw_keys, values, cumulative, betas):
         rhs = tl.sum(tl.where(positions[:, None] == row, residual, 0), 0)
         beta = tl.sum(tl.where(positions == row, betas, 0))
         solved = tl.where(positions[:, None] == row, beta * (rhs - correction)[None, :], solved)
-    return solved, keys
+    return solved, keys, residual
 
 
 @triton.jit
@@ -64,6 +64,7 @@ def _replay_step(
     Positions,
     Windows,
     Output,
+    Rounding,
     query_scale,
     STRIDES,
     KEY_HEADS: tl.constexpr,
@@ -71,6 +72,7 @@ def _replay_step(
     V: tl.constexpr,
     READ_MODE: tl.constexpr,
     NULL: tl.constexpr,
+    RECORD_ROUNDING: tl.constexpr = False,
 ):
     tile, row, head = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     slot = tl.load(Slots + row).to(tl.int64)
@@ -129,9 +131,19 @@ def _replay_step(
         values = tl.where(times[:, None] == position, v[None, :], values)
         betas = tl.load(Betas + slot * sb + gate_offsets, times < position, 0)
         betas = tl.where(times == position, beta, betas)
-        solved, normalized_keys = _flush(state, key_window, values, cumulative, betas)
+        solved, normalized_keys, residual = _flush(state, key_window, values, cumulative, betas)
         output = decay * projected_q + tl.sum(solved * (weights * key_query)[:, None], 0)
         weighted = (solved * weights[:, None]).to(tl.bfloat16)
+        if RECORD_ROUNDING:
+            RoundedKeys, Residuals, Weighted = Rounding
+            offsets = ((row.to(tl.int64) * HEADS + head) * 16 + times[:, None]) * V + rows[None, :]
+            tl.store(Residuals + offsets, residual, rows[None, :] < V)
+            tl.store(Weighted + offsets, weighted, rows[None, :] < V)
+            if tile == 0:
+                key_offsets_out = (
+                    (row.to(tl.int64) * HEADS + head) * 16 + times[:, None]
+                ) * 128 + channels[None, :]
+                tl.store(RoundedKeys + key_offsets_out, normalized_keys)
         state = decay * state + tl.dot(tl.trans(weighted), normalized_keys)
         tl.store(Anchor + state_offsets, state, rows[:, None] < V)
     else:

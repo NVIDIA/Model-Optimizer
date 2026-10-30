@@ -48,37 +48,54 @@ def read_quantizer(request):
     ).cuda()
 
 
-def test_native_two_precision_forward_and_window_backward(read_quantizer):
-    torch.manual_seed(41)
+@pytest.mark.parametrize(
+    ("length", "heads", "value_dim", "seed"), [(33, 2, 64, 41), (256, 12, 128, 20261030)]
+)
+def test_native_two_precision_forward_and_window_backward(
+    read_quantizer, length, heads, value_dim, seed
+):
+    torch.manual_seed(seed)
     q, k = [
-        torch.randn(33, 2, 128, device="cuda", dtype=torch.bfloat16).float().requires_grad_()
+        torch.randn(length, heads, 128, device="cuda", dtype=torch.bfloat16)
+        .float()
+        .requires_grad_()
         for _ in range(2)
     ]
-    v = torch.randn(33, 2, 64, device="cuda", dtype=torch.bfloat16).float().requires_grad_()
-    a = (torch.randn(33, 2, device="cuda") * 0.1 - 3).bfloat16().float()
+    v = (
+        torch.randn(length, heads, value_dim, device="cuda", dtype=torch.bfloat16)
+        .float()
+        .requires_grad_()
+    )
+    a = (torch.randn(length, heads, device="cuda") * 0.1 - 3).bfloat16().float()
     b = torch.randn_like(a).bfloat16().float()
     g = (-torch.nn.functional.softplus(a)).requires_grad_()
     beta = b.sigmoid().requires_grad_()
-    state = (torch.randn(2, 128, 64, device="cuda") * 0.1).requires_grad_()
+    state = (torch.randn(heads, 128, value_dim, device="cuda") * 0.1).requires_grad_()
     params = (q, k, v, g, beta, state)
-    rate, bias = torch.zeros(2, device="cuda"), torch.zeros(2, device="cuda")
+    rate, bias = torch.zeros(heads, device="cuda"), torch.zeros(heads, device="cuda")
     mode = validate_two_precision(None, read_quantizer)
     torch.manual_seed(91)
     actual = two_precision_decode(*params, (a, b, rate, bias), mode, read_quantizer.rounding)
     torch.manual_seed(91)
-    runner = _native_replay(state.detach(), mode, read_quantizer.rounding)
+    runner = _native_replay(state.detach(), mode, read_quantizer.rounding, record_rounding=True)
     exact = _native_replay(state.detach(), "s32_rs")
-    expected, reads = [], []
-    for i in range(33):
+    expected, reads, anchors, choices, final_states = [], [], [], [], []
+    for i in range(length):
+        if i % 16 == 0:
+            anchors.append(runner.state_hi[0].transpose(-1, -2).clone())
         packed = torch.cat([x[i].flatten() for x in (q, k, v)])[None].bfloat16()
         inputs = (packed, a[i : i + 1], b[i : i + 1], rate, bias)
         expected.append(runner.step(*inputs)[0].clone())
         if i % 16 == 0:
             reads.append(runner.state_lo[0].transpose(-1, -2).clone())
+        if (i + 1) % 16 == 0 or i + 1 == length:
+            choices.append(tuple(x[0].clone() for x in (*runner.rounding, runner.cache.updates)))
+        if (i + 1) % 16 == 0:
+            final_states.append(runner.state_hi[0].transpose(-1, -2).clone())
         exact_output = exact.step(*inputs)[0].clone()
         # Quantized reads must never contaminate the FP32 recurrence checkpoint.
         torch.testing.assert_close(runner.state_hi, exact.state_hi, rtol=0, atol=0)
-        if i in (0, 15, 31):
+        if i == 0 or (i + 1) % 16 == 0:
             torch.testing.assert_close(expected[-1], exact_output, rtol=0, atol=0)
     torch.testing.assert_close(actual, torch.stack(expected), rtol=0, atol=0)
     stochastic = read_quantizer.rounding == "stochastic"
@@ -86,16 +103,36 @@ def test_native_two_precision_forward_and_window_backward(read_quantizer):
         torch.manual_seed(92)
         other = two_precision_decode(*params, (a, b, rate, bias), mode, "stochastic")
         assert not torch.equal(actual, other)
-    reference = _oracle(*params, read_quantizer, reads=reads if stochastic else None)
+    reference_states = []
+    reference = _oracle(
+        *params,
+        read_quantizer,
+        reads=reads,
+        anchors=anchors,
+        roundings=choices,
+        final_states=reference_states,
+    )
+    if length == 33:
+        # Retain the independent arithmetic check separately from trajectory-conditioned STE parity.
+        independent = _oracle(*params, read_quantizer, reads=reads if stochastic else None)
+        torch.testing.assert_close(actual, independent, rtol=2e-3, atol=2e-6)
+    torch.testing.assert_close(
+        torch.stack(final_states), torch.stack(reference_states), rtol=2e-3, atol=2e-6
+    )
     torch.testing.assert_close(actual, reference, rtol=2e-3, atol=2e-6)
     upstream = torch.randn_like(actual)
     rng_state = torch.cuda.get_rng_state()
-    gradients = torch.autograd.grad(actual, params, upstream)
+    gradients = torch.autograd.grad(actual, params, upstream, retain_graph=True)
+    for _ in range(2):
+        repeated = torch.autograd.grad(actual, params, upstream, retain_graph=True)
+        for gradient, repeated_gradient in zip(gradients, repeated):
+            torch.testing.assert_close(gradient, repeated_gradient, rtol=0, atol=0)
     torch.testing.assert_close(torch.cuda.get_rng_state(), rng_state)
     expected_gradients = torch.autograd.grad(reference, params, upstream)
     for gradient, expected_gradient in zip(gradients, expected_gradients):
         assert torch.isfinite(gradient).all() and gradient.norm() > 0
-        torch.testing.assert_close(gradient, expected_gradient, rtol=5e-3, atol=2e-5)
+        # Recorded casts leave only FP32 reduction differences in the STE adjoint.
+        torch.testing.assert_close(gradient, expected_gradient, rtol=2e-5, atol=1e-6)
 
 
 def test_two_precision_public_api_padding_and_baseline(read_quantizer):

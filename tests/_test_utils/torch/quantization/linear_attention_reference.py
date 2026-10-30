@@ -276,9 +276,20 @@ def chunk_gdn_reference(
     return output, final.transpose(-1, -2) if state_v_first else final
 
 
-def two_precision_reference(q, k, v, g, beta, state, quantizer, reads=None):
-    """Independent two-precision replay in canonical [H,K,V] layout."""
-
+def two_precision_reference(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    state,
+    quantizer,
+    reads=None,
+    anchors=None,
+    roundings=None,
+    final_states=None,
+):
+    # Canonical [H,K,V] state, unlike the production value-first window adjoint.
     def rounded(x, dtype=torch.bfloat16):
         return forward_value(x, x.to(dtype))
 
@@ -294,6 +305,10 @@ def two_precision_reference(q, k, v, g, beta, state, quantizer, reads=None):
     beta = rounded(beta)
     outputs = []
     for start in range(0, len(q), 16):
+        if anchors is not None:
+            # Linearize along the native trajectory without severing the state adjoint.
+            state = forward_value(state, anchors[start // 16])
+        choices = None if roundings is None else roundings[start // 16]
         stop = min(start + 16, len(q))
         local_g = g[start:stop].cumsum(0)
         keys = k[start:stop].transpose(0, 1)
@@ -308,6 +323,8 @@ def two_precision_reference(q, k, v, g, beta, state, quantizer, reads=None):
             if i == 15:
                 # Solve all raw-input residuals at once, rather than sequential replay.
                 all_keys = rounded(keys)
+                if choices is not None:
+                    all_keys = forward_value(keys, choices[0])
                 gram = all_keys @ all_keys.transpose(-1, -2)
                 gates = local_g.T
                 retentions = (gates[:, :, None] - gates[:, None, :]).exp()
@@ -318,11 +335,18 @@ def two_precision_reference(q, k, v, g, beta, state, quantizer, reads=None):
                     v[start:stop].transpose(0, 1)
                     - gates.exp()[..., None] * (all_keys @ rounded(state))
                 )
+                if choices is not None:
+                    residual = forward_value(residual, choices[1])
                 u = torch.linalg.solve_triangular(lower, b[..., None] * residual, upper=False)
                 weighted = u * (gates[:, -1:] - gates).exp()[..., None]
                 output = torch.einsum("hk,hkv->hv", q[t], working)
                 output = output + torch.einsum("hlk,hk,hlv->hv", keys, q[t], weighted)
-                state = decay * state + all_keys.transpose(-1, -2) @ rounded(weighted)
+                rounded_weighted = rounded(weighted)
+                if choices is not None:
+                    rounded_weighted = forward_value(weighted, choices[2])
+                state = decay * state + all_keys.transpose(-1, -2) @ rounded_weighted
+                if final_states is not None:
+                    final_states.append(state)
             else:
                 if i:
                     working = working + keys[:, :i].transpose(-1, -2) @ (
@@ -331,6 +355,10 @@ def two_precision_reference(q, k, v, g, beta, state, quantizer, reads=None):
                 delta = beta[t, :, None] * (v[t] - torch.einsum("hk,hkv->hv", k[t], working))
                 working = working + k[t, :, :, None] * delta[:, None, :]
                 output = torch.einsum("hk,hkv->hv", q[t], working)
-                updates.append(rounded(delta, torch.float16))
+                updates.append(
+                    rounded(delta, torch.float16)
+                    if choices is None
+                    else forward_value(delta, choices[3][:, i])
+                )
             outputs.append(output)
     return torch.stack(outputs)
