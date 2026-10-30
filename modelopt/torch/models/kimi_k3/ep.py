@@ -331,9 +331,10 @@ def prepare(
 ):
     """Adapt Kimi-K3's remote MoE to the EP/a2a framework and set its EP plan.
 
-    Steps: shim OutputRecorder -> force-load + monkey-patch the remote KimiSparseMoeBlock (fused experts +
-    ExpertsInterface forward) -> set base_model_ep_plan on text_config -> register the w1/w3/w2 fusion
-    converters and the decompressor. Returns the same config object, mutated in place.
+    Steps: install the decompressor -> shim OutputRecorder -> force-load + monkey-patch the remote
+    KimiSparseMoeBlock (fused experts + ExpertsInterface forward) -> set base_model_ep_plan on
+    text_config -> register the w1/w3/w2 fusion converters. Returns the same config object, mutated in
+    place.
 
     The 896 ``mxfp4-pack-quantized`` routed experts are DECOMPRESSED at load: ``_onfly_decompress``
     dequantizes each local expert's packed weight -> bf16 INSIDE the fused-expert conversion, stored as
@@ -364,6 +365,14 @@ def prepare(
 
     text_cfg = getattr(hf_config, "text_config", None) or hf_config
 
+    # The 896 routed experts are compressed-tensors `mxfp4-pack-quantized` (4-bit, group 32); everything
+    # else (attention, shared experts, latent projections, dense layer, embeddings, lm_head, vision) is
+    # plain bf16. The decompressor is the step that can still refuse the checkpoint, so it comes before
+    # anything below patches the process: a refusal leaves it unchanged. Its hooks rewrite only the
+    # converters of a config it marked. Plain bf16 experts come without a quantization_config.
+    if any(getattr(cfg, "quantization_config", None) is not None for cfg in (hf_config, text_cfg)):
+        _onfly_decompress.install_onfly_decompress(hf_config)
+
     # This checkpoint's remote code, not whichever revision this process imported first. Every patch
     # is idempotent, so a repeat prepare for the same checkpoint changes nothing.
     package = _force_load_remote_modeling(hf_config, ckpt_path, trust_remote_code).__module__
@@ -389,16 +398,11 @@ def prepare(
     register_torch_a2a()
     text_cfg._experts_implementation = "torch_a2a"
 
-    # The 896 routed experts are compressed-tensors `mxfp4-pack-quantized` (4-bit, group 32); everything
-    # else (attention, shared experts, latent projections, dense layer, embeddings, lm_head, vision) is
-    # plain bf16. Register the per-expert w1/w3/w2 -> gate_up_proj/down_proj fusion converters (tf 5.13
-    # skips these for custom-code models) BEFORE the decompressor patches get_model_conversion_mapping, so
-    # the decompressor has converters to rewrite into compressed-aware (weight_packed -> bf16) ones. Drop
-    # quantization_config afterwards so transformers builds no competing HF quantizer.
+    # The per-expert w1/w3/w2 -> gate_up_proj/down_proj fusion converters (tf 5.13 skips these for
+    # custom-code models). The decompressor rewrites them into compressed-aware (weight_packed -> bf16)
+    # ones at the load, so both need only come before it. Drop quantization_config afterwards so
+    # transformers builds no competing HF quantizer.
     _register_kimi_k3_conversions()
-    # Plain bf16 experts come without a quantization_config: nothing to decompress.
-    if any(getattr(cfg, "quantization_config", None) is not None for cfg in (hf_config, text_cfg)):
-        _onfly_decompress.install_onfly_decompress(hf_config)
     for cfg in (hf_config, text_cfg):
         if getattr(cfg, "quantization_config", None) is not None:
             cfg.quantization_config = None

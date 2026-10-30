@@ -580,10 +580,12 @@ def test_the_remote_modeling_is_imported_through_the_class_the_auto_map_declares
         kimi_k3._force_load_remote_modeling(config_only, "/ckpt", False)
 
 
-@pytest.mark.usefixtures("private_conversion_registry", "remote_checkpoint")
-def test_prepare_lets_an_error_reading_the_quant_config_through(monkeypatch):
+@pytest.mark.usefixtures("private_conversion_registry")
+def test_prepare_lets_an_error_reading_the_quant_config_through(monkeypatch, remote_checkpoint):
     """compressed_tensors raises pydantic's ValidationError, a ValueError, for a quantization_config
-    it cannot parse. Dropped after that, the config would load the experts newly initialized."""
+    it cannot parse. Dropped after that, the config would load the experts newly initialized. The
+    refusal comes before prepare patches the remote block or registers its converters, so a process
+    that goes on after it is unchanged."""
 
     def install(cfg):
         raise ValueError("1 validation error for QuantizationConfig")
@@ -595,6 +597,9 @@ def test_prepare_lets_an_error_reading_the_quant_config_through(monkeypatch):
 
     with pytest.raises(ValueError, match="validation error"):
         _prepare(config)
+    assert isinstance(remote_checkpoint.KimiSparseMoeBlock(_config()).experts, nn.ModuleList)
+    registered = cm.get_checkpoint_conversion_mapping("kimi_linear") or []
+    assert not any("block_sparse_moe.experts.*.w1.weight" in c.source_patterns for c in registered)
 
 
 @pytest.mark.usefixtures("private_conversion_registry", "restore_loader_hooks", "remote_checkpoint")
