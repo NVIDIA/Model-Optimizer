@@ -17,15 +17,17 @@
 
 import contextlib
 import copy
+import json
 import os
 from typing import Any
 
 import torch
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
-from transformers import Cache, DynamicCache, PreTrainedModel
+from transformers import Cache, DynamicCache, LlamaConfig, PreTrainedModel
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from transformers.utils import ModelOutput
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils import print_rank_0, warn_rank_0
 
 from ...export.plugins.hf_spec_export import EagleExporter, SpeculativeDecodingExporter
@@ -61,6 +63,48 @@ def default_eagle_aux_layer_ids(num_layers: int) -> list[int]:
     Three layers near the start, middle, and end of the stack.
     """
     return sorted({1, max(0, num_layers // 2 - 1), max(0, num_layers - 4)})
+
+
+def _report_hidden_state_sanity(base_logits, input_ids, loss_mask):
+    """Check that streamed hidden states belong to the tokens they arrive with.
+
+    Rank 0 prints ``HIDDEN_STATE_SANITY`` and writes it to ``SPECDEC_HIDDEN_STATE_SANITY_PATH``
+    when set. Returns ``None`` when the batch scores no token.
+    """
+    with torch.no_grad():
+        predicted = base_logits[:, :-1].argmax(dim=-1)
+        target = input_ids[:, 1:].to(predicted.device)
+        if loss_mask is not None:
+            valid = loss_mask[:, 1:].to(predicted.device).bool()
+        else:
+            valid = torch.ones_like(target, dtype=torch.bool)
+        tokens = int(valid.sum())
+        if tokens == 0:
+            return None
+        agreement = float(((predicted == target) & valid).sum()) / tokens
+    record = {
+        "base_top1_next_token_agreement": round(agreement, 4),
+        "tokens": tokens,
+        "batch_shape": list(input_ids.shape),
+    }
+    print_rank_0("HIDDEN_STATE_SANITY " + json.dumps(record))
+    path = os.environ.get("SPECDEC_HIDDEN_STATE_SANITY_PATH")
+    if path and dist.is_master():
+        with open(path, "w") as handle:
+            json.dump(record, handle)
+    return record
+
+
+def _reduce_per_layer_rope(arch_config, base_cfg):
+    """Reduce a ``rope_parameters`` keyed by layer type to the last base layer's entry."""
+    rope = arch_config.get("rope_parameters")
+    if isinstance(rope, dict) and rope and all(isinstance(v, dict) for v in rope.values()):
+        selected = rope.get((getattr(base_cfg, "layer_types", None) or [None])[-1])
+        if selected is None:
+            del arch_config["rope_parameters"]
+        else:
+            arch_config["rope_parameters"] = dict(selected)
+            arch_config.pop("rope_scaling", None)  # the legacy key would win in from_dict
 
 
 @EagleDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
@@ -363,6 +407,11 @@ class HFEagleModel(EagleModel):
         # Use the base model's config class so fields like max_position_embeddings are declared
         # before transformers' rope standardization runs in __post_init__.
         base_config_cls = type(self._base_llm_config)
+        if getattr(self._base_llm_config, "is_heterogeneous", False):
+            # A per-layer base config (Gemma 4) cannot describe the single llama-style draft
+            # layer, which keeps the EAGLE default attention shape as for every other base.
+            base_config_cls = LlamaConfig
+            _reduce_per_layer_rope(arch_config, self._base_llm_config)
         self.eagle_config = base_config_cls.from_dict(arch_config)
         self.eagle_config.eagle_decoder_type = self.eagle_decoder_type
         self.eagle_config.draft_vocab_size = getattr(
@@ -707,13 +756,26 @@ class HFEagleModel(EagleModel):
             # Parse base model outputs forwarded from teacher
             assert "base_model_outputs" in kwargs
             base_outputs = EagleBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
+            streamed_logits = None
             if base_outputs.logits is None:
                 # Re-apply the base final norm when the producer captured a pre-norm hidden
                 # (vLLM streaming); fails loud if pre-norm is declared but no norm was located.
                 out_hiddens = _maybe_apply_base_final_norm(
                     base_outputs.out_hiddens, kwargs["base_model_outputs"], self._base_model_norm
                 )
-                base_outputs.logits = self._base_model_lm_head(out_hiddens)
+                streamed_logits = base_outputs.logits = self._base_model_lm_head(out_hiddens)
+            if not getattr(self, "_hidden_state_sanity_reported", False):
+                # Score the streamed hidden states, never producer-supplied logits: those can be
+                # correct while the hidden-state stream is misaligned, which is what this catches.
+                if streamed_logits is None:
+                    out_hiddens = _maybe_apply_base_final_norm(
+                        base_outputs.out_hiddens,
+                        kwargs["base_model_outputs"],
+                        self._base_model_norm,
+                    )
+                    streamed_logits = self._base_model_lm_head(out_hiddens)
+                record = _report_hidden_state_sanity(streamed_logits, input_ids, loss_mask)
+                self._hidden_state_sanity_reported = record is not None
             past_key_values = None
         else:
             with self._nvtx_range("base_model_forward"):

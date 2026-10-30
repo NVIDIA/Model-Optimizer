@@ -23,6 +23,7 @@ import torch
 
 pytest.importorskip("transformers")
 import transformers
+from _test_utils.torch.transformers_models import get_tiny_gemma4
 
 from modelopt.torch.speculative.plugins.modeling_fakebase import (
     FakeBaseConfig,
@@ -65,10 +66,30 @@ def fake_checkpoint(tmp_path, fake_config):
     return tmp_path
 
 
+@pytest.fixture
+def heterogeneous_config(fake_config, monkeypatch):
+    """Swap the fake config for a tiny per-layer (Gemma 4) text config of the same shape."""
+    pytest.importorskip("transformers.models.gemma4")
+    cfg = get_tiny_gemma4(hidden_size=_HIDDEN_SIZE, vocab_size=_VOCAB_SIZE).config
+    if not getattr(cfg, "is_heterogeneous", False):
+        pytest.skip("transformers without per-layer Gemma 4 attributes")
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **kw: cfg)
+    return cfg
+
+
 def test_fakebase_local_happy_path(fake_checkpoint):
     model = FakeBaseModel.from_source(str(fake_checkpoint))
     assert model.lm_head.weight.shape == torch.Size([_VOCAB_SIZE, _HIDDEN_SIZE])
     assert model.embed_tokens.weight.shape == torch.Size([_VOCAB_SIZE, _HIDDEN_SIZE])
+
+
+def test_fakebase_heterogeneous_config_reads_the_last_layer(fake_checkpoint, heterogeneous_config):
+    """Attributes transformers declares per layer are taken from the last layer, not raised on."""
+    model = FakeBaseModel.from_source(str(fake_checkpoint))
+    last = heterogeneous_config.per_layer_config[-1]
+    assert model.config.num_attention_heads == heterogeneous_config.num_attention_heads
+    assert model.config.num_key_value_heads == last.num_key_value_heads
+    assert model.lm_head.weight.shape == torch.Size([_VOCAB_SIZE, _HIDDEN_SIZE])
 
 
 def test_fakebase_missing_index_raises(tmp_path, fake_config):
