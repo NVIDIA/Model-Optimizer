@@ -677,7 +677,9 @@ def _sharded_load_kwargs(
 def _refuse_a_rank_without_its_gpu(route, decided: bool) -> None:
     """Refuse a rank without a GPU of its own before the ``route`` load, with the other ranks.
 
-    Inside the load, the others would wait for this rank in its collectives.
+    Inside the FSDP2 load, the others would wait for this rank in its collectives; the
+    expert-parallel load refuses only a run in which some ranks have one, and neither names the way
+    to a whole model.
     """
     if not _has_own_gpu():
         raise RuntimeError(
