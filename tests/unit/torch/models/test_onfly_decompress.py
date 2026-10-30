@@ -66,10 +66,11 @@ PACKED = ("weight_packed", "weight_scale", "weight_shape")  # what pack-quantize
 
 @pytest.fixture
 def restore_loader_hooks(monkeypatch):
-    """Undo the process-wide transformers hooks the decompressor installs, and its load state."""
+    """Undo the process-wide transformers hooks the decompressor installs, and start the test with
+    no decompressing load under way, whatever an earlier test's load left."""
     for owner, name in ((cml, "spawn_materialize"), (mu, "get_model_conversion_mapping")):
         monkeypatch.setattr(owner, name, getattr(owner, name))
-    monkeypatch.setattr(onfly, "_LOAD", dict(onfly._LOAD))
+    monkeypatch.setattr(onfly, "_LOAD", {"decompressing": False})
 
 
 class _ScaledCompressor:
