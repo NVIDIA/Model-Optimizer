@@ -13,12 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for ``modelopt.torch.utils.fsdp2_utils``: which parameters stay out of FSDP2's shards."""
+"""Tests for ``modelopt.torch.utils.fsdp2_utils``: which parameters stay out of FSDP2's shards, and
+the distribution plan a wrap leaves to its caller."""
 
 import pytest
 import torch
 import torch.nn as nn
 
+import modelopt.torch.utils.distributed as dist
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.utils import fsdp2_utils
+from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan, set_distribution_plan
 from modelopt.torch.utils.fsdp2_utils import _off_dtype_params
 
 
@@ -61,3 +66,33 @@ def test_off_dtype_params_dominant_is_by_numel(params, expected):
         off = _off_dtype_params(model)
     kept = {n for n, p in model.named_parameters() if p not in off}
     assert kept == {expected}
+
+
+def test_fsdp2_wrap_leaves_the_plan_to_the_load(monkeypatch):
+    """load_pretrained records the plan once, at the end of the load; the wrap it calls records none,
+    so a caller that wraps a model itself must record one before anything reads it."""
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
+    monkeypatch.setattr(
+        LayerActivationCollector, "get_decoder_layers", staticmethod(lambda model: list(model))
+    )
+    monkeypatch.setattr(fsdp2_utils, "fully_shard", lambda module, **kwargs: None)
+    monkeypatch.setattr(dist, "size", lambda group=None: 4)
+
+    fsdp2_utils.fsdp2_wrap(model)
+
+    with pytest.raises(RuntimeError, match="no distribution plan recorded"):
+        distribution_plan(model)
+
+
+def test_fsdp2_wrap_refuses_a_model_recorded_as_replicated(monkeypatch):
+    """A plan is recorded once, so a model recorded as replicated, as load_pretrained records a model
+    it loads whole, is refused rather than sharded behind its plan, which the export would believe."""
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
+    set_distribution_plan(model, DistributionPlan())
+    monkeypatch.setattr(
+        LayerActivationCollector, "get_decoder_layers", staticmethod(lambda model: list(model))
+    )
+    monkeypatch.setattr(fsdp2_utils, "fully_shard", lambda *a, **k: pytest.fail("sharded"))
+
+    with pytest.raises(RuntimeError, match="which replicates it, and a plan is recorded once"):
+        fsdp2_utils.fsdp2_wrap(model)

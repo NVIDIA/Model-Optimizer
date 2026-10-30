@@ -1553,22 +1553,3 @@ def test_what_needs_the_group_is_refused_in_a_launch_that_sets_none_up(
     with pytest.raises(error, match=match):
         load_pretrained(str(tmp_path), distribution=distribution)
     assert loaders == {}
-
-
-# --------------------------------------------------------------------------------- fsdp2_wrap
-
-
-def test_fsdp2_wrap_leaves_the_plan_to_the_load(monkeypatch):
-    """load_pretrained records the plan once, at the end of the load; the wrap it calls records none,
-    so a caller that wraps a model itself must record one before anything reads it."""
-    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
-    monkeypatch.setattr(
-        LayerActivationCollector, "get_decoder_layers", staticmethod(lambda model: list(model))
-    )
-    monkeypatch.setattr(model_load_utils, "fully_shard", lambda module, **kwargs: None)
-    monkeypatch.setattr(dist, "size", lambda group=None: 4)
-
-    model_load_utils.fsdp2_wrap(model)
-
-    with pytest.raises(RuntimeError, match="no distribution plan recorded"):
-        distribution_plan(model)

@@ -584,7 +584,8 @@ def _has_own_gpu() -> bool:
 def _load_sharded(ckpt_path, load_kwargs) -> nn.Module:
     """The FSDP2 load, by the arguments :func:`_sharded_load_kwargs` checked."""
     if not dist.is_initialized():
-        # A single process's group of one; a run (distributed_run) destroys it on exit.
+        # A single process's group of one, which the sharded model needs for as long as it lives:
+        # a run (distributed_run) destroys it on exit, and outside one it stays up.
         dist.setup()
     return parallel_load_and_prepare_fsdp2(
         ckpt_path,
