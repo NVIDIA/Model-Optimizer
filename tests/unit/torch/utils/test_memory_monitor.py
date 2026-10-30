@@ -15,6 +15,7 @@
 
 """Unit tests for launch_memory_monitor's NVML availability probe, against a fake NVML."""
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -25,9 +26,11 @@ import modelopt.torch.utils.memory_monitor as mm
 class _FakeNVML:
     """Reference-counted like NVML: every call but init raises while uninitialized."""
 
-    def __init__(self, memory_info_supported: bool = True):
+    def __init__(self, memory_info_supported: bool = True, devices: int = 1, on_sample=None):
         self.inits = 0
         self.memory_info_supported = memory_info_supported
+        self.devices = devices
+        self.on_sample = on_sample  # called with a device's handle before its memory is read
 
     def install(self, monkeypatch):
         for name in ("Init", "Shutdown", "DeviceGetCount", "DeviceGetHandleByIndex"):
@@ -47,7 +50,7 @@ class _FakeNVML:
 
     def DeviceGetCount(self):  # noqa: N802
         self._require_init()
-        return 1
+        return self.devices
 
     def DeviceGetHandleByIndex(self, index):  # noqa: N802
         self._require_init()
@@ -57,6 +60,8 @@ class _FakeNVML:
         self._require_init()
         if not self.memory_info_supported:
             raise RuntimeError("Not Supported")
+        if self.on_sample is not None:
+            self.on_sample(handle)
         return SimpleNamespace(used=2 * 1024**3)
 
 
@@ -96,4 +101,35 @@ def test_stopping_a_stopped_monitor_does_nothing(monkeypatch, capsys):
     monitor.stop()
 
     assert capsys.readouterr().out == ""
+    assert nvml.inits == 0
+
+
+def test_the_report_waits_for_a_sampling_pass_in_flight(monkeypatch, capsys):
+    """stop() can come while the thread is between two GPUs of a sampling pass: the report waits for
+    the pass to finish rather than miss the last GPU, or iterate the samples while they grow."""
+    in_flight, joining = threading.Event(), threading.Event()
+
+    def hold_the_second_gpu(handle):
+        if handle == 1 and threading.current_thread() is not threading.main_thread():
+            # The first GPU is sampled; hold the second until stop() waits for the thread (5 s max).
+            in_flight.set()
+            joining.wait(timeout=5)
+
+    nvml = _FakeNVML(devices=2, on_sample=hold_the_second_gpu)
+    nvml.install(monkeypatch)
+    monitor = mm.launch_memory_monitor(monitor_interval=0.01)
+    join = monitor.monitor_thread.join
+
+    def join_and_release(*args, **kwargs):
+        joining.set()
+        return join(*args, **kwargs)
+
+    monkeypatch.setattr(monitor.monitor_thread, "join", join_and_release)
+    assert in_flight.wait(timeout=5)
+
+    monitor.stop()
+
+    report = capsys.readouterr().out
+    assert "GPU 0: Peak memory usage" in report
+    assert "GPU 1: Peak memory usage" in report
     assert nvml.inits == 0

@@ -125,6 +125,9 @@ class GPUMemoryMonitor:
             return
         self._stopped = True
         self.is_running = False
+        # The thread can be inside a sampling pass, still adding to peak_memory: let it finish first.
+        if self.monitor_thread:
+            self.monitor_thread.join()
         # Print peak memory usage
         print("########")
         for gpu_idx, peak_mem in self.peak_memory.items():
@@ -132,8 +135,6 @@ class GPUMemoryMonitor:
                 f"GPU {gpu_idx}: Peak memory usage = {peak_mem:.2f} GB for all processes on the GPU"
             )
         print("########")
-        if self.monitor_thread:
-            self.monitor_thread.join()
         nvmlShutdown()
 
 
