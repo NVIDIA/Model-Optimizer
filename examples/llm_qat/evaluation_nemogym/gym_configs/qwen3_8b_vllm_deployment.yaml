@@ -1,0 +1,31 @@
+# Shared deployment for exported HF teacher, PTQ, and QAD checkpoints.
+services:
+  policy:
+    type: vllm
+    container: ${oc.env:GYM_VLLM_IMAGE,vllm/vllm-openai:v0.29.0}
+    model: /checkpoint
+    # Override per checkpoint, e.g. services.policy.served_model_name=qwen3-8b-ptq
+    served_model_name: qwen3-8b
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    mounts:
+      - ${oc.env:MODEL_CHECKPOINT}:/checkpoint
+      - ${oc.env:GYM_CACHE_DIR}:/cache
+    # The login-node home directory is not mounted inside the container.
+    pre_command: |
+      cd /
+    extra_args: >-
+      --dtype bfloat16
+      --gpu-memory-utilization 0.90
+      --max-model-len 40960
+      --max-num-seqs 256
+      --enable-prefix-caching
+      --reasoning-parser qwen3
+      --seed 42
+      --data-parallel-size ${oc.env:GYM_GPUS_PER_NODE,8}
+    health_check:
+      timeout_seconds: 1800
+    env:
+      HF_HOME: lit:/cache/huggingface
+      VLLM_CACHE_ROOT: lit:/cache/vllm
+      VLLM_ENGINE_READY_TIMEOUT_S: lit:1800
