@@ -23,10 +23,14 @@ code was imported as. An adapter that loads the checkpoint's own code applies th
 the model.
 """
 
+import functools
+import inspect
 import sys
 
 import torch
 import torch.nn as nn
+
+from modelopt.torch.utils import print_rank_0
 
 
 def _install_output_recorder_shim() -> None:
@@ -34,49 +38,26 @@ def _install_output_recorder_shim() -> None:
 
     The remote ``modeling_kimi`` does ``from transformers.utils.generic import OutputRecorder`` (used
     once, as output-recording metadata), but that symbol moved to ``transformers.modeling_utils`` in
-    recent transformers. Re-export it into ``utils.generic`` (or inject a benign stub) BEFORE the remote
-    modeling imports so the import succeeds. Idempotent.
+    recent transformers. Re-export it into ``utils.generic`` BEFORE the remote modeling imports so the
+    import succeeds. Idempotent.
     """
-    import transformers.utils.generic as _g
+    # transformers is optional: only an adapter that loads remote code reaches this.
+    import transformers.utils.generic as generic
 
-    if hasattr(_g, "OutputRecorder"):
-        return
-    found = None
-    for _p in ("transformers.modeling_utils", "transformers.utils"):
-        try:
-            _m = __import__(_p, fromlist=["OutputRecorder"])
-            if hasattr(_m, "OutputRecorder"):
-                found = _m.OutputRecorder
-                break
-        except Exception:
-            pass
-    if found is None:
+    if not hasattr(generic, "OutputRecorder"):
+        from transformers.modeling_utils import OutputRecorder
 
-        class OutputRecorder:  # minimal stub: satisfies the import + the metadata use only
-            def __init__(self, *a, **k):
-                self.args, self.kwargs = a, k
-
-        found = OutputRecorder
-    _g.OutputRecorder = found
+        generic.OutputRecorder = OutputRecorder
 
 
 def _find_module_defining(class_name: str, package: str):
     """Return the loaded module of ``package`` that DEFINES a class named ``class_name``, or None.
 
     ``package`` is where one checkpoint's remote code was imported (``transformers_modules.<repo>...``);
-    another revision loaded in the same process has a package of its own, whose classes are not this
-    checkpoint's to patch.
-
-    Identify the remote module by the CLASS it defines, NOT by its file name -- the plugin depends only on
-    the class names it patches, never on the remote code's file layout, so this survives remote-file
-    renames (e.g. ``modeling_kimi`` vs ``modeling_kimi_linear``). transformers
-    owns parsing + importing the remote files (via ``trust_remote_code`` + ``auto_map``); we only locate
-    the already-imported module. ``__module__ == module.__name__`` requires the class to be DEFINED here
-    (not merely imported), which uniquely picks the defining module (e.g. the backbone that defines
-    ``KimiSparseMoeBlock``, not the VLM wrapper that may import it). Guarded with try/except because
-    iterating ``sys.modules`` can touch lazy/magic modules -- notably ``torch.classes``, whose
-    ``__getattr__`` returns a namespace proxy for ANY name and raises on use (the proxy is not a ``type``,
-    so it is rejected regardless).
+    another revision loaded in the same process has a package of its own. Matching the class, not a file
+    name, survives remote-file renames (``modeling_kimi`` vs ``modeling_kimi_linear``), and requiring
+    ``__module__`` to be the module's skips one that only imports the class (the VLM wrapper importing
+    the backbone's). ``getattr`` is guarded, since a lazy module can raise on it.
     """
     for name, mod in list(sys.modules.items()):
         if mod is None or name.rpartition(".")[0] != package:
@@ -103,8 +84,6 @@ def _patch_kda_a_log(kmod) -> None:
     original __init__ so the trained values load into the right shape; ``torch.empty`` is fine (overwritten by the
     checkpoint on load). Idempotent.
     """
-    from modelopt.torch.utils import print_rank_0
-
     KDA = getattr(kmod, "KimiDeltaAttention", None)  # noqa: N806 (a class, keeping its own name)
     if KDA is None or getattr(KDA, "_kimi_k3_a_log_patched", False):
         return
@@ -134,11 +113,6 @@ def _patch_kda_beta_sigmoid(kmod) -> None:
     (``|1 - beta*||k||^2| > 1``) diverges to inf, a NaN amax in calibration. Random weights keep
     ``beta`` small enough to hide it. Idempotent.
     """
-    import functools
-    import inspect
-
-    from modelopt.torch.utils import print_rank_0
-
     if getattr(kmod, "_kimi_k3_beta_sigmoid_patched", False):
         return
     kernels = [
@@ -214,11 +188,6 @@ def _shim_create_causal_mask(kmod) -> None:
     so wrap that module-level reference: translate ``input_embeds`` -> ``inputs_embeds`` and drop ``cache_position``
     where the installed signature does not take it. Idempotent.
     """
-    import functools
-    import inspect
-
-    from modelopt.torch.utils import print_rank_0
-
     orig = getattr(kmod, "create_causal_mask", None)
     if orig is None or getattr(orig, "_kimi_k3_ccm_shim", False):
         return
@@ -261,15 +230,14 @@ def _patch_kimi_cache_get_mask_sizes(kmod) -> None:
 
     tf 5.15's mask preprocessing also asks the cache for ``get_query_offset(layer_idx)``, which the remote
     cache predates (``AttributeError`` once ``generate`` decodes with a cache). Add it when the class has
-    none, as transformers' own caches answer it: the tokens already cached. Idempotent.
+    none, own or inherited, as transformers' own caches answer it: the tokens already cached. Idempotent.
     """
-    from modelopt.torch.utils import print_rank_0
-
     Cache = getattr(kmod, "KimiDynamicCache", None)  # noqa: N806 (a class, keeping its own name)
     if Cache is None or getattr(Cache, "_kimi_k3_gms_patched", False):
         return
 
     def _get_mask_sizes(self, query_length, layer_idx):
+        # The remote body's own arithmetic, kv_offset 0 included; only the query length's type differs.
         ql = query_length.shape[0] if torch.is_tensor(query_length) else int(query_length)
         past_seen_tokens = self.get_seq_length(layer_idx)
         return ql + past_seen_tokens, 0
@@ -278,12 +246,11 @@ def _patch_kimi_cache_get_mask_sizes(kmod) -> None:
         return self.get_seq_length(layer_idx)
 
     Cache.get_mask_sizes = _get_mask_sizes
-    # The cache's own method is kept; ours replaces an inherited one, as the cache's own answer.
-    has_own = "get_query_offset" in vars(Cache)
-    if not has_own:
+    has_offset = hasattr(Cache, "get_query_offset")
+    if not has_offset:
         Cache.get_query_offset = _get_query_offset
     Cache._kimi_k3_gms_patched = True
-    added = "" if has_own else " and added get_query_offset (tf>=5.15)"
+    added = "" if has_offset else " and added get_query_offset (tf>=5.15)"
     print_rank_0(
         f"[kimi_k3] patched KimiDynamicCache.get_mask_sizes (accept int query_length; tf>=5.13){added}"
     )
@@ -296,7 +263,6 @@ def _shim_tie_weights_kwargs(package: str) -> None:
     Kimi-K3's remote ``KimiK3ForConditionalGeneration.tie_weights(self)`` has the older no-kwarg signature
     (it just delegates to ``self.language_model.tie_weights()``) -> ``TypeError``. Wrap it to swallow the
     extra kwargs (they only concern lm_head/embeddings tying, which the delegate handles). Idempotent.
-    (Same class of fix as kimi_vl.)
 
     Locate the VLM wrapper by the class it DEFINES (``KimiK3ForConditionalGeneration``) via
     ``_find_module_defining`` -- name-independent and safe against the ``torch.classes`` magic module

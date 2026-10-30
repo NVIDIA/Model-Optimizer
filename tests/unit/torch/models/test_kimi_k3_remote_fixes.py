@@ -16,8 +16,8 @@
 """The fixes Kimi-K3's own remote modeling needs on current transformers and fla-core.
 
 The checkpoint's modeling is not available here, so the tests patch a stand-in remote module -- the
-classes and functions the fixes reach -- on tiny CPU tensors. Every process-wide patch is undone after
-each test.
+classes and functions the fixes reach -- on tiny CPU tensors. A test that patches transformers itself
+undoes it through ``monkeypatch``.
 """
 
 import inspect
@@ -30,6 +30,9 @@ from _test_utils.torch.kimi_k3_remote import remote_module
 from torch import nn
 
 transformers = pytest.importorskip("transformers")
+
+from transformers import modeling_utils
+from transformers.utils import generic
 
 from modelopt.torch.models.kimi_k3 import _remote_fixes
 
@@ -183,7 +186,8 @@ def test_kimi_cache_mask_sizes_and_query_offset_count_the_cached_tokens():
     """transformers >= 5.13 passes the query length as an int; the remote cache expects a
     ``cache_position`` tensor. Either way kv_length is the query length plus the cached tokens.
     transformers >= 5.15 also asks for the query offset, which the remote cache lacks: the cached
-    tokens, as transformers' own caches answer. A cache with its own offset keeps it."""
+    tokens, as transformers' own caches answer. A cache that has an offset, its own or inherited,
+    keeps it."""
     remote = remote_module()
     _remote_fixes._patch_kimi_cache_get_mask_sizes(remote)
     cache = remote.KimiDynamicCache(seen_tokens=5)
@@ -194,9 +198,20 @@ def test_kimi_cache_mask_sizes_and_query_offset_count_the_cached_tokens():
     assert remote.calls == [("get_seq_length", 2), ("get_seq_length", 1), ("get_seq_length", 2)]
 
     remote = remote_module()
-    remote.KimiDynamicCache.get_query_offset = own = lambda self, layer_idx=0: 7
+    base = type("Cache", (), {"get_query_offset": lambda self, layer_idx=0: 7})
+    remote.KimiDynamicCache = type("KimiDynamicCache", (remote.KimiDynamicCache, base), {})
     _remote_fixes._patch_kimi_cache_get_mask_sizes(remote)
-    assert remote.KimiDynamicCache.get_query_offset is own
+    assert remote.KimiDynamicCache(seen_tokens=5).get_query_offset(2) == 7
+
+
+def test_output_recorder_is_put_back_where_the_remote_code_imports_it(monkeypatch):
+    """The remote code imports ``OutputRecorder`` from ``transformers.utils.generic``, which newer
+    transformers keeps in ``transformers.modeling_utils`` only."""
+    monkeypatch.setattr(generic, "OutputRecorder", None, raising=False)
+    monkeypatch.delattr(generic, "OutputRecorder")
+    _remote_fixes._install_output_recorder_shim()
+
+    assert generic.OutputRecorder is modeling_utils.OutputRecorder
 
 
 def test_tie_weights_shim_leaves_an_inherited_tie_weights_alone(monkeypatch):
