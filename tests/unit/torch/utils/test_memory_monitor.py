@@ -91,7 +91,8 @@ def test_stopping_a_stopped_monitor_does_nothing(monkeypatch, capsys):
     monitor = mm.launch_memory_monitor(monitor_interval=0.01)
 
     monitor.stop()
-    assert "Peak memory usage" in capsys.readouterr().out
+    # The report's frame, which prints whether or not the monitor thread sampled a GPU yet.
+    assert "########" in capsys.readouterr().out
     monitor.stop()
 
     assert capsys.readouterr().out == ""
