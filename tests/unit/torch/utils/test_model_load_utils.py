@@ -592,7 +592,7 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
     serve(config)
 
     with pytest.raises(
-        RuntimeError, match="can be expert-parallel, but the plan resolved"
+        ValueError, match="can be expert-parallel, but the plan resolved"
     ) as refused:
         resolve_distribution_plan(str(tmp_path), **arguments)
     if arguments:  # a knob the arguments override would lead straight back here

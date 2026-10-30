@@ -1613,7 +1613,8 @@ def _decide_distribution(
                 f"Shard its experts ({knob} above 1, dividing both its {num_experts} experts and "
                 "the world size), shard"
             )
-        raise RuntimeError(
+        # A ValueError, as the decision's other refusals of what its inputs resolve to are.
+        raise ValueError(
             f"{hf_config.model_type} can be expert-parallel, but the plan resolved to ep_size=1 at "
             f"world_size={world_size}, so every rank would hold the whole MoE. {shard} the whole "
             f"model with FSDP2 ({fsdp}, for an unquantized causal LM), load it in a single "
