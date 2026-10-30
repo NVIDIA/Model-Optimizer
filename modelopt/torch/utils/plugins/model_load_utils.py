@@ -1819,7 +1819,12 @@ def _ep_aware_caching_allocator_warmup(
                 f"(was full-model ~device-max; EP-aware plan-driven sizing)"
             )
             return total
-        except Exception:
+        except Exception as e:
+            # Its fallback reserves most of the device, so say why, or a later NCCL failure has no cause.
+            warn_rank_0(
+                f"EP-aware warmup sizing failed ({type(e).__name__}: {e}); using transformers' "
+                "full-model sizing, which may reserve most of the device."
+            )
             return orig(model, accelerator_device_map, hf_quantizer, *args, **kwargs)
 
     try:
