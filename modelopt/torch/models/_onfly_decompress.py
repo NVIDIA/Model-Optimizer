@@ -15,19 +15,10 @@
 
 """Decompress a compressed-tensors MoE checkpoint's experts as ``from_pretrained`` loads them.
 
-Each rank decompresses only its own experts into the transformers 5.x fused-experts layout, so
-expert-parallel PTQ runs on the original compressed checkpoint, with no decompressed copy on disk.
-The math is the ``compressed_tensors`` library's, driven by the checkpoint's ``quantization_config``:
-``compressor.compression_param_names(scheme)`` names the stored keys of one weight, and
-``compressor.decompress(...)["weight"]`` dequantizes them, so every format the library registers
-works whose stored floating-point tensors bf16 holds exactly (:func:`check_compressed_keys`). It
-needs ``compressed_tensors`` importable and transformers 5.8 or newer (earlier releases'
-``Concatenate`` looks up the sibling keys the decompression consumed).
-
-:func:`install_onfly_decompress` rewrites the per-expert converters ``get_model_conversion_mapping``
-returns, for the model built from the config it marks: each ``.weight`` source becomes the stored
-keys, and a ``DecompressExperts`` op ahead of the merge dequantizes each expert.
-:func:`to_native_backbone_config` builds a VLM's transformers-native backbone config.
+Each rank decompresses only its own experts into the fused-experts layout, so expert-parallel PTQ
+runs on the original compressed checkpoint. The ``compressed_tensors`` library does the math,
+driven by the checkpoint's ``quantization_config``. Needs transformers 5.8: earlier releases'
+``Concatenate`` looks up the sibling keys the decompression consumed.
 """
 
 import os
@@ -42,18 +33,11 @@ def to_native_backbone_config(
     model_type: str = "deepseek_v3",
     architectures: "tuple[str, ...]" = ("DeepseekV3ForCausalLM",),
 ):
-    """Derive the transformers-native fused backbone config from a VLM config's ``text_config``, so
-    ``from_pretrained`` builds the native model directly from the ORIGINAL checkpoint's compressed
-    shards — NO preprocessed native-config "view" dir.
+    """The transformers-native backbone config for a VLM config's bundled ``text_config``.
 
-    A VLM's ``text_config`` is typically the bundled remote-code config (its ``auto_map`` points at a
-    ModuleList modeling file, and it carries the stale compressed-tensors ``quantization_config``).
-    Dropping ``auto_map`` + ``quantization_config`` and setting ``model_type`` to the native type makes
-    it resolve to the stock transformers native config (which, for the a2a path, supplies
-    ``base_model_ep_plan``). ``architectures`` must be set to the native class (NOT left None — hf_ptq's
-    VL-detection iterates ``config.architectures``).
-
-    Defaults target the Kimi DeepSeek-V3 backbone; pass ``model_type`` / ``architectures`` for another.
+    Drops the remote ``auto_map`` and the stale ``quantization_config``, and names the native model
+    type and class (hf_ptq's VLM detection reads ``architectures``). The decompression mark carries
+    over. Defaults target the Kimi DeepSeek-V3 backbone.
     """
     from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
@@ -102,14 +86,10 @@ def _find_quantization_config(hf_config):
 
 
 def _read_compression(hf_config):
-    """Parse the checkpoint's compressed-tensors ``quantization_config`` and return
-    ``(compressor, scheme, param_names, format_str)`` via the ``compressed_tensors`` registry.
+    """``(compressor, scheme, param_names, format)`` for the checkpoint's compressed-tensors config.
 
-    ``compressor`` is the registered compressor for ``format`` (its ``decompress`` classmethod is the
-    dequant); ``scheme`` is the ``QuantizationScheme`` (supplies ``scheme.weights`` to ``decompress``);
-    ``param_names`` is the exact set of stored sibling keys per weight. The checkpoint's one config
-    group is the experts' scheme; a checkpoint with several, or whose one group does not target the
-    experts, is refused. ``None`` for a config with no ``quantization_config``: nothing to decompress."""
+    ``param_names`` are the keys one weight is stored under. The one config group must target the
+    experts; several groups are refused. ``None`` for a config with no ``quantization_config``."""
     # Look the config up first: with none, compressed_tensors need not even be installed. A config
     # that fails to parse raises pydantic's ValidationError, a ValueError of its own.
     quantization_config = _find_quantization_config(hf_config)
@@ -167,10 +147,8 @@ def _read_compression(hf_config):
 def _make_op_class(compressor, scheme, param_names):
     """Build the per-expert decompress op, bound to a compressor, its scheme and the stored keys.
 
-    The first stored key is the anchor the decompressed experts are emitted under, in place of the
-    ``.weight`` the downstream merge expects. The op subclasses ``MergeModulelist`` only because the
-    loader shards experts at load (``tensor_idx``, so non-local experts arrive as ``None``) only when
-    a converter's first op is one; the original merge later in the chain still does the stacking.
+    It subclasses ``MergeModulelist`` only so the loader shards experts at load, handing it ``None``
+    for each expert another rank owns; the merge later in the chain still does the stacking.
     """
     from transformers.core_model_loading import MergeModulelist
 
@@ -178,23 +156,10 @@ def _make_op_class(compressor, scheme, param_names):
     others = [(pn, "." + pn) for pn in param_names[1:]]
 
     class DecompressExperts(MergeModulelist):
-        """First op in a fused-experts WeightConverter chain.
-
-        For each anchor source (e.g. ``*.weight_packed``), pair it with its sibling stored params (``*.weight_scale``,
-        ``*.weight_shape``, ``*.weight_zero_point``, ``*.weight_global_scale``, ... — whatever the format stores),
-        decompress each expert via ``compressed_tensors`` -> bf16, and emit the decompressed list UNDER the anchor key
-        (dropping the siblings). The downstream MergeModulelist/Concatenate then fuse as for an uncompressed checkpoint.
-
-        Subclasses ``MergeModulelist`` purely so the loader recognizes ``operations[0]`` and shards experts
-        at load (see ``_make_op_class`` docstring); non-local experts arrive as ``None`` (from
-        ``GroupedGemmParallel.shard_tensor``) and are skipped, so only this rank's local experts are
-        decompressed.
-        """
+        """Decompress each owned expert's stored params to bf16, under the first stored key."""
 
         def __init__(self):
-            super().__init__(
-                dim=0
-            )  # dim unused (convert overridden); needed so isinstance -> shard_index
+            super().__init__(dim=0)  # dim unused: convert is overridden
 
         @torch.no_grad()
         def convert(self, input_dict, *args, **kwargs):
@@ -206,11 +171,8 @@ def _make_op_class(compressor, scheme, param_names):
                     continue
                 stem = base[: -len(anchor)]
                 lists = {param_names[0]: input_dict.pop(pat)}
-                # Pop each sibling if PRESENT; a checkpoint may store only a SUBSET of the scheme's
-                # possible params (e.g. mxfp4-pack-quantized declares weight_global_scale via
-                # compression_param_names, but the public moonshotai/Kimi-K3 checkpoint stores only
-                # weight_packed + weight_scale). Missing optional siblings simply aren't passed to the
-                # compressor (whose decompress uses whatever the scheme requires).
+                # A checkpoint may store a subset of the scheme's params (Kimi-K3's mxfp4 stores no
+                # weight_global_scale): only those present go to the compressor.
                 for pn, suf in others:
                     sib = input_dict.pop(stem + suf + marker, None)
                     if sib is not None:
@@ -224,8 +186,7 @@ def _make_op_class(compressor, scheme, param_names):
                     raise ValueError(
                         f"DecompressExperts: {stem} stores {counts}, not one per expert"
                     )
-                # Non-local experts were sharded away at load (GroupedGemmParallel -> None); decompress
-                # only the local experts this rank owns. Keeps peak memory at the per-rank shard.
+                # Experts other ranks own arrive as None: only this rank's are decompressed.
                 out[pat] = [
                     compressor.decompress({pn: lists[pn][i] for pn in present}, scheme)[
                         "weight"
@@ -245,10 +206,10 @@ def _make_op_class(compressor, scheme, param_names):
 
 
 def _compressedify(conv, compressor, scheme, param_names):
-    """Rewrite a per-expert WeightConverter (.weight sources) into a compressed-aware one.
+    """Rewrite a per-expert converter to read the stored keys, with ``DecompressExperts`` first.
 
-    each ``.weight`` -> the checkpoint's stored keys ``[.<pn>$ for pn in param_names]`` (anchor first, preserving
-    gate/up order so Concatenate fuses gate-then-up), and prepend DecompressExperts.
+    Each ``.weight`` source becomes its stored keys, grouped by key with the anchor first, which
+    keeps gate before up for the merge.
     """
     from transformers.core_model_loading import WeightConverter
 
@@ -278,16 +239,11 @@ def _compressedify(conv, compressor, scheme, param_names):
 
 
 def _install_keep_int_native():
-    """Patch _materialize_copy so INTEGER source tensors are never cast to a FLOATING dtype during load.
+    """Patch ``_materialize_copy`` so an integer source tensor is never cast to a float dtype.
 
-    Without an hf_quantizer the loader casts every source to the target param dtype (bf16); that destroys the integer
-    bit pattern of packed weights (`weight_packed`), shapes (`weight_shape`), zero-points and g_idx. Floats (the scale,
-    global scale, dense weights) still cast normally, so the expert-parallel load refuses a checkpoint whose compressed
-    experts store a float bf16 cannot hold exactly (:func:`check_compressed_keys`).
-
-    Process-wide, unlike the converter rewrite: any later load keeps an integer tensor native where it would have cast
-    it to a floating-point dtype. Only a compressed checkpoint loaded without its quantizer asks for that cast: with a
-    quantizer the loader keeps integer tensors as stored, and an unquantized checkpoint stores none for a float param.
+    Without a quantizer the loader casts every source to the parameter's dtype, which would destroy
+    packed weights, shapes and zero-points. Process-wide: only a compressed checkpoint loaded without
+    its quantizer asks for such a cast.
     """
     import transformers.core_model_loading as cml
 
@@ -332,19 +288,12 @@ def stored_names(hf_config) -> tuple[str, ...]:
 
 
 def install_onfly_decompress(hf_config):
-    """Monkeypatch get_model_conversion_mapping so the fused-MoE per-expert converters decompress the
-    checkpoint's compressed-tensors weights on the fly, in whatever ``format`` the checkpoint declares.
-    Call before from_pretrained of a compressed checkpoint. ``hf_config`` is the model config carrying
-    the compressed-tensors ``quantization_config`` (top-level or under ``text_config``); the format,
-    bit-width, group size, strategy and stored param names are all read from it.
+    """Make ``from_pretrained`` decompress the experts of the checkpoint ``hf_config`` describes.
 
-    The hooks are process-wide, so a process decompresses one compressed checkpoint: installing again
-    for it marks that config too, and installing for a checkpoint compressed differently raises. Only a
-    model built from a marked config, or from one whose ``text_config`` is marked, has its converters
-    rewritten; any other model ``from_pretrained`` loads in the process, an uncompressed MoE say,
-    keeps its stock converters. :func:`to_native_backbone_config` carries the mark to the backbone
-    config it derives, and the expert-parallel load checks the checkpoint against it
-    (:func:`check_compressed_keys`)."""
+    Call before ``from_pretrained``. The hooks are process-wide but rewrite only the converters of a
+    model built from a config they marked: one compressed checkpoint per process, installing again
+    for it marks that config too, and one compressed differently is refused.
+    """
     from modelopt.torch.utils import print_rank_0
     from modelopt.torch.utils.moe import require_transformers
 
@@ -439,17 +388,10 @@ def install_onfly_decompress(hf_config):
 def check_compressed_keys(hf_config, ckpt_dir) -> None:
     """Refuse a checkpoint the decompression would load wrong, by the tensors ``ckpt_dir`` stores.
 
-    The hooks rewrite only the experts' converters, and the expert-parallel load drops the
-    quantization_config that would load any other compressed weight: a weight compressed outside the
-    experts would load newly initialized, and so would an expert stored uncompressed, which the
-    rewritten converters do not read. A weight counts as compressed when it stores a name
-    ``hf_config``'s mark holds other than ``weight``, which an uncompressed weight is stored under
-    too.
-
-    The load may also cast a compressed weight's floating-point tensors to bf16, the dtype its
-    experts decompress to, before the decompression reads them: one that bf16 cannot hold exactly,
-    such as an fp32 global scale or an fp16 scale, would shift every weight it scales. Only the
-    tensors' names and dtypes are read.
+    Only the experts decompress, and the load drops the config any other compressed weight would need:
+    the experts alone must be compressed, every one of them. The load may cast their float tensors to
+    bf16 before decompressing, so one bf16 cannot hold exactly (an fp32 scale) is refused too. Reads
+    only the tensors' names and dtypes.
     """
     from safetensors import safe_open
 
