@@ -877,6 +877,20 @@ def test_a_placement_over_shared_gpus_is_refused_where_each_rank_holds_its_own_c
         )
 
 
+@pytest.mark.parametrize(
+    "plan",
+    [DistributionPlan(4, ep_size=4), DistributionPlan(4, dense="fsdp")],
+    ids=["expert_parallel", "fsdp"],
+)
+def test_a_plan_that_shards_the_model_is_refused(monkeypatch, tmp_path, plan):
+    """get_model loads a whole model on every rank; a plan that shards it goes to load_pretrained."""
+    LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
+    monkeypatch.setattr(example_utils, "load_pretrained", lambda *a, **k: pytest.fail("loaded"))
+
+    with pytest.raises(ValueError, match="shards the model over the ranks"):
+        example_utils.get_model(str(tmp_path), device="cuda:1", distribution=plan)
+
+
 def test_without_a_plan_the_load_decides_and_refuses_sharding_knobs_it_cannot_honor(
     monkeypatch, tmp_path
 ):

@@ -659,6 +659,11 @@ def get_model(
     # the caller gave reaches load_pretrained: without one it decides itself as before, and refuses
     # MODELOPT_* knobs asking to shard over a launch whose process group is not set up.
     plan = distribution or DistributionPlan()
+    if plan.is_expert_parallel or plan.is_fsdp_dense:
+        raise ValueError(
+            f"{plan!r} shards the model over the ranks, but get_model loads the whole model on "
+            "every rank: load it with load_pretrained."
+        )
     routing = {} if distribution is None else {"distribution": distribution}
 
     _disk_offload = offload_folder is not None
