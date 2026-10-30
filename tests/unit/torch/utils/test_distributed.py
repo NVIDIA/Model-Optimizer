@@ -174,13 +174,15 @@ _HF_EXTRA = r"needs the hf extra \(pip install 'nvidia-modelopt\[hf\]'\)"
     [
         ("transformers", _HF_EXTRA),
         ("huggingface_hub", _HF_EXTRA),
+        ("transformers.conversion_mapping", "halted; None in sys.modules"),
         ("modelopt.torch.utils.plugins.model_load_utils", "halted; None in sys.modules"),
     ],
-    ids=["transformers", "huggingface_hub", "another-import-error"],
+    ids=["transformers", "huggingface_hub", "transformers-submodule", "another-import-error"],
 )
 def test_fsdp2_wrap_names_the_extra_its_old_path_needs(monkeypatch, missing, message):
     """Without the hf extra, the old path says what it needs rather than which module is missing;
-    any other import error reaches the caller as it is."""
+    any other import error, such as a module an installed transformers lacks, reaches the caller as
+    it is."""
     monkeypatch.delitem(sys.modules, "modelopt.torch.utils.plugins.model_load_utils", raising=False)
     monkeypatch.setitem(sys.modules, missing, None)
 
