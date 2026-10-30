@@ -844,7 +844,7 @@ def _remote_kimi():
     return model
 
 
-@pytest.mark.parametrize("model_type", ["kimi_vl"])
+@pytest.mark.parametrize("model_type", ["kimi_vl", "kimi_k25"])
 def test_a_remote_moe_whose_prepare_attaches_its_plan_left_whole_is_an_error(
     run_as, serve, monkeypatch, tmp_path, model_type
 ):

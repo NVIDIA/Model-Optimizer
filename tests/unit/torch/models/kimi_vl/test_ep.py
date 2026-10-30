@@ -42,6 +42,7 @@ import transformers.utils.import_utils as import_utils
 from transformers import DeepseekV3Config, DeepseekV3ForCausalLM, PretrainedConfig
 
 from modelopt.torch.models import _onfly_decompress, _remote_code, get_spec
+from modelopt.torch.models.kimi_k25 import ep as kimi_k25
 from modelopt.torch.models.kimi_vl import ep as kimi_vl
 from modelopt.torch.utils.moe import _routed_expert_keys
 
@@ -159,11 +160,14 @@ def test_prepare_rebuilds_the_language_model_config_without_a_decompressor(monke
     assert dmu.get_cached_module_file is not staging
 
 
-# What the Kimi adapters share, through each adapter's prepare.
+# Kimi-K2.5's adapter is Kimi-VL's with on-the-fly decompression added; these hold for both.
 _BOTH_ADAPTERS = pytest.mark.parametrize(
     ("adapter", "remote"),
-    [(kimi_vl, ("modeling_kimi_vl", "KimiVLForConditionalGeneration"))],
-    ids=["vl"],
+    [
+        (kimi_vl, ("modeling_kimi_vl", "KimiVLForConditionalGeneration")),
+        (kimi_k25, ("modeling_kimi_k25", "KimiK25ForConditionalGeneration")),
+    ],
+    ids=["vl", "k25"],
     indirect=["remote"],
 )
 
@@ -233,7 +237,7 @@ def test_the_swap_fails_loudly_when_the_remote_modeling_has_nothing_to_swap(
         adapter.prepare(_vlm_config(), ckpt_path="/ckpt", trust_remote_code=True)
 
 
-@pytest.mark.parametrize("adapter", [kimi_vl], ids=["vl"])
+@pytest.mark.parametrize("adapter", [kimi_vl, kimi_k25], ids=["vl", "k25"])
 @pytest.mark.parametrize(
     ("config", "kwargs", "match"),
     [
@@ -282,7 +286,9 @@ def test_prepare_refuses_before_patching_anything(monkeypatch, adapter, config, 
     assert dmu.get_cached_module_file is unstaged_loader
 
 
-@pytest.mark.parametrize(("model_type", "adapter"), [("kimi_vl", kimi_vl)], ids=["vl"])
+@pytest.mark.parametrize(
+    ("model_type", "adapter"), [("kimi_vl", kimi_vl), ("kimi_k25", kimi_k25)], ids=["vl", "k25"]
+)
 def test_the_spec_routes_expert_parallelism_through_its_own_adapter(model_type, adapter):
     """The checkpoint's code builds no EP-capable experts, so its whole EP setup is this adapter's
     ``prepare``: another Kimi adapter's would load it without its own swap or decompression."""
