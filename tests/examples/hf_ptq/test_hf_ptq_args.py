@@ -1111,6 +1111,43 @@ def test_main_makes_a_hub_checkpoint_local_before_loading(monkeypatch, tmp_path)
     ]
 
 
+@pytest.mark.parametrize("world_size", [1, 2], ids=["single_process", "two_ranks"])
+def test_a_rank_that_fails_aborts_a_run_of_several_ranks(monkeypatch, world_size):
+    """The other ranks may wait in a collective the failed rank never reaches, where tearing the
+    process group down would wait on them with the error unprinted: a run of several ranks aborts
+    instead, which exits, so the launcher stops the others. A single process raises as before."""
+    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "org/model")
+    events = []
+
+    class _AbortedError(BaseException):
+        """abort() exits the process; this stand-in raises instead, so the test sees it."""
+
+    def setup_distributed_args(args):
+        args.dist_state = SimpleNamespace(rank=0, world_size=world_size, is_main=True)
+
+    def abort():
+        events.append("abort")
+        raise _AbortedError
+
+    def load_model(args):
+        raise RuntimeError("this rank's load failed")
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.compiler, "set_stance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_ptq, "launch_memory_monitor", lambda: None)
+    monkeypatch.setattr(hf_ptq, "ensure_local_checkpoint", lambda path: (path, path))
+    monkeypatch.setattr(hf_ptq, "setup_distributed_args", setup_distributed_args)
+    monkeypatch.setattr(hf_ptq, "cleanup_distributed", lambda args: events.append("cleanup"))
+    monkeypatch.setattr(hf_ptq, "abort", abort)
+    monkeypatch.setattr(hf_ptq, "load_model", load_model)
+
+    with pytest.raises(_AbortedError if world_size > 1 else RuntimeError):
+        hf_ptq.main(args)
+
+    # The real abort() exits before the teardown runs.
+    assert events == (["abort", "cleanup"] if world_size > 1 else ["cleanup"])
+
+
 def test_tensorrt_llm_export_copies_non_model_files_from_the_local_copy(monkeypatch, tmp_path):
     """The deprecated TensorRT-LLM exporter does not copy them itself; hf_ptq does, from disk."""
     hf_ptq, args = _parse_hf_ptq_args(
