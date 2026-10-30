@@ -861,7 +861,15 @@ def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method)
     assert torch.allclose(output_ref, output_test)
 
 
-@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+@pytest.mark.parametrize(
+    "method",
+    [
+        "gradient",
+        "kl_div",
+        {"method": "kl_div", "context": "lowest"},
+        {"method": "kl_div", "context": 1},
+    ],
+)
 def test_format_shards_merge_into_the_unsharded_search(tmp_path, method):
     source = TransformerBlock()
     data = [source.get_input() for _ in range(2)]
@@ -887,9 +895,10 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, method):
     for i, shard in enumerate(shards):
         _, state = search(shard, (i, 2))
         assert not state["best"]["recipe"]
-    # Shards hold disjoint formats: 2 of the 3 searched formats on shard 0, 1 on shard 1.
+    # Shards split the searched formats (2 on shard 0, 1 on shard 1); a scoring context is shared.
     calibrated = [set(safe_load(shard)["quantizer_states"]) for shard in shards]
-    assert not calibrated[0] & calibrated[1] and len(calibrated[0] | calibrated[1]) == 3
+    shared = calibrated[0] & calibrated[1]
+    assert len(shared) == isinstance(method, dict) and len(calibrated[0] | calibrated[1]) == 3
 
     merged = tmp_path / "merged.pth"
     model_quant.merge_auto_quantize_checkpoints(list(reversed(shards)), str(merged))
@@ -899,6 +908,12 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, method):
 
     for name, stats in expected["candidate_stats"].items():
         assert state["candidate_stats"][name]["raw_scores"] == pytest.approx(stats["raw_scores"])
+        if isinstance(method, dict) and len(stats["formats"]) > 1:
+            # In a quantized context BF16 is measured too, not taken as 0.
+            assert stats["raw_scores"][-1] > 0
+    if isinstance(method, dict):
+        # Context scores share a base damage; the solver must still spend the 6-bit budget.
+        assert expected["best"]["constraints"]["effective_bits"] > 5.0
     assert state["best"]["recipe"] == expected["best"]["recipe"]
 
 
