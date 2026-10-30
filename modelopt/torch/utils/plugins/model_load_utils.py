@@ -820,11 +820,15 @@ def load_pretrained(
             # accelerate could pick the same idle GPU.
             kwargs.setdefault("device_map", {"": f"cuda:{dist.local_rank()}"})
         auto_class = auto_class or AutoModelForCausalLM
-        with prepare_model_for_loading(
-            model_type,
-            ckpt_path,
-            trust_remote_code,
-            model_class=None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class,
+        # It runs no collective, so a rank failing in it alone would leave the others in the next.
+        with (
+            _refused_together("whole-model load", alone),
+            prepare_model_for_loading(
+                model_type,
+                ckpt_path,
+                trust_remote_code,
+                model_class=None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class,
+            ),
         ):
             model = auto_class.from_pretrained(ckpt_path, **hub_options, **kwargs)
         keys = None
