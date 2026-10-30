@@ -47,11 +47,12 @@ def test_a_spec_declares_a_plan_a_floor_a_prepare_or_a_refusal(model_type):
 
 
 def test_the_omni_vlm_reuses_the_text_models_plan():
-    """Two spellings of one architecture must not drift into two different plans."""
-    assert (
-        get_spec("nemotron_h_omni").ep_spec.base_model_ep_plan
-        == get_spec("nemotron_h").ep_spec.base_model_ep_plan
-    )
+    """Two spellings of one architecture must not drift into two different plans, nor share one
+    dict, which a change through either spec would carry into the other."""
+    omni = get_spec("nemotron_h_omni").ep_spec.base_model_ep_plan
+    text = get_spec("nemotron_h").ep_spec.base_model_ep_plan
+    assert omni == text
+    assert omni is not text
 
 
 def test_the_omni_vlm_puts_its_plan_on_the_nested_config():

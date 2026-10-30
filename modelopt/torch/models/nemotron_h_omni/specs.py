@@ -42,7 +42,9 @@ register(
         # the order the load reads them.
         min_transformers_version="5.18",
         ep_spec=EPSpec(
-            base_model_ep_plan=BASE_MODEL_EP_PLAN,
+            # Its own copy: the registry is process-wide, and a spec holding NemotronH's dict would
+            # carry any change to one plan into the other.
+            base_model_ep_plan=dict(BASE_MODEL_EP_PLAN),
             plan_config_attr=("text_config", "llm_config"),
         ),
     )
