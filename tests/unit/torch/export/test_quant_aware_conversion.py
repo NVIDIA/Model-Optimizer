@@ -1387,6 +1387,27 @@ def test_the_identity_decode_is_known_without_the_fp8_integration(monkeypatch):
         quant_aware_conversion._quantization_codec_ops.cache_clear()
 
 
+@pytest.mark.parametrize(
+    ("sources", "targets", "in_place"),
+    [
+        # A dequantizing FP8 load, reversed: the weight and the scales folded into it.
+        (["weight$"], ["weight$", "weight_scale_inv", "activation_scale"], True),
+        (["mlp.up_proj.weight$"], ["mlp.up_proj.weight$", "mlp.up_proj.weight_scale_inv"], True),
+        # A later target names another module, so the converter renames it.
+        (["mlp.up_proj.weight$"], ["mlp.up_proj.weight$", "mlp.gate_proj.weight"], False),
+    ],
+    ids=["bare-siblings", "module-siblings", "another-module"],
+)
+def test_a_codec_converter_decodes_in_place_only_if_it_names_one_module(sources, targets, in_place):
+    """A converter skipped as a decode in place gives up its reverse rules, so it must rename
+    nothing: a target naming another module is kept, to be reversed or refused."""
+    core = pytest.importorskip("transformers.core_model_loading")
+    if not hasattr(core, "_IdentityOp"):
+        pytest.skip("transformers build has no _IdentityOp")
+    rev = types.SimpleNamespace(source_patterns=sources, target_patterns=targets)
+    assert quant_aware_conversion._decodes_in_place(rev, [core._IdentityOp()]) is in_place
+
+
 def test_dense_split_names_each_part_once_through_load_siblings():
     """A dense fused converter that a dequantizing load rewrote still un-fuses into one part per
     module, not one per checkpoint tensor the load consumed."""
