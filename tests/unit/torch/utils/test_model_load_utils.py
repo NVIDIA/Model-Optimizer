@@ -914,12 +914,13 @@ def process_group(monkeypatch):
     ids=["defaults_to_the_rank_gpu", "caller_placement_wins"],
 )
 def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
-    run_as, serve, loaders, auto_class, tmp_path, device_map, placed
+    run_as, serve, loaders, auto_class, monkeypatch, tmp_path, device_map, placed
 ):
     """Each rank takes the whole model onto its own GPU; "auto" would let every rank's accelerate
     pick the same idle GPU."""
     run_as(4, rank=1)
     serve(LlamaConfig(**_TINY))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)  # each rank has a GPU
     kwargs = {} if device_map is None else {"device_map": device_map}
 
     model = load_pretrained(str(tmp_path), auto_class, **kwargs)
