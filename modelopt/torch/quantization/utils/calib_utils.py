@@ -121,6 +121,16 @@ def _own_gpus() -> list[int]:
     return get_process_gpus()
 
 
+def _update_room(helper, weight) -> int:
+    """Bytes a GPU needs to run ``helper``'s update of ``weight``, as measured with the CUDA codecs.
+
+    The Hessian, the inverse and their temporaries; the float32 copy of the weight with a
+    dtype-conversion temporary (a projection much wider than its input makes the weight the larger
+    part); and the codec's tables and scratch, about 35 MiB on a GPU's first update.
+    """
+    return 2**26 + 4 * (8 * helper.hessian.numel() + 2 * weight.numel())
+
+
 def update_expert_weights(work, block_size, perc_damp):
     """Run the GPTQ updates of ``(helper, weight)`` pairs, spread over this process's GPUs.
 
@@ -130,12 +140,9 @@ def update_expert_weights(work, block_size, perc_damp):
     back to its weight; the others, or all of them when fewer than two GPUs qualify, run in turn on
     their weight's device.
     """
-    movable = [(h, w) for h, w in work if h.UPDATES_ON_ANY_DEVICE and w.is_cuda]
-    # A worker holds one expert at a time: its Hessian, the inverse and their temporaries, the
-    # float32 copy of its weight with a dtype-conversion temporary (a projection much wider than
-    # its input makes the weight the larger part), and the codec's tables and scratch, about
-    # 35 MiB on a GPU's first update.
-    room = 2**26 + max((4 * (8 * h.hessian.numel() + 2 * w.numel()) for h, w in movable), default=0)
+    movable = [(h, w) for h, w in work if w.is_cuda and h.updates_on_any_device()]
+    # A worker holds one expert at a time.
+    room = max((_update_room(h, w) for h, w in movable), default=0)
     gpus = [gpu for gpu in _own_gpus() if get_available_gpu_memory(gpu) > room]
     if len(gpus) < 2 or len(movable) < 2:
         movable = []
@@ -320,9 +327,6 @@ class GPTQHelper:
     """
 
     CACHE_NAME = "_forward_no_gptq_hessian"
-    # Whether update_weights() may run on a device other than its weight's: true only for helpers
-    # whose update reads no quantizer state, which lives on the weight's device.
-    UPDATES_ON_ANY_DEVICE = False
 
     def __init__(
         self,
@@ -427,13 +431,22 @@ class GPTQHelper:
         self.weight = None
         self.h_inv = None
 
+    def updates_on_any_device(self) -> bool:
+        """Whether :meth:`update_weights` may run on a device other than its weight's.
+
+        True only for helpers whose update reads no quantizer state, which lives on the weight's
+        device, and fits the room :func:`update_expert_weights` checks for.
+        """
+        return False
+
     def update_weights(self, block_size, perc_damp, weight=None, device=None):
         """Run GPTQ blockwise weight update on this helper's weight.
 
         Populates ``self.weight`` and ``self.h_inv``, runs the blockwise update, logs MSE, and
         overwrites ``weight`` (default ``module.weight``) in place, so an expert's slice of a
         fused 3-D parameter is written back into that parameter. The update runs on ``device``,
-        by default the weight's; only a helper with ``UPDATES_ON_ANY_DEVICE`` may pass another.
+        by default the weight's; only a helper whose :meth:`updates_on_any_device` is true may
+        pass another.
         """
         weight = self.module.weight if weight is None else weight
         device = weight.device if device is None else device

@@ -24,6 +24,7 @@ from conftest import requires_triton
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.quantization.extensions import get_cuda_ext_ggml
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.ggml.gptq import GGMLGPTQHelper
 from modelopt.torch.quantization.model_calib import gptq
@@ -117,6 +118,52 @@ def test_expert_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, i
             assert torch.equal(
                 pinned_packed_weight(q1, "iq2_xxs"), pinned_packed_weight(q2, "iq2_xxs")
             )
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "shape", "cuda_extension"),
+    [
+        ("iq2_xxs", (16384, 2048), True),  # a projection 8x wider than its input
+        ("iq1_s", (1024, 512), True),
+        # The PyTorch encoder's scratch grows with block_chunk_size, past the room check.
+        ("iq1_s", (1024, 512), False),
+    ],
+)
+def test_an_update_that_may_move_fits_its_room(
+    need_2_gpus, monkeypatch, num_bits, shape, cuda_extension
+):
+    """An expert update that may run on another GPU peaks there within the room it is admitted with."""
+    if not cuda_extension:
+        monkeypatch.setattr(get_cuda_ext_ggml, "extension", None, raising=False)
+    out_features, in_features = shape
+    torch.manual_seed(RAND_SEED)
+    linear = torch.nn.Linear(
+        in_features, out_features, bias=False, dtype=torch.bfloat16, device="cuda:0"
+    )
+    inputs = torch.randn(512, in_features, dtype=torch.bfloat16, device="cuda:0")
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": num_bits, "block_sizes": {-1: 256}, "backend": "ggml"},
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(linear, config, forward_loop=lambda m: m(inputs))
+    helper = GGMLGPTQHelper(linear, "linear", log_mse=False)
+    helper.accumulate(inputs)
+    worker = torch.device("cuda", 1)
+    torch.cuda.synchronize(worker)
+    torch.cuda.reset_peak_memory_stats(worker)
+    allocated = torch.cuda.memory_allocated(worker)
+    with torch.cuda.device(worker):
+        helper.update_weights(256, 0.3, linear.weight, device=worker)
+    peak = torch.cuda.max_memory_allocated(worker) - allocated
+
+    if helper.updates_on_any_device():
+        assert peak <= calib_utils._update_room(helper, linear.weight)
 
 
 @pytest.mark.parametrize("blocker", ["idle_gpu_full", "idle_gpu_too_small", "multi_rank"])

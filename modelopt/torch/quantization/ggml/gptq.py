@@ -19,6 +19,7 @@ from collections.abc import Callable
 
 import torch
 
+from ..extensions import get_cuda_ext_ggml
 from ..utils.calib_utils import GPTQHelper, register_gptq_helper
 from .common import floored_second_moments, pin_packed_weight
 from .registry import GGML_FORMAT_REGISTRY
@@ -78,8 +79,13 @@ class GGMLGPTQHelper(GPTQHelper):
     those exact codes rather than encoding the GPTQ'd weight again, which would not return them.
     """
 
-    # The update reads only the weight, its Hessian and the format's codec.
-    UPDATES_ON_ANY_DEVICE = True
+    def updates_on_any_device(self):
+        """Whether the CUDA encoders are available.
+
+        The update reads only the weight, its Hessian and the format's codec, but the PyTorch
+        fallback's scratch grows with ``block_chunk_size``, past the room the update is checked for.
+        """
+        return get_cuda_ext_ggml() is not None
 
     def update_weights(self, block_size, perc_damp, weight=None, device=None):
         """Run the GPTQ update, then pin the chosen payload to the weight quantizer."""
