@@ -17,6 +17,11 @@
 
 The same architecture as ``llama4`` reached through ``Llama4ForCausalLM``, with its own
 ``base_model_ep_plan`` on the root config, so it is refused expert parallelism the same way.
+
+Only that refusal is registered under this type, deliberately: no MoE or export section, so its
+MoE and export lookups find none, as they did before this type had a spec. Giving it ``llama4``'s
+MoE section would change how text-only Llama-4 checkpoints match MoE blocks in quantization and
+export, which belongs with tests of those paths, not with its expert-parallel refusal.
 """
 
 from ..llama4.specs import EP_UNSUPPORTED
