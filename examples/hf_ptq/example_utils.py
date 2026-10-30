@@ -56,7 +56,7 @@ from modelopt.torch.models.hf import (
 )
 from modelopt.torch.quantization.mode import get_modelike_from_algo_cfg
 from modelopt.torch.utils import distributed as dist_utils
-from modelopt.torch.utils.distributed import distribution_plan
+from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
 from modelopt.torch.utils.plugins.model_load_utils import is_fsdp2_text_only_vlm, load_pretrained
 
@@ -652,8 +652,11 @@ def get_model(
     offload_folder=None,
     max_cpu_memory_gb=None,
     max_gpu_memory_gb=None,
+    distribution: DistributionPlan | None = None,
 ):
     print(f"Initializing model from {ckpt_path}")
+    # The plan to load the whole model by on every rank; a single process's by default.
+    plan = distribution or DistributionPlan()
 
     _disk_offload = offload_folder is not None
     if _disk_offload and max_cpu_memory_gb is None:
@@ -664,9 +667,25 @@ def get_model(
             UserWarning,
         )
 
-    device_map = "auto"
-    if device == "cpu":
-        device_map = "cpu"
+    # Under torchrun each rank asks for its own "cuda:<local_rank>". Do not fall through to "auto":
+    # accelerate runs its placement heuristic INDEPENDENTLY in every rank, and on a node whose GPUs
+    # are all idle every rank scores them identically and picks the SAME card. All ranks' weights,
+    # and with them every quantizer's _amax buffer, then live on one GPU; the first NCCL collective
+    # binds the whole data-parallel group to that single device and aborts with "Duplicate GPU
+    # detected : rank 1 and rank 0 both on CUDA device ...". Every load path below honours the pin
+    # except those that load with no device map (Nemotron VL): each rank builds a whole copy in host
+    # memory and only then moves it to its own GPU, so the node needs one host copy per rank.
+    # A dense model too large to replicate per rank wants --use_fsdp2, not "auto" sharding: under
+    # data-parallel calibration each rank must own its own GPU. A single process keeps "auto".
+    # hf_ptq hands in its run's torch.device, which never equals a string such as "cpu".
+    on_cpu = torch.device(device).type == "cpu"
+    if plan.world_size > 1 and not on_cpu and ":" not in str(device):
+        raise ValueError(
+            f"{plan!r} has each rank hold its own copy of the model on its own GPU, but "
+            f"device={device!r} names no GPU index; pass the rank's own GPU, cuda:<local_rank>."
+        )
+    pinned = {"": str(device)} if not on_cpu and plan.world_size > 1 else None
+    device_map = "cpu" if on_cpu else pinned or "auto"
 
     # Prepare config kwargs for loading
     config_kwargs = {"trust_remote_code": trust_remote_code} if trust_remote_code else {}
@@ -702,13 +721,24 @@ def get_model(
     # modules together for checkpoints that fit; larger ones can still spill and split a
     # tied pair, and need an explicit single-device map. Multi-GPU only: a single-GPU split
     # cannot separate a tied pair, and sequential would needlessly cap max_memory there.
-    if device != "cpu" and torch.cuda.device_count() > 1 and is_diffusion_gemma(hf_config):
+    if (
+        not pinned
+        and not on_cpu
+        and torch.cuda.device_count() > 1
+        and is_diffusion_gemma(hf_config)
+    ):
         print(
             "Detected DiffusionGemma model. Using device_map='sequential'; the balanced "
             "'auto' mapping can split its tied encoder/decoder weights across GPUs."
         )
         use_seq_device_map = True
 
+    if use_seq_device_map and pinned:
+        raise ValueError(
+            f"--use_seq_device_map spreads one model over every GPU, but each rank of this run "
+            f"holds its own copy on its own GPU ({device}). Drop it, or shard the model with "
+            "--use_fsdp2."
+        )
     if use_seq_device_map:
         device_map = "sequential"
         # If we use sequential, set max_memory limit to ensure that the model does not occupy the full GPU
@@ -760,6 +790,7 @@ def get_model(
             ckpt_path,
             AutoModelForCausalLM,
             model_type=hf_config.model_type,
+            distribution=plan,
             device_map=device_map,
             **model_kwargs,
         )
@@ -771,7 +802,8 @@ def get_model(
                 ckpt_path,
                 AutoModelForCausalLM,
                 model_type=hf_config.model_type,
-                device_map="auto",
+                distribution=plan,
+                device_map=pinned or "auto",
                 trust_remote_code=trust_remote_code,
                 dtype="auto",
                 **experts_kwargs,
@@ -798,7 +830,8 @@ def get_model(
             ckpt_path,
             AutoModelForCausalLM,
             model_type=hf_config.model_type,
-            device_map="cpu" if device == "cpu" else "sequential",
+            distribution=plan,
+            device_map="cpu" if on_cpu else pinned or "sequential",
             **model_kwargs,
         )
     else:
@@ -884,7 +917,9 @@ def get_model(
                 f"Offload folder: {offload_folder}\n"
                 "Weights exceeding GPU+CPU budgets will be streamed from disk."
             )
-        else:
+        elif not pinned:
+            # A pinned copy goes onto its rank's GPU whole, by a map that ignores max_memory: sizing
+            # it over the node's GPUs would print a limit the load does not apply.
             inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
             if "cpu" in inferred_device_map.values():
                 for _device in max_memory:
@@ -906,6 +941,7 @@ def get_model(
             ckpt_path,
             auto_model_module,
             model_type=hf_config.model_type,
+            distribution=plan,
             device_map=device_map,
             **model_kwargs2,
         )
@@ -914,11 +950,11 @@ def get_model(
         _unpack_compressed_linear_weights(model, ckpt_path)
 
     # If device_map was disabled (None), manually move model to target device
-    if device_map is None and device != "cpu":
+    if device_map is None and not on_cpu:
         print(f"Moving model to {device} device...")
         model = model.to(device)
 
-    if device == "cuda" and not is_model_on_gpu(model):
+    if torch.device(device).type == "cuda" and not is_model_on_gpu(model):
         print("Warning: Some parameters are not on a GPU. Calibration can be slow or hit OOM")
 
     return model
