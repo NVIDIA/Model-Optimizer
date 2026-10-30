@@ -207,12 +207,12 @@ def _patch_kda_beta_sigmoid(kmod) -> None:
 def _shim_create_causal_mask(kmod) -> None:
     """tf-version compat for the backbone forward's ``create_causal_mask`` call.
 
-    The remote code (written for an older transformers) calls it as ``create_causal_mask(config=, input_embeds=,
-    attention_mask=, cache_position=, past_key_values=, position_ids=)``, but tf 5.13's ``create_causal_mask`` renamed
-    ``input_embeds`` -> ``inputs_embeds`` and no longer accepts ``cache_position`` -> ``TypeError`` at the first
-    calibration forward. The remote module binds ``create_causal_mask`` at import (``from transformers.masking_utils
-    import ...``), so wrap that module-level reference: translate ``input_embeds`` -> ``inputs_embeds`` and drop
-    ``cache_position`` where the installed signature does not take it. Idempotent.
+    The remote code calls it as ``create_causal_mask(config=, input_embeds=, attention_mask=, cache_position=,
+    past_key_values=, position_ids=)``, in older spellings: every transformers this supports (5.5 on) names the second
+    ``inputs_embeds``, and tf 5.13's no longer accepts ``cache_position`` -> ``TypeError`` at the first calibration
+    forward. The remote module binds ``create_causal_mask`` at import (``from transformers.masking_utils import ...``),
+    so wrap that module-level reference: translate ``input_embeds`` -> ``inputs_embeds`` and drop ``cache_position``
+    where the installed signature does not take it. Idempotent.
     """
     import functools
     import inspect
