@@ -27,6 +27,7 @@ Changelog
 *Speculative Decoding*
 
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
+- Add ``examples/speculative_decoding/offline_ar/`` to measure a DFlash draft's acceptance length offline: it replays greedy speculative decoding on target hidden states dumped once by ``collect_hidden_states/``, so each checkpoint is evaluated on one GPU without running the target.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
