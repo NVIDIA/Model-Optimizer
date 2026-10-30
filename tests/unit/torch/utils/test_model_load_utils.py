@@ -825,16 +825,16 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
 
 
-def _remote_kimi(moe):
+def _remote_kimi():
     """A remote-code Kimi VLM as the checkpoint's own code builds it, unpatched by its spec's
     ``prepare``: each MoE layer of its language model holds its routed experts as per-expert
-    modules in an ``nn.ModuleList``, at ``language_model.model.layers.<i>.<moe>.experts``."""
+    modules in an ``nn.ModuleList``, at ``language_model.model.layers.<i>.mlp.experts``."""
 
     def layer():
         block = nn.Module()
         block.gate = nn.Linear(2, 4, bias=False)
         block.experts = nn.ModuleList(nn.Linear(2, 2, bias=False) for _ in range(4))
-        return nn.ModuleDict({moe: block})
+        return nn.ModuleDict({"mlp": block})
 
     model = nn.Module()
     model.language_model = nn.Module()
@@ -844,9 +844,9 @@ def _remote_kimi(moe):
     return model
 
 
-@pytest.mark.parametrize(("model_type", "moe"), [("kimi_vl", "mlp")])
+@pytest.mark.parametrize("model_type", ["kimi_vl"])
 def test_a_remote_moe_whose_prepare_attaches_its_plan_left_whole_is_an_error(
-    run_as, serve, monkeypatch, tmp_path, model_type, moe
+    run_as, serve, monkeypatch, tmp_path, model_type
 ):
     """Remote-code Kimi checkpoints get their plan from their spec's ``prepare``, which an EP degree
     of 1 skips: it patches their code. The plan their spec states still finds the experts their own
@@ -855,7 +855,7 @@ def test_a_remote_moe_whose_prepare_attaches_its_plan_left_whole_is_an_error(
     monkeypatch.setattr(
         get_spec(model_type).ep_spec, "prepare", lambda *a, **k: pytest.fail("ran prepare")
     )
-    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi(moe))
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi())
     run_as(4)
     serve(SimpleNamespace(model_type=model_type, text_config=SimpleNamespace(n_routed_experts=8)))
 
