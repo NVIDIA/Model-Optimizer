@@ -741,6 +741,16 @@ def _awq_on_a_sharded_fsdp2_model_job(rank, size):
         for config in (mtq.W4A8_AWQ_BETA_CFG, INT4_AWQ_FULL_CFG):  # awq_lite, awq_full
             with pytest.raises(NotImplementedError, match=f"FSDP2 model sharded over {size} ranks"):
                 mtq.quantize(model, config, forward_loop)
+        # AutoQuantize checks every candidate before it calibrates the first one.
+        with pytest.raises(NotImplementedError, match="AutoQuantize candidate 'W4A8_AWQ_BETA_CFG'"):
+            mtq.auto_quantize(
+                model,
+                constraints={"effective_bits": 6.0},
+                quantization_formats=[mtq.FP8_DEFAULT_CFG, mtq.W4A8_AWQ_BETA_CFG],
+                data_loader=[SimpleLinear.get_input()],
+                forward_step=lambda m, batch: m(batch),
+                loss_func=lambda output, batch: output.sum(),
+            )
         assert not is_quantized(model)
         mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
         with pytest.raises(NotImplementedError, match="awq_lite"):
@@ -749,7 +759,7 @@ def _awq_on_a_sharded_fsdp2_model_job(rank, size):
 
 def test_awq_on_a_sharded_fsdp2_model_is_refused(cpu_dist_workers):
     """Each rank would fold its own AWQ scale into its shard: every rank refuses alike, before the
-    model changes, through ``mtq.quantize`` and ``mtq.calibrate``."""
+    model changes, through ``mtq.quantize``, ``mtq.auto_quantize`` and ``mtq.calibrate``."""
     cpu_dist_workers.run(_awq_on_a_sharded_fsdp2_model_job)
 
 
