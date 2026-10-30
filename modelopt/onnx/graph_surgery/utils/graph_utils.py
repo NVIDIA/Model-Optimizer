@@ -24,7 +24,7 @@ from collections.abc import Iterable
 import numpy as np
 import onnx
 import torch
-from onnx import TensorProto, numpy_helper
+from onnx import TensorProto, helper, numpy_helper
 
 from ...logging_config import logger
 from .dtype_conversion import fp16_to_bf16_array
@@ -1057,3 +1057,32 @@ def _node_inputs(node):
             for graph in attribute.graphs:
                 used.update(_captured_names(graph))
     return used
+
+
+def _set_axes(model, cache: GraphCache, node: onnx.NodeProto, axes, preferred_name: str) -> None:
+    """Attach axes using the model's default-domain Squeeze/Unsqueeze schema."""
+    versions = {o.domain: o.version for o in model.opset_import}
+    opset = versions.get("", versions.get("ai.onnx", 1))
+    if opset < 13:
+        node.attribute.append(
+            helper.make_attribute("axes", list(axes), attr_type=onnx.AttributeProto.INTS)
+        )
+    else:
+        axes_name = cache.unique_name(preferred_name)
+        model.graph.initializer.append(
+            numpy_helper.from_array(np.asarray(axes, dtype=np.int64), name=axes_name)
+        )
+        node.input.append(axes_name)
+
+
+def _subgraph_captures(graph: onnx.GraphProto) -> set[str]:
+    """Collect outer-scope values referenced inside this graph's nested subgraphs."""
+    captured: set[str] = set()
+    for node in graph.node:
+        for attribute in node.attribute:
+            if attribute.type == onnx.AttributeProto.GRAPH:
+                captured.update(_captured_names(attribute.g))
+            elif attribute.type == onnx.AttributeProto.GRAPHS:
+                for subgraph in attribute.graphs:
+                    captured.update(_captured_names(subgraph))
+    return captured
