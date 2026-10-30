@@ -111,6 +111,15 @@ def test_registered_wrapper_quantizes_up_and_down_proj():
     assert set(weight_attr_names(converted)) == {"up_proj", "down_proj"}
 
 
+def test_experts_marked_transposed_are_refused():
+    """The wrapper slices each expert's weight as (out_dim, in_dim), with nothing in the shapes to
+    tell a transposed layout apart, so experts transformers marks is_transposed are refused."""
+    experts = _ExpertsModel("eager").experts
+    experts.is_transposed = True
+    with pytest.raises(NotImplementedError, match="is_transposed"):
+        QuantModuleRegistry.convert(experts)
+
+
 def test_expert_index_recovery():
     """The eager forward names an up_proj slice's expert from its storage offset."""
     experts = QuantModuleRegistry.convert(_ExpertsModel("eager").experts)
