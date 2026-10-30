@@ -1052,6 +1052,14 @@ def auto_quantize(
         if isinstance(quantization_formats, str) or not isinstance(quantization_formats, Sequence):
             raise TypeError("`quantization_formats` must be a sequence of formats.")
         quantization_formats = list(quantization_formats)
+    plan = dist.recorded_distribution_plan(model)
+    if plan is not None and plan.is_expert_parallel:  # before anything converts the model
+        raise NotImplementedError(
+            f"auto_quantize does not support a model whose experts are sharded over {plan.ep_size} "
+            "ranks yet: its forwards would run the experts without the expert-parallel forwards "
+            "that quantization replaces and distributed_forward_loop restores. Quantize it with "
+            "mtq.quantize through distributed_forward_loop, or AutoQuantize in a single process."
+        )
 
     method_name, method_config = _parse_auto_quantize_method(method)
     is_kv_search = constraints is not None and constraints.get("cost_model") == COST_MODEL_KV_CACHE
