@@ -1387,11 +1387,11 @@ def test_a_load_refuses_what_it_cannot_load(
     match,
 ):
     """Before anything loads: a plan for another world; a quantized checkpoint, which FSDP2 would
-    read as stored, a VLM's whose remote code builds it as a causal LM with its language model
-    quantized included; a VLM, which FSDP2 would build through AutoModelForCausalLM, refused or as
-    its language model alone; anything but a plan; and the sharded loads' config, or an option only
-    the FSDP2 load takes, which from_pretrained would take for a model argument and fail far from
-    here, or drop."""
+    read as stored, even when only a VLM's language model is quantized and its remote code builds it
+    as a causal LM; a VLM, which FSDP2 would build through AutoModelForCausalLM, refused or as its
+    language model alone; anything but a plan; and the sharded loads' config, or an option only the
+    FSDP2 load takes, which from_pretrained would take for a model argument and fail far from here,
+    or drop."""
     run_as(2)
     config = serve(transformers.LlavaConfig() if checkpoint == "vlm" else LlamaConfig(**_TINY))
     if checkpoint == "quantized":
