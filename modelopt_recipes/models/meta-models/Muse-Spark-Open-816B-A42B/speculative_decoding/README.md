@@ -11,7 +11,9 @@ for [meta-models/Muse-Spark-Open-816B-A42B](https://huggingface.co/meta-models/M
 
 The launcher examples are under `tools/launcher/examples/meta-models/Muse-Spark-Open-816B-A42B/`.
 Stage 2 starts from the export of stage 1's checkpoint-390000, and the release is stage 2's
-checkpoint-25000. Both stages stream hidden states from the NVFP4 target,
+checkpoint-25000. Neither is the last checkpoint of its run, and the recipes keep only the last
+three, so stop each run once its checkpoint is written, or copy the checkpoint out. Both stages
+stream hidden states from the NVFP4 target,
 [meta-models/Muse-Spark-Open-816B-A42B-NVFP4](https://huggingface.co/meta-models/Muse-Spark-Open-816B-A42B-NVFP4),
 served by vLLM.
 
