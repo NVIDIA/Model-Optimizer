@@ -1620,8 +1620,8 @@ def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_st
 
 
 # The checkpoint formats load_and_prepare_ep dequantizes as it loads, beside unquantized ones (None).
-# mxfp4 is for experts stored in the standard layout.
-_EP_SOURCE_FORMATS = frozenset({None, "mxfp4"})
+# Not MXFP4: transformers dequantizes it into GPT-OSS's transposed expert layout, whatever the model's.
+_EP_SOURCE_FORMATS: frozenset[str | None] = frozenset({None})
 
 
 def _ckpt_quant_method(cfg):
@@ -1765,10 +1765,12 @@ def load_and_prepare_ep(
         if quant_method not in _EP_SOURCE_FORMATS:
             # transformers' own quantizer would load it as stored, for PTQ to treat as plain weights.
             dequantized = ", ".join(sorted(f for f in _EP_SOURCE_FORMATS if f))
+            loads = "unquantized checkpoints" + (
+                f" and dequantizes {dequantized}" if dequantized else ""
+            )
             raise NotImplementedError(
                 f"The expert-parallel load cannot dequantize a {quant_method!r} checkpoint: it loads "
-                f"unquantized checkpoints and dequantizes {dequantized}. Start from an unquantized copy "
-                "of the model."
+                f"{loads}. Start from an unquantized copy of the model."
             )
         # The swapped plan is this load's own: the caller's config keeps the plan its checkpoint declares.
         hf_config = copy.deepcopy(hf_config)
@@ -1892,17 +1894,6 @@ def load_and_prepare_ep(
         from_pretrained_kwargs["tp_plan"] = "auto"
     if attn_implementation is not None:
         from_pretrained_kwargs["attn_implementation"] = attn_implementation
-    if quant_method == "mxfp4":
-        # Native mxfp4 checkpoints (fused `gate_up_proj_blocks`/`_scales` + biases) must be
-        # DEQUANTIZED to bf16 on load so ModelOpt can insert nvfp4/fp8 quantizers on the fused bf16 experts
-        # (the a2a grouped_gemm expects bf16). transformers dequantizes blocks->bf16 during from_pretrained.
-        # NB: the single-process loader needed device_map="sequential" to dodge a CUDA illegal-access in the
-        # mxfp4 dequant under multi-GPU device_map="auto"; the EP path uses device_mesh (no device_map), so
-        # watch for an EP-shard-awareness issue in the dequant convert-op.
-        from transformers import Mxfp4Config
-
-        from_pretrained_kwargs["quantization_config"] = Mxfp4Config(dequantize=True)
-        print_rank_0("[ep] native mxfp4 checkpoint -> Mxfp4Config(dequantize=True) -> bf16")
     # DP=EP all-to-all: swap the ep_plan to our torch_a2a styles (torch_a2a_router emits GLOBAL ids
     # unmasked; torch_a2a_experts injects the EP process_group + skips the all-reduce) and select the
     # `torch_a2a` experts forward (NCCL all-to-all dispatch/combine around the quantizable
