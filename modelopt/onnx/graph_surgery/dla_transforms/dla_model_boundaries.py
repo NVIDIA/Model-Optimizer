@@ -329,31 +329,26 @@ def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=Fal
         for consumer in consumers:
             if _is_standard_node(consumer, local_functions, {"Unsqueeze"}):
                 output_shape = unsqueezed_shapes[id(consumer)]
-                if promoted_shape[-len(output_shape) :] == output_shape:
-                    old_output = consumer.output[0]
-                    for downstream, _ in cache.get_consumers(old_output):
-                        for index, name in enumerate(downstream.input):
-                            if name == old_output:
-                                downstream.input[index] = output
-                    replacements[id(consumer)] = []
-                else:
-                    target = add_initializer(
-                        graph,
-                        cache.unique_name((consumer.name or consumer.output[0]) + "_reshape_shape"),
-                        np.asarray(output_shape, dtype=np.int64),
-                        dtype=TensorProto.INT64,
-                        with_value_info=False,
+                target_shape = (
+                    promoted_shape
+                    if promoted_shape[-len(output_shape) :] == output_shape
+                    else output_shape
+                )
+                target = add_initializer(
+                    graph,
+                    cache.unique_name((consumer.name or consumer.output[0]) + "_reshape_shape"),
+                    np.asarray(target_shape, dtype=np.int64),
+                    dtype=TensorProto.INT64,
+                    with_value_info=False,
+                )
+                replacements[id(consumer)] = [
+                    helper.make_node(
+                        "Reshape",
+                        [output, target],
+                        list(consumer.output),
+                        name=cache.unique_name((consumer.name or consumer.output[0]) + "_reshape"),
                     )
-                    replacements[id(consumer)] = [
-                        helper.make_node(
-                            "Reshape",
-                            [output, target],
-                            list(consumer.output),
-                            name=cache.unique_name(
-                                (consumer.name or consumer.output[0]) + "_reshape"
-                            ),
-                        )
-                    ]
+                ]
             else:
                 for index, name in enumerate(consumer.input):
                     if name == value.name:
