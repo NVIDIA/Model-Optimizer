@@ -1771,6 +1771,13 @@ def load_and_prepare_ep(
             for cfg in (hf_config, *(getattr(hf_config, attr, None) for attr in _SUB_CONFIG_ATTRS)):
                 if cfg is not None:
                     vars(cfg).pop("quantization_config", None)
+                    if hasattr(cfg, "quantization_config"):
+                        # A class attribute or property, which the instance dict cannot clear.
+                        raise NotImplementedError(
+                            f"{type(cfg).__name__} keeps quantization_config off its instance, so "
+                            "this load cannot clear it, and transformers' own quantizer would "
+                            "compete with the decompressor. Decompress the checkpoint first."
+                        )
         ep_cfg = _ep_config(hf_config)  # for VLMs the plan lives on .text_config
         ep_plan = dict(getattr(ep_cfg, "base_model_ep_plan", None) or {})
         if not ep_plan:
@@ -1872,6 +1879,8 @@ def load_and_prepare_ep(
             from modelopt.torch.models import _onfly_decompress
 
             _onfly_decompress.check_compressed_keys(hf_config, ckpt_path)
+            # Minus "weight": a float format's anchor is .weight itself, and an unplaced plain weight
+            # is what the export has always carried as stored.
             compressed_names = set(_onfly_decompress.stored_names(hf_config)) - {"weight"}
 
     # Experts are sharded over ``ep`` and replicated over ``edp``; the dense part is replicated over
@@ -1948,7 +1957,8 @@ def load_and_prepare_ep(
         # for the export to carry.
         unplaced = record_unplaced_source_keys(model, ckpt_path)
         # The export would copy them as stored, and this load dropped the quantization_config that
-        # reads a compressed one, such as an MTP layer's experts.
+        # reads a compressed one, such as an MTP layer's experts. A suffix is enough to tell them:
+        # check_compressed_keys refused any compressed tensor outside the experts.
         if carried := [key for key in unplaced if key.rpartition(".")[2] in compressed_names]:
             raise NotImplementedError(
                 f"The checkpoint stores {len(carried)} compressed tensors the model has no parameter "

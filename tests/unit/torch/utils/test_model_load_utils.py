@@ -2244,7 +2244,8 @@ def test_a_compressed_checkpoint_a_spec_decompresses_as_it_loads_passes(
     checkpoint passes the format check and loads without its quantization_config, at every level,
     which would build transformers' own compressed-tensors quantizer to compete with the
     decompressor. The same checkpoint unmarked is refused, and the caller's config keeps its own.
-    So is one that compresses more than its experts, by the names it stores, before it loads."""
+    So is one that compresses more than its experts, by the names it stores, before it loads, and a
+    config whose class keeps quantization_config, which the load cannot clear."""
     from safetensors.torch import save_file
 
     from modelopt.torch.models import _onfly_decompress
@@ -2293,6 +2294,15 @@ def test_a_compressed_checkpoint_a_spec_decompresses_as_it_loads_passes(
         assert not hasattr(level, "quantization_config")
     assert config.quantization_config is text.quantization_config is quantization_config
     assert llm.quantization_config is quantization_config
+
+    # A config class that keeps quantization_config as a class attribute cannot have it cleared.
+    typed_config = type("_Typed", (SimpleNamespace,), {"quantization_config": quantization_config})
+    typed = typed_config(text_config=SimpleNamespace(base_model_ep_plan=_EP_PLAN))
+    _onfly_decompress._mark(typed, tuple(stored_as))
+    loaded.clear()
+    with pytest.raises(NotImplementedError, match="keeps quantization_config off its instance"):
+        load_and_prepare_ep(str(tmp_path / "experts"), plan, hf_config=typed)
+    assert not loaded
 
 
 @pytest.mark.parametrize("compressed", [False, True], ids=["uncompressed", "compressed"])
