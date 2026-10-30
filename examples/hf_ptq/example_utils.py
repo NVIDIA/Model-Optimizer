@@ -140,7 +140,8 @@ def validate_fsdp2_supported(args, config):
     if dist_utils.size() > 1 and (awq := _awq_calibrations(args)):
         issues.append(
             f"AWQ calibration ({', '.join(sorted(awq))}) on more than one rank: each rank would fold "
-            "its own smoothing scale into its weight shard (use one GPU, or a non-AWQ format)"
+            "its own smoothing scale into its weight shard (drop --use_fsdp2, run on one rank, or "
+            "use a non-AWQ format)"
         )
     if not issues and checkpoint_has_mtp(config.model_type, args.local_checkpoint_path):
         issues.append("Nemotron-H MTP (auxiliary modules are not constructed by the FSDP2 loader)")

@@ -98,7 +98,9 @@ Changelog
 - Fix QAT of Hugging Face fused MoE experts with non-reentrant activation checkpointing, as in the ``examples/llm_qat`` FSDP2 config: the experts' ``F.linear`` interception stayed installed after the recompute, and training crashed with ``aten.mm.default got mixed torch.Tensor and DTensor``.
 - Fix quantization-aware training of Diffusers models failing in the backward pass with ``NotImplementedError`` once their attention modules are quantized, with or without MHA quantization.
 - Fix weight calibration, GPTQ and weight folding of Hugging Face fused MoE experts sharded by the expert parallelism of Transformers 5.16 and later, which used another rank's expert weights on every rank but the first.
-- ``export_hf_checkpoint`` of an FSDP2 model quantized with W4A8 AWQ (``W4A8_AWQ_BETA_CFG``) no longer fails with ``AttributeError: 'SequentialQuantizer' object has no attribute '_fake_quant'``; AWQ calibration of an FSDP2 model sharded over more than one rank, whose ranks would fold different smoothing scales into their weight shards, is rejected with ``NotImplementedError`` until it is supported, as is ``mtq.auto_quantize`` with an AWQ candidate, such as its default ``NVFP4_AWQ_LITE_CFG``, before the search starts. ``mtq.compress`` now refuses W4A8 weights with ``NotImplementedError``, since a compressed W4A8 model could neither run nor be reloaded.
+- Fix ``export_hf_checkpoint`` of an FSDP2 model quantized with W4A8 AWQ (``W4A8_AWQ_BETA_CFG``), which failed with an ``AttributeError`` on every rank.
+- AWQ calibration (``awq_lite``, ``awq_full``) of an FSDP2 model sharded over more than one rank is now rejected with ``NotImplementedError`` by ``mtq.quantize``, ``mtq.calibrate`` and ``mtq.auto_quantize`` (before its search starts, its default formats included), and by ``examples/hf_ptq --use_fsdp2`` before loading the model: each rank would fold a different smoothing scale into its weight shard. Calibrate in a single process, or use a non-AWQ algorithm.
+- ``mtq.compress`` now rejects W4A8 weights with ``NotImplementedError``: a compressed W4A8 model could neither run nor be reloaded.
 
 0.48.0 (2026-10-xx)
 ^^^^^^^^^^^^^^^^^^^
