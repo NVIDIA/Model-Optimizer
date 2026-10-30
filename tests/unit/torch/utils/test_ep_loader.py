@@ -31,6 +31,7 @@ from unittest import mock
 import pytest
 import torch
 from _test_utils.torch.distributed.utils import bounded_collectives
+from _test_utils.torch.moe_models import model_with_decoder_at
 from packaging.version import Version
 from torch import nn
 
@@ -53,59 +54,6 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _transformers_mesh_builder,
     load_and_prepare_ep,
 )
-
-# ----------------------------------------------------------------------------------- tiny MoE
-
-
-class _Experts(nn.Module):
-    """A layer's routed experts as one grouped-GEMM container (every expert in fused tensors)."""
-
-    def __init__(self):
-        super().__init__()
-        self.gate_up_proj = nn.Parameter(torch.zeros(4, 4, 2))
-        self.down_proj = nn.Parameter(torch.zeros(4, 2, 2))
-        self.weight_quantizer = nn.Identity()  # quantizer insertion adds children like this
-
-    def forward(self, hidden_states, top_k_index, top_k_weights, process_group=None):
-        return hidden_states
-
-
-class _SharedExperts(nn.Module):
-    """The always-on shared expert MLP: dense, replicated on every rank."""
-
-    def __init__(self):
-        super().__init__()
-        self.gate_up_proj = nn.Linear(2, 4, bias=False)
-
-    def forward(self, hidden_states):
-        return hidden_states
-
-
-class _MoeLayer(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.self_attn = nn.Linear(2, 2)
-        self.mlp = nn.Module()
-        self.mlp.gate = nn.Linear(2, 4, bias=False)  # the router
-        self.mlp.experts = _Experts()
-        self.mlp.shared_experts = _SharedExperts()
-
-
-def _model_with_decoder_at(prefix):
-    """A two-layer MoE whose decoder (``layers.<i>``) sits under ``prefix`` (``""``: the decoder)."""
-    decoder = nn.Module()
-    decoder.embed_tokens = nn.Embedding(8, 2)
-    decoder.layers = nn.ModuleList(_MoeLayer() for _ in range(2))
-    if not prefix:
-        return decoder
-    root = parent = nn.Module()
-    *path, leaf = prefix.rstrip(".").split(".")
-    for name in path:
-        parent.add_module(name, nn.Module())
-        parent = getattr(parent, name)
-    parent.add_module(leaf, decoder)
-    return root
-
 
 # ------------------------------------------------------------------------------- the plan
 
@@ -316,7 +264,7 @@ def test_a_plan_whose_expert_containers_match_no_module_is_refused(ep_world_of_t
     class _Loader:
         @staticmethod
         def from_pretrained(path, **kwargs):
-            return _model_with_decoder_at("model.")
+            return model_with_decoder_at("model.")
 
     monkeypatch.setattr(
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
@@ -342,7 +290,7 @@ def test_the_model_keeps_the_plan_its_checkpoint_declares(
     class _PastError(Exception):
         """Raised by the load's next check."""
 
-    model = _model_with_decoder_at("model.")
+    model = model_with_decoder_at("model.")
 
     class _Loader:
         @staticmethod
@@ -476,7 +424,9 @@ def test_expert_containers_and_their_children_get_the_expert_state():
     """Everything else, the root and the containers' own parents included, gets the dense state; so
     does a sibling whose name merely starts with a container's (Qwen2-MoE keeps
     ``shared_expert_gate`` beside ``shared_expert``)."""
-    model = _model_with_decoder_at("model.")
+    model = model_with_decoder_at("model.")
+    for layer in model.model.layers:
+        layer.mlp.experts.weight_quantizer = nn.Identity()  # a child, as quantizer insertion adds
     model.model.layers[0].mlp.experts_gate = nn.Linear(2, 1)
     experts = {f"model.layers.{i}.mlp.experts": model.model.layers[i].mlp.experts for i in (0, 1)}
     dense, expert = object(), object()
@@ -504,7 +454,7 @@ def test_expert_containers_and_their_children_get_the_expert_state():
 def test_the_expert_parallel_mesh_comes_with_an_expert_parallel_plan_only(plan, is_expert_parallel):
     """An expert-parallel plan: the mesh transformers kept on the model. Any other model has none,
     even with a device mesh on it, as a load through from_pretrained's own TP can leave."""
-    model = _model_with_decoder_at("model.")
+    model = model_with_decoder_at("model.")
     if plan is not None:
         set_distribution_plan(model, plan)
     model._device_mesh = mesh = object()
@@ -515,7 +465,7 @@ def test_the_expert_parallel_mesh_comes_with_an_expert_parallel_plan_only(plan, 
 def test_an_expert_parallel_model_without_its_mesh_is_refused():
     """A model recorded expert-parallel that load_and_prepare_ep did not load has no mesh for
     calibration to re-install the all-to-all forwards over; it is refused by name."""
-    model = _model_with_decoder_at("model.")
+    model = model_with_decoder_at("model.")
     set_distribution_plan(model, DistributionPlan(2, ep_size=2))
 
     with pytest.raises(RuntimeError, match="carries no device mesh"):
@@ -705,7 +655,7 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
         # No rank has a GPU here: the others are given theirs.
         patches.append(mock.patch.object(model_load_utils, "_has_own_gpu", return_value=True))
     if failure in ("load", "record"):
-        loaded = _model_with_decoder_at("model.")
+        loaded = model_with_decoder_at("model.")
         load = fail if failure == "load" and fails_here else (lambda path, **kwargs: loaded)
         loader = SimpleNamespace(__name__="Loader", from_pretrained=load)
         record = fail if failure == "record" and fails_here else None
