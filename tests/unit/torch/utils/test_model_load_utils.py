@@ -1484,6 +1484,30 @@ def test_an_automatic_layout_says_so_when_it_refuses_a_placement(
 
 
 @pytest.mark.parametrize(
+    ("checkpoint", "match"),
+    [("quantized", "dequantize"), ("mtp", "MTP head")],
+    ids=["quantized", "mtp"],
+)
+def test_a_measured_layout_names_the_way_back_when_it_refuses_a_checkpoint(
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, checkpoint, match
+):
+    """Nothing asked for the layout rank 0's GPU memory chose, so a checkpoint the FSDP2 load cannot
+    take is refused with the way to load it whole, as every refusal of that load says."""
+    run_as(2, rank=1)
+    config = serve(LlamaConfig(**_TINY))
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: 1)
+    if checkpoint == "quantized":
+        config.quantization_config = {"quant_method": "fp8"}
+    else:
+        monkeypatch.setattr(models_hf, "checkpoint_has_mtp", lambda *a: True)
+
+    with pytest.raises(NotImplementedError, match=match) as refused:
+        load_pretrained(str(tmp_path))
+    assert "MODELOPT_FSDP_SIZE=1" in str(refused.value)
+    assert loaders == {}
+
+
+@pytest.mark.parametrize(
     ("distribution", "options", "error", "match"),
     [
         (DistributionPlan(4), {}, ValueError, "is for 4 ranks"),
