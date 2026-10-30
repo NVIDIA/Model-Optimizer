@@ -1749,6 +1749,16 @@ def load_and_prepare_ep(
             f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}."
         )
     world_size, ep_degree, edp = plan.world_size, plan.ep_size, plan.edp
+    # The ep_plan styles this load keeps: grouped_gemm, and those it swaps for its torch_a2a styles
+    # (torch_a2a_router emits GLOBAL ids unmasked; torch_a2a_experts injects the EP process_group +
+    # skips the all-reduce). nemotron_h's logits-only gate has no ep_router entry, so its
+    # nemotron_experts_ep also maps to torch_a2a_experts. The checks and the swapped plan both read it.
+    swap = {
+        "ep_router": "torch_a2a_router",
+        "moe_tp_experts": "torch_a2a_experts",
+        "nemotron_experts_ep": "torch_a2a_experts",
+    }
+    kept_styles = {"grouped_gemm", *swap}
     # Each rank checks its own transformers, the config it reads or was handed, and the plan against
     # it: one refusing fails every rank here, before the checkpoint's fetch and the meshes.
     with _refused_together("the expert-parallel load's checks", alone=False):
@@ -1807,7 +1817,7 @@ def load_and_prepare_ep(
         dropped = sorted(
             name
             for name, style in ep_plan.items()
-            if style not in ("grouped_gemm", "ep_router", *_EXPERTS_STYLES)
+            if style not in kept_styles
             and name not in containers
             and any(name.startswith(key + ".") for key in containers)
         )
@@ -1900,23 +1910,14 @@ def load_and_prepare_ep(
         from_pretrained_kwargs["tp_plan"] = "auto"
     if attn_implementation is not None:
         from_pretrained_kwargs["attn_implementation"] = attn_implementation
-    # DP=EP all-to-all: swap the ep_plan to our torch_a2a styles (torch_a2a_router emits GLOBAL ids
-    # unmasked; torch_a2a_experts injects the EP process_group + skips the all-reduce) and select the
+    # DP=EP all-to-all: swap the ep_plan to our torch_a2a styles (``swap`` above) and select the
     # `torch_a2a` experts forward (NCCL all-to-all dispatch/combine around the quantizable
     # _grouped_linear). Tokens are routed to the expert-owning rank by all-to-all instead of every rank
-    # computing all tokens + all-reduce. Requires per-rank (data-parallel) calib data. nemotron_h's
-    # logits-only gate has no ep_router entry, so its nemotron_experts_ep also maps to torch_a2a_experts.
+    # computing all tokens + all-reduce. Requires per-rank (data-parallel) calib data.
     register_torch_a2a()  # idempotent; register the experts forward + the two styles, right before use
-    swap = {
-        "ep_router": "torch_a2a_router",
-        "moe_tp_experts": "torch_a2a_experts",
-        "nemotron_experts_ep": "torch_a2a_experts",
-    }
     # Keep expert-related entries (grouped_gemm expert params + the router/experts styles); DROP the TP
     # styles (a2a builds no TP group for them -> would shard attention across the wrong mesh).
-    swapped_plan = {
-        k: swap.get(v, v) for k, v in ep_plan.items() if v in swap or v == "grouped_gemm"
-    }
+    swapped_plan = {k: swap.get(v, v) for k, v in ep_plan.items() if v in kept_styles}
     # Tag every routed-experts CONTAINER torch_a2a_experts (injects the EP process_group + marks the
     # routed expert), found as the distribution plan's decision finds them: some plans tag only the
     # expert PARAMS grouped_gemm, and name the container through their parents.
