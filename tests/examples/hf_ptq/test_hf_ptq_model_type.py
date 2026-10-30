@@ -24,6 +24,16 @@ import torch
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
 
 
+class _Model(torch.nn.Module):
+    """A model whose ``generate`` is ``generate``: the previews read the module's distribution plan."""
+
+    def __init__(self, generate, config=None):
+        super().__init__()
+        self.generate = generate
+        if config is not None:
+            self.config = config
+
+
 @pytest.fixture
 def hf_ptq(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.syspath_prepend(str(_EXAMPLES_DIR))
@@ -43,7 +53,7 @@ def hf_ptq(monkeypatch: pytest.MonkeyPatch):
 )
 def test_pre_quantize_generation_skip(hf_ptq, model_type: str, skips_generation: bool):
     generate_calls = []
-    full_model = SimpleNamespace(generate=lambda *args, **kwargs: generate_calls.append(1) or "out")
+    full_model = _Model(lambda *args, **kwargs: generate_calls.append(1) or "out")
     args = SimpleNamespace(specdec_offline_dataset=None, skip_generate=False)
     batch = {"input_ids": torch.ones(2, 4, dtype=torch.long)}
 
@@ -58,7 +68,7 @@ def test_pre_quantize_generation_skip(hf_ptq, model_type: str, skips_generation:
 )
 def test_pre_quantize_preview_removes_padding(hf_ptq, ids, mask):
     calls = []
-    model = SimpleNamespace(generate=lambda ids, **kwargs: calls.append((ids, kwargs)) or ids)
+    model = _Model(lambda ids, **kwargs: calls.append((ids, kwargs)) or ids)
     args = SimpleNamespace(specdec_offline_dataset=None, skip_generate=False)
     batch = {"input_ids": torch.tensor([ids]), "attention_mask": torch.tensor([mask])}
     prompt, attention_mask, _ = hf_ptq.pre_quantize(args, model, "llama", None, [batch], False)
@@ -122,9 +132,7 @@ def test_post_quantize_preview_keeps_whole_answer(
 ):
     """The preview must decode the answer, not slice a prompt-length prefix off it."""
     monkeypatch.setattr(hf_ptq, "export_quantized", lambda *args, **kwargs: None)
-    full_model = SimpleNamespace(
-        config=config, generate=lambda *args, **kwargs: torch.tensor(generated)
-    )
+    full_model = _Model(lambda *args, **kwargs: torch.tensor(generated), config)
     tokenizer = SimpleNamespace(
         batch_decode=lambda ids, **kwargs: [" ".join(map(str, row.tolist())) for row in ids]
     )
