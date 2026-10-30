@@ -22,6 +22,7 @@ import onnx_graphsurgeon as gs
 import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.export import (
     FP8QuantExporter,
@@ -541,6 +542,50 @@ class TestFP8QuantExporter:
             if initializer.name == scale.name
         )
         assert output_scale.data_type == TensorProto.BFLOAT16
+
+    @pytest.mark.parametrize("compute_dtype", [np.float32, np.float16])
+    def test_fp8_packing_preserves_clipping_and_casts(self, compute_dtype):
+        weights = gs.Constant(
+            "weight", np.array([[1.0, 0.0, -1.0], [0.5, 0.25, -0.25]], dtype=np.float32)
+        )
+        scale = gs.Constant("linear/weight_quantizer/scale", np.array(0.5 / 448, dtype=np.float32))
+        q = gs.Variable("q", dtype=TensorProto.FLOAT8E4M3FN, shape=(2, 3))
+        dq = gs.Variable("dq", dtype=np.float32, shape=(2, 3))
+        cast = gs.Variable("cast", dtype=compute_dtype, shape=(2, 3))
+        transposed = gs.Variable("transposed", dtype=compute_dtype, shape=(3, 2))
+        inputs = gs.Variable("inputs", dtype=compute_dtype, shape=(1, 3))
+        output = gs.Variable("output", dtype=compute_dtype, shape=(1, 2))
+        graph = gs.Graph(
+            nodes=[
+                gs.Node(op="TRT_FP8QuantizeLinear", inputs=[weights, scale], outputs=[q]),
+                gs.Node(op="TRT_FP8DequantizeLinear", inputs=[q, scale], outputs=[dq]),
+                gs.Node(
+                    op="Cast",
+                    inputs=[dq],
+                    outputs=[cast],
+                    attrs={
+                        "to": TensorProto.FLOAT16
+                        if compute_dtype == np.float16
+                        else TensorProto.FLOAT
+                    },
+                ),
+                gs.Node(
+                    op="Transpose", inputs=[cast], outputs=[transposed], attrs={"perm": [1, 0]}
+                ),
+                gs.Node(op="MatMul", inputs=[inputs, transposed], outputs=[output]),
+            ],
+            inputs=[inputs],
+            outputs=[output],
+            opset=23,
+        )
+
+        converted = FP8QuantExporter.compress_weights(gs.export_onnx(graph))
+        onnx.checker.check_model(converted, full_check=True)
+        actual = ReferenceEvaluator(converted).run(
+            None, {"inputs": np.array([[1.0, 2.0, 3.0]], dtype=compute_dtype)}
+        )[0]
+        assert actual.dtype == compute_dtype
+        np.testing.assert_allclose(actual, np.array([[-1.0, 0.25]], dtype=compute_dtype))
 
 
 class TestMXFP8QuantExporter:
