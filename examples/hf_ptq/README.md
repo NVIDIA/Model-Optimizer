@@ -677,6 +677,12 @@ torchrun --nproc_per_node=<num_gpus_per_node> \
 
 To run across nodes, add the `--nnodes`, `--node_rank`, `--master_addr` and `--master_port` flags shown in [Manual (run on each node)](#manual-run-on-each-node). `--calib_size` is the total over all ranks.
 
+Under Slurm, [`slurm/multinode_ep_ptq.slurm`](./slurm/multinode_ep_ptq.slurm) is a ready-to-run example that quantizes Qwen3-235B-A22B to NVFP4 across nodes. Edit its `CONFIG` block and submit:
+
+```bash
+sbatch --nodes=2 slurm/multinode_ep_ptq.slurm
+```
+
 Two environment variables override the automatic distribution plan:
 
 | Variable | Default | Effect |
