@@ -927,27 +927,36 @@ def process_group(monkeypatch, a_gpu):
 
 
 @pytest.mark.parametrize(
-    ("device_map", "gpus", "placed"),
+    ("passed", "gpus", "placed"),
     [
-        (None, 4, {"device_map": {"": "cuda:1"}}),
-        ("cpu", 4, {"device_map": "cpu"}),
-        (None, 1, {}),
+        ({}, 4, {"device_map": {"": "cuda:1"}}),
+        ({"device_map": "cpu"}, 4, {"device_map": "cpu"}),
+        ({"device_map": None}, 4, {"device_map": None}),
+        ({}, 1, {}),
+        ({"mp_policy": None, "cpu_offload": None}, 4, {"device_map": {"": "cuda:1"}}),
     ],
-    ids=["defaults_to_the_rank_gpu", "caller_placement_wins", "no_gpu_of_its_own"],
+    ids=[
+        "defaults_to_the_rank_gpu",
+        "caller_placement_wins",
+        "none_loads_on_the_cpu",
+        "no_gpu_of_its_own",
+        "fsdp2_options_at_none",
+    ],
 )
 def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
-    run_as, serve, loaders, auto_class, monkeypatch, tmp_path, device_map, gpus, placed
+    run_as, serve, loaders, auto_class, monkeypatch, tmp_path, passed, gpus, placed
 ):
     """Each rank takes the whole model onto its own GPU; "auto" would let every rank's accelerate
-    pick the same idle GPU. A rank with none of its own, on a host with fewer GPUs than ranks, is
-    left to from_pretrained's placement rather than handed a device it does not have."""
+    pick the same idle GPU. device_map=None is from_pretrained's own: a load on the CPU, which the
+    caller places, as hf_ptq does. A rank with none of its own, on a host with fewer GPUs than
+    ranks, is left to from_pretrained's placement rather than handed a device it does not have. The
+    FSDP2 load's own options at None, their default, ask nothing and do not reach from_pretrained."""
     run_as(4, rank=1)
     serve(LlamaConfig(**_TINY))
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: gpus)
-    kwargs = {} if device_map is None else {"device_map": device_map}
 
-    model = load_pretrained(str(tmp_path), auto_class, **kwargs)
+    model = load_pretrained(str(tmp_path), auto_class, **passed)
 
     assert auto_class.calls == [placed]
     assert distribution_plan(model) == DistributionPlan(4)

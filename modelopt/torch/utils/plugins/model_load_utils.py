@@ -625,7 +625,8 @@ def load_pretrained(
       stored, so it refuses a quantized checkpoint.
     * otherwise ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
       ``AutoModelForCausalLM``), placed as ``kwargs`` say. Every rank of a distributed run gets the
-      whole model, ``device_map`` defaulting to the rank's own GPU when it has one.
+      whole model, onto the rank's own GPU when it has one and no ``device_map`` is passed;
+      ``device_map=None``, ``from_pretrained``'s own, loads it on the CPU for the caller to place.
 
     A plan with ``ep_size > 1`` raises: no load here shards the routed experts. On a distributed run
     every rank loads the plan rank 0 was handed, and a refusal on any rank, of its own arguments, of a
@@ -802,6 +803,12 @@ def load_pretrained(
         # Options only the FSDP2 load takes would reach from_pretrained, which has no use for them.
         shared = {"trust_remote_code", "attn_implementation", "hf_config"}  # hf_config: see above
         own = _SHARDED_LOAD_OPTIONS[_FSDP2] - shared
+        if route is None:
+            # mp_policy or cpu_offload passed as None, their default, asks nothing of a whole load;
+            # broadcast_chunk_size=None does ask, to broadcast all of a source's layers at once.
+            for name in own - {"broadcast_chunk_size"}:
+                if name in kwargs and kwargs[name] is None:
+                    del kwargs[name]
         if route is None and (sharded := sorted(set(kwargs) & own)):
             raise TypeError(
                 f"{sharded} only apply to the FSDP2 load, but {plan!r} gives every rank the whole "
