@@ -597,9 +597,10 @@ def load_pretrained(
 
     * ``dense="fsdp"``: a causal LM FSDP2-sharded over the whole process group, each rank reading its
       own layers (:func:`parallel_load_and_prepare_fsdp2`, whose ``cpu_offload``, ``mp_policy`` and
-      ``broadcast_chunk_size`` ``kwargs`` may set). A single process sets a group of one up for it,
-      which needs ``torchrun --nproc_per_node=1``. It reads the checkpoint's tensors as stored, so it
-      refuses a quantized checkpoint.
+      ``broadcast_chunk_size`` ``kwargs`` may set). A single process, or a group of one, reads no
+      knob and takes this load only from a plan passed as ``distribution``; it sets a group of one up
+      for it, which needs ``torchrun --nproc_per_node=1``. It reads the checkpoint's tensors as
+      stored, so it refuses a quantized checkpoint.
     * otherwise ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
       ``AutoModelForCausalLM``), placed as ``kwargs`` say. Every rank of a distributed run gets the
       whole model, ``device_map`` defaulting to the rank's GPU when there is one.
@@ -608,11 +609,11 @@ def load_pretrained(
     every rank loads the plan rank 0 was handed, and a refusal on any rank, of its own arguments, of a
     checkpoint it cannot see or of the config it reads, raises on every rank. A launch whose processes
     set no process group up (a launcher that only exports ``WORLD_SIZE``) has each process load as a
-    single process does, the whole model with no plan to agree on; a plan for several ranks and a
-    sharded load need the group, so there they are refused: set it up first, with
-    :func:`~modelopt.torch.utils.distributed.distributed_run`. The plan is recorded on the model
-    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), where calibration and export
-    read it back.
+    single process does, the whole model with no plan to agree on and no ``device_map`` default; a
+    plan for several ranks and a sharded load need the group, so there they are refused: set it up
+    first, with :func:`~modelopt.torch.utils.distributed.distributed_run`. The plan is recorded on
+    the model (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), where calibration
+    and export read it back.
 
     A sharded load builds the model class and places it itself. Besides its own options it takes
     ``trust_remote_code``, ``attn_implementation`` and ``hf_config``, and refuses any other keyword
