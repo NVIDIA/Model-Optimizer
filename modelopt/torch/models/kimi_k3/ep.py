@@ -340,6 +340,10 @@ def prepare(
     bf16 fused params, and the compressed-tensors ``quantization_config`` is dropped. ModelOpt then
     inserts/calibrates/folds the fp8/nvfp4 quantizers on those bf16 params. That is ~4x the packed HBM
     (the memory bottleneck), but PTQ needs the bf16 weights.
+
+    The patches are process-wide and stay after the load: a later load of the same checkpoint in this
+    process, through a class the sharded loads refuse (such as ``AutoModel``), runs on the patched
+    code. The plan decision itself never makes such a load.
     """
     # Not at module scope: the model registry imports this module, and modelopt.torch.utils.moe
     # imports the registry.
