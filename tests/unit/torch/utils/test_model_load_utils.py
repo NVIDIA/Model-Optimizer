@@ -2295,6 +2295,59 @@ def test_a_compressed_checkpoint_a_spec_decompresses_as_it_loads_passes(
     assert llm.quantization_config is quantization_config
 
 
+@pytest.mark.parametrize("compressed", [False, True], ids=["uncompressed", "compressed"])
+def test_a_decompressed_load_refuses_compressed_tensors_its_model_does_not_place(
+    ep_world_of_two, monkeypatch, tmp_path, compressed
+):
+    """The export copies the tensors the model has no parameter for as stored, and this load dropped
+    the quantization_config that reads a compressed one: an MTP layer's compressed experts are
+    refused, its uncompressed weights carried as before."""
+    from safetensors.torch import save_file
+
+    from modelopt.torch.models import _onfly_decompress
+
+    class _PastError(Exception):
+        """Raised by the load's next check."""
+
+    def next_check(*args, **kwargs):
+        raise _PastError
+
+    model = _model_with_decoder_at("model.")
+
+    class _Loader:
+        @staticmethod
+        def from_pretrained(path, config, **kwargs):
+            model.config = copy.deepcopy(config)
+            return model
+
+    mtp = "model.layers.2.mlp.experts.0.up_proj"  # past the model's two layers
+    stored_as = {"weight_packed": torch.int32, "weight_scale": torch.bfloat16}
+    names = list(stored_as) if compressed else ["weight"]
+    stored = {f"{m}.{n}": torch.ones(1, dtype=d) for m in (mtp,) for n, d in stored_as.items()}
+    save_file(stored, str(tmp_path / "model.safetensors"))
+    monkeypatch.setattr(
+        "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
+    )
+    monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
+    monkeypatch.setattr(
+        model_load_utils, "unplaced_source_keys", lambda *args: [f"{mtp}.{n}" for n in names]
+    )
+    monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
+    config = SimpleNamespace(
+        num_experts=8,
+        base_model_ep_plan=dict(_EP_PLAN),
+        quantization_config={"quant_method": "compressed-tensors"},
+    )
+    _onfly_decompress._mark(config, tuple(stored_as))
+
+    with pytest.raises(NotImplementedError if compressed else _PastError) as refused:
+        load_and_prepare_ep(str(tmp_path), DistributionPlan(2, ep_size=2), hf_config=config)
+    if compressed:
+        assert f"2 compressed tensors the model has no parameter for, such as {mtp}" in str(
+            refused.value
+        )
+
+
 # ----------------------------------------------------------------------- _seed_parallel_states
 
 

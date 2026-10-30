@@ -1639,7 +1639,7 @@ def _ckpt_quant_method(cfg):
     or ``None`` if the checkpoint isn't natively quantized. Checks the top config, then a VLM's
     ``text_config`` or ``llm_config``.
     """
-    for c in (cfg, getattr(cfg, "text_config", None), getattr(cfg, "llm_config", None)):
+    for c in (cfg, *(getattr(cfg, attr, None) for attr in _SUB_CONFIG_ATTRS)):
         qc = getattr(c, "quantization_config", None)
         m = qc.get("quant_method") if isinstance(qc, dict) else getattr(qc, "quant_method", None)
         if m:
@@ -1768,8 +1768,8 @@ def load_and_prepare_ep(
             # 5.11 transformers takes any quantization_config attribute, None too, for a quantized
             # checkpoint. Every level _ckpt_quant_method reads is cleared.
             for cfg in (hf_config, *(getattr(hf_config, attr, None) for attr in _SUB_CONFIG_ATTRS)):
-                if cfg is not None and hasattr(cfg, "quantization_config"):
-                    del cfg.quantization_config
+                if cfg is not None:
+                    vars(cfg).pop("quantization_config", None)
         ep_cfg = _ep_config(hf_config)  # for VLMs the plan lives on .text_config
         ep_plan = dict(getattr(ep_cfg, "base_model_ep_plan", None) or {})
         if not ep_plan:
@@ -1861,6 +1861,7 @@ def load_and_prepare_ep(
     dtype = getattr(hf_config, "dtype", None) or torch.bfloat16
     # The load and the export both read the local snapshot, made only once the checks pass, so a
     # refused load downloads nothing.
+    compressed_names: set[str] = set()
     with _refused_together("the local checkpoint", alone=False):
         _, ckpt_path = ensure_local_checkpoint(ckpt_path)
         if _decompressed_as_loaded(hf_config):
@@ -1870,6 +1871,7 @@ def load_and_prepare_ep(
             from modelopt.torch.models import _onfly_decompress
 
             _onfly_decompress.check_compressed_keys(hf_config, ckpt_path)
+            compressed_names = set(_onfly_decompress.stored_names(hf_config)) - {"weight"}
 
     # Experts are sharded over ``ep`` and replicated over ``edp``; the dense part is replicated over
     # the whole world (``dp``).
@@ -1943,7 +1945,15 @@ def load_and_prepare_ep(
 
         # The checkpoint tensors the model has no parameter for (an MTP head), worked out once, at load,
         # for the export to carry.
-        record_unplaced_source_keys(model, ckpt_path)
+        unplaced = record_unplaced_source_keys(model, ckpt_path)
+        # The export would copy them as stored, and this load dropped the quantization_config that
+        # reads a compressed one, such as an MTP layer's experts.
+        if carried := [key for key in unplaced if key.rpartition(".")[2] in compressed_names]:
+            raise NotImplementedError(
+                f"The checkpoint stores {len(carried)} compressed tensors the model has no parameter "
+                f"for, such as {carried[0]}: the export would copy them as stored, with no "
+                "quantization_config to read them. Decompress the checkpoint first."
+            )
 
         # The model carries the ep submesh, for calibration to re-install the all-to-all forwards
         # over (expert_parallel_mesh); transformers sets it differently by release.
