@@ -1117,6 +1117,29 @@ def test_typed_training_section_accepts_hf_extras(tmp_path):
     assert dumped["learning_rate"] == 1e-4
 
 
+@pytest.mark.parametrize(
+    ("extra", "valid"),
+    [
+        ("  data_echo_uses: 4\n  dataloader_drop_last: true\n", True),
+        ("  data_echo_uses: 4\n", False),  # a short last batch would derail the echo plan
+        ("  data_echo_uses: 4\n  dataloader_drop_last: true\n  cp_size: 2\n", False),
+    ],
+)
+def test_training_section_validates_data_echo(tmp_path, extra, valid):
+    """Data echoing needs whole batches, and each rank's own examples (no context parallelism)."""
+    recipe_path = tmp_path / "eagle.yml"
+    recipe_path.write_text(
+        "metadata:\n  recipe_type: speculative_eagle\ntraining:\n"
+        + extra
+        + "eagle:\n  eagle_decoder_type: llama\n"
+    )
+    if valid:
+        assert load_recipe(recipe_path).training.data_echo_uses == 4
+    else:
+        with pytest.raises(Exception):  # pydantic.ValidationError
+            load_recipe(recipe_path)
+
+
 # ---------------------------------------------------------------------------
 # CLI-style dotlist overrides
 # ---------------------------------------------------------------------------

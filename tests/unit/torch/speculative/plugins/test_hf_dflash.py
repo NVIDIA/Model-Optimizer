@@ -21,6 +21,7 @@ GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 import json
 import logging
 import os
+from collections import Counter
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -1407,7 +1408,10 @@ class TestAnchorSamplingStaticShape:
         )
         assert anchors.shape[1] == SEQ_LEN - BLOCK_SIZE + 1, "the sequence should bind here"
 
-    def test_static_sampling_does_not_sync_on_the_batch(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "anchor_key", [None, torch.tensor([[11, 0], [12, 3]])], ids=["random", "keyed"]
+    )
+    def test_static_sampling_does_not_sync_on_the_batch(self, monkeypatch, anchor_key):
         """With static shapes, anchor sampling must not read the batch back to the host."""
         model = self._model(num_anchors=8, static=True)
 
@@ -1417,7 +1421,68 @@ class TestAnchorSamplingStaticShape:
         # Implicit reads too: int(t) and `if t:` sync as surely as t.item() does.
         for name in ("item", "tolist", "__int__", "__float__", "__bool__", "__index__"):
             monkeypatch.setattr(torch.Tensor, name, host_read)
-        model._sample_anchor_positions(SEQ_LEN, self._loss_mask((13, 5)), self.DEVICE)
+        model._sample_anchor_positions(
+            SEQ_LEN, self._loss_mask((13, 5)), self.DEVICE, anchor_key=anchor_key
+        )
+
+    @pytest.mark.parametrize("static", [False, True], ids=["eager", "static"])
+    def test_echo_keys_cover_each_row_before_repeating(self, static):
+        """The uses of one sample take consecutive slices of one order: no anchor repeats
+        before the row's valid positions are used up, and each use keeps as many as a random draw."""
+        model = self._model(num_anchors=3, static=static)
+        loss_mask = self._loss_mask((13, 7))
+        uses = 4
+        _, random_keep = model._sample_anchor_positions(SEQ_LEN, loss_mask, self.DEVICE)
+        per_row = [Counter(), Counter()]
+        for use in range(uses):
+            key = torch.tensor([[11, use], [12, use]])
+            anchors, keep = model._sample_anchor_positions(
+                SEQ_LEN, loss_mask, self.DEVICE, anchor_key=key
+            )
+            assert torch.equal(keep, random_keep)
+            for row in range(2):
+                per_row[row].update(anchors[row][keep[row]].tolist())
+        for row, n_valid in enumerate((13, 7)):
+            taken = sum(per_row[row].values())
+            assert set(per_row[row]) <= set(range(n_valid))
+            assert max(per_row[row].values()) == -(-taken // n_valid)  # ceil: spread evenly
+
+
+@pytest.mark.parametrize(
+    "arch",
+    [
+        {},
+        {"projector_type": "dspark", "markov_rank": 4},
+        {"projector_type": "domino", "gru_hidden_dim": 8, "emb_dim": 8},
+    ],
+    ids=["dflash", "dspark", "domino"],
+)
+def test_training_forward_hands_the_echo_key_to_the_sampler(arch, monkeypatch):
+    """Data echoing's ``anchor_key`` reaches anchor sampling in every DFlash-family forward."""
+    model = get_tiny_llama(num_hidden_layers=4)
+    config = get_dflash_config(block_size=BLOCK_SIZE)
+    config["dflash_architecture_config"].update(arch)
+    mtsp.convert(model, [("dflash", config)])
+    model.train()
+    keys = []
+    sample = model._sample_anchor_positions
+
+    def spy(*args, anchor_key=None, **kwargs):
+        keys.append(anchor_key)
+        return sample(*args, anchor_key=anchor_key, **kwargs)
+
+    monkeypatch.setattr(model, "_sample_anchor_positions", spy)
+    torch.manual_seed(0)
+    input_ids = torch.randint(1, model.dflash_config.vocab_size, (2, SEQ_LEN))
+    key = torch.tensor([[11, 0], [12, 1]])
+    out = model(
+        input_ids=input_ids,
+        attention_mask=torch.ones_like(input_ids),
+        labels=input_ids.clone(),
+        anchor_key=key,
+    )
+    assert keys == [key]
+    assert torch.isfinite(out.loss)
 
     def test_trailing_padding_blocks_do_not_change_the_loss(self):
         """The padding the static shape introduces is weightless in the loss and accuracy.

@@ -34,7 +34,7 @@ from modelopt.torch.speculative.eagle.utils import (
 )
 from modelopt.torch.speculative.plugins.master_weight_adamw import MasterWeightAdamW
 from modelopt.torch.speculative.utils import get_ttt_msk_func
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import EchoLoader, LaneEchoPlan, print_rank_0, replay_echo_plan
 from modelopt.torch.utils.distributed import is_master
 from modelopt.torch.utils.plugins.transformers_dataset import (
     LanguageDataCollator,
@@ -223,6 +223,30 @@ def make_speculative_data_module(
     }
 
 
+def make_echo_loader(loader, args) -> EchoLoader:
+    """Data echoing over the training ``loader``, as set by the ``data_echo_*`` training args."""
+    b = args.per_device_train_batch_size
+    plan = LaneEchoPlan(
+        args.data_echo_uses, args.data_echo_min_gap, args.data_echo_gap_spread, args.process_index
+    )
+    stats = replay_echo_plan(plan, len(loader), b)
+    print_rank_0(
+        f"Data echoing: {plan}, lane gaps {plan.lane_gaps(b)}, store={args.data_echo_store}, "
+        f"disjoint anchors={args.data_echo_disjoint_anchors}; {len(loader)} fresh batches -> "
+        f"{stats['steps']} steps per epoch per rank, up to {stats['max_held']} examples held"
+    )
+    # Per rank, so the ranks draw different anchors.
+    seed = (args.data_seed if args.data_seed is not None else args.seed) * 1000 + args.process_index
+    return EchoLoader(
+        loader,
+        plan,
+        b,
+        store="cpu" if args.data_echo_store == "cpu" else None,
+        key_field="anchor_key" if args.data_echo_disjoint_anchors else None,
+        key_seed=seed,
+    )
+
+
 class EagleTrainerWithAccLog(Trainer):
     """Wrapper around Trainer that logs training accuracy."""
 
@@ -234,6 +258,13 @@ class EagleTrainerWithAccLog(Trainer):
     ):
         super().__init__(*args, **kwargs)
         self.lora_lr_multiplier = lora_lr_multiplier
+
+    def get_train_dataloader(self):
+        """Wrap the training loader in data echoing when ``training.data_echo_uses > 1``."""
+        loader = super().get_train_dataloader()
+        if getattr(self.args, "data_echo_uses", 1) == 1:
+            return loader
+        return make_echo_loader(loader, self.args)
 
     def create_optimizer(self, model=None):
         """Override to give LoRA parameters a higher learning rate.

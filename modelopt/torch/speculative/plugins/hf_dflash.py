@@ -226,6 +226,15 @@ class _DFlashLossTerms(NamedTuple):
     supervised_mask: torch.Tensor
 
 
+def _hash_uniform(seed: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+    """Deterministic uniforms in [0, 1) per (seed, position); 31-bit integer mixing, so no overflow."""
+    x = ((seed & 0x7FFFFFFF) * 0x9E37 + pos * 0x85EB + 0x3039) & 0x7FFFFFFF
+    for _ in range(3):
+        x = (x * 0x41C64E6D + 0x3039) & 0x7FFFFFFF
+        x = x ^ (x >> 15)
+    return x.to(torch.float64) / 2**31
+
+
 @DFlashDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
 class HFDFlashModel(DFlashModel):
     """DFlash Model for HuggingFace transformers."""
@@ -578,10 +587,14 @@ class HFDFlashModel(DFlashModel):
 
         return DFlashExporter(self)
 
-    def _sample_anchor_positions(self, seq_len, loss_mask, device):
+    def _sample_anchor_positions(self, seq_len, loss_mask, device, anchor_key=None):
         """Randomly sample anchor positions per sample.
 
         Returns (anchor_positions [B, N], block_keep_mask [B, N]).
+
+        ``anchor_key`` (``[B, 2]`` int64 of (seed, use), from data echoing) replaces the random
+        draw with a fixed random order per seed, and use ``k`` takes the ``k``-th slice of it, so
+        the uses of one sample cover its valid positions before any anchor repeats.
 
         With ``torch.compile`` (``dynamic=False``) or FlexAttention on, ``N`` is fixed by the
         config and ``seq_len``, not by the batch, so those shape-specialized graphs see one
@@ -615,10 +628,21 @@ class HFDFlashModel(DFlashModel):
         fill = torch.tensor(seq_len + 1, device=device)
         masked_indices = torch.where(valid, indices, fill)
 
-        random_vals = torch.rand(bsz, max_anchor + 1, device=device)
+        if anchor_key is None:
+            random_vals = torch.rand(bsz, max_anchor + 1, device=device)
+        else:
+            random_vals = _hash_uniform(anchor_key[:, :1], indices)
         random_vals = torch.where(valid, random_vals, torch.tensor(2.0, device=device))
 
         _, sorted_idx = random_vals.sort(dim=1)
+        if anchor_key is not None:
+            # Valid positions fill the first valid_counts sorted slots; rotate them by
+            # use * take (wrapping), leaving the invalid tail in place.
+            n_valid = valid_counts.clamp(min=1).unsqueeze(1)
+            take = torch.minimum(valid_counts, cap).unsqueeze(1)
+            offset = (anchor_key[:, 1:2] * take) % n_valid
+            rotated = torch.where(indices < n_valid, (indices + offset) % n_valid, indices)
+            sorted_idx = torch.gather(sorted_idx, 1, rotated)
         gathered = torch.gather(masked_indices, 1, sorted_idx)
 
         # Blank past `cap` before sorting: sorting first would pull anchors from beyond the
@@ -934,6 +958,8 @@ class HFDFlashModel(DFlashModel):
         - Label alignment: position k predicts token at anchor+k
         - Optional loss decay weighting
         """
+        # Data echoing's per-sample key; it must not reach the base model on any path.
+        anchor_key = kwargs.pop("anchor_key", None)
         if not self.training:
             if self.dflash_offline:
                 raise RuntimeError(
@@ -1034,7 +1060,7 @@ class HFDFlashModel(DFlashModel):
 
         # 3. Random anchor sampling
         anchor_positions, block_keep_mask = self._sample_anchor_positions(
-            seq_len, loss_mask, device
+            seq_len, loss_mask, device, anchor_key=anchor_key
         )
         n_blocks = anchor_positions.shape[1]
 
