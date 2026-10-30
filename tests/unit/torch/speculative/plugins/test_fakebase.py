@@ -278,3 +278,52 @@ def test_find_final_norm_path_returns_none_without_a_norm():
             self.model = torch.nn.Linear(4, 4)
 
     assert find_final_norm_path(_NoNorm()) is None
+
+
+def test_muse_spark_base_reproduces_its_embedding_and_logit_transforms(tmp_path):
+    """The draft's embeddings and both logit streams must match what the target computes.
+
+    transformers has no ``muse_spark`` config class, so the fake base reads the raw JSON.
+    The embedding norm and the logit transform are in the model's code, not its config:
+    dropping either still trains, against the wrong inputs or the wrong teacher.
+    """
+    multiplier, cap, eps = 0.25, 5.0, 1e-5
+    text_config = {
+        "model_type": "muse_spark_text",
+        "hidden_size": _HIDDEN_SIZE,
+        "vocab_size": _VOCAB_SIZE,
+        "num_hidden_layers": 2,
+        "rms_norm_eps": eps,
+        "rope_parameters": {"rope_theta": 500000.0, "rope_type": "default"},
+        "output_multiplier": multiplier,
+        "final_logit_softcapping": cap,
+        "tie_word_embeddings": False,
+    }
+    config = {"model_type": "muse_spark", "dtype": "bfloat16", "text_config": text_config}
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    embed, head = torch.randn(_VOCAB_SIZE, _HIDDEN_SIZE), torch.randn(_VOCAB_SIZE, _HIDDEN_SIZE)
+    safetensors.torch.save_file(
+        {
+            "model.language_model.embed_tokens.weight": embed,
+            "lm_head.weight": head,
+            "model.language_model.norm.weight": torch.ones(_HIDDEN_SIZE),
+        },
+        tmp_path / "model.safetensors",
+    )
+
+    with pytest.warns(UserWarning, match="muse_spark"):
+        model = FakeBaseModel.from_source(str(tmp_path))
+
+    ids = torch.tensor([3, 7])
+    rows = embed[ids]
+    expected = rows * torch.rsqrt(rows.pow(2).mean(-1, keepdim=True) + eps)
+    tol = {"rtol": 2e-2, "atol": 2e-2}  # the fake base keeps the checkpoint's bf16
+    torch.testing.assert_close(model.embed_tokens(ids).float(), expected, **tol)
+    x = torch.randn(2, _HIDDEN_SIZE)
+    logits = model.lm_head(x.to(model.lm_head.weight.dtype)).float()
+    torch.testing.assert_close(logits, cap * torch.tanh(multiplier * (x @ head.T) / cap), **tol)
+    assert model.config.final_norm_type == "rmsnorm"
+    assert model.config.rope_theta == 500000.0
+    rebuilt = FakeBaseModel(FakeBaseConfig(**model.config.to_dict()))
+    assert type(rebuilt.embed_tokens) is type(model.embed_tokens)
+    assert type(rebuilt.lm_head) is type(model.lm_head)
