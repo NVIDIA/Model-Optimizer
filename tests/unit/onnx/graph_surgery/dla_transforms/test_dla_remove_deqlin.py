@@ -60,7 +60,7 @@ from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms import dla_remove_deqlin as _mod
 
-pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
 _OPSET_VERSION = 21
 _MAX_IR_VERSION_FOR_ORT = 10
@@ -100,8 +100,6 @@ def _prepare_model(model: onnx.ModelProto) -> None:
 
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
     """Execute the graph outputs with the CPU runtime."""
-    import onnxruntime as ort
-
     _clamp_ir(model)
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
