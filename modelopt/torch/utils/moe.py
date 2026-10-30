@@ -156,6 +156,18 @@ def _ep_spec(model_type: str):
     return getattr(get_spec(model_type), "ep_spec", None)
 
 
+def _ep_floor(model_type: str) -> str:
+    """The transformers release ``model_type``'s expert parallelism needs.
+
+    The expert-parallel load's own, or its spec's when that is later. A model whose spec states no
+    release, or that has no spec, still needs the load's: auto must pick no EP degree below it,
+    rather than reach the load and fail there.
+    """
+    ep = _ep_spec(model_type)
+    stated = ep.requires_transformers if ep is not None else None
+    return max(_EP_MIN_TRANSFORMERS, stated or _EP_MIN_TRANSFORMERS, key=parse)
+
+
 def check_distributed_support(model_type: str) -> None:
     """Refuse ``model_type``'s expert parallelism if its spec does, or below its transformers floor.
 
@@ -181,12 +193,8 @@ def check_distributed_support(model_type: str) -> None:
             f"{model_type} cannot be quantized expert-parallel yet: {ep.unsupported} Quantize it "
             f"{without_ep}."
         )
-    # A model whose spec states no release, or that has no spec, still needs the load's floor: auto
-    # must pick no EP degree below it, rather than reach the load and fail there.
-    stated = ep.requires_transformers if ep is not None else None
-    floor = max(_EP_MIN_TRANSFORMERS, stated or _EP_MIN_TRANSFORMERS, key=parse)
     try:
-        require_transformers(floor, f"{model_type} expert-parallel PTQ")
+        require_transformers(_ep_floor(model_type), f"{model_type} expert-parallel PTQ")
     except RuntimeError as e:
         raise RuntimeError(f"{e} Or quantize it {without_ep}.") from None
 

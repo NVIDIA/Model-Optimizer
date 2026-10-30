@@ -676,7 +676,7 @@ _NO_EP_YET = (
 )
 _NEEDS_LATER = (
     "can be expert-parallel, but the plan resolved .* this transformers cannot shard its experts. "
-    "Upgrade transformers to shard them, or shard the whole model with FSDP2"
+    r"Upgrade transformers to 5\.7 or later to shard them, or shard the whole model with FSDP2"
 )
 
 
