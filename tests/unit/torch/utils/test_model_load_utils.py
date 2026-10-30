@@ -64,6 +64,7 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _auto_class,
     _conversion_plan,
     _convert_keys,
+    _off_dtype_params,
     _resolve_target,
     build_meta_causal_lm,
     record_unplaced_source_keys,
@@ -186,6 +187,50 @@ def test_meta_qwen_vlm_preserves_architecture_and_vision(model_type):
         == config.text_config.num_hidden_layers
     )
     assert all(parameter.is_meta for parameter in model.parameters())
+
+
+# ----------------------------------------------------------------------- fsdp2_wrap's dtype helpers
+
+
+def _model(*sizes_and_dtypes) -> torch.nn.Module:
+    model = torch.nn.Module()
+    for i, (numel, dtype) in enumerate(sizes_and_dtypes):
+        model.register_parameter(f"p{i}", torch.nn.Parameter(torch.zeros(numel, dtype=dtype)))
+    return model
+
+
+def test_off_dtype_params_uniform_is_empty(recwarn):
+    model = _model((8, torch.bfloat16), (4, torch.bfloat16))
+    assert _off_dtype_params(model) == set()
+    assert not recwarn.list
+
+
+def test_off_dtype_params_returns_only_the_minority():
+    # An fp32 MoE router gate next to bf16 weights, as Nemotron-3-Nano ships it.
+    model = _model((100, torch.bfloat16), (5, torch.float32))
+    with pytest.warns(UserWarning, match="mixed parameter dtypes"):
+        off = _off_dtype_params(model)
+    assert off == {model.p1}
+
+
+@pytest.mark.parametrize(
+    ("params", "expected"),
+    [
+        # Dominant dtype is by element count, not parameter count: three small fp32 params
+        # lose to one large bf16 param, and vice versa.
+        ([(100, torch.bfloat16), (5, torch.float32), (5, torch.float32), (5, torch.float32)], "p0"),
+        (
+            [(100, torch.float32), (5, torch.bfloat16), (5, torch.bfloat16), (5, torch.bfloat16)],
+            "p0",
+        ),
+    ],
+)
+def test_off_dtype_params_dominant_is_by_numel(params, expected):
+    model = _model(*params)
+    with pytest.warns(UserWarning, match="mixed parameter dtypes"):
+        off = _off_dtype_params(model)
+    kept = {n for n, p in model.named_parameters() if p not in off}
+    assert kept == {expected}
 
 
 # -------------------------------------------------------------- deciding how a model is distributed
