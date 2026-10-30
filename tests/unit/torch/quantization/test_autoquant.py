@@ -861,6 +861,47 @@ def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method)
     assert torch.allclose(output_ref, output_test)
 
 
+@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+def test_format_shards_merge_into_the_unsharded_search(tmp_path, method):
+    source = TransformerBlock()
+    data = [source.get_input() for _ in range(2)]
+    formats = [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG]
+
+    def search(checkpoint, format_shard=None):
+        return mtq.auto_quantize(
+            copy.deepcopy(source),
+            constraints={"effective_bits": 6.0},
+            quantization_formats=formats,
+            data_loader=data,
+            forward_step=lambda model, batch: model(batch),
+            loss_func=(lambda output, batch: output.sum()) if method == "gradient" else None,
+            num_calib_steps=2,
+            num_score_steps=2,
+            checkpoint=str(checkpoint),
+            format_shard=format_shard,
+            method=method,
+        )
+
+    _, expected = search(tmp_path / "full.pth")
+    shards = [tmp_path / f"shard{i}.pth" for i in range(2)]
+    for i, shard in enumerate(shards):
+        _, state = search(shard, (i, 2))
+        assert not state["best"]["recipe"]
+    # Shards hold disjoint formats: 2 of the 3 searched formats on shard 0, 1 on shard 1.
+    calibrated = [set(safe_load(shard)["quantizer_states"]) for shard in shards]
+    assert not calibrated[0] & calibrated[1] and len(calibrated[0] | calibrated[1]) == 3
+
+    merged = tmp_path / "merged.pth"
+    model_quant.merge_auto_quantize_checkpoints(list(reversed(shards)), str(merged))
+    with pytest.raises(ValueError, match="format shard"):
+        search(shards[0])
+    _, state = search(merged)
+
+    for name, stats in expected["candidate_stats"].items():
+        assert state["candidate_stats"][name]["raw_scores"] == pytest.approx(stats["raw_scores"])
+    assert state["best"]["recipe"] == expected["best"]["recipe"]
+
+
 def test_auto_quantize_disable_layers():
     model = TransformerBlock()
 
@@ -1076,7 +1117,7 @@ def test_gradient_scoring_tracks_reused_module_invocations():
 
     class TestHparam:
         is_configurable = True
-        choices = [no_quant_recipe, quant_recipe]
+        choices = scored_choices = [no_quant_recipe, quant_recipe]
         active = no_quant_recipe
 
     class ScoreModule(torch.nn.Module):
