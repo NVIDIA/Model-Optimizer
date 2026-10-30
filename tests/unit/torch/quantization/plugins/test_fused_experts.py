@@ -3081,7 +3081,7 @@ class TestFusedExpertsInterceptionCheck:
         GPT-OSS-style experts name them router_indices."""
         checked = 0
         for path in sorted((Path(transformers.__file__).parent / "models").glob("*/modeling_*.py")):
-            source = path.read_text()
+            source = path.read_text(encoding="utf-8")
             if "use_experts_implementation" not in source:
                 continue
             for node in ast.parse(source).body:
