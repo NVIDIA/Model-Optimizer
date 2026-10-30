@@ -706,6 +706,9 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
     elif failure == "unseen-checkpoint" and fails_here:
         # Rank 0 makes the checkpoint local; a rank on a node without that storage cannot see it.
         patches.append(mock.patch.object(hf_checkpoint_utils.os.path, "isdir", return_value=False))
+    elif failure == "no-gpu" and not fails_here:
+        # No rank has a GPU here: the others are given theirs.
+        patches.append(mock.patch.object(model_load_utils, "_has_own_gpu", return_value=True))
     if failure in ("load", "record"):
         loaded = _model_with_decoder_at("model.")
         load = fail if failure == "load" and fails_here else (lambda path, **kwargs: loaded)
@@ -743,6 +746,7 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
         ("transformers", 1, "requires transformers >= 5.7, but 5.6.2"),
         ("quantized-config", 1, "cannot dequantize a 'gptq'"),
         ("unseen-checkpoint", 1, "which this rank cannot see"),
+        ("no-gpu", 1, "this rank has none, though other ranks have theirs"),
         ("load", 1, "the GPU ran out of memory"),
         ("record", 1, "a weight file this rank cannot read"),
     ],
@@ -751,8 +755,9 @@ def test_a_load_failing_on_one_rank_fails_every_rank(
     cpu_dist_workers, tmp_path, failure, failing_rank, match
 ):
     """One rank fails alone: reading the config, on its transformers, on its arguments, seeing the
-    checkpoint rank 0 made local, or in the load. Every rank raises that failure, rather than leave the others
-    waiting for it in the meshes (stood in by a bounded barrier) or the warmup's collectives."""
+    checkpoint rank 0 made local, without a GPU of its own where the others have theirs, or in the
+    load. Every rank raises that failure, rather than leave the others waiting for it in the meshes
+    (stood in by a bounded barrier) or the warmup's collectives."""
     Qwen3MoeConfig(num_experts=4, num_hidden_layers=1, hidden_size=8).save_pretrained(tmp_path)
     cpu_dist_workers.run(
         _one_rank_fails_job,

@@ -1826,6 +1826,19 @@ def load_and_prepare_ep(
                 f"{plan!r}: ep_size={ep_degree} must divide the {num_experts} routed experts, which the "
                 "all-to-all transport shares out equally over the expert-parallel ranks."
             )
+    # Each rank builds the meshes below on its own GPU. A live process group (gloo, say) does not
+    # give every rank one, and a rank without it would fail building them while the others wait in
+    # their subgroups' creation: refused on every rank first. A run in which no rank has one fails
+    # building them on every rank alike.
+    some_rank_has_one = dist.all_reduce("each rank's GPU", _has_own_gpu, combine=any)
+    with _refused_together("this rank's GPU", alone=False):
+        if some_rank_has_one and not _has_own_gpu():
+            raise RuntimeError(
+                "The expert-parallel load builds its meshes on each rank's own GPU, and this rank "
+                f"has none, though other ranks have theirs: it sees {torch.cuda.device_count()} "
+                f"GPU(s) as local rank {dist.local_rank()}. Run one process per GPU, as "
+                "torchrun --nproc_per_node=<GPUs per node> does."
+            )
     # transformers 5.6 on, which the floor above makes sure of.
     from torch.distributed.device_mesh import init_device_mesh
     from transformers.distributed import DistributedConfig
