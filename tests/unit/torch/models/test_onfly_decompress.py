@@ -745,6 +745,30 @@ def test_a_checkpoint_whose_experts_are_not_its_one_compressed_group_is_refused(
         onfly._read_compression(config)
 
 
+@pytest.mark.parametrize(
+    ("top", "group", "match"),
+    [("mixed-precision", "pack-quantized", None), ("fakequant", None, "no compressor")],
+    ids=["the-group-names-it", "none-registered"],
+)
+def test_the_format_is_the_one_group_s_own_and_must_have_a_compressor(top, group, match):
+    """compressed-tensors writes "mixed-precision" at the top level once a group names its own
+    format; the one group's format is the one to decompress with. A format nothing registers is
+    refused by this module, rather than failing inside the library's registry."""
+    pytest.importorskip(
+        "compressed_tensors", reason="needs compressed-tensors (CI's unit session installs it)"
+    )
+    experts = _int4(True, EXPERTS)
+    if group is not None:
+        experts["format"] = group
+    config = SimpleNamespace(quantization_config={**_pack_quantized(moe=experts), "format": top})
+
+    if match is None:
+        assert onfly._read_compression(config)[3] == group
+    else:
+        with pytest.raises(NotImplementedError, match=match):
+            onfly._read_compression(config)
+
+
 def test_real_pack_quantized_experts_round_trip_exactly():
     """With the real compressed_tensors INT4 compressor, packed experts come back out of the fused
     converter as the original weights (chosen to be exact in INT4 x 0.5 and in bf16)."""
