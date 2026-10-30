@@ -51,8 +51,10 @@ from transformers.integrations.moe import ALL_EXPERTS_FUNCTIONS
 from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
 from modelopt.torch.models import _onfly_decompress, get_spec
 from modelopt.torch.models.kimi_k3 import ep as kimi_k3
+from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import moe
 from modelopt.torch.utils.moe import check_distributed_support
+from modelopt.torch.utils.plugins import model_load_utils
 
 ROUTES = torch.tensor([[0, 3], [1, 2], [3, 1], [2, 0], [1, 3]])  # top-2 experts of 5 tokens
 
@@ -374,9 +376,9 @@ def torch_a2a_unregistered(monkeypatch):
     "private_conversion_registry", "remote_checkpoint", "torch_a2a_unregistered"
 )
 def test_a_model_builds_from_the_prepared_config_before_the_expert_parallel_load():
-    """The plan decision builds the model from prepare's config on the meta device before the
-    expert-parallel load registers torch_a2a, and transformers refuses to build a model whose experts
-    implementation it has not registered: prepare registers the one it names."""
+    """transformers refuses to build a model whose experts implementation it has not registered, so
+    prepare, which only the expert-parallel route runs, registers the one it names: a model built
+    from its config before the expert-parallel load registers torch_a2a builds."""
     text = SimpleNamespace()
     _prepare(SimpleNamespace(text_config=text, auto_map=_AUTO_MAP))
 
@@ -657,6 +659,79 @@ def test_a_config_that_lost_its_quantization_config_is_refused_by_the_checkpoint
     with pytest.raises(ValueError, match="no compressed-tensors quantization_config"):
         kimi_k3.prepare(config, ckpt_path=str(tmp_path), trust_remote_code=True)
     assert isinstance(remote_checkpoint.KimiSparseMoeBlock(_config()).experts, nn.ModuleList)
+
+
+def _built_by_its_own_code():
+    """Kimi-K3 as its own code builds it, on the meta device: each MoE layer of its language model
+    holds its 8 routed experts as per-expert modules, at
+    ``language_model.model.layers.<i>.block_sparse_moe.experts``."""
+
+    def layer():
+        moe_block = nn.Module()
+        moe_block.experts = nn.ModuleList(nn.Linear(2, 2, bias=False) for _ in range(8))
+        return nn.ModuleDict({"block_sparse_moe": moe_block})
+
+    model = nn.Module()
+    model.language_model = nn.Module()
+    model.language_model.model = nn.Module()
+    model.language_model.model.layers = nn.ModuleList(layer() for _ in range(2))
+    model.tie_weights = lambda: None
+    return model
+
+
+@pytest.mark.usefixtures(
+    "private_conversion_registry", "restore_loader_hooks", "torch_a2a_unregistered"
+)
+@pytest.mark.parametrize(
+    ("ranks", "dense", "outcome"),
+    [(3, "fsdp", "fsdp2"), (3, "replicate", "refused"), (4, "replicate", "expert-parallel")],
+    ids=["fsdp2", "whole", "expert-parallel"],
+)
+def test_only_an_expert_parallel_plan_patches_kimi_k3s_code(
+    monkeypatch, remote_checkpoint, tmp_path, ranks, dense, outcome
+):
+    """Deciding the plan builds Kimi-K3 as its own code builds it, importable but unpatched, and
+    finds its 8 experts through the plan the spec states. Only an expert-parallel plan (4 ranks)
+    then runs ``prepare``. FSDP2-sharded, or left whole on 3 ranks, which no EP degree of the 8
+    experts divides (refused), the run keeps the remote MoE block, the converter registry, the
+    experts implementations, the loader and the config as read."""
+    as_read = SimpleNamespace(
+        model_type="kimi_k3", text_config=SimpleNamespace(num_experts=8), auto_map=_AUTO_MAP
+    )
+    monkeypatch.setattr(dist, "size", lambda group=None: ranks)
+    monkeypatch.setattr(
+        transformers.AutoConfig, "from_pretrained", lambda *a, **k: copy.deepcopy(as_read)
+    )
+    monkeypatch.setattr(
+        model_load_utils, "build_meta_causal_lm", lambda *a, **k: _built_by_its_own_code()
+    )
+    hooks = (mu.get_model_conversion_mapping, cml.spawn_materialize)
+
+    if outcome == "refused":
+        with pytest.raises(ValueError, match="can be expert-parallel, but the plan resolved"):
+            model_load_utils.resolve_distribution_plan(
+                str(tmp_path), dense=dense, trust_remote_code=True
+            )
+    else:
+        plan, config = model_load_utils.resolve_distribution_plan(
+            str(tmp_path), dense=dense, trust_remote_code=True
+        )
+        assert plan.is_expert_parallel == (outcome == "expert-parallel")
+    expert_parallel = outcome == "expert-parallel"
+    assert hasattr(hf_generic, "OutputRecorder")  # importable on every plan
+    fused = not isinstance(remote_checkpoint.KimiSparseMoeBlock(_config()).experts, nn.ModuleList)
+    assert fused == expert_parallel
+    registered = cm.get_checkpoint_conversion_mapping("kimi_linear") or []
+    fusion = any("block_sparse_moe.experts.*.w1.weight" in c.source_patterns for c in registered)
+    assert fusion == expert_parallel
+    assert ("torch_a2a" in type(ALL_EXPERTS_FUNCTIONS)._global_mapping) == expert_parallel
+    if expert_parallel:
+        assert config.text_config.base_model_ep_plan == kimi_k3.BASE_MODEL_EP_PLAN
+        assert config.text_config._experts_implementation == "torch_a2a"
+    else:
+        assert (mu.get_model_conversion_mapping, cml.spawn_materialize) == hooks
+    if outcome == "fsdp2":
+        assert vars(config.text_config) == {"num_experts": 8}
 
 
 @pytest.mark.usefixtures("private_conversion_registry", "restore_loader_hooks", "remote_checkpoint")

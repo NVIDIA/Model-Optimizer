@@ -248,16 +248,26 @@ def _patch_kimi_moe_block(kmod) -> None:
     print_rank_0("[kimi_k3] patched KimiSparseMoeBlock: fused experts + ExpertsInterface forward")
 
 
+def make_importable() -> None:
+    """What Kimi-K3's own code needs to import on this transformers, and nothing more.
+
+    The ``OutputRecorder`` it imports from where transformers no longer keeps it, and its relative
+    imports staged. It patches no class, config, converter or loader hook, so the plan decision runs
+    it before ``prepare``, whatever plan comes out. Idempotent.
+    """
+    _install_output_recorder_shim()
+    stage_full_remote_closure()
+
+
 def _force_load_remote_modeling(hf_config, ckpt_path: str, trust_remote_code: bool) -> type:
     """Import the remote modeling now, so its classes can be patched before the model is built.
 
     Force the remote modeling into ``sys.modules`` (so we can monkey-patch its classes BEFORE
     ``from_pretrained`` instantiates the model) by resolving the model class the checkpoint's config
-    declares in its ``auto_map`` -- no hardcoded remote file/module name. Runs the OutputRecorder + closure
-    shims first. Returns that class, whose package holds this checkpoint's remote code.
+    declares in its ``auto_map`` -- no hardcoded remote file/module name. Makes the code importable
+    first. Returns that class, whose package holds this checkpoint's remote code.
     """
-    _install_output_recorder_shim()
-    stage_full_remote_closure()
+    make_importable()
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
     auto_map = getattr(hf_config, "auto_map", None) or {}
@@ -358,9 +368,9 @@ def prepare(
     inserts/calibrates/folds the fp8/nvfp4 quantizers on those bf16 params. That is ~4x the packed HBM
     (the memory bottleneck), but PTQ needs the bf16 weights.
 
-    The patches are process-wide and stay after the load: a later load of the same checkpoint in this
-    process, through a class the sharded loads refuse (such as ``AutoModel``), runs on the patched
-    code. The plan decision itself never makes such a load.
+    Only an expert-parallel plan runs it, but its patches are process-wide and stay after that load:
+    a later load of the same checkpoint in the same process, after an expert-parallel load, runs on
+    the patched code.
     """
     # Not at module scope: the model registry imports this module, and modelopt.torch.utils.moe
     # imports the registry.
@@ -414,8 +424,8 @@ def prepare(
         # grouped_gemm shards the bf16 fused params; the experts container goes through moe_tp_experts
         # (-> torch_a2a_experts).
         text_cfg.base_model_ep_plan = dict(BASE_MODEL_EP_PLAN)
-    # transformers refuses to build a model whose experts implementation it has not registered, and
-    # the plan decision builds this one on the meta device before the expert-parallel load runs.
+    # transformers refuses to build a model whose experts implementation it has not registered: on the
+    # expert-parallel route, the only one that runs prepare, before anything builds this config.
     register_torch_a2a()
     text_cfg._experts_implementation = "torch_a2a"
 
