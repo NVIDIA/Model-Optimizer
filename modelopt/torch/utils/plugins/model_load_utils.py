@@ -66,6 +66,7 @@ from modelopt.torch.utils.fsdp2_utils import fsdp2_wrap
 from modelopt.torch.utils.logging import print_rank_0, warn_rank_0
 from modelopt.torch.utils.moe import (
     _EXPERTS_STYLES,
+    _SUB_CONFIG_ATTRS,
     _choose_ep_degree,
     _ep_config,
     _num_experts_from_config,
@@ -1624,6 +1625,13 @@ def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_st
 _EP_SOURCE_FORMATS: frozenset[str | None] = frozenset({None})
 
 
+def _decompressed_as_loaded(cfg) -> bool:
+    """Whether a model spec installed the on-the-fly decompressor for this config's checkpoint."""
+    from modelopt.torch.models import _onfly_decompress
+
+    return _onfly_decompress.is_marked(cfg)
+
+
 def _ckpt_quant_method(cfg):
     """Return the checkpoint's native quantization method, or ``None``.
 
@@ -1740,7 +1748,7 @@ def load_and_prepare_ep(
                 config_kwargs["attn_implementation"] = attn_implementation
             hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
         quant_method = _ckpt_quant_method(hf_config)
-        if quant_method not in _EP_SOURCE_FORMATS:
+        if quant_method not in _EP_SOURCE_FORMATS and not _decompressed_as_loaded(hf_config):
             # transformers' own quantizer would load it as stored, for PTQ to treat as plain weights.
             dequantized = ", ".join(sorted(f for f in _EP_SOURCE_FORMATS if f))
             loads = "unquantized checkpoints" + (
@@ -1752,6 +1760,16 @@ def load_and_prepare_ep(
             )
         # The swapped plan is this load's own: the caller's config keeps the plan its checkpoint declares.
         hf_config = copy.deepcopy(hf_config)
+        if _decompressed_as_loaded(hf_config):
+            # The decompressor hands the experts over dequantized. Left on the config (Kimi-K2.5's
+            # config class copies its text config's to the top level), the checkpoint's
+            # quantization_config would build transformers' compressed-tensors quantizer, which from
+            # 5.13 claims the same expert converters first. Deleted rather than set to None: before
+            # 5.11 transformers takes any quantization_config attribute, None too, for a quantized
+            # checkpoint. Every level _ckpt_quant_method reads is cleared.
+            for cfg in (hf_config, *(getattr(hf_config, attr, None) for attr in _SUB_CONFIG_ATTRS)):
+                if cfg is not None and hasattr(cfg, "quantization_config"):
+                    del cfg.quantization_config
         ep_cfg = _ep_config(hf_config)  # for VLMs the plan lives on .text_config
         ep_plan = dict(getattr(ep_cfg, "base_model_ep_plan", None) or {})
         if not ep_plan:
@@ -1845,6 +1863,13 @@ def load_and_prepare_ep(
     # refused load downloads nothing.
     with _refused_together("the local checkpoint", alone=False):
         _, ckpt_path = ensure_local_checkpoint(ckpt_path)
+        if _decompressed_as_loaded(hf_config):
+            # Only the experts decompress as they load, and the config cannot say what else the
+            # checkpoint compressed, or in which dtypes: what it stores is checked before anything
+            # loads.
+            from modelopt.torch.models import _onfly_decompress
+
+            _onfly_decompress.check_compressed_keys(hf_config, ckpt_path)
 
     # Experts are sharded over ``ep`` and replicated over ``edp``; the dense part is replicated over
     # the whole world (``dp``).
