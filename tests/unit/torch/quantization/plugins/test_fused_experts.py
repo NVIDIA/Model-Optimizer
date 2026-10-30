@@ -2318,7 +2318,9 @@ class TestGroupedMMExperts:
     )
     def test_a_capture_follows_the_path_that_ran(self, selected, ran):
         """A capture hook reads the path that ran, not the one the config named when it was
-        registered, so each expert still receives exactly the rows routed to it."""
+        registered, so each expert still receives exactly the rows routed to it. Once a grouped
+        forward has returned, a capture reached outside it does not split its input by that
+        forward's offsets."""
         model = _GroupedMoEModel(selected)
         rows = {}
 
@@ -2331,6 +2333,10 @@ class TestGroupedMMExperts:
             model.config._experts_implementation = ran
             try:
                 self._forward_loop_all_experts(model)
+                if ran == "grouped_mm":
+                    captured = dict(rows)
+                    model.moe.experts.gate_up_proj_input_quantizer(torch.randn(3, HIDDEN_DIM))
+                    assert rows == captured
             finally:
                 for handle in handles:
                     handle.remove()
