@@ -1736,7 +1736,8 @@ def _decide_distribution(
         )
         ep = _ep_spec(hf_config.model_type)
         if ep is not None and ep.unsupported:
-            raise RuntimeError(
+            # NotImplementedError, as check_distributed_support refuses the same spec.
+            raise NotImplementedError(
                 f"{hf_config.model_type} cannot be quantized expert-parallel yet, and the plan "
                 f"replicates it at world_size={world_size}, so every rank would hold the whole "
                 f"MoE. Instead, {others}"
