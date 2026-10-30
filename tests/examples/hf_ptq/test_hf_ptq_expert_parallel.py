@@ -684,7 +684,7 @@ def test_an_expert_parallel_run_replants_the_all_to_all_forwards_after_quantizin
     )
     monkeypatch.setattr(
         hf_ptq,
-        "_reinstall_a2a_forwards",
+        "reinstall_a2a_forwards",
         lambda model, mesh: events.append(("replant", model, mesh)),
     )
     args = SimpleNamespace(
