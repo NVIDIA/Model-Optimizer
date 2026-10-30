@@ -604,9 +604,24 @@ def _sharded_load_kwargs(
     return {"trust_remote_code": trust_remote_code, "hf_config": hf_config, **kwargs}
 
 
+def _own_gpu_index() -> int | None:
+    """This rank's GPU, as torch's DeviceMesh takes it, or ``None`` for a rank with none there.
+
+    Once the process has set CUDA up (setup(), a device-bound group, the caller's own set_device),
+    the device it set; before, the one its local rank numbers. A launch that exposes one GPU to
+    each process, each bound to cuda:0, so has a GPU on every rank, whatever its local rank.
+    """
+    if not torch.cuda.is_available():
+        return None
+    if torch.cuda.is_initialized():
+        return torch.cuda.current_device()
+    index = dist.local_rank()
+    return index if index < torch.cuda.device_count() else None
+
+
 def _has_own_gpu() -> bool:
-    """Whether this rank has a GPU of its own: the one its local rank numbers, as setup() binds."""
-    return torch.cuda.is_available() and dist.local_rank() < torch.cuda.device_count()
+    """Whether this rank has a GPU of its own (:func:`_own_gpu_index`)."""
+    return _own_gpu_index() is not None
 
 
 def _load_sharded(ckpt_path, load_kwargs) -> nn.Module:
@@ -617,7 +632,7 @@ def _load_sharded(ckpt_path, load_kwargs) -> nn.Module:
         dist.setup()
     return parallel_load_and_prepare_fsdp2(
         ckpt_path,
-        torch.device("cuda", dist.local_rank()),
+        torch.device("cuda", _own_gpu_index()),
         dist.rank(),
         dist.size(),
         **load_kwargs,
@@ -647,8 +662,9 @@ def load_pretrained(
       stored, so it refuses a quantized checkpoint.
     * otherwise ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
       ``AutoModelForCausalLM``), placed as ``kwargs`` say. Every rank of a distributed run gets the
-      whole model, onto the rank's own GPU when it has one and no ``device_map`` is passed;
-      ``device_map=None``, ``from_pretrained``'s own, loads it on the CPU for the caller to place.
+      whole model, onto the rank's own GPU (the one it is bound to, else the one its local rank
+      numbers) when it has one and no ``device_map`` is passed; ``device_map=None``,
+      ``from_pretrained``'s own, loads it on the CPU for the caller to place.
 
     A plan with ``ep_size > 1`` raises: no load here shards the routed experts. On a distributed run
     every rank loads the plan rank 0 was handed, and a refusal on any rank, of its own arguments, of a
@@ -868,11 +884,11 @@ def load_pretrained(
         # A sharded load finds the unplaced keys while it places the weights.
         keys = model._modelopt_unplaced_source_keys
     else:
-        if plan.world_size > 1 and _has_own_gpu():
+        if plan.world_size > 1 and (index := _own_gpu_index()) is not None:
             # Each rank takes the whole model onto its own GPU. Left to "auto", every rank's
             # accelerate could pick the same idle GPU; a rank with none loads as from_pretrained
             # places it.
-            kwargs.setdefault("device_map", {"": f"cuda:{dist.local_rank()}"})
+            kwargs.setdefault("device_map", {"": f"cuda:{index}"})
         elif plan.world_size > 1 and "device_map" not in kwargs:
             # This rank says so itself: rank 0 may have a GPU of its own, and nothing to say.
             warnings.warn(
