@@ -678,6 +678,12 @@ _NEEDS_LATER = (
     "can be expert-parallel, but the plan resolved .* this transformers cannot shard its experts. "
     r"Upgrade transformers to 5\.7 or later to shard them, or shard the whole model with FSDP2"
 )
+# The same, for an EP degree the caller set to 1, which an upgrade alone leaves at 1.
+_NEEDS_LATER_AND_A_DEGREE = (
+    "can be expert-parallel, but the plan resolved .* this transformers cannot shard its experts. "
+    r"Upgrade transformers to 5\.7 or later and set MODELOPT_EP_DEGREE above 1, dividing both its "
+    "8 experts and the world size, to shard them, or shard the whole model with FSDP2"
+)
 
 
 @pytest.mark.parametrize(
@@ -724,6 +730,13 @@ _NEEDS_LATER = (
             "5.6.2",
             id="below_the_ep_floor_no_degree",
         ),
+        pytest.param(
+            _deepseek_v3(n_routed_experts=8),
+            "1",
+            _NEEDS_LATER_AND_A_DEGREE,
+            "5.6.2",
+            id="below_the_ep_floor_explicit_degree_one",
+        ),
     ],
 )
 def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
@@ -745,8 +758,10 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
         monkeypatch.setattr(transformers, "__version__", version)
     experts = getattr(config, "n_routed_experts", None) or getattr(config, "num_experts", 0)
     below = Version(transformers.__version__) < Version(_EP_MIN_TRANSFORMERS)
-    if refusal.startswith("can be") and below and experts % 2 == 0:  # an EP degree divides them
-        refusal = _NEEDS_LATER
+    if version is None and refusal.startswith("can be") and below and experts % 2 == 0:
+        # On a transformers below the floor, upgrading is the way out where an EP degree divides
+        # the experts, with a degree set to 1 raised as well.
+        refusal = _NEEDS_LATER_AND_A_DEGREE if ep_degree is not None else _NEEDS_LATER
     if ep_degree is not None:
         if config.model_type == "qwen3_moe" and Version(transformers.__version__) < Version("5.7"):
             pytest.skip("qwen3_moe's base_model_ep_plan ships in transformers 5.7")
