@@ -3034,9 +3034,23 @@ def _meshes_in_step(*args, **kwargs):
     raise _PastTheMeshesError
 
 
+class _InTheLoadError(Exception):
+    """Raised by the weights' load stand-in: this rank got into the load."""
+
+
+def _load_in_step(*args, **kwargs):
+    """The weights' load, as the collective it is: a rank in it waits for every peer."""
+    torch.distributed.barrier()
+    raise _InTheLoadError
+
+
 def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
     path, hf_config, patches = ckpt, None, []
-    if failure != "unreadable-config":
+    if failure == "unreadable-plan-provenance":
+        # A VLM's config, handed in: the plan to keep is read from where it sits in config.json.
+        plan = {"base_model_ep_plan": dict(_EP_PLAN), "num_experts": 4}
+        hf_config = SimpleNamespace(model_type=_NO_SPEC, text_config=SimpleNamespace(**plan))
+    elif failure != "unreadable-config":
         hf_config = SimpleNamespace(
             model_type=_NO_SPEC, base_model_ep_plan=dict(_EP_PLAN), num_experts=4
         )
@@ -3061,9 +3075,15 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
     elif failure == "unseen-checkpoint" and fails_here:
         # Rank 0 makes the checkpoint local; a rank on a node without that storage cannot see it.
         patches.append(mock.patch.object(hf_checkpoint_utils.os.path, "isdir", return_value=False))
-    if failure in ("load", "record"):
+    elif failure == "unreadable-plan-provenance" and fails_here:
+        # This rank reads a config.json that is no JSON object: it declares no plan, not an error.
+        reads = SimpleNamespace(load=lambda f: [])
+        patches.append(mock.patch.object(model_load_utils, "json", reads))
+    if failure in ("load", "record", "unreadable-plan-provenance"):
         loaded = model_with_decoder_at("model.")
         load = fail if failure == "load" and fails_here else (lambda path, **kwargs: loaded)
+        if failure == "unreadable-plan-provenance":
+            load = _load_in_step
         loader = SimpleNamespace(__name__="Loader", from_pretrained=load)
         record = fail if failure == "record" and fails_here else None
         patches += [
@@ -3086,7 +3106,10 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
     # The one rank's failure on every rank, before any rank went on alone into a collective. The GPU
     # check decides on every rank at once, from one gather, so no rank relays another's failure.
     assert refused is not None and match in refused, (rank, refused)
-    assert fails_here or failure == "no-gpu" or f"rank {failing_rank} failed" in refused, refused
+    if match != _InTheLoadError.__name__:  # else no rank failed, and every rank got into the load
+        assert fails_here or failure == "no-gpu" or f"rank {failing_rank} failed" in refused, (
+            refused
+        )
 
 
 @pytest.mark.skipif(
@@ -3102,6 +3125,7 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
         ("no-gpu", 1, "rank(s) [1] have none while the others have theirs"),
         ("load", 1, "the GPU ran out of memory"),
         ("record", 1, "a weight file this rank cannot read"),
+        ("unreadable-plan-provenance", 1, _InTheLoadError.__name__),
     ],
 )
 def test_a_load_failing_on_one_rank_fails_every_rank(
@@ -3110,7 +3134,9 @@ def test_a_load_failing_on_one_rank_fails_every_rank(
     """One rank fails alone: reading the config, on its transformers, on its arguments, seeing the
     checkpoint rank 0 made local, without a GPU of its own where the others have theirs, or in the
     load. Every rank raises that failure, rather than leave the others waiting for it in the meshes
-    (stood in by a bounded barrier) or the warmup's collectives."""
+    (stood in by a bounded barrier) or the warmup's collectives. A config.json one rank cannot read
+    as a JSON object declares no plan to keep there, so every rank goes on into the load (stood in
+    by a bounded barrier too)."""
     Qwen3MoeConfig(num_experts=4, num_hidden_layers=1, hidden_size=8).save_pretrained(tmp_path)
     cpu_dist_workers.run(
         _one_rank_fails_job,
