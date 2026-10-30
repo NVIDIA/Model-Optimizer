@@ -1817,9 +1817,10 @@ def load_and_prepare_ep(
                 "siblings."
             )
         # The all-to-all transport finds an expert's rank by dividing its id by this rank's share of
-        # the experts, which holds only when every rank holds as many. A count the config names none of
+        # the experts, which holds only when every rank holds as many. Counted in the config that holds
+        # the plan, as the distribution plan's decision counts them. A count the config names none of
         # the ways this reads is checked once the experts load, from their weights.
-        num_experts = _num_experts_from_config(hf_config)
+        num_experts = _num_experts_from_config(ep_cfg)
         if num_experts % ep_degree:
             raise ValueError(
                 f"{plan!r}: ep_size={ep_degree} must divide the {num_experts} routed experts, which the "

@@ -207,6 +207,31 @@ def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch, gloo_world_
     assert resolved == ["org/model"]
 
 
+def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, gloo_world_of_one):
+    """As the distribution plan's decision counts them: a VLM whose nested config holds the MoE and
+    its plan has its experts counted there, not by an expert-ish field on its root config."""
+
+    class _CheckedError(Exception):
+        """Stops the load once its checks pass."""
+
+    def resolve(path, **hub_options):
+        raise _CheckedError
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "size", lambda group=None: 4)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
+    monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
+    monkeypatch.setattr(model_load_utils, "ensure_local_checkpoint", resolve)
+    text = SimpleNamespace(base_model_ep_plan=_EP_PLAN, num_experts=8)
+
+    with pytest.raises(_CheckedError):
+        load_and_prepare_ep(
+            "org/model",
+            DistributionPlan(4, ep_size=4),
+            hf_config=SimpleNamespace(text_config=text, num_experts=3),
+        )
+
+
 @pytest.mark.parametrize(
     ("config", "error", "match"),
     [
