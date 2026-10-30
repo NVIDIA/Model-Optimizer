@@ -493,9 +493,10 @@ def _route(plan: DistributionPlan) -> str | None:
             raise NotImplementedError(
                 f"{plan!r} FSDP2-shards the dense part, but the expert-parallel load replicates it "
                 "on every rank. Sharding the dense part under expert parallelism is not supported "
-                "yet. A plan left to decide shards it when a whole copy of it and a rank's share "
-                "of the routed experts would take more than "
-                f"{_REPLICATED_SHARE:.0%} of a GPU. Replicate it anyway (MODELOPT_FSDP_SIZE=1, or "
+                "yet. An EP degree left to the decision gives way to FSDP2 for the whole model when "
+                "a whole copy of the dense part and a rank's share of the routed experts would take "
+                f"more than {_REPLICATED_SHARE:.0%} of a GPU; the degree asked for stands. "
+                "Replicate the dense part anyway (MODELOPT_FSDP_SIZE=1, or "
                 "a plan with dense='replicate'), or shard the whole model with FSDP2 "
                 "(MODELOPT_EP_DEGREE=1 with MODELOPT_FSDP_SIZE=world) if the checkpoint is an "
                 "unquantized causal LM."
