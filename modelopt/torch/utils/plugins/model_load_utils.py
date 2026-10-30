@@ -2029,20 +2029,22 @@ def _declared_ep_plan(ckpt_dir: str, hf_config, ep_cfg):
     ModelOpt's -- the one a model spec attaches
     (:func:`~modelopt.torch.utils.moe.apply_distributed_support`) -- or the config class's, and an
     export must write out neither. A file this rank cannot read as a JSON object declares none, with
-    a warning: what the checkpoint declared is lost to the export then.
+    a warning on this rank, which may be the only one that cannot: what the checkpoint declared is
+    lost to its model's config then.
     """
     path = os.path.join(ckpt_dir, "config.json")
     keeps_none = (
-        "so the loaded model keeps no expert-parallel plan of its own, and an export writes none"
+        f"so rank {dist.rank()}'s model keeps no expert-parallel plan of its own, and an export "
+        "from it writes none"
     )
     try:
         with open(path) as f:
             source = json.load(f)
     except (OSError, ValueError) as e:
-        warn_rank_0(f"Cannot read {path} ({e}), {keeps_none}.")
+        warnings.warn(f"Cannot read {path} ({e}), {keeps_none}.")
         return _UNDECLARED
     if not isinstance(source, dict):
-        warn_rank_0(f"{path} is not a JSON object, {keeps_none}.")
+        warnings.warn(f"{path} is not a JSON object, {keeps_none}.")
         return _UNDECLARED
     if ep_cfg is not hf_config:
         attr = next((a for a in _SUB_CONFIG_ATTRS if getattr(hf_config, a, None) is ep_cfg), None)

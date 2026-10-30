@@ -28,6 +28,7 @@ import inspect
 import json
 import math
 import os
+import warnings
 from contextlib import ExitStack, contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest import mock
@@ -3108,6 +3109,8 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
     with bounded_collectives(), ExitStack() as stack:
         for patch in patches:
             stack.enter_context(patch)
+        caught = stack.enter_context(warnings.catch_warnings(record=True))
+        warnings.simplefilter("always")
         try:  # not pytest.raises: its failure would end the pooled worker instead of the job
             load_and_prepare_ep(path, DistributionPlan(2, ep_size=2), hf_config=hf_config)
         except Exception as error:
@@ -3119,6 +3122,12 @@ def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
         assert fails_here or failure == "no-gpu" or f"rank {failing_rank} failed" in refused, (
             refused
         )
+    else:  # the plan the one rank could not read is lost to its model alone, which says so
+        warned = [
+            str(w.message) for w in caught if "keeps no expert-parallel plan" in str(w.message)
+        ]
+        assert bool(warned) == fails_here, (rank, warned)
+        assert not warned or f"rank {rank}'s model" in warned[0], warned
 
 
 @pytest.mark.skipif(
