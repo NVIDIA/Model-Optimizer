@@ -955,17 +955,28 @@ def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
 
 
 @pytest.mark.parametrize(
-    "dtype",
-    [{"dtype": "auto"}, {"dtype": None}, {"torch_dtype": "auto"}],
-    ids=["auto", "none", "torch_dtype"],
+    "defaults",
+    [
+        {"dtype": "auto"},
+        {"dtype": None},
+        {"torch_dtype": "auto"},
+        # As hf_ptq passes them: placement options at from_pretrained's own default.
+        {
+            "device_map": None,
+            "max_memory": None,
+            "offload_folder": None,
+            "quantization_config": None,
+        },
+    ],
+    ids=["auto", "none", "torch_dtype", "placement-none"],
 )
 def test_an_fsdp_plan_loads_through_the_parallel_fsdp2_loader(
-    run_as, loaders, process_group, monkeypatch, tmp_path, dtype
+    run_as, loaders, process_group, monkeypatch, tmp_path, defaults
 ):
     """FSDP2 shards over the process group it reads its rank and GPU from, by a config read once,
     with the Hub options the load was given (custom code an ``auto_map`` names in another repo).
     It keeps the checkpoint's dtype, as from_pretrained does for "auto" and for None, under either
-    name of the argument."""
+    name of the argument, and takes a placement option passed as None as not passed."""
     run_as(2, rank=1)
     served, reads = LlamaConfig(**_TINY), []
     monkeypatch.setattr(
@@ -974,7 +985,7 @@ def test_an_fsdp_plan_loads_through_the_parallel_fsdp2_loader(
     plan = DistributionPlan(2, dense="fsdp")
 
     model = load_pretrained(
-        str(tmp_path), distribution=plan, cpu_offload=True, local_files_only=True, **dtype
+        str(tmp_path), distribution=plan, cpu_offload=True, local_files_only=True, **defaults
     )
 
     call = loaders.pop("fsdp2")
@@ -1376,16 +1387,22 @@ def test_a_load_refuses_what_it_cannot_load(
     assert auto_class.calls == []
 
 
+@pytest.mark.parametrize("device_map", ["auto", None], ids=["placed", "none"])
 def test_an_automatic_layout_says_so_when_it_refuses_a_placement(
-    run_as, serve, loaders, monkeypatch, tmp_path
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, device_map
 ):
     """With neither a plan nor MODELOPT_FSDP_SIZE, rank 0's GPU memory decides to shard a model too
     big for it, and the sharded load refuses options that place a whole model. The refusal says the
-    layout was decided rather than asked for, and how to keep the load whole."""
-    run_as(2)
+    layout was decided rather than asked for, and how to keep the load whole. device_map=None, as
+    hf_ptq passes it, places nothing, and the model is sharded."""
+    run_as(2, rank=1)
     serve(LlamaConfig(**_TINY))
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: 1)
 
+    if device_map is None:
+        load_pretrained(str(tmp_path), AutoModelForCausalLM, device_map=None, dtype="auto")
+        assert "fsdp2" in loaders
+        return
     with pytest.raises(TypeError, match=r"\['device_map'\] place.*MODELOPT_FSDP_SIZE=1"):
         load_pretrained(str(tmp_path), device_map="auto")
     assert loaders == {}
