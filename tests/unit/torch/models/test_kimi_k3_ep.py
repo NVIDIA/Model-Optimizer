@@ -44,7 +44,7 @@ import transformers.core_model_loading as cml
 import transformers.dynamic_module_utils as dmu
 import transformers.modeling_utils as mu
 import transformers.utils.generic as hf_generic
-from transformers.core_model_loading import WeightConverter, build_glob_alternation
+from transformers.core_model_loading import build_glob_alternation
 from transformers.integrations.moe import ALL_EXPERTS_FUNCTIONS
 
 from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
@@ -75,15 +75,8 @@ def private_conversion_registry(monkeypatch):
 
 @pytest.fixture
 def restore_loader_hooks(monkeypatch):
-    """Undo the process-wide transformers hooks the on-the-fly decompressor installs, whichever of
-    them its release patches: the copy, or the spawn that also covers the shard path."""
-    for owner, name in (
-        (WeightConverter, "add_tensor"),
-        (WeightConverter, "materialize_tensors"),
-        (cml, "_materialize_copy"),
-        (cml, "spawn_materialize"),
-        (mu, "get_model_conversion_mapping"),
-    ):
+    """Undo the process-wide transformers hooks the on-the-fly decompressor installs."""
+    for owner, name in ((cml, "spawn_materialize"), (mu, "get_model_conversion_mapping")):
         monkeypatch.setattr(owner, name, getattr(owner, name))
 
 
