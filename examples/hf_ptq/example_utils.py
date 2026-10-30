@@ -44,6 +44,8 @@ from transformers import (
     ProcessorMixin,
 )
 
+from modelopt.recipe import load_recipe
+from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
 from modelopt.torch.models import hf_model_type
@@ -52,6 +54,7 @@ from modelopt.torch.models.hf import (
     prefers_bundled_code,
     prepare_model_for_loading,
 )
+from modelopt.torch.quantization.mode import get_modelike_from_algo_cfg
 from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
 from modelopt.torch.utils.plugins.model_load_utils import is_fsdp2_text_only_vlm, load_pretrained
@@ -94,6 +97,27 @@ def cleanup_distributed(args):
         dist_utils.cleanup()
 
 
+def _awq_calibrations(args) -> set[str]:
+    """The AWQ calibrations (``awq_lite``, ``awq_full``) the run's --recipe or --qformat uses."""
+    if getattr(args, "recipe", None) is not None:
+        recipe = load_recipe(args.recipe)
+        configs = [getattr(recipe, "quantize", None)]
+        search = getattr(recipe, "auto_quantize", None)  # the KV-cache search allows only max
+        if search is not None:
+            configs += search.candidate_formats
+            configs += [c for space in search.module_search_spaces for c in space.candidate_formats]
+        algorithms = [config.algorithm for config in configs if config is not None]
+    else:
+        preset = QUANT_CFG_CHOICES.get(getattr(args, "qformat", None) or "")
+        algorithms = [preset.get("algorithm")] if preset is not None else []
+    methods = {
+        mode.removesuffix("_calibrate")
+        for algorithm in algorithms
+        for mode, _ in get_modelike_from_algo_cfg(algorithm)
+    }
+    return methods & {"awq_lite", "awq_full"}
+
+
 def validate_fsdp2_supported(args, config):
     """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
     issues = []
@@ -113,6 +137,11 @@ def validate_fsdp2_supported(args, config):
         issues.append("speculative decoding (--specdec_offline_dataset)")
     if getattr(args, "low_memory_mode", False):
         issues.append("--low_memory_mode (redundant with FSDP2)")
+    if dist_utils.size() > 1 and (awq := _awq_calibrations(args)):
+        issues.append(
+            f"AWQ calibration ({', '.join(sorted(awq))}) on more than one rank: each rank would fold "
+            "its own smoothing scale into its weight shard (use one GPU, or a non-AWQ format)"
+        )
     if not issues and checkpoint_has_mtp(config.model_type, args.local_checkpoint_path):
         issues.append("Nemotron-H MTP (auxiliary modules are not constructed by the FSDP2 loader)")
 

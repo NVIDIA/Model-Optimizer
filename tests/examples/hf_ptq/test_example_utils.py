@@ -58,6 +58,29 @@ def test_fsdp2_qwen_vlm_requires_text_only_calibration(
         example_utils.validate_fsdp2_supported(args, config)
 
 
+@pytest.mark.parametrize(
+    ("ranks", "qformat", "recipe", "refused"),
+    [
+        (2, "w4a8_awq_beta", None, True),
+        (2, "fp8", "general/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits", True),
+        (2, "fp8", None, False),
+        (1, "w4a8_awq_beta", None, False),
+    ],
+)
+def test_fsdp2_refuses_awq_on_several_ranks_before_loading(
+    monkeypatch, ranks, qformat, recipe, refused
+):
+    """Each rank would fold its own AWQ scale into its weight shard, which the library refuses
+    only once the model is loaded: the example refuses at argument validation."""
+    monkeypatch.setattr(example_utils.dist_utils, "size", lambda: ranks)
+    args = SimpleNamespace(local_checkpoint_path="local-model", qformat=qformat, recipe=recipe)
+    expected = (
+        pytest.raises(NotImplementedError, match="AWQ calibration") if refused else nullcontext()
+    )
+    with expected:
+        example_utils.validate_fsdp2_supported(args, SimpleNamespace(model_type="llama"))
+
+
 def _write_safetensors(path, tensors):
     save_file(tensors, str(path), metadata={"format": "pt"})
 
