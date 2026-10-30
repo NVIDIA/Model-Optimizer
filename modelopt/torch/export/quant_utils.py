@@ -324,8 +324,8 @@ def get_kv_cache_scaling_factor(
     # Both FP8 and NVFP4 cache scales are amax / 448, as the HF exporter writes them and
     # vLLM / TensorRT-LLM read them.
     scaling_factors = []
-    for quantizer_name in ("k_bmm_quantizer", "v_bmm_quantizer"):
-        quantizer = getattr(self_attention_module, quantizer_name)
+    quantizers = [self_attention_module.k_bmm_quantizer, self_attention_module.v_bmm_quantizer]
+    for quantizer in quantizers:
         if not quantizer.is_enabled:
             amax = None
         elif use_constant_amax and quantizer._use_constant_amax and not quantizer.is_mx_format:
@@ -349,7 +349,9 @@ def get_kv_cache_scaling_factor(
         factor = scaling_factors[i]
         if factor is None:
             continue
-        if _has_large_fp8_scale(factor):
+        if not (use_constant_amax and quantizers[i]._use_constant_amax) and _has_large_fp8_scale(
+            factor
+        ):
             warn(
                 "Warning: Large KV activation detected. "
                 "Quantized KV cache may lead to higher accuracy drop."

@@ -751,7 +751,7 @@ def _kv_attention(k_cfg, v_cfg, k_amax=896.0, v_amax=224.0) -> nn.Module:
     [((), False), (("k", "v"), False), (("k", "v"), True), (("k",), False), (("v",), True)],
 )
 def test_kv_cache_capture(
-    k_cfg, v_cfg, quantization_format, k_scale, v_scale, constant_axes, keep_amax
+    k_cfg, v_cfg, quantization_format, k_scale, v_scale, constant_axes, keep_amax, recwarn
 ):
     attention = _kv_attention(k_cfg, v_cfg)
     for axis in constant_axes:
@@ -766,6 +766,8 @@ def test_kv_cache_capture(
 
     state = capture_kv_cache_export_state(attention)
 
+    calibrated_fp8_k = quantization_format in {"FP8", "FP8_K_NVFP4_V"} and "k" not in constant_axes
+    assert len(recwarn) == int(calibrated_fp8_k)
     assert get_kv_cache_export_spec(attention) == state.quantization_format == quantization_format
     torch.testing.assert_close(state.k_scale.squeeze(), torch.tensor(k_scale))
     torch.testing.assert_close(state.v_scale.squeeze(), torch.tensor(v_scale))
