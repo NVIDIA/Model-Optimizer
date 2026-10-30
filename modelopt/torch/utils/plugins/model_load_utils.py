@@ -55,7 +55,6 @@ from transformers import (
 )
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
-from transformers.integrations.tensor_parallel import replace_layer_number_by_wildcard
 
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import env, moe
@@ -84,6 +83,11 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     indexed_weight_map,
     read_safetensors_subset,
 )
+
+try:  # where newer transformers keeps it; older releases, under integrations (now a partial shim)
+    from transformers.distributed.tensor_parallel import replace_layer_number_by_wildcard
+except ImportError:
+    from transformers.integrations.tensor_parallel import replace_layer_number_by_wildcard
 
 __all__ = [
     "build_meta_causal_lm",
