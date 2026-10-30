@@ -2143,12 +2143,9 @@ def export_hf_checkpoint(
         return sorted({*_carried, *off_index_tensor_names(model)})
 
     if _sharded_export:
-        # Rank 0 reads more of the source here than its peers, so a failure there alone must fail
-        # every rank rather than leave the others waiting in the export's first collective. Every
-        # rank then seeds get_quant_config with rank 0's names.
-        model._modelopt_carried_over_names = all_reduce(
-            "carried weights", carried_over_names, lambda names: names[0]
-        )
+        # Rank 0 reads the source here and sends every rank its names, so a failure of that read
+        # fails every rank rather than leave the others waiting in the export's first collective.
+        model._modelopt_carried_over_names = broadcast_from("carried weights", carried_over_names)
     else:
         model._modelopt_carried_over_names = carried_over_names()
     if _writes_extra and _carried:
@@ -2372,9 +2369,14 @@ def export_hf_checkpoint(
         # Print (not just warnings.warn, which the default filter can dedupe/suppress) BEFORE the
         # barrier below: under FSDP2/EP every other rank is still waiting there, so a failing rank
         # that raises straight into `finally` blocks on that barrier forever without this rank's
-        # traceback ever reaching the log -- the job just hangs with no visible error.
-        _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        print(f"[export_hf_checkpoint] rank {_rank} failed:\n{traceback.format_exc()}", flush=True)
+        # traceback ever reaching the log -- the job just hangs with no visible error. A single
+        # process has no barrier, and the interpreter prints the traceback.
+        if is_fsdp2_sharded or is_ep_sharded:
+            print(
+                f"[export_hf_checkpoint] rank {torch.distributed.get_rank()} failed:\n"
+                f"{traceback.format_exc()}",
+                flush=True,
+            )
         warnings.warn(
             "Cannot export model to the model_config. The modelopt-optimized model state_dict"
             " can be saved with torch.save for further inspection."
