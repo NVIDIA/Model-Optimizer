@@ -13,7 +13,7 @@ Before acting, load these Model Optimizer instructions:
 - `compare-results/SKILL.md`
 - `accessing-mlflow/SKILL.md` when existing runs are in MLflow
 - `ptq/SKILL.md` for recipe support and validation constraints
-- `qad/SKILL.md` when the user has authorized QAD; a candidate is then a recipe plus its QAD settings, chosen by its recipe loop
+- `qad/SKILL.md` when the user has authorized QAD; a candidate is then a recipe plus the QAD settings from its recipe loop
 
 Recover prior candidate state before proposing work. Keep the search space and acceptance threshold explicit. Recommend one next candidate with a falsifiable rationale. Reject candidates that violate runtime-fusion or coverage constraints. Never call a recipe best before comparable evaluation exists.
 

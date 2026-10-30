@@ -11,8 +11,10 @@ description: >-
 # ModelOpt Quantization-Aware Distillation
 
 QAD is expensive. Run it only when the user explicitly authorizes QAD for the
-target model or run. A Day-0, PTQ, evaluation, comparison, or recipe-search
-request alone is not authorization to start QAD.
+target model or run, with a loop or GPU-hour budget. A Day-0, PTQ, evaluation,
+comparison, or recipe-search request alone is not authorization to start QAD.
+The authorization covers new recipes from a recipe search only when the user
+says so.
 
 ## Confirm the gap
 
@@ -80,9 +82,10 @@ For Megatron Bridge, before constructing commands, read:
    Megatron's `99,1,0` split creates the 1% validation holdout from the same
    data. Keep every source mixed across training, never ordered as a
    curriculum, so early stops see the whole blend.
-4. **Run and monitor QAD.** Run one QAD training job at a time and fold startup
-   validation into it; do not submit separate GPU preflight jobs or split at
-   recovery iterations. Let training continue while evaluating saved
+4. **Run and monitor QAD.** Run one training job at a time per QAD run;
+   separate runs may train in parallel. Fold startup validation into the first
+   job; do not submit separate GPU preflight jobs or split at recovery
+   iterations. Let training continue while evaluating saved
    checkpoints, and cancel it when a stop condition below is met.
 
 ### Default training policy
@@ -99,7 +102,7 @@ For Megatron Bridge, before constructing commands, read:
 | Training validation | every 25 iterations; deterministic 1% holdout; 2 batches |
 | Checkpoint interval | 50 iterations |
 | Loss logging | every 10 iterations |
-| Recovery benchmark | from the KD-loss knee, then every 50-100 iterations |
+| Recovery benchmark | from the KD-loss knee, then every checkpoint |
 | Slurm duration exit | 220 minutes for a 4-hour allocation |
 
 ### Run policy
@@ -123,57 +126,52 @@ For Megatron Bridge, before constructing commands, read:
 - Start benchmark evaluation at the knee of the KD loss curve, where its steep
   drop ends, rounded to the next checkpoint, then evaluate every checkpoint
   while the scores still change. Before the knee, use loss only to catch
-  drift.
-- Run noise is about 2x the standard error of a benchmark's gap to BF16, pooled
-  over repeated evaluations; a single evaluation is often noisier than 0.5
-  points. Repeat a benchmark only when its gap is within run noise of 1%, and
-  cap the repeats.
+  drift; after it, judge and pick checkpoints by benchmarks alone, since KD
+  loss keeps falling after they peak. Between near ties, the benchmark most
+  sensitive to quantization decides.
+- Run noise is 2x the standard error of a benchmark's gap to BF16: from the
+  per-sample standard errors of both sides on a single run, pooled across
+  runs once repeats exist. Repeat a benchmark only when its gap is within run
+  noise of 1%, up to 8 runs per side.
 - Export each checkpoint to evaluate and pass the ptq skill's
-  `references/checkpoint-validation.md` gate on it before evaluation.
+  `references/checkpoint-validation.md` gate on it before evaluation. Run the
+  serving canary on the run's first export only; later exports change only
+  weights.
 - At each evaluated checkpoint, decide:
-  - **Pass:** every benchmark is within 1% of BF16. Keep the checkpoint and
-    stop the run.
-  - **Miss:** the scores converge short of 1%, two evaluated checkpoints past
-    the knee bring no gain beyond run noise, or two consecutive checkpoints
-    decline. Stop and change one QAD knob in the [recipe loop](#recipe-loop).
+  - **Pass:** every benchmark of the full original PTQ suite is within 1% of
+    BF16, each at its compare-results run floor (such as SciCode's 8 runs per
+    side). Keep the checkpoint and stop the run.
+  - **Miss:** two evaluated checkpoints past the knee bring no gain beyond run
+    noise, or two consecutive checkpoints decline beyond it. Stop and change
+    one QAD knob in the [recipe loop](#recipe-loop).
   - **Otherwise continue** to the next checkpoint.
-- Pick the checkpoint by benchmarks, never by KD loss, which keeps falling after
-  the benchmarks peak. Between near ties, the benchmark most sensitive to
-  quantization decides.
 - After a duration exit, resume the latest QAD checkpoint in the same output
   directory with unchanged prepared data paths/cache, seed, topology, optimizer,
   scheduler, iteration, and consumed-sample state; do not restart from PTQ.
-- Report the PTQ recipe, data sample, training topology, loss/state, checkpoints,
-  and comparable BF16/PTQ/QAD results.
+- Report, per loop, the PTQ recipe and calibration, data sample, QAD settings,
+  training topology, loss/state, checkpoints, and comparable BF16/PTQ/QAD
+  results.
 
 ### Recipe loop
 
-Each loop runs QAD on the best PTQ recipe for one layout and changes one thing
-from the last loop. Record each loop's recipe, calibration, QAD settings,
-checkpoints, and scores.
+Each loop runs QAD on one PTQ recipe and changes one thing from the last loop.
+Start from the best PTQ recipe of the preceding PTQ evaluation or recipe
+search, and run each new recipe first with the default policy as its control.
+This loop chooses the QAD settings; the quant-recipe-search skill chooses the
+next recipe from its outcome. Stop when the QAD budget is spent and report the
+best result so far.
 
-1. **Start from the best PTQ recipe for the target.** Take it from the
-   preceding PTQ evaluation or recipe search, and run QAD on it with the
-   default policy.
-2. **On a pass, compress more by one module group** from the passing recipe,
-   in order of bytes saved; never add two groups, or the MTP head, in one loop.
-   Find the best PTQ recipe for the new layout, starting from the passing
-   recipe's calibration, and evaluate it before its QAD. When GPUs are idle,
-   run the next 2-3 single-group candidates in parallel. A group can be a slice:
-   its middle layers with the first and last few kept, or some of its
-   projections (such as GDN `in_proj` only, or attention `linear_qkv` only).
-3. **On a miss, change one QAD knob.** Run every new layout first with the
-   default policy as its control. Read each missed benchmark against PTQ:
+1. **On a miss, change one QAD knob.** Read each missed benchmark against PTQ:
    worse than PTQ is drift (lower the peak LR or add matching data); better
    than PTQ but short is under-recovery (keep the LR high longer with a larger
    `train_iters`, or train further). Knobs, in order: peak LR, `train_iters`,
    data blend, then teacher-generated data.
-4. **Compare a knob with its control at the same checkpoints** past the knee,
-   on benchmark scores pooled over fresh runs, never on KD loss. A rejection
-   holds only for that PTQ base: rerun the control when the base changes.
-5. **Compress less** only after the knobs miss clearly on a layout, or at
-   once when QAD stays flat against PTQ or far from passing: shrink the last
-   added group to a slice before dropping it.
+2. **Compare a knob with its control at the same checkpoints** past the knee,
+   on benchmark scores pooled over fresh runs. A rejection holds only for that
+   PTQ recipe: rerun the control when the recipe changes.
+3. **End the loop on a recipe** with a pass, or with a clear miss once every
+   knob has missed or as soon as QAD stays flat against PTQ or far from
+   passing. Return the outcome, the best checkpoint, and its scores.
 
 ## Hugging Face execution and training policy
 

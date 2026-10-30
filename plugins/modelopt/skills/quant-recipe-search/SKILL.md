@@ -155,6 +155,22 @@ Do not collapse the search to one dimension such as numeric format only. Read
    the candidate is comparable to the validated measured baseline, and the
    user-defined goal is met. An externally unverified baseline is non-blocking.
 
+When the user has authorized QAD, a candidate is a recipe plus the QAD settings
+from the `qad` skill's recipe loop, which ends each recipe with a pass or a
+clear miss. Step the layout from that outcome:
+
+- After a pass, add one module group to the passing recipe, in order of bytes
+  saved; the MTP head is its own group. A group can be a slice: its middle
+  layers with the first and last few kept, or some of its projections (such as
+  GDN `in_proj` only, or attention `linear_qkv` only). Find and evaluate the
+  new layout's best PTQ recipe, starting from the passing recipe's
+  calibration, before its QAD. When GPUs are idle, run two or three
+  single-group candidates as separate QAD runs, each with its own control.
+- After a clear miss, shrink the added group to a slice; if that misses too,
+  drop the group and try the next one on the last passing recipe.
+- Stop when every group has been added or dropped, or the QAD budget is spent.
+  Return the most compressed passing recipe and its QAD checkpoint.
+
 Maintain a recipe portfolio table with recipe name, objective, active-cost
 estimate, calibration notes, checkpoint path, eval/log references, accuracy,
 verbosity, positional exclusions, and decision.
