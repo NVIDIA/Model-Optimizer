@@ -36,6 +36,8 @@ from modelopt.torch.opt.plugins.transformers import (
 )
 from modelopt.torch.utils import print_rank_0
 
+from .offline_teacher import OFFLINE_TEACHER_KEYS, fused_linear_topk_kl, topk_kl
+
 __all__ = [
     "IGNORE_INDEX",
     "DistillArgsWithTeacherModel",
@@ -80,6 +82,24 @@ class DistillArguments(ModelOptHFArguments):
             "help": (
                 "JSD beta coefficient in [0, 1]. 0=forward KL, 1=reverse KL. "
                 "Only used when --use_liger_kernel is enabled."
+            )
+        },
+    )
+    offline_teacher_dir: str | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Directory of precomputed teacher top-k log-probs (examples/llm_qat/"
+                "dump_teacher_topk.py). Replaces the teacher forward: no teacher model is loaded."
+            )
+        },
+    )
+    offline_teacher_top_k: int | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Train against only the first k of the dumped teacher top-k (default: all of them). "
+                "Eval keeps the full dump so that runs with different k stay comparable."
             )
         },
     )
@@ -141,16 +161,24 @@ class KDTrainer(ModelOptHFTrainer):
             )
 
         teacher = distill_args.teacher_model
-        if teacher is None:
+        self._offline_teacher = distill_args.offline_teacher_dir is not None
+        if self._offline_teacher:
+            if teacher is not None:
+                raise ValueError("Pass either `teacher_model` or `offline_teacher_dir`, not both.")
+            # The dump stores log-probs at temperature 1; other temperatures need raw logits.
+            if distill_args.temperature != 1.0:
+                raise ValueError("`offline_teacher_dir` supports only temperature 1.0.")
+        elif teacher is None:
             raise ValueError("`distill_args.teacher_model` is required.")
-        if not isinstance(teacher, nn.Module):
+        elif not isinstance(teacher, nn.Module):
             raise TypeError(
                 "`distill_args.teacher_model` must be a pre-loaded nn.Module. "
                 "Load the teacher in the training script before constructing KDTrainer."
             )
 
         self._teacher_model = teacher
-        self._teacher_model.requires_grad_(False)
+        if teacher is not None:
+            teacher.requires_grad_(False)
         self._kd_criterion = LogitsDistillationLoss(
             temperature=distill_args.temperature, reduction="none"
         )
@@ -181,7 +209,7 @@ class KDTrainer(ModelOptHFTrainer):
 
     def _ensure_teacher_prepared(self):
         """Prepare teacher model via accelerator (handles FSDP2, DeepSpeed, DDP)."""
-        if self._teacher_prepared:
+        if self._teacher_prepared or self._offline_teacher:
             return
         self._teacher_prepared = True
         self._teacher_model = self._prepare_model(self._teacher_model)
@@ -222,6 +250,8 @@ class KDTrainer(ModelOptHFTrainer):
         as ``eval_ce_loss``.
         """
         self._ensure_teacher_prepared()
+        teacher_topk = [inputs.get(k) for k in OFFLINE_TEACHER_KEYS]
+        inputs = {k: v for k, v in inputs.items() if k not in OFFLINE_TEACHER_KEYS}
         # ``skip_logits`` (added for Liger eval by transformers>=5.15) would make the teacher's
         # Liger forward demand labels; the fused KD loss needs its hidden states instead.
         kd_inputs = {k: v for k, v in inputs.items() if k not in ("labels", "skip_logits")}
@@ -244,7 +274,10 @@ class KDTrainer(ModelOptHFTrainer):
             batch_size = find_batch_size(inputs)
             self._record_eval_ce_loss(ce_loss, batch_size)
 
-        kd_loss = self._compute_kd_loss(outputs, labels, kd_inputs, **kwargs)
+        if self._offline_teacher:
+            kd_loss = self._offline_kd_loss(outputs, labels, *teacher_topk, **kwargs)
+        else:
+            kd_loss = self._compute_kd_loss(outputs, labels, kd_inputs, **kwargs)
 
         if self._kd_loss_alpha < 1.0:
             loss = self._kd_loss_alpha * kd_loss + (1.0 - self._kd_loss_alpha) * ce_loss
@@ -272,9 +305,11 @@ class KDTrainer(ModelOptHFTrainer):
         return self._standard_kd_loss(outputs, labels, **kwargs)
 
     def _compute_teacher_outputs(self, inputs):
-        with torch.no_grad(), self._ds_gather(self._teacher_model.parameters()):
-            self._teacher_model.eval()
-            return self._teacher_model(**inputs)
+        teacher = self._teacher_model
+        assert teacher is not None, "Online KD needs a teacher model."
+        with torch.no_grad(), self._ds_gather(teacher.parameters()):
+            teacher.eval()
+            return teacher(**inputs)
 
     def _standard_kd_loss(self, outputs, labels, num_items_in_batch=None, **kwargs):
         """KD loss with causal shift and ignore-index masking."""
@@ -287,23 +322,67 @@ class KDTrainer(ModelOptHFTrainer):
             return per_token_loss.mean()
         shift_labels = labels[..., 1:]
         mask = shift_labels != IGNORE_INDEX
-        num_tokens = mask.sum().clamp(min=1)
-        loss = (per_token_loss * mask).sum() / num_tokens
+        loss = (per_token_loss * mask).sum() / mask.sum().clamp(min=1)
+        return self._scale_to_num_items(loss, shift_labels, num_items_in_batch)
 
-        if num_items_in_batch is not None:
-            if num_items_in_batch == 0:
-                loss = loss * 0.0
-            else:
-                loss = loss * (num_tokens / num_items_in_batch)
-                # Match HF Trainer's DDP compensation: when
-                # average_tokens_across_devices is active, num_items_in_batch is
-                # the global count and DDP will average gradients across ranks.
-                # HF's parent compute_loss already multiplies CE by world_size;
-                # we must do the same for KD so the configured kd_loss_alpha
-                # ratio is preserved.
-                if getattr(self.args, "average_tokens_across_devices", False):
-                    loss = loss * self.args.world_size
+    def _scale_to_num_items(self, loss, shift_labels, num_items_in_batch):
+        """Rescale a per-token mean KD loss to HF Trainer's ``num_items_in_batch`` normalization."""
+        if num_items_in_batch is None or shift_labels is None:
+            return loss
+        if num_items_in_batch == 0:
+            return loss * 0.0
+        num_tokens = (shift_labels != IGNORE_INDEX).sum().clamp(min=1)
+        loss = loss * (num_tokens / num_items_in_batch)
+        # Match HF Trainer's DDP compensation: when average_tokens_across_devices is active,
+        # num_items_in_batch is the global count and DDP will average gradients across ranks.
+        # HF's parent compute_loss already multiplies CE by world_size; we must do the same for
+        # KD so the configured kd_loss_alpha ratio is preserved.
+        if getattr(self.args, "average_tokens_across_devices", False):
+            loss = loss * self.args.world_size
         return loss
+
+    def _offline_kd_loss(self, outputs, labels, positions, teacher_ids, teacher_logprobs, **kwargs):
+        """KD loss against dumped teacher top-k log-probs, on the same shifted loss positions."""
+        if positions is None or teacher_ids is None or teacher_logprobs is None:
+            raise ValueError(
+                "Offline KD needs the teacher top-k in each batch; wrap the datasets in "
+                "OfflineTeacherDataset and the collator in OfflineTeacherCollator."
+            )
+        shift_labels = labels[..., 1:]
+        valid = shift_labels != IGNORE_INDEX
+        dumped = positions >= 0
+        rows = torch.arange(positions.size(0), device=positions.device)[:, None].expand_as(
+            positions
+        )
+        rows, cols = rows[dumped], positions[dumped]
+        # The dump must cover exactly the positions the labels train on, or KD silently drifts.
+        if not (torch.equal(dumped.sum(-1), valid.sum(-1)) and bool(valid[rows, cols].all())):
+            raise ValueError("Dumped teacher positions do not match this batch's loss positions.")
+        teacher_ids = teacher_ids[dumped]
+        teacher_logprobs = teacher_logprobs[dumped]
+
+        if self.use_liger_kernel:
+            # outputs.logits holds hidden states here (lm_head patched to identity).
+            model = self.accelerator.unwrap_model(self.model)
+            student_lm_head = self._get_lm_head(model)
+            hidden = outputs.logits.to(student_lm_head.weight.dtype)[rows, cols]
+            loss = super()._sharded_liger_compute(
+                lambda: fused_linear_topk_kl(
+                    hidden, student_lm_head.weight, teacher_ids, teacher_logprobs
+                )
+            )
+        else:
+            loss = topk_kl(outputs.logits[rows, cols], teacher_ids, teacher_logprobs)
+        loss = loss / valid.sum().clamp(min=1)
+        return self._scale_to_num_items(loss, shift_labels, kwargs.get("num_items_in_batch"))
+
+    def _set_signature_columns_if_needed(self):
+        # Keep the dumped teacher columns: Trainer otherwise drops inputs the model does not take.
+        super()._set_signature_columns_if_needed()
+        if self._offline_teacher:
+            self._signature_columns += [
+                k for k in OFFLINE_TEACHER_KEYS if k not in self._signature_columns
+            ]
 
     @contextmanager
     def _teacher_liger_identity_lm_head(self):
@@ -355,18 +434,7 @@ class KDTrainer(ModelOptHFTrainer):
             )
 
         loss = super()._sharded_liger_compute(_compute)
-
-        if num_items_in_batch is not None and labels is not None:
-            if num_items_in_batch == 0:
-                loss = loss * 0.0
-            else:
-                mask = shift_labels != IGNORE_INDEX
-                num_tokens = mask.sum().clamp(min=1)
-                loss = loss * (num_tokens / num_items_in_batch)
-                if getattr(self.args, "average_tokens_across_devices", False):
-                    loss = loss * self.args.world_size
-
-        return loss
+        return self._scale_to_num_items(loss, shift_labels, num_items_in_batch)
 
     def _teacher_liger_enabled(self, fn, teacher_lm_head):
         if self.is_fsdp_enabled:

@@ -49,6 +49,10 @@ from transformers.trainer_utils import get_last_checkpoint
 from utils import get_lora_config, get_metrics_with_perplexity, make_supervised_data_module
 
 import modelopt.torch.opt as mto
+from modelopt.torch.distill.plugins.offline_teacher import (
+    OfflineTeacherCollator,
+    OfflineTeacherDataset,
+)
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer, QATTrainer
 from modelopt.torch.utils import print_rank_0
 
@@ -105,17 +109,37 @@ def train():
 
     distill_config = None
     if distill_args.distill:
-        assert distill_args.teacher_model is not None, "Teacher model is required for distillation."
-        teacher = transformers.AutoModelForCausalLM.from_pretrained(
-            distill_args.teacher_model,
-            dtype=torch.bfloat16,
-            **model_kwargs,
-        )
+        teacher = None
+        if distill_args.offline_teacher_dir is not None:
+            # Teacher outputs were dumped ahead of time; attach them row by row. An eval-only run
+            # needs no train dump.
+            for split, key in (("train", "train_dataset"), ("eval", "eval_dataset")):
+                if data_module.get(key) is not None and (
+                    split != "train" or training_args.do_train
+                ):
+                    data_module[key] = OfflineTeacherDataset(
+                        data_module[key],
+                        distill_args.offline_teacher_dir,
+                        split,
+                        top_k=distill_args.offline_teacher_top_k if split == "train" else None,
+                    )
+            data_module["data_collator"] = OfflineTeacherCollator(data_module["data_collator"])
+        else:
+            assert distill_args.teacher_model is not None, (
+                "Teacher model is required for distillation."
+            )
+            teacher = transformers.AutoModelForCausalLM.from_pretrained(
+                distill_args.teacher_model,
+                dtype=torch.bfloat16,
+                **model_kwargs,
+            )
         distill_config = {
             "teacher_model": teacher,
+            "offline_teacher_dir": distill_args.offline_teacher_dir,
             "temperature": distill_args.temperature,
             "criterion": distill_args.criterion,
             "liger_jsd_beta": distill_args.liger_jsd_beta,
+            "kd_loss_alpha": distill_args.kd_loss_alpha,
         }
 
     if distill_config is None:
