@@ -21,12 +21,14 @@ stub the dynamic-module loader with a stand-in remote module. Every process-wide
 after each test.
 """
 
+import copy
 import importlib
 import sys
 import types
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 transformers = pytest.importorskip("transformers")
 
@@ -102,14 +104,19 @@ def remote(monkeypatch, request):
             continue
         _restore(monkeypatch, owner, name)
     module = types.ModuleType(f"transformers_modules.Kimi.0123abcd.{modeling}")
-    module.DeepseekV3ForCausalLM = type("DeepseekV3ForCausalLM", (), {})
+    module.remote_lm = type("DeepseekV3ForCausalLM", (), {"__init__": lambda self, config: None})
+    module.DeepseekV3ForCausalLM = module.remote_lm
     module.loads, module.tied = [], []
+
+    def build(self, config=None):
+        if config is not None:  # as both checkpoints' VLM classes build their language model
+            self.language_model = module.DeepseekV3ForCausalLM(config.text_config)
 
     def tie_weights(self):
         module.tied.append(self)
         return "tied"
 
-    module.vlm = type(vlm_name, (), {"tie_weights": tie_weights})
+    module.vlm = type(vlm_name, (), {"__init__": build, "tie_weights": tie_weights})
     setattr(module, vlm_name, module.vlm)
 
     def import_remote_class(class_ref, ckpt_path, **kwargs):
@@ -178,12 +185,28 @@ def test_prepare_with_a_checkpoint_swaps_in_native_deepseek_v3_and_shims_tie_wei
 
     vlm_class = f"{remote.__name__.rsplit('.', 1)[-1]}.{remote.vlm.__name__}"
     assert remote.loads == [(vlm_class, "/ckpt", {"trust_remote_code": True})] * 2
-    assert remote.DeepseekV3ForCausalLM is DeepseekV3ForCausalLM
     assert import_utils.is_torch_fx_available() is False
     assert remote.vlm.tie_weights is shim
     model = remote.vlm()
     assert model.tie_weights(missing_keys=set(), recompute_mapping=False) == "tied"
     assert remote.tied == [model]
+
+
+@_BOTH_ADAPTERS
+def test_a_load_off_expert_parallelism_builds_the_checkpoint_s_own_language_model(
+    monkeypatch, adapter, remote
+):
+    """Deciding the plan prepares a copy of the config on every rank before the plan is known, and
+    the patch outlives that copy. A load the plan keeps off expert parallelism (replicated, or
+    FSDP2) builds from the config as read, so its VLM gets the checkpoint's own language model, as
+    with no patch; only the native config ``prepare`` makes builds transformers' native one."""
+    monkeypatch.setattr(_onfly_decompress, "install_onfly_decompress", lambda cfg: None)
+    as_read = _vlm_config()
+    prepared = adapter.prepare(copy.deepcopy(as_read), ckpt_path="/ckpt", trust_remote_code=True)
+
+    with torch.device("meta"):
+        assert type(remote.vlm(prepared).language_model) is DeepseekV3ForCausalLM
+        assert type(remote.vlm(as_read).language_model) is remote.remote_lm
 
 
 @_BOTH_ADAPTERS
