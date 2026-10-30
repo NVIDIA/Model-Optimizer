@@ -121,14 +121,19 @@ def _own_gpus() -> list[int]:
     return get_process_gpus()
 
 
-def _update_room(helper, weight) -> int:
+def _update_room(helper, weight, block_size) -> int:
     """Bytes a GPU needs to run ``helper``'s update of ``weight``, as measured with the CUDA codecs.
 
     The Hessian, the inverse and their temporaries; the float32 copy of the weight with a
     dtype-conversion temporary (a projection much wider than its input makes the weight the larger
-    part); and the codec's tables and scratch, about 35 MiB on a GPU's first update.
+    part); the block's errors and up to four temporaries of a group no wider than the block, each
+    as large as the weight when the input is no wider than a block; and the codec's tables and
+    scratch, about 35 MiB on a GPU's first update.
     """
-    return 2**26 + 4 * (8 * helper.hessian.numel() + 2 * weight.numel())
+    columns = weight.shape[-1]
+    rows = weight.numel() // columns
+    block = min(block_size, columns)
+    return 2**26 + 4 * (8 * helper.hessian.numel() + rows * (2 * columns + 5 * block))
 
 
 def update_expert_weights(work, block_size, perc_damp):
@@ -142,7 +147,7 @@ def update_expert_weights(work, block_size, perc_damp):
     """
     movable = [(h, w) for h, w in work if w.is_cuda and h.updates_on_any_device()]
     # A worker holds one expert at a time.
-    room = max((_update_room(h, w) for h, w in movable), default=0)
+    room = max((_update_room(h, w, block_size) for h, w in movable), default=0)
     gpus = [gpu for gpu in _own_gpus() if get_available_gpu_memory(gpu) > room]
     if len(gpus) < 2 or len(movable) < 2:
         movable = []

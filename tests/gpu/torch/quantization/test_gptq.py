@@ -125,6 +125,7 @@ def test_expert_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, i
     ("num_bits", "shape", "cuda_extension"),
     [
         ("iq2_xxs", (16384, 2048), True),  # a projection 8x wider than its input
+        ("iq2_xxs", (65536, 256), True),  # one GPTQ block spans the input
         ("iq1_s", (1024, 512), True),
         # The PyTorch encoder's scratch grows with block_chunk_size, past the room check.
         ("iq1_s", (1024, 512), False),
@@ -157,16 +158,17 @@ def test_an_update_that_may_move_fits_its_room(
     mtq.quantize(linear, config, forward_loop=lambda m: m(inputs))
     helper = GGMLGPTQHelper(linear, "linear", log_mse=False)
     helper.accumulate(inputs)
+    block_size = 256
     worker = torch.device("cuda", 1)
     torch.cuda.synchronize(worker)
     torch.cuda.reset_peak_memory_stats(worker)
     allocated = torch.cuda.memory_allocated(worker)
     with torch.cuda.device(worker):
-        helper.update_weights(256, 0.3, linear.weight, device=worker)
+        helper.update_weights(block_size, 0.3, linear.weight, device=worker)
     peak = torch.cuda.max_memory_allocated(worker) - allocated
 
     if helper.updates_on_any_device():
-        assert peak <= calib_utils._update_room(helper, linear.weight)
+        assert peak <= calib_utils._update_room(helper, linear.weight, block_size)
 
 
 @pytest.mark.parametrize("blocker", ["idle_gpu_full", "idle_gpu_too_small", "multi_rank"])
