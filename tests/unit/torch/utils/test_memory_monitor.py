@@ -15,7 +15,6 @@
 
 """Unit tests for launch_memory_monitor's NVML availability probe, against a fake NVML."""
 
-import atexit
 from types import SimpleNamespace
 
 import pytest
@@ -66,7 +65,6 @@ def launched():
     monitors = []
     yield monitors
     for monitor in monitors:
-        atexit.unregister(monitor.stop)
         monitor.stop()
 
 
@@ -83,3 +81,18 @@ def test_the_monitor_starts_only_where_nvml_can_report_memory(monkeypatch, launc
 
     assert (monitor is not None) is supported
     assert nvml.inits == (1 if supported else 0)
+
+
+def test_stopping_a_stopped_monitor_does_nothing(monkeypatch, capsys):
+    """launch_memory_monitor registers stop() to run at exit, so a monitor its caller stopped is
+    stopped again then: the second stop neither reports again nor shuts NVML down a second time."""
+    nvml = _FakeNVML()
+    nvml.install(monkeypatch)
+    monitor = mm.launch_memory_monitor(monitor_interval=0.01)
+
+    monitor.stop()
+    assert "Peak memory usage" in capsys.readouterr().out
+    monitor.stop()
+
+    assert capsys.readouterr().out == ""
+    assert nvml.inits == 0

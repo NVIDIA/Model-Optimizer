@@ -85,6 +85,7 @@ class GPUMemoryMonitor:
         self.peak_memory = {}  # GPU index to peak memory mapping
         self.is_running = False
         self.monitor_thread = None
+        self._stopped = False
         nvmlInit()
         self.device_count = nvmlDeviceGetCount()
 
@@ -116,8 +117,13 @@ class GPUMemoryMonitor:
         GPU that was monitored, and properly shuts down the NVML interface. It will
         wait for the monitoring thread to complete before returning.
 
-        The peak memory usage is displayed in GB for each GPU index.
+        The peak memory usage is displayed in GB for each GPU index. Stopping a stopped monitor does
+        nothing, as when a caller stops it and the exit hook :func:`launch_memory_monitor` registered
+        runs too.
         """
+        if self._stopped:
+            return
+        self._stopped = True
         self.is_running = False
         # Print peak memory usage
         print("########")
