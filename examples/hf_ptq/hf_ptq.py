@@ -43,7 +43,9 @@ from example_utils import (
     get_tokenizer,
     is_nemotron_vl,
     is_trtllm_enc_dec_export,
+    keep_the_experts_implementation,
     mlflow_run,
+    preview_generate_kwargs,
     recipe_layerwise_blocks,
     run_nemotron_vl_preview,
     save_source_config,
@@ -809,11 +811,13 @@ def pre_quantize(
             trust_remote_code=args.trust_remote_code,
         )
     else:
-        generated_ids_before_ptq = full_model.generate(
-            preview_input_ids,
-            attention_mask=preview_attention_mask,
-            max_new_tokens=100,
-        )
+        with keep_the_experts_implementation(full_model):
+            generated_ids_before_ptq = full_model.generate(
+                preview_input_ids,
+                attention_mask=preview_attention_mask,
+                max_new_tokens=100,
+                **preview_generate_kwargs(full_model),
+            )
 
     return preview_input_ids, preview_attention_mask, generated_ids_before_ptq
 
@@ -866,12 +870,15 @@ def post_quantize(
         # part of the model to CPU (seen on unified-memory single-GPU hosts) can make a
         # quantized layer run on CPU, which some kernels (e.g. NVFP4 dynamic block
         # quantization) don't support. Don't let that discard the completed calibration.
+        lockstep = preview_generate_kwargs(full_model)
         try:
-            generated_ids_after_ptq = full_model.generate(
-                preview_input_ids,
-                attention_mask=preview_attention_mask,
-                max_new_tokens=100,
-            )
+            with keep_the_experts_implementation(full_model):
+                generated_ids_after_ptq = full_model.generate(
+                    preview_input_ids,
+                    attention_mask=preview_attention_mask,
+                    max_new_tokens=100,
+                    **lockstep,
+                )
         except Exception as e:
             warnings.warn(f"Post-quantization generation sanity check failed, skipping it: {e}")
     elif is_nemotron_vl_model and tokenizer is not None:

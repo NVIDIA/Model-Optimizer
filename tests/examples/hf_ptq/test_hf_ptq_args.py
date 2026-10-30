@@ -38,7 +38,11 @@ from modelopt.recipe.presets import QUANT_CFG_CHOICES, RecipeSupersededAction
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.utils import mlflow as mlflow_lib
-from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
+from modelopt.torch.utils.distributed import (
+    DistributionPlan,
+    distribution_plan,
+    set_distribution_plan,
+)
 from modelopt.torch.utils.mlflow import describe_run, run_tags
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
@@ -1012,9 +1016,12 @@ def test_post_quantize_export_survives_a_failed_sanity_generate(monkeypatch):
     NVBug 6752977."""
     hf_ptq = _import_hf_ptq(monkeypatch)
 
-    full_model = SimpleNamespace(
-        generate=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
-    )
+    class _FailingModel(torch.nn.Module):
+        def generate(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    full_model = _FailingModel()
+    set_distribution_plan(full_model, DistributionPlan())
     export_calls = []
     monkeypatch.setattr(
         hf_ptq,
