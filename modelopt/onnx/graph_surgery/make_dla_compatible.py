@@ -35,6 +35,7 @@ from .dla_transforms.dla_cast_to_fp32 import _apply_cast_to_fp32
 from .dla_transforms.dla_constants_to_initializers import _constants_to_initializers_from_model
 from .dla_transforms.dla_decompose_lstm import _apply_decompose_lstm
 from .dla_transforms.dla_graph_cleanup import _remove_unused_initializers
+from .dla_transforms.dla_greater import _apply_greater
 from .dla_transforms.dla_indexing import (
     _apply_gather,
     _apply_gather_elements,
@@ -53,6 +54,7 @@ from .dla_transforms.dla_model_boundaries import (
     _BoundaryPreflightError,
     _require_output_rank_conversion,
 )
+from .dla_transforms.dla_not import _apply_not
 from .dla_transforms.dla_rank_conversion import (
     _apply_argmax,
     _apply_flatten,
@@ -73,6 +75,7 @@ from .dla_transforms.dla_reshape_patterns import (
     _apply_reshape_reduce_sum,
     _apply_reshape_transpose_reshape,
 )
+from .dla_transforms.dla_where import _apply_where
 from .utils.graph_utils import (
     DEFAULT_QDQ_REMOVE_QUANT_TYPES,
     GraphCache,
@@ -137,6 +140,9 @@ DLA_TRANSFORMS = (
     ("Non4DLpNorm", _apply_non4d_lpnorm),
     ("FixInstanceNormChannelMismatch", _apply_fix_instancenorm_channels),
     ("UpdateAxis", _apply_update_axis),
+    ("Where", _apply_where),
+    ("Not", _apply_not),
+    ("Greater", _apply_greater),
     ("ShapeInference", infer_shapes),
     ("RemoveUnusedInitializers", _remove_unused_initializers),
 )
