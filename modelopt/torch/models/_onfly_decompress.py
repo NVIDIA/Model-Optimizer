@@ -403,13 +403,13 @@ def install_onfly_decompress(hf_config):
     )
 
 
-def check_compressed_keys(hf_config, ckpt_dir) -> None:
+def check_compressed_keys(hf_config, ckpt_dir) -> dict[str, str]:
     """Refuse a checkpoint the decompression would load wrong, by the tensors ``ckpt_dir`` stores.
 
     Only the experts decompress, and the load drops the config any other compressed weight would need:
     the experts alone must be compressed, every one of them. The load may cast their float tensors to
     bf16 before decompressing, so one bf16 cannot hold exactly (an fp32 scale) is refused too. Reads
-    only the tensors' names and dtypes.
+    only the tensors' names and dtypes, and returns the ``tensor name -> file`` map it read.
     """
     # A plugin: it imports huggingface_hub, which this module needs nowhere else.
     from modelopt.torch.utils.plugins.hf_checkpoint_utils import checkpoint_tensor_files
@@ -483,3 +483,4 @@ def check_compressed_keys(hf_config, ckpt_dir) -> None:
             "to, before decompressing, shifting every weight they scale. Decompress the checkpoint "
             "first."
         )
+    return tensor_files
