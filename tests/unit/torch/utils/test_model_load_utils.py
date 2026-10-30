@@ -825,6 +825,44 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
 
 
+def _remote_kimi(moe):
+    """A remote-code Kimi VLM as the checkpoint's own code builds it, unpatched by its spec's
+    ``prepare``: each MoE layer of its language model holds its routed experts as per-expert
+    modules in an ``nn.ModuleList``, at ``language_model.model.layers.<i>.<moe>.experts``."""
+
+    def layer():
+        block = nn.Module()
+        block.gate = nn.Linear(2, 4, bias=False)
+        block.experts = nn.ModuleList(nn.Linear(2, 2, bias=False) for _ in range(4))
+        return nn.ModuleDict({moe: block})
+
+    model = nn.Module()
+    model.language_model = nn.Module()
+    model.language_model.model = nn.Module()
+    model.language_model.model.layers = nn.ModuleList(layer() for _ in range(2))
+    model.tie_weights = lambda: None  # a PreTrainedModel's; nothing here is tied
+    return model
+
+
+@pytest.mark.parametrize(("model_type", "moe"), [("kimi_vl", "mlp")])
+def test_a_remote_moe_whose_prepare_attaches_its_plan_left_whole_is_an_error(
+    run_as, serve, monkeypatch, tmp_path, model_type, moe
+):
+    """Remote-code Kimi checkpoints get their plan from their spec's ``prepare``, which an EP degree
+    of 1 skips: it patches their code. The plan their spec states still finds the experts their own
+    code builds, so whole on every rank they are refused like Qwen3-MoE."""
+    monkeypatch.setenv("MODELOPT_EP_DEGREE", "1")
+    monkeypatch.setattr(
+        get_spec(model_type).ep_spec, "prepare", lambda *a, **k: pytest.fail("ran prepare")
+    )
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi(moe))
+    run_as(4)
+    serve(SimpleNamespace(model_type=model_type, text_config=SimpleNamespace(n_routed_experts=8)))
+
+    with pytest.raises(RuntimeError, match="can be expert-parallel, but the plan resolved"):
+        resolve_distribution_plan(str(tmp_path))
+
+
 def test_an_ep_capable_moe_may_be_fsdp2_sharded_instead(run_as, serve, monkeypatch, tmp_path):
     """Asked for no expert parallelism but for dense sharding, the MoE is sharded whole by FSDP2,
     which is not the waste of a replica on every rank."""
