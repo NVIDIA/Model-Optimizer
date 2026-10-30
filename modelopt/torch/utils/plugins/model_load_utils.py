@@ -930,14 +930,16 @@ def _auto_class(hf_config, require_lm_head: bool = True, trust_remote_code: bool
     A causal LM builds through ``AutoModelForCausalLM``, head included: ``require_lm_head`` only
     applies to a model whose architecture reads as a VLM's -- a nested text config, a vision
     config, or a ``*ForConditionalGeneration`` architecture -- or that is an encoder-decoder model
-    (``is_encoder_decoder``), whether or not it names its architecture. Such a model builds through
-    ``AutoModel``, which leaves its LM head out, unless ``require_lm_head``: then through the
-    remote ``AutoModelForCausalLM`` when the checkpoint registers its ``*ForConditionalGeneration``
-    there, its code is trusted and it registers no image-text class, else through its seq2seq
-    class if it is an encoder-decoder model, else through ``AutoModelForImageTextToText`` if that
-    recognizes the config or, its code trusted, the checkpoint registers one, else through
-    ``AutoModelForCausalLM`` if that recognizes it (as it does Phi-4-multimodal), else still
-    through ``AutoModel``.
+    (``is_encoder_decoder``), whether or not it names its architecture. Without ``require_lm_head``
+    such a model builds through ``AutoModel``, its base model, when that can build it (the config
+    is a native one, or a trusted remote one registering ``AutoModel``): most base models leave the
+    head out, since it is not required, though some keep it (Llama4's). Otherwise it builds through
+    the remote ``AutoModelForCausalLM`` when the checkpoint registers its
+    ``*ForConditionalGeneration`` there, its code is trusted and it registers no image-text class,
+    else through its seq2seq class if it is an encoder-decoder model, else through
+    ``AutoModelForImageTextToText`` if that recognizes the config or, its code trusted, the
+    checkpoint registers one, else through ``AutoModelForCausalLM`` if that recognizes it (as it
+    does Phi-4-multimodal), else still through ``AutoModel``.
     """
     architectures = getattr(hf_config, "architectures", None) or []
     is_vlm = (
@@ -947,9 +949,12 @@ def _auto_class(hf_config, require_lm_head: bool = True, trust_remote_code: bool
     )
     if not is_vlm and not getattr(hf_config, "is_encoder_decoder", False):
         return AutoModelForCausalLM
-    if not require_lm_head:
-        return AutoModel
     auto_map = getattr(hf_config, "auto_map", None) or {}
+    if not require_lm_head and (
+        type(hf_config) in AutoModel._model_mapping
+        or (trust_remote_code and "AutoModel" in auto_map)
+    ):
+        return AutoModel
     remote_with_head = (
         trust_remote_code
         and "conditionalgeneration" in str(auto_map.get("AutoModelForCausalLM", "")).lower()

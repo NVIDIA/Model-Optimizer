@@ -323,6 +323,13 @@ _REMOTE_IMAGE_TEXT_VLM = {
         ),
         (WhisperConfig(), True, False, AutoModelForSpeechSeq2Seq),
         (T5Config(architectures=["T5ForConditionalGeneration"]), False, False, AutoModel),
+        (_vlm_config(auto_map=_REMOTE_VLM), False, True, AutoModelForCausalLM),
+        (
+            _vlm_config(auto_map={**_REMOTE_VLM, "AutoModel": "m.KimiK25Model"}),
+            False,
+            True,
+            AutoModel,
+        ),
     ],
     ids=[
         "causal-lm",
@@ -336,6 +343,8 @@ _REMOTE_IMAGE_TEXT_VLM = {
         "encoder-decoder",
         "speech-encoder-decoder",
         "encoder-decoder-backbone",
+        "remote-vlm-without-a-base-class",
+        "remote-vlm-backbone",
     ],
 )
 def test_the_class_that_builds_the_whole_model(
