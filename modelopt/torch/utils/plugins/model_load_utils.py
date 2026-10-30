@@ -552,7 +552,10 @@ def _whole_instead(decided: bool, route: str = _FSDP2) -> str:
 def _refuse_sharded_load_options(
     route, auto_class, kwargs, decided: bool, measured: bool = False
 ) -> None:
-    """Refuse what the sharded load ``route`` cannot honor; ``measured``: GPU memory chose it."""
+    """Refuse what the sharded load ``route`` cannot honor; ``measured``: the decision chose it.
+
+    By rank 0's GPU memory for the FSDP2 load, by the model's experts for the expert-parallel one.
+    """
     # An option passed as None, from_pretrained's own default (device_map=None, say), asks nothing.
     passed = {name for name, value in kwargs.items() if value is not None}
     unknown = sorted(passed - _SHARDED_LOAD_OPTIONS[route] - {"dtype", "torch_dtype"})
@@ -560,10 +563,16 @@ def _refuse_sharded_load_options(
     dtypes = [name for name in ("dtype", "torch_dtype") if kwargs.get(name) not in (None, "auto")]
     if measured and (refused := sorted({*unknown, *dtypes})):
         # Say so, rather than refuse the options below as if the caller had asked for this load.
+        chose = (
+            "no plan or MODELOPT_EP_DEGREE asked for a layout, and the plan decision shards the "
+            "model's routed experts over the ranks"
+            if route == _EXPERT_PARALLEL
+            else "no plan or MODELOPT_FSDP_SIZE asked for a layout, and by rank 0's GPU memory the "
+            f"model does not fit one GPU, so the {route} load shards it"
+        )
         raise TypeError(
-            f"{refused} do not apply to a sharded load, but no plan or MODELOPT_FSDP_SIZE asked for "
-            f"a layout, and by rank 0's GPU memory the model does not fit one GPU, so the {route} "
-            f"load shards it. To load it whole on every rank: {_whole_instead(decided)}."
+            f"{refused} do not apply to a sharded load, but {chose}. To load it whole on every "
+            f"rank: {_whole_instead(decided, route)}."
         )
     if _init_quantized_weights():
         raise NotImplementedError(
@@ -901,7 +910,12 @@ def load_pretrained(
                 f"{sharded} only apply to the expert-parallel load, but {plan!r} gives every rank "
                 "the whole model; pass a plan with ep_size > 1 to shard an MoE's routed experts."
             )
-        measured = decided and route == _FSDP2 and _dense_from_env(plan.world_size) == "auto"
+        # Whether the decision chose this sharded layout with nothing asking for it: by rank 0's GPU
+        # memory for the FSDP2 load, by the model's routed experts for the expert-parallel one.
+        measured = decided and (
+            (route == _FSDP2 and _dense_from_env(plan.world_size) == "auto")
+            or (route == _EXPERT_PARALLEL and _ep_degree(None) == "auto")
+        )
         if route is not None and config is not None:
             # The sharded load builds from hf_config, a copy, as building writes to the config.
             del kwargs["config"]
