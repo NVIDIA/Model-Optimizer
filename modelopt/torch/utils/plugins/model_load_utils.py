@@ -510,6 +510,7 @@ def _refuse_sharded_load_options(
     # An option passed as None, from_pretrained's own default (device_map=None, say), asks nothing.
     passed = {name for name, value in kwargs.items() if value is not None}
     unknown = sorted(passed - _SHARDED_LOAD_OPTIONS[route] - {"dtype", "torch_dtype"})
+    # torch_dtype is from_pretrained's older name for dtype, and None means "auto" to it.
     dtypes = [name for name in ("dtype", "torch_dtype") if kwargs.get(name) not in (None, "auto")]
     if measured and (placed := sorted({*unknown, *dtypes})):
         # Say so, rather than refuse the options below as if the caller had asked for this load.
@@ -524,15 +525,13 @@ def _refuse_sharded_load_options(
         raise NotImplementedError(
             f"The {route} load builds its model class itself; auto_class={name} does not apply to it."
         )
-    # torch_dtype is from_pretrained's older name for dtype, and None means "auto" to it.
-    for name in ("dtype", "torch_dtype"):
-        value = kwargs.get(name)
-        if value not in (None, "auto"):  # A sharded load keeps the checkpoint's dtype.
-            raise TypeError(
-                f"The {route} load reads the checkpoint's tensors as stored and keeps their dtype, "
-                f"so {name}={value!r} does not apply to it; FSDP2's mp_policy sets the dtype it "
-                "computes in."
-            )
+    if dtypes:  # A sharded load keeps the checkpoint's dtype.
+        name = dtypes[0]
+        raise TypeError(
+            f"The {route} load reads the checkpoint's tensors as stored and keeps their dtype, so "
+            f"{name}={kwargs[name]!r} does not apply to it; FSDP2's mp_policy sets the dtype it "
+            "computes in."
+        )
     if unknown:
         whole = (
             " To place the model yourself, have every rank load it whole: "
@@ -559,8 +558,8 @@ def _sharded_load_kwargs(
         # prepare_model_for_loading builds the head on a whole model only; carried over, the
         # head would be exported unquantized.
         raise NotImplementedError(
-            f"The {route} load cannot build the MTP head this {model_type} checkpoint carries; "
-            "load it unsharded."
+            f"The {route} load cannot build the MTP head this {model_type} checkpoint carries. To "
+            f"load it whole on every rank: {_whole_instead(decided)}."
         )
     trust_remote_code = kwargs.pop("trust_remote_code", False)
     hf_config = kwargs.pop("hf_config", None)
@@ -573,7 +572,8 @@ def _sharded_load_kwargs(
         # It reads the tensors as stored: quantized weights, a VLM's language model's included,
         # would load as if they were not.
         raise NotImplementedError(
-            f"The {route} load cannot dequantize this {model_type} checkpoint; load it unsharded."
+            f"The {route} load cannot dequantize this {model_type} checkpoint. To load it whole on "
+            f"every rank: {_whole_instead(decided)}."
         )
     # It builds as build_meta_causal_lm does: a text-only VLM it supports through its image-text
     # class, anything else through AutoModelForCausalLM, which refuses most VLMs' configs and, for
@@ -674,7 +674,9 @@ def load_pretrained(
     :func:`resolve_distribution_plan` returned with the plan handed in as ``distribution``: the load
     builds from it as given, so without that plan it is refused. A ``config`` passed for the load, or
     a path to one as ``from_pretrained`` takes, is the one the plan is decided from, and a sharded
-    load takes it as its ``hf_config``.
+    load takes it as its ``hf_config``. A whole-model load refuses the options only the FSDP2 load
+    takes, but for ``cpu_offload`` at ``False`` or ``None`` and ``mp_policy`` at ``None``, which ask
+    nothing of it; ``broadcast_chunk_size=None`` asks for all of a source's layers at once.
 
     Whatever the placement:
 
