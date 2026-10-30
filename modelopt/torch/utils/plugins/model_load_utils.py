@@ -552,8 +552,10 @@ def _sharded_load_kwargs(route, ckpt_path, auto_class, model_type, kwargs, hub_o
         hf_config = AutoConfig.from_pretrained(
             ckpt_path, trust_remote_code=trust_remote_code, **hub_options
         )
-    if getattr(hf_config, "quantization_config", None) is not None:
-        # It reads the tensors as stored: quantized weights would load as if they were not.
+    nested = (getattr(hf_config, name, None) for name in ("text_config", "llm_config"))
+    if any(getattr(c, "quantization_config", None) is not None for c in (hf_config, *nested)):
+        # It reads the tensors as stored: quantized weights, a VLM's language model's included,
+        # would load as if they were not.
         raise NotImplementedError(
             f"The {route} load cannot dequantize this {model_type} checkpoint; load it unsharded."
         )
