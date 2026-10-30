@@ -786,14 +786,17 @@ def _decodes_in_place(rev, ops) -> bool:
 
     A dequantizing load (FineGrainedFP8 ``dequantize=True``) decodes each weight in place, and
     its reverse would re-encode the weight in the source's format. The export never wants that:
-    it writes ModelOpt's own quantized weights and scales. Such a converter renames nothing.
+    it writes ModelOpt's own quantized weights and scales. Such a converter renames nothing: the
+    weight maps onto itself, and every pattern names a tensor of the same module, the weight or a
+    scale the load folded into it. One naming another module would rename it, so it is not skipped.
     """
     codec_ops = _quantization_codec_ops()
     if not ops or not codec_ops or not all(isinstance(op, codec_ops) for op in ops):
         return False
     sources = [p.strip("^$") for p in _as_list(rev.source_patterns)]
     targets = [p.strip("^$") for p in _as_list(rev.target_patterns)]
-    return bool(sources) and sources[:1] == targets[:1]
+    modules = {p.rpartition(".")[0] for p in (*sources, *targets)}
+    return bool(sources) and sources[:1] == targets[:1] and len(modules) == 1
 
 
 def _build_reverse_rules(
