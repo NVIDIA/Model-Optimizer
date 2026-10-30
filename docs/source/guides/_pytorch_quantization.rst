@@ -70,11 +70,42 @@ To verify that the quantizer nodes are placed correctly in the model, let's prin
     mtq.print_quant_summary(model)
 
 
-After PTQ, the model can be exported to ONNX with the normal PyTorch ONNX export flow.
+After PTQ, ModelOpt's helper supplies the operator translations and weight
+postprocessing required by the ``torch.export``-based ONNX workflow.
 
 .. code-block:: python
 
-    torch.onnx.export(model, sample_input, onnx_file)
+    from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
+
+    sample_input = next(iter(data_loader))
+    onnx_bytes, _ = get_onnx_bytes_and_metadata(
+        model,
+        (sample_input,),
+        dynamo_export=True,
+    )
+    OnnxBytes.from_bytes(onnx_bytes).write_to_disk("onnx_model")
+
+Dynamo export supports FP8, INT8, INT4 AWQ, MXFP8, NVFP4, and mixed
+FP8-plus-NVFP4 AutoQuant on canonical Linear, MatMul, or Gemm weight paths.
+Omitting ``onnx_opset`` selects opset 23 for Dynamo export and opset 20 for the
+legacy default; explicit Dynamo opsets below 23 are rejected.
+
+``get_onnx_bytes_and_metadata`` is the supported interface because it owns Dynamo
+capture, quantization lowering, and packed-weight postprocessing. Direct
+``torch.onnx.export(..., dynamo=True)`` calls are unsupported for ModelOpt-quantized
+models, and a failed Dynamo export does not fall back to the legacy exporter. Set
+``dynamo_export=False`` to select the legacy path explicitly.
+
+Static quantized weights may use constant reshapes, casts, or a transpose around
+the quantization marker, but must feed exactly one Linear, MatMul, or Gemm.
+Shared quantized weights, fanout, arbitrary weight views, ``dynamic_axes``, and
+block-quantized activation ranks other than 2 or 3 are unsupported and fail
+closed. The supported mixed AutoQuant configuration is FP8 plus NVFP4.
+
+FP8, INT8, MXFP8, NVFP4, and mixed FP8-plus-NVFP4 ViT models can be built and
+executed with TensorRT on hardware that supports the selected precision (NVFP4
+requires Blackwell). INT4 AWQ is limited to ONNX export and checker validation;
+do not request a TensorRT build for it.
 
 ModelOpt also supports direct export of Huggingface or Megatron-Bridge/Megatron-LM LLM models to TensorRT-LLM for deployment.
 Please see :doc:`TensorRT-LLM Deployment <../deployment/1_tensorrt_llm>` for more details.

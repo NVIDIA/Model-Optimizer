@@ -43,6 +43,12 @@ from modelopt.onnx.export import (
     NVFP4QuantExporter,
     ONNXQuantExporter,
 )
+from modelopt.onnx.export._dynamo_adapter import (
+    _sync_initializer_metadata,
+    finalize_dynamo_export,
+    normalize_dynamo_weight_paths,
+)
+from modelopt.onnx.export.fp8_exporter import _DynamoFP8QuantExporter
 from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_with_smallest_nonzero
 from modelopt.onnx.utils import (
     change_casts_to_fp16,
@@ -96,6 +102,7 @@ ValueInfoType = Any
 
 # a few constants...
 DEFAULT_ONNX_OPSET = 20
+_DEFAULT_DYNAMO_ONNX_OPSET = 23
 ONNX_EXPORT_OUT_PREFIX = "out"
 
 
@@ -334,12 +341,12 @@ def split_args_kwargs(args_tuple):
 
 
 def is_int4_quantized(model: nn.Module) -> bool:
-    """Check if the model is quantized in INT4 mode.
-    This method does not check if the model has been quantized in mixed precision format."""
+    """Check whether the model contains enabled INT4 weight-only quantization."""
     for _, module in model.named_modules():
         if (
             hasattr(module, "input_quantizer")
             and hasattr(module, "weight_quantizer")
+            and module.weight_quantizer.is_enabled
             and module.weight_quantizer._num_bits == 4
             and module.input_quantizer._disabled
         ):
@@ -393,7 +400,10 @@ def is_fp8_quantized(model: nn.Module) -> bool:
             hasattr(module, "weight_quantizer")
             and hasattr(module, "input_quantizer")
             and module.weight_quantizer.is_enabled
-            and module.input_quantizer.is_enabled
+            and (
+                module.input_quantizer.is_enabled
+                or isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d))
+            )
             and module.weight_quantizer._num_bits == (4, 3)
             and module.input_quantizer._num_bits == (4, 3)
             # Exclude MXFP8 which also uses (4,3) but has block_sizes with scale_bits
@@ -429,7 +439,9 @@ def _disable_fp8_conv_weight_quantizers(model: nn.Module):
             module.weight_quantizer.enable()
 
 
-def quantize_weights(model: nn.Module, onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+def quantize_weights(
+    model: nn.Module, onnx_model: onnx.ModelProto, *, dynamo_export: bool = False
+) -> onnx.ModelProto:
     """Real quantizes the weights in the onnx model.
 
     Applies weight quantization to an ONNX model based on the quantization scheme detected
@@ -445,6 +457,7 @@ def quantize_weights(model: nn.Module, onnx_model: onnx.ModelProto) -> onnx.Mode
         model (nn.Module): The original PyTorch model used to detect quantization schemes.
             This model should have been quantized using modelopt's quantization APIs.
         onnx_model (onnx.ModelProto): The ONNX model whose weights will be quantized.
+        dynamo_export: Whether captured Conv quantizers supply their own scales and exclusions.
 
     Returns:
         onnx.ModelProto: The ONNX model with quantized weights applied. The returned model
@@ -465,7 +478,7 @@ def quantize_weights(model: nn.Module, onnx_model: onnx.ModelProto) -> onnx.Mode
     if is_mxfp8_quantized(model):
         onnx_exporters.append(MXFP8QuantExporter)
     if is_fp8_quantized(model):
-        onnx_exporters.append(FP8QuantExporter)
+        onnx_exporters.append(_DynamoFP8QuantExporter if dynamo_export else FP8QuantExporter)
     if is_int8_quantized(model):
         onnx_exporters.append(INT8QuantExporter)
 
@@ -487,7 +500,7 @@ def get_onnx_bytes_and_metadata(
     dynamic_axes: dict = {},
     remove_exported_model: bool = True,
     dynamo_export: bool = False,
-    onnx_opset: int = DEFAULT_ONNX_OPSET,
+    onnx_opset: int | None = None,
     dq_only: bool = False,
     weights_dtype: str = "fp32",
 ) -> tuple[bytes, ModelMetadata]:
@@ -505,9 +518,12 @@ def get_onnx_bytes_and_metadata(
             export process.
         dynamo_export: If True, the model is exported using `dynamo=True` in
             `torch.onnx.export <https://pytorch.org/docs/stable/onnx.html#torch.onnx.export>`_.
-        onnx_opset: The onnx opset version to use for exporting the model.
+        onnx_opset: The ONNX opset version. Defaults to 20 for legacy export and 23 for
+            Dynamo export.
         dq_only: If True, the exported onnx model is converted to a dq_only model.
-        weights_dtype: Requested high-precision dtype for exported weights. For an FP8 model,
+        weights_dtype: Requested high-precision dtype for exported weights. Dynamo FP8 with
+            FP16 parameters preserves FP32 quantizer math when requesting FP16. Dynamo NVFP4
+            rejects BF16 requests. For an FP8 model,
             ``"bf16"`` is accepted only when every floating parameter is already BF16. This is
             a weight-focused no-op, not a graph-wide conversion: floating buffers are not
             considered for eligibility and may preserve higher-precision regions.
@@ -517,7 +533,8 @@ def get_onnx_bytes_and_metadata(
         ModelMetadata: The model's meta data.
 
     Raises:
-        ValueError: If model is not an nn.Module or the requested precision conversion is unsupported.
+        ValueError: If model is not an nn.Module or the requested export configuration is unsupported.
+        NotImplementedError: If Dynamo export is requested with dynamic axes.
     """
     if not isinstance(model, nn.Module):
         raise ValueError("Only PyTorch model compilation is supported.")
@@ -537,6 +554,7 @@ def get_onnx_bytes_and_metadata(
     uses_fp4 = is_fp4_quantized(model)
     uses_mxfp8 = is_mxfp8_quantized(model)
     uses_fp8 = is_fp8_quantized(model)
+    preserve_dynamo_fp8_precision = dynamo_export and uses_fp8
     uses_int8 = is_int8_quantized(model)
     uses_other_unsupported_quantizer = is_int4_quantized(model) or uses_mxfp8 or uses_int8
     is_bf16_fp8_noop = (
@@ -546,11 +564,9 @@ def get_onnx_bytes_and_metadata(
         and not (uses_fp4 or uses_other_unsupported_quantizer)
     )
 
-    # Standardize model args and also tensorize them so they also appear in the onnx graph!
-    # Floats/ints are tensorized when they are provided, but not tensorized when they are not
-    # provided which is somewhat inconsistent (we always tensorize them!)
     named_args, _ = standardize_named_model_args(model, dummy_input)
-    named_args = {k: _to_expected_onnx_type(v) for k, v in named_args.items()}
+    if not dynamo_export:
+        named_args = {name: _to_expected_onnx_type(value) for name, value in named_args.items()}
 
     # Also standardize dummy_input again so we can use it
     dummy_input = tuple(named_args.values())
@@ -560,20 +576,47 @@ def get_onnx_bytes_and_metadata(
     # Get input tree spec, see generate_onnx_input for more info as well on this
     flat_input, tree_spec_input = flatten_tree(named_args)
 
-    # input names are the names of the flattened input tree spec but without None values
-    input_names = [k for k, v in zip(tree_spec_input.names, flat_input) if v is not None]
+    # Dynamo specializes Python scalars, so only tensor leaves become graph inputs.
+    input_names = [
+        k
+        for k, v in zip(tree_spec_input.names, flat_input)
+        if (isinstance(v, torch.Tensor) if dynamo_export else v is not None)
+    ]
 
     # we also want to record the input names that are None so we can remove them from the input
     # during inference.
-    input_none_names = list(set(tree_spec_input.names) - set(input_names))
+    input_none_names = [k for k, v in zip(tree_spec_input.names, flat_input) if v is None]
+
+    if not onnx_load_path:
+        if onnx_opset is None:
+            onnx_opset = _DEFAULT_DYNAMO_ONNX_OPSET if dynamo_export else DEFAULT_ONNX_OPSET
+        if dynamo_export and onnx_opset < _DEFAULT_DYNAMO_ONNX_OPSET:
+            raise ValueError(
+                f"Dynamo ONNX export requires opset {_DEFAULT_DYNAMO_ONNX_OPSET} or newer."
+            )
+        if dynamo_export and dynamic_axes:
+            raise NotImplementedError("Dynamo ONNX export does not support dynamic_axes yet.")
+
+    if dynamo_export and not onnx_load_path and uses_fp4 and weights_dtype == "bf16":
+        raise ValueError("Dynamo NVFP4 export does not support weights_dtype=bf16.")
 
     use_torch_autocast = not (
         uses_fp4 or uses_mxfp8 or uses_fp8 or uses_int8 or weights_dtype == "fp32"
     )
     autocast = torch.autocast("cuda") if use_torch_autocast else nullcontext()
 
+    if dynamo_export and not onnx_load_path:
+        # ONNXScript is an optional Dynamo dependency; legacy export must not import it.
+        from modelopt.torch.quantization._dynamo_onnx import (
+            _get_dynamo_onnx_translation_table,
+            _validate_dynamo_quantization,
+        )
+
+        dynamo_validation = _validate_dynamo_quantization(model)
+    else:
+        dynamo_validation = nullcontext()
     # Get output once (we export in inference mode - so also using inference mode here!)
-    with torch.inference_mode(), autocast:
+    with torch.inference_mode(), autocast, dynamo_validation:
         output = model(*named_args.values())
 
     # Get output tree spec
@@ -616,13 +659,20 @@ def get_onnx_bytes_and_metadata(
     quantizer_context = (
         configure_linear_module_onnx_quantizers(model) if uses_fp4 or uses_mxfp8 else nullcontext()
     )
-    # Disable FP8 Conv weight quantizers: TorchScript custom ops produce outputs with
-    # unknown shapes, causing _convolution symbolic to fail. Conv weights are quantized
-    # to FP8 in post-processing by FP8QuantExporter instead.
-    conv_wq_context = _disable_fp8_conv_weight_quantizers(model) if uses_fp8 else nullcontext()
+    # Only TorchScript needs the workaround for custom Conv outputs with unknown shapes.
+    # Dynamo preserves weight markers so packing uses calibrated scales and exclusions.
+    conv_wq_context = (
+        _disable_fp8_conv_weight_quantizers(model)
+        if uses_fp8 and not dynamo_export
+        else nullcontext()
+    )
     with torch.inference_mode(), autocast, quantizer_context, conv_wq_context:
         additional_kwargs = {}
-        if not dynamo_export:
+        if dynamo_export:
+            additional_kwargs["custom_translation_table"] = _get_dynamo_onnx_translation_table()
+            if "fallback" in inspect.signature(torch.onnx.export).parameters:
+                additional_kwargs["fallback"] = False
+        else:
             additional_kwargs["dynamic_axes"] = dynamic_axes
         torch.onnx.export(
             model,
@@ -656,28 +706,58 @@ def get_onnx_bytes_and_metadata(
         tree_spec_input, tree_spec_output, input_none_names, onnx_opt_graph, model
     )
 
-    onnx_opt_graph = quantize_weights(model, onnx_opt_graph)
+    if dynamo_export:
+        onnx_opt_graph = normalize_dynamo_weight_paths(onnx_opt_graph)
+
+    onnx_opt_graph = quantize_weights(model, onnx_opt_graph, dynamo_export=dynamo_export)
+    if preserve_dynamo_fp8_precision:
+        assert onnx_opset is not None
+        onnx_opt_graph = finalize_dynamo_export(onnx_opt_graph, onnx_opset)
+        onnx_opt_graph = infer_shapes(onnx_opt_graph)
 
     if dq_only:
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
 
-    if weights_dtype in ["fp16", "bf16"] and not is_bf16_fp8_noop:
-        if uses_other_unsupported_quantizer or uses_fp8:
+    is_fp16_fp8_noop = (
+        dynamo_export
+        and weights_dtype == "fp16"
+        and source_parameter_dtypes == {torch.float16}
+        and uses_fp8
+        and not (uses_fp4 or uses_other_unsupported_quantizer)
+    )
+    preserve_block_io_types = dynamo_export and (uses_fp4 or uses_mxfp8) and weights_dtype == "fp32"
+    if (weights_dtype in ["fp16", "bf16"] or preserve_block_io_types) and not (
+        is_bf16_fp8_noop or is_fp16_fp8_noop
+    ):
+        if (dynamo_export and uses_fp4) or uses_other_unsupported_quantizer or uses_fp8:
+            blocked_ops = (
+                ["Div"]
+                if preserve_block_io_types
+                else ["QuantizeLinear", "DequantizeLinear", "Div"]
+            )
             onnx_opt_graph = convert_float_to_float16(
                 onnx_opt_graph,
-                keep_io_types=False,
+                keep_io_types=preserve_block_io_types,
                 disable_shape_infer=True,
                 check_fp16_ready=False,
-                op_block_list=["QuantizeLinear", "DequantizeLinear", "Div"],
+                op_block_list=blocked_ops,
+                node_block_list=[
+                    node.name
+                    for node in onnx_opt_graph.graph.node
+                    if preserve_dynamo_fp8_precision
+                    and node.op_type in {"QuantizeLinear", "DequantizeLinear"}
+                    and not any(attr.name == "block_size" for attr in node.attribute)
+                ],
             )
             # Change FP32 cast nodes feeding into Concat/Add to FP16
             op_list = ["Concat", "Add", "Sqrt", "LayerNormalization", "Clip", "Mul", "Exp"]
             onnx_opt_graph = change_casts_to_fp16(onnx_opt_graph, op_list)
-            # Remove Cast(FP32->FP16) nodes after DQ by setting DQ output to FP16 directly
-            onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
-            # Remove Cast(FP16->FP32) feeding Q/DQ scales so DQ stays FP16 for downstream
-            # MatMul/Add layers under strongly-typed TRT parsing.
-            onnx_opt_graph = fold_qdq_scale_fp16_to_fp32_casts(onnx_opt_graph)
+            # Dynamo FP8 needs FP32 scales even when the surrounding graph is FP16.
+            if not preserve_dynamo_fp8_precision:
+                onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
+                onnx_opt_graph = fold_qdq_scale_fp16_to_fp32_casts(onnx_opt_graph)
+            if preserve_block_io_types:
+                _sync_initializer_metadata(onnx_opt_graph.graph)
         else:
             onnx_opt_graph = convert_to_f16(
                 onnx_opt_graph, low_precision_type=weights_dtype, keep_io_types=False
@@ -686,12 +766,16 @@ def get_onnx_bytes_and_metadata(
     onnx_opt_graph = remove_redundant_casts(onnx_opt_graph)
 
     # Remove Cast nodes around Q/DQ for optimal TRT fusion
-    if uses_fp8:
+    if uses_fp8 and not dynamo_export:
         onnx_opt_graph = fold_q_fp16_to_fp32_casts(onnx_opt_graph)
         onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
 
     # TensorRT expects all scales to be postive
     onnx_opt_graph = replace_zero_scale_with_smallest_nonzero(onnx_opt_graph)
+
+    if dynamo_export:
+        assert onnx_opset is not None
+        onnx_opt_graph = finalize_dynamo_export(onnx_opt_graph, onnx_opset)
 
     # TODO: Remove manual ir_version change once ORT supports ir_version 11
     # Must be set after all gs.export_onnx() calls as graphsurgeon resets ir_version
