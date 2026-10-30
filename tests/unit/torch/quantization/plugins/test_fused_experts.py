@@ -2118,10 +2118,12 @@ class TestGroupedMMExperts:
             expected = torch.stack([q(weight[idx]) for idx, q in enumerate(quantizers)])
         torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
-    def test_calibrating_a_projection_returns_its_weight_without_a_copy(self):
+    @pytest.mark.parametrize("constant_amax", [False, True], ids=["calibrating", "constant-amax"])
+    def test_calibrating_a_projection_returns_its_weight_without_a_copy(self, constant_amax):
         """Weight quantizers that only collect statistics hand every slice back unchanged, so a
         calibration forward returns the stored weight itself rather than a copy of every expert's
-        weight, and still collects each expert's statistics."""
+        weight, and still collects each expert's statistics. One whose amax is constant collects
+        nothing, so it is not called."""
         model = _GroupedMoEModel("grouped_mm")
         try:
             mtq.quantize(model, self._quant_cfg(), self._forward_loop_all_experts)
@@ -2129,18 +2131,23 @@ class TestGroupedMMExperts:
             self._cleanup_registry(_SyntheticGroupedExperts)
         experts = model.moe.experts
         weight, quantizers = experts.gate_up_proj, experts.gate_up_proj_weight_quantizers
+        calls = []
         for q in quantizers:
             q.reset_amax()
+            q._use_constant_amax = constant_amax
+            q.register_forward_hook(lambda *_: calls.append(1))
         enable_stats_collection(experts)
         with torch.no_grad():
             out = experts._quantize_grouped_weight(weight, quantizers)
-        finish_stats_collection(experts)
 
         assert out is weight
-        for idx, q in enumerate(quantizers):
-            torch.testing.assert_close(
-                q.amax.flatten(), weight[idx].detach().abs().amax(dim=1), rtol=0, atol=0
-            )
+        assert len(calls) == (0 if constant_amax else NUM_EXPERTS)
+        if not constant_amax:
+            finish_stats_collection(experts)
+            for idx, q in enumerate(quantizers):
+                torch.testing.assert_close(
+                    q.amax.flatten(), weight[idx].detach().abs().amax(dim=1), rtol=0, atol=0
+                )
 
     @pytest.mark.parametrize("transform", ["pre_quant_scale", "rotate"])
     def test_disabled_quantizers_keep_their_pre_quant_scale_and_rotation(

@@ -972,9 +972,12 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             and not q.rotate_is_enabled
             for q in quantizers
         ):
-            if any(q.is_enabled for q in quantizers):
-                for q, w in zip(quantizers, weight, strict=True):
-                    if q.is_enabled:
+            # Only a calibrating quantizer does anything with its slice: one whose amax is constant
+            # (enable_stats_collection leaves it neither quantizing nor calibrating) would not.
+            collecting = [q.is_enabled and q._if_calib for q in quantizers]
+            if any(collecting):
+                for q, w, collects in zip(quantizers, weight, collecting, strict=True):
+                    if collects:
                         q(w)  # collects this expert's statistics
             return weight
         # One kernel launch for every expert where the format has one. Unlike the eager path, which
