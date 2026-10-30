@@ -2294,14 +2294,21 @@ def load_and_prepare_ep(
                 vars(kept_ep_config).pop("base_model_ep_plan", None)
             else:
                 kept_ep_config.base_model_ep_plan = declared_plan
-        if plan.is_fsdp_dense and dist.is_master():
-            _nmeta = [n for n, p in model.named_parameters() if p.is_meta]
-            _dense_meta = [n for n in _nmeta if not is_expert_fn(n)]
-            print(
-                f"[ep] dense-meta load: {len(_nmeta)} meta param(s) after from_pretrained "
-                f"({len(_dense_meta)} dense, {len(_nmeta) - len(_dense_meta)} expert); experts materialized. "
-                f"e.g. dense-meta {_dense_meta[:3]}",
-                flush=True,
+        if plan.is_fsdp_dense:
+            meta = [n for n, p in model.named_parameters() if p.is_meta]
+            dense_meta = [n for n in meta if not is_expert_fn(n)]
+            if not dense_meta:
+                # A transformers that places the dense part without asking get_device loads it whole
+                # on every rank, which is what this layout exists to avoid, and would do so silently.
+                raise RuntimeError(
+                    "Sharding the dense part needs from_pretrained to leave it on meta, but no dense "
+                    f"param came back on meta on transformers {transformers.__version__}: every rank "
+                    "loaded the whole dense part. Set MODELOPT_FSDP_SIZE=1 if the dense part fits "
+                    "one GPU."
+                )
+            print_rank_0(
+                f"[ep] dense-meta load: {len(dense_meta)} dense param(s) on meta, "
+                f"{len(meta) - len(dense_meta)} expert; e.g. {dense_meta[:3]}"
             )
         # The experts forward reads the implementation from the config when it runs, which
         # from_pretrained left on grouped_mm: torch_a2a on every (sub)config. An export writes none.

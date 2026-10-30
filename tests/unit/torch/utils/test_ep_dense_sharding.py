@@ -376,6 +376,58 @@ def test_a_listed_container_is_wrapped_once_not_again_through_its_blocks(fsdp_me
     assert not any(isinstance(block, FSDPModule) for block in model.vision_tower.blocks)
 
 
+class _ShardMesh:
+    """The meshes, as far as the loader reads them before it loads the dense part."""
+
+    device_type = "cpu"
+
+    def __getitem__(self, name):
+        return self
+
+    def size(self):
+        return 2
+
+    def get_group(self):
+        return -1
+
+
+def test_a_dense_part_from_pretrained_did_not_leave_on_meta_is_refused(
+    monkeypatch, gloo_world_of_one
+):
+    """A transformers that places the dense part without asking ``get_device`` loads it whole on every
+    rank, the memory this layout exists to save: the load refuses that before sharding anything."""
+
+    class _DenseLoadedError(Exception):
+        """Raised by the dense load: the loader got past the check."""
+
+    def dense_load(*args, **kwargs):
+        raise _DenseLoadedError
+
+    loader = SimpleNamespace(__name__="Loader", from_pretrained=lambda path, **kwargs: _MoeLM())
+    monkeypatch.setattr("modelopt.torch.utils.distributed.is_initialized", lambda: True)
+    monkeypatch.setattr("modelopt.torch.utils.distributed.size", lambda group=None: 2)
+    monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
+    monkeypatch.setattr(
+        "torch.distributed.device_mesh.init_device_mesh", lambda *a, **k: _ShardMesh()
+    )
+    monkeypatch.setattr(model_load_utils, "ensure_local_checkpoint", lambda p, **k: (None, p))
+    monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: loader)
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: None)
+    monkeypatch.setattr(model_load_utils, "_load_ep_dense_distributed", dense_load)
+    config = SimpleNamespace(
+        base_model_ep_plan={
+            "layers.*.mlp.gate": "ep_router",
+            "layers.*.mlp.experts": "moe_tp_experts",
+            "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+            "layers.*.mlp.experts.down_proj": "grouped_gemm",
+        },
+        num_experts=4,
+    )
+
+    with pytest.raises(RuntimeError, match="no dense param came back on meta"):
+        load_and_prepare_ep("unused", DistributionPlan(2, 2, "fsdp"), hf_config=config)
+
+
 # ------------------------------------------------------------------ _load_ep_dense_distributed
 
 
