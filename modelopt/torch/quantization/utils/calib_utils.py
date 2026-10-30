@@ -153,8 +153,9 @@ def update_expert_weights(work, block_size, perc_damp):
     for item in movable[1:]:
         pending.put(item)
 
+    @torch.no_grad()  # grad mode is per thread, like the current device
     def worker(gpu):
-        torch.cuda.set_device(gpu)  # per thread
+        torch.cuda.set_device(gpu)
         device = torch.device("cuda", gpu)
         while True:
             try:
