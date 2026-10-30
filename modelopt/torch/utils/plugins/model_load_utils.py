@@ -1879,28 +1879,33 @@ def load_and_prepare_ep(
             # loads. Imported here for the reason _decompressed_as_loaded gives.
             from modelopt.torch.models import _onfly_decompress
 
-            _onfly_decompress.check_compressed_keys(hf_config, ckpt_path)
+            tensor_files = _onfly_decompress.check_compressed_keys(hf_config, ckpt_path)
             # Minus "weight": a float format's anchor is .weight itself, and an unplaced plain weight
             # is what the export has always carried as stored.
             compressed_names = set(_onfly_decompress.stored_names(hf_config)) - {"weight"}
             # An MTP layer is stored past the decoder layers the model builds, so its compressed
             # experts would be refused only after the whole load, by the check that follows it.
-            # Refused here instead, before anything loads; that check stays for any other shape.
+            # Refused here instead, before anything loads, from the names just read; that check
+            # stays for any other shape. transformers 5.18 builds no decoder layer past
+            # num_hidden_layers, so this refuses nothing that check would let through there.
             built = getattr(ep_cfg, "num_hidden_layers", None)
-            past = sorted(
-                name
-                for name in checkpoint_tensor_files(ckpt_path)
-                if name.rpartition(".")[2] in compressed_names
-                and (layer := re.search(r"(?:^|\.)layers\.(\d+)\.", name))
-                and built is not None
-                and int(layer[1]) >= built
+            past = (
+                []
+                if built is None
+                else sorted(
+                    name
+                    for name in tensor_files
+                    if name.rpartition(".")[2] in compressed_names
+                    and (layer := re.search(r"(?:^|\.)layers\.(\d+)\.", name))
+                    and int(layer[1]) >= built
+                )
             )
             if past:
                 raise NotImplementedError(
                     f"The checkpoint stores {len(past)} compressed tensors past the model's {built} "
-                    f"decoder layers, such as {past[0]} (an MTP layer): the model has no parameter "
-                    "for them, and the export would copy them as stored, with no quantization_config "
-                    "to read them. Decompress the checkpoint first."
+                    f"decoder layers, such as {past[0]} (an MTP layer's, typically): the model builds "
+                    "no parameter for them, and the export would copy them as stored, with no "
+                    "quantization_config to read them. Decompress the checkpoint first."
                 )
 
     # Experts are sharded over ``ep`` and replicated over ``edp``; the dense part is replicated over
