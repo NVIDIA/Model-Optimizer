@@ -140,8 +140,15 @@ def launch_memory_monitor(monitor_interval: float = 1.0) -> GPUMemoryMonitor | N
     Returns:
         GPUMemoryMonitor: The monitor instance that was launched
     """
+    # Probe that NVML can report memory on this host before starting the monitor. NVML must be
+    # initialized for the probe itself; without it every call raises NVMLError_Uninitialized, and
+    # the monitor would never start anywhere.
     try:
-        nvmlDeviceGetMemoryInfo(nvmlDeviceGetHandleByIndex(0))
+        nvmlInit()
+        try:
+            nvmlDeviceGetMemoryInfo(nvmlDeviceGetHandleByIndex(0))
+        finally:
+            nvmlShutdown()
     except Exception as e:
         print(f"Failed to get GPU memory info: {e}. Stopping GPU memory monitor.")
         return None
