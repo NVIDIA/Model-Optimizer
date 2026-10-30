@@ -30,7 +30,6 @@ import torch
 import transformers
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
-from autoquant_utils import _recipe_is_auto_quantize
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from safetensors import safe_open
 from transformers import (
@@ -43,7 +42,7 @@ from transformers import (
     ProcessorMixin,
 )
 
-from modelopt.recipe import load_recipe
+from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
@@ -183,7 +182,12 @@ def resolve_distribution(args) -> tuple[DistributionPlan, Any]:
             "names. Drop it, or quantize without expert parallelism: with --use_fsdp2, or in a "
             "single process."
         )
-    if plan.world_size > 1 and not args.use_fsdp2 and _recipe_is_auto_quantize(args.recipe):
+    if (
+        plan.world_size > 1
+        and not args.use_fsdp2
+        and args.recipe is not None
+        and isinstance(load_recipe(args.recipe), ModelOptAutoQuantizeRecipe)
+    ):
         # Each rank would score its own data, and could pick other formats per layer.
         raise NotImplementedError(
             f"{plan!r}: AutoQuantize scores each rank's own calibration data and reduces no score "

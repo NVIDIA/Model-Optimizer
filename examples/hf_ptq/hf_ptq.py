@@ -102,11 +102,11 @@ from modelopt.torch.utils.dataset_utils import (
     get_supported_datasets,
 )
 from modelopt.torch.utils.distributed import (
-    _reinstall_a2a_forwards,
     distributed_forward_loop,
     distributed_run,
     distribution_plan,
     local_rank,
+    reinstall_a2a_forwards,
     shard_dataloader,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
@@ -622,7 +622,7 @@ def mono_quantize(
         if distribution_plan(full_model).is_expert_parallel:
             # A config that runs no calibration loop never re-planted the a2a forwards, which the
             # preview and the export need.
-            _reinstall_a2a_forwards(full_model, expert_parallel_mesh(full_model))
+            reinstall_a2a_forwards(full_model, expert_parallel_mesh(full_model))
 
         # For VL models, update full_model to use the quantized language model
         if is_nemotron_vl_model and language_model is not full_model:
