@@ -26,7 +26,7 @@ import torch
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 from torch.distributed.tensor import DTensor
 
-from modelopt.torch.utils.distributed import _PLAN_ATTR
+from modelopt.torch.utils.distributed import _recorded_plan
 from modelopt.torch.utils.logging import warn_rank_0
 
 __all__ = ["fsdp2_wrap"]
@@ -106,19 +106,17 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     any of whose submodules, already records a plan, as a model ``load_pretrained`` returned does: a
     plan is recorded once, so wrap a model loaded with ``from_pretrained`` instead.
     """
-    for name, module in model.named_modules():
-        recorded = getattr(module, _PLAN_ATTR, None)
-        if recorded is not None:
-            # The record would no longer hold: a model recorded as replicated would read as
-            # replicated while sharded, which the export would believe, and one recorded as sharded
-            # is wrapped already.
-            where = f"{type(module).__name__} {name!r}" if name else type(module).__name__
-            raise RuntimeError(
-                f"{where} is already recorded as distributed by {recorded!r}, and a plan is "
-                "recorded once. To shard a model yourself, load it with from_pretrained rather "
-                "than load_pretrained, which records the plan it loaded by, then record yours with "
-                "set_distribution_plan() once it is wrapped."
-            )
+    if (found := _recorded_plan(model)) is not None:
+        # The record would no longer hold: a model recorded as replicated would read as replicated
+        # while sharded, which the export would believe, and one recorded as sharded is wrapped
+        # already. A ValueError, as set_distribution_plan raises for the same record.
+        where, recorded = found
+        raise ValueError(
+            f"{where} is already recorded as distributed by {recorded!r}, and a plan is recorded "
+            "once. To shard a model yourself, load it with from_pretrained rather than "
+            "load_pretrained, which records the plan it loaded by, then record yours with "
+            "set_distribution_plan() once it is wrapped."
+        )
     # Importing the quantization package registers every mode and plugin; only a wrap needs it.
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
