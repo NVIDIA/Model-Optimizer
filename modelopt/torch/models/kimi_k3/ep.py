@@ -182,7 +182,8 @@ def _patch_kimi_moe_block(kmod) -> None:
 
     Swap ``KimiSparseMoeBlock.experts`` (per-expert ModuleList) for the fused experts module and rewrite
     its ``forward`` to dispatch through it (keeping the latent down/up projections, optional norm, and
-    shared experts around the fused call). Idempotent.
+    shared experts around the fused call). A block built before the patch keeps its per-expert experts,
+    and so its own forward. Idempotent.
     """
     from modelopt.torch.utils import print_rank_0
 
@@ -192,6 +193,7 @@ def _patch_kimi_moe_block(kmod) -> None:
     FusedExperts = _build_fused_experts_class(kmod)  # noqa: N806 (a class, keeping its own name)
 
     _orig_init = Block.__init__
+    _orig_forward = Block.forward
 
     def _init(self, config):
         _orig_init(self, config)
@@ -203,6 +205,9 @@ def _patch_kimi_moe_block(kmod) -> None:
         self.experts = FusedExperts(config, width)
 
     def _forward(self, hidden_states):
+        if isinstance(self.experts, nn.ModuleList):
+            # Built before the patch: the per-expert experts only the block's own forward runs.
+            return _orig_forward(self, hidden_states)
         identity = hidden_states
         orig_shape = hidden_states.shape
         topk_idx, topk_weight = self.gate(hidden_states)
