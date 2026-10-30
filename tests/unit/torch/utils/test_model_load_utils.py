@@ -1982,28 +1982,44 @@ def test_a_rank_that_cannot_apply_the_spec_fails_every_rank(cpu_dist_workers, tm
             "config and hf_config",
         ),
         ({"gpus": 0}, RuntimeError, "this rank has none"),
+        ({"gpus": 0, "config": True}, RuntimeError, "this rank has none"),
     ],
-    ids=["placement", "dtype", "torch_dtype", "model_class", "mtp_head", "two_configs", "no_gpu"],
+    ids=[
+        "placement",
+        "dtype",
+        "torch_dtype",
+        "model_class",
+        "mtp_head",
+        "two_configs",
+        "no_gpu",
+        "no_gpu_config_passed",
+    ],
 )
 def test_a_sharded_load_refuses_what_it_cannot_honor(
     run_as, serve, loaders, process_group, monkeypatch, tmp_path, sharding, change, error, match
 ):
     """Placement, a model class, a head only a whole model builds, two configs to load with, a rank
     without a GPU of its own: none reaches a sharded load, which fails before it starts rather than
-    load something other than what was asked."""
+    load something other than what was asked. A rank without a GPU is refused before the model's
+    spec prepares its config, which can import the checkpoint's code, whichever config it loads
+    with."""
     run_as(2)
     expert_parallel = sharding == "expert-parallel"
-    serve(_deepseek_v3() if expert_parallel else LlamaConfig(**_TINY))
+    config = serve(_deepseek_v3() if expert_parallel else LlamaConfig(**_TINY))
     if change.get("mtp"):
         monkeypatch.setattr(models_hf, "checkpoint_has_mtp", lambda *a: True)
     if "gpus" in change:  # a host that shows this rank no GPU
         monkeypatch.setattr(torch.cuda, "device_count", lambda: change["gpus"])
+        monkeypatch.setattr(
+            model_load_utils,
+            "apply_distributed_support",
+            lambda *a, **k: pytest.fail("prepared a rank that cannot load"),
+        )
     plan = DistributionPlan(2, ep_size=2) if expert_parallel else DistributionPlan(2, dense="fsdp")
+    kwargs = {**change.get("kwargs", {}), **({"config": config} if change.get("config") else {})}
 
     with pytest.raises(error, match=match) as refused:
-        load_pretrained(
-            str(tmp_path), change.get("auto_class"), distribution=plan, **change.get("kwargs", {})
-        )
+        load_pretrained(str(tmp_path), change.get("auto_class"), distribution=plan, **kwargs)
     if "device_map" in change.get("kwargs", {}) or "gpus" in change:
         # The way to a whole model it names, for the plan handed in: an expert-parallel MoE's is a
         # plan with an EP degree of 1.
