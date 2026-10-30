@@ -150,11 +150,20 @@ def remote_kimi(monkeypatch, tmp_path):
     """A checkpoint whose remote modeling module defines ``DeepseekV3ForCausalLM`` and the VLM class
     and imports a class from a sibling module, plus a patch pointing the former at a native
     stand-in; the modules transformers loads from it are dropped afterwards."""
-    monkeypatch.setattr(dmu, "HF_MODULES_CACHE", str(tmp_path / "modules"))
+    modules = tmp_path / "modules"
+    modules.mkdir()
+    monkeypatch.setattr(dmu, "HF_MODULES_CACHE", str(modules))
     monkeypatch.setattr(dmu, "get_class_in_module", dmu.get_class_in_module)
     monkeypatch.setattr(_remote_code, "_KEPT_PATCHES", {})
-    # transformers puts its modules cache on sys.path; another test's must not shadow this one's.
+    # The staged code imports as the package transformers_modules, from the modules cache on
+    # sys.path: neither another test's cache there nor the package imported from it may shadow
+    # this one.
     monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.syspath_prepend(str(modules))
+    for name in [
+        n for n in sys.modules if n.partition(".")[0] == dmu.TRANSFORMERS_DYNAMIC_MODULE_NAME
+    ]:
+        monkeypatch.delitem(sys.modules, name)
     loaded = set(sys.modules)
     ckpt = tmp_path / "ckpt"
     ckpt.mkdir()
@@ -175,7 +184,8 @@ def remote_kimi(monkeypatch, tmp_path):
         ckpt=ckpt, same_ckpt=tmp_path / "same_ckpt", native=native, patch=to_native
     )
     for name in set(sys.modules) - loaded:
-        del sys.modules[name]
+        if name.partition(".")[0] == dmu.TRANSFORMERS_DYNAMIC_MODULE_NAME:
+            del sys.modules[name]
 
 
 @pytest.mark.parametrize("load_again", ["forced", "another-path"])
