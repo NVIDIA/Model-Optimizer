@@ -775,7 +775,7 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
         resolve_distribution_plan(str(tmp_path), **arguments)
     if refusal is _NO_EP_YET:  # as the load refuses the same spec
         assert refused.type is NotImplementedError
-    if "divid" in refusal:  # the decision's refusal of what its inputs resolve to
+    if refusal.startswith(_CAN_BE_EP[: _CAN_BE_EP.index("{")]):  # what its inputs resolve to
         assert refused.type is ValueError, refused.type
     if arguments:  # a knob the arguments override would lead straight back here
         assert "ep_size=1 with dense='replicate'" in str(refused.value), refused.value
