@@ -226,6 +226,7 @@ def apply_distributed_support(
     *,
     ckpt_path: "str | None" = None,
     trust_remote_code: bool = False,
+    prepare: bool = True,
 ):
     """Prepare ``hf_config`` so ``model_type`` can be loaded expert-parallel, from its model spec.
 
@@ -240,6 +241,10 @@ def apply_distributed_support(
     would substitute our idea of the layout for the model's own. It wins wherever the load reads
     one (:func:`_ep_config`), not only on the config the spec would take: on the root, or on
     another nested config.
+
+    With ``prepare=False``, the spec's ``prepare`` does not run, and the plan it would attach
+    (``prepared_ep_plan``) goes on the config instead: what a plan decision reads, which changes
+    nothing outside the config, as a load that is not expert-parallel must find the process.
 
     Returns the config to load, unchanged for a model type with no spec or no EP section. The plan
     is written into the config it is given, so a caller that keeps its own config passes a copy, as
@@ -277,10 +282,11 @@ def apply_distributed_support(
                 f"config.{' or config.'.join(attrs)}, which this config does not have, nor a plan "
                 "of its own."
             )
-    if ep.base_model_ep_plan and not existing:
-        target.base_model_ep_plan = dict(ep.base_model_ep_plan)
+    plan = ep.base_model_ep_plan or (None if prepare else ep.prepared_ep_plan)
+    if plan and not existing:
+        target.base_model_ep_plan = dict(plan)
 
-    if ep.prepare is not None:
+    if prepare and ep.prepare is not None:
         hf_config = ep.prepare(hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code)
     return hf_config
 

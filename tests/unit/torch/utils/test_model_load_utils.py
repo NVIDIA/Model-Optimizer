@@ -868,6 +868,50 @@ def test_a_remote_moe_whose_prepare_attaches_its_plan_left_whole_is_an_error(
         resolve_distribution_plan(str(tmp_path))
 
 
+@needs_ep_transformers
+@pytest.mark.parametrize("model_type", ["kimi_vl", "kimi_k25"])
+@pytest.mark.parametrize(
+    ("ranks", "dense", "expert_parallel"),
+    [(3, "fsdp", False), (3, "replicate", None), (4, "replicate", True)],
+    ids=["fsdp2", "whole", "expert-parallel"],
+)
+def test_a_remote_moe_is_prepared_for_an_expert_parallel_plan_alone(
+    run_as, serve, monkeypatch, tmp_path, model_type, ranks, dense, expert_parallel
+):
+    """A Kimi spec's ``prepare`` patches the checkpoint's own code, the loader's hooks and the
+    config for the whole process, so only an expert-parallel plan runs it, once decided. The
+    decision finds the experts through the plan the spec states, in the model the checkpoint's own
+    code builds. Sharded by FSDP2, or left whole on every rank (refused), the run never prepares,
+    and gets the config as read."""
+    calls = []
+    plan = get_spec(model_type).ep_spec.prepared_ep_plan
+
+    def prepare(hf_config, **kwargs):
+        calls.append(kwargs)
+        hf_config.text_config = SimpleNamespace(n_routed_experts=4, base_model_ep_plan=dict(plan))
+        return hf_config
+
+    monkeypatch.setattr(get_spec(model_type).ep_spec, "prepare", prepare)
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi())
+    run_as(ranks)  # 4 experts shard over 4 ranks, and over no EP degree of 3
+    as_read = serve(
+        SimpleNamespace(model_type=model_type, text_config=SimpleNamespace(n_routed_experts=4))
+    )
+
+    if expert_parallel is None:
+        with pytest.raises(ValueError, match="can be expert-parallel, but the plan resolved"):
+            resolve_distribution_plan(str(tmp_path), dense=dense)
+        assert calls == []
+        return
+    decided, config = resolve_distribution_plan(str(tmp_path), dense=dense)
+    assert decided.is_expert_parallel == expert_parallel
+    assert len(calls) == expert_parallel
+    if expert_parallel:
+        assert config.text_config.base_model_ep_plan == plan
+    else:
+        assert config is as_read and vars(config.text_config) == {"n_routed_experts": 4}
+
+
 def test_an_ep_capable_moe_may_be_fsdp2_sharded_instead(run_as, serve, monkeypatch, tmp_path):
     """Asked for no expert parallelism but for dense sharding, the MoE is sharded whole by FSDP2,
     which is not the waste of a replica on every rank."""
@@ -1735,8 +1779,9 @@ def test_a_load_prepares_its_config_once(
     )
     prepared = []
 
-    def apply_distributed_support(model_type, hf_config, **kwargs):
-        prepared.append(model_type)
+    def apply_distributed_support(model_type, hf_config, prepare=True, **kwargs):
+        if prepare:  # the plan alone, which deciding reads, prepares nothing
+            prepared.append(model_type)
         hf_config.base_model_ep_plan = get_spec("deepseek_v3").ep_spec.base_model_ep_plan
         return hf_config
 
