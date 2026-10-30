@@ -215,3 +215,20 @@ def test_tie_weights_shim_leaves_an_inherited_tie_weights_alone(monkeypatch):
     _remote_fixes._shim_tie_weights_kwargs("transformers_modules.inheriting_stub")
 
     assert vlm().tie_weights(recompute_mapping=False) == {"recompute_mapping": False}
+
+
+def test_tie_weights_shim_absorbs_the_kwargs_a_class_override_rejects(monkeypatch):
+    """The VLM class's own ``tie_weights(self)`` rejects the ``recompute_mapping`` transformers
+    passes: the shim drops the kwargs and calls it, and wraps it once."""
+    remote = remote_module("transformers_modules.kimi_stub.modeling_kimi_k3")
+    monkeypatch.setitem(sys.modules, remote.__name__, remote)
+    vlm = remote.KimiK3ForConditionalGeneration
+
+    _remote_fixes._shim_tie_weights_kwargs("transformers_modules.kimi_stub")
+    shim = vlm.tie_weights
+    _remote_fixes._shim_tie_weights_kwargs("transformers_modules.kimi_stub")
+    assert vlm.tie_weights is shim
+
+    model = vlm()
+    assert model.tie_weights(recompute_mapping=False) == "tied"
+    assert remote.calls == [("tie_weights", model)]
