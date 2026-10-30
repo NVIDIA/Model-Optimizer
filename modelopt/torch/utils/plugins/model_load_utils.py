@@ -903,8 +903,8 @@ def load_pretrained(
                 kwargs["hf_config"] = copy.deepcopy(config)
         if model_type is None:
             # The load uses the config passed for it, if any, so the loading hook follows that one.
-            if route == _FSDP2 and hf_config is None and config is None:
-                # The FSDP2 load builds from the checkpoint's config too: read it once, for both.
+            if route is not None and hf_config is None and config is None:
+                # A sharded load builds from the checkpoint's config too: read it once, for both.
                 hf_config = AutoConfig.from_pretrained(
                     ckpt_path, trust_remote_code=trust_remote_code, **hub_options
                 )
