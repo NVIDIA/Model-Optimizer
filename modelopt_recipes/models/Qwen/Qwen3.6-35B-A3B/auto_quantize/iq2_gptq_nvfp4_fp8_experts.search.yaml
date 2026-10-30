@@ -14,15 +14,16 @@
 # limitations under the License.
 
 # Shared search for the Qwen3.6-35B-A3B sub-4-bit recipes: routed experts choose IQ2_XXS, IQ2_XS,
-# IQ2_S, NVFP4, FP8 or BF16; every other linear stays BF16 and counts toward the budget.
+# IQ2_S, NVFP4, FP8 or BF16; every other linear stays BF16 and counts toward the budget. All
+# candidates are weight-only, since the cost counts weight bits and the IQ2 formats are W2A16.
 
 # modelopt-schema: modelopt.recipe.config.AutoQuantizeConfig
 imports:
   iq2_xxs: configs/numerics/iq2_xxs
   iq2_xs: configs/numerics/iq2_xs
   iq2_s: configs/numerics/iq2_s
-  nvfp4: configs/ptq/presets/model/nvfp4
-  fp8: configs/ptq/presets/model/fp8
+  w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
+  fp8: configs/numerics/fp8
 
 constraints:
   effective_bits: 3.0
@@ -51,8 +52,11 @@ module_search_spaces:
           - *disable_all
           - quantizer_name: "*weight_quantizer"
             cfg: {$import: iq2_s}
-      - $import: nvfp4
-      - $import: fp8
+      - $import: w4a16_nvfp4
+      - quant_cfg:
+          - *disable_all
+          - quantizer_name: "*weight_quantizer"
+            cfg: {$import: fp8}
     allow_no_quant: true
 # Score each candidate's output KL with every other expert layer at IQ2_XXS: at these budgets a
 # layer's damage compounds with the others', which BF16-context scores underrate for late layers.
