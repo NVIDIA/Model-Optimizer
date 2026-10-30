@@ -2159,7 +2159,7 @@ def test_routed_experts_without_experts_in_their_names_are_refused(ep_world_of_t
         "dividing",
         "not-dividing",
         "not-shown",
-        "sharded-over-another-mesh",
+        "sharded-over-a-mesh-of-another-size",
         "never-sharded",
         "owning-no-weights",
     ],
@@ -2171,10 +2171,10 @@ def test_an_expert_count_the_config_does_not_name_is_read_off_the_loaded_experts
     loaded experts' weights: transformers keeps the whole count on the DTensors it shards them into,
     and 5.16.0 splits a count ep_size does not divide without an error. A count neither shows is
     refused, as the distribution plan's decision refuses it. So is a rank holding another share of
-    the experts than ``ep_size`` gives it: sharded over another mesh than its EP group, or never
-    sharded, which plain weights show against the count the config names. Experts whose container
-    owns no weights itself (each expert's in a child module) show no share at all, and are refused
-    rather than passed unchecked."""
+    the experts than ``ep_size`` gives it: sharded over a mesh of another size than its EP group,
+    or never sharded, which plain weights show against the count the config names. Experts whose
+    container owns no weights itself (each expert's in a child module) show no share at all, and are
+    refused rather than passed unchecked."""
     from torch.distributed.device_mesh import init_device_mesh
     from torch.distributed.tensor import DTensor, Shard
 
@@ -2400,9 +2400,10 @@ def quant_wrappers():
 def test_routed_experts_with_a_quant_wrapper_of_their_own_are_refused(quant_wrappers):
     """Quantization would convert them to it, whose forward drops the process group the all-to-all
     transport passes in. The registry serves every model in the process, so no registration is
-    added or removed; the shared experts, which the transport does not manage, may keep a wrapper."""
+    added or removed; the shared experts, which the transport does not manage, may keep a wrapper.
+    The experts come as a one-shot iterable, which the transposed-experts rule reads first."""
     with pytest.raises(NotImplementedError, match=r"cannot quantize _Experts: ModelOpt quantizes"):
-        _refuse_unquantizable_experts([_Experts(), _Experts()])
+        _refuse_unquantizable_experts(_Experts() for _ in range(2))
 
     assert _Experts in quant_wrappers
     assert _SharedExperts in quant_wrappers

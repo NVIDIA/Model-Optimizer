@@ -1624,6 +1624,8 @@ def _refuse_unquantizable_experts(expert_modules) -> None:
         _transposed_experts,
     )
 
+    # Read once per rule: a one-shot iterable would let the second rule pass on nothing.
+    expert_modules = tuple(expert_modules)
     # Quantization's own rules: it leaves transposed experts unquantized, and its torch_a2a check
     # refuses eager-only ones. This refuses both at load.
     transposed = _transposed_experts(expert_modules)
@@ -2007,14 +2009,14 @@ def load_and_prepare_ep(
                 )
         # Each rank must hold its share of every container's experts, num_experts // ep_size: the share the
         # all-to-all transport routes tokens by. A load that leaves them whole on every rank (a plan whose
-        # expert weights no style shards) or shards them over another mesh (transformers 5.18 builds one
-        # of its own for the load, which _experts_sharded_over swaps for the expert-parallel one) would
-        # run without an error, computing tokens against other experts' weights and merging the scales of
-        # different experts. A DTensor (transformers 5.16 on) shows the whole count and this rank's share;
-        # a plain tensor shows the share, checked against the config's count when it names one. A model
-        # whose containers show neither, as containers owning no weights themselves would, is refused too:
-        # an unchecked share passes as a correct one. The check reads the containers' weights together,
-        # so it relies on a model's routed experts sharing one layout, as every transformers MoE's do.
+        # expert weights no style shards) or shards them over a mesh of another size would run without an
+        # error, computing tokens against other experts' weights and merging the scales of different
+        # experts. The check compares counts: it catches a wrong share, not a same-size mesh. A DTensor
+        # (transformers 5.16 on) shows the whole count and this rank's share; a plain tensor shows the
+        # share, checked against the config's count when it names one. A model whose containers show
+        # neither, as containers owning no weights themselves would, is refused too: an unchecked share
+        # passes as a correct one. The check reads the containers' weights together, so it relies on a
+        # model's routed experts sharing one layout, as every transformers MoE's do.
         # Every rank refuses alike, whichever ranks hold a wrong share: the guard tells every rank.
         held = [
             (param.shape[0], param.to_local().shape[0])
