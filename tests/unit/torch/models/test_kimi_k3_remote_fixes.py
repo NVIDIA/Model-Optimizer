@@ -27,6 +27,7 @@ import types
 import pytest
 import torch
 from _test_utils.torch.kimi_k3_remote import remote_module
+from torch import nn
 
 transformers = pytest.importorskip("transformers")
 
@@ -96,6 +97,36 @@ def test_kda_layers_whose_kernels_the_beta_patch_cannot_find_are_refused():
 
     del remote.KimiDeltaAttention
     _remote_fixes._patch_kda_beta_sigmoid(remote)
+
+
+def test_kda_a_log_is_allocated_in_the_shape_the_checkpoint_stores():
+    """The remote ``KimiDeltaAttention`` allocates ``A_log`` per head, while the checkpoint stores
+    it per head dimension: allocated as stored, it stays a parameter the load fills, in its dtype.
+    Only that stale 1-D layout is re-allocated; another is left for the load to check. The
+    constructor is wrapped once."""
+    remote = remote_module()
+    _remote_fixes._patch_kda_a_log(remote)
+    init = remote.KimiDeltaAttention.__init__
+    _remote_fixes._patch_kda_a_log(remote)
+    assert remote.KimiDeltaAttention.__init__ is init
+
+    kda = remote.KimiDeltaAttention(num_heads=3, head_dim=5)
+
+    assert kda.A_log.shape == (5,)
+    assert kda.A_log.dtype == torch.bfloat16
+    assert dict(kda.named_parameters())["A_log"] is kda.A_log
+
+    class PerHeadDimDecay(nn.Module):
+        def __init__(self, num_heads, head_dim):
+            super().__init__()
+            self.head_dim = head_dim
+            self.A_log = nn.Parameter(torch.zeros(num_heads, head_dim))
+
+    other = types.ModuleType("kimi_k3_2d_stub")
+    other.KimiDeltaAttention = PerHeadDimDecay
+    _remote_fixes._patch_kda_a_log(other)
+
+    assert other.KimiDeltaAttention(num_heads=3, head_dim=5).A_log.shape == (3, 5)
 
 
 # ------------------------------------------------------------- transformers-version compatibility

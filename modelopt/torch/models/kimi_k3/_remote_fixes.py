@@ -113,7 +113,8 @@ def _patch_kda_a_log(kmod) -> None:
     def _init(self, *args, **kwargs):
         _orig_init(self, *args, **kwargs)
         a_log = getattr(self, "A_log", None)
-        if a_log is not None and a_log.shape[0] != self.head_dim:
+        # Only the stale layout: a 1-D A_log of the wrong length. Any other is left for the load to check.
+        if a_log is not None and a_log.ndim == 1 and a_log.shape[0] != self.head_dim:
             self.A_log = nn.Parameter(
                 torch.empty(self.head_dim, dtype=a_log.dtype, device=a_log.device)
             )
