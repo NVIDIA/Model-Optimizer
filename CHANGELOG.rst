@@ -41,6 +41,8 @@ Changelog
 
 *Misc*
 
+- ModelOpt MCP can track launcher jobs in MLflow and archive terminal status and task logs.
+- Launcher pipelines can prepare declared assets through an optional provider before submission, mount resolved inputs read-only, and record their versions in experiment metadata.
 - The ``evaluation`` agent skill can stop looping ("doom loop") reasoning early: ask it to avoid doom loops and it adds vLLM's ``repetition_detection`` request field (vLLM 0.17.0 or later) to every task, ending a request once its output repeats. Use the same setting for baseline and candidate runs.
 
 **Backward Breaking Changes**

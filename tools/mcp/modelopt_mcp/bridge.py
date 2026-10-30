@@ -31,17 +31,22 @@ This module deliberately doesn't expose anything the MCP tools don't
 need — keeps the surface area auditable.
 """
 
+import contextlib
+import getpass
 import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess  # nosec B404 - fixed-argv CLI probes are required; shell=True is not used.
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -52,6 +57,8 @@ _THIS_DIR = Path(__file__).resolve().parent
 
 _DEFAULT_SOURCE_REPO = "https://github.com/NVIDIA/Model-Optimizer.git"
 _DEFAULT_SOURCE_REF = "main"
+_DEFAULT_MLFLOW_TRACKING_URI = "https://mlflow-modelopt.nvidia.com/"
+_DEFAULT_MLFLOW_EXPERIMENT = "ci-tests"
 
 # Canonical task-status failure tokens — matched against the FIRST word
 # of each ``status_<task>.out`` file by ``job_status_impl``.
@@ -580,6 +587,482 @@ def _launcher_argv(abs_yaml: Path, checkout: SourceCheckout | None, *flags: str)
 
 
 # ---------------------------------------------------------------------------
+# Optional MLflow tracking
+# ---------------------------------------------------------------------------
+
+
+def _mlflow_tracking_uri(tracking_uri: str | None) -> str:
+    """Resolve the tracking URI used for MCP-managed MLflow runs."""
+    return (
+        tracking_uri
+        or os.environ.get("MLFLOW_TRACKING_URI")
+        or os.environ.get("MODELOPT_MCP_MLFLOW_TRACKING_URI")
+        or _DEFAULT_MLFLOW_TRACKING_URI
+    )
+
+
+def _mlflow_experiment_name(experiment_name: str | None) -> str:
+    """Resolve the experiment name for MCP-managed MLflow runs."""
+    return (
+        experiment_name
+        or os.environ.get("MODELOPT_MCP_MLFLOW_EXPERIMENT")
+        or _DEFAULT_MLFLOW_EXPERIMENT
+    )
+
+
+def _setup_mlflow() -> tuple[Any | None, dict | None]:
+    """Import MLflow lazily so users who do not enable tracking avoid the dependency."""
+    try:
+        import mlflow
+    except ImportError:
+        return None, {
+            "ok": False,
+            "reason": "mlflow_not_installed",
+            "diagnostic": (
+                "MLflow tracking was requested, but the `mlflow` Python package "
+                "is not installed in the modelopt-mcp environment."
+            ),
+        }
+    return mlflow, None
+
+
+def _mlflow_run_url(tracking_uri: str, experiment_id: str | None, run_id: str) -> str | None:
+    """Best-effort browser URL for MLflow UIs that use the standard hash route."""
+    if not tracking_uri.startswith(("http://", "https://")) or not experiment_id:
+        return None
+    return f"{tracking_uri.rstrip('/')}/#/experiments/{experiment_id}/runs/{run_id}"
+
+
+def _mlflow_basename(yaml_path: str) -> str:
+    """Human-readable run-name base from a launcher YAML path."""
+    path = Path(yaml_path)
+    parent = path.parent.name
+    stem = path.stem
+    return f"{parent}/{stem}" if parent else stem
+
+
+def _mlflow_user_label() -> str:
+    """Stable user component for MCP-created MLflow run names."""
+    return os.environ.get("USER") or os.environ.get("USERNAME") or getpass.getuser()
+
+
+def _mlflow_cluster_label(cluster_host: str | None, executor: str) -> str:
+    """Stable cluster component for MCP-created MLflow run names."""
+    return cluster_host or executor
+
+
+def _mlflow_run_name(
+    *,
+    yaml_path: str,
+    executor: str,
+    cluster_host: str | None,
+    job_name: str | None,
+) -> str:
+    """Default MCP MLflow run name: user/cluster/yaml."""
+    if job_name:
+        return job_name
+    return (
+        f"{_mlflow_user_label()}/"
+        f"{_mlflow_cluster_label(cluster_host, executor)}/"
+        f"{_mlflow_basename(yaml_path)}"
+    )
+
+
+def _create_mlflow_run(
+    *,
+    yaml_path: str,
+    executor: str,
+    tracking_uri: str | None,
+    experiment_name: str | None,
+    cluster_host: str | None,
+    job_name: str | None,
+    source: SourceCheckout | None,
+) -> dict:
+    """Create the pre-submit MLflow run and return fields for submit_job."""
+    mlflow, error = _setup_mlflow()
+    if error:
+        return error
+    assert mlflow is not None
+
+    uri = _mlflow_tracking_uri(tracking_uri)
+    exp_name = _mlflow_experiment_name(experiment_name)
+    run_name = _mlflow_run_name(
+        yaml_path=yaml_path,
+        executor=executor,
+        cluster_host=cluster_host,
+        job_name=job_name,
+    )
+    run_id = None
+    try:
+        client = mlflow.tracking.MlflowClient(tracking_uri=uri)
+        experiment = client.get_experiment_by_name(exp_name)
+        experiment_id = (
+            experiment.experiment_id if experiment else client.create_experiment(exp_name)
+        )
+        run = client.create_run(
+            experiment_id,
+            tags={
+                "mlflow.runName": run_name,
+                "lifecycle": "submitted",
+                "managed_by": "modelopt-mcp",
+            },
+        )
+        run_id = run.info.run_id
+        for key, value in {
+            "target_yaml": yaml_path,
+            "executor": executor,
+            "cluster_host": cluster_host or "",
+            "source_ref": source.ref if source else "",
+            "source_sha": source.resolved_sha if source else "",
+        }.items():
+            client.log_param(run_id, key, value)
+    except Exception as exc:
+        if run_id:
+            _mark_mlflow_submission_failed(run_id, uri, "mlflow_create_failed")
+        return {
+            "ok": False,
+            "reason": "mlflow_create_failed",
+            "diagnostic": f"Failed to create MLflow run: {exc}",
+            "mlflow_tracking_uri": uri,
+            "mlflow_experiment": exp_name,
+        }
+
+    return {
+        "ok": True,
+        "mlflow_run_id": run_id,
+        "mlflow_tracking_uri": uri,
+        "mlflow_experiment": exp_name,
+        "mlflow_experiment_id": experiment_id,
+        "mlflow_run_url": _mlflow_run_url(uri, experiment_id, run_id),
+    }
+
+
+def _mark_mlflow_submission_failed(mlflow_run_id: str, tracking_uri: str, reason: str) -> None:
+    """Best-effort update when submission fails after a run was created."""
+    mlflow, error = _setup_mlflow()
+    if error:
+        return
+    assert mlflow is not None
+    with contextlib.suppress(Exception):
+        client = mlflow.tracking.MlflowClient(tracking_uri=tracking_uri)
+        client.set_tag(mlflow_run_id, "lifecycle", "submit_failed")
+        client.set_tag(mlflow_run_id, "result_label", "SUBMIT_FAILED")
+        client.log_param(mlflow_run_id, "submit_failure_reason", reason)
+        client.log_metric(mlflow_run_id, "result", 0.0)
+        client.set_terminated(mlflow_run_id, status="FAILED")
+
+
+def _mlflow_result_metric(status: str) -> float:
+    """Convert MCP terminal status to a compact numeric result."""
+    if status == "done":
+        return 1.0
+    if status == "failed":
+        return 0.0
+    return -1.0
+
+
+def _is_safe_regular_artifact(path: Path, exp_dir: Path) -> bool:
+    """Return whether path is a non-symlink regular file contained in exp_dir."""
+    try:
+        if path.is_symlink():
+            return False
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(exp_dir.resolve(strict=True))
+        return stat.S_ISREG(path.stat(follow_symlinks=False).st_mode)
+    except (OSError, ValueError):
+        return False
+
+
+def _mlflow_artifact_files(exp_dir: Path) -> list[Path]:
+    """Local launcher files worth preserving durably in MLflow."""
+    patterns = [
+        "log_*.out",
+        "nemo_logs_task_*.log",
+        "status_*.out",
+        "_DONE",
+        _SLURM_STATUS_META,
+    ]
+    seen: set[Path] = set()
+    files: list[Path] = []
+    for pattern in patterns:
+        for path in sorted(exp_dir.glob(pattern)):
+            if _is_safe_regular_artifact(path, exp_dir) and path not in seen:
+                seen.add(path)
+                files.append(path)
+    return files
+
+
+def _open_no_follow_text_writer(path: Path):
+    """Open path for truncating text output without following symlinks."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path} is not a regular file")
+        return os.fdopen(fd, "w", encoding="utf-8", errors="replace")
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _snapshot_mlflow_artifacts(exp_dir: Path, snapshot_dir: Path) -> list[Path]:
+    """Copy safe artifacts into an agent-owned directory before upload."""
+    snapshots: list[Path] = []
+    for source in _mlflow_artifact_files(exp_dir):
+        target = snapshot_dir / source.name
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(source, flags)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                continue
+            with os.fdopen(fd, "rb") as src, target.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+        except OSError:
+            continue
+        snapshots.append(target)
+    return snapshots
+
+
+def _infer_nemo_log_task_count(experiment_id: str, explicit_count: int | None = None) -> int:
+    """Best-effort task count for `nemo experiment logs <id> <idx>` fetches."""
+    if explicit_count is not None and explicit_count > 0:
+        return explicit_count
+    status = job_status_impl(experiment_id)
+    task_statuses = status.get("task_statuses") if status.get("ok") else None
+    if isinstance(task_statuses, dict) and task_statuses:
+        return len(task_statuses)
+    return 1
+
+
+def _nemo_logs_command(experiment_id: str, job_idx: int) -> dict:
+    """Resolve one Nemo logs invocation for both excerpts and MLflow archives."""
+    invalid = _validate_experiment_id(experiment_id)
+    if invalid:
+        return invalid
+    resolved = _resolve_experiment_dir_and_root(experiment_id)
+    if resolved is None:
+        return {
+            "ok": False,
+            "reason": "experiment_dir_not_found",
+            "diagnostic": _experiment_not_found_diagnostic(),
+        }
+    _, root = resolved
+    if root.name != "experiments":
+        return {
+            "ok": False,
+            "reason": "experiment_layout_unsupported",
+            "diagnostic": f"Nemo requires experiments/<title>/<id>; found {root}.",
+        }
+    child_env = os.environ.copy()
+    child_env["NEMORUN_HOME"] = str(root.parent)
+    nemo_cli = shutil.which("nemo") or str(Path(sys.executable).with_name("nemo"))
+    return {
+        "ok": True,
+        "argv": [nemo_cli, "experiment", "logs", experiment_id, str(job_idx)],
+        "env": child_env,
+    }
+
+
+def _run_nemo_logs(command: dict, *, output=None, timeout_sec: float = 60):
+    """Run the resolved, fixed-argv Nemo command for an excerpt or full archive."""
+    return subprocess.run(  # nosec B603 B607 - fixed nemo CLI argv; no shell.
+        command["argv"],
+        env=command["env"],
+        stdout=subprocess.PIPE if output is None else output,
+        stderr=subprocess.PIPE if output is None else subprocess.STDOUT,
+        text=True,
+        timeout=timeout_sec,
+        check=False,
+    )
+
+
+def _read_text_tail(path: Path) -> str:
+    """Read only the diagnostic tail of a potentially large task log."""
+    try:
+        flags = os.O_RDONLY | os.O_NONBLOCK
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return ""
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - 8192))
+            return stream.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _fetch_single_nemo_log_to_file(
+    *,
+    experiment_id: str,
+    job_idx: int,
+    target: Path,
+    timeout_sec: float = 120,
+) -> dict:
+    """Stream full Nemo logs to a safe file without buffering in the MCP process."""
+    command = _nemo_logs_command(experiment_id, job_idx)
+    if not command["ok"]:
+        return command
+    try:
+        with _open_no_follow_text_writer(target) as output:
+            proc = _run_nemo_logs(command, output=output, timeout_sec=timeout_sec)
+    except FileNotFoundError as exc:
+        return {"ok": False, "reason": "nemo_cli_not_found", "diagnostic": str(exc)}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "logs_fetch_timeout"}
+    except OSError as exc:
+        return {"ok": False, "reason": "logs_fetch_failed", "diagnostic": str(exc)}
+    if proc.returncode:
+        return {
+            "ok": False,
+            "reason": "logs_fetch_failed",
+            "exit_code": proc.returncode,
+            "diagnostic": _read_text_tail(target),
+        }
+    return {"ok": True}
+
+
+def _fetch_nemo_logs_to_experiment_dir(
+    *,
+    experiment_id: str,
+    exp_dir: Path,
+    task_count: int | None = None,
+    max_total_sec: float = 120,
+) -> dict:
+    """Fetch terminal Nemo/Slurm logs into exp_dir so MLflow can archive them."""
+    fetched: list[str] = []
+    errors: list[dict] = []
+    deadline = time.monotonic() + max_total_sec
+    for job_idx in range(_infer_nemo_log_task_count(experiment_id, task_count)):
+        target = exp_dir / f"nemo_logs_task_{job_idx}.log"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            errors.append(
+                {
+                    "job_idx": job_idx,
+                    "artifact": target.name,
+                    "ok": False,
+                    "reason": "logs_fetch_timeout",
+                    "diagnostic": "Nemo log fetch deadline exhausted before this task was fetched.",
+                }
+            )
+            break
+        result = _fetch_single_nemo_log_to_file(
+            experiment_id=experiment_id,
+            job_idx=job_idx,
+            target=target,
+            timeout_sec=min(120, remaining),
+        )
+        if result.get("ok"):
+            fetched.append(target.name)
+        else:
+            errors.append({"job_idx": job_idx, "artifact": target.name, **result})
+
+    return {"fetched_artifacts": fetched, "errors": errors}
+
+
+def finalize_mlflow_run_impl(
+    *,
+    experiment_id: str,
+    mlflow_run_id: str,
+    tracking_uri: str | None = None,
+    status: str | None = None,
+    fetch_remote_logs: bool = True,
+    task_count: int | None = None,
+) -> dict:
+    """Attach final MCP status and local launcher logs to a pre-created MLflow run."""
+    if not mlflow_run_id:
+        return {
+            "ok": False,
+            "reason": "missing_mlflow_run_id",
+            "diagnostic": "finalize_mlflow_run requires the mlflow_run_id returned by submit_job.",
+        }
+    invalid = _validate_experiment_id(experiment_id)
+    if invalid:
+        return {**invalid, "mlflow_run_id": mlflow_run_id}
+
+    exp_dir = _resolve_experiment_dir(experiment_id)
+    if exp_dir is None:
+        return {
+            "ok": False,
+            "experiment_id": experiment_id,
+            "mlflow_run_id": mlflow_run_id,
+            "reason": "experiment_dir_not_found",
+            "diagnostic": _experiment_not_found_diagnostic(),
+        }
+
+    final_status = status or job_status_impl(experiment_id).get("status", "unknown")
+    if final_status not in {"done", "failed"}:
+        return {
+            "ok": False,
+            "experiment_id": experiment_id,
+            "experiment_dir": str(exp_dir),
+            "mlflow_run_id": mlflow_run_id,
+            "reason": "experiment_not_terminal",
+            "status": final_status,
+        }
+    log_fetch = {"fetched_artifacts": [], "errors": []}
+    if fetch_remote_logs:
+        log_fetch = _fetch_nemo_logs_to_experiment_dir(
+            experiment_id=experiment_id,
+            exp_dir=exp_dir,
+            task_count=task_count,
+        )
+    uri = _mlflow_tracking_uri(tracking_uri)
+    mlflow, error = _setup_mlflow()
+    if error:
+        return {
+            **error,
+            "experiment_id": experiment_id,
+            "mlflow_run_id": mlflow_run_id,
+            "log_fetch": log_fetch,
+        }
+    assert mlflow is not None
+
+    uploaded: list[str] = []
+    try:
+        client = mlflow.tracking.MlflowClient(tracking_uri=uri)
+        client.log_param(mlflow_run_id, "experiment_id", experiment_id)
+        client.log_metric(mlflow_run_id, "result", _mlflow_result_metric(final_status))
+        with tempfile.TemporaryDirectory(prefix="modelopt-mcp-mlflow-") as snapshot:
+            for path in _snapshot_mlflow_artifacts(exp_dir, Path(snapshot)):
+                client.log_artifact(mlflow_run_id, str(path), artifact_path="logs")
+                uploaded.append(path.name)
+        client.set_tag(mlflow_run_id, "lifecycle", "finalized")
+        client.set_tag(mlflow_run_id, "result_label", final_status.upper())
+        client.set_terminated(
+            mlflow_run_id, status="FINISHED" if final_status == "done" else "FAILED"
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": "mlflow_finalize_failed",
+            "diagnostic": f"Failed to finalize MLflow run: {exc}",
+            "experiment_id": experiment_id,
+            "mlflow_run_id": mlflow_run_id,
+            "mlflow_tracking_uri": uri,
+            "uploaded_artifacts": uploaded,
+            "log_fetch": log_fetch,
+        }
+
+    return {
+        "ok": True,
+        "experiment_id": experiment_id,
+        "experiment_dir": str(exp_dir),
+        "mlflow_run_id": mlflow_run_id,
+        "mlflow_tracking_uri": uri,
+        "status": final_status,
+        "uploaded_artifacts": uploaded,
+        "log_fetch": log_fetch,
+    }
+
+
+# ---------------------------------------------------------------------------
 # list_examples
 # ---------------------------------------------------------------------------
 
@@ -1038,6 +1521,9 @@ def submit_job_impl(
     dry_run: bool = False,
     source_ref: str | None = None,
     source_repo: str | None = None,
+    enable_mlflow: bool = False,
+    mlflow_tracking_uri: str | None = None,
+    mlflow_experiment: str | None = None,
 ) -> dict:
     """Submit a launcher YAML.
 
@@ -1166,6 +1652,27 @@ def submit_job_impl(
             ),
         }
 
+    mlflow_info: dict = {"ok": True, "enabled": False}
+    if enable_mlflow:
+        mlflow_info = _create_mlflow_run(
+            yaml_path=str(abs_yaml),
+            executor=executor,
+            tracking_uri=mlflow_tracking_uri,
+            experiment_name=mlflow_experiment,
+            cluster_host=cluster_host,
+            job_name=job_name,
+            source=checkout,
+        )
+        if not mlflow_info.get("ok"):
+            return {
+                **mlflow_info,
+                "executor": executor,
+                "yaml_path": yaml_path,
+                "resolved_path": str(abs_yaml),
+                **_source_result_fields(checkout),
+            }
+        mlflow_info["enabled"] = True
+
     # ---- Dispatch to the launcher ---------------------------------
     # Subprocess `uv run launch.py --yaml <abs_yaml> --yes ...` rather
     # than calling core.run_jobs directly in-process. Why subprocess:
@@ -1222,6 +1729,9 @@ def submit_job_impl(
         control_socket=control_socket,
         reconnect_command=reconnect_command,
     )
+    if mlflow_info.get("enabled"):
+        child_env["MLFLOW_RUN_ID"] = mlflow_info["mlflow_run_id"]
+        child_env["MLFLOW_TRACKING_URI"] = mlflow_info["mlflow_tracking_uri"]
 
     if executor == "docker":
         # Docker mode: spawn detached. Redirect stdout/stderr to a side-channel
@@ -1243,6 +1753,12 @@ def submit_job_impl(
                 mode="w+b",
             )
         except OSError as e:
+            if mlflow_info.get("enabled"):
+                _mark_mlflow_submission_failed(
+                    mlflow_info["mlflow_run_id"],
+                    mlflow_info["mlflow_tracking_uri"],
+                    "docker_submit_log_unavailable",
+                )
             return {
                 "ok": False,
                 "executor": "docker",
@@ -1263,6 +1779,12 @@ def submit_job_impl(
         except FileNotFoundError:
             log_file.close()
             log_path.unlink(missing_ok=True)
+            if mlflow_info.get("enabled"):
+                _mark_mlflow_submission_failed(
+                    mlflow_info["mlflow_run_id"],
+                    mlflow_info["mlflow_tracking_uri"],
+                    "launcher_not_installed",
+                )
             return _launcher_not_installed(argv)
         finally:
             log_file.close()
@@ -1277,6 +1799,7 @@ def submit_job_impl(
             "experiment_id": experiment_id,
             "stdout_log": str(log_path),
             "stdout_tail": stdout_tail,
+            "mlflow": mlflow_info,
             **_source_result_fields(checkout),
             "diagnostic": (
                 "Docker mode launched detached and experiment_id was captured from launcher output."
@@ -1303,8 +1826,20 @@ def submit_job_impl(
             check=False,
         )
     except FileNotFoundError:
+        if mlflow_info.get("enabled"):
+            _mark_mlflow_submission_failed(
+                mlflow_info["mlflow_run_id"],
+                mlflow_info["mlflow_tracking_uri"],
+                "launcher_not_installed",
+            )
         return _launcher_not_installed(argv)
     except subprocess.TimeoutExpired as e:
+        if mlflow_info.get("enabled"):
+            _mark_mlflow_submission_failed(
+                mlflow_info["mlflow_run_id"],
+                mlflow_info["mlflow_tracking_uri"],
+                "submission_timeout",
+            )
         return {
             "ok": False,
             "executor": "slurm",
@@ -1325,6 +1860,12 @@ def submit_job_impl(
     stderr_tail = str(proc.stderr or "")[-2000:]
 
     if proc.returncode != 0 or _launcher_reported_error(stdout_tail, stderr_tail):
+        if mlflow_info.get("enabled"):
+            _mark_mlflow_submission_failed(
+                mlflow_info["mlflow_run_id"],
+                mlflow_info["mlflow_tracking_uri"],
+                "launch_py_failed",
+            )
         return {
             "ok": False,
             "executor": "slurm",
@@ -1345,6 +1886,12 @@ def submit_job_impl(
     experiment_id, experiment_dir, slurm_job_id = _parse_launcher_submission(stdout_tail)
 
     if not experiment_id:
+        if mlflow_info.get("enabled"):
+            _mark_mlflow_submission_failed(
+                mlflow_info["mlflow_run_id"],
+                mlflow_info["mlflow_tracking_uri"],
+                "launch_result_unparsed",
+            )
         return {
             "ok": False,
             "executor": "slurm",
@@ -1381,6 +1928,7 @@ def submit_job_impl(
         "exit_code": 0,
         "stdout_tail": stdout_tail,
         "argv": argv,
+        "mlflow": mlflow_info,
         **_source_result_fields(checkout),
     }
 
@@ -1587,13 +2135,19 @@ def _resolve_experiment_dir(experiment_id: str) -> Path | None:
        for the case where the operator didn't set NEMORUN_HOME at all
        AND the MCP server's cwd differs from where launch.py ran.
     """
+    resolved = _resolve_experiment_dir_and_root(experiment_id)
+    return resolved[0] if resolved is not None else None
+
+
+def _resolve_experiment_dir_and_root(experiment_id: str) -> tuple[Path, Path] | None:
+    """Return an experiment directory together with its matched search root."""
     for root in _experiment_search_roots():
         direct = root / experiment_id
         if direct.exists():
-            return direct
+            return direct, root
         for nested in root.glob(f"*/{experiment_id}"):
             if nested.exists():
-                return nested
+                return nested, root
     return None
 
 
@@ -1922,6 +2476,10 @@ def wait_for_experiment_impl(
     experiment_id: str,
     timeout_sec: int,
     poll_interval_sec: int,
+    *,
+    finalize_mlflow: bool = False,
+    mlflow_run_id: str | None = None,
+    mlflow_tracking_uri: str | None = None,
 ) -> dict:
     """Block until ``experiment_id`` reaches a terminal status or the timeout elapses.
 
@@ -1946,7 +2504,26 @@ def wait_for_experiment_impl(
             # dir doesn't exist.
             return {**status, "waited_seconds": time.monotonic() - started}
         if status["status"] in ("done", "failed"):
-            return {**status, "waited_seconds": time.monotonic() - started}
+            result = {**status, "waited_seconds": time.monotonic() - started}
+            if finalize_mlflow:
+                if not mlflow_run_id:
+                    result["mlflow_finalize"] = {
+                        "ok": False,
+                        "reason": "missing_mlflow_run_id",
+                        "diagnostic": (
+                            "finalize_mlflow=True requires the mlflow_run_id "
+                            "returned by submit_job(enable_mlflow=True)."
+                        ),
+                    }
+                else:
+                    result["mlflow_finalize"] = finalize_mlflow_run_impl(
+                        experiment_id=experiment_id,
+                        mlflow_run_id=mlflow_run_id,
+                        tracking_uri=mlflow_tracking_uri,
+                        status=status["status"],
+                        task_count=len(status.get("task_statuses") or {}),
+                    )
+            return result
         if time.monotonic() - started > timeout_sec:
             return {
                 "ok": False,
@@ -2118,27 +2695,25 @@ def read_cluster_artifact_impl(
             "reason": "invalid_path",
             "diagnostic": "path must be relative to the experiment dir, without '..'.",
         }
+
     if not path:
         # Mode 1: fetch log via `nemo experiment logs`. Subprocess
         # because the CLI handles tunnel auth and remote-path
         # resolution.
-        argv = [
-            "uv",
-            "run",
-            "nemo",
-            "experiment",
-            "logs",
-            experiment_id,
-            str(job_idx),
-        ]
+        command = _nemo_logs_command(experiment_id, job_idx)
+        if not command["ok"]:
+            return {**command, "experiment_id": experiment_id, "job_idx": job_idx}
+        argv = command["argv"]
         try:
-            proc = subprocess.run(  # nosec B603 B607 - fixed nemo CLI argv; no shell.
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
+            proc = _run_nemo_logs(command)
+        except FileNotFoundError as e:
+            return {
+                "ok": False,
+                "experiment_id": experiment_id,
+                "job_idx": job_idx,
+                "reason": "nemo_cli_not_found",
+                "diagnostic": f"Could not execute the NeMo Run CLI at {argv[0]!r}: {e}",
+            }
         except subprocess.TimeoutExpired:
             return {
                 "ok": False,
@@ -2160,10 +2735,15 @@ def read_cluster_artifact_impl(
                 "exit_code": proc.returncode,
                 "diagnostic": (
                     f"`nemo experiment logs` exited with code "
-                    f"{proc.returncode}. stderr: {proc.stderr.strip()[-400:]}"
+                    f"{proc.returncode}. stderr: {(proc.stderr or '').strip()[-400:]}"
                 ),
             }
-        content = (proc.stdout or "")[-8192:]
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        if stdout and stderr:
+            content = f"{stdout[-4095:]}\n{stderr[-4096:]}"
+        else:
+            content = (stdout or stderr)[-8192:]
         return {
             "ok": True,
             "experiment_id": experiment_id,

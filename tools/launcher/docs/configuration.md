@@ -223,3 +223,44 @@ uv run launch.py --yaml config.yaml pipeline.task_0.config.hf_local="" --yes
 ```
 
 For Slurm clusters, `SLURM_HF_LOCAL` sets the container mount path.
+
+## Required assets before submission
+
+`pipeline.assets` declares inputs relative to `/hf-local`. Empty/unset assets keep
+existing behavior. Local unversioned inputs are checked for existence. Remote or
+revision-pinned inputs require an explicit `asset_resolver` command; the launcher
+has no dependency on a particular storage service.
+
+```yaml
+pipeline:
+  assets: ["Org/Model@v1"]
+  asset_resolver: ["my-artifact-provider", "--profile", "my-team"]
+  asset_timeout: 900
+  # task_0, task_1, ... as usual
+```
+
+The command runs on the submitting machine with no shell. It reads a JSON object
+from stdin with `schema_version: 1`, `assets`, `host` (null for local Docker), and
+`hf_local` (the host source of the `/hf-local` mount). It must resolve/check all
+inputs, fetch missing inputs if authorized, and wait for completed materialization.
+Successful JSON stdout has this shape:
+
+```json
+{"schema_version":1,"status":"ready","assets":[{"name":"Org/Model","path":"/shared/hf-local/.snapshots/immutable-id","version":"v1"}]}
+```
+
+Return assets in declaration order. Paths must lie under the declared source root;
+use immutable snapshots when versions are supported. Diagnostics belong on stderr;
+never include credentials in the command, response or manifest. A nonzero exit,
+non-ready response, invalid manifest or timeout prevents the pipeline from creating
+an experiment. Transfers can continue independently after a timeout; providers must
+persist task receipts so rerunning resumes rather than duplicates them. Providers
+can return a `retry` argv list for an actionable recovery command.
+
+The launcher validates every active target before submission, adds read-only
+per-asset mounts at `/hf-local/<org>/<name>`, and records provider provenance in the
+experiment's `metadata.json`. Cross-cluster pipelines invoke the provider separately
+for each distinct host/cache root. Missing providers or mismatched mounts fail
+before job submission. Additional mounts must not overlap declared asset destinations,
+and Slurm arguments cannot override the container mounts. Dry-run configuration
+inspection does not transfer assets.

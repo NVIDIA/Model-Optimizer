@@ -27,6 +27,7 @@ import shlex
 import subprocess  # nosec B404
 import sys
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import nemo_run as run
@@ -69,6 +70,13 @@ def get_default_env(experiment_title=None):
         "MLM_SKIP_INSTALL": "1",
         **specdec_s3,
     }
+    tracking = {
+        key: os.environ[key]
+        for key in ("MLFLOW_RUN_ID", "MLFLOW_TRACKING_URI")
+        if os.environ.get(key)
+    }
+    slurm_env.update(tracking)
+    local_env.update(tracking)
     return slurm_env, local_env
 
 
@@ -244,6 +252,8 @@ class SandboxPipeline:
     tasks: list[SandboxTask] = None
 
     assets: list[str] = None  # HF repo paths (relative to hf_local) to verify before submission
+    asset_resolver: list[str] = None  # Optional argv implementing the asset readiness protocol
+    asset_timeout: int = 900
 
     test_level: int = 0
     allow_to_fail: bool = False
@@ -734,6 +744,139 @@ def report_versions(base_dir):
 # ---------------------------------------------------------------------------
 
 
+def _prepare_assets(job, hf_local):
+    if not job.assets:
+        return {}
+    if not isinstance(job.assets, list) or not all(isinstance(ref, str) for ref in job.assets):
+        raise ValueError("assets must be a list of strings")
+    names = [value.partition("@")[0] for value in job.assets]
+    if len(set(names)) != len(names) or any(
+        not re.fullmatch(r"[\w.-]+/[\w.-]+", name)
+        or any(part in (".", "..") for part in name.split("/"))
+        for name in names
+    ):
+        raise ValueError("assets must contain unique org/name or org/name@revision references")
+    if job.asset_timeout <= 0:
+        raise ValueError("asset_timeout must be positive")
+    targets = {}
+    for task in job.tasks:
+        if task.skip:
+            continue
+        mounts = task.slurm_config.container_mounts or []
+        if hf_local is None or task.slurm_config.local:
+            destinations = [PurePosixPath(m.split(":")[1]) for m in mounts if ":" in m]
+            for destination in destinations:
+                if destination == PurePosixPath("/hf-local") and hf_local is None:
+                    continue
+                if any(
+                    destination.is_relative_to(PurePosixPath("/hf-local") / name)
+                    or (PurePosixPath("/hf-local") / name).is_relative_to(destination)
+                    for name in names
+                ):
+                    raise ValueError("Container mounts overlap a declared asset destination")
+        if hf_local is None and any(
+            arg.startswith("--container-mounts")
+            for raw in task.slurm_config.srun_args or []
+            for arg in shlex.split(raw)
+        ):
+            raise ValueError("srun_args must not override declared asset mounts")
+        if hf_local is not None:
+            target = (None, str(Path(hf_local).resolve()))
+        else:
+            mounts = task.slurm_config.container_mounts or []
+            roots = [m.split(":")[0] for m in mounts if m.split(":")[1:2] == ["/hf-local"]]
+            if len(roots) != 1 or not PurePosixPath(roots[0]).is_absolute():
+                raise ValueError("Declared assets require one absolute /hf-local source mount")
+            target = (task.slurm_config.host, roots[0])
+            if not target[0]:
+                raise ValueError("Remote asset preparation requires a cluster host")
+        targets.setdefault(target, None)
+    for host, root in targets:
+        if job.asset_resolver:
+            if not isinstance(job.asset_resolver, list) or not all(
+                isinstance(arg, str) and arg for arg in job.asset_resolver
+            ):
+                raise ValueError("asset_resolver must be a nonempty command argv list")
+            request = {"schema_version": 1, "assets": job.assets, "host": host, "hf_local": root}
+            try:
+                result = subprocess.run(  # nosec B603 - explicitly configured argv, no shell.
+                    job.asset_resolver,
+                    input=json.dumps(request),
+                    text=True,
+                    capture_output=True,
+                    timeout=job.asset_timeout,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                detail = getattr(exc, "stderr", "") or ""
+                if isinstance(detail, bytes):
+                    detail = detail.decode("utf-8", errors="replace")
+                raise ValueError(
+                    f"Asset resolver failed; no job was submitted. {detail[-2000:]}"
+                ) from exc
+            diagnostic = (result.stderr or "")[-2000:]
+            try:
+                response = json.loads(result.stdout)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Asset resolver returned invalid JSON; no job was submitted. {diagnostic}"
+                ) from exc
+            if not isinstance(response, dict):
+                raise ValueError("Asset resolver must return a JSON object")
+            if result.returncode or response.get("status") != "ready":
+                retry = response.get("retry")
+                if not isinstance(retry, list) or not all(isinstance(arg, str) for arg in retry):
+                    retry = job.asset_resolver
+                raise ValueError(
+                    "Assets are not ready; no job was submitted. Resume with: "
+                    + shlex.join(retry)
+                    + ("" if response.get("retry") else " (same JSON request on stdin)")
+                    + f". {diagnostic}"
+                )
+            resolved = response.get("assets", [])
+            if (
+                response.get("schema_version") != 1
+                or not isinstance(resolved, list)
+                or not all(isinstance(item, dict) for item in resolved)
+                or [a.get("name") for a in resolved] != names
+                or any(
+                    "@" in ref and not isinstance(item.get("version"), str)
+                    for ref, item in zip(job.assets, resolved)
+                )
+            ):
+                raise ValueError("Asset resolver returned an incomplete manifest")
+        elif host is None and all("@" not in ref for ref in job.assets):
+            resolved = [{"name": name, "path": str(Path(root, name).resolve())} for name in names]
+            if any(not Path(item["path"]).is_dir() for item in resolved):
+                raise ValueError(
+                    "A declared local asset is missing; configure asset_resolver to fetch it"
+                )
+        else:
+            raise ValueError(
+                "Configure asset_resolver to verify/fetch remote or revision-pinned assets"
+            )
+        for item in resolved:
+            if not isinstance(item.get("path"), str):
+                raise ValueError("Resolved asset path must be a string")
+            path = PurePosixPath(item["path"])
+            if (
+                not path.is_absolute()
+                or ".." in path.parts
+                or not path.is_relative_to(root)
+                or any(c in str(path) for c in (":", "\n", "\r", ","))
+            ):
+                raise ValueError("Resolved asset path must be inside the /hf-local source root")
+            if host is None:
+                real = Path(path).resolve()
+                if not real.is_dir() or not real.is_relative_to(Path(root).resolve()):
+                    raise ValueError(
+                        "Resolved local asset must be a directory inside its cache root"
+                    )
+                item["path"] = str(real)
+        targets[(host, root)] = resolved
+    return targets
+
+
 def run_jobs(
     job_table,
     hf_local,
@@ -774,6 +917,7 @@ def run_jobs(
         if job.skip:
             continue
 
+        assets = _prepare_assets(job, hf_local)
         dependency = None
         exp = run.Experiment(experiment_title, log_level="INFO")
         job.experiment = exp
@@ -827,6 +971,22 @@ def run_jobs(
                         experiment_title,
                     )
                     task_env.update(default_slurm_env)
+
+                if assets:
+                    if hf_local is not None:
+                        target = (None, str(Path(hf_local).resolve()))
+                        mounts = executor.volumes
+                    else:
+                        root = next(
+                            m.split(":")[0]
+                            for m in task.slurm_config.container_mounts
+                            if m.split(":")[1:2] == ["/hf-local"]
+                        )
+                        target = (task.slurm_config.host, root)
+                        mounts = executor.container_mounts
+                    mounts.extend(
+                        f"{item['path']}:/hf-local/{item['name']}:ro" for item in assets[target]
+                    )
 
                 # When allow_to_fail is set, use "afterany" so downstream tasks
                 # run even if a predecessor times out or fails.
@@ -892,6 +1052,10 @@ def run_jobs(
             "job_name": job_name,
             "allow_to_fail": job.allow_to_fail,
             "note": job.note,
+            "assets": [
+                {"host": host, "hf_local": root, "resolved": resolved}
+                for (host, root), resolved in assets.items()
+            ],
         }
         metadata_path = os.path.join("experiments", experiment_title, exp._id, "metadata.json")
         os.makedirs(os.path.dirname(metadata_path), exist_ok=True)

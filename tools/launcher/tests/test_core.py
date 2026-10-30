@@ -208,7 +208,12 @@ class TestGetDefaultEnv:
         # get_default_env honors HF_HOME / TRITON_CACHE_DIR overrides, so isolate the ambient env.
         monkeypatch.delenv("HF_HOME", raising=False)
         monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
+        monkeypatch.setenv("MLFLOW_RUN_ID", "run-123")
+        monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://tracking.example")
         slurm_env, local_env = get_default_env()
+        for env in (slurm_env, local_env):
+            assert env["MLFLOW_RUN_ID"] == "run-123"
+            assert env["MLFLOW_TRACKING_URI"] == "https://tracking.example"
         assert slurm_env["TRITON_CACHE_DIR"] == "/cicd/triton-cache"
         assert slurm_env["HF_HOME"] == "/cicd/hf-cache"
         assert slurm_env["MLM_SKIP_INSTALL"] == "1"
