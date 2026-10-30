@@ -3031,6 +3031,25 @@ class TestFusedExpertsInterceptionCheck:
         finally:
             TestFusedExpertsCalibration._cleanup_registry(_SyntheticFusedExperts)
 
+    def test_a_grouped_forward_counts_whatever_its_routing_says(self):
+        """The grouped forwards call `_grouped_linear` whatever rows they are handed, and torch_a2a's
+        routing indices are global expert ids, so the eager routing test does not apply there: a
+        grouped experts forward that reached neither hook fails loudly even when every row's index
+        is past this module's experts."""
+        model = _TinyMoEModel()
+        model.moe.experts = _BypassingExperts()
+        model.moe.experts.config = _ExpertsConfig("grouped_mm")
+
+        def forward_loop(m):
+            beyond = torch.full((4, TOP_K), NUM_EXPERTS)
+            m.moe.experts(torch.randn(4, HIDDEN_DIM), beyond, torch.ones(4, TOP_K))
+
+        try:
+            with pytest.raises(RuntimeError, match="collected nothing"):
+                mtq.quantize(model, _INT8_EXPERTS_CFG, forward_loop)
+        finally:
+            TestFusedExpertsCalibration._cleanup_registry(_BypassingExperts)
+
     def test_forwards_after_a_hook_fired_are_not_counted(self):
         """Once a hook has fired the check passes, so later forwards skip the routing test, which
         syncs the host."""
