@@ -25,6 +25,7 @@ from torch import nn
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.imatrix import GGMLImatrixEncoder
+from modelopt.torch.quantization.model_calib import _imatrix_sum_of_squares
 
 IQ2_XXS_IMATRIX = {
     "quant_cfg": [
@@ -90,8 +91,10 @@ def test_imatrix_encodes_each_gpus_weights_at_once(need_2_gpus, monkeypatch, inf
     )
 
 
-def test_imatrix_second_moments_of_bf16_inputs_on_gpu(monkeypatch):
-    """On a GPU, bf16 inputs take the fused float32 reduction, which gives the float64 statistic."""
+@pytest.mark.parametrize("rows", [300, 2048, 2500], ids=["remainder", "groups", "both"])
+def test_imatrix_second_moments_of_bf16_inputs_on_gpu(monkeypatch, rows):
+    """On a GPU, bf16 inputs take the fused float32 reduction, over 512-row groups and the rows
+    left over, which gives the float64 statistic."""
     calls = []
     iq2_xxs = GGML_FORMAT_REGISTRY["iq2_xxs"]
 
@@ -104,10 +107,21 @@ def test_imatrix_second_moments_of_bf16_inputs_on_gpu(monkeypatch):
     )
     torch.manual_seed(0)
     scale = torch.randn(512).mul(1.5).exp()  # columns of very different scale
-    inputs = (torch.randn(2500, 512) * scale).to("cuda", torch.bfloat16)
+    inputs = (torch.randn(rows, 512) * scale).to("cuda", torch.bfloat16)
     model = nn.Linear(512, 8, bias=False, device="cuda", dtype=torch.bfloat16)
     mtq.quantize(model, IQ2_XXS_IMATRIX, forward_loop=lambda m: m(inputs))
 
     second_moments = inputs.double().square().mean(dim=0)
     expected = second_moments.clamp_min(1e-4 * second_moments.mean()).sqrt().float()
     torch.testing.assert_close(calls[-1], expected, rtol=1e-5, atol=0)
+
+
+def test_imatrix_statistic_takes_no_input_sized_gpu_buffer():
+    """The GPU reduction's temporaries stay well below a float32 copy of 1,024 rows, the slice the
+    statistic took before; one reduction over all rows stages a 142 MiB buffer for this input."""
+    x = torch.randn(32768 + 300, 4096, device="cuda", dtype=torch.bfloat16)
+    torch.cuda.synchronize()
+    before = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    _imatrix_sum_of_squares(x)
+    assert torch.cuda.max_memory_allocated() - before < 1024 * x.shape[1] * 4

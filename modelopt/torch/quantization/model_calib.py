@@ -2662,6 +2662,28 @@ def gptq(
 # Calibration rows squared at a time, bounding imatrix's float32 temporaries to this slice of an
 # input rather than twice the whole of it.
 _IMATRIX_ROW_CHUNK = 1024
+# Rows a GPU reduction sums at once. A CUDA reduction over about 1,000 rows or more stages partial
+# sums in a global buffer that grows with the input, 512 MiB for 512K x 4,096 bf16 rows; summing
+# 512-row groups first keeps the temporaries to about 1% of the input.
+_IMATRIX_GPU_GROUP = 512
+
+
+def _imatrix_sum_of_squares(x: torch.Tensor) -> torch.Tensor:
+    """Per-column sum of squares of the rows of ``x``, in float32."""
+    if not (x.is_cuda and x.dtype in (torch.bfloat16, torch.float16, torch.float32)):
+        # On a CPU vector_norm copies the whole input to float32 first, and it rejects float64,
+        # so square float32 slices of the input instead.
+        return sum(rows.float().square().sum(dim=0) for rows in x.split(_IMATRIX_ROW_CHUNK))
+    # On a GPU vector_norm squares and sums in float32 inside the kernel, without a float32 copy.
+    full = x.shape[0] // _IMATRIX_GPU_GROUP * _IMATRIX_GPU_GROUP
+    parts = []
+    if full:
+        groups = x[:full].reshape(-1, _IMATRIX_GPU_GROUP, x.shape[1])
+        group_sums = torch.linalg.vector_norm(groups, 2, dim=1, dtype=torch.float32).square_()
+        parts.append(group_sums.sum(dim=0))
+    if full < x.shape[0]:
+        parts.append(torch.linalg.vector_norm(x[full:], 2, dim=0, dtype=torch.float32).square_())
+    return sum(parts[1:], parts[0])
 
 
 @torch.no_grad()
@@ -2731,13 +2753,7 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
         x = inputs.detach().reshape(-1, inputs.shape[-1])
         if x.shape[0] == 0:
             return
-        if x.is_cuda and x.dtype in (torch.bfloat16, torch.float16, torch.float32):
-            # On a GPU this squares and sums in float32 inside one kernel, without a float32 copy.
-            sum_sq = torch.linalg.vector_norm(x, 2, dim=0, dtype=torch.float32).square()
-        else:
-            # On a CPU that reduction copies the whole input to float32 first, and it rejects
-            # float64, so square float32 slices of the input instead.
-            sum_sq = sum(rows.float().square().sum(dim=0) for rows in x.split(_IMATRIX_ROW_CHUNK))
+        sum_sq = _imatrix_sum_of_squares(x)
         entry[0] = sum_sq if entry[0] is None else entry[0] + sum_sq
         entry[1] += x.shape[0]
 
