@@ -178,7 +178,8 @@ def test_the_patched_block_reproduces_the_remote_per_expert_forward(overrides):
     """Swapping the per-expert ModuleList for the fused module keeps the block's output: the latent
     projections, the latent norm and the shared experts stay around the fused call, and w1 / w3 /
     w2 are the gate rows, the up rows and the down of the fused params. A ``situ`` model hands the
-    full [gate; up] row to the remote ``SituAndMul``."""
+    full [gate; up] row to the remote ``SituAndMul``. A block built before the patch, as a model
+    loaded earlier in the process holds, keeps its per-expert experts and its own forward."""
     remote = remote_module()
     config = _config(**overrides)
     reference = remote.KimiSparseMoeBlock(config)
@@ -189,6 +190,8 @@ def test_the_patched_block_reproduces_the_remote_per_expert_forward(overrides):
         expected = reference(hidden_states)
 
     kimi_k3._patch_kimi_moe_block(remote)
+    with torch.no_grad():
+        torch.testing.assert_close(reference(hidden_states), expected)
     block = remote.KimiSparseMoeBlock(config)
     assert not isinstance(block.experts, nn.ModuleList)
     dense = {k: v for k, v in reference.state_dict().items() if not k.startswith("experts.")}
