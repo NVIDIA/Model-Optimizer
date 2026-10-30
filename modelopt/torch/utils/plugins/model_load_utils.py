@@ -636,8 +636,9 @@ def load_pretrained(
     plan for several ranks and a sharded load need the group, so there they are refused: set it up
     first, with :func:`~modelopt.torch.utils.distributed.distributed_run`. The plan is recorded on
     the model (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), where calibration
-    and export read it back. It is recorded once, so a model to shard yourself (:func:`fsdp2_wrap`)
-    is one loaded with ``from_pretrained``, not here.
+    and export read it back. It is recorded once, so a model to shard yourself
+    (:func:`~modelopt.torch.utils.fsdp2_utils.fsdp2_wrap`) is one loaded with ``from_pretrained``,
+    not here.
 
     A sharded load builds the model class and places it itself. Besides its own options it takes
     ``trust_remote_code``, ``attn_implementation`` and ``hf_config``, and refuses any other keyword
@@ -1207,7 +1208,8 @@ def parallel_load_and_prepare_fsdp2(
     a smaller value lowers the peak transient GPU memory at the cost of more collectives (default 8;
     pass ``None`` to broadcast all of a source's layers at once).
 
-    It records no distribution plan, as :func:`fsdp2_wrap` does not; :func:`load_pretrained` does.
+    It records no distribution plan, as :func:`~modelopt.torch.utils.fsdp2_utils.fsdp2_wrap` does
+    not; :func:`load_pretrained` does.
     """
     resolved_path = _resolve_checkpoint_dir(ckpt_path, rank)
     weight_map = indexed_weight_map(resolved_path)
