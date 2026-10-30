@@ -560,8 +560,9 @@ _TORCH_A2A_REGISTERED = False
 def register_torch_a2a():
     """Register everything the torch_a2a path needs into stock transformers (idempotent).
 
-    Done lazily from ``load_and_prepare_ep``, not at import time, so importing this module has no
-    transformers side effect:
+    Done lazily, not at import time, so importing this module has no transformers side effect: by
+    ``load_and_prepare_ep``, and by a spec's ``prepare`` that names ``torch_a2a`` on the config a
+    model is built from before that load (Kimi-K3's). It registers:
 
     - the ``torch_a2a`` experts forward into ``ExpertsInterface`` (``ALL_EXPERTS_FUNCTIONS``);
     - two EP parallel styles into ``ALL_PARALLEL_STYLES``:
