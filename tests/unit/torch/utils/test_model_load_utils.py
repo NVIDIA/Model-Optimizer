@@ -2139,7 +2139,11 @@ def test_routed_experts_without_experts_in_their_names_are_refused(ep_world_of_t
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
     monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: None)
     config = SimpleNamespace(
-        base_model_ep_plan={"layers.*.mlp.routed": "moe_tp_experts"}, num_experts=4
+        base_model_ep_plan={
+            "layers.*.mlp.routed": "moe_tp_experts",
+            "layers.*.mlp.routed.gate_up_proj": "grouped_gemm",
+        },
+        num_experts=4,
     )
 
     with pytest.raises(
