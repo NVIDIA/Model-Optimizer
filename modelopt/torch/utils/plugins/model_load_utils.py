@@ -449,8 +449,12 @@ _SHARDED_LOAD_OPTIONS = {
 
 
 def _whole_load_options(kwargs) -> list[str]:
-    """The load ``kwargs`` that place a whole model, which the FSDP2 load refuses."""
-    names = set(kwargs) - _SHARDED_LOAD_OPTIONS[_FSDP2] - {"config", "dtype", "torch_dtype"}
+    """The load ``kwargs`` that place a whole model, which the FSDP2 load refuses.
+
+    One passed as None, from_pretrained's own default, places nothing.
+    """
+    passed = {name for name, value in kwargs.items() if value is not None}
+    names = passed - _SHARDED_LOAD_OPTIONS[_FSDP2] - {"config", "dtype", "torch_dtype"}
     dtypes = {name for name in ("dtype", "torch_dtype") if kwargs.get(name) not in (None, "auto")}
     return sorted(names | dtypes)
 
@@ -512,7 +516,9 @@ def _refuse_sharded_load_options(route, auto_class, kwargs) -> None:
                 f"so {name}={value!r} does not apply to it; FSDP2's mp_policy sets the dtype it "
                 "computes in."
             )
-    unknown = sorted(set(kwargs) - _SHARDED_LOAD_OPTIONS[route] - {"dtype", "torch_dtype"})
+    # An option passed as None, from_pretrained's own default (device_map=None, say), asks nothing.
+    passed = {name for name, value in kwargs.items() if value is not None}
+    unknown = sorted(passed - _SHARDED_LOAD_OPTIONS[route] - {"dtype", "torch_dtype"})
     if unknown:
         whole = (
             " To place the model yourself, have every rank load it whole: MODELOPT_FSDP_SIZE=1, or "
@@ -531,7 +537,8 @@ def _sharded_load_kwargs(route, ckpt_path, auto_class, model_type, kwargs, hub_o
     from modelopt.torch.models.hf import checkpoint_has_mtp
 
     _refuse_sharded_load_options(route, auto_class, kwargs)
-    kwargs = {k: v for k, v in kwargs.items() if k not in ("dtype", "torch_dtype")}
+    # Past the refusal, anything else is a dtype the load keeps or an option at its default, None.
+    kwargs = {k: v for k, v in kwargs.items() if k in _SHARDED_LOAD_OPTIONS[route]}
     if checkpoint_has_mtp(model_type, ckpt_path):
         # prepare_model_for_loading builds the head on a whole model only; carried over, the
         # head would be exported unquantized.
@@ -633,7 +640,8 @@ def load_pretrained(
 
     A sharded load builds the model class and places it itself. Besides its own options it takes
     ``trust_remote_code``, ``attn_implementation`` and ``hf_config``, and refuses any other keyword
-    rather than ignore it. With neither a plan nor ``MODELOPT_FSDP_SIZE``, rank 0's GPU memory
+    rather than ignore it, but for one passed as ``None``, ``from_pretrained``'s own default, which
+    asks nothing. With neither a plan nor ``MODELOPT_FSDP_SIZE``, rank 0's GPU memory
     decides whether the dense part is sharded, so a call that places the model (``device_map``,
     ``quantization_config``, a ``dtype``) loads only where it fits one GPU: pass ``distribution=``
     or set ``MODELOPT_FSDP_SIZE=1`` to keep it whole. The model is weighed in the checkpoint's own
