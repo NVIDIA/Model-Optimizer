@@ -575,10 +575,11 @@ def _refuse_sharded_load_options(
         )
     if dtypes:  # A sharded load keeps the checkpoint's dtype.
         name = dtypes[0]
+        # Only the FSDP2 load computes in another dtype, through its mp_policy.
+        computes = "; FSDP2's mp_policy sets the dtype it computes in" if route == _FSDP2 else ""
         raise TypeError(
             f"The {route} load reads the checkpoint's tensors as stored and keeps their dtype, so "
-            f"{name}={kwargs[name]!r} does not apply to it; FSDP2's mp_policy sets the dtype it "
-            "computes in."
+            f"{name}={kwargs[name]!r} does not apply to it{computes}."
         )
     if unknown:
         raise TypeError(

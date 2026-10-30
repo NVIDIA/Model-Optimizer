@@ -1578,6 +1578,9 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
         # plan with an EP degree of 1.
         whole_moe = "DistributionPlan(2, 1, 'replicate')"
         assert (whole_moe in str(refused.value)) == expert_parallel, refused.value
+    if {"dtype", "torch_dtype"} & set(change.get("kwargs", {})):
+        # Only the FSDP2 load takes an mp_policy to compute in another dtype.
+        assert ("mp_policy" in str(refused.value)) != expert_parallel, refused.value
     assert loaders == {}
 
 
