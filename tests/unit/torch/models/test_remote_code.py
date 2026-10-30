@@ -15,6 +15,8 @@
 
 """Staging every module of a local checkpoint's remote code, and keeping a patch on it."""
 
+import importlib
+import os
 import shutil
 import sys
 from types import ModuleType, SimpleNamespace
@@ -56,54 +58,111 @@ def test_every_module_of_a_local_checkpoint_is_staged(monkeypatch, tmp_path):
     assert sorted(p.name for p in stage.iterdir()) == ["a.py", "b.py", "c.py"]
 
 
-def test_a_module_is_staged_whole_or_not_at_all(monkeypatch, tmp_path):
-    """Every rank stages into the same dir and imports what it finds there, so a module must not
-    appear before its copy completes: a copy cut short leaves nothing behind for a rank to take as
-    staged, and the next load stages the whole module."""
-    ckpt, stage = tmp_path / "ckpt", tmp_path / "stage"
-    ckpt.mkdir()
-    stage.mkdir()
-    (ckpt / "a.py").write_text("from .b import B\n")
-    (ckpt / "b.py").write_text("B = 1\n" * 100)
+def _stage_only_the_module(monkeypatch, ckpt, stage):
+    """Stand in for transformers' staging of the module itself, without its imports."""
 
     def stage_only_the_module(path, module_file, *args, **kwargs):
         shutil.copy(ckpt / module_file, stage / module_file)
         return str(stage / module_file)
 
+    monkeypatch.setattr(dmu, "get_cached_module_file", stage_only_the_module)
+    stage_full_remote_closure()
+
+
+def test_a_module_is_staged_whole_or_not_at_all(monkeypatch, tmp_path):
+    """Every rank stages into the same dir and imports what it finds there, so a module must not
+    appear before its copy completes: a copy cut short leaves nothing behind for a rank to take as
+    staged, not even its temp file, the other modules are still staged, and the next load stages
+    the whole module."""
+    ckpt, stage = tmp_path / "ckpt", tmp_path / "stage"
+    ckpt.mkdir()
+    stage.mkdir()
+    (ckpt / "a.py").write_text("from .b import B\n")
+    (ckpt / "b.py").write_text("B = 1\n" * 100)
+    (ckpt / "c.py").write_text("C = 1\n")
+    copy = shutil.copy
+
     def copy_cut_short(src, dst):
+        if not src.endswith("b.py"):
+            return copy(src, dst)
         with open(src) as f, open(dst, "w") as out:
             out.write(f.read()[:10])
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(dmu, "get_cached_module_file", stage_only_the_module)
-    stage_full_remote_closure()
+    _stage_only_the_module(monkeypatch, ckpt, stage)
     with monkeypatch.context() as m:
         m.setattr(_remote_code, "shutil", SimpleNamespace(copy=copy_cut_short))
-        with pytest.warns(UserWarning, match="No space left"):
+        with pytest.warns(UserWarning, match=r"b\.py .*No space left"):
             dmu.get_cached_module_file(str(ckpt), "a.py")
-    assert not (stage / "b.py").exists()
+    assert sorted(p.name for p in stage.iterdir()) == ["a.py", "c.py"]
 
     dmu.get_cached_module_file(str(ckpt), "a.py")
     assert (stage / "b.py").read_text() == (ckpt / "b.py").read_text()
 
 
-@pytest.mark.parametrize("load_again", ["forced", "another-path"])
-def test_a_patch_stays_on_a_module_transformers_loads_again(
-    monkeypatch, tmp_path, capsys, load_again
-):
-    """transformers re-executes a remote module it loads again (when the files it hashes change, or
-    forced), and loads a second copy under another name for another path to the same checkpoint;
-    either way the module's globals are fresh. The patch must be back on the module the class is
-    resolved from, which is the one from_pretrained builds from, and the re-patch is reported."""
+def test_a_staged_module_that_differs_from_the_checkpoints_is_staged_again(monkeypatch, tmp_path):
+    """As transformers does for the modules it stages itself: a stage dir can hold another copy of
+    a module, from a checkpoint staged there before or from before the checkpoint's own was
+    edited, and the load must import the checkpoint's."""
+    ckpt, stage = tmp_path / "ckpt", tmp_path / "stage"
+    ckpt.mkdir()
+    stage.mkdir()
+    (ckpt / "a.py").write_text("from .b import B\n")
+    (ckpt / "b.py").write_text("B = 2\n")
+    (stage / "b.py").write_text("B = 1\n")
+
+    _stage_only_the_module(monkeypatch, ckpt, stage)
+    dmu.get_cached_module_file(str(ckpt), "a.py")
+
+    assert (stage / "b.py").read_text() == "B = 2\n"
+
+
+def test_a_module_staged_after_its_dir_was_imported_from_is_found(monkeypatch, tmp_path):
+    """The import system caches what a directory holds, and only notices a change when the
+    directory's modification time does; on a filesystem that stamps it coarsely, a module staged
+    within the same tick stays hidden from the import that needs it, unless the caches are
+    invalidated, as transformers does after its own copies."""
+    ckpt, stage = tmp_path / "ckpt", tmp_path / "staged_pkg"
+    ckpt.mkdir()
+    stage.mkdir()
+    (stage / "__init__.py").write_text("")
+    (stage / "a.py").write_text("")
+    (ckpt / "a.py").write_text("")
+    (ckpt / "b.py").write_text("B = 1\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "staged_pkg", raising=False)
+    try:
+        importlib.import_module("staged_pkg.a")  # caches what the stage dir holds
+        mtime = os.stat(stage).st_mtime_ns
+
+        _stage_only_the_module(monkeypatch, ckpt, stage)
+        dmu.get_cached_module_file(str(ckpt), "a.py")
+        os.utime(stage, ns=(mtime, mtime))  # a stamp too coarse to tell the copy apart
+
+        assert importlib.import_module("staged_pkg.b").B == 1
+    finally:
+        for name in [n for n in sys.modules if n == "staged_pkg" or n.startswith("staged_pkg.")]:
+            del sys.modules[name]
+
+
+@pytest.fixture
+def remote_kimi(monkeypatch, tmp_path):
+    """A checkpoint whose remote modeling module defines ``DeepseekV3ForCausalLM`` and the VLM class
+    and imports a class from a sibling module, plus a patch pointing the former at a native
+    stand-in; the modules transformers loads from it are dropped afterwards."""
     monkeypatch.setattr(dmu, "HF_MODULES_CACHE", str(tmp_path / "modules"))
     monkeypatch.setattr(dmu, "get_class_in_module", dmu.get_class_in_module)
     monkeypatch.setattr(_remote_code, "_KEPT_PATCHES", {})
+    # transformers puts its modules cache on sys.path; another test's must not shadow this one's.
+    monkeypatch.setattr(sys, "path", list(sys.path))
     loaded = set(sys.modules)
     ckpt = tmp_path / "ckpt"
     ckpt.mkdir()
     (ckpt / "modeling_kimi_k25.py").write_text(
+        "from .modeling_vision import VisionTower\n\n\n"
         "class DeepseekV3ForCausalLM:\n    pass\n\n\nclass KimiK25ForConditionalGeneration:\n    pass\n"
     )
+    (ckpt / "modeling_vision.py").write_text("class VisionTower:\n    pass\n")
     (tmp_path / "same_ckpt").symlink_to(ckpt)
     native = type("DeepseekV3ForCausalLM", (), {})
 
@@ -112,22 +171,52 @@ def test_a_patch_stays_on_a_module_transformers_loads_again(
         module.DeepseekV3ForCausalLM = native
         return changed
 
-    ref = "modeling_kimi_k25.KimiK25ForConditionalGeneration"
-    try:
-        first = dmu.get_class_from_dynamic_module(ref, str(ckpt))
-        patched = keep_patched(".modeling_kimi_k25", to_native)
-        if load_again == "forced":
-            again = dmu.get_class_from_dynamic_module(ref, str(ckpt), force_download=True)
-        else:
-            again = dmu.get_class_from_dynamic_module(ref, str(tmp_path / "same_ckpt"))
+    yield SimpleNamespace(
+        ckpt=ckpt, same_ckpt=tmp_path / "same_ckpt", native=native, patch=to_native
+    )
+    for name in set(sys.modules) - loaded:
+        del sys.modules[name]
 
-        assert patched == [first.__module__]
-        assert again is not first  # a fresh module, not the one patched above
-        assert sys.modules[again.__module__].DeepseekV3ForCausalLM is native
-        assert f"re-patched {again.__module__}" in capsys.readouterr().out
-    finally:
-        for name in set(sys.modules) - loaded:
-            del sys.modules[name]
+
+@pytest.mark.parametrize("load_again", ["forced", "another-path"])
+def test_a_patch_stays_on_a_module_transformers_loads_again(remote_kimi, capsys, load_again):
+    """transformers re-executes a remote module it loads again (when the files it hashes change, or
+    forced), and loads a second copy under another name for another path to the same checkpoint;
+    either way the module's globals are fresh. The patch must be back on the module the class is
+    resolved from, which is the one from_pretrained builds from, and the re-patch is reported."""
+    ref = "modeling_kimi_k25.KimiK25ForConditionalGeneration"
+    first = dmu.get_class_from_dynamic_module(ref, str(remote_kimi.ckpt))
+    patched = keep_patched(".modeling_kimi_k25", remote_kimi.patch)
+    if load_again == "forced":
+        again = dmu.get_class_from_dynamic_module(ref, str(remote_kimi.ckpt), force_download=True)
+    else:
+        again = dmu.get_class_from_dynamic_module(ref, str(remote_kimi.same_ckpt))
+
+    assert patched == [first.__module__]
+    assert again is not first  # a fresh module, not the one patched above
+    assert sys.modules[again.__module__].DeepseekV3ForCausalLM is remote_kimi.native
+    assert f"re-patched {again.__module__}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "resolved", ["DeepseekV3ForCausalLM", "VisionTower"], ids=["patched-name", "imported-class"]
+)
+def test_resolving_any_class_from_a_module_loaded_again_puts_its_patch_back(remote_kimi, resolved):
+    """The class handed back is the module's as patched, even when the patch rebinds that very name,
+    which transformers read before the patch ran; and a class the module imports from a sibling,
+    which another module defines, still puts the patch back on the module loaded again."""
+    vlm = dmu.get_class_from_dynamic_module(
+        "modeling_kimi_k25.KimiK25ForConditionalGeneration", str(remote_kimi.ckpt)
+    )
+    keep_patched(".modeling_kimi_k25", remote_kimi.patch)
+
+    cls = dmu.get_class_from_dynamic_module(
+        f"modeling_kimi_k25.{resolved}", str(remote_kimi.ckpt), force_download=True
+    )
+
+    module = sys.modules[vlm.__module__]
+    assert module.DeepseekV3ForCausalLM is remote_kimi.native
+    assert cls is getattr(module, resolved)
 
 
 @pytest.mark.parametrize(
@@ -156,7 +245,7 @@ def test_only_remote_modules_are_patched(monkeypatch, defined_in):
     assert keep_patched(".modeling_kimi_k25", seen.append) == [remote.__name__]
     module_path = f"{remote.__name__.replace('.', '/')}.py"  # the remote module, as loaded
     assert dmu.get_class_in_module(cls.__name__, module_path) is cls
-    assert seen == [remote]
+    assert seen and all(module is remote for module in seen)
 
 
 @pytest.mark.parametrize("loaded", [True, False], ids=["patch-refuses", "nothing-loaded"])
