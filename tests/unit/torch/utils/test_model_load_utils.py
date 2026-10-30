@@ -2337,7 +2337,7 @@ def test_a_decompressed_load_refuses_compressed_tensors_its_model_does_not_place
     def next_check(*args, **kwargs):
         raise _PastError
 
-    model = _model_with_decoder_at("model.")
+    model = model_with_decoder_at("model.")
 
     class _Loader:
         @staticmethod
