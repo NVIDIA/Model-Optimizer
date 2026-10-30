@@ -120,7 +120,8 @@ def _drop_tie_weights_kwargs(orig_tie):
 
     Dropping ``missing_keys`` as well as ``recompute_mapping`` is safe because the remote
     ``tie_weights`` only calls its language model's, and the Kimi checkpoints set
-    ``tie_word_embeddings=False``: nothing is tied, so no tied key is left to report to the load.
+    ``tie_word_embeddings=False``: nothing is tied, so no tied key is left to report to the load. A
+    tied one would still load its embedding into both, with ``lm_head.weight`` reported missing.
     """
 
     def _tie_weights(self, *args, **kwargs):  # drop recompute_mapping etc.
