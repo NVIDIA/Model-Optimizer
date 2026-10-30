@@ -30,6 +30,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
 transformers = pytest.importorskip("transformers")
@@ -66,7 +67,7 @@ PACKED = ("weight_packed", "weight_scale", "weight_shape")  # what pack-quantize
 @pytest.fixture
 def restore_loader_hooks(monkeypatch):
     """Undo the process-wide transformers hooks the decompressor installs, and its load state."""
-    for owner, name in ((cml, "_materialize_copy"), (mu, "get_model_conversion_mapping")):
+    for owner, name in ((cml, "spawn_materialize"), (mu, "get_model_conversion_mapping")):
         monkeypatch.setattr(owner, name, getattr(owner, name))
     monkeypatch.setattr(onfly, "_LOAD", dict(onfly._LOAD))
 
@@ -236,43 +237,82 @@ def test_only_owned_experts_and_stored_siblings_reach_the_compressor():
         decompress.convert(short)
 
 
+PACKED_INT32 = torch.tensor([[2**31 - 15, -(2**31) + 3]], dtype=torch.int32)  # not exact in bf16
+
+
+def _read(path, sharding_op=None, dtype=torch.bfloat16):
+    """Read ``path``'s one tensor the way the loader does: a safetensors slice, through spawn_materialize."""
+    with safe_open(str(path), framework="pt") as stored:
+        [key] = stored.keys()
+        kwargs = {"sharding_op": sharding_op, "tensor_idx": 0} if sharding_op else {}
+        return cml.spawn_materialize(None, stored.get_slice(key), "cpu", dtype, **kwargs)()
+
+
 @pytest.mark.usefixtures("restore_loader_hooks")
-def test_integer_checkpoint_tensors_keep_their_dtype_on_load():
-    """Without a quantizer the loader casts every tensor to the model's float dtype, which destroys
-    packed weights, shapes and zero-points. In a decompressing load integers stay integers; floats
-    are still cast, and integer-to-integer casts still happen. Any other load casts as before."""
+def test_integer_checkpoint_tensors_keep_their_dtype_on_load(tmp_path):
+    """Without a quantizer the loader casts every tensor to the model's float dtype as it reads it,
+    which destroys packed weights, shapes and zero-points. In a decompressing load integers stay
+    integers; floats are still cast, and integer-to-integer casts still happen. Any other load casts
+    as before."""
+    save_file({"packed": PACKED_INT32}, str(tmp_path / "packed.safetensors"))
     onfly._install_keep_int_native()
-    packed = torch.tensor([[2**31 - 15, -(2**31) + 3]], dtype=torch.int32)  # not exact in bf16
-    assert cml._materialize_copy(packed, dtype=torch.bfloat16).dtype == torch.bfloat16
+    assert _read(tmp_path / "packed.safetensors").dtype == torch.bfloat16
     onfly._LOAD["decompressing"] = True
 
-    kept = cml._materialize_copy(packed, dtype=torch.bfloat16)
+    kept = _read(tmp_path / "packed.safetensors")
 
     assert kept.dtype == torch.int32
-    assert torch.equal(kept, packed)
-    assert cml._materialize_copy(torch.ones(2), dtype=torch.bfloat16).dtype == torch.bfloat16
-    assert cml._materialize_copy(packed, dtype=torch.int64).dtype == torch.int64
-    # the loader reaches the hook through spawn_materialize, which looks it up at call time
-    assert cml.spawn_materialize(None, packed, "cpu", torch.bfloat16)().dtype == torch.int32
+    assert torch.equal(kept, PACKED_INT32)
+    assert _read(tmp_path / "packed.safetensors", dtype=torch.int64).dtype == torch.int64
+    assert (
+        cml.spawn_materialize(None, torch.ones(2), "cpu", torch.bfloat16)().dtype == torch.bfloat16
+    )
+    assert cml.spawn_materialize(None, PACKED_INT32, "cpu", torch.bfloat16)().dtype == torch.int32
 
 
 @pytest.mark.usefixtures("restore_loader_hooks")
-def test_a_copy_parameter_a_release_adds_passes_through(monkeypatch):
-    """The patch sits on every later load's copy path, so a parameter a release adds reaches the
-    loader's copy, passed positionally, as the loader passes the ones it has, or by keyword."""
+def test_an_integer_sharded_onto_the_expert_mesh_keeps_its_dtype(tmp_path, gloo_world_of_one):
+    """From transformers 5.14 an expert-parallel load shards each expert's tensor onto the mesh as it
+    reads it, and the shard op casts it to the parameter's dtype, not the copy: a decompressing load
+    keeps the packed integers there too."""
+    sharding_utils = pytest.importorskip("transformers.distributed.sharding_utils")
+    from torch.distributed.tensor import Shard, distribute_tensor
+
+    experts = torch.zeros(2, 4, 8, dtype=torch.bfloat16)  # a fused expert param, sharded by expert
+    shard = sharding_utils.DtensorShardOperation(
+        distribute_tensor(experts, gloo_world_of_one, [Shard(0)])
+    )
+    save_file({"packed": PACKED_INT32}, str(tmp_path / "packed.safetensors"))
+    onfly._install_keep_int_native()
+    onfly._LOAD["decompressing"] = True
+
+    kept = _read(tmp_path / "packed.safetensors", sharding_op=shard)
+
+    assert kept.dtype == torch.int32
+    assert torch.equal(kept, PACKED_INT32)
+
+
+@pytest.mark.usefixtures("restore_loader_hooks")
+def test_a_read_parameter_a_release_adds_passes_through(monkeypatch):
+    """The patch sits on every later load's reads, so a parameter past the dtype (5.14's sharding_op
+    and tensor_idx, or one a release adds) reaches the loader's own, positionally or by keyword."""
     seen = []
 
-    def release_copy(tensor, device=None, dtype=None, non_blocking=False):
-        seen.append(non_blocking)
+    def release_spawn(
+        thread_pool, tensor, device=None, dtype=None, sharding_op=None, tensor_idx=None
+    ):
+        seen.append((sharding_op, tensor_idx))
         return tensor
 
-    monkeypatch.setattr(cml, "_materialize_copy", release_copy)
+    monkeypatch.setattr(cml, "spawn_materialize", release_spawn)
     onfly._install_keep_int_native()
 
-    cml._materialize_copy(torch.ones(2), "cpu", torch.bfloat16, True)
-    cml._materialize_copy(torch.ones(2), "cpu", torch.bfloat16, non_blocking=True)
+    cml.spawn_materialize(None, torch.ones(2), "cpu", torch.bfloat16, "op", 3)
+    cml.spawn_materialize(
+        None, torch.ones(2), "cpu", torch.bfloat16, sharding_op="op", tensor_idx=3
+    )
 
-    assert seen == [True, True]
+    assert seen == [("op", 3), ("op", 3)]
 
 
 # ------------------------------------------------------------------------ installing the rewrite
@@ -361,7 +401,7 @@ def test_installing_twice_wraps_the_loader_once(monkeypatch):
     monkeypatch.setattr(onfly, "_read_compression", read)
 
     def hooks():
-        return mu.get_model_conversion_mapping, cml._materialize_copy
+        return mu.get_model_conversion_mapping, cml.spawn_materialize
 
     onfly.install_onfly_decompress(SimpleNamespace())
     installed = hooks()
@@ -586,7 +626,7 @@ def test_a_config_with_nothing_to_decompress_leaves_the_loader_alone(
         mu.get_model_conversion_mapping,
         WeightConverter.add_tensor,
         WeightConverter.materialize_tensors,
-        cml._materialize_copy,
+        cml.spawn_materialize,
     )
 
     with pytest.raises(error, match=match):
@@ -596,7 +636,7 @@ def test_a_config_with_nothing_to_decompress_leaves_the_loader_alone(
         mu.get_model_conversion_mapping,
         WeightConverter.add_tensor,
         WeightConverter.materialize_tensors,
-        cml._materialize_copy,
+        cml.spawn_materialize,
     ) == hooks
 
 
