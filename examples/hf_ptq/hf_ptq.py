@@ -297,10 +297,8 @@ def make_calib_dataloader(
         )
     world_size = distribution_plan(language_model).world_size
     if world_size > 1 and calib_dataloader is not None:
-        # Every distributed calibration path is data-parallel over the world, so each rank calibrates
-        # on its own per-rank shard (and the quantizer amax is synced across ranks): MoE expert-parallel
-        # a2a routes each token to its expert-owning rank; dense DP replicates the model per rank; FSDP2
-        # shards the params but still feeds each rank its own data.
+        # Every distributed plan is data-parallel over the world: each rank calibrates on its own
+        # shard, and the quantizers' amax is synced across the ranks.
         calib_dataloader = _shard_calib_dataloader(
             calib_dataloader, args.dist_state.rank, world_size
         )
@@ -589,22 +587,10 @@ def mono_quantize(
             # They must be consumed by the complete VLM even when only a nested component is the
             # quantization target; the full forward still exercises that component's quantizers.
             if distribution_plan(full_model).is_expert_parallel:
-                # An expert-parallel run has to calibrate through distributed_forward_loop, not the
-                # plain one: it calls _reinstall_a2a_forwards first, which re-plants the
-                # torch_a2a expert/router forward wrappers that quantizer insertion clobbers on
-                # transformers >= 5.16 (where the styles install a forward rather than a pre-hook).
-                # Without it the experts forward runs with process_group=None and raises
-                # "torch_a2a experts forward requires the EP `process_group`" at calibration step 0.
-                # On <= 5.13 the wrappers are pre-hooks that survive, so the reinstall is a no-op --
-                # which is why this is invisible on older transformers and fatal on newer. Other
-                # distributed runs (FSDP2, or a model replicated on every rank) keep the plain loop,
-                # which retries no batch that runs out of memory on a plan of several ranks: the
-                # error reaches distributed_run, which aborts the rank and with it the run. Image
-                # batches go through the VLM's own forward, as they do without expert parallelism:
-                # Nemotron-H Omni, for one, calibrates on images by default. Text batches go through
-                # the language model, but the loop re-plants over the model it is handed, so that is
-                # the full model: transformers keeps the expert-parallel plan on the model
-                # from_pretrained built, and a VLM's language model names no experts in its own.
+                # The distributed loop first re-plants the torch_a2a forwards that quantizer
+                # insertion clobbers on transformers >= 5.16. It is handed the full model, whose
+                # expert-parallel plan names the experts; text batches still run through the
+                # language model.
                 calibrate_loop = distributed_forward_loop(
                     full_model,
                     calib_dataloader,
@@ -634,10 +620,8 @@ def mono_quantize(
         else:
             language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
         if distribution_plan(full_model).is_expert_parallel:
-            # The calibration loop re-plants the a2a forwards quantizer insertion drops (on
-            # transformers >= 5.16; a no-op before), but a config without static activation scales
-            # calibrates without it, and algorithm None (the MX formats) never calls it; the
-            # preview and the export forward through them.
+            # A config that runs no calibration loop never re-planted the a2a forwards, which the
+            # preview and the export need.
             _reinstall_a2a_forwards(full_model, expert_parallel_mesh(full_model))
 
         # For VL models, update full_model to use the quantized language model
@@ -1608,10 +1592,7 @@ def main(args: argparse.Namespace):
     random.seed(RAND_SEED)
     np.random.seed(RAND_SEED)
 
-    # A distributed launch owns its process group for the whole run, and the run takes this
-    # process's rank, size and device from it. Entered here rather than inside load_model so
-    # cleanup still runs if loading raises -- otherwise the surviving ranks block on the first
-    # collective until the NCCL timeout.
+    # The run owns a distributed launch's process group, and ends it even if loading raises.
     with distributed_run(timeout=timedelta(hours=3), device=args.device) as dist_state:
         args.dist_state = dist_state
         _main_inner(args)
@@ -1624,9 +1605,8 @@ def _main_inner(args: argparse.Namespace):
         # path.
         args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(args.pyt_ckpt_path)
 
-        # launch a memory monitor to read the currently used GPU memory. It reads every GPU on the
-        # node, so a distributed run starts one per node, on its local rank 0, rather than one per
-        # rank.
+        # launch a memory monitor to read the currently used GPU memory, one per node: it reads all
+        # of the node's GPUs.
         if args.dist_state.world_size == 1 or local_rank() == 0:
             launch_memory_monitor()
 
