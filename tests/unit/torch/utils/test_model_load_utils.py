@@ -501,31 +501,35 @@ def test_an_ep_degree_that_does_not_divide_the_world_names_where_it_came_from(
         resolve_distribution_plan(str(tmp_path), **arguments)
 
 
+@pytest.mark.parametrize("value", ["world", "-2"], ids=["word", "below-1"])
 @pytest.mark.parametrize(
     ("world_size", "source"),
     [(4, "MODELOPT_EP_DEGREE"), (1, "ep_size")],
     ids=["knob", "argument-in-a-single-process"],
 )
 def test_an_ep_degree_that_is_not_a_number_names_where_it_came_from(
-    run_as, serve, monkeypatch, tmp_path, world_size, source
+    run_as, serve, monkeypatch, tmp_path, world_size, source, value
 ):
-    """A single process takes its own argument as given, but parses it as the decision does."""
+    """A single process takes its own argument as given, but parses it as the decision does, and a
+    degree below 1 is no degree either."""
     run_as(world_size)
     serve(LlamaConfig(**_TINY))
     arguments = {}
     if source == "ep_size":
-        arguments["ep_size"] = "world"
+        arguments["ep_size"] = value
     else:
-        monkeypatch.setenv(source, "world")
+        monkeypatch.setenv(source, value)
 
-    with pytest.raises(ValueError, match=f"{source}='world'"):
+    with pytest.raises(ValueError, match=f"{source}='{value}'"):
         resolve_distribution_plan(str(tmp_path), **arguments)
 
 
 @needs_qwen3_moe_ep_plan
-@pytest.mark.parametrize("value", ["0", "", "AUTO"], ids=["zero", "exported-empty", "capitals"])
+@pytest.mark.parametrize(
+    "value", ["0", "", "AUTO", " auto "], ids=["zero", "exported-empty", "capitals", "padded"]
+)
 def test_an_ep_degree_of_0_is_auto(run_as, serve, monkeypatch, tmp_path, value):
-    """And so is one exported empty, and auto in any case: the plan decides."""
+    """And so is one exported empty, and auto in any case or padded: the plan decides."""
     monkeypatch.setenv("MODELOPT_EP_DEGREE", value)
     run_as(4)
     serve(_qwen3_moe(num_experts=8))
@@ -1192,36 +1196,43 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
 
 
 @pytest.mark.parametrize(
-    ("distribution", "checkpoint", "whole_model_kwargs", "error", "match"),
+    ("distribution", "checkpoint", "options", "error", "match"),
     [
         (
             DistributionPlan(4, dense="fsdp"),
             "causal-lm",
-            False,
+            None,
             ValueError,
             "is for 4 ranks, but this run has 2",
         ),
         (
             DistributionPlan(2, dense="fsdp"),
             "quantized",
-            False,
+            None,
             NotImplementedError,
             "cannot dequantize",
         ),
         (
             DistributionPlan(2, dense="fsdp"),
             "vlm",
-            False,
+            None,
             NotImplementedError,
             "builds a causal LM, which this llava checkpoint is not",
         ),
-        ("fsdp2", "causal-lm", False, TypeError, "expected a DistributionPlan or None"),
+        ("fsdp2", "causal-lm", None, TypeError, "expected a DistributionPlan or None"),
         (
             DistributionPlan(2),
             "causal-lm",
-            True,
+            "hf_config",
             TypeError,
             "returned with a plan that shards the model",
+        ),
+        (
+            DistributionPlan(2),
+            "causal-lm",
+            {"cpu_offload": True},
+            TypeError,
+            r"\['cpu_offload'\] only apply to the FSDP2 load",
         ),
     ],
     ids=[
@@ -1230,6 +1241,7 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
         "vlm-checkpoint",
         "not-a-plan",
         "hf-config-on-a-whole-load",
+        "fsdp2-option-on-a-whole-load",
     ],
 )
 def test_a_load_refuses_what_it_cannot_load(
@@ -1241,22 +1253,24 @@ def test_a_load_refuses_what_it_cannot_load(
     tmp_path,
     distribution,
     checkpoint,
-    whole_model_kwargs,
+    options,
     error,
     match,
 ):
     """Before anything loads: a plan for another world; a quantized checkpoint, which FSDP2 would
     read as stored; a VLM, which FSDP2 would build through AutoModelForCausalLM, refused or as its
-    language model alone; anything but a plan; and the sharded loads' config, which from_pretrained
-    would take for a model argument and fail far from here."""
+    language model alone; anything but a plan; and the sharded loads' config, or an option only the
+    FSDP2 load takes, which from_pretrained would take for a model argument and fail far from here,
+    or drop."""
     run_as(2)
     config = serve(transformers.LlavaConfig() if checkpoint == "vlm" else LlamaConfig(**_TINY))
     if checkpoint == "quantized":
         config.quantization_config = {"quant_method": "fp8"}
-    whole = {"auto_class": auto_class, "hf_config": config} if whole_model_kwargs else {}
+    if options == "hf_config":
+        options = {"auto_class": auto_class, "hf_config": config}
 
     with pytest.raises(error, match=match):
-        load_pretrained(str(tmp_path), distribution=distribution, **whole)
+        load_pretrained(str(tmp_path), distribution=distribution, **(options or {}))
     assert loaders == {}
     assert auto_class.calls == []
 
