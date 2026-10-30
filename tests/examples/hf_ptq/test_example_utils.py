@@ -35,7 +35,15 @@ from transformers import AutoModelForCausalLM, LlamaConfig
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 
-@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+@pytest.mark.parametrize(
+    ("model_type", "architectures"),
+    [
+        ("qwen3_5", None),
+        ("qwen3_5_moe", None),
+        ("llava", ["LlavaForConditionalGeneration"]),
+        ("NemotronH_Nano_VL_V2", ["NemotronH_Nano_VL_V2"]),
+    ],
+)
 @pytest.mark.parametrize(
     ("calib_with_images", "packed_location", "error"),
     [
@@ -45,16 +53,29 @@ from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
         (False, "text", "pack-quantized"),
     ],
 )
-def test_fsdp2_qwen_vlm_requires_text_only_calibration(
-    model_type, calib_with_images, packed_location, error
+def test_fsdp2_vlm_requires_text_only_calibration(
+    model_type, architectures, calib_with_images, packed_location, error
 ):
     args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=calib_with_images)
-    config = SimpleNamespace(model_type=model_type, vision_config={}, text_config=SimpleNamespace())
+    config = SimpleNamespace(
+        model_type=model_type,
+        architectures=architectures,
+        vision_config={},
+        text_config=SimpleNamespace(),
+    )
     if packed_location is not None:
         target = config if packed_location == "root" else config.text_config
         target.quantization_config = {"quant_method": "compressed-tensors"}
     expected = pytest.raises(NotImplementedError, match=error) if error else nullcontext()
     with expected:
+        example_utils.validate_fsdp2_supported(args, config)
+
+
+def test_fsdp2_refuses_encoder_decoder():
+    args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=False)
+    config = SimpleNamespace(model_type="t5", architectures=["T5ForConditionalGeneration"])
+    config.is_encoder_decoder = True
+    with pytest.raises(NotImplementedError, match="encoder-decoder"):
         example_utils.validate_fsdp2_supported(args, config)
 
 

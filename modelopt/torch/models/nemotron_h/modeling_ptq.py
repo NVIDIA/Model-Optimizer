@@ -33,12 +33,14 @@ def get_nemotron_h_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
 
     # Custom remote-code checkpoint uses model.backbone.layers;
     # native transformers NemotronHModel uses model.model.layers.
-    for container_attr in ("backbone", "model"):
-        container = getattr(model, container_attr, None)
-        if container is not None and hasattr(container, "layers"):
-            layers = container.layers
-            if layers and hasattr(layers[0], "block_type"):
-                return layers
+    # A VLM (e.g. Nemotron Nano VL) nests the causal LM under ``language_model``.
+    for lm in (model, getattr(model, "language_model", None)):
+        for container_attr in ("backbone", "model"):
+            container = getattr(lm, container_attr, None)
+            if container is not None and hasattr(container, "layers"):
+                layers = container.layers
+                if layers and hasattr(layers[0], "block_type"):
+                    return layers
 
     return None
 

@@ -44,6 +44,7 @@ __all__ = [
     "broadcast_from",
     "distributed_run",
     "distribution_plan",
+    "fsdp2_root_unsharded",
     "fsdp2_wrap",
     "gather_bytes",
     "gather_state_dicts",
@@ -708,6 +709,25 @@ def abort(exit_code: int = 1) -> None:
     os._exit(exit_code)
 
 
+@contextmanager
+def fsdp2_root_unsharded(model: torch.nn.Module) -> Iterator[None]:
+    """Gather the FSDP2 root's own parameters while a submodule of ``model`` is called directly.
+
+    Calling a submodule skips the root's pre-forward, which makes ``model`` the FSDP2 root and
+    unshards the parameters it holds outside its own units (e.g. the embeddings). No-op for a model
+    that is not an FSDP2 root.
+    """
+    if not isinstance(model, FSDPModule):
+        yield
+        return
+    fully_shard.state(model)._lazy_init()  # else the first unit called would claim the root
+    model.unshard()
+    try:
+        yield
+    finally:
+        model.reshard()
+
+
 def is_fsdp2_model(model) -> bool:
     """Return True if any submodule of ``model`` has been wrapped with FSDP2 ``fully_shard``."""
     return any(isinstance(m, FSDPModule) for m in model.modules())
@@ -792,14 +812,18 @@ def _auxiliary_modules(model, decoder_layers) -> list[torch.nn.Module]:
             parts = name.split(".")
             for i in range(1, len(parts)):
                 ancestor_ids.add(id(model.get_submodule(".".join(parts[:i]))))
+    # Asked of every ancestor: a VLM wrapper may not expose its language model's lm_head.
     embedding_ids = set()
-    for getter in ("get_input_embeddings", "get_output_embeddings"):
-        try:
-            embedding = getattr(model, getter)()
-        except (AttributeError, NotImplementedError):
-            embedding = None
-        if embedding is not None:
-            embedding_ids.add(id(embedding))
+    for module in model.modules():
+        if id(module) not in ancestor_ids:
+            continue
+        for getter in ("get_input_embeddings", "get_output_embeddings"):
+            try:
+                embedding = getattr(module, getter)()
+            except (AttributeError, NotImplementedError):
+                embedding = None
+            if embedding is not None:
+                embedding_ids.add(id(embedding))
 
     aux = []
     for module in model.modules():

@@ -33,9 +33,10 @@ from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
-from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
+from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
 from modelopt.torch.utils.distributed import (
     barrier,
@@ -62,9 +63,6 @@ def _meta_model_factory(config):
     rejects most VLM configs, and for the rest may build a text-only class whose parameter names
     no longer match the checkpoint.
     """
-    from transformers import AutoModelForImageTextToText
-    from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
-
     auto_map = getattr(config, "auto_map", None) or {}
     if "AutoModelForCausalLM" in auto_map:
         return AutoModelForCausalLM
