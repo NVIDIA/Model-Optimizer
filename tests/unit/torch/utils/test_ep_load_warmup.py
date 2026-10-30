@@ -189,14 +189,18 @@ def test_an_error_while_sizing_falls_back_to_the_stock_sizing(monkeypatch):
 
 def test_a_sizing_hook_with_other_parameters_keeps_the_stock_sizing(monkeypatch):
     """A release whose hook takes other leading parameters keeps transformers' own sizing: the
-    replacement would not know how the hook is called."""
+    replacement would not know how the hook is called. It says so, since that sizing may reserve
+    most of the device."""
 
     def stock_sizing(model, device_map, quantizer=None):
         return {_GPU: 123}
 
     monkeypatch.setattr(modeling_utils, "get_total_byte_count", stock_sizing)
 
-    with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN):
+    with (
+        pytest.warns(UserWarning, match="using its full-model sizing"),
+        _ep_aware_caching_allocator_warmup(4, _A2A_PLAN),
+    ):
         assert modeling_utils.get_total_byte_count is stock_sizing
 
 

@@ -1588,7 +1588,8 @@ def _decide_distribution(
             "the export cannot write yet"
         )
         remedy = (
-            " Set MODELOPT_EP_DEGREE to the world size if it divides the expert count, or "
+            " Set MODELOPT_EP_DEGREE to the world size if it divides the expert count, "
+            "MODELOPT_EP_DEGREE=1 to FSDP2-shard the whole model without expert parallelism, or "
             "MODELOPT_FSDP_SIZE=1 if the dense part fits one GPU."
         )
     if dense == "auto":
@@ -1759,8 +1760,14 @@ def _ep_aware_caching_allocator_warmup(
     except (TypeError, ValueError):
         params = []
     # A release whose hook takes other leading parameters calls it in a way this replacement cannot
-    # know, so it keeps the stock sizing rather than fail the load at transformers' call site.
+    # know, so it keeps the stock sizing rather than fail the load at transformers' call site. Said,
+    # since that sizing may reserve most of the device and a later NCCL failure would have no cause.
     if params[:3] != ["model", "accelerator_device_map", "hf_quantizer"]:
+        warn_rank_0(
+            f"transformers {transformers.__version__}'s warmup sizing hook takes {params[:3]}, not "
+            "(model, accelerator_device_map, hf_quantizer); using its full-model sizing, which may "
+            "reserve most of the device."
+        )
         yield
         return
 
