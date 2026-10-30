@@ -889,7 +889,11 @@ def load_pretrained(
                 f"{sharded} only apply to the FSDP2 load, but {plan!r} gives every rank the whole "
                 "model; pass a plan with dense='fsdp' to shard it."
             )
-        # As do the options only the expert-parallel load takes.
+        # As do the options only the expert-parallel load takes, but for one passed as None, which
+        # asks nothing of either load: its default holds, rather than None read as False.
+        for name in _EP_ONLY_LOAD_OPTIONS:
+            if name in kwargs and kwargs[name] is None:
+                del kwargs[name]
         if route is None and (sharded := sorted(set(kwargs) & _EP_ONLY_LOAD_OPTIONS)):
             raise TypeError(
                 f"{sharded} only apply to the expert-parallel load, but {plan!r} gives every rank "
