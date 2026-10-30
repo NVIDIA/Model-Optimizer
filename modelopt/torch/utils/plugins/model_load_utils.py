@@ -687,17 +687,18 @@ def load_pretrained(
     asks nothing. With neither a plan nor ``MODELOPT_FSDP_SIZE``, rank 0's GPU memory
     decides whether the dense part is sharded, so a call that places the model (``device_map``,
     ``quantization_config``, a ``dtype``) loads only where it fits one GPU: pass ``distribution=``
-    or set ``MODELOPT_FSDP_SIZE=1`` to keep it whole. The model is weighed in the checkpoint's own
-    dtype (its config's, else bfloat16), not one the load asks for: hand a load that widens it,
-    ``dtype=torch.float32`` say, its plan. ``hf_config`` is the config
-    :func:`resolve_distribution_plan` returned with the plan handed in as ``distribution``: the load
-    builds from it as given, so without that plan it is refused. A ``config`` passed for the load, or
-    a path to one as ``from_pretrained`` takes, is the one the plan is decided from, and a sharded
-    load takes it as its ``hf_config``. A whole-model load refuses the options only the FSDP2 load
-    takes, but at the FSDP2 load's own defaults (``cpu_offload=False``, ``mp_policy=None``,
-    ``broadcast_chunk_size=8``) or ``cpu_offload=None``, which ask nothing of it, so a caller can
-    forward them whatever the plan; ``broadcast_chunk_size=None`` asks for all of a source's layers
-    at once.
+    or set ``MODELOPT_FSDP_SIZE=1`` to keep it whole. An option at ``from_pretrained``'s own
+    default, ``device_map=None`` included, places nothing and does not keep the load whole. The
+    model is weighed in the checkpoint's own dtype (its config's, else bfloat16), not one the load
+    asks for: hand a load that widens it, ``dtype=torch.float32`` say, its plan. ``hf_config`` is
+    the config :func:`resolve_distribution_plan` returned with the plan handed in as
+    ``distribution``: the load builds from it as given, so without that plan it is refused. A
+    ``config`` passed for the load, or a path to one as ``from_pretrained`` takes, is the one the
+    plan is decided from, and a sharded load takes it as its ``hf_config``. A whole-model load
+    refuses the options only the FSDP2 load takes, but at the FSDP2 load's own defaults
+    (``cpu_offload=False``, ``mp_policy=None``, ``broadcast_chunk_size=8``) or ``cpu_offload=None``,
+    which ask nothing of it, so a caller can forward them whatever the plan;
+    ``broadcast_chunk_size=None`` asks for all of a source's layers at once.
 
     Whatever the placement:
 
