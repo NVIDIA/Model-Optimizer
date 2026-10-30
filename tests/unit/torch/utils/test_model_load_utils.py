@@ -576,20 +576,28 @@ def test_an_ep_degree_that_is_not_a_number_names_where_it_came_from(
     [
         pytest.param(_qwen3_moe(num_experts=3), None, id="auto_finds_no_degree"),
         pytest.param(_qwen3_moe(num_experts=8), "1", id="explicit_degree_one"),
+        pytest.param(_qwen3_moe(num_experts=8), 1, id="explicit_degree_one_as_an_argument"),
     ],
 )
 def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
     run_as, serve, monkeypatch, tmp_path, config, ep_degree
 ):
     """No EP degree above 1 divides 3 experts over 2 ranks, and an explicit 1 asks for none. With
-    nothing sharded either, every rank would hold the whole MoE: that must fail, not run."""
-    if ep_degree is not None:
+    nothing sharded either, every rank would hold the whole MoE: that must fail, not run. The ways
+    out are named as the caller set the plan, so arguments, which override the knobs, are named."""
+    if isinstance(ep_degree, str):
         monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
+    arguments = {"ep_size": ep_degree, "dense": "auto"} if isinstance(ep_degree, int) else {}
     run_as(2)
     serve(config)
 
-    with pytest.raises(RuntimeError, match="can be expert-parallel, but the plan resolved"):
-        resolve_distribution_plan(str(tmp_path))
+    with pytest.raises(
+        RuntimeError, match="can be expert-parallel, but the plan resolved"
+    ) as refused:
+        resolve_distribution_plan(str(tmp_path), **arguments)
+    if arguments:  # a knob the arguments override would lead straight back here
+        assert "ep_size=1 with dense='replicate'" in str(refused.value), refused.value
+        assert "MODELOPT_" not in str(refused.value), refused.value
 
 
 @needs_qwen3_moe_ep_plan

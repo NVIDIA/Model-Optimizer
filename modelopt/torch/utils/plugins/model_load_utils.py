@@ -1494,6 +1494,7 @@ def _decide_distribution(
     # What the caller set the EP degree and the dense layout with, for a refusal to name them.
     knob = "MODELOPT_EP_DEGREE" if ep_size is None else "ep_size"
     replicate = "MODELOPT_FSDP_SIZE=1" if dense is None else "dense='replicate'"
+    fsdp = "MODELOPT_FSDP_SIZE=world" if dense is None else "dense='fsdp'"
     if world_size == 1:
         # Nothing to shard over, so nothing about the model matters, nor do the knobs: a shell still
         # exporting a multi-GPU run's would otherwise reshape a single process's load. The caller's
@@ -1609,15 +1610,14 @@ def _decide_distribution(
             )
         else:
             shard = (
-                f"Shard its experts (MODELOPT_EP_DEGREE above 1, dividing both its {num_experts} "
-                "experts and the world size), shard"
+                f"Shard its experts ({knob} above 1, dividing both its {num_experts} experts and "
+                "the world size), shard"
             )
         raise RuntimeError(
             f"{hf_config.model_type} can be expert-parallel, but the plan resolved to ep_size=1 at "
             f"world_size={world_size}, so every rank would hold the whole MoE. {shard} the whole "
-            "model with FSDP2 (MODELOPT_FSDP_SIZE=world, for an unquantized causal LM), load it in "
-            "a single process, or replicate it on every rank outright: MODELOPT_EP_DEGREE=1 with "
-            "MODELOPT_FSDP_SIZE=1, or "
+            f"model with FSDP2 ({fsdp}, for an unquantized causal LM), load it in a single "
+            f"process, or replicate it on every rank outright: {knob}=1 with {replicate}, or "
             f"load_pretrained(..., distribution=DistributionPlan({world_size}, 1, 'replicate'))."
         )
     return DistributionPlan(world_size, ep_size, dense)
