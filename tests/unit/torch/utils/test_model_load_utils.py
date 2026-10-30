@@ -1633,6 +1633,13 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
             TypeError,
             r"\['cpu_offload'\] only apply",
         ),
+        (
+            DistributionPlan(2),
+            "causal-lm",
+            {"freeze": False},
+            TypeError,
+            r"\['freeze'\] only apply to the expert-parallel load",
+        ),
     ],
     ids=[
         "another-world",
@@ -1642,6 +1649,7 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
         "not-a-plan",
         "hf-config-on-a-whole-load",
         "fsdp2-option-on-a-whole-load",
+        "ep-option-on-a-whole-load",
     ],
 )
 def test_a_load_refuses_what_it_cannot_load(
@@ -1661,8 +1669,8 @@ def test_a_load_refuses_what_it_cannot_load(
     read as stored, even when only a VLM's language model is quantized and its remote code builds it
     as a causal LM; a VLM but a text-only one it supports, which FSDP2 would build through
     AutoModelForCausalLM, refused or as its language model alone; anything but a plan; and the
-    sharded loads' config, or an option only the FSDP2 load takes, which from_pretrained would take
-    for a model argument and fail far from here, or drop."""
+    sharded loads' config, or an option only one sharded load takes, which from_pretrained would
+    take for a model argument and fail far from here, or drop."""
     run_as(2)
     config = serve(transformers.LlavaConfig() if checkpoint == "vlm" else LlamaConfig(**_TINY))
     if checkpoint == "quantized":
