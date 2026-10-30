@@ -804,17 +804,29 @@ def _dtensor_dim0_offset(dt) -> int:
         return 0
 
 
-def _split_local_fused_module(prefix: str, sharded_sd: dict) -> dict:
+def _split_local_fused_module(
+    prefix: str, sharded_sd: dict, ep_rank: int = 0, total_experts: int = 0
+) -> dict:
     """Split this rank's local shard of a fused-experts module into per-expert keys.
 
     Split THIS rank's *local* shard of one fused-experts module into per-expert keys with GLOBAL
     expert indices (plain, local tensors -- no all-gather).
 
-    FSDP2 shards the fused 3-D expert weight on dim 0 (the expert axis), so every expert this rank
+    FSDP2/EP shard the fused 3-D expert weight on dim 0 (the expert axis), so every expert this rank
     owns is whole and local. We reuse :func:`split_fused_experts_state_dict` on the ``to_local()``
     shard (which numbers experts ``0..E_local-1``) and then shift each expert index by the rank's
     global dim-0 offset, so the resulting per-expert keys match the single-process export and stay
     on this rank for a direct distributed write (no consolidation).
+
+    The fused expert tensor can arrive in two EP layouts, distinguished by its dim-0 size vs
+    ``total_experts`` (the config expert count):
+      * **per-EP-group** (size < total): transformers pre-sliced the param to this rank's EP group
+        (FSDP x EP -> a dp-sharded DTensor of the group; or a plain ep-shard). ``_dtensor_dim0_offset``
+        only gives the WITHIN-group offset, so we add the EP block base ``ep_rank * group_size``.
+      * **all-experts** (size == total): an EP DTensor sharded across the ep mesh spanning all experts
+        (classic DP x EP). ``_dtensor_dim0_offset`` already returns the TRUE global offset -> no base.
+    ``total_experts == 0``, a count the caller could not read off the model's config, takes the
+    tensor for a per-EP-group slice.
     """
     gated = f"{prefix}.gate_up_proj" in sharded_sd
     first = "gate_up_proj" if gated else "up_proj"
@@ -822,6 +834,13 @@ def _split_local_fused_module(prefix: str, sharded_sd: dict) -> dict:
     # dp_offset: this rank's dim-0 start WITHIN its DTensor; n_local: experts it owns.
     dp_offset = _dtensor_dim0_offset(fw) if isinstance(fw, DTensor) else 0
     n_local = fw.to_local().shape[0] if isinstance(fw, DTensor) else fw.shape[0]
+    group_size = int(fw.shape[0])
+    # Add the EP block base only when the tensor is a per-EP-group slice (size < total_experts) or
+    # total is unknown (0). When it spans all experts, dp_offset is already global.
+    add_ep_base = (
+        bool(ep_rank) and group_size > 0 and (total_experts == 0 or group_size < total_experts)
+    )
+    offset = dp_offset + (ep_rank * group_size if add_ep_base else 0)
 
     def _loc(key):
         v = sharded_sd.get(key)
@@ -864,12 +883,12 @@ def _split_local_fused_module(prefix: str, sharded_sd: dict) -> dict:
     split_local = split_fused_experts_state_dict(
         local_fused
     )  # keys {prefix}.{i}.* (i in 0..E_local-1)
-    if dp_offset == 0:
+    if offset == 0:
         return split_local
 
     plen = len(prefix) + 1
     out: dict = {}
     for key, val in split_local.items():
         i_str, tail = key[plen:].split(".", 1)
-        out[f"{prefix}.{int(i_str) + dp_offset}.{tail}"] = val
+        out[f"{prefix}.{int(i_str) + offset}.{tail}"] = val
     return out
