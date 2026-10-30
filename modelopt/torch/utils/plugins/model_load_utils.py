@@ -499,9 +499,9 @@ def _read_config(path, auto_class, trust_remote_code: bool = False, **hub_option
 def _refuse_sharded_load_options(route, auto_class, kwargs) -> None:
     """Refuse the arguments the sharded load ``route`` cannot honor: the arguments alone decide."""
     if auto_class not in (None, AutoModelForCausalLM):
+        name = getattr(auto_class, "__name__", repr(auto_class))
         raise NotImplementedError(
-            f"The {route} load builds its model class itself; auto_class={auto_class.__name__} "
-            "does not apply to it."
+            f"The {route} load builds its model class itself; auto_class={name} does not apply to it."
         )
     # torch_dtype is from_pretrained's older name for dtype, and None means "auto" to it.
     for name in ("dtype", "torch_dtype"):
@@ -564,15 +564,21 @@ def _sharded_load_kwargs(route, ckpt_path, auto_class, model_type, kwargs, hub_o
             f"The {route} load shards through a process group, even on one rank, which a process "
             "started without a launcher cannot set up; launch it with `torchrun --nproc_per_node=1`."
         )
-    if not torch.cuda.is_available():
+    if not _has_own_gpu():
         # Refused here, with the other ranks, rather than inside the load, where they would wait
         # for this rank in its broadcasts.
         raise RuntimeError(
-            f"The {route} load shards onto each rank's GPU, and this rank has none. To load it "
+            f"The {route} load shards onto each rank's own GPU, and this rank has none: it sees "
+            f"{torch.cuda.device_count()} GPU(s) as local rank {dist.local_rank()}. To load it "
             "whole on every rank, set MODELOPT_FSDP_SIZE=1 or pass "
             f"distribution=DistributionPlan({dist.size()}, dense='replicate')."
         )
     return {"trust_remote_code": trust_remote_code, "hf_config": hf_config, **kwargs}
+
+
+def _has_own_gpu() -> bool:
+    """Whether this rank has a GPU of its own: the one its local rank numbers, as setup() binds."""
+    return torch.cuda.is_available() and dist.local_rank() < torch.cuda.device_count()
 
 
 def _load_sharded(ckpt_path, load_kwargs) -> nn.Module:
@@ -611,7 +617,7 @@ def load_pretrained(
       stored, so it refuses a quantized checkpoint.
     * otherwise ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
       ``AutoModelForCausalLM``), placed as ``kwargs`` say. Every rank of a distributed run gets the
-      whole model, ``device_map`` defaulting to the rank's GPU when there is one.
+      whole model, ``device_map`` defaulting to the rank's own GPU when it has one.
 
     A plan with ``ep_size > 1`` raises: no load here shards the routed experts. On a distributed run
     every rank loads the plan rank 0 was handed, and a refusal on any rank, of its own arguments, of a
@@ -816,7 +822,8 @@ def load_pretrained(
                     ckpt_path, trust_remote_code=trust_remote_code, **hub_options
                 )
                 kwargs["hf_config"] = hf_config
-            model_type = getattr(hf_config or config, "model_type", None) or (
+            chosen = hf_config if hf_config is not None else config
+            model_type = getattr(chosen, "model_type", None) or (
                 _read_config(ckpt_path, auto_class, trust_remote_code, **hub_options).model_type
             )
         load_kwargs = (
@@ -829,9 +836,10 @@ def load_pretrained(
         # A sharded load finds the unplaced keys while it places the weights.
         keys = model._modelopt_unplaced_source_keys
     else:
-        if plan.world_size > 1 and torch.cuda.is_available():
+        if plan.world_size > 1 and _has_own_gpu():
             # Each rank takes the whole model onto its own GPU. Left to "auto", every rank's
-            # accelerate could pick the same idle GPU.
+            # accelerate could pick the same idle GPU; a rank with none loads as from_pretrained
+            # places it.
             kwargs.setdefault("device_map", {"": f"cuda:{dist.local_rank()}"})
         auto_class = auto_class or AutoModelForCausalLM
         # It runs no collective, so a rank failing in it alone would leave the others in the next.
@@ -1362,7 +1370,9 @@ def _ep_degree(ep_size) -> int | str:
         return "auto"
     try:
         degree = int(value)
-    except ValueError:
+    except (ValueError, TypeError):  # TypeError: an argument that is no number at all, as [2]
+        degree = 0
+    if isinstance(value, float) and value != degree:  # int() truncates a fraction
         degree = 0
     if degree < 1:
         name = "MODELOPT_EP_DEGREE" if ep_size is None else "ep_size"
@@ -1399,8 +1409,9 @@ def _decide_distribution(
     if auto_class not in (None, AutoModelForCausalLM):
         # Something asks to shard, and every sharded load refuses this class: refuse it here, rather
         # than build the model of the decision's own pick of class, which may not build at all.
+        name = getattr(auto_class, "__name__", repr(auto_class))
         raise NotImplementedError(
-            f"A sharded load builds its model class itself, so auto_class={auto_class.__name__} "
+            f"A sharded load builds its model class itself, so auto_class={name} "
             f"does not apply to it, and ep_size={ep_size!r}, dense={dense!r} ask to shard. To give "
             "every rank the whole model, plan ep_size=1 and dense='replicate' "
             "(MODELOPT_EP_DEGREE=1, MODELOPT_FSDP_SIZE=1)."
