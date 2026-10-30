@@ -19,6 +19,7 @@ import copy
 import logging
 import os
 import re
+import warnings
 from collections import defaultdict
 from contextlib import contextmanager
 from itertools import chain
@@ -860,6 +861,14 @@ def load_pretrained(
             # accelerate could pick the same idle GPU; a rank with none loads as from_pretrained
             # places it.
             kwargs.setdefault("device_map", {"": f"cuda:{dist.local_rank()}"})
+        elif plan.world_size > 1 and "device_map" not in kwargs:
+            # This rank says so itself: rank 0 may have a GPU of its own, and nothing to say.
+            warnings.warn(
+                f"Rank {dist.rank()} has no GPU of its own: it sees {torch.cuda.device_count()} "
+                f"GPU(s) as local rank {dist.local_rank()}, so it loads the whole model where "
+                "from_pretrained places it, on the CPU, while ranks with one load it onto theirs.",
+                stacklevel=2,
+            )
         auto_class = auto_class or AutoModelForCausalLM
         # It runs no collective, so a rank failing in it alone would leave the others in the next.
         with (

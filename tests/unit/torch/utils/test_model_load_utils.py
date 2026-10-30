@@ -963,6 +963,22 @@ def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
     assert loaders == {}
 
 
+def test_a_rank_without_a_gpu_of_its_own_says_so(
+    run_as, serve, loaders, auto_class, monkeypatch, tmp_path
+):
+    """On a host with fewer GPUs than ranks, a rank of a replicated load left without one loads the
+    model where from_pretrained places it while its peers load onto theirs: it warns itself, as rank
+    0 may have a GPU of its own and nothing to say."""
+    run_as(4, rank=1)
+    serve(LlamaConfig(**_TINY))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+
+    with pytest.warns(UserWarning, match="local rank 1"):
+        load_pretrained(str(tmp_path), auto_class)
+    assert auto_class.calls == [{}]
+
+
 @pytest.mark.parametrize(
     "defaults",
     [
