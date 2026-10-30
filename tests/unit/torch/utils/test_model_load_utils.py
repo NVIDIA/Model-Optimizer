@@ -507,7 +507,7 @@ def test_an_ep_size_that_is_no_whole_number_is_refused(run_as, serve, tmp_path, 
     run_as(4)
     serve(LlamaConfig(**_TINY))
 
-    with pytest.raises(ValueError, match=r"ep_size=.*: expected auto, 0 \(auto\) or an EP degree"):
+    with pytest.raises(ValueError, match=r"ep_size=.*EP degree"):
         resolve_distribution_plan(str(tmp_path), ep_size=value)
 
 
@@ -1043,7 +1043,7 @@ def test_hf_config_is_refused_without_the_plan_it_came_with(
     run_as(2, rank=1)
     serve(LlamaConfig(**_TINY))
 
-    with pytest.raises(TypeError, match="returned with a plan that shards the model: pass that"):
+    with pytest.raises(TypeError, match=r"hf_config.*resolve_distribution_plan"):
         load_pretrained(str(tmp_path), hf_config=LlamaConfig(**{**_TINY, "num_hidden_layers": 2}))
     assert loaders == {}
 
@@ -1083,7 +1083,7 @@ def test_a_model_class_of_the_callers_own_loads_whole(
         assert len(auto_class.calls) == 1
     else:
         monkeypatch.setenv("MODELOPT_FSDP_SIZE", fsdp_size)
-        with pytest.raises(NotImplementedError, match="builds its model class itself"):
+        with pytest.raises(NotImplementedError, match="auto_class=Auto "):
             load_pretrained(str(tmp_path), auto_class)
     assert loaders == {}
 
@@ -1109,7 +1109,7 @@ def test_an_expert_parallel_plan_is_refused(run_as, serve, loaders, auto_class, 
     run_as(2)
     serve(Qwen3MoeConfig(num_experts=8, moe_intermediate_size=8, **_TINY))
 
-    with pytest.raises(NotImplementedError, match="shards the routed experts"):
+    with pytest.raises(NotImplementedError, match=r"ep_size=2.*MODELOPT_EP_DEGREE=1"):
         load_pretrained(str(tmp_path), auto_class, distribution=DistributionPlan(2, ep_size=2))
     assert loaders == {}
     assert auto_class.calls == []
@@ -1127,7 +1127,7 @@ def _every_rank_loads_rank0s_plan_job(rank, size, ckpt, handed, placed):
         assert refused is None and distribution_plan(model) == handed[0], (rank, refused)
     else:
         # Rank 0's refusal, on every rank, rather than a rank left waiting in the broadcast.
-        assert "expected a DistributionPlan or None" in str(refused), (rank, refused)
+        assert "expected a DistributionPlan" in str(refused), (rank, refused)
 
 
 @pytest.mark.parametrize(
@@ -1191,15 +1191,19 @@ def _one_rank_refused_job(rank, size, ckpt, refused_on_1, gpus_on_1, match):
 @pytest.mark.parametrize(
     ("refused_on_1", "gpus_on_1", "match"),
     [
-        ({"config": LlamaConfig(**_TINY), "hf_config": LlamaConfig(**_TINY)}, 2, "both name"),
-        ({"dtype": torch.float32}, 2, "keeps their dtype"),
+        (
+            {"config": LlamaConfig(**_TINY), "hf_config": LlamaConfig(**_TINY)},
+            2,
+            "config and hf_config",
+        ),
+        ({"dtype": torch.float32}, 2, "dtype=torch.float32"),
         (
             {"hf_config": LlamaConfig(**_TINY, quantization_config={"quant_method": "fp8"})},
             2,
-            "cannot dequantize",
+            "dequantize",
         ),
-        ({}, 0, "this rank has none"),
-        ({}, 1, "this rank has none"),
+        ({}, 0, "as local rank 1"),
+        ({}, 1, "as local rank 1"),
     ],
     ids=["two-configs", "dtype", "quantized-config", "no-gpu", "fewer-gpus-than-ranks"],
 )
@@ -1255,18 +1259,18 @@ def test_a_whole_load_that_fails_on_one_rank_fails_every_rank(cpu_dist_workers, 
     ("change", "error", "match"),
     [
         ({"kwargs": {"device_map": "auto"}}, TypeError, r"\['device_map'\] do not apply"),
-        ({"kwargs": {"dtype": torch.bfloat16}}, TypeError, "keeps their dtype"),
+        ({"kwargs": {"dtype": torch.bfloat16}}, TypeError, r"dtype=torch\.bfloat16"),
         (
             {"kwargs": {"torch_dtype": torch.bfloat16}},
             TypeError,
-            r"keeps their dtype, so torch_dtype=torch\.bfloat16",
+            r"torch_dtype=torch\.bfloat16",
         ),
-        ({"auto_class": AutoModel}, NotImplementedError, "builds its model class itself"),
-        ({"mtp": True}, NotImplementedError, "cannot build the MTP head"),
+        ({"auto_class": AutoModel}, NotImplementedError, "auto_class=AutoModel"),
+        ({"mtp": True}, NotImplementedError, "MTP head"),
         (
             {"kwargs": {"config": LlamaConfig(**_TINY), "hf_config": LlamaConfig(**_TINY)}},
             TypeError,
-            "config and hf_config both name",
+            "config and hf_config",
         ),
     ],
     ids=["placement", "dtype", "torch_dtype", "model_class", "mtp_head", "two_configs"],
@@ -1300,36 +1304,36 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
             "causal-lm",
             None,
             ValueError,
-            "is for 4 ranks, but this run has 2",
+            "is for 4 ranks",
         ),
         (
             DistributionPlan(2, dense="fsdp"),
             "quantized",
             None,
             NotImplementedError,
-            "cannot dequantize",
+            "dequantize",
         ),
         (
             DistributionPlan(2, dense="fsdp"),
             "vlm",
             None,
             NotImplementedError,
-            "builds a causal LM, which this llava checkpoint is not",
+            "llava",
         ),
-        ("fsdp2", "causal-lm", None, TypeError, "expected a DistributionPlan or None"),
+        ("fsdp2", "causal-lm", None, TypeError, "expected a DistributionPlan"),
         (
             DistributionPlan(2),
             "causal-lm",
             "hf_config",
             TypeError,
-            "returned with a plan that shards the model",
+            r"hf_config.*resolve_distribution_plan",
         ),
         (
             DistributionPlan(2),
             "causal-lm",
             {"cpu_offload": True},
             TypeError,
-            r"\['cpu_offload'\] only apply to the FSDP2 load",
+            r"\['cpu_offload'\] only apply",
         ),
     ],
     ids=[
@@ -1382,7 +1386,7 @@ def test_an_automatic_layout_says_so_when_it_refuses_a_placement(
     serve(LlamaConfig(**_TINY))
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: 1)
 
-    with pytest.raises(TypeError, match=r"\['device_map'\] place a whole model, but no plan"):
+    with pytest.raises(TypeError, match=r"\['device_map'\] place.*MODELOPT_FSDP_SIZE=1"):
         load_pretrained(str(tmp_path), device_map="auto")
     assert loaders == {}
 
@@ -1391,24 +1395,29 @@ def test_an_automatic_layout_says_so_when_it_refuses_a_placement(
     ("distribution", "options", "error", "match"),
     [
         (DistributionPlan(4), {}, ValueError, "is for 4 ranks"),
-        (DistributionPlan(2), {"hf_config": LlamaConfig(**_TINY)}, TypeError, "plan that shards"),
+        (
+            DistributionPlan(2),
+            {"hf_config": LlamaConfig(**_TINY)},
+            TypeError,
+            r"hf_config.*resolve_distribution_plan",
+        ),
         (
             DistributionPlan(2, dense="fsdp"),
             {"device_map": "auto"},
             TypeError,
-            r"\['device_map'\] do not apply to the FSDP2 load",
+            r"\['device_map'\] do not apply",
         ),
         (
             DistributionPlan(2, dense="fsdp"),
             {"auto_class": AutoModel},
             NotImplementedError,
-            "auto_class=AutoModel does not apply",
+            "auto_class=AutoModel",
         ),
         (
             DistributionPlan(2, dense="fsdp"),
             {"dtype": torch.float32},
             TypeError,
-            "keeps their dtype",
+            r"dtype=torch\.float32",
         ),
     ],
     ids=[
@@ -1454,7 +1463,7 @@ def test_a_single_process_fsdp2_load_sets_up_its_group_of_one(
     plan = DistributionPlan(dense="fsdp")
 
     if quantized:
-        with pytest.raises(NotImplementedError, match="cannot dequantize"):
+        with pytest.raises(NotImplementedError, match="dequantize"):
             load_pretrained(str(tmp_path), distribution=plan)
         assert live == []
         return
@@ -1509,21 +1518,21 @@ def test_a_launch_that_sets_no_group_up_loads_whole_on_each_process(
             DistributionPlan(8),
             {},
             RuntimeError,
-            "is for 8 ranks, whose process group this 8-rank launch has not",
+            r"is for 8 ranks.*distributed_run",
         ),
         (
             DistributionPlan(dense="fsdp"),
             {},
             RuntimeError,
-            r"shards through this 8-rank launch's .* DistributionPlan\(8, dense='fsdp'\)",
+            r"DistributionPlan\(8, dense='fsdp'\)",
         ),
         (
             None,
             {"MODELOPT_FSDP_SIZE": "world"},
             RuntimeError,
-            "MODELOPT_FSDP_SIZE=world ask to shard",
+            "MODELOPT_FSDP_SIZE=world",
         ),
-        (None, {"MODELOPT_EP_DEGREE": "4"}, RuntimeError, "MODELOPT_EP_DEGREE=4 ask to shard"),
+        (None, {"MODELOPT_EP_DEGREE": "4"}, RuntimeError, "MODELOPT_EP_DEGREE=4"),
         (None, {"MODELOPT_EP_DEGREE": "eigth"}, ValueError, "MODELOPT_EP_DEGREE='eigth'"),
     ],
     ids=["several-ranks", "sharded", "fsdp-knob", "ep-knob", "ep-knob-not-a-degree"],

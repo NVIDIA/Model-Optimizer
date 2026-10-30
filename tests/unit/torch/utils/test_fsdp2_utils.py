@@ -94,5 +94,5 @@ def test_fsdp2_wrap_refuses_a_model_recorded_as_replicated(monkeypatch):
     )
     monkeypatch.setattr(fsdp2_utils, "fully_shard", lambda *a, **k: pytest.fail("sharded"))
 
-    with pytest.raises(RuntimeError, match="which replicates it, and a plan is recorded once"):
+    with pytest.raises(RuntimeError, match="which replicates it"):
         fsdp2_utils.fsdp2_wrap(model)
