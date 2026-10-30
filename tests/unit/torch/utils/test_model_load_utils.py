@@ -670,7 +670,9 @@ def test_what_a_rank_holds_with_the_dense_part_replicated_must_fit(
 ):
     """At EP 4 a rank holds the rest of the model whole and a quarter of the routed experts, so the
     dense part is sharded when that does not fit one GPU, however small the rest; with no EP the
-    whole MoE must fit, and here it does not."""
+    whole MoE must fit, and here it does not. The expert-parallel load replicates the dense part,
+    so an EP degree left to the decision gives way to FSDP2 for the whole model, where one asked
+    for stands, for the load to refuse."""
     run_as(4)
     config = serve(_qwen3_moe(num_experts=8))
     model = _meta(config)
@@ -678,7 +680,9 @@ def test_what_a_rank_holds_with_the_dense_part_replicated_must_fit(
     # A GPU 60% of which holds the rest of the model and that share of the experts.
     gpu_memory(int((_bytes(model) - experts + experts_fitting * experts) / 0.6))
 
-    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4, dense)
+    decided = DistributionPlan(4, 4) if dense == "replicate" else DistributionPlan(4, dense="fsdp")
+    assert resolve_distribution_plan(str(tmp_path))[0] == decided
+    assert resolve_distribution_plan(str(tmp_path), ep_size=4)[0] == DistributionPlan(4, 4, dense)
     assert resolve_distribution_plan(str(tmp_path), ep_size=1)[0] == DistributionPlan(
         4, dense="fsdp"
     )
