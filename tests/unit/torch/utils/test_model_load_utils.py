@@ -536,10 +536,12 @@ def test_an_ep_degree_that_is_not_a_number_names_where_it_came_from(
 
 @needs_qwen3_moe_ep_plan
 @pytest.mark.parametrize(
-    "value", ["0", "", "AUTO", " auto "], ids=["zero", "exported-empty", "capitals", "padded"]
+    "value",
+    ["0", "", " ", "AUTO", " auto "],
+    ids=["zero", "exported-empty", "exported-blank", "capitals", "padded"],
 )
 def test_an_ep_degree_of_0_is_auto(run_as, serve, monkeypatch, tmp_path, value):
-    """And so is one exported empty, and auto in any case or padded: the plan decides."""
+    """And so is one exported empty or blank, and auto in any case or padded: the plan decides."""
     monkeypatch.setenv("MODELOPT_EP_DEGREE", value)
     run_as(4)
     serve(_qwen3_moe(num_experts=8))
@@ -619,16 +621,17 @@ def test_arguments_override_the_env_knobs(run_as, serve, monkeypatch, tmp_path):
         ("4", "fsdp"),
         ("WORLD", "fsdp"),
         ("", "fsdp"),
+        (" ", "fsdp"),
         (" world ", "fsdp"),
         ("2", None),
     ],
-    ids=["1", "4", "WORLD", "exported-empty", "padded", "part-of-the-world"],
+    ids=["1", "4", "WORLD", "exported-empty", "exported-blank", "padded", "part-of-the-world"],
 )
 def test_the_dense_knob_replicates_or_shards_over_the_whole_world(
     run_as, serve, gpu_memory, monkeypatch, tmp_path, value, dense
 ):
-    """Exported empty, the knob is auto, which shards a model too big for one GPU. Sharding over
-    part of the world is refused: no layout does that."""
+    """Exported empty or blank, the knob is auto, which shards a model too big for one GPU. Sharding
+    over part of the world is refused: no layout does that."""
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", value)
     run_as(4)
     serve(LlamaConfig(**_TINY))
