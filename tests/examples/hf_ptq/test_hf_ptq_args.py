@@ -1051,6 +1051,32 @@ def test_post_quantize_export_survives_a_failed_sanity_generate(monkeypatch):
     assert len(export_calls) == 1
 
 
+def test_post_quantize_stops_the_run_when_a_sharded_models_preview_fails(monkeypatch):
+    """A sharded model's ranks decode the preview in lockstep: a rank that skipped its failure would
+    go on to the export's collectives while the others still wait in generate's."""
+    hf_ptq = _import_hf_ptq(monkeypatch)
+
+    class _FailingModel(torch.nn.Module):
+        def generate(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    full_model = _FailingModel()
+    set_distribution_plan(full_model, DistributionPlan(2, dense="fsdp"))
+    export_calls = []
+    monkeypatch.setattr(hf_ptq, "export_quantized", lambda *a, **k: export_calls.append((a, k)))
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    ids = torch.zeros(1, 4, dtype=torch.long)
+    args = SimpleNamespace(specdec_offline_dataset=None, verbose=False)
+
+    with pytest.raises(RuntimeError, match="--skip_generate") as stopped:
+        hf_ptq.post_quantize(
+            args, full_model, full_model, "llama", None, None, ids, None, ids, False, None, None
+        )
+
+    assert str(stopped.value.__cause__) == "boom"
+    assert export_calls == []
+
+
 @pytest.mark.usefixtures("clean_env")
 def test_main_makes_a_hub_checkpoint_local_before_loading(monkeypatch, tmp_path):
     """--pyt_ckpt_path keeps the Hub ID; the model loads from the local copy resolved first."""
