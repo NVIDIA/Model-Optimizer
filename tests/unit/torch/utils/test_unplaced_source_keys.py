@@ -412,7 +412,7 @@ def test_compressed_experts_decompressed_at_load_are_placed(tmp_path, monkeypatc
     if Version(transformers_version) < Version("5.8"):
         pytest.skip("the on-the-fly decompression needs transformers >= 5.8")
     # The decompressor's hooks are process-wide: undone after the test.
-    for owner, name in ((cml, "_materialize_copy"), (mu, "get_model_conversion_mapping")):
+    for owner, name in ((cml, "spawn_materialize"), (mu, "get_model_conversion_mapping")):
         monkeypatch.setattr(owner, name, getattr(owner, name))
     hidden, inter, experts = 64, 32, 2
     config = AutoConfig.for_model(
