@@ -56,6 +56,16 @@ def test_empty_corpus_raises():
         StreamingDataset([], tokenizer=MagicMock(), config=StreamingConfig())
 
 
+def test_an_indexable_corpus_is_kept_and_an_iterator_materialized():
+    """An Arrow-backed corpus stays memory-mapped instead of being copied into every rank."""
+    datasets = pytest.importorskip("datasets")
+    corpus = datasets.Dataset.from_list(_entries(5))
+    ds = StreamingDataset(corpus, tokenizer=MagicMock(), config=StreamingConfig())
+    assert ds.entries is corpus
+    ds = StreamingDataset(iter(_entries(5)), tokenizer=MagicMock(), config=StreamingConfig())
+    assert ds.entries == _entries(5)
+
+
 def test_len_matches_corpus():
     ds = StreamingDataset(_entries(37), tokenizer=MagicMock(), config=StreamingConfig())
     assert len(ds) == 37
