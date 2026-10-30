@@ -497,11 +497,7 @@ def _refused_together(label: str, alone: bool):
 
 
 def _read_config(path, auto_class, trust_remote_code: bool = False, **hub_options):
-    """``path``'s config, read as ``auto_class.from_pretrained`` reads it.
-
-    A model class reads it through its own config class, an auto class, which has none, through
-    ``AutoConfig``.
-    """
+    """``path``'s config as ``auto_class.from_pretrained`` reads it: config_class, or AutoConfig."""
     if (reader := getattr(auto_class, "config_class", None)) is not None:
         return reader.from_pretrained(path, **hub_options)
     return AutoConfig.from_pretrained(path, trust_remote_code=trust_remote_code, **hub_options)
@@ -784,8 +780,7 @@ def load_pretrained(
         if _route(plan) is not None:
             kwargs.setdefault("hf_config", hf_config)
     elif plan is None:
-        # A process alone, without a group or in a group of one, holds the whole model, as the
-        # decision rules for one rank whatever the model: nothing to decide, nor a config to read.
+        # One rank holds the whole model, whatever the model: there is nothing to decide or read.
         plan = DistributionPlan()
     route = _route(plan)
     # Each rank reads the checkpoint's config itself, so a refusal of what it reads, or of its own
