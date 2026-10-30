@@ -44,7 +44,10 @@ register(
         # prepare swaps a native deepseek_v3 in as the language model, with deepseek_v3's plan,
         # and decompresses the experts as they load, which needs transformers 5.8.
         ep_spec=EPSpec(
-            prepare=prepare, prepared_ep_plan=BASE_MODEL_EP_PLAN, requires_transformers="5.8"
+            prepare=prepare,
+            prepared_ep_plan=BASE_MODEL_EP_PLAN,
+            plan_config_attr="text_config",
+            requires_transformers="5.8",
         ),
     )
 )

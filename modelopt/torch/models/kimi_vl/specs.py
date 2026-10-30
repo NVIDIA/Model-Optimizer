@@ -36,6 +36,8 @@ register(
         model_type="kimi_vl",
         modeling_source="remote_code",
         # prepare swaps a native deepseek_v3 in as the language model, with deepseek_v3's plan.
-        ep_spec=EPSpec(prepare=prepare, prepared_ep_plan=BASE_MODEL_EP_PLAN),
+        ep_spec=EPSpec(
+            prepare=prepare, prepared_ep_plan=BASE_MODEL_EP_PLAN, plan_config_attr="text_config"
+        ),
     )
 )
