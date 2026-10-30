@@ -15,10 +15,8 @@
 
 """Decompress a compressed-tensors MoE checkpoint's experts as ``from_pretrained`` loads them.
 
-Each rank decompresses only its own experts into the fused-experts layout, so expert-parallel PTQ
-runs on the original compressed checkpoint. The ``compressed_tensors`` library does the math,
-driven by the checkpoint's ``quantization_config``. Needs transformers 5.8: earlier releases'
-``Concatenate`` looks up the sibling keys the decompression consumed.
+Each rank decompresses only its own experts, with the ``compressed_tensors`` library, so expert-parallel
+PTQ runs on the original checkpoint. Needs transformers 5.8, whose ``Concatenate`` reads only its keys.
 """
 
 import functools
@@ -207,9 +205,7 @@ def _decompressing_converter_class():
     from transformers.core_model_loading import WeightConverter
 
     class DecompressingConverter(WeightConverter):
-        """Reads the stored keys, and reverses as the converter it rewrote: the decompression is
-        load-only, so a save (``save_pretrained``, ModelOpt's export) names the experts back after
-        the checkpoint's ``.weight`` keys."""
+        """Reverses as the converter it rewrote: a save names the experts back as ``.weight`` keys."""
 
         __slots__ = ("_reversible",)
 
@@ -265,10 +261,8 @@ _LOAD = {"decompressing": False}
 def _install_keep_int_native():
     """Patch ``spawn_materialize`` so a decompressing load never casts an integer source to a float.
 
-    Without a quantizer the loader casts every source to the parameter's dtype as it reads it: in its
-    copy, or, from transformers 5.14, in ``DtensorShardOperation.shard_tensor`` as it shards it onto
-    the expert-parallel mesh. Either would destroy packed weights, shapes and zero-points, so the
-    dtype is dropped where both start. Every other load casts as before.
+    Without a quantizer the loader casts each source to its parameter's dtype in the copy, or from
+    transformers 5.14 in ``DtensorShardOperation.shard_tensor``: both start here. Other loads cast.
     """
     import transformers.core_model_loading as cml
 
@@ -278,20 +272,15 @@ def _install_keep_int_native():
 
     # Any other argument passes through, positionally or by keyword: a release may add some.
     def spawn_materialize(thread_pool, tensor, device=None, dtype=None, *args, **kwargs):
-        floating = dtype is not None and dtype.is_floating_point
-        if _LOAD["decompressing"] and floating and not _stores_floats(tensor):
+        # A safetensors slice is judged by its stored dtype, without reading it.
+        stored = tensor.get_dtype() if hasattr(tensor, "get_dtype") else None
+        floats = stored.startswith(("F", "BF")) if stored else tensor.is_floating_point()
+        if _LOAD["decompressing"] and dtype is not None and dtype.is_floating_point and not floats:
             dtype = None  # keep packed/shape/zero-point/g_idx integers native
         return orig(thread_pool, tensor, device, dtype, *args, **kwargs)
 
     setattr(spawn_materialize, "_onfly_patched", True)
     cml.spawn_materialize = spawn_materialize
-
-
-def _stores_floats(tensor) -> bool:
-    """Whether a checkpoint tensor holds floats; a safetensors slice is judged without reading it."""
-    if hasattr(tensor, "get_dtype"):
-        return tensor.get_dtype().startswith(("F", "BF"))
-    return tensor.is_floating_point()
 
 
 # Marks a config whose model's converters the installed hooks rewrite (holds the names each
