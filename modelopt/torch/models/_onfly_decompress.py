@@ -25,8 +25,10 @@ import functools
 import os
 
 import torch
+from safetensors import safe_open
 
-from modelopt.torch.utils.moe import _SUB_CONFIG_ATTRS
+from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils.moe import _SUB_CONFIG_ATTRS, require_transformers
 
 
 def to_native_backbone_config(
@@ -322,9 +324,6 @@ def install_onfly_decompress(hf_config):
     model built from a config they marked: one compressed checkpoint per process, installing again
     for it marks that config too, and one compressed differently is refused.
     """
-    from modelopt.torch.utils import print_rank_0
-    from modelopt.torch.utils.moe import require_transformers
-
     if isinstance(hf_config, dict):
         # The load finds the hooks by a mark on the config object, which a dict cannot carry.
         raise TypeError("install_onfly_decompress: pass the model's config object, not a dict")
@@ -424,8 +423,7 @@ def check_compressed_keys(hf_config, ckpt_dir) -> None:
     bf16 before decompressing, so one bf16 cannot hold exactly (an fp32 scale) is refused too. Reads
     only the tensors' names and dtypes.
     """
-    from safetensors import safe_open
-
+    # A plugin: it imports huggingface_hub, which this module needs nowhere else.
     from modelopt.torch.utils.plugins.hf_checkpoint_utils import checkpoint_tensor_files
 
     stored_as = stored_names(hf_config)
