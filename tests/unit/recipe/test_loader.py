@@ -2440,7 +2440,8 @@ def test_load_recipe_autoquantize_rejects_options_for_methods_without_options(tm
         + "    num_path_nodes: 2\n"
     )
 
-    with pytest.raises(ValueError, match=rf"auto_quantize_method='{method}'.*no method_options"):
+    expected = "no method_options" if method == "gradient" else "only the 'context'"
+    with pytest.raises(ValueError, match=rf"auto_quantize_method='{method}'.*{expected}"):
         load_recipe(recipe_file)
 
 
