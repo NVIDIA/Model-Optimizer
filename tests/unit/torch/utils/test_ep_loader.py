@@ -107,7 +107,12 @@ def _model_with_decoder_at(prefix):
 
 # ------------------------------------------------------------------------------- the plan
 
-_EP_PLAN = {"layers.*.mlp.gate": "ep_router", "layers.*.mlp.experts": "moe_tp_experts"}
+_EP_PLAN = {
+    "layers.*.mlp.gate": "ep_router",
+    "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+    "layers.*.mlp.experts.down_proj": "grouped_gemm",
+    "layers.*.mlp.experts": "moe_tp_experts",
+}
 
 
 class _Mesh:
@@ -219,15 +224,34 @@ def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch, gloo_world_
             ValueError,
             "styles no routed experts",
         ),
+        *(
+            (
+                SimpleNamespace(
+                    base_model_ep_plan={"layers.*.mlp.experts": "moe_tp_experts", **params}
+                ),
+                ValueError,
+                r"shards no weights of layers\.\*\.mlp\.experts through grouped_gemm",
+            )
+            for params in ({}, {"layers.*.mlp.experts.gate_up_proj": "packed_colwise"})
+        ),
     ],
-    ids=["gptq", "modelopt", "compressed-tensors", "no-ep-plan", "no-routed-experts"],
+    ids=[
+        "gptq",
+        "modelopt",
+        "compressed-tensors",
+        "no-ep-plan",
+        "no-routed-experts",
+        "experts-container-only",
+        "experts-sharded-otherwise",
+    ],
 )
 def test_a_config_the_load_cannot_take_is_refused_before_anything_loads(
     ep_world_of_two, config, error, match
 ):
     """A format transformers' own quantizer would load as stored, for PTQ to treat as plain weights,
-    or a plan that leaves the experts whole on every rank; the load refuses either before it reads
-    anything."""
+    or a plan that leaves the experts whole on every rank: one naming no routed experts, or none of
+    whose entries shards their weights by grouped_gemm, the only expert-weight style the load
+    shards by. The load refuses each before it reads anything."""
     with pytest.raises(error, match=match):
         load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
     assert ep_world_of_two == []

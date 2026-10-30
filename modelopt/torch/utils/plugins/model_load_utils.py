@@ -78,6 +78,7 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
 __all__ = [
     "build_meta_causal_lm",
     "fsdp2_wrap",
+    "is_fsdp2_text_only_vlm",
     "load_and_prepare_ep",
     "load_pretrained",
     "parallel_load_and_prepare_fsdp2",
@@ -1614,7 +1615,7 @@ def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_st
 
 
 # The checkpoint formats load_and_prepare_ep dequantizes as it loads, beside unquantized ones (None).
-# mxfp4 is for experts stored in the standard layout: GPT-OSS's are transposed, which the load refuses.
+# mxfp4 is for experts stored in the standard layout.
 _EP_SOURCE_FORMATS = frozenset({None, "mxfp4"})
 
 
@@ -1715,6 +1716,8 @@ def load_and_prepare_ep(
     (:func:`~modelopt.torch.utils.moe.expert_parallel_mesh`), once the caller has recorded the plan.
     A refusal on any rank -- of its transformers, the config, the checkpoint, or in the load --
     raises on every rank, so no rank is left waiting in a collective for one that already failed.
+    Without ``hf_config`` every rank reads the checkpoint's config itself, from the Hub for a Hub ID,
+    before rank 0 makes the checkpoint local: on many ranks, pass it (as ``hf_ptq`` does).
     """
     # Imported here, so looked up when the load runs: its tests stand in a process group and a
     # transformers release by patching these two modules.
@@ -1780,6 +1783,22 @@ def load_and_prepare_ep(
             raise ValueError(
                 f"base_model_ep_plan={ep_plan} styles no routed experts ({', '.join(_EXPERTS_STYLES)} "
                 "or grouped_gemm), so this load would leave them whole on every rank."
+            )
+        # Only grouped_gemm entries shard an expert's weights here: the torch_a2a styles the
+        # containers take for the load shard nothing themselves (packed_* entries are dropped).
+        unsharded = sorted(
+            key
+            for key in _routed_expert_keys(ep_plan)
+            if not any(
+                style == "grouped_gemm" and name.startswith(key + ".")
+                for name, style in ep_plan.items()
+            )
+        )
+        if unsharded:
+            raise ValueError(
+                f"base_model_ep_plan={ep_plan} shards no weights of {', '.join(unsharded)} through "
+                "grouped_gemm, the only expert-weight style this load shards by, so every rank would "
+                "hold every expert."
             )
         # The all-to-all transport finds an expert's rank by dividing its id by this rank's share of
         # the experts, which holds only when every rank holds as many. A count the config names none of
@@ -1849,7 +1868,7 @@ def load_and_prepare_ep(
     if attn_implementation is not None:
         from_pretrained_kwargs["attn_implementation"] = attn_implementation
     if quant_method == "mxfp4":
-        # Native mxfp4 checkpoints (e.g. gpt-oss: fused `gate_up_proj_blocks`/`_scales` + biases) must be
+        # Native mxfp4 checkpoints (fused `gate_up_proj_blocks`/`_scales` + biases) must be
         # DEQUANTIZED to bf16 on load so ModelOpt can insert nvfp4/fp8 quantizers on the fused bf16 experts
         # (the a2a grouped_gemm expects bf16). transformers dequantizes blocks->bf16 during from_pretrained.
         # NB: the single-process loader needed device_map="sequential" to dodge a CUDA illegal-access in the
@@ -1858,9 +1877,7 @@ def load_and_prepare_ep(
         from transformers import Mxfp4Config
 
         from_pretrained_kwargs["quantization_config"] = Mxfp4Config(dequantize=True)
-        print_rank_0(
-            "[ep] native mxfp4 checkpoint (e.g. gpt-oss) -> Mxfp4Config(dequantize=True) -> bf16"
-        )
+        print_rank_0("[ep] native mxfp4 checkpoint -> Mxfp4Config(dequantize=True) -> bf16")
     # DP=EP all-to-all: swap the ep_plan to our torch_a2a styles (torch_a2a_router emits GLOBAL ids
     # unmasked; torch_a2a_experts injects the EP process_group + skips the all-reduce) and select the
     # `torch_a2a` experts forward (NCCL all-to-all dispatch/combine around the quantizable
