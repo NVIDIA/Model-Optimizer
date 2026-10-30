@@ -14,16 +14,168 @@
 # limitations under the License.
 
 
-import importlib
+import copy
+import importlib.util
+import os
+import sys
 from collections import defaultdict
 from pathlib import Path
 
 import onnx
 import pytest
+import torch
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 
+import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _load_example_module(name, relative_path):
+    spec = importlib.util.spec_from_file_location(name, _REPO_ROOT / relative_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("num_convs", [1, 2])
+def test_dynamo_fp8_export_with_unquantized_rgb_input(tmp_path, num_convs):
+    torch_quant_to_onnx = _load_example_module(
+        "torch_quant_to_onnx_for_test", "examples/torch_onnx/torch_quant_to_onnx.py"
+    )
+    inputs = torch.randn(1, 3, 4, 4)
+    model = torch.nn.Sequential(
+        *(torch.nn.Conv2d(3 if index == 0 else 8, 8, 1) for index in range(num_convs))
+    ).eval()
+    model = mtq.quantize(
+        model,
+        torch_quant_to_onnx.get_quant_config("fp8"),
+        forward_loop=lambda candidate: candidate(inputs),
+    )
+    torch_quant_to_onnx._disable_low_channel_fp8_conv_input_quantizers(model)
+    onnx_path = tmp_path / "rgb_conv.onnx"
+
+    torch_quant_to_onnx.export_to_onnx(
+        model,
+        inputs.shape,
+        onnx_path,
+        torch.device("cpu"),
+        weights_dtype="fp16",
+        dynamo_export=True,
+    )
+
+    exported = onnx.load(onnx_path)
+    onnx.checker.check_model(exported, full_check=True)
+    initializers = {tensor.name: tensor for tensor in exported.graph.initializer}
+    producers = {output: node for node in exported.graph.node for output in node.output}
+    convs = [node for node in exported.graph.node if node.op_type == "Conv"]
+    assert len(convs) == num_convs
+    assert convs[0].input[0] == exported.graph.input[0].name
+    for conv in convs:
+        weight_cast = producers[conv.input[1]]
+        assert weight_cast.op_type == "Cast"
+        assert (
+            next(attr.i for attr in weight_cast.attribute if attr.name == "to")
+            == onnx.TensorProto.FLOAT16
+        )
+        weight_dq = producers[weight_cast.input[0]]
+        assert (weight_dq.domain, weight_dq.op_type) == ("", "DequantizeLinear")
+        assert initializers[weight_dq.input[0]].data_type == onnx.TensorProto.FLOAT8E4M3FN
+
+
+@pytest.mark.parametrize(
+    ("opset", "trt_build", "message"),
+    [
+        (22, False, "requires --onnx_opset=23 or newer"),
+        (25, True, "supports --onnx_opset up to 24"),
+    ],
+)
+def test_cli_rejects_unsupported_dynamo_opset(
+    monkeypatch, capsys, tmp_path, opset, trt_build, message
+):
+    torch_quant_to_onnx = _load_example_module(
+        "torch_quant_to_onnx_for_test", "examples/torch_onnx/torch_quant_to_onnx.py"
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "torch_quant_to_onnx.py",
+            "--onnx_save_path",
+            str(tmp_path / "model.onnx"),
+            "--dynamo_export",
+            f"--onnx_opset={opset}",
+            *(["--trt_build"] if trt_build else []),
+        ],
+    )
+    monkeypatch.setattr(
+        torch_quant_to_onnx.timm,
+        "create_model",
+        lambda *_args, **_kwargs: pytest.fail("invalid opset should fail before model loading"),
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        torch_quant_to_onnx.main()
+
+    assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("enabled_int4_layer", [None, 0, 1])
+def test_cli_trt_build_checks_enabled_int4_weights(
+    monkeypatch, capsys, tmp_path, enabled_int4_layer
+):
+    example = _load_example_module(
+        "torch_quant_to_onnx_for_test", "examples/torch_onnx/torch_quant_to_onnx.py"
+    )
+    model = torch.nn.Sequential(*(torch.nn.Linear(128, 128) for _ in range(3))).eval()
+    inputs = torch.randn(1, 128)
+    config = copy.deepcopy(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
+    config["quant_cfg"].extend(
+        [
+            {
+                "quantizer_name": "2.weight_quantizer",
+                "cfg": {"num_bits": (4, 3), "block_sizes": None},
+            },
+            {"quantizer_name": "2.input_quantizer", "cfg": {"num_bits": (4, 3)}, "enable": True},
+        ]
+    )
+    model = mtq.quantize(model, config, forward_loop=lambda candidate: candidate(inputs))
+    for index in range(2):
+        if index != enabled_int4_layer:
+            model[index].weight_quantizer.disable()
+
+    onnx_path = tmp_path / "mixed.onnx"
+    monkeypatch.setattr(
+        sys, "argv", ["torch_quant_to_onnx.py", "--onnx_save_path", str(onnx_path), "--trt_build"]
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(example.timm, "create_model", lambda *_args, **_kwargs: model)
+    monkeypatch.setattr(example, "get_model_input_shape", lambda _model: (128,))
+    monkeypatch.setattr(example, "load_calibration_data", lambda *_args, **_kwargs: [inputs])
+    monkeypatch.setattr(example, "quantize_model", lambda *_args: model)
+    builds = []
+    monkeypatch.setattr(
+        example, "build_trt_engine", lambda path, *_args, **_kwargs: builds.append(path)
+    )
+
+    if enabled_int4_layer is not None:
+        with pytest.raises(SystemExit, match="2"):
+            example.main()
+        assert "exported graph contains INT4 AWQ weights" in capsys.readouterr().err
+        assert not onnx_path.exists()
+        assert builds == []
+    else:
+        example.main()
+        exported = onnx.load(onnx_path)
+        onnx.checker.check_model(exported, full_check=True)
+        assert all(
+            tensor.data_type != onnx.TensorProto.INT4 for tensor in exported.graph.initializer
+        )
+        assert builds == [str(onnx_path)]
+
 
 # TODO: Add int4_awq once the INT4 exporter supports non-MatMul/Gemm consumer patterns
 # (e.g., DQ -> Reshape -> Slice in small ViT / SwinTransformer ONNX graphs).
@@ -112,6 +264,34 @@ def test_torch_onnx(tmp_path, model_key, qformat):
 
     if model_key == "resnet50" and qformat in _RESNET_RECIPE_QFORMATS:
         _assert_residual_inputs_are_quantized(onnx_save_path)
+
+
+@pytest.mark.timeout(600)
+def test_torch_onnx_dynamo_fp8_default_opset(tmp_path):
+    timm_model_name, model_kwargs = _MODELS["vit_tiny"]
+    onnx_save_path = tmp_path / "vit_tiny.fp8.dynamo.onnx"
+    cmd_parts = extend_cmd_parts(
+        ["python", "torch_quant_to_onnx.py"],
+        timm_model_name=timm_model_name,
+        model_kwargs=model_kwargs,
+        qformat="fp8",
+        onnx_save_path=str(onnx_save_path),
+        calibration_data_size="1",
+    )
+    cmd_parts.extend(["--no_pretrained", "--dynamo_export", "--trt_build"])
+
+    env = os.environ.copy()
+    env["TORCH_EXTENSIONS_DIR"] = str(tmp_path / "torch_extensions")
+    env["TRITON_CACHE_DIR"] = str(tmp_path / "triton_cache")
+    run_example_command(cmd_parts, "torch_onnx", env=env)
+
+    model = onnx.load(onnx_save_path, load_external_data=True)
+    onnx.checker.check_model(model, full_check=True)
+    assert next(opset.version for opset in model.opset_import if not opset.domain) == 23
+    assert any(
+        initializer.data_type == onnx.TensorProto.FLOAT8E4M3FN
+        for initializer in model.graph.initializer
+    )
 
 
 def test_torch_onnx_recipe_flag(tmp_path):
