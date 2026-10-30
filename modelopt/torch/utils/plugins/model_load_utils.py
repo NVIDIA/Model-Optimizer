@@ -755,17 +755,24 @@ def load_pretrained(
             # Read as the load reads it, so the plan and the loading hook follow the config the
             # model is built from, which need not be in the checkpoint's directory. A model class
             # of the caller's own reads it through its own config class, as from_pretrained does.
-            reader = getattr(auto_class, "config_class", None) or AutoConfig
-            config = reader.from_pretrained(
-                config, trust_remote_code=kwargs.get("trust_remote_code", False), **hub_options
+            reader = getattr(auto_class, "config_class", None)
+            config = (
+                reader.from_pretrained(config, **hub_options)
+                if reader is not None
+                else AutoConfig.from_pretrained(
+                    config, trust_remote_code=kwargs.get("trust_remote_code", False), **hub_options
+                )
             )
     subfolder = kwargs.pop("subfolder", None)
     if subfolder:
         ckpt_path = os.path.join(ckpt_path, subfolder)
     trust_remote_code = kwargs.get("trust_remote_code", False)
     hf_config = kwargs.get("hf_config")
-    decided = plan is None and not alone
-    if plan is None and alone:
+    # A process alone, without a group or in a group of one, holds the whole model, as the decision
+    # rules for one rank whatever the model: nothing to decide, nor a config to read for it, which a
+    # model class of the caller's own reads through its own config class.
+    decided = plan is None and dist.size() > 1
+    if plan is None and not decided:
         plan = DistributionPlan()
     elif plan is None:
         plan, hf_config = resolve_distribution_plan(

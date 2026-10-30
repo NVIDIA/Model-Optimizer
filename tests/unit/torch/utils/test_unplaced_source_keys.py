@@ -241,6 +241,19 @@ def test_a_config_passed_for_the_load_needs_none_on_disk(
     assert model._modelopt_unplaced_source_keys == [STRAY]
 
 
+def test_a_model_class_of_the_callers_own_reads_its_config_itself(tmp_path):
+    """Its model type given, a single process reads no config for a model class of the caller's
+    own: the class reads the checkpoint's through its own config class, which AutoConfig need not
+    know, and the plan of a single process is the same whatever the model."""
+    config = _OwnConfig(**_tiny_llama_config().to_diff_dict())
+    _save(tmp_path, config, {**LlamaForCausalLM(config).state_dict(), STRAY: torch.ones(32)})
+
+    model = _load(tmp_path, _OwnModel, model_type=_OwnConfig.model_type)
+
+    assert model._modelopt_unplaced_source_keys == [STRAY]
+    assert distribution_plan(model) == DistributionPlan()
+
+
 def test_an_ignore_rule_does_not_hide_an_unplaced_tensor(tmp_path):
     """Qwen3-Next ignores ``^mtp.*``, DeepSeek-V3 and GLM their MTP layers.
 
