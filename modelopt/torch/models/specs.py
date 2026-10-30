@@ -211,7 +211,11 @@ class EPSpec(SpecSection):
     config to load. Reserved for checkpoints carrying their own modeling code, where the work is
     patching classes or installing on-the-fly weight decompression. Runs after the declarative
     fields above have been applied, so a ``prepare`` that returns another config than the one it
-    was handed must carry over the ``base_model_ep_plan`` they attached."""
+    was handed must carry over the ``base_model_ep_plan`` they attached.
+
+    It runs before the run's plan is decided, wherever the plan could still be expert-parallel, so
+    a run whose EP degree comes out at 1 has run it too: it must leave a load of the whole model,
+    on every rank or FSDP2-sharded, as it would be without it, and may run more than once."""
 
     prepared_ep_plan: dict[str, str] | None = None
     """The ``base_model_ep_plan`` ``prepare`` attaches, for a model whose plan only ``prepare``
