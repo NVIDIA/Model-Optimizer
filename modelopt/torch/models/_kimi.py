@@ -23,7 +23,7 @@ keep the vision tower and projector from the checkpoint's code.
 
 # modelopt.torch.utils and transformers are imported inside the functions: the model registry imports
 # this module, and it must import without transformers, the optional [hf] extra.
-from ._remote_code import keep_patched
+from ._remote_code import keep_patched, stage_full_remote_closure
 
 
 def checkpoint_to_patch(
@@ -114,6 +114,18 @@ def install_compat_import_shims() -> None:
         print_rank_0(f"[kimi] compat-shim warning (attn_mask_utils): {type(e).__name__}: {e}")
 
 
+def make_importable() -> None:
+    """What both checkpoints' own code needs to import on this transformers, and nothing more.
+
+    The names newer transformers dropped, and the code's two-deep relative imports staged. It patches
+    no class, config, converter or loader hook, so the plan decision runs it before ``prepare``,
+    whatever plan comes out. Idempotent.
+    """
+    install_compat_import_shims()
+    # transformers stages only 1-hop relative imports; Kimi's remote code is 2 hops deep.
+    stage_full_remote_closure()
+
+
 def _drop_tie_weights_kwargs(orig_tie):
     """Wrap a remote ``tie_weights()`` that predates the kwargs newer transformers pass to it.
 
@@ -134,10 +146,10 @@ def _native_for_the_prepared_config(own_class, native_class):
     """The ``DeepseekV3ForCausalLM`` the patched module builds its language model with.
 
     transformers' native class for the native ``DeepseekV3Config`` ``prepare`` puts on
-    ``text_config``, and the checkpoint's own class for its own config. Deciding the plan prepares a
-    copy of the config before the plan is known, and the patch outlives that copy: a load the plan
-    keeps off expert parallelism builds from the config as read, and so gets the checkpoint's own
-    language model, as it would with no patch.
+    ``text_config``, and the checkpoint's own class for its own config. The patch outlives the load
+    it was made for: a later load in the process that its plan keeps off expert parallelism builds
+    from the config as read, and so gets the checkpoint's own language model, as it would with no
+    patch.
     """
     from transformers import DeepseekV3Config
 

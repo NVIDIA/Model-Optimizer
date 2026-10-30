@@ -1848,12 +1848,12 @@ def resolve_distribution_plan(
 
     Unless the call or rank 0's knobs rule expert parallelism out (a single process, an
     ``auto_class`` the sharded loads refuse, or an EP degree of 1, which auto is for a model whose
-    spec refuses expert parallelism on the installed transformers), every rank applies the model's
-    spec to a copy of the config first
-    (:func:`~modelopt.torch.utils.moe.apply_distributed_support`): for several models it is what
-    supplies the expert-parallel plan, and an expert-parallel plan returns that copy. Any other
-    plan returns the config without it, which the export would otherwise write out; the spec's
-    ``prepare`` has run for it all the same, which its contract allows
+    spec refuses expert parallelism on the installed transformers), every rank reads the model's
+    spec into a copy of the config first, its plan without its ``prepare``
+    (:func:`~modelopt.torch.utils.moe.apply_distributed_support` with ``prepare=False``): for
+    several models it is what supplies the expert-parallel plan. An expert-parallel plan then has
+    every rank prepare a copy of the config as read, which it returns. Any other plan returns the
+    config as read, and its load never meets what ``prepare`` patches
     (:attr:`~modelopt.torch.models.EPSpec.prepare`). A plan that
     leaves an expert-parallel MoE whole on every rank raises, unless both knobs ask for exactly
     that: ``ep_size=1`` with ``dense="replicate"`` (``MODELOPT_EP_DEGREE=1`` and

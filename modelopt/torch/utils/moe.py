@@ -242,9 +242,11 @@ def apply_distributed_support(
     one (:func:`_ep_config`), not only on the config the spec would take: on the root, or on
     another nested config.
 
-    With ``prepare=False``, the spec's ``prepare`` does not run, and the plan it would attach
-    (``prepared_ep_plan``) goes on the config instead: what a plan decision reads, which changes
-    nothing outside the config, as a load that is not expert-parallel must find the process.
+    With ``prepare=False``, the spec's ``prepare`` does not run: the plan it would attach
+    (``prepared_ep_plan``) goes on the config instead, and only what makes the checkpoint's own code
+    importable runs (``make_importable``). That is what a plan decision reads, and it patches no
+    class, config, converter or loader hook, as a load that is not expert-parallel must find the
+    process.
 
     Returns the config to load, unchanged for a model type with no spec or no EP section. The plan
     is written into the config it is given, so a caller that keeps its own config passes a copy, as
@@ -288,6 +290,8 @@ def apply_distributed_support(
 
     if prepare and ep.prepare is not None:
         hf_config = ep.prepare(hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code)
+    elif not prepare and ep.make_importable is not None:
+        ep.make_importable()
     return hf_config
 
 
