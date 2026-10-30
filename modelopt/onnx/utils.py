@@ -833,7 +833,7 @@ def save_onnx(model: onnx.ModelProto, onnx_path: str, save_as_external_data: boo
         model_copy = copy.deepcopy(model)
         # ONNX's converter checks location in cwd, even when the model is saved elsewhere.
         for tensor in onnx.external_data_helper._get_initializer_tensors(model_copy):
-            if tensor.HasField("raw_data") and sys.getsizeof(tensor.raw_data) >= 1024:
+            if tensor.HasField("raw_data") and len(tensor.raw_data) >= 1024:
                 onnx.external_data_helper.set_external_data(tensor, external_data_name)
         onnx.save_model(model_copy, onnx_path)
     else:

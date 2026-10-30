@@ -203,6 +203,34 @@ def test_save_onnx(tmp_path):
     assert os.path.exists(os.path.join(tmp_path, "test.onnx"))
 
 
+@pytest.mark.parametrize("size", [991, 1023, 1024])
+def test_save_onnx_external_data_threshold(tmp_path, size):
+    weight = np.arange(size, dtype=np.uint8)
+    model = make_model(
+        make_graph(
+            [make_node("Identity", ["weight"], ["output"])],
+            "external_data_threshold",
+            [],
+            [make_tensor_value_info("output", onnx.TensorProto.UINT8, [size])],
+            initializer=[onnx.numpy_helper.from_array(weight, "weight")],
+        ),
+        opset_imports=[make_opsetid("", 21)],
+    )
+    path = tmp_path / "model.onnx"
+
+    onnx_utils.save_onnx(model, str(path), save_as_external_data=True)
+
+    saved = onnx.load(path, load_external_data=False)
+    assert onnx.external_data_helper.uses_external_data(saved.graph.initializer[0]) == (
+        size >= 1024
+    )
+    assert (tmp_path / "model.onnx_data").exists() == (size >= 1024)
+    np.testing.assert_array_equal(
+        onnx.numpy_helper.to_array(onnx.load(path).graph.initializer[0]), weight
+    )
+    onnx.checker.check_model(str(path))
+
+
 @pytest.mark.parametrize("mixed", [False, True])
 @pytest.mark.parametrize("same_cwd", [False, True])
 def test_save_onnx_preserves_unloaded_external_data(tmp_path, monkeypatch, mixed, same_cwd):
