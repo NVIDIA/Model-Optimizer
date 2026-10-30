@@ -270,6 +270,22 @@ def _force_load_remote_modeling(hf_config, ckpt_path: str, trust_remote_code: bo
     return get_class_from_dynamic_module(class_ref, ckpt_path, trust_remote_code=trust_remote_code)
 
 
+def _checkpoint_quantized(ckpt_path: str) -> bool:
+    """Whether the checkpoint's own ``config.json`` has a ``quantization_config``, top or text level.
+
+    The config ``prepare`` is handed cannot always say: ``prepare`` drops its quantization_config,
+    and the decompressor clears its mark at the load, so a config prepared and loaded before has
+    neither.
+    """
+    from transformers import PretrainedConfig
+
+    stored, _ = PretrainedConfig.get_config_dict(ckpt_path)
+    return any(
+        isinstance(level, dict) and level.get("quantization_config") is not None
+        for level in (stored, stored.get("text_config"))
+    )
+
+
 def _register_kimi_k3_conversions() -> None:
     """Register the per-expert to fused-expert weight converters.
 
@@ -369,8 +385,13 @@ def prepare(
     # else (attention, shared experts, latent projections, dense layer, embeddings, lm_head, vision) is
     # plain bf16. The decompressor is the step that can still refuse the checkpoint, so it comes before
     # anything below patches the process: a refusal leaves it unchanged. Its hooks rewrite only the
-    # converters of a config it marked. Plain bf16 experts come without a quantization_config.
-    if any(getattr(cfg, "quantization_config", None) is not None for cfg in (hf_config, text_cfg)):
+    # converters of a config it marked. Plain bf16 experts come without a quantization_config. The
+    # checkpoint's own config counts too: a config prepared and loaded before has lost both its
+    # quantization_config and the mark, and the install refuses it rather than let the experts load
+    # newly initialized.
+    if any(
+        getattr(cfg, "quantization_config", None) is not None for cfg in (hf_config, text_cfg)
+    ) or _checkpoint_quantized(ckpt_path):
         _onfly_decompress.install_onfly_decompress(hf_config)
 
     # This checkpoint's remote code, not whichever revision this process imported first. Every patch
