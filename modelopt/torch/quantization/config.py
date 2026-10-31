@@ -1266,10 +1266,11 @@ class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):
         of the group_size used in the quantization.""",
     )
     fused: bool = ModeloptField(
-        default=False,
+        default=True,
         title="Use fused Triton kernel for GPTQ.",
         description="""When True, use a fused Triton kernel that combines quantization and
-        per-column error propagation into one launch per GPTQ block.""",
+        per-column error propagation into one launch per GPTQ block. Applies to static NVFP4
+        weights without 4/6 scaling on SM89+; other cases use the unfused loop.""",
     )
     importance_weighted: bool = ModeloptField(
         default=False,

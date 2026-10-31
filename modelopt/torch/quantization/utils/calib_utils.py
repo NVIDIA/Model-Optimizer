@@ -46,6 +46,7 @@ from contextlib import contextmanager
 import torch
 import torch.distributed as dist
 
+import modelopt.torch.kernels.quantization.gemm as triton_kernel
 from modelopt.torch.utils import (
     get_available_gpu_memory,
     get_process_gpus,
@@ -53,6 +54,8 @@ from modelopt.torch.utils import (
     warn_rank_0,
 )
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
+
+from .numeric_utils import E4M3_MAX, fp8_max_for_normalization
 
 # A GPU takes a new Hessian only if enough memory stays available after it for the calibration
 # forward that follows. Until GPTQ has measured that forward on the GPU, keep this share free.
@@ -490,9 +493,8 @@ class GPTQHelper:
     def _blockwise_update(self, block_size):
         """Column-wise GPTQ update.
 
-        When ``self.fused`` is True and the weight quantizer is an
-        ``NVFP4StaticQuantizer``, uses :func:`gptq_blockwise_update_fused_scalar`
-        (a fused Triton kernel).  Otherwise falls back to
+        When ``self.fused`` is True and :meth:`_fused_supported` holds, uses
+        :func:`gptq_blockwise_update_fused_scalar` (a fused Triton kernel).  Otherwise falls back to
         :func:`gptq_blockwise_update` (unfused column-by-column loop).
         """
         assert self.weight is not None and self.h_inv is not None, (
@@ -500,23 +502,42 @@ class GPTQHelper:
         )
         quantizer = self.weight_quantizer
 
-        if self.fused and getattr(quantizer, "_is_nvfp4_static_quantizer", False):
+        if self.fused and self._fused_supported(quantizer, self.weight):
             block_sizes = quantizer.block_sizes
+            # The kernel looks up each column's scale by absolute index, so GPTQ blocks need not
+            # align with quantizer groups.
             quant_block_size = block_sizes.get(-1) or block_sizes.get(1)
-            if quant_block_size is not None and block_size % quant_block_size != 0:
-                raise ValueError(
-                    f"GPTQ block_size ({block_size}) must be divisible by the quantizer"
-                    f" group_size ({quant_block_size})"
-                )
             out_features, num_cols = self.weight.shape
-            n_blocks = num_cols // quant_block_size
-            block_amax = quantizer.amax.reshape(out_features, n_blocks).float()
-            global_scale = quantizer.global_amax.float().item() / (6.0 * 448.0)
+            # A width the group size does not divide carries a scale for its padded last group.
+            n_blocks = -(-num_cols // quant_block_size)
+            # The quantizer's own FP8 scales, so the fused update rounds onto the same grid.
+            block_scale = triton_kernel.compute_fp4_scales(quantizer.amax, quantizer.global_amax)
             gptq_blockwise_update_fused_scalar(
-                self.weight, block_amax, global_scale, self.h_inv, block_size, quant_block_size
+                self.weight,
+                block_scale.reshape(out_features, n_blocks),
+                self.h_inv,
+                block_size,
+                quant_block_size,
             )
         else:
             gptq_blockwise_update(self.weight, self.h_inv, block_size, quantizer)
+
+    def _fused_supported(self, quantizer, weight):
+        # The fused kernel stands in for the quantizer's forward with a plain static QDQ over
+        # last-dim groups, so anything else that forward does (pre-quant scale, rotation, LSQ,
+        # 2-D blocks) takes the unfused loop. It also needs FP8 Triton casts (SM89+) and the
+        # default FP8 scale range (no 4/6).
+        return (
+            getattr(quantizer, "_is_nvfp4_static_quantizer", False)
+            and {k for k in quantizer.block_sizes if isinstance(k, int)} in ({-1}, {1})
+            and quantizer.pre_quant_scale is None
+            and not quantizer.rotate_is_enabled
+            and not quantizer._lsq
+            and fp8_max_for_normalization(quantizer) == E4M3_MAX
+            and triton_kernel.IS_AVAILABLE
+            and weight.is_cuda
+            and torch.cuda.get_device_capability(weight.device) >= (8, 9)
+        )
 
     def _print_mse_error(self, hessian, weight):
         """Log Hessian-weighted relative MSE between ``self.weight`` and original ``weight``."""
@@ -565,20 +586,19 @@ def gptq_blockwise_update(weight, h_inv, block_size, quantize_fn):
         weight[:, block_end:].addmm_(errs, h_inv[block_start:block_end, block_end:], alpha=-1)
 
 
-def gptq_blockwise_update_fused_scalar(
-    weight, block_amax, global_scale, h_inv, block_size, quant_block_size
-):
+def gptq_blockwise_update_fused_scalar(weight, block_scale, h_inv, block_size, quant_block_size):
     """Fused GPTQ blockwise update for NVFP4 scalar quantization.
 
-    Uses a fused Triton kernel that combines scale computation, quantization,
-    and per-column error propagation into one launch per GPTQ block, avoiding
-    the Python-level per-column loop in :func:`gptq_blockwise_update`.
+    Uses a fused Triton kernel that combines quantization and per-column error propagation
+    into one launch per GPTQ block, avoiding the Python-level per-column loop in
+    :func:`gptq_blockwise_update`.
 
     Args:
         weight: Weight tensor ``[out_features, in_features]``, modified **in-place**
             with fake-quantized values.
-        block_amax: Per-block amax values ``[out_features, n_amax_blocks]``.
-        global_scale: Pre-computed ``global_amax / (6.0 * 448.0)`` (scalar).
+        block_scale: FP8-quantized per-block scales ``[out_features, n_scale_blocks]``, as
+            :func:`compute_fp4_scales <modelopt.torch.kernels.quantization.gemm.compute_fp4_scales>`
+            returns them.
         h_inv: Upper-triangular Cholesky factor of the damped inverse Hessian
             ``[in_features, in_features]``.
         block_size: Number of columns to process per GPTQ block.
@@ -591,8 +611,7 @@ def gptq_blockwise_update_fused_scalar(
         be = min(bs + block_size, num_cols)
         qw, err = gptq_fused_block_scalar(
             weight[:, bs:be].clone().contiguous(),
-            block_amax,
-            global_scale,
+            block_scale,
             h_inv[bs:be, bs:be].contiguous(),
             quant_block_size,
             bs,

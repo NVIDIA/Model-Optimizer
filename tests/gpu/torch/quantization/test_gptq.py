@@ -24,6 +24,7 @@ from conftest import requires_triton
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.kernels.quantization.gemm import compute_fp4_scales
 from modelopt.torch.quantization.extensions import get_cuda_ext_ggml
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.ggml.gptq import GGMLGPTQHelper
@@ -408,7 +409,7 @@ def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer, calib_jsonl):
 
 
 def _make_nvfp4_test_data(quant_block_size, out_features, dim):
-    """Create weight, weight_quantizer, block_amax, global_scale, and h_inv for NVFP4 GPTQ tests."""
+    """Create weight, weight_quantizer, block_scale, and h_inv for NVFP4 GPTQ tests."""
     # Build a quantized Linear with NVFP4 static config at the desired block size
     model = torch.nn.Linear(dim, out_features, bias=False, device="cuda")
     weight = model.weight.data.clone()
@@ -431,8 +432,9 @@ def _make_nvfp4_test_data(quant_block_size, out_features, dim):
     model.weight.data = weight.clone()
 
     weight_quantizer = model.weight_quantizer
-    block_amax = weight_quantizer.amax.reshape(out_features, -1).float()
-    global_scale = weight_quantizer.global_amax.float().item() / (6.0 * 448.0)
+    block_scale = compute_fp4_scales(weight_quantizer.amax, weight_quantizer.global_amax).reshape(
+        out_features, -1
+    )
 
     # Compute Hessian
     hessian = torch.zeros(dim, dim, dtype=torch.float32)
@@ -440,7 +442,7 @@ def _make_nvfp4_test_data(quant_block_size, out_features, dim):
     hessian = hessian.to("cuda")
     h_inv = compute_hessian_inverse(hessian, weight, perc_damp=0.01)
 
-    return weight, weight_quantizer, block_amax, global_scale, h_inv
+    return weight, weight_quantizer, block_scale, h_inv
 
 
 def _run_unfused_gptq_nvfp4(weight, weight_quantizer, h_inv, gptq_block_size):
@@ -450,14 +452,10 @@ def _run_unfused_gptq_nvfp4(weight, weight_quantizer, h_inv, gptq_block_size):
     return w
 
 
-def _run_fused_gptq_nvfp4(
-    weight, block_amax, global_scale, h_inv, gptq_block_size, quant_block_size
-):
+def _run_fused_gptq_nvfp4(weight, block_scale, h_inv, gptq_block_size, quant_block_size):
     """Fused Triton GPTQ for NVFP4 using the production fused update."""
     w = weight.float().clone()
-    gptq_blockwise_update_fused_scalar(
-        w, block_amax, global_scale, h_inv, gptq_block_size, quant_block_size
-    )
+    gptq_blockwise_update_fused_scalar(w, block_scale, h_inv, gptq_block_size, quant_block_size)
     return w
 
 
@@ -465,11 +463,11 @@ def _run_fused_gptq_nvfp4(
 def test_fused_nvfp4_gptq_runs_on_the_weights_gpu(need_2_gpus):
     """A layer device_map placed on another GPU is updated there, not from the current GPU."""
     torch.manual_seed(42)
-    weight, _, block_amax, global_scale, h_inv = _make_nvfp4_test_data(16, 64, 256)
-    expected = _run_fused_gptq_nvfp4(weight, block_amax, global_scale, h_inv, 128, 16)
+    weight, _, block_scale, h_inv = _make_nvfp4_test_data(16, 64, 256)
+    expected = _run_fused_gptq_nvfp4(weight, block_scale, h_inv, 128, 16)
 
-    weight, block_amax, h_inv = (t.to("cuda:1") for t in (weight, block_amax, h_inv))
-    got = _run_fused_gptq_nvfp4(weight, block_amax, global_scale, h_inv, 128, 16)
+    weight, block_scale, h_inv = (t.to("cuda:1") for t in (weight, block_scale, h_inv))
+    got = _run_fused_gptq_nvfp4(weight, block_scale, h_inv, 128, 16)
 
     assert torch.cuda.current_device() == 0
     torch.testing.assert_close(got.cpu(), expected.cpu(), rtol=0, atol=0)
@@ -488,7 +486,7 @@ def test_fused_vs_unfused_nvfp4(quant_block_size, gptq_block_size):
     dim = max(256, quant_block_size * 4)
     out_features = 64
 
-    weight, weight_quantizer, block_amax, global_scale, h_inv = _make_nvfp4_test_data(
+    weight, weight_quantizer, block_scale, h_inv = _make_nvfp4_test_data(
         quant_block_size,
         out_features,
         dim,
@@ -496,8 +494,7 @@ def test_fused_vs_unfused_nvfp4(quant_block_size, gptq_block_size):
 
     weight_fused = _run_fused_gptq_nvfp4(
         weight,
-        block_amax,
-        global_scale,
+        block_scale,
         h_inv,
         gptq_block_size,
         quant_block_size,
@@ -524,6 +521,56 @@ def test_fused_vs_unfused_nvfp4(quant_block_size, gptq_block_size):
     )
 
     torch.testing.assert_close(weight_fused, weight_unfused, atol=1e-4, rtol=1e-4)
+
+
+@requires_triton
+@pytest.mark.parametrize(
+    ("in_features", "block_size", "cfg_update", "takes_fused"),
+    [
+        (96, 48, {}, True),  # non-power-of-two GPTQ block
+        (208, 128, {}, True),  # non-power-of-two final block
+        (70, 128, {}, True),  # width the NVFP4 group size does not divide
+        (96, 40, {}, True),  # GPTQ block not a multiple of the group size
+        # The quantizer forward does more than a per-row static QDQ, so GPTQ stays unfused.
+        (64, 128, {"block_sizes": {"four_over_six": True}}, False),
+        (64, 128, {"block_sizes": {-2: 16}}, False),
+        (64, 128, {"rotate": {"enable": True, "mode": "rotate_back"}}, False),
+    ],
+)
+def test_gptq_fused_matches_unfused(in_features, block_size, cfg_update, takes_fused, monkeypatch):
+    if torch.cuda.get_device_capability() < (8, 9):
+        pytest.skip("fused GPTQ needs SM89+")
+    if "rotate" in cfg_update:
+        pytest.importorskip("fast_hadamard_transform")
+    fused_calls = []
+    fused_update = calib_utils.gptq_blockwise_update_fused_scalar
+    monkeypatch.setattr(
+        calib_utils,
+        "gptq_blockwise_update_fused_scalar",
+        lambda *args: fused_calls.append(1) or fused_update(*args),
+    )
+    torch.manual_seed(0)
+    model = torch.nn.Linear(in_features, 32, bias=False, device="cuda")
+    inp = torch.randn(4, 16, in_features, device="cuda")
+    block_sizes = {-1: 16, "type": "static", "scale_bits": (4, 3)}
+    weight_cfg = {
+        "num_bits": (2, 1),
+        **cfg_update,
+        "block_sizes": {**block_sizes, **cfg_update.get("block_sizes", {})},
+    }
+    weights = []
+    for fused in (True, False):
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": weight_cfg},
+            ],
+            "algorithm": {"method": "gptq", "block_size": block_size, "fused": fused},
+        }
+        qmodel = mtq.quantize(copy.deepcopy(model), quant_cfg, forward_loop=lambda m: m(inp))
+        weights.append(qmodel.weight.data)
+    assert len(fused_calls) == int(takes_fused)
+    torch.testing.assert_close(weights[0], weights[1], atol=1e-4, rtol=1e-4)
 
 
 _NVFP4_BENCH_CONFIGS = [
@@ -557,13 +604,13 @@ def bench_fused_nvfp4():
 
     for quant_block_size, gptq_block_size, out_features, dim in _NVFP4_BENCH_CONFIGS:
         torch.manual_seed(42)
-        weight, weight_quantizer, block_amax, global_scale, h_inv = _make_nvfp4_test_data(
+        weight, weight_quantizer, block_scale, h_inv = _make_nvfp4_test_data(
             quant_block_size, out_features, dim
         )
 
         def run_fused():
             return _run_fused_gptq_nvfp4(
-                weight, block_amax, global_scale, h_inv, gptq_block_size, quant_block_size
+                weight, block_scale, h_inv, gptq_block_size, quant_block_size
             )
 
         def run_unfused():

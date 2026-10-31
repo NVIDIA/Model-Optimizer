@@ -2520,7 +2520,7 @@ def gptq(
     forward_loop: ForwardLoop,
     perc_damp: float = 0.01,
     block_size: int = 128,
-    fused: bool = False,
+    fused: bool = True,
     importance_weighted: bool = False,
     hessian_input_dtype: str = "float32",
 ):
