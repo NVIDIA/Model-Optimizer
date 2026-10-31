@@ -886,6 +886,14 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         return idx
 
     def _setup(self):
+        # Each expert's weight is sliced as (out_dim, in_dim), and a transposed container would be
+        # sliced wrong with nothing in the shapes to catch it. register_fused_experts_on_the_fly skips
+        # such containers; this refuses them for the wrappers registered explicitly (FP8, Nemotron-H).
+        if getattr(self, "is_transposed", False):
+            raise NotImplementedError(
+                f"{type(self).__name__} quantizes expert weights stored (num_experts, out_dim, "
+                "in_dim), but these experts are marked is_transposed."
+            )
         n = self.num_experts
         setattr(self, self._first_proj_input_quantizer_attr, TensorQuantizer())
         setattr(

@@ -80,6 +80,19 @@ from modelopt.torch.quantization.utils.core_utils import module_name_maps, weigh
 from modelopt.torch.utils.moe import torch_a2a_experts_forward
 
 
+def test_native_fp8_experts_marked_transposed_are_refused():
+    """Native FP8 experts are registered explicitly, past the check that skips transposed
+    containers, and their weights and block scales are read (out_dim, in_dim): experts marked
+    is_transposed are refused at conversion rather than calibrated and exported wrong."""
+    experts = FP8Experts(
+        PretrainedConfig(hidden_size=32, intermediate_size=32, num_experts=2, hidden_act="silu"),
+        block_size=None,
+    )
+    experts.is_transposed = True
+    with pytest.raises(NotImplementedError, match="is_transposed"):
+        QuantModuleRegistry.convert(experts)
+
+
 def test_native_fp8_experts_dequantized_before_nvfp4_export():
     """Calibrate and pack scaled FP8 gate/up and down weights, preserving their BF16 values."""
     generator = torch.Generator().manual_seed(42)
@@ -499,14 +512,14 @@ class TestQuantFusedExperts:
         class _TransposedExperts(_SyntheticFusedExperts):
             pass
 
-        def build():
+        def build(marked=True):
             model = _TinyMoEModel()
             model.moe.experts = _TransposedExperts()
-            model.moe.experts.is_transposed = True
+            model.moe.experts.is_transposed = marked
             return model
 
-        model = build()
-        # As an earlier release did: matched by shape, with the gated wrapper.
+        # As an earlier release did: matched by shape, with the gated wrapper, which read no flag.
+        model = build(marked=False)
         QuantModuleRegistry.register({_TransposedExperts: "test.TransposedExperts"})(
             _QuantFusedExperts
         )
