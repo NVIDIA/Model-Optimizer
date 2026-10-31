@@ -82,6 +82,7 @@ from modelopt.torch.utils.moe import (
     _spec_refuses_ep,
     apply_distributed_support,
     check_distributed_support,
+    check_not_patched_by_prepare,
     config_levels,
     register_torch_a2a,
 )
@@ -995,6 +996,8 @@ def load_pretrained(
             model_type = getattr(chosen, "model_type", None) or (
                 _read_config(ckpt_path, auto_class, trust_remote_code, **hub_options).model_type
             )
+        if route != _EXPERT_PARALLEL:
+            check_not_patched_by_prepare(model_type)
         load_kwargs = (
             {}
             if route is None

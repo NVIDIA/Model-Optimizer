@@ -45,6 +45,7 @@ from _test_utils.torch import kimi_k3_tiny_modeling, kimi_vl_tiny_modeling
 from torch.distributed.tensor import DTensor
 from transformers import (
     AutoConfig,
+    AutoModel,
     AutoModelForCausalLM,
     DeepseekV3Config,
     DeepseekV3ForCausalLM,
@@ -55,6 +56,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
 from modelopt.torch.models import _onfly_decompress
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.utils import moe
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
     ParallelState,
@@ -627,11 +629,27 @@ def _kimi_k3_expert_parallel_job(rank, size, ckpt_dir):
             except ValueError as e:
                 if "no compressed-tensors quantization_config" not in str(e):
                     problems.append(f"a load with the returned model.config failed otherwise: {e}")
+            # Nor may a whole-model load of it in this process, through a class the sharded loads
+            # refuse: prepare patched Kimi-K3's MoE block for every later load, so it is refused
+            # before anything is built.
+            try:
+                load_pretrained(
+                    ckpt_dir,
+                    auto_class=AutoModel,
+                    config=model.config,
+                    distribution=DistributionPlan(size, 1, "replicate"),
+                    trust_remote_code=True,
+                )
+                problems.append("a whole-model load after the expert-parallel one was not refused")
+            except NotImplementedError as e:
+                if "patched its modeling code" not in str(e):
+                    problems.append(f"a whole-model load after it failed otherwise: {e}")
 
             gathered = [None] * size
             dist.all_gather_object(gathered, problems)
     finally:
         mu.get_model_conversion_mapping, cml.spawn_materialize = hooks
+        moe._PATCHED_EVERY_LOAD.discard("kimi_k3")  # the workers outlive the job
     found = [problem for rank_problems in gathered for problem in rank_problems]
     assert not found, "\n".join(found[:20])
 
