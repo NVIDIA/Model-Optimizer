@@ -52,6 +52,10 @@ transformers' still-evolving ``WeightConverter`` conversion-ops API.
 
 from .. import _kimi, _onfly_decompress
 
+# The checkpoint formats prepare has the experts decompress as they load; the spec states them for
+# the plan decision, which runs before prepare.
+DECOMPRESSED_FORMATS = ("compressed-tensors",)
+
 
 def make_buildable(
     hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool = False, **_
@@ -91,7 +95,7 @@ def prepare(hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool 
     #    from the copy of quantization_config Kimi's config class keeps on the top-level config;
     #    step 2 leaves that copy alone. A checkpoint without that copy is refused.
     quantization_config = _onfly_decompress._find_quantization_config(hf_config) or {}
-    if quantization_config.get("quant_method") == "compressed-tensors":
+    if quantization_config.get("quant_method") in DECOMPRESSED_FORMATS:
         _onfly_decompress.install_onfly_decompress(hf_config)
     else:
         _kimi.refuse_quantization_only_on_text_config("kimi_k25", hf_config)
