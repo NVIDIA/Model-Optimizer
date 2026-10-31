@@ -18,10 +18,14 @@
 ``load_and_prepare_ep`` shards an MoE's routed experts over the ranks, and the ``torch_a2a`` experts
 forward sends each token to the rank that holds its expert. Every rank runs its own batch through the
 sharded model, and the result must match the whole model run on that batch alone. A checkpoint whose
-experts are compressed-tensors compressed loads the same way, each rank decompressing its own.
+experts are compressed-tensors compressed loads the same way, each rank decompressing its own, and
+so does a remote-code VLM through its model spec's adapter.
 """
 
+import copy
 import json
+import shutil
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -37,8 +41,15 @@ if Version(transformers.__version__) < Version("5.7"):
 
 import transformers.core_model_loading as cml
 import transformers.modeling_utils as mu
+from _test_utils.torch import kimi_vl_tiny_modeling
 from torch.distributed.tensor import DTensor
-from transformers import AutoConfig, AutoModelForCausalLM, Qwen3MoeConfig
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    DeepseekV3Config,
+    DeepseekV3ForCausalLM,
+    Qwen3MoeConfig,
+)
 
 from modelopt.torch.models import _onfly_decompress
 from modelopt.torch.utils.distributed import (
@@ -46,7 +57,7 @@ from modelopt.torch.utils.distributed import (
     distribution_plan,
     set_distribution_plan,
 )
-from modelopt.torch.utils.moe import expert_parallel_mesh
+from modelopt.torch.utils.moe import apply_distributed_support, expert_parallel_mesh
 from modelopt.torch.utils.plugins.model_load_utils import load_and_prepare_ep
 
 NUM_EXPERTS = 8
@@ -244,3 +255,147 @@ def test_expert_parallel_model_matches_the_whole_model(
         pytest.skip(f"{NUM_EXPERTS} experts do not shard over EP {ep_degree} on these GPUs")
     _save_tiny_qwen3_moe(tmp_path)
     dist_workers.run(_sharded_model_matches_the_whole_one, str(tmp_path), ep_degree)
+
+
+# ------------------------------------------------------------------------------------- Kimi-VL
+
+# A tiny Kimi-VL: a vision tower and a projector beside a DeepSeek-V3 language model with a dense first
+# layer, then one MoE layer of 8 routed experts, as the checkpoint's own code builds it (remote code,
+# ``kimi_vl_tiny_modeling``), its experts stored per expert.
+KIMI_VL_TEXT = {
+    "model_type": "deepseek_v3",
+    "vocab_size": 64,
+    "hidden_size": 64,
+    "intermediate_size": 64,
+    "moe_intermediate_size": 32,
+    "num_hidden_layers": 2,
+    "first_k_dense_replace": 1,
+    "n_routed_experts": NUM_EXPERTS,
+    "num_experts_per_tok": 2,
+    "n_shared_experts": 1,
+    "n_group": 1,
+    "topk_group": 1,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 4,
+    "q_lora_rank": None,
+    "kv_lora_rank": 16,
+    "qk_nope_head_dim": 16,
+    "qk_rope_head_dim": 8,
+    "v_head_dim": 16,
+    "max_position_embeddings": 64,
+    "tie_word_embeddings": False,
+}
+KIMI_VL_MOE = "language_model.model.layers.1.mlp.experts"
+KIMI_VL_OWN = ("vision_tower.weight", "multi_modal_projector.weight")
+
+
+def _save_tiny_kimi_vl(ckpt_dir):
+    """A tiny Kimi-VL-shaped remote checkpoint whose experts are stored per expert, as Kimi-VL's are."""
+    ckpt_dir = Path(ckpt_dir)
+    shutil.copy(kimi_vl_tiny_modeling.__file__, ckpt_dir / "modeling_kimi_vl.py")
+    remote = "modeling_kimi_vl.KimiVLForConditionalGeneration"
+    config = {
+        "model_type": "kimi_vl",
+        "architectures": ["KimiVLForConditionalGeneration"],
+        "auto_map": {
+            "AutoConfig": "modeling_kimi_vl.KimiVLConfig",
+            "AutoModel": remote,
+            "AutoModelForCausalLM": remote,
+        },
+        "torch_dtype": "bfloat16",
+        "text_config": KIMI_VL_TEXT,
+    }
+    (ckpt_dir / "config.json").write_text(json.dumps(config))
+    torch.manual_seed(0)
+    language_model = DeepseekV3ForCausalLM(DeepseekV3Config(**KIMI_VL_TEXT)).to(torch.bfloat16)
+    tensors = {}
+    inter = KIMI_VL_TEXT["moe_intermediate_size"]
+    for name, tensor in language_model.state_dict().items():
+        name = f"language_model.{name}"
+        if name == f"{KIMI_VL_MOE}.gate_up_proj":  # stored per expert, gate and up apart
+            for e in range(NUM_EXPERTS):
+                tensors[f"{KIMI_VL_MOE}.{e}.gate_proj.weight"] = tensor[e, :inter].contiguous()
+                tensors[f"{KIMI_VL_MOE}.{e}.up_proj.weight"] = tensor[e, inter:].contiguous()
+        elif name == f"{KIMI_VL_MOE}.down_proj":
+            for e in range(NUM_EXPERTS):
+                tensors[f"{KIMI_VL_MOE}.{e}.down_proj.weight"] = tensor[e].contiguous()
+        else:
+            tensors[name] = tensor.contiguous()
+    width, hidden = 16, KIMI_VL_TEXT["hidden_size"]
+    for name, shape in (
+        ("vision_tower.weight", (width, width)),
+        ("vision_tower.bias", (width,)),
+        ("multi_modal_projector.weight", (hidden, width)),
+        ("multi_modal_projector.bias", (hidden,)),
+    ):
+        tensors[name] = torch.randn(shape).to(torch.bfloat16)
+    save_file(tensors, str(ckpt_dir / "model.safetensors"), metadata={"format": "pt"})
+
+
+def _kimi_vl_expert_parallel_job(rank, size, ckpt_dir):
+    device = torch.device("cuda", rank)
+    stored = load_file(str(Path(ckpt_dir) / "model.safetensors"))
+    per_rank = NUM_EXPERTS // size
+    owned = range(rank * per_rank, (rank + 1) * per_rank)
+    problems = []
+    with bounded_collectives(seconds=120):
+        config = AutoConfig.from_pretrained(ckpt_dir, trust_remote_code=True)
+        plan = DistributionPlan(size, ep_size=size)
+        prepared = apply_distributed_support(
+            "kimi_vl", copy.deepcopy(config), ckpt_path=ckpt_dir, trust_remote_code=True
+        )
+        model = load_and_prepare_ep(
+            ckpt_dir, plan, trust_remote_code=True, hf_config=copy.deepcopy(prepared)
+        ).eval()
+        whole = AutoModelForCausalLM.from_pretrained(
+            ckpt_dir, config=copy.deepcopy(prepared), trust_remote_code=True, dtype=torch.bfloat16
+        )
+        whole = whole.to(device).eval()
+
+        # The native language model the adapter swaps in fuses this rank's experts, and only those,
+        # from the per-expert tensors as they load.
+        experts = model.language_model.model.layers[1].mlp.experts
+        gate_up = [
+            torch.cat([stored[f"{KIMI_VL_MOE}.{e}.{part}_proj.weight"] for part in ("gate", "up")])
+            for e in owned
+        ]
+        down = [stored[f"{KIMI_VL_MOE}.{e}.down_proj.weight"] for e in owned]
+        for name, expected in (("gate_up_proj", gate_up), ("down_proj", down)):
+            if not torch.equal(_local(getattr(experts, name)).cpu(), torch.stack(expected)):
+                problems.append(f"{name}: rank {rank}'s experts {list(owned)} differ")
+        # The vision tower and the projector, the checkpoint's own code's, load as stored.
+        problems.extend(
+            f"{name} differs from the checkpoint's"
+            for name in KIMI_VL_OWN
+            if not torch.equal(model.get_parameter(name).detach().cpu(), stored[name])
+        )
+        if model._modelopt_unplaced_source_keys:
+            problems.append(f"unplaced: {model._modelopt_unplaced_source_keys[:3]}")
+
+        # Each rank its own batch through the experts, against the whole model on that batch.
+        generator = torch.Generator().manual_seed(rank)
+        input_ids = torch.randint(0, KIMI_VL_TEXT["vocab_size"], (2, 16), generator=generator)
+        with torch.no_grad():
+            sharded = model(input_ids.to(device)).logits.float()
+            reference = whole(input_ids.to(device)).logits.float()
+        if not torch.allclose(sharded, reference, atol=2e-2, rtol=2e-2):
+            problems.append(f"logits differ by {(sharded - reference).abs().max().item():.3g}")
+
+        gathered = [None] * size
+        dist.all_gather_object(gathered, problems)
+    found = [problem for rank_problems in gathered for problem in rank_problems]
+    assert not found, "\n".join(found[:20])
+
+
+def test_kimi_vl_loads_expert_parallel_and_matches_the_whole_model(
+    need_2_gpus, dist_workers, tmp_path
+):
+    """A Kimi-VL-shaped remote checkpoint loaded expert-parallel through its model spec: the native
+    DeepSeek-V3 the adapter swaps in fuses each rank's own experts from the per-expert tensors, the
+    vision tower and projector load as stored, nothing is left unplaced, and each rank's logits match
+    the whole model's on one GPU. Each rank's checks are gathered before any rank fails, so a
+    regression fails instead of hanging."""
+    if NUM_EXPERTS % dist_workers.world_size:
+        pytest.skip(f"{NUM_EXPERTS} experts do not shard over {dist_workers.world_size} GPUs")
+    _save_tiny_kimi_vl(tmp_path)
+    dist_workers.run(_kimi_vl_expert_parallel_job, ckpt_dir=str(tmp_path))
