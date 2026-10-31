@@ -951,11 +951,12 @@ def _two_rank_job(rank, world_size, tmp_dir):
     mesh = init_device_mesh("cpu", (world_size,))
 
     # An unquantized MoE whose vocab rows and experts split unevenly, written with tensors it does
-    # not own, which every rank is handed; the test compares what the two ranks wrote between them
-    # with the source checkpoint and those tensors. It is written in inference mode, with a buffer
-    # made there that shards unevenly, as an inference-mode pack makes its scales: the writer copies
-    # each such shard out of inference mode, and the rewrapped DTensor must keep the global shape,
-    # which the two uneven shards would otherwise each re-infer differently.
+    # not own, which only rank 0 is handed, as the export entry hands them; the test compares what
+    # the two ranks wrote between them with the source checkpoint and those tensors. It is written
+    # in inference mode, with a buffer made there that shards unevenly, as an inference-mode pack
+    # makes its scales: the writer copies each such shard out of inference mode, and the rewrapped
+    # DTensor must keep the global shape, which the two uneven shards would otherwise each re-infer
+    # differently.
     moe = _fsdp2_shard(_load(tmp_dir / "moe"), mesh)
     with torch.inference_mode():
         rows = _uneven_rows()
@@ -1038,8 +1039,8 @@ def _two_rank_job(rank, world_size, tmp_dir):
 
 def test_two_ranks_write_one_checkpoint_and_reject_inconsistent_state(cpu_dist_workers, tmp_path):
     """Shards cross ranks point to point, each tensor gets one owner, files share one numbering,
-    and the tensors handed to every rank are written once. A tensor sharded unevenly in inference
-    mode is written whole.
+    and the tensors handed to rank 0 alone are written once. A tensor sharded unevenly in
+    inference mode is written whole.
 
     The same job also checks the cross-rank consistency errors.
     """
