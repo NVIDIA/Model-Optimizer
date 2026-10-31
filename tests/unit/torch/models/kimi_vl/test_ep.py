@@ -294,6 +294,27 @@ def test_only_an_expert_parallel_plan_patches_the_checkpoint_s_code(
         assert config.text_config.base_model_ep_plan is None
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"ckpt_path": None, "trust_remote_code": True}, {"ckpt_path": "/ckpt"}],
+    ids=["no-checkpoint", "untrusted"],
+)
+def test_the_build_step_installs_nothing_when_there_is_nothing_to_build(monkeypatch, kwargs):
+    """With no checkpoint, or code this load may not run, nothing of the checkpoint's is imported or
+    built, so the build step installs no import shim and no staging either."""
+    for module_name, name in COMPAT_SYMBOLS:
+        with contextlib.suppress(ImportError):
+            _restore(monkeypatch, importlib.import_module(module_name), name)
+    monkeypatch.delattr(import_utils, "is_torch_fx_available", raising=False)
+    staging = dmu.get_cached_module_file
+    monkeypatch.setattr(dmu, "get_cached_module_file", staging)
+
+    kimi_vl.make_buildable(_vlm_config(), **kwargs)
+
+    assert dmu.get_cached_module_file is staging
+    assert not hasattr(import_utils, "is_torch_fx_available")
+
+
 def test_the_build_step_lets_the_checkpoint_s_own_vlm_build_on_this_transformers(
     monkeypatch, tmp_path
 ):
@@ -321,7 +342,10 @@ def test_the_build_step_lets_the_checkpoint_s_own_vlm_build_on_this_transformers
         )
 
         assert type(model).tie_weights._kimi_tie_weights_shim
-        assert sys.modules[type(model).__module__].DeepseekV3ForCausalLM is DeepseekV3ForCausalLM
+        # Nothing swapped: the language model is the checkpoint's own, its experts per expert.
+        own = sys.modules[type(model).__module__].DeepseekV3ForCausalLM
+        assert not getattr(own, "_kimi_native_swap", False)
+        assert type(model.language_model) is own
     finally:
         # The checkpoint's code stays imported otherwise, for later tests to find as a Kimi module.
         for name in set(sys.modules) - loaded:

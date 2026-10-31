@@ -136,11 +136,11 @@ def make_buildable(
 
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
-    make_importable()
     if type(hf_config).__module__.startswith("transformers.") or ckpt_path is None:
         return
     if not trust_remote_code:
         return
+    make_importable()
     get_class_from_dynamic_module(
         f"{modeling}.{vlm_class}", ckpt_path, trust_remote_code=trust_remote_code
     )
