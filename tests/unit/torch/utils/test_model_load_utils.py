@@ -3304,5 +3304,8 @@ def test_without_expert_parallelism_the_stock_sizing_stays(ep_degree):
 def test_a_transformers_without_the_sizing_hook_is_left_alone(monkeypatch):
     monkeypatch.delattr(modeling_utils, "get_total_byte_count")
 
-    with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN):
+    with (
+        pytest.warns(UserWarning, match="has no get_total_byte_count"),
+        _ep_aware_caching_allocator_warmup(4, _A2A_PLAN),
+    ):
         assert not hasattr(modeling_utils, "get_total_byte_count")

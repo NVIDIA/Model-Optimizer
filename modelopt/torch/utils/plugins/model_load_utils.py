@@ -1748,13 +1748,19 @@ def _ep_aware_caching_allocator_warmup(
     expert param under the EP load, so the warmup would reserve about the whole GPU on every rank and
     starve the all-to-all's NCCL buffers. While the load runs, an expert param counts ``1/ep_degree`` of
     itself and, with ``dense_on_meta``, a dense ``.weight``/``.bias`` nothing. It only sizes a
-    reservation: a hook of another signature, or an error while sizing, keeps the stock sizing.
+    reservation: a release without the hook, a hook of another signature, or an error while sizing,
+    keeps the stock sizing, and says so.
     """
     if ep_degree <= 1:
         yield
         return
     orig = getattr(hf_modeling_utils, "get_total_byte_count", None)
     if orig is None:
+        warn_rank_0(
+            f"transformers {transformers.__version__} has no get_total_byte_count in "
+            "modeling_utils to size the load warmup by; using its own sizing, which may reserve "
+            "most of the device."
+        )
         yield
         return
     try:
