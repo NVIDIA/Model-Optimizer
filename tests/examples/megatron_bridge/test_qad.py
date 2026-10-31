@@ -309,8 +309,8 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
 def test_qad_train_moe_expert_fc_only(tmp_path: Path, num_gpus):
     """--train_moe_expert_fc_only survives the QAD restore: only the expert FC weights train.
 
-    The freeze hook runs before the quantized student is restored (--student_megatron_path), so
-    this checks the restore leaves every other parameter frozen.
+    The freeze hook runs after the quantized student is restored (--student_megatron_path), and
+    full recomputation covers the embedding hook that keeps the first layers' gradients flowing.
     """
     # head_dim=8 so TE has a fused-attention backend on the CI runner (see test_distill.py).
     hf_model_path = create_tiny_qwen3_moe_dir(tmp_path, with_tokenizer=True, head_dim=8)
@@ -356,6 +356,9 @@ def test_qad_train_moe_expert_fc_only(tmp_path: Path, num_gpus):
         mbs=1,
         gbs=4,
         moe_aux_loss_coeff=0,
+        recompute_granularity="full",
+        recompute_method="uniform",
+        recompute_num_layers=1,
         train_iters=3,
         lr_warmup_iters=1,
         eval_interval=3,
@@ -372,7 +375,7 @@ def test_qad_train_moe_expert_fc_only(tmp_path: Path, num_gpus):
     assert first.keys() == last.keys()
     # The helper keeps keys like ``chained_0.optimizer...``, whose state changes on every step.
     trained = {n for n in first if "optimizer" not in n and not torch.equal(first[n], last[n])}
-    assert any(".mlp.experts." in n for n in trained), "no expert weight trained"
+    assert any(".layers.0.mlp.experts." in n for n in trained), "first-layer experts did not train"
     # The final norm is the one dense parameter that stays trainable.
     stray = {n for n in trained if ".mlp.experts." not in n and "final_layernorm" not in n}
     assert not stray, f"non-expert tensors changed in expert-only QAD: {sorted(stray)[:5]}"

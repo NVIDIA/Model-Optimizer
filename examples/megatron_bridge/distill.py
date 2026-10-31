@@ -323,7 +323,10 @@ def get_args():
     parser.add_argument(
         "--train_moe_expert_fc_only",
         action="store_true",
-        help="Train only the student's routed-expert FC weights; freeze everything else, routers included.",
+        help="Train only the student's routed-expert FC weights; freeze everything else, routers "
+        "included, except the decoder's final norm (kept trainable so the dense optimizer is not "
+        "empty). Requires --pp_size 1, cannot be combined with a LoRA student, and needs "
+        "--moe_aux_loss_coeff 0.",
     )
     parser.add_argument(
         "--fake_quant_weight_cache",
@@ -630,9 +633,14 @@ def _freeze_student_params(
     Returns the (trainable, frozen) parameter counts. With ``check_layout`` (a single pipeline
     stage holds every layer), raise if the option matched nothing, so it is not silently ignored.
     """
+    named = list(student.named_parameters())
+    if expert_fc_only and any(name.endswith((".lora_A", ".lora_B")) for name, _ in named):
+        # LoRA training freezes the backbone and trains the adapters; this mode would freeze the
+        # adapters and train the base experts instead, silently undoing that policy.
+        raise ValueError("--train_moe_expert_fc_only cannot be combined with a LoRA student.")
     trainable = frozen = 0
     routers = experts = dense = 0
-    for name, param in student.named_parameters():
+    for name, param in named:
         is_router = ".router." in name
         is_expert = ".mlp.experts." in name
         # Keep the final norm trainable in expert-only mode: with every dense parameter frozen, the
@@ -640,14 +648,16 @@ def _freeze_student_params(
         # Match the decoder's norm by path: an MTP head has its own ``final_layernorm``.
         keep_dense = expert_fc_only and _DECODER_FINAL_NORM.search(name) is not None
         freeze = (not is_expert and not keep_dense) if expert_fc_only else is_router
-        param.requires_grad_(not freeze)
+        # Only ever freeze: a parameter an earlier step froze (e.g. the LoRA restore) stays frozen.
+        if freeze:
+            param.requires_grad_(False)
         routers += is_router
         experts += is_expert
-        dense += (not freeze) and not is_expert
-        if freeze:
-            frozen += param.numel()
-        else:
+        if param.requires_grad:
             trainable += param.numel()
+            dense += not is_expert
+        else:
+            frozen += param.numel()
     if check_layout:
         if freeze_router and not routers:
             raise ValueError("--freeze_router found no MoE router parameter in the student.")

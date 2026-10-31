@@ -388,6 +388,29 @@ def test_expert_fc_only_keeps_only_the_decoder_final_norm():
     assert not any(n.startswith("mtp.") for n in names)
 
 
+def test_freeze_router_keeps_earlier_freezes():
+    # E.g. the LoRA restore freezes the backbone: --freeze_router must not train it again.
+    model = _ToyMoeStudent()
+    model.requires_grad_(False)
+    model.decoder.layers["0"]["mlp"]["experts"].linear_fc1.requires_grad_(True)
+    trainable, frozen = _freeze_student_params(
+        model, freeze_router=True, expert_fc_only=False, check_layout=True
+    )
+    assert _trainable_names(model) == {
+        "decoder.layers.0.mlp.experts.linear_fc1.weight",
+        "decoder.layers.0.mlp.experts.linear_fc1.bias",
+    }
+    assert trainable + frozen == sum(p.numel() for p in model.parameters())
+
+
+def test_expert_fc_only_rejects_lora_student():
+    model = _ToyMoeStudent()
+    model.decoder.layers["0"]["self_attention"].lora_A = torch.nn.Parameter(torch.zeros(1, 2))
+    with pytest.raises(ValueError, match="LoRA"):
+        _freeze_student_params(model, freeze_router=False, expert_fc_only=True, check_layout=True)
+    assert all(p.requires_grad for p in model.parameters())  # refused before changing anything
+
+
 def test_freeze_student_params_fails_loudly():
     with pytest.raises(ValueError, match="no trainable dense parameter"):
         _freeze_student_params(
