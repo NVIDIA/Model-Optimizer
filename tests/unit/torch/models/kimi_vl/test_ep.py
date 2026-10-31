@@ -21,8 +21,11 @@ stub the dynamic-module loader with a stand-in remote module. Every process-wide
 after each test.
 """
 
+import contextlib
 import copy
 import importlib
+import json
+import shutil
 import sys
 import types
 from types import SimpleNamespace
@@ -37,13 +40,26 @@ from packaging.version import Version
 if Version(transformers.__version__) < Version("5.7"):
     pytest.skip("Kimi-VL expert parallelism needs transformers >= 5.7", allow_module_level=True)
 
+import transformers.core_model_loading as cml
 import transformers.dynamic_module_utils as dmu
+import transformers.modeling_utils as mu
 import transformers.utils.import_utils as import_utils
-from transformers import DeepseekV3Config, DeepseekV3ForCausalLM, PretrainedConfig
+from _test_utils.torch import kimi_vl_tiny_modeling
+from torch import nn
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    DeepseekV3Config,
+    DeepseekV3ForCausalLM,
+    PretrainedConfig,
+)
 
 from modelopt.torch.models import _onfly_decompress, _remote_code, get_spec
+from modelopt.torch.models.kimi_k25 import ep as kimi_k25
 from modelopt.torch.models.kimi_vl import ep as kimi_vl
+from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils.moe import _routed_expert_keys
+from modelopt.torch.utils.plugins import model_load_utils
 
 # Symbols the remote modeling imports that newer transformers dropped.
 COMPAT_SYMBOLS = (
@@ -159,11 +175,14 @@ def test_prepare_rebuilds_the_language_model_config_without_a_decompressor(monke
     assert dmu.get_cached_module_file is not staging
 
 
-# What the Kimi adapters share, through each adapter's prepare.
+# Kimi-K2.5's adapter is Kimi-VL's with on-the-fly decompression added; these hold for both.
 _BOTH_ADAPTERS = pytest.mark.parametrize(
     ("adapter", "remote"),
-    [(kimi_vl, ("modeling_kimi_vl", "KimiVLForConditionalGeneration"))],
-    ids=["vl"],
+    [
+        (kimi_vl, ("modeling_kimi_vl", "KimiVLForConditionalGeneration")),
+        (kimi_k25, ("modeling_kimi_k25", "KimiK25ForConditionalGeneration")),
+    ],
+    ids=["vl", "k25"],
     indirect=["remote"],
 )
 
@@ -196,10 +215,10 @@ def test_prepare_with_a_checkpoint_swaps_in_native_deepseek_v3_and_shims_tie_wei
 def test_a_load_off_expert_parallelism_builds_the_checkpoint_s_own_language_model(
     monkeypatch, adapter, remote
 ):
-    """Deciding the plan prepares a copy of the config on every rank before the plan is known, and
-    the patch outlives that copy. A load the plan keeps off expert parallelism (replicated, or
-    FSDP2) builds from the config as read, so its VLM gets the checkpoint's own language model, as
-    with no patch; only the native config ``prepare`` makes builds transformers' native one."""
+    """The patch outlives the load it was made for. A later load in the process that its plan keeps
+    off expert parallelism (replicated, or FSDP2) builds from the config as read, so its VLM gets
+    the checkpoint's own language model, as with no patch; only the native config ``prepare`` makes
+    builds transformers' native one."""
     monkeypatch.setattr(_onfly_decompress, "install_onfly_decompress", lambda cfg: None)
     as_read = _vlm_config()
     prepared = adapter.prepare(copy.deepcopy(as_read), ckpt_path="/ckpt", trust_remote_code=True)
@@ -207,6 +226,131 @@ def test_a_load_off_expert_parallelism_builds_the_checkpoint_s_own_language_mode
     with torch.device("meta"):
         assert type(remote.vlm(prepared).language_model) is DeepseekV3ForCausalLM
         assert type(remote.vlm(as_read).language_model) is remote.remote_lm
+
+
+def _built_by_its_own_code():
+    """The VLM the checkpoint's own code builds, on the meta device: each MoE layer of its language
+    model holds its routed experts as per-expert modules, at ``language_model.model.layers.<i>.mlp.experts``."""
+
+    def layer():
+        mlp = nn.Module()
+        mlp.experts = nn.ModuleList(nn.Linear(2, 2, bias=False) for _ in range(8))
+        return nn.ModuleDict({"mlp": mlp})
+
+    model = nn.Module()
+    model.language_model = nn.Module()
+    model.language_model.model = nn.Module()
+    model.language_model.model.layers = nn.ModuleList(layer() for _ in range(2))
+    model.tie_weights = lambda: None
+    return model
+
+
+@_BOTH_ADAPTERS
+@pytest.mark.parametrize(
+    ("ranks", "dense", "outcome"),
+    [(3, "fsdp", "fsdp2"), (3, "replicate", "refused"), (4, "replicate", "expert-parallel")],
+    ids=["fsdp2", "whole", "expert-parallel"],
+)
+def test_only_an_expert_parallel_plan_patches_the_checkpoint_s_code(
+    monkeypatch, tmp_path, adapter, remote, ranks, dense, outcome
+):
+    """Deciding the plan builds the model the checkpoint's own code builds, importable but unpatched,
+    and finds its 8 experts through the plan the spec states. Only an expert-parallel plan (4 ranks)
+    then runs ``prepare``, which swaps in the native language model. FSDP2-sharded, or left whole on
+    3 ranks, which no EP degree of the 8 experts divides (refused), the run keeps the checkpoint's
+    own class, the loader and the config as read."""
+    model_type = "kimi_vl" if adapter is kimi_vl else "kimi_k25"
+    as_read = _vlm_config()
+    as_read.model_type = model_type
+    monkeypatch.setattr(dist, "size", lambda group=None: ranks)
+    monkeypatch.setattr(
+        transformers.AutoConfig, "from_pretrained", lambda *a, **k: copy.deepcopy(as_read)
+    )
+    monkeypatch.setattr(
+        model_load_utils, "build_meta_causal_lm", lambda *a, **k: _built_by_its_own_code()
+    )
+    hooks = (mu.get_model_conversion_mapping, cml.spawn_materialize)
+
+    if outcome == "refused":
+        with pytest.raises(ValueError, match="can be expert-parallel, but the plan resolved"):
+            model_load_utils.resolve_distribution_plan(
+                str(tmp_path), dense=dense, trust_remote_code=True
+            )
+    else:
+        plan, config = model_load_utils.resolve_distribution_plan(
+            str(tmp_path), dense=dense, trust_remote_code=True
+        )
+        assert plan.is_expert_parallel == (outcome == "expert-parallel")
+    assert import_utils.is_torch_fx_available() is False  # importable on every plan
+    assert getattr(vars(remote.vlm)["tie_weights"], "_kimi_tie_weights_shim", False)  # buildable
+    assert (remote.DeepseekV3ForCausalLM is remote.remote_lm) == (outcome != "expert-parallel")
+    if outcome == "expert-parallel":
+        assert type(config.text_config) is DeepseekV3Config
+        assert config.text_config.base_model_ep_plan
+    else:
+        assert (mu.get_model_conversion_mapping, cml.spawn_materialize) == hooks
+    if outcome == "fsdp2":
+        assert type(config.text_config) is _RemoteTextConfig
+        assert config.text_config.base_model_ep_plan is None
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"ckpt_path": None, "trust_remote_code": True}, {"ckpt_path": "/ckpt"}],
+    ids=["no-checkpoint", "untrusted"],
+)
+def test_the_build_step_installs_nothing_when_there_is_nothing_to_build(monkeypatch, kwargs):
+    """With no checkpoint, or code this load may not run, nothing of the checkpoint's is imported or
+    built, so the build step installs no import shim and no staging either."""
+    for module_name, name in COMPAT_SYMBOLS:
+        with contextlib.suppress(ImportError):
+            _restore(monkeypatch, importlib.import_module(module_name), name)
+    monkeypatch.delattr(import_utils, "is_torch_fx_available", raising=False)
+    staging = dmu.get_cached_module_file
+    monkeypatch.setattr(dmu, "get_cached_module_file", staging)
+
+    kimi_vl.make_buildable(_vlm_config(), **kwargs)
+
+    assert dmu.get_cached_module_file is staging
+    assert not hasattr(import_utils, "is_torch_fx_available")
+
+
+def test_the_build_step_lets_the_checkpoint_s_own_vlm_build_on_this_transformers(
+    monkeypatch, tmp_path
+):
+    """The plan decision builds the checkpoint's own code on the meta device before ``prepare``
+    runs, and Kimi-VL's VLM class has a ``tie_weights`` that takes none of the keyword arguments
+    transformers' ``post_init`` passes it. ``make_buildable`` adapts it, and swaps nothing: the
+    module still builds the language model from its own ``DeepseekV3ForCausalLM``."""
+    for module_name, name in COMPAT_SYMBOLS:
+        with contextlib.suppress(ImportError):
+            _restore(monkeypatch, importlib.import_module(module_name), name)
+    monkeypatch.setattr(dmu, "get_cached_module_file", dmu.get_cached_module_file)
+    shutil.copy(kimi_vl_tiny_modeling.__file__, tmp_path / "modeling_kimi_vl.py")
+    remote = "modeling_kimi_vl.KimiVLForConditionalGeneration"
+    auto_map = {"AutoConfig": "modeling_kimi_vl.KimiVLConfig", "AutoModelForCausalLM": remote}
+    text = {"model_type": "deepseek_v3", "hidden_size": 16, "num_hidden_layers": 1}
+    stored = {"model_type": "kimi_vl", "auto_map": auto_map, "text_config": text}
+    (tmp_path / "config.json").write_text(json.dumps(stored))
+    loaded = set(sys.modules)
+    try:
+        config = AutoConfig.from_pretrained(tmp_path, trust_remote_code=True)
+
+        kimi_vl.make_buildable(config, ckpt_path=str(tmp_path), trust_remote_code=True)
+        model = model_load_utils.build_meta_causal_lm(
+            str(tmp_path), True, None, copy.deepcopy(config), auto_class=AutoModelForCausalLM
+        )
+
+        assert type(model).tie_weights._kimi_tie_weights_shim
+        # Nothing swapped: the language model is the checkpoint's own, its experts per expert.
+        own = sys.modules[type(model).__module__].DeepseekV3ForCausalLM
+        assert not getattr(own, "_kimi_native_swap", False)
+        assert type(model.language_model) is own
+    finally:
+        # The checkpoint's code stays imported otherwise, for later tests to find as a Kimi module.
+        for name in set(sys.modules) - loaded:
+            if name.startswith("transformers_modules."):
+                del sys.modules[name]
 
 
 @_BOTH_ADAPTERS
@@ -233,7 +377,7 @@ def test_the_swap_fails_loudly_when_the_remote_modeling_has_nothing_to_swap(
         adapter.prepare(_vlm_config(), ckpt_path="/ckpt", trust_remote_code=True)
 
 
-@pytest.mark.parametrize("adapter", [kimi_vl], ids=["vl"])
+@pytest.mark.parametrize("adapter", [kimi_vl, kimi_k25], ids=["vl", "k25"])
 @pytest.mark.parametrize(
     ("config", "kwargs", "match"),
     [
@@ -282,7 +426,9 @@ def test_prepare_refuses_before_patching_anything(monkeypatch, adapter, config, 
     assert dmu.get_cached_module_file is unstaged_loader
 
 
-@pytest.mark.parametrize(("model_type", "adapter"), [("kimi_vl", kimi_vl)], ids=["vl"])
+@pytest.mark.parametrize(
+    ("model_type", "adapter"), [("kimi_vl", kimi_vl), ("kimi_k25", kimi_k25)], ids=["vl", "k25"]
+)
 def test_the_spec_routes_expert_parallelism_through_its_own_adapter(model_type, adapter):
     """The checkpoint's code builds no EP-capable experts, so its whole EP setup is this adapter's
     ``prepare``: another Kimi adapter's would load it without its own swap or decompression."""

@@ -825,6 +825,33 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
 
 
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version(_ep_floor("kimi_k25")),
+    reason="Kimi-K2.5's expert parallelism needs a later transformers",
+)
+@pytest.mark.parametrize(
+    ("model_type", "expert_parallel"), [("kimi_k25", True), ("kimi_vl", False)]
+)
+def test_a_checkpoint_its_spec_decompresses_is_decided_expert_parallel(
+    run_as, serve, monkeypatch, tmp_path, model_type, expert_parallel
+):
+    """The decision runs before ``prepare``, which installs the decompressor. A compressed-tensors
+    checkpoint whose spec decompresses its experts as they load (Kimi-K2.5's) is planned
+    expert-parallel all the same; one whose spec does not (Kimi-VL's) is planned without it, as the
+    expert-parallel load would refuse it."""
+    spec = get_spec(model_type).ep_spec
+    monkeypatch.setattr(spec, "prepare", lambda hf_config, **kwargs: hf_config)
+    monkeypatch.setattr(spec, "make_buildable", lambda *args, **kwargs: None)
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi())
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+    run_as(4)
+    scheme = {"quant_method": "compressed-tensors"}
+    text = SimpleNamespace(n_routed_experts=4, quantization_config=scheme)
+    serve(SimpleNamespace(model_type=model_type, quantization_config=scheme, text_config=text))
+
+    assert resolve_distribution_plan(str(tmp_path))[0].is_expert_parallel == expert_parallel
+
+
 def _remote_kimi():
     """A remote-code Kimi VLM as the checkpoint's own code builds it, unpatched by its spec's
     ``prepare``: each MoE layer of its language model holds its routed experts as per-expert
@@ -844,7 +871,7 @@ def _remote_kimi():
     return model
 
 
-@pytest.mark.parametrize("model_type", ["kimi_vl"])
+@pytest.mark.parametrize("model_type", ["kimi_vl", "kimi_k25"])
 def test_a_remote_moe_whose_prepare_attaches_its_plan_left_whole_is_an_error(
     run_as, serve, monkeypatch, tmp_path, model_type
 ):
@@ -1735,8 +1762,9 @@ def test_a_load_prepares_its_config_once(
     )
     prepared = []
 
-    def apply_distributed_support(model_type, hf_config, **kwargs):
-        prepared.append(model_type)
+    def apply_distributed_support(model_type, hf_config, prepare=True, **kwargs):
+        if prepare:  # the plan alone, which deciding reads, prepares nothing
+            prepared.append(model_type)
         hf_config.base_model_ep_plan = get_spec("deepseek_v3").ep_spec.base_model_ep_plan
         return hf_config
 
@@ -1961,9 +1989,12 @@ def test_a_whole_load_that_fails_on_one_rank_fails_every_rank(cpu_dist_workers, 
 
 def _one_rank_cannot_apply_the_spec_job(rank, size, ckpt, step):
     apply = model_load_utils.apply_distributed_support
+    prepares = []
 
     def apply_on_rank0_only(*args, **kwargs):
-        if rank == 1:
+        prepares.append(kwargs.get("prepare", True))
+        # "prepared": rank 1 states the spec as rank 0 does, and fails only where prepare runs.
+        if rank == 1 and (step != "prepared" or prepares[-1]):
             raise OSError("this rank cannot import the checkpoint's code")
         return apply(*args, **kwargs)
 
@@ -1983,7 +2014,7 @@ def _one_rank_cannot_apply_the_spec_job(rank, size, ckpt, step):
                 mock.patch.object(model_load_utils, "load_and_prepare_ep", _loaded_in_step)
             )
         try:
-            if step == "decision":
+            if step in ("decision", "prepared"):
                 resolve_distribution_plan(ckpt)
             else:
                 load_pretrained(ckpt, distribution=DistributionPlan(2, ep_size=2))
@@ -1992,14 +2023,17 @@ def _one_rank_cannot_apply_the_spec_job(rank, size, ckpt, step):
         else:
             raised = "no error"
     assert "cannot import the checkpoint's code" in raised, raised
+    # Deciding an expert-parallel plan, every rank reached the step that prepares it.
+    assert (True in prepares) == (step != "decision"), prepares
 
 
 @needs_ep_transformers
-@pytest.mark.parametrize("step", ["decision", "load"])
+@pytest.mark.parametrize("step", ["decision", "prepared", "load"])
 def test_a_rank_that_cannot_apply_the_spec_fails_every_rank(cpu_dist_workers, tmp_path, step):
     """A spec's preparation reads the checkpoint and imports its code on each rank, which can fail
-    on one alone; the others must not wait for it, in the plan's broadcast when deciding, nor in the
-    load a handed expert-parallel plan starts."""
+    on one alone; the others must not wait for it, in the plan's broadcast when deciding, in the
+    step that prepares the expert-parallel plan decided, nor in the load a handed expert-parallel
+    plan starts."""
     _deepseek_v3(n_routed_experts=8).save_pretrained(tmp_path)
     cpu_dist_workers.run(_one_rank_cannot_apply_the_spec_job, ckpt=str(tmp_path), step=step)
 
