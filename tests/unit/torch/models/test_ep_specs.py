@@ -261,12 +261,16 @@ def test_a_refusal_comes_before_the_rest_of_the_section(monkeypatch):
 
 @needs_ep_transformers
 def test_prepare_runs_after_the_plan_is_attached_and_its_config_is_returned(monkeypatch):
-    """A prepare hook may inspect or adjust the plan, so it must not run before there is one."""
+    """A prepare hook may inspect or adjust the plan, so it must not run before there is one. A
+    config it returns in place of the one it was handed is what the load gets, the plan carried
+    over, as the spec's contract asks."""
     seen = {}
+    replacement = cfg()
 
     def prepare(hf_config, **kwargs):
         seen.update(kwargs, config=hf_config, plan_present=hasattr(hf_config, "base_model_ep_plan"))
-        return "replaced"
+        replacement.base_model_ep_plan = hf_config.base_model_ep_plan
+        return replacement
 
     spec = ModelSpec(
         model_type="_probe",
@@ -279,7 +283,8 @@ def test_prepare_runs_after_the_plan_is_attached_and_its_config_is_returned(monk
 
     returned = apply_distributed_support("_probe", config, ckpt_path="/c", trust_remote_code=True)
 
-    assert returned == "replaced"
+    assert returned is replacement
+    assert returned.base_model_ep_plan == spec.ep_spec.base_model_ep_plan
     assert seen == {
         "config": config,
         "ckpt_path": "/c",
