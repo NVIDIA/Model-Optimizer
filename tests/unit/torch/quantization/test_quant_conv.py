@@ -415,15 +415,13 @@ class TestQuantConv3dNVFP4:
         """Training mode must fall back to the default (cuDNN) path with a warning.
 
         The implicit-GEMM kernel is inference-only; this exercises the CPU-visible
-        training-fallback branch. We disable the quantizers so the default-path
-        ``super().forward()`` does not try to run NVFP4 dynamic quantization
-        (which requires CUDA).
+        training-fallback branch. We turn off quantization (the quantizers stay enabled,
+        so the NVFP4 branch is still taken) so the default-path ``super().forward()``
+        does not try to run NVFP4 dynamic quantization (which requires CUDA).
         """
         m = self._make_nvfp4_conv3d()
-        # NVFP4 predicate reads configuration (num_bits/block_sizes), not enable
-        # state, so disabling the quantizers still routes through the NVFP4 branch.
-        m.input_quantizer.disable()
-        m.weight_quantizer.disable()
+        m.input_quantizer.disable_quant()
+        m.weight_quantizer.disable_quant()
         assert m._should_use_implicit_gemm()
         m.train()
         x = torch.randn(1, NUM_IN_CHANNELS, 4, 4, 4)
