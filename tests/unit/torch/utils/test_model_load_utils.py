@@ -2974,8 +2974,6 @@ def test_a_compressed_checkpoint_a_spec_decompresses_as_it_loads_passes(
     So is one that compresses more than its experts, by the names it stores, before it loads, and a
     config whose class keeps quantization_config, which the load cannot clear; one whose class only
     forwards its text config's loads."""
-    from safetensors.torch import save_file
-
     from modelopt.torch.models import _onfly_decompress
 
     class _LoadedError(Exception):
@@ -3005,7 +3003,10 @@ def test_a_compressed_checkpoint_a_spec_decompresses_as_it_loads_passes(
     text = SimpleNamespace(quantization_config=quantization_config, base_model_ep_plan=_EP_PLAN)
     llm = SimpleNamespace(quantization_config=quantization_config)
     config = SimpleNamespace(
-        quantization_config=quantization_config, text_config=text, llm_config=llm
+        model_type=_NO_SPEC,
+        quantization_config=quantization_config,
+        text_config=text,
+        llm_config=llm,
     )
     plan = DistributionPlan(2, ep_size=2)
 
@@ -3025,7 +3026,9 @@ def test_a_compressed_checkpoint_a_spec_decompresses_as_it_loads_passes(
 
     # A config class that keeps quantization_config as a class attribute cannot have it cleared.
     typed_config = type("_Typed", (SimpleNamespace,), {"quantization_config": quantization_config})
-    typed = typed_config(text_config=SimpleNamespace(base_model_ep_plan=_EP_PLAN))
+    typed = typed_config(
+        model_type=_NO_SPEC, text_config=SimpleNamespace(base_model_ep_plan=_EP_PLAN)
+    )
     _onfly_decompress._mark(typed, tuple(stored_as))
     loaded.clear()
     with pytest.raises(NotImplementedError, match="keeps quantization_config off its instance"):
@@ -3039,7 +3042,7 @@ def test_a_compressed_checkpoint_a_spec_decompresses_as_it_loads_passes(
             return self.text_config.quantization_config
 
     text = SimpleNamespace(quantization_config=quantization_config, base_model_ep_plan=_EP_PLAN)
-    forwarding = _Forwarding(text_config=text)
+    forwarding = _Forwarding(model_type=_NO_SPEC, text_config=text)
     _onfly_decompress._mark(forwarding, tuple(stored_as))
     with pytest.raises(_LoadedError):
         load_and_prepare_ep(str(tmp_path / "experts"), plan, hf_config=forwarding)
@@ -3059,8 +3062,6 @@ def test_a_decompressed_load_refuses_compressed_tensors_its_model_does_not_place
     not. Compressed experts stored past the config's decoder layers are refused before anything
     loads. Which keys go unplaced is stood in for here; a real decompressed load's are pinned in
     test_unplaced_source_keys.py."""
-    from safetensors.torch import save_file
-
     from modelopt.torch.models import _onfly_decompress
 
     class _PastError(Exception):
@@ -3093,6 +3094,7 @@ def test_a_decompressed_load_refuses_compressed_tensors_its_model_does_not_place
     )
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
     config = SimpleNamespace(
+        model_type=_NO_SPEC,
         num_experts=8,
         num_hidden_layers=layers,
         base_model_ep_plan=dict(_EP_PLAN),
