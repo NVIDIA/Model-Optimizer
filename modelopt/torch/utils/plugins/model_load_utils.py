@@ -2037,8 +2037,10 @@ def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, expert_mo
     The dense ``.weight``/``.bias`` params arrive on meta (:func:`_ep_dense_meta_load`); the experts,
     already loaded and EP-sharded, are left as they are. Returns the number of layers sharded.
     """
+    # The GPU the rank is bound to, as the experts and FSDP2's compute are: not the one its local
+    # rank numbers, which a launch showing each process one GPU does not bind.
     cuda = fsdp_mesh.device_type == "cuda"
-    device = torch.device(fsdp_mesh.device_type, dist.local_rank() if cuda else None)
+    device = torch.device(fsdp_mesh.device_type, _own_gpu_index() if cuda else None)
     n_dense = _fsdp2_shard_dense(model, fsdp_mesh, expert_modules)
     # Every alias of a tied param: the checkpoint may store the one named_parameters() drops.
     dense_names = {

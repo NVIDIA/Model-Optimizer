@@ -3024,6 +3024,33 @@ def test_the_dense_load_shards_first_then_asks_for_exactly_the_meta_dense_params
     assert not any(_is_expert(name) or name.endswith("A_log") for name in meta_dense)
 
 
+def test_the_dense_load_materializes_on_the_gpu_the_rank_is_bound_to(fsdp_mesh, monkeypatch):
+    """Not on the one its local rank numbers: a launch that shows each process one GPU binds every
+    rank to cuda:0 while the local ranks run 0, 1, ..., and the experts and FSDP2's compute are on
+    the bound one."""
+    loads = []
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    for name, value in [
+        ("is_available", True),
+        ("is_initialized", True),
+        ("current_device", 0),
+        ("device_count", 1),
+    ]:
+        monkeypatch.setattr(torch.cuda, name, lambda value=value: value)
+    monkeypatch.setattr(model_load_utils, "_fsdp2_shard_dense", lambda *args: 0)
+
+    def record_load(model, local_dir, device, *, load_names):
+        loads.append(device)
+
+    monkeypatch.setattr(model_load_utils, "_meta_dcp_load", record_load)
+
+    _load_ep_dense_distributed(
+        nn.Linear(2, 2), SimpleNamespace(device_type="cuda"), "unused", lambda name: False, []
+    )
+
+    assert loads == [torch.device("cuda", 0)]
+
+
 def test_a_tied_head_the_checkpoint_stores_alone_reaches_both_aliases(fsdp_mesh, tmp_path):
     """A tied checkpoint can store the pair as ``lm_head.weight`` alone, which ``from_pretrained``
     loads into both aliases. With a tied MoE as the expert-parallel load leaves it -- the dense part
