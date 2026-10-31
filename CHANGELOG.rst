@@ -31,6 +31,7 @@ Changelog
 
 *Megatron Framework (M-LM / M-Bridge)*
 
+- Add ``--freeze_router`` and ``--train_moe_expert_fc_only`` to ``examples/megatron_bridge/distill.py`` to freeze the student's MoE routers, or to train only its routed-expert FC weights (plus the decoder's final norm), during distillation. Pass ``--moe_aux_loss_coeff 0`` with either.
 - Add ``--sft_in_batch_packing``, ``--moe_aux_loss_coeff`` and ``--dsa_kernel_backend`` to ``examples/megatron_bridge/distill.py`` (``--dsa_kernel_backend`` also to ``quantize.py``): pack ``--sft_hf_dataset`` conversations per micro-batch instead of padding each to ``--seq_length``, override the MoE load-balancing loss weight (e.g. 0 for padded SFT data), and select fused DeepSeek sparse-attention kernels for long sequences.
 - Add ``--fake_quant_weight_cache`` to ``examples/megatron_bridge/distill.py`` to fake-quantize each student weight once per QAD step instead of once per micro-batch and activation recomputation. It costs an extra BF16 copy of the student's quantized weights per GPU.
 - Add ``--document_boundaries`` to ``examples/megatron_bridge/distill.py`` to attend within each document of a pre-tokenized window, and ``tokenizer`` / ``max_length`` / ``pack_max_tokens`` to ``chat_jsonl`` blends to drop conversations with nothing to train and pair the rest for ``--sft_in_batch_packing``. Packed distillation of Gated DeltaNet models needs ``flash-linear-attention`` >= 0.5.2 (earlier versions compute it wrongly); install ``examples/megatron_bridge/requirements.txt`` in ``nemo:26.08``.

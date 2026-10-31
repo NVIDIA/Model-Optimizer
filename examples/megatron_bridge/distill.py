@@ -24,6 +24,7 @@ import argparse
 import contextlib
 import inspect
 import os
+import re
 from pathlib import Path
 
 import torch
@@ -316,6 +317,21 @@ def get_args():
         "token, so with --sft padding it also sends gradient into the padded positions.",
     )
     parser.add_argument(
+        "--freeze_router",
+        action="store_true",
+        help="Freeze the student's MoE routers and stop their expert-bias updates. Pass "
+        "--moe_aux_loss_coeff 0 as well: the aux loss still sends gradient to earlier layers "
+        "through the router logits.",
+    )
+    parser.add_argument(
+        "--train_moe_expert_fc_only",
+        action="store_true",
+        help="Train only the student's routed-expert FC weights; freeze everything else, routers "
+        "included, except the decoder's final norm (kept trainable so the dense optimizer is not "
+        "empty). Requires --pp_size 1, cannot be combined with a LoRA student, and needs "
+        "--moe_aux_loss_coeff 0.",
+    )
+    parser.add_argument(
         "--fake_quant_weight_cache",
         action="store_true",
         help="QAD: fake-quantize each student weight once per training step and reuse it for every "
@@ -471,6 +487,10 @@ def get_args():
         raise ValueError("--checkpoint_keep_last must be >= -1.")
     if args.validate_only and args.eval_iters == 0:
         raise ValueError("--validate_only requires --eval_iters > 0.")
+    if args.train_moe_expert_fc_only and args.pp_size > 1:
+        # Only the last stage holds the final norm, so the other stages would have no trainable
+        # dense parameter and an empty dense optimizer.
+        raise ValueError("--train_moe_expert_fc_only requires --pp_size 1.")
     if args.pp_size == 1 and (
         args.num_layers_in_first_pipeline_stage or args.num_layers_in_last_pipeline_stage
     ):
@@ -605,6 +625,54 @@ def _add_document_boundaries() -> None:
     GPTDataset.__getitem__ = getitem_with_boundaries
 
 
+_DECODER_FINAL_NORM = re.compile(r"(^|\.)decoder\.final_(layernorm|norm)\.")
+
+
+def _freeze_student_params(
+    student: torch.nn.Module, *, freeze_router: bool, expert_fc_only: bool, check_layout: bool
+) -> tuple[int, int]:
+    """Set ``requires_grad`` for ``--freeze_router`` / ``--train_moe_expert_fc_only``.
+
+    Returns the (trainable, frozen) parameter counts. With ``check_layout`` (a single pipeline
+    stage holds every layer), raise if the option matched nothing, so it is not silently ignored.
+    """
+    named = list(student.named_parameters())
+    if expert_fc_only and any(name.endswith((".lora_A", ".lora_B")) for name, _ in named):
+        # LoRA training freezes the backbone and trains the adapters; this mode would freeze the
+        # adapters and train the base experts instead, silently undoing that policy.
+        raise ValueError("--train_moe_expert_fc_only cannot be combined with a LoRA student.")
+    trainable = frozen = 0
+    routers = experts = dense = 0
+    for name, param in named:
+        is_router = ".router." in name
+        is_expert = ".mlp.experts." in name
+        # Keep the final norm trainable in expert-only mode: with every dense parameter frozen, the
+        # dense distributed optimizer is empty and checkpoint saving crashes on it.
+        # Match the decoder's norm by path: an MTP head has its own ``final_layernorm``.
+        keep_dense = expert_fc_only and _DECODER_FINAL_NORM.search(name) is not None
+        freeze = (not is_expert and not keep_dense) if expert_fc_only else is_router
+        # Only ever freeze: a parameter an earlier step froze (e.g. the LoRA restore) stays frozen.
+        if freeze:
+            param.requires_grad_(False)
+        routers += is_router
+        experts += is_expert
+        if param.requires_grad:
+            trainable += param.numel()
+            dense += not is_expert
+        else:
+            frozen += param.numel()
+    if check_layout:
+        if freeze_router and not routers:
+            raise ValueError("--freeze_router found no MoE router parameter in the student.")
+        if expert_fc_only and not experts:
+            raise ValueError("--train_moe_expert_fc_only found no routed-expert parameter.")
+        if expert_fc_only and not dense:
+            raise ValueError(
+                "--train_moe_expert_fc_only left no trainable dense parameter (final norm not found)."
+            )
+    return trainable, frozen
+
+
 class FakeQuantWeightCache(Callback):
     """Fake-quantize each student weight once per training step instead of once per micro-batch."""
 
@@ -683,6 +751,8 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         set_moe_expert_layout(provider, moe_grouped_gemm)
         if args.moe_aux_loss_coeff is not None:
             provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
+        if args.freeze_router or args.train_moe_expert_fc_only:
+            provider.moe_router_bias_update_rate = 0.0
         if per_token_loss:
             provider.calculate_per_token_loss = True
         if args.recompute_granularity is not None:
@@ -751,6 +821,39 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         kd_config,
         distill_submodule="language_model" if is_vlm else None,
     )
+
+    # Registered before the QAD restore hook below, which is prepended after it: the restore runs
+    # first, so it cannot recreate a parameter or reset ``requires_grad`` after the freeze.
+    if args.freeze_router or args.train_moe_expert_fc_only:
+
+        def _freeze_student_hook(model_chunks):
+            student = unwrap_model(model_chunks[0])
+            trainable, frozen = _freeze_student_params(
+                student,
+                freeze_router=args.freeze_router,
+                expert_fc_only=args.train_moe_expert_fc_only,
+                check_layout=args.pp_size == 1,
+            )
+            if args.train_moe_expert_fc_only:
+                # With the embedding frozen no activation requires grad, so the checkpointed first
+                # layers would silently get no parameter gradients.
+                for module in student.modules():
+                    if type(module).__name__ == "LanguageModelEmbedding":
+                        module.register_forward_hook(
+                            lambda _m, _i, out: (
+                                out.requires_grad_(True)
+                                if torch.is_tensor(out) and not out.requires_grad
+                                else out
+                            )
+                        )
+            print_rank_0(
+                f"Student params: {trainable:,} trainable, {frozen:,} frozen "
+                f"(freeze_router={args.freeze_router}, "
+                f"train_moe_expert_fc_only={args.train_moe_expert_fc_only}) on this rank."
+            )
+            return model_chunks
+
+        distill_provider.register_pre_wrap_hook(_freeze_student_hook, prepend=True)
 
     if args.student_megatron_path:
         # QAD: restore the quantized student weights + ModelOpt state before the KD conversion (a no-op
