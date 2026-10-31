@@ -525,6 +525,29 @@ def sparsity_main(
     mts.export(full_model)
 
 
+def _restore_quantized_state_if_requested(args: argparse.Namespace, full_model: torch.nn.Module) -> bool:
+    """Restore a previously-calibrated ModelOpt state and skip calibration.
+
+    Returns True if a restore happened (caller should skip mono_quantize).
+    """
+    if args.restore_quantized_state is None:
+        return False
+    print(
+        f"Restoring quantized state from {args.restore_quantized_state}; skipping calibration."
+    )
+    mto.restore(full_model, args.restore_quantized_state)
+    return True
+
+
+def _save_quantized_state_if_requested(args: argparse.Namespace, full_model: torch.nn.Module) -> None:
+    """Save the just-calibrated ModelOpt state, if requested, so a later export-only retry can
+    restore it via --restore_quantized_state instead of repeating calibration."""
+    if args.save_quantized_state is None:
+        return
+    print(f"Saving quantized state to {args.save_quantized_state}")
+    mto.save(full_model, args.save_quantized_state)
+
+
 def mono_quantize(
     args: argparse.Namespace,
     quant_cfg: dict[str, Any],
@@ -943,6 +966,17 @@ def quantize_main(
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
 ):
+    if _restore_quantized_state_if_requested(args, full_model):
+        # Restore mode retries a failed/interrupted export from a previously calibrated state,
+        # so none of the calibration-only work below (batch-size probing, calibration
+        # dataloader construction, the pre-quantize generation preview) is needed -- go
+        # straight to export, with no before/after generation comparison.
+        export_quantized(args, full_model, language_model, model_type)
+        return
+
+    # Detect if this is a Nemotron VL model using architecture-based detection.
+    is_nemotron_vl_model = is_nemotron_vl(full_model)
+
     # Load the recipe up front so we can detect layerwise calibration before batch-size probing.
     recipe = None
     if args.recipe is not None:
@@ -1072,9 +1106,6 @@ def quantize_main(
         ),
     )
 
-    # Detect if this is a Nemotron VL model using architecture-based detection
-    is_nemotron_vl_model = is_nemotron_vl(full_model)
-
     preview_input_ids, preview_attention_mask, generated_ids_before_ptq = pre_quantize(
         args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
     )
@@ -1126,6 +1157,7 @@ def quantize_main(
 
         quant_cfg = _prepare_quant_cfg(args, quant_cfg, full_model)
 
+        quantized_this_run = bool(quant_cfg)
         if quant_cfg:
             mono_quantize(
                 args,
@@ -1149,6 +1181,10 @@ def quantize_main(
         # The cast reads the source MXFP4 ``*_scales``/``*_blocks`` tensors from the local
         # checkpoint directory main() downloaded.
         apply_cast_mxfp4_to_nvfp4(language_model, args.local_checkpoint_path)
+
+    # Save after the cast (if any) so a restore later reflects what actually gets exported.
+    if quantized_this_run:
+        _save_quantized_state_if_requested(args, full_model)
 
     post_quantize(
         args,
@@ -1375,6 +1411,27 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--save_quantized_state",
+        type=str,
+        default=None,
+        help=(
+            "Path to save the calibrated model (full weights plus ModelOpt state, so expect a "
+            "file as large as the model) after calibration completes, before export. Lets a "
+            "failed or interrupted export be retried via --restore_quantized_state without "
+            "repeating calibration. Plain (non-AutoQuantize) recipe/qformat path only."
+        ),
+    )
+    parser.add_argument(
+        "--restore_quantized_state",
+        type=str,
+        default=None,
+        help=(
+            "Path to a ModelOpt state previously written by --save_quantized_state. When set, "
+            "calibration is skipped entirely and the saved state is restored onto the model "
+            "before proceeding straight to export."
+        ),
+    )
+    parser.add_argument(
         "--kv_auto_quantize_checkpoint",
         type=str,
         default=None,
@@ -1475,6 +1532,19 @@ def parse_args() -> argparse.Namespace:
         parser.error(
             "--low_memory_mode does not support --recipe; the low-memory loader initializes "
             "quantizers from --qformat/--kv_cache_qformat."
+        )
+    if args.save_quantized_state is not None and args.restore_quantized_state is not None:
+        parser.error(
+            "--save_quantized_state and --restore_quantized_state are mutually exclusive: "
+            "restoring a saved state skips calibration, so there is nothing new to save."
+        )
+    if (
+        args.save_quantized_state is not None or args.restore_quantized_state is not None
+    ) and _recipe_is_auto_quantize(args.recipe):
+        parser.error(
+            "--save_quantized_state/--restore_quantized_state are only supported for the plain "
+            "(non-AutoQuantize) recipe/qformat path; AutoQuantize's search state is not a single "
+            "quantized model state."
         )
     if args.use_fsdp2 and args.use_seq_device_map:
         warnings.warn("--use_seq_device_map is ignored when --use_fsdp2 is set.")
