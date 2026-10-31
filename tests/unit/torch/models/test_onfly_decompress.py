@@ -23,6 +23,7 @@ compressed checkpoints, skip when it cannot be imported.
 """
 
 import copy
+import importlib.metadata
 import json
 import sys
 from concurrent.futures import Future
@@ -847,7 +848,7 @@ def test_a_checkpoint_whose_experts_are_not_its_one_compressed_group_is_refused(
     experts no group targets are stored as plain weights the rewritten converters would not find."""
     pytest.importorskip(
         "compressed_tensors",
-        minversion=onfly._MIN_COMPRESSED_TENSORS,
+        minversion="0.16",
         reason="needs compressed-tensors (CI's unit session installs it)",
     )
     config = SimpleNamespace(quantization_config=_pack_quantized(**groups))
@@ -867,7 +868,7 @@ def test_the_format_is_the_one_group_s_own_and_must_have_a_compressor(top, group
     refused by this module, rather than failing inside the library's registry."""
     pytest.importorskip(
         "compressed_tensors",
-        minversion=onfly._MIN_COMPRESSED_TENSORS,
+        minversion="0.16",
         reason="needs compressed-tensors (CI's unit session installs it)",
     )
     experts = _int4(True, EXPERTS)
@@ -885,7 +886,7 @@ def test_the_format_is_the_one_group_s_own_and_must_have_a_compressor(top, group
 def test_a_compressed_tensors_before_per_scheme_compressors_is_refused_by_its_release(monkeypatch):
     """compressed-tensors 0.13 states a compressor's parameter names as a property, which a call
     by scheme fails on deep in the setup; such a release is refused first, naming the one needed."""
-    ct = pytest.importorskip(
+    pytest.importorskip(
         "compressed_tensors", reason="needs compressed-tensors (CI's unit session installs it)"
     )
     from compressed_tensors.compressors.base import BaseCompressor
@@ -897,13 +898,18 @@ def test_a_compressed_tensors_before_per_scheme_compressors_is_refused_by_its_re
         def compression_param_names(self):
             return ("weight_packed", "weight_scale")
 
-    monkeypatch.setattr(ct, "__version__", "0.13.0")
+    installed = importlib.metadata.version
+    monkeypatch.setattr(
+        importlib.metadata,
+        "version",
+        lambda name: "0.13.0" if name == "compressed-tensors" else installed(name),
+    )
     monkeypatch.setattr(
         BaseCompressor, "get_value_from_registry", staticmethod(lambda name: _PropertyForm)
     )
     config = SimpleNamespace(quantization_config=_pack_quantized(moe=_int4(True, EXPERTS)))
 
-    with pytest.raises(RuntimeError, match=r"compressed-tensors >= 0\.16\.0, but 0\.13\.0"):
+    with pytest.raises(ImportError, match=r"compressed-tensors>=0\.16 is required.*==0\.13\.0"):
         onfly._read_compression(config)
 
 
@@ -976,7 +982,7 @@ def test_a_compressed_checkpoint_loads_exactly_and_saves_under_its_own_names(tmp
     and the export names its expanded experts after them."""
     pytest.importorskip(
         "compressed_tensors",
-        minversion=onfly._MIN_COMPRESSED_TENSORS,
+        minversion="0.16",
         reason="needs compressed-tensors (CI's unit session installs it)",
     )
     from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
@@ -1008,7 +1014,7 @@ def test_a_load_the_decompressor_did_not_mark_casts_as_before(tmp_path):
     a later load of a model no config of which was marked casts it to its float parameter."""
     pytest.importorskip(
         "compressed_tensors",
-        minversion=onfly._MIN_COMPRESSED_TENSORS,
+        minversion="0.16",
         reason="needs compressed-tensors (CI's unit session installs it)",
     )
     onfly.install_onfly_decompress(
