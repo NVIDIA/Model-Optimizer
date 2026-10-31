@@ -35,10 +35,10 @@ __all__ = [
 
 
 def ep_degree() -> str:
-    """Expert-parallel degree knob for ``resolve_distribution_plan``; ``""``/unset -> ``"auto"``."""
-    return os.environ.get("MODELOPT_EP_DEGREE") or "auto"
+    """Expert-parallel degree knob for ``resolve_distribution_plan``; blank/unset -> ``"auto"``."""
+    return (os.environ.get("MODELOPT_EP_DEGREE") or "").strip() or "auto"
 
 
 def fsdp_size() -> str:
-    """Dense-sharding knob for ``resolve_distribution_plan``; ``""``/unset -> ``"auto"``."""
-    return os.environ.get("MODELOPT_FSDP_SIZE") or "auto"
+    """Dense-sharding knob for ``resolve_distribution_plan``; blank/unset -> ``"auto"``."""
+    return (os.environ.get("MODELOPT_FSDP_SIZE") or "").strip() or "auto"
