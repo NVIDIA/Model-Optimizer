@@ -1844,6 +1844,30 @@ def test_a_sharded_load_is_refused_inside_init_quantized_weights(
 
 
 @needs_qwen3_moe_ep_plan
+@pytest.mark.parametrize("handed", [False, True], ids=["knob", "handed"])
+def test_an_expert_parallel_load_is_refused_inside_init_quantized_weights(
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, handed
+):
+    """The expert-parallel load never calls from_pretrained either, and its way to a whole model on
+    every rank sets the EP degree to 1 as well, as the decision refuses to replicate an MoE unasked."""
+    run_as(2, rank=1)
+    serve(_qwen3_moe(num_experts=8))
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+    monkeypatch.setenv("MODELOPT_EP_DEGREE", "2")
+    plan = {"distribution": DistributionPlan(2, 2)} if handed else {}
+
+    with (
+        init_quantized_weights(mtq.INT8_DEFAULT_CFG),
+        pytest.raises(
+            NotImplementedError,
+            match=r"expert-parallel load .*init_quantized_weights.*DistributionPlan\(2, 1, 'replicate'\)",
+        ),
+    ):
+        load_pretrained(str(tmp_path), **plan)
+    assert loaders == {}
+
+
+@needs_qwen3_moe_ep_plan
 @pytest.mark.parametrize(
     "options",
     [{"device_map": "auto"}, {"freeze": True, "require_lm_head": False}],
