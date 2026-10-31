@@ -60,7 +60,8 @@ from vllm.v1.core.sched.output import SchedulerOutput
 
 from .hf_streaming_dataset import nixl_backends_from_env
 
-logger = init_logger(__name__)
+# Under vllm.*: vLLM configures only its own logger tree, so a modelopt.* logger's INFO is dropped.
+logger = init_logger(f"vllm.{__name__}")
 
 
 def planes_dim(kv_cache, n_planes: int) -> int:
@@ -109,6 +110,13 @@ def extract_from_kv_cache(kv_cache, slot_mapping, num_tokens, pdim: int = 2):
         block_size = kv_cache.shape[1]
         out = kv_cache[slot_mapping // block_size, slot_mapping % block_size]
     return out[:num_tokens]
+
+
+def _request_slots(block_ids, num_tokens: int, block_size: int, device=None):
+    """Cache slots of a request's first ``num_tokens`` tokens, addressed through its own blocks."""
+    blocks = torch.as_tensor(block_ids, dtype=torch.long, device=device)
+    pos = torch.arange(num_tokens, device=device)
+    return blocks[pos // block_size] * block_size + pos % block_size
 
 
 def _group_holds_hidden_state(group_spec) -> bool:
@@ -263,11 +271,6 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     See the module docstring for the pooled design and scope.
     """
 
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        """Keep the capture layer's blocks separate from the drafter's KV cache."""
-        return False
-
     def __init__(self, vllm_config, role, kv_cache_config):
         """Read pool/sidecar config from ``kv_connector_extra_config`` and init state."""
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
@@ -298,7 +301,6 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._accum_finished: set[str] = set()
         self._oversize_warned = False  # one-shot guard against log spam on oversized prompts
         self._num_blocks = 0
-        self._firstcap_dumped = False
         self._slotcheck_left = 8  # bounded deep validation; the cheap bound check is always on
         self._lock = threading.Lock()
         # scheduler state
@@ -359,35 +361,30 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._planes_dim = planes_dim(kv, n_planes)
         self._cache_block_size = kv.shape[2] if self._planes_dim == 1 else kv.shape[1]
         self._num_blocks = kv.shape[0]
-        # The block ids we address with come from the scheduler, per kv-cache group. If the
-        # group we picked is not this cache's, its ids index a different (usually much
-        # larger) pool -- and because every group starts allocating from low ids, the first
-        # requests can look fine and only later requests run off the end. Dump what we
-        # resolved so that mismatch is visible at startup rather than as an assert later.
-        for i, g in enumerate(getattr(self._kv_cache_config, "kv_cache_groups", None) or []):
-            spec = g.kv_cache_spec
-            print(
-                f"[HSCONN] kv-cache group {i}: spec={type(spec).__name__} "
-                f"layers={len(g.layer_names)} spec_block_size={getattr(spec, 'block_size', '?')}"
-                f"{'  <-- capturing from this one' if i == self._hs_group else ''}",
-                flush=True,
-            )
-        print(
-            f"[HSCONN] capture cache view {tuple(kv.shape)} planes_dim={self._planes_dim} "
-            f"blocks={self._num_blocks} block_size={self._cache_block_size}",
-            flush=True,
-        )
         self._feat_shape = (
             (kv.shape[1], kv.shape[3]) if self._planes_dim == 1 else tuple(kv.shape[2:])
         )
         self._per_token_elems = int(prod(self._feat_shape))
+        # The block ids we address with come from the scheduler, per kv-cache group. If the
+        # group we picked is not this cache's, its ids index a different (usually much
+        # larger) pool -- and because every group starts allocating from low ids, the first
+        # requests can look fine and only later requests run off the end. Log what we
+        # resolved so that mismatch is visible at startup rather than as an assert later.
+        groups = getattr(self._kv_cache_config, "kv_cache_groups", None) or []
         logger.info(
-            "RdmaHiddenStatesConnector: hidden-state cache view %s -> %d planes x %d "
-            "hidden (planes on dim %d)",
+            "RdmaHiddenStatesConnector: capturing from kv-cache group %d of %s; cache view "
+            "%s -> %d planes x %d hidden (planes on dim %d), %d blocks of %d tokens",
+            self._hs_group,
+            [
+                (type(g.kv_cache_spec).__name__, len(g.layer_names), g.kv_cache_spec.block_size)
+                for g in groups
+            ],
             tuple(kv.shape),
             self._feat_shape[0],
             self._feat_shape[1],
             self._planes_dim,
+            self._num_blocks,
+            self._cache_block_size,
         )
         self._dtype = kv.dtype
         self._slot_elems = self._max_tokens * self._per_token_elems
@@ -530,9 +527,7 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                 # into a run, not reproducibly, and never pointing at this line. The code
                 # this replaced was safe only incidentally: it sliced vLLM's long-lived
                 # slot_mapping rather than allocating anything.
-                blocks = torch.as_tensor(req.block_ids, dtype=torch.long, device=device)
-                pos = torch.arange(n, device=device)
-                rsm = blocks[pos // block_size] * block_size + (pos % block_size)
+                rsm = _request_slots(req.block_ids, n, block_size, device)
                 if self._slotcheck_left > 0:
                     # Bounded deep check: every derived slot must be one this step actually
                     # writes. torch.isin over the batch is not free, so only the first few.
@@ -578,9 +573,9 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """Assign each newly scheduled request a ring-pool slot for this step.
 
-        ``save_kv_layer`` walks ``slot_mapping`` with a running offset, so it needs each
-        prompt computed whole in one step; assert that here (chunked prefill would split
-        it and silently misalign the capture).
+        A request is captured once, in the step that first schedules it, from the blocks it
+        holds then. Under chunked prefill that step computes only the first chunk and
+        ``block_ids`` covers only that chunk, so require the whole prompt here.
         """
         meta = RdmaConnMeta()
         for nr in scheduler_output.scheduled_new_reqs:
