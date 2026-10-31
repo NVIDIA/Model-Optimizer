@@ -1,0 +1,93 @@
+# DFlash2 drafter for meta-models/Muse-Spark-Open-816B-A42B, stage 1 of 2 (streaming):
+# reproduces the training of nvidia/Muse-Spark-Open-816B-A42B-DFlash2 up to the checkpoint
+# stage 2 starts from. Stage 2 is hf_streaming_dflash2_long_context.yaml next to this file.
+#
+# The drafter, objective and schedule live in the recipe this points at,
+#   modelopt_recipes/models/meta-models/Muse-Spark-Open-816B-A42B/speculative_decoding/
+#     dflash2.yaml
+# (its README.md covers the training data and the results); this file holds the cluster and
+# serve settings.
+#
+# Shape: 14 serve + 8 trainer nodes of 4 GB300 GPUs, ~0.35 s/step (390,000 steps in ~38 h).
+# Each serve node runs one replica of the NVFP4 target with TP4 and expert parallelism, and
+# one replica delivers ~12 samples/s of 4K tokens, so fewer serve nodes slow the trainers down.
+#
+# Muse-Spark specifics:
+#   * EAGLE_CAPTURE_IDS = recipe target_layer_ids [3,19,31,47,59] + 1 (post-layer, 1-based),
+#     plus 62 = the final layer, whose hidden state is the distillation teacher.
+#   * SERVE_BLOCK_SIZE=256: vLLM pads the hidden-state page up to the attention page, which
+#     needs block size >= 32 x the 6 captured layers.
+#   * --language-model-only: the training data is text, so the serve skips the vision and
+#     audio towers.
+#   * HS_MAX_TOKENS, the hidden-state slot size, must cover training.training_seq_len.
+#   * The script installs examples/speculative_decoding/requirements.txt on every node, which
+#     pins transformers<5.13, and that version rejects the `window_attention` layer type in the
+#     checkpoint's vision_config: vllm serve then fails to parse config.json. Serve a copy whose
+#     config.json says `full_attention` there instead (the weights can be symlinks). The vision
+#     tower is never built under --language-model-only, so nothing else changes.
+#
+# Run ON the cluster login node:
+#   export SLURM_HOST=localhost SLURM_ACCOUNT=<your_account> \
+#          SLURM_PARTITION=<multi_node_partition> \
+#          SLURM_HF_LOCAL=<hf_models_dir> \
+#          SLURM_JOB_DIR=<experiments_dir> \
+#          NEMORUN_HOME=$PWD
+#   uv run launch.py --yaml examples/meta-models/Muse-Spark-Open-816B-A42B/hf_streaming_dflash2.yaml \
+#          identity=$HOME/.ssh/id_ecdsa detach=True --yes
+#
+# A resubmitted job resumes from the latest checkpoint in training.output_dir. Stage 2 starts
+# from the export of checkpoint-390000, not of the last checkpoint, and the recipe keeps only
+# the last three: stop the job once checkpoint-390000 is written (the release did not use the
+# remaining 44,744 steps), or copy it out before checkpoint-397500 is written. Export it with
+#   scripts/export_hf_checkpoint.py --model_path <output_dir>/checkpoint-390000
+
+job_name: Muse-Spark-Open-816B-A42B_DFlash2_streaming
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    # The NVFP4 checkpoint, one replica per 4-GPU GB300 node; its vision_config patched (see header).
+    hf_model: /hf-local/meta-models/Muse-Spark-Open-816B-A42B-NVFP4
+
+  task_0:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/models/meta-models/Muse-Spark-Open-816B-A42B/speculative_decoding/dflash2.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.data_path=<path to the synthesized corpus>
+      - training.output_dir=/scratchspace/dflash2
+      # The vLLM serve container has no tensorboard.
+      - training.report_to=none
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - EAGLE_CAPTURE_IDS: "[4,20,32,48,60,62]"
+      - SERVE_NODES: "14"
+      - SERVE_TP: "4"
+      - SERVE_ENABLE_EP: "1"
+      - SERVE_EXTRA_ARGS: "--language-model-only"
+      - SERVE_BLOCK_SIZE: "256"
+      - SERVE_MAX_MODEL_LEN: "4608"
+      - SERVE_MAX_NUM_SEQS: "32"
+      - SERVE_GPU_MEM_UTIL: "0.9"
+      # Loading 500 GB of weights on every replica can take tens of minutes.
+      - SERVE_READY_TIMEOUT: "3600"
+      - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
+      - HS_MAX_TOKENS: "4608"
+      - HS_POOL_SLOTS: "64"
+      - STREAMING_NUM_WORKERS: "8"
+      # RDMA transport is UCX (InfiniBand) by default. On AWS EFA, uncomment:
+      # - NIXL_BACKENDS: "LIBFABRIC"
+      # - FI_PROVIDER: "efa"
+      # - NCCL_IB_DISABLE: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 22
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      # The launcher asks for 4 h unless told otherwise.
+      time: "16:00:00"
+      # A vLLM build that serves Muse-Spark-Open with the extract_hidden_states method.
+      container: <vllm-image-with-muse-spark>

@@ -45,6 +45,7 @@ from modelopt.torch.speculative.plugins.modeling_dflash2 import (
     DFlash2Module,
     DFlashGroupedConv,
 )
+from modelopt.torch.speculative.plugins.modeling_fakebase import _SoftCappedLMHead
 
 BLOCK_SIZE = 4
 NUM_DRAFT_LAYERS = 2
@@ -608,8 +609,11 @@ class TestDFlash2BlockObjective:
 class TestDFlash2Export:
     """Test the DFlash2 export format (weights + config)."""
 
-    def _export(self, tmp_path):
+    def _export(self, tmp_path, lm_head=None):
         model = get_tiny_llama(num_hidden_layers=4)
+        if lm_head is not None:
+            lm_head.weight.data.copy_(model.lm_head.weight.data)
+            model.lm_head = lm_head
         mtsp.convert(model, [("dflash", _get_dflash2_config())])
         export_dir = tmp_path / "exported"
         model.get_exporter().export(export_dir)
@@ -654,3 +658,22 @@ class TestDFlash2Export:
         assert dflash_config["selector_top_k"] == SELECTOR_TOP_K
         assert "mask_token_id" in dflash_config
         assert "target_layer_ids" in dflash_config
+        assert "output_multiplier" not in dflash_config
+        assert "final_logit_softcapping" not in dflash_config
+
+    def test_export_config_carries_the_target_logit_transform(self, tmp_path):
+        """vLLM's DFlash2 applies the target's logit transform only if dflash_config says so.
+
+        Without it the served draft's logits come out unscaled and uncapped while training
+        saw them transformed: the draft distribution is too sharp, which costs acceptance
+        under sampling.
+        """
+        model = get_tiny_llama(num_hidden_layers=4)
+        hidden, vocab = model.config.hidden_size, model.config.vocab_size
+        head = _SoftCappedLMHead(
+            hidden, vocab, bias=False, logits_multiplier=0.25, logits_soft_cap=20.0
+        )
+        with open(self._export(tmp_path, lm_head=head) / "config.json") as f:
+            dflash_config = json.load(f)["dflash_config"]
+        assert dflash_config["output_multiplier"] == 0.25
+        assert dflash_config["final_logit_softcapping"] == 20.0

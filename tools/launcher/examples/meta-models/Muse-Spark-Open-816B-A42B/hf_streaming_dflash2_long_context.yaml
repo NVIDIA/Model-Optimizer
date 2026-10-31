@@ -1,0 +1,62 @@
+# DFlash2 drafter for meta-models/Muse-Spark-Open-816B-A42B, stage 2 of 2 (streaming):
+# continues the stage-1 export (hf_streaming_dflash2.yaml, checkpoint-390000) at 12K tokens
+# on the corpus's long samples. The released nvidia/Muse-Spark-Open-816B-A42B-DFlash2 is
+# checkpoint-25000 of this run (~6 h on this shape); later checkpoints did not improve
+# acceptance. The recipe keeps only the last three checkpoints, so stop the job once
+# checkpoint-25000 is written, or copy it out before checkpoint-32500 is written. Export it with
+#   scripts/export_hf_checkpoint.py --model_path <output_dir>/checkpoint-25000
+#
+# Recipe:
+#   modelopt_recipes/models/meta-models/Muse-Spark-Open-816B-A42B/speculative_decoding/
+#     dflash2_long_context.yaml
+# Serve settings as in stage 1, except that each request is 3x longer: HS_MAX_TOKENS and
+# SERVE_MAX_MODEL_LEN cover the 12,288-token sequences and SERVE_MAX_NUM_SEQS is lower.
+#
+# Run ON the cluster login node, with the environment from stage 1:
+#   uv run launch.py --yaml examples/meta-models/Muse-Spark-Open-816B-A42B/hf_streaming_dflash2_long_context.yaml \
+#          identity=$HOME/.ssh/id_ecdsa detach=True --yes
+
+job_name: Muse-Spark-Open-816B-A42B_DFlash2_long_context_streaming
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    # The same patched copy as stage 1 (see that file's header).
+    hf_model: /hf-local/meta-models/Muse-Spark-Open-816B-A42B-NVFP4
+
+  task_0:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/models/meta-models/Muse-Spark-Open-816B-A42B/speculative_decoding/dflash2_long_context.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      # The stage-1 export (a deployment checkpoint, not a training one).
+      - dflash.dflash_init_checkpoint=<path to the stage-1 export>
+      - data.data_path=<path to the long samples of the synthesized corpus>
+      - training.output_dir=/scratchspace/dflash2_long_context
+      - training.report_to=none
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - EAGLE_CAPTURE_IDS: "[4,20,32,48,60,62]"
+      - SERVE_NODES: "14"
+      - SERVE_TP: "4"
+      - SERVE_ENABLE_EP: "1"
+      - SERVE_EXTRA_ARGS: "--language-model-only"
+      - SERVE_BLOCK_SIZE: "256"
+      - SERVE_MAX_MODEL_LEN: "12800"
+      - SERVE_MAX_NUM_SEQS: "8"
+      - SERVE_GPU_MEM_UTIL: "0.9"
+      - SERVE_READY_TIMEOUT: "3600"
+      - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
+      - HS_MAX_TOKENS: "12288"
+      - HS_POOL_SLOTS: "64"
+      - STREAMING_NUM_WORKERS: "8"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 22
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      time: "16:00:00"
+      container: <vllm-image-with-muse-spark>

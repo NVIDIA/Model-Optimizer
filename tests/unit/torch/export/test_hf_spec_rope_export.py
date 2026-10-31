@@ -122,6 +122,7 @@ def _make_dflash_exporter(dflash_export_rope_scaling=None, base_rope_theta=50000
         mask_token_id=999,
         target_layer_ids=[1, 3, 5, 7],
         dflash_export_rope_scaling=dflash_export_rope_scaling,
+        _base_model_lm_head=torch.nn.Linear(128, 1000, bias=False),  # no logit transform
     )
     exporter = DFlashExporter.__new__(DFlashExporter)
     exporter.model = model

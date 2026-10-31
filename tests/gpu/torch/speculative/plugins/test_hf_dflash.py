@@ -25,6 +25,7 @@ from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.plugins.dflash_flex_attention import is_block_mask
+from modelopt.torch.speculative.plugins.modeling_fakebase import _SoftCappedLMHead
 
 BLOCK_SIZE = 4
 NUM_DRAFT_LAYERS = 2
@@ -409,8 +410,17 @@ class TestDFlashFusedLossGPU:
     }
 
     @staticmethod
-    def _step(fused, overrides, arch):
+    def _step(fused, overrides, arch, soft_capped_head=False):
         model = get_tiny_llama(num_hidden_layers=4)
+        if soft_capped_head:  # as the fake base builds it for Muse-Spark
+            head = _SoftCappedLMHead(
+                *model.lm_head.weight.shape[::-1],
+                bias=False,
+                logits_multiplier=0.5,
+                logits_soft_cap=3.0,
+            )
+            head.weight.data.copy_(model.lm_head.weight.data)
+            model.lm_head = head
         config = get_dflash_config()
         config.update(dflash_fused_loss=fused, **overrides)
         config["dflash_architecture_config"].update(arch)
@@ -425,19 +435,21 @@ class TestDFlashFusedLossGPU:
         return out, {name: p.grad for name, p in params if p.grad is not None}
 
     @pytest.mark.parametrize(
-        ("overrides", "arch"),
+        ("overrides", "arch", "soft_capped_head"),
         [
-            ({}, {}),  # KD on the base's logits, D-PACE weighting
+            ({}, {}, False),  # KD on the base's logits, D-PACE weighting
             (
                 {"dflash_self_logit_distillation": False, "dflash_lk_loss_type": "lambda"},
                 DFLASH2_ARCH,
+                False,
             ),
+            ({}, DFLASH2_ARCH, True),  # the Muse-Spark recipe's loss
         ],
-        ids=["dflash-kd", "dflash2-selector"],
+        ids=["dflash-kd", "dflash2-selector", "dflash2-kd-soft-capped-head"],
     )
-    def test_matches_the_materialized_logits(self, overrides, arch):
-        eager, eager_grads = self._step(False, overrides, arch)
-        fused, fused_grads = self._step(True, overrides, arch)
+    def test_matches_the_materialized_logits(self, overrides, arch, soft_capped_head):
+        eager, eager_grads = self._step(False, overrides, arch, soft_capped_head)
+        fused, fused_grads = self._step(True, overrides, arch, soft_capped_head)
         torch.testing.assert_close(fused.loss, eager.loss)
         assert fused.train_acc == eager.train_acc
         assert fused_grads.keys() == eager_grads.keys()
