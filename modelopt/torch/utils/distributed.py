@@ -69,6 +69,7 @@ __all__ = [
     "is_master",
     "rank",
     "recorded_distribution_plan",
+    "reinstall_a2a_forwards",
     "set_distribution_plan",
     "shard_dataloader",
     "size",
@@ -860,8 +861,9 @@ def _reinstall_a2a_forwards(model, ep_mesh) -> int:
     rebinds ``module.forward`` on the same instance, dropping the wrapper -- after which
     ``torch_a2a_experts_forward`` receives ``process_group=None`` and raises.
 
-    Called at the top of the calibration loop: after conversion (so it wraps the QUANTIZED forward)
-    and before the first forward. Only a forward quantizer insertion rebound is planted again: a
+    Called at the top of the calibration loop, and through :func:`reinstall_a2a_forwards` right
+    after quantizing without one: after conversion (so it wraps the QUANTIZED forward) and
+    before the first forward. Only a forward quantizer insertion rebound is planted again: a
     wrapper still in place -- transformers' from the load, on a module quantization left alone, or
     one planted here on an earlier pass -- is kept, since wrapping it again would run its transforms
     twice. ``ep_mesh`` is the mesh the routed experts are sharded over; without one there is nothing
@@ -906,6 +908,16 @@ def _reinstall_a2a_forwards(model, ep_mesh) -> int:
             flush=True,
         )
     return n
+
+
+def reinstall_a2a_forwards(model, ep_mesh) -> int:
+    """Re-plant the routed experts' all-to-all forwards that quantizer insertion dropped.
+
+    For a caller that quantizes an expert-parallel model without :func:`distributed_forward_loop`,
+    which does it itself: a recipe that runs no calibration runs no loop. ``ep_mesh`` is the mesh the
+    experts are sharded over. Returns how many forwards it planted again.
+    """
+    return _reinstall_a2a_forwards(model, ep_mesh)
 
 
 def _release_cached_cuda_memory():
