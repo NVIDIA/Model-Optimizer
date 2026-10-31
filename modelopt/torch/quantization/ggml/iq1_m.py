@@ -47,6 +47,7 @@ from .common import (
     choice_blocks,
     chunk_importance,
     dequantize_blocks,
+    encode_every_choice,
     importance_blocks,
     narrow_to_float32,
     validate_block_chunk_size,
@@ -166,6 +167,7 @@ def quantize_iq1_m(
     block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
     importance: torch.Tensor | None = None,
     choices: torch.Tensor | None = None,
+    every_choice: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ1_M blocks.
 
@@ -173,12 +175,13 @@ def quantize_iq1_m(
     and ``[weight.ndim]``. ``importance``, a non-negative per-input-column vector, weights each
     value's squared error in the search, as llama.cpp's imatrix does. ``choices``,
     ``[*weight.shape[:-1], weight.shape[-1] // 256, 16]``, fixes each 16-value group's 3-bit local
-    scale.
+    scale. ``every_choice`` returns every choice's payload instead, each with that choice in
+    every group, ``[num_choices, *packed shape]``.
     """
     validate_weight(weight, "IQ1_M")
     validate_block_chunk_size(block_chunk_size)
     block_importance = importance_blocks(importance, weight, "IQ1_M")
-    block_choices = choice_blocks(choices, weight, 16, 8, "IQ1_M")
+    block_choices = choice_blocks(choices, weight, 16, 8, "IQ1_M", every_choice)
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ1_M_BLOCK_SIZE)
@@ -192,10 +195,19 @@ def quantize_iq1_m(
                 for start in range(0, blocks.shape[0], _SCALE_BLOCK_CHUNK_SIZE)
             ]
             packed = extension.iq1_m_pack(
-                blocks, grid, torch.cat(scale_chunks), block_importance, block_choices
+                blocks, grid, torch.cat(scale_chunks), block_importance, block_choices, every_choice
             )
-            return packed.reshape(packed_shape), logical_shape
+            return packed.reshape(*packed.shape[:-2], *packed_shape), logical_shape
 
+    if every_choice:
+        return encode_every_choice(
+            quantize_iq1_m,
+            weight,
+            16,
+            8,
+            block_chunk_size=block_chunk_size,
+            importance=importance,
+        )
     chunks = [
         _encode_blocks(
             blocks[start : start + block_chunk_size],

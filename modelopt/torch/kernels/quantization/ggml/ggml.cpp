@@ -23,17 +23,19 @@
 #include "common.cuh"
 
 at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid, std::optional<at::Tensor> importance,
-                           std::optional<at::Tensor> choices);
+                           std::optional<at::Tensor> choices, bool every_choice);
 at::Tensor iq2_xs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales,
-                            std::optional<at::Tensor> importance,
-                            std::optional<at::Tensor> choices);
+                            std::optional<at::Tensor> importance, std::optional<at::Tensor> choices,
+                            bool every_choice);
 at::Tensor iq2_xxs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales,
                              std::optional<at::Tensor> importance,
-                             std::optional<at::Tensor> choices);
+                             std::optional<at::Tensor> choices, bool every_choice);
 at::Tensor iq2_s_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales,
-                           std::optional<at::Tensor> importance, std::optional<at::Tensor> choices);
+                           std::optional<at::Tensor> importance, std::optional<at::Tensor> choices,
+                           bool every_choice);
 at::Tensor iq1_m_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales,
-                           std::optional<at::Tensor> importance, std::optional<at::Tensor> choices);
+                           std::optional<at::Tensor> importance, std::optional<at::Tensor> choices,
+                           bool every_choice);
 at::Tensor q8_0_pack_cuda(at::Tensor input);
 at::Tensor iq1_s_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
 at::Tensor iq1_m_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
@@ -59,10 +61,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              "zero during packing, and finite elements outside the float32 range saturate. "
              "An optional float32 importance [blocks per row, 256] weights each value's "
              "squared error in the search; flattened block i uses row i % rows. Optional integer "
-             "choices [blocks, groups] fix each group's choice instead of searching it.",
+             "choices [blocks, groups] fix each group's choice instead of searching it. With "
+             "every_choice, returns every choice's payload, each with that choice in every group, "
+             "as [choices, blocks, bytes].",
              pybind11::arg("input"), pybind11::arg("grid"),
              pybind11::arg("importance") = pybind11::none(),
-             pybind11::arg("choices") = pybind11::none());
+             pybind11::arg("choices") = pybind11::none(), pybind11::arg("every_choice") = false);
   module.def("iq2_xs_pack", &iq2_xs_pack_cuda,
              "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
              "dimension is a multiple of 256. The grid must be float32 [512, 8] holding "
@@ -72,10 +76,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              "treated as zero during packing, and finite elements outside the float32 range "
              "saturate. An optional float32 importance [blocks per row, 256] weights each value's "
              "squared error in the search; flattened block i uses row i % rows. Optional integer "
-             "choices [blocks, groups] fix each group's choice instead of searching it.",
+             "choices [blocks, groups] fix each group's choice instead of searching it. With "
+             "every_choice, returns every choice's payload, each with that choice in every group, "
+             "as [choices, blocks, bytes].",
              pybind11::arg("input"), pybind11::arg("grid"), pybind11::arg("scales"),
              pybind11::arg("importance") = pybind11::none(),
-             pybind11::arg("choices") = pybind11::none());
+             pybind11::arg("choices") = pybind11::none(), pybind11::arg("every_choice") = false);
   module.def("iq2_xxs_pack", &iq2_xxs_pack_cuda,
              "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
              "dimension is a multiple of 256. The grid must be float32 [256, 8] holding "
@@ -85,10 +91,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              "treated as zero during packing, and finite elements outside the float32 range "
              "saturate. An optional float32 importance [blocks per row, 256] weights each value's "
              "squared error in the search; flattened block i uses row i % rows. Optional integer "
-             "choices [blocks, groups] fix each group's choice instead of searching it.",
+             "choices [blocks, groups] fix each group's choice instead of searching it. With "
+             "every_choice, returns every choice's payload, each with that choice in every group, "
+             "as [choices, blocks, bytes].",
              pybind11::arg("input"), pybind11::arg("grid"), pybind11::arg("scales"),
              pybind11::arg("importance") = pybind11::none(),
-             pybind11::arg("choices") = pybind11::none());
+             pybind11::arg("choices") = pybind11::none(), pybind11::arg("every_choice") = false);
   module.def("iq2_s_pack", &iq2_s_pack_cuda,
              "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
              "dimension is a multiple of 256. The grid must be float32 [1024, 8] holding "
@@ -98,10 +106,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              "treated as zero during packing, and finite elements outside the float32 range "
              "saturate. An optional float32 importance [blocks per row, 256] weights each value's "
              "squared error in the search; flattened block i uses row i % rows. Optional integer "
-             "choices [blocks, groups] fix each group's choice instead of searching it.",
+             "choices [blocks, groups] fix each group's choice instead of searching it. With "
+             "every_choice, returns every choice's payload, each with that choice in every group, "
+             "as [choices, blocks, bytes].",
              pybind11::arg("input"), pybind11::arg("grid"), pybind11::arg("scales"),
              pybind11::arg("importance") = pybind11::none(),
-             pybind11::arg("choices") = pybind11::none());
+             pybind11::arg("choices") = pybind11::none(), pybind11::arg("every_choice") = false);
   module.def("iq1_m_pack", &iq1_m_pack_cuda,
              "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
              "dimension is a multiple of 256. The grid must be float32 [2048, 8], and scales must "
@@ -111,10 +121,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              "treated as zero during packing, and finite elements outside the float32 range "
              "saturate. An optional float32 importance [blocks per row, 256] weights each value's "
              "squared error in the search; flattened block i uses row i % rows. Optional integer "
-             "choices [blocks, groups] fix each group's choice instead of searching it.",
+             "choices [blocks, groups] fix each group's choice instead of searching it. With "
+             "every_choice, returns every choice's payload, each with that choice in every group, "
+             "as [choices, blocks, bytes].",
              pybind11::arg("input"), pybind11::arg("grid"), pybind11::arg("scales"),
              pybind11::arg("importance") = pybind11::none(),
-             pybind11::arg("choices") = pybind11::none());
+             pybind11::arg("choices") = pybind11::none(), pybind11::arg("every_choice") = false);
   module.def("q8_0_pack", &q8_0_pack,
              "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
              "dimension is a multiple of 32. Returns uint8 [numel / 32, 34] on the input device. "

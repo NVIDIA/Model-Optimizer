@@ -95,11 +95,11 @@ __global__ void find_scale(const scalar_t *input, int64_t num_blocks, __half *sc
 } // namespace
 
 at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid, std::optional<at::Tensor> importance,
-                           std::optional<at::Tensor> choices) {
+                           std::optional<at::Tensor> choices, bool every_choice) {
   check_pack_inputs("IQ1_S", input, grid, Format::kEntries);
   if (importance.has_value())
     check_importance("IQ1_S", input, *importance);
-  const auto fixed = checked_choices("IQ1_S", input, choices, Format::kGroups);
+  const auto fixed = checked_choices("IQ1_S", input, choices, Format::kGroups, every_choice);
   const auto values = input.contiguous();
   c10::cuda::CUDAGuard guard(values.device());
   const int64_t num_blocks = values.numel() / kBlockSize;
@@ -113,7 +113,7 @@ at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid, std::optional<at::
                 reinterpret_cast<__half *>(scales.data_ptr<at::Half>()));
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
-  return iq1_encode_blocks<Format>(values, grid, scales, importance, fixed);
+  return iq1_encode_blocks<Format>(values, grid, scales, importance, fixed, every_choice);
 }
 
 at::Tensor iq1_s_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype) {

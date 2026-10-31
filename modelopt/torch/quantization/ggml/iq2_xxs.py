@@ -45,6 +45,7 @@ from .common import (
     choice_blocks,
     chunk_importance,
     dequantize_blocks,
+    encode_every_choice,
     importance_blocks,
     iq2_tile_terms,
     narrow_to_float32,
@@ -204,6 +205,7 @@ def quantize_iq2_xxs(
     block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
     importance: torch.Tensor | None = None,
     choices: torch.Tensor | None = None,
+    every_choice: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ2_XXS blocks.
 
@@ -213,13 +215,14 @@ def quantize_iq2_xxs(
     treated as zero during packing. ``importance``, a non-negative per-input-column vector,
     weights each value's squared error in the search, as llama.cpp's imatrix does. ``choices``,
     ``[*weight.shape[:-1], weight.shape[-1] // 256, 8]``, fixes each 32-value sub-block's 4-bit
-    local scale.
+    local scale. ``every_choice`` returns every choice's payload instead, each with that choice in
+    every group, ``[num_choices, *packed shape]``.
     """
     validate_weight(weight, "IQ2_XXS")
     validate_block_chunk_size(block_chunk_size)
     block_importance = importance_blocks(importance, weight, "IQ2_XXS")
     block_choices = choice_blocks(
-        choices, weight, _IQ2_XXS_SUBBLOCKS, _IQ2_XXS_LOCAL_SCALES, "IQ2_XXS"
+        choices, weight, _IQ2_XXS_SUBBLOCKS, _IQ2_XXS_LOCAL_SCALES, "IQ2_XXS", every_choice
     )
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
@@ -238,10 +241,19 @@ def quantize_iq2_xxs(
                 for start in range(0, blocks.shape[0], _SCALE_BLOCK_CHUNK_SIZE)
             ]
             packed = extension.iq2_xxs_pack(
-                blocks, grid, torch.cat(scale_chunks), block_importance, block_choices
+                blocks, grid, torch.cat(scale_chunks), block_importance, block_choices, every_choice
             )
-            return packed.reshape(packed_shape), logical_shape
+            return packed.reshape(*packed.shape[:-2], *packed_shape), logical_shape
 
+    if every_choice:
+        return encode_every_choice(
+            quantize_iq2_xxs,
+            weight,
+            _IQ2_XXS_SUBBLOCKS,
+            _IQ2_XXS_LOCAL_SCALES,
+            block_chunk_size=block_chunk_size,
+            importance=importance,
+        )
     chunks = [
         _encode_blocks(
             blocks[start : start + block_chunk_size],

@@ -43,6 +43,7 @@ from .common import (
     choice_blocks,
     chunk_importance,
     dequantize_blocks,
+    encode_every_choice,
     importance_blocks,
     narrow_to_float32,
     validate_block_chunk_size,
@@ -218,6 +219,7 @@ def quantize_iq1_s(
     block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
     importance: torch.Tensor | None = None,
     choices: torch.Tensor | None = None,
+    every_choice: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ1_S blocks.
 
@@ -227,12 +229,13 @@ def quantize_iq1_s(
     treated as zero during packing. ``importance``, a non-negative per-input-column vector,
     weights each value's squared error in the search, as llama.cpp's imatrix does. ``choices``,
     ``[*weight.shape[:-1], weight.shape[-1] // 256, 8]``, fixes each 32-value group's 3-bit local
-    scale and delta sign, as ``shift * 8 + local``.
+    scale and delta sign, as ``shift * 8 + local``. ``every_choice`` returns every choice's payload
+    instead, each with that choice in every group, ``[num_choices, *packed shape]``.
     """
     validate_weight(weight, "IQ1_S")
     validate_block_chunk_size(block_chunk_size)
     block_importance = importance_blocks(importance, weight, "IQ1_S")
-    block_choices = choice_blocks(choices, weight, 8, 16, "IQ1_S")
+    block_choices = choice_blocks(choices, weight, 8, 16, "IQ1_S", every_choice)
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ1_S_BLOCK_SIZE)
@@ -240,14 +243,25 @@ def quantize_iq1_s(
     if weight.is_cuda:
         extension = get_cuda_ext_ggml()
         if extension is not None:
-            packed = extension.iq1_s_pack(blocks, grid, block_importance, block_choices)
+            packed = extension.iq1_s_pack(
+                blocks, grid, block_importance, block_choices, every_choice
+            )
             packed_shape = (
                 *weight.shape[:-1],
                 weight.shape[-1] // IQ1_S_BLOCK_SIZE,
                 IQ1_S_BLOCK_BYTES,
             )
-            return packed.reshape(packed_shape), logical_shape
+            return packed.reshape(*packed.shape[:-2], *packed_shape), logical_shape
 
+    if every_choice:
+        return encode_every_choice(
+            quantize_iq1_s,
+            weight,
+            8,
+            16,
+            block_chunk_size=block_chunk_size,
+            importance=importance,
+        )
     chunks = [
         _encode_blocks(
             blocks[start : start + block_chunk_size],
