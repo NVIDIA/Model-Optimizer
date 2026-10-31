@@ -132,15 +132,12 @@ def _refuse_unsupported_distributed_calibration(
 ) -> None:
     """Refuse a calibration that would come out wrong on a model distributed over several ranks.
 
-    Each rank of such a model calibrates on its own data, so an algorithm that keeps its statistics
-    on the rank would calibrate the ranks' copies, or shards, of a weight differently. Under expert
-    parallelism each rank's per-expert quantizers hold its own experts, and calibration syncs them
-    over the groups their module's ``ParallelState`` names, every rank for a module converted
-    without one: a module holding routed experts must name the experts' expert-parallel group and,
-    for data parallelism, only the ranks holding the same experts, or any calibration would merge
-    different experts' scales. Called before anything changes, so the caller seeds the routed
-    experts' ``ParallelState`` before quantizing, as the expert-parallel load does; their quantized
-    modules, whose state calibration reads, are checked again once converted, before they calibrate.
+    Each rank calibrates on its own data: an algorithm that keeps its statistics on the rank would
+    calibrate the ranks' copies or shards of a weight differently, and a module holding routed
+    experts must name the experts' expert-parallel group and, for data parallelism, only the ranks
+    holding the same experts, or calibration would merge different experts' scales. Called before
+    anything changes, so the caller seeds the experts' ``ParallelState`` before quantizing, as the
+    expert-parallel load does; their quantized modules are checked again before they calibrate.
     """
     plan = dist.recorded_distribution_plan(model)
     if plan is None or plan.world_size == 1:

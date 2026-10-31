@@ -702,19 +702,13 @@ def distributed_run(
 class _StridedIterableShard(IterableDataset):
     """Rank-strided shard of a streaming ``IterableDataset`` (no ``len()`` required).
 
-    ``DistributedSampler`` only works with map-style datasets. Streaming calibration datasets (e.g. the
-    Nemotron image-text ``NemotronTarPlusJsonlIterable``) are iterable, so each rank instead builds its
-    own copy of the stream, the same on every rank as :func:`shard_dataloader` requires,
-    and takes slot ``rank`` from every complete group of ``world_size`` consecutive samples. Any
-    trailing incomplete group is dropped so every rank yields exactly the same count -- preserving
-    the equal-per-rank-batch invariant that keeps per-step EP collectives from hanging when one rank
-    runs short. A stream shorter than ``world_size`` has no complete group, so it is refused rather
-    than leaving every rank with nothing to calibrate on. It is iterated in the loader's own process
-    (:func:`shard_dataloader` refuses workers for a stream). Every rank still reads and decodes every
-    sample, keeping one in ``world_size``: for a stream costly to decode, a map-style dataset, or a
-    source that shards itself, saves that work.
-    ``vlm_dataset_utils._ShardedIterable`` cannot stand in: it pads every rank to a count its own loader
-    knows, while this wraps any loader's stream, which may know none.
+    Each rank builds its own copy of the stream, the same on every rank, and takes slot ``rank`` from
+    every complete group of ``world_size`` samples. A trailing incomplete group is dropped so every
+    rank yields the same count, which keeps the per-step EP collectives from hanging; a stream shorter
+    than ``world_size`` is refused. Every rank still reads and decodes every sample: for a stream
+    costly to decode, a map-style dataset or a source that shards itself saves that work.
+    ``vlm_dataset_utils._ShardedIterable`` cannot stand in: it pads every rank to a count its own
+    loader knows, while this wraps any loader's stream, which may know none.
     """
 
     def __init__(self, base: IterableDataset, rank: int, world_size: int):
@@ -840,18 +834,12 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
 def _reinstall_a2a_forwards(model, ep_mesh) -> int:
     """Re-plant the torch_a2a TP forward wrappers that quantizer insertion clobbered.
 
-    transformers installs its TP input/output transforms by REPLACING ``module.forward`` with an
-    instance attribute (TensorParallelLayer.install_forward). For torch_a2a_experts that wrapper is
-    what passes the EP ``process_group`` into the experts forward. ModelOpt's quantizer insertion
-    rebinds ``module.forward`` on the same instance, dropping the wrapper -- after which
-    ``torch_a2a_experts_forward`` receives ``process_group=None`` and raises.
-
-    Called at the top of the calibration loop: after conversion (so it wraps the QUANTIZED forward)
-    and before the first forward. Only a forward quantizer insertion rebound is planted again: a
-    wrapper still in place -- transformers' from the load, on a module quantization left alone, or
-    one planted here on an earlier pass -- is kept, since wrapping it again would run its transforms
-    twice. ``ep_mesh`` is the mesh the routed experts are sharded over; without one there is nothing
-    to re-plant.
+    transformers installs its TP transforms by replacing ``module.forward`` on the instance
+    (``install_forward``); for torch_a2a_experts that wrapper passes the EP ``process_group`` to the
+    experts forward. Quantizer insertion rebinds ``module.forward``, dropping it, and the experts
+    forward then raises. Called after conversion, before the first forward. Only a forward quantizer
+    insertion rebound is planted again: a wrapper still in place is kept, since wrapping it again
+    would run its transforms twice. Without an ``ep_mesh`` there is nothing to re-plant.
     """
     if ep_mesh is None:
         return 0
@@ -873,10 +861,8 @@ def _reinstall_a2a_forwards(model, ep_mesh) -> int:
         style_name = _get_parameter_tp_plan(parameter_name=name, tp_plan=plan, is_weight=False)
         if style_name not in ("torch_a2a_experts", "torch_a2a_router"):
             continue
-        # install_forward() -- and the clobber it causes -- only exist on transformers >=5.16. Older
-        # releases install their TP input/output transforms as forward PRE-HOOKS, which survive
-        # ModelOpt rebinding ``module.forward``: nothing to re-plant. Checked per style, the one
-        # about to be called.
+        # Before transformers 5.16 a style installs its transforms as forward pre-hooks, which
+        # survive the rebind: nothing to re-plant. Checked per style, the one about to be called.
         style = ALL_PARALLEL_STYLES.get(style_name)
         if not hasattr(style, "install_forward"):
             continue
