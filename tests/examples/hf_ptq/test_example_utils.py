@@ -21,17 +21,22 @@ recording path, checkpoint-path resolution, and the sidecar copy.
 """
 
 import warnings
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
-from _test_utils.torch.transformers_models import create_tiny_qwen3_moe_dir, get_tiny_nemotron_h
+from _test_utils.torch.transformers_models import (
+    create_tiny_qwen3_moe_dir,
+    get_tiny_llama,
+    get_tiny_nemotron_h,
+)
 from safetensors.torch import save_file
-from transformers import AutoModelForCausalLM, LlamaConfig
+from transformers import AutoModelForCausalLM, GenerationMixin, LlamaConfig
 
+from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 
@@ -190,6 +195,60 @@ def test_get_model_preserves_preparation_error(monkeypatch, tmp_path, failure_at
 def test_build_quant_cfg_sets_moe_calib_experts_ratio_on_every_algorithm(algorithm, expected):
     quant_cfg = example_utils.build_quant_cfg({"quant_cfg": [], "algorithm": algorithm}, None, 0.5)
     assert quant_cfg["algorithm"] == expected
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["the-model", "a-model-around-it"])
+def test_a_preview_keeps_generate_from_switching_the_experts_implementation(monkeypatch, wrapped):
+    """On a GPU, ``generate`` switches a ``grouped_mm`` MoE's experts to ``batched_mm`` for decoding,
+    which ModelOpt's quantizers do not intercept (the preview after PTQ decodes unquantized experts)
+    and which Transformers refuses for an FSDP2-wrapped class (``FSDPQwen3MoeForCausalLM does not
+    support setting experts implementation``). The hook ``generate`` enters is out of the way for the
+    preview, and back after it, also when the previewed model generates through a submodule, as a
+    Nemotron-VL model's ``chat`` generates through its language model."""
+    entered = []
+
+    @contextmanager
+    def switch(self):
+        entered.append(type(self).__name__)
+        raise ValueError(f"{type(self).__name__} does not support setting experts implementation.")
+        yield
+
+    monkeypatch.setattr(GenerationMixin, "_optimize_model_for_decode", switch)
+    model = get_tiny_llama()
+    # The model around it has no hook of its own; the preview generates through the inner one.
+    previewed = torch.nn.ModuleDict({"language_model": model}) if wrapped else model
+    input_ids = torch.tensor([[1, 2, 3]])
+
+    # Some releases enter the hook only for the decode steps after the first token.
+    with pytest.raises(ValueError, match="does not support setting experts implementation"):
+        model.generate(input_ids, max_new_tokens=3)
+    with example_utils.keep_the_experts_implementation(previewed):
+        model.generate(input_ids, max_new_tokens=3)
+
+    assert entered == ["LlamaForCausalLM"]  # only the first, unprotected call reached the hook
+    assert "_optimize_model_for_decode" not in vars(model)
+
+
+def test_a_model_without_the_decode_hook_is_previewed_as_it_is():
+    model = torch.nn.Linear(1, 1)
+
+    with example_utils.keep_the_experts_implementation(model):
+        assert "_optimize_model_for_decode" not in vars(model)
+    assert not hasattr(model, "_optimize_model_for_decode")
+
+
+def test_a_decode_hook_on_the_model_itself_is_put_back_and_previews_nest():
+    """A hook bound on the model instance is restored rather than dropped, and a preview inside
+    another leaves the outer one's stand-in in place."""
+    model = torch.nn.Linear(1, 1)
+    own = model._optimize_model_for_decode = object()
+
+    with example_utils.keep_the_experts_implementation(model):
+        with example_utils.keep_the_experts_implementation(model):
+            pass
+        assert model._optimize_model_for_decode is nullcontext
+
+    assert model._optimize_model_for_decode is own
 
 
 def test_get_original_hf_quant_method_mxfp4_dict():
@@ -716,3 +775,131 @@ class _Recipe:
 def test_recipe_layerwise_blocks(recipe, expected):
     """Both recipe shapes normalize to dicts, so callers need no shape-aware access."""
     assert example_utils.recipe_layerwise_blocks(recipe) == expected
+
+
+# Small enough that the dense part fits any GPU.
+_TINY = {
+    "hidden_size": 16,
+    "intermediate_size": 32,
+    "num_hidden_layers": 1,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "vocab_size": 32,
+}
+
+
+@pytest.mark.parametrize(
+    ("device", "world_size", "device_map"),
+    [
+        ("cuda:1", 4, {"": "cuda:1"}),
+        (torch.device("cuda:1"), 4, {"": "cuda:1"}),
+        ("cuda:1", 1, "auto"),
+        (torch.device("cpu"), 1, "cpu"),
+    ],
+    ids=["str", "torch_device", "single_process", "cpu"],
+)
+def test_a_rank_device_pins_the_whole_model_to_it(
+    monkeypatch, tmp_path, device, world_size, device_map
+):
+    """Under torchrun each rank asks for its own cuda:<local_rank>; "auto" would let every rank's
+    accelerate pick the same idle GPU. A single process spreads the model over the GPUs, whatever
+    GPU it names, and keeps it on a CPU it names, as the torch.device hf_ptq's run hands in. Only a
+    single process's load is held to a memory limit sized over the node's GPUs: the pinned map would
+    ignore one."""
+    LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
+    # No GPU on the node holds the model, so sizing it over the node limits its memory.
+    monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 0, "cpu": 1 << 40})
+    placed = []
+
+    plan = DistributionPlan(world_size)
+
+    def load_pretrained(ckpt_path, auto_class, **kwargs):
+        assert kwargs["distribution"] == plan
+        placed.append((kwargs["device_map"], "max_memory" in kwargs))
+        return torch.nn.Linear(1, 1)
+
+    monkeypatch.setattr(example_utils, "load_pretrained", load_pretrained)
+
+    example_utils.get_model(str(tmp_path), device=device, distribution=plan)
+
+    assert placed == [(device_map, world_size == 1)]
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    ["pack-quantized", "mxfp4", "diffusion-gemma"],
+)
+def test_every_load_path_keeps_the_rank_pin(monkeypatch, tmp_path, checkpoint):
+    """A pack-quantized or MXFP4 checkpoint loads through a path of its own, and DiffusionGemma asks
+    for a sequential map on a multi-GPU node; each would otherwise place every rank's copy over the
+    same GPUs."""
+    quantization_config = {
+        "pack-quantized": {"quant_method": "compressed-tensors", "format": "pack-quantized"},
+        "mxfp4": {"quant_method": "mxfp4"},
+    }.get(checkpoint)
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"], quantization_config=quantization_config, **_TINY
+    ).save_pretrained(tmp_path)
+    if checkpoint == "diffusion-gemma":
+        monkeypatch.setattr(example_utils, "is_diffusion_gemma", lambda config: True)
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(example_utils, "_unpack_compressed_linear_weights", lambda *args: None)
+    placed = []
+
+    def load_pretrained(ckpt_path, auto_class, **kwargs):
+        placed.append(kwargs["device_map"])
+        return torch.nn.Linear(1, 1)
+
+    monkeypatch.setattr(example_utils, "load_pretrained", load_pretrained)
+
+    example_utils.get_model(str(tmp_path), device="cuda:1", distribution=DistributionPlan(4))
+
+    assert placed == [{"": "cuda:1"}]
+
+
+@pytest.mark.parametrize(
+    ("device", "kwargs", "match"),
+    [
+        ("cuda:1", {"use_seq_device_map": True}, "--use_seq_device_map"),
+        # "auto" would let every rank's accelerate pick the same idle GPU.
+        ("cuda", {}, "names no GPU"),
+    ],
+    ids=["sequential_map", "unindexed_device"],
+)
+def test_a_placement_over_shared_gpus_is_refused_where_each_rank_holds_its_own_copy(
+    tmp_path, device, kwargs, match
+):
+    LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
+
+    with pytest.raises(ValueError, match=match):
+        example_utils.get_model(
+            str(tmp_path), device=device, distribution=DistributionPlan(4), **kwargs
+        )
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [DistributionPlan(4, ep_size=4), DistributionPlan(4, dense="fsdp")],
+    ids=["expert_parallel", "fsdp"],
+)
+def test_a_plan_that_shards_the_model_is_refused(monkeypatch, tmp_path, plan):
+    """get_model loads a whole model on every rank; a plan that shards it goes to load_pretrained."""
+    LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
+    monkeypatch.setattr(example_utils, "load_pretrained", lambda *a, **k: pytest.fail("loaded"))
+
+    with pytest.raises(ValueError, match="shards the model over the ranks"):
+        example_utils.get_model(str(tmp_path), device="cuda:1", distribution=plan)
+
+
+def test_without_a_plan_the_load_decides_and_refuses_sharding_knobs_it_cannot_honor(
+    monkeypatch, tmp_path
+):
+    """get_model hands load_pretrained only a plan its caller gave. Without one the load decides
+    as before, so a MODELOPT_* knob asking to shard over a launch whose process group is not set up
+    is refused, rather than ignored for a one-rank plan."""
+    LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+
+    with pytest.raises(RuntimeError, match="MODELOPT_FSDP_SIZE=world ask to shard"):
+        example_utils.get_model(str(tmp_path), device="cuda:0")

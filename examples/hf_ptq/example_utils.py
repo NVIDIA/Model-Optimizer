@@ -22,7 +22,7 @@ import logging
 import os
 import warnings
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -56,6 +56,7 @@ from modelopt.torch.models.hf import (
 )
 from modelopt.torch.quantization.mode import get_modelike_from_algo_cfg
 from modelopt.torch.utils import distributed as dist_utils
+from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
 from modelopt.torch.utils.plugins.model_load_utils import is_fsdp2_text_only_vlm, load_pretrained
 
@@ -154,6 +155,48 @@ def validate_fsdp2_supported(args, config):
         )
 
 
+def preview_generate_kwargs(model) -> dict[str, Any]:
+    """Extra ``generate`` kwargs that keep every rank of a sharded model decoding a preview.
+
+    Each rank previews the first sample of its own calibration shard, so the ranks finish at
+    different steps. A model its plan shards runs a collective in every forward (the routed experts'
+    all-to-all, FSDP2's all-gathers): a rank that stopped decoding would leave the others blocked in
+    it. ``synced_gpus`` keeps every rank stepping until all of them have finished.
+    """
+    plan = distribution_plan(model)
+    sharded = plan.world_size > 1 and (plan.is_expert_parallel or plan.is_fsdp_dense)
+    return {"synced_gpus": True} if sharded else {}
+
+
+@contextmanager
+def keep_the_experts_implementation(model) -> Iterator[None]:
+    """Keep ``generate`` from switching a MoE's experts to ``batched_mm`` while it decodes.
+
+    On a GPU, ``generate`` runs the experts of a ``grouped_mm`` MoE on ``batched_mm`` for the
+    decoding stage and switches them back (``_optimize_model_for_decode``, Transformers 5.0 and
+    later). Two things follow. ModelOpt's quantizers sit on the ``eager``, ``grouped_mm`` and
+    ``torch_a2a`` forwards, which ``batched_mm`` bypasses, so the preview after PTQ would decode on
+    unquantized experts. And Transformers refuses the switch for an FSDP2-wrapped model, whose class
+    is a subclass built outside its modeling module: ``FSDPQwen3MoeForCausalLM does not support
+    setting experts implementation``. Every module of the model that has the hook is kept from it:
+    a model can generate through a submodule, as a Nemotron-VL model's ``chat`` generates through
+    its language model.
+    """
+    modules = [m for m in model.modules() if hasattr(m, "_optimize_model_for_decode")]
+    # Put back what each module itself held, if anything: a nested use, or a hook bound per instance.
+    own = [(module, vars(module).get("_optimize_model_for_decode")) for module in modules]
+    for module in modules:
+        module._optimize_model_for_decode = nullcontext
+    try:
+        yield
+    finally:
+        for module, held in own:
+            if held is None:
+                del module._optimize_model_for_decode
+            else:
+                module._optimize_model_for_decode = held
+
+
 def run_nemotron_vl_preview(
     full_model,
     tokenizer,
@@ -178,32 +221,37 @@ def run_nemotron_vl_preview(
     """
     from vlm_utils import run_text_only_generation, run_vl_preview_generation
 
-    print(f"Running text-only preview generation for Nemotron VL model ({stage_name})...")
-    question = tokenizer.decode(input_ids[0], skip_special_tokens=True)
-    generation_config = {
-        "max_new_tokens": 100,
-        "do_sample": False,
-        "eos_token_id": tokenizer.eos_token_id,
-    }
+    with keep_the_experts_implementation(full_model):
+        print(f"Running text-only preview generation for Nemotron VL model ({stage_name})...")
+        question = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+        lockstep = preview_generate_kwargs(full_model)
+        generation_config = {
+            "max_new_tokens": 100,
+            "do_sample": False,
+            "eos_token_id": tokenizer.eos_token_id,
+            **lockstep,
+        }
 
-    # Try text-only generation (may fail for encoder-decoder models like Nemotron-Parse)
-    text_response = run_text_only_generation(
-        full_model, tokenizer, question, generation_config, pyt_ckpt_path, trust_remote_code
-    )
+        # Try text-only generation (may fail for encoder-decoder models like Nemotron-Parse)
+        text_response = run_text_only_generation(
+            full_model, tokenizer, question, generation_config, pyt_ckpt_path, trust_remote_code
+        )
 
-    generated_ids = None
-    if text_response is not None:
-        print(f"✅ Text-only generation successful: {text_response[:100]}...")
-        generated_ids = text_response
-    elif allow_fallback:
-        print("Text-only generation failed, falling back to standard generate...")
-        generated_ids = full_model.generate(input_ids, max_new_tokens=100)
+        generated_ids = None
+        if text_response is not None:
+            print(f"✅ Text-only generation successful: {text_response[:100]}...")
+            generated_ids = text_response
+        elif allow_fallback:
+            print("Text-only generation failed, falling back to standard generate...")
+            generated_ids = full_model.generate(input_ids, max_new_tokens=100, **lockstep)
 
-    # Run additional VL test with images
-    print(f"Running additional VL test with images ({stage_name})...")
-    run_vl_preview_generation(full_model, tokenizer, pyt_ckpt_path, stage_name, trust_remote_code)
+        # Run additional VL test with images
+        print(f"Running additional VL test with images ({stage_name})...")
+        run_vl_preview_generation(
+            full_model, tokenizer, pyt_ckpt_path, stage_name, trust_remote_code, lockstep
+        )
 
-    return generated_ids
+        return generated_ids
 
 
 def _is_multimodal_config(config):
@@ -604,8 +652,19 @@ def get_model(
     offload_folder=None,
     max_cpu_memory_gb=None,
     max_gpu_memory_gb=None,
+    distribution: DistributionPlan | None = None,
 ):
     print(f"Initializing model from {ckpt_path}")
+    # The plan to load the whole model by on every rank; a single process's by default. Only a plan
+    # the caller gave reaches load_pretrained: without one it decides itself as before, and refuses
+    # MODELOPT_* knobs asking to shard over a launch whose process group is not set up.
+    plan = distribution or DistributionPlan()
+    if plan.is_expert_parallel or plan.is_fsdp_dense:
+        raise ValueError(
+            f"{plan!r} shards the model over the ranks, but get_model loads the whole model on "
+            "every rank: load it with load_pretrained."
+        )
+    routing = {} if distribution is None else {"distribution": distribution}
 
     _disk_offload = offload_folder is not None
     if _disk_offload and max_cpu_memory_gb is None:
@@ -616,9 +675,25 @@ def get_model(
             UserWarning,
         )
 
-    device_map = "auto"
-    if device == "cpu":
-        device_map = "cpu"
+    # Under torchrun each rank asks for its own "cuda:<local_rank>". Do not fall through to "auto":
+    # accelerate runs its placement heuristic INDEPENDENTLY in every rank, and on a node whose GPUs
+    # are all idle every rank scores them identically and picks the SAME card. All ranks' weights,
+    # and with them every quantizer's _amax buffer, then live on one GPU; the first NCCL collective
+    # binds the whole data-parallel group to that single device and aborts with "Duplicate GPU
+    # detected : rank 1 and rank 0 both on CUDA device ...". Every load path below honours the pin
+    # except those that load with no device map (Nemotron VL): each rank builds a whole copy in host
+    # memory and only then moves it to its own GPU, so the node needs one host copy per rank.
+    # A dense model too large to replicate per rank wants --use_fsdp2, not "auto" sharding: under
+    # data-parallel calibration each rank must own its own GPU. A single process keeps "auto".
+    # hf_ptq hands in its run's torch.device, which never equals a string such as "cpu".
+    on_cpu = torch.device(device).type == "cpu"
+    if plan.world_size > 1 and not on_cpu and ":" not in str(device):
+        raise ValueError(
+            f"{plan!r} has each rank hold its own copy of the model on its own GPU, but "
+            f"device={device!r} names no GPU index; pass the rank's own GPU, cuda:<local_rank>."
+        )
+    pinned = {"": str(device)} if not on_cpu and plan.world_size > 1 else None
+    device_map = "cpu" if on_cpu else pinned or "auto"
 
     # Prepare config kwargs for loading
     config_kwargs = {"trust_remote_code": trust_remote_code} if trust_remote_code else {}
@@ -654,13 +729,24 @@ def get_model(
     # modules together for checkpoints that fit; larger ones can still spill and split a
     # tied pair, and need an explicit single-device map. Multi-GPU only: a single-GPU split
     # cannot separate a tied pair, and sequential would needlessly cap max_memory there.
-    if device != "cpu" and torch.cuda.device_count() > 1 and is_diffusion_gemma(hf_config):
+    if (
+        not pinned
+        and not on_cpu
+        and torch.cuda.device_count() > 1
+        and is_diffusion_gemma(hf_config)
+    ):
         print(
             "Detected DiffusionGemma model. Using device_map='sequential'; the balanced "
             "'auto' mapping can split its tied encoder/decoder weights across GPUs."
         )
         use_seq_device_map = True
 
+    if use_seq_device_map and pinned:
+        raise ValueError(
+            f"--use_seq_device_map spreads one model over every GPU, but each rank of this run "
+            f"holds its own copy on its own GPU ({device}). Drop it, or shard the model with "
+            "--use_fsdp2."
+        )
     if use_seq_device_map:
         device_map = "sequential"
         # If we use sequential, set max_memory limit to ensure that the model does not occupy the full GPU
@@ -712,6 +798,7 @@ def get_model(
             ckpt_path,
             AutoModelForCausalLM,
             model_type=hf_config.model_type,
+            **routing,
             device_map=device_map,
             **model_kwargs,
         )
@@ -723,7 +810,8 @@ def get_model(
                 ckpt_path,
                 AutoModelForCausalLM,
                 model_type=hf_config.model_type,
-                device_map="auto",
+                **routing,
+                device_map=pinned or "auto",
                 trust_remote_code=trust_remote_code,
                 dtype="auto",
                 **experts_kwargs,
@@ -750,7 +838,8 @@ def get_model(
             ckpt_path,
             AutoModelForCausalLM,
             model_type=hf_config.model_type,
-            device_map="cpu" if device == "cpu" else "sequential",
+            **routing,
+            device_map="cpu" if on_cpu else pinned or "sequential",
             **model_kwargs,
         )
     else:
@@ -836,7 +925,9 @@ def get_model(
                 f"Offload folder: {offload_folder}\n"
                 "Weights exceeding GPU+CPU budgets will be streamed from disk."
             )
-        else:
+        elif not pinned:
+            # A pinned copy goes onto its rank's GPU whole, by a map that ignores max_memory: sizing
+            # it over the node's GPUs would print a limit the load does not apply.
             inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
             if "cpu" in inferred_device_map.values():
                 for _device in max_memory:
@@ -858,6 +949,7 @@ def get_model(
             ckpt_path,
             auto_model_module,
             model_type=hf_config.model_type,
+            **routing,
             device_map=device_map,
             **model_kwargs2,
         )
@@ -866,11 +958,11 @@ def get_model(
         _unpack_compressed_linear_weights(model, ckpt_path)
 
     # If device_map was disabled (None), manually move model to target device
-    if device_map is None and device != "cpu":
+    if device_map is None and not on_cpu:
         print(f"Moving model to {device} device...")
         model = model.to(device)
 
-    if device == "cuda" and not is_model_on_gpu(model):
+    if torch.device(device).type == "cuda" and not is_model_on_gpu(model):
         print("Warning: Some parameters are not on a GPU. Calibration can be slow or hit OOM")
 
     return model

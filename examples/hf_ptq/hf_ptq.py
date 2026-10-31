@@ -43,7 +43,9 @@ from example_utils import (
     get_tokenizer,
     is_nemotron_vl,
     is_trtllm_enc_dec_export,
+    keep_the_experts_implementation,
     mlflow_run,
+    preview_generate_kwargs,
     recipe_layerwise_blocks,
     run_nemotron_vl_preview,
     save_source_config,
@@ -99,7 +101,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
-from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
+from modelopt.torch.utils.distributed import DistributionPlan, abort, set_distribution_plan
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.mlflow import add_mlflow_args, resolve_mlflow_args
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
@@ -116,6 +118,10 @@ from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 RAND_SEED = 1234
 # Most tokens per calibration batch when layerwise calibration picks the batch size (64 x 512).
 LAYERWISE_CALIB_TOKENS = 32768
+_PREVIEW_STOPS_THE_RUN = (
+    "The preview after quantization failed, which stops the run before the export, so no "
+    "checkpoint is written; --skip_generate exports without the preview."
+)
 
 
 def _layerwise_calib_batch_size(calib_seq: int, num_samples: int) -> int:
@@ -809,11 +815,13 @@ def pre_quantize(
             trust_remote_code=args.trust_remote_code,
         )
     else:
-        generated_ids_before_ptq = full_model.generate(
-            preview_input_ids,
-            attention_mask=preview_attention_mask,
-            max_new_tokens=100,
-        )
+        with keep_the_experts_implementation(full_model):
+            generated_ids_before_ptq = full_model.generate(
+                preview_input_ids,
+                attention_mask=preview_attention_mask,
+                max_new_tokens=100,
+                **preview_generate_kwargs(full_model),
+            )
 
     return preview_input_ids, preview_attention_mask, generated_ids_before_ptq
 
@@ -866,13 +874,20 @@ def post_quantize(
         # part of the model to CPU (seen on unified-memory single-GPU hosts) can make a
         # quantized layer run on CPU, which some kernels (e.g. NVFP4 dynamic block
         # quantization) don't support. Don't let that discard the completed calibration.
+        lockstep = preview_generate_kwargs(full_model)
         try:
-            generated_ids_after_ptq = full_model.generate(
-                preview_input_ids,
-                attention_mask=preview_attention_mask,
-                max_new_tokens=100,
-            )
+            with keep_the_experts_implementation(full_model):
+                generated_ids_after_ptq = full_model.generate(
+                    preview_input_ids,
+                    attention_mask=preview_attention_mask,
+                    max_new_tokens=100,
+                    **lockstep,
+                )
         except Exception as e:
+            if lockstep:
+                # The ranks decode in lockstep: a rank that skipped the preview would go on to the
+                # export's collectives while the others still wait in generate's, so the run stops.
+                raise RuntimeError(_PREVIEW_STOPS_THE_RUN) from e
             warnings.warn(f"Post-quantization generation sanity check failed, skipping it: {e}")
     elif is_nemotron_vl_model and tokenizer is not None:
         generated_ids_after_ptq = run_nemotron_vl_preview(
@@ -1577,6 +1592,14 @@ def main(args: argparse.Namespace):
                     tokenizer,
                     device,
                 )
+    except BaseException:
+        # A rank that fails alone, such as in a sharded model's lockstep preview, leaves the others
+        # in a collective it never reaches, and cleanup's barrier and destroy_process_group would
+        # wait on them with the traceback unprinted. abort() prints it and exits, so the launcher
+        # stops the other ranks.
+        if args.dist_state.world_size > 1:
+            abort()
+        raise
     finally:
         cleanup_distributed(args)
 

@@ -20,8 +20,40 @@ import os
 from PIL import Image
 from transformers import AutoImageProcessor, AutoProcessor
 
+from modelopt.torch.utils.distributed import all_reduce
 
-def run_vl_preview_generation(model, tokenizer, model_path, stage_name, trust_remote_code=False):
+
+def _load_sample_image(images_dir):
+    """The first sample image in ``images_dir`` that opens, or None, saying why there is none."""
+    if not os.path.exists(images_dir):
+        print(f"❌ Warning: Images directory not found at {images_dir}")
+        return None
+
+    # Use single image for VL preview to avoid shape mismatch issues
+    image_files = ["example1a.jpeg", "example1b.jpeg", "example.jpg", "test.jpg", "sample.png"]
+    missing_files = []
+    for img_file in image_files:
+        img_path = os.path.join(images_dir, img_file)
+        if os.path.exists(img_path):
+            try:
+                image = Image.open(img_path)
+                print(f"  ✅ Successfully loaded: {img_file}")
+                return image  # Use the first available image
+            except Exception as e:
+                print(f"  ⚠️  Warning: Could not open {img_file}: {e}")
+                missing_files.append(f"{img_file} (corrupted)")
+        else:
+            missing_files.append(img_file)
+
+    print(f"❌ Warning: No valid sample images found in {images_dir}")
+    print(f"   Searched for: {', '.join(image_files)}")
+    print(f"   Missing/invalid files: {', '.join(missing_files)}")
+    return None
+
+
+def run_vl_preview_generation(
+    model, tokenizer, model_path, stage_name, trust_remote_code=False, generation_kwargs=None
+):
     """Run preview generation for VL models using sample images.
 
     Args:
@@ -30,6 +62,7 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name, trust_re
         model_path: Path to the model (for loading image processor)
         stage_name: Description of the stage (e.g., "before quantization")
         trust_remote_code: Whether to trust remote code for Huggingface models and tokenizers
+        generation_kwargs: Extra ``generate`` kwargs, such as ``synced_gpus`` for a sharded model
     Returns:
         Generated response text for logging/comparison
     """
@@ -38,37 +71,13 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name, trust_re
 
         # Load sample images from the images directory
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        images_dir = os.path.join(script_dir, "images")
-
-        # Check if images directory exists
-        if not os.path.exists(images_dir):
-            print(f"❌ Warning: Images directory not found at {images_dir}")
-            print("   VL preview generation requires sample images to test vision capabilities.")
-            print("   Skipping VL preview generation.")
-            return None
-
-        # Use single image for VL preview to avoid shape mismatch issues
-        image_files = ["example1a.jpeg", "example1b.jpeg", "example.jpg", "test.jpg", "sample.png"]
-        image = None
-        missing_files = []
-        for img_file in image_files:
-            img_path = os.path.join(images_dir, img_file)
-            if os.path.exists(img_path):
-                try:
-                    image = Image.open(img_path)
-                    print(f"  ✅ Successfully loaded: {img_file}")
-                    break  # Use the first available image
-                except Exception as e:
-                    print(f"  ⚠️  Warning: Could not open {img_file}: {e}")
-                    missing_files.append(f"{img_file} (corrupted)")
-            else:
-                missing_files.append(img_file)
-
-        if image is None:
-            print(f"❌ Warning: No valid sample images found in {images_dir}")
-            print(f"   Searched for: {', '.join(image_files)}")
-            if missing_files:
-                print(f"   Missing/invalid files: {', '.join(missing_files)}")
+        image = _load_sample_image(os.path.join(script_dir, "images"))
+        found = image is not None
+        if (generation_kwargs or {}).get("synced_gpus"):
+            # Each node reads the images from its own checkout, while the ranks of a sharded model
+            # decode in lockstep: every rank previews, or none does.
+            found = all_reduce("VL preview sample image", lambda: image is not None, all)
+        if not found:
             print("   VL preview generation requires sample images to test vision capabilities.")
             print("   Skipping VL preview generation.")
             return None
@@ -79,6 +88,7 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name, trust_re
             "max_new_tokens": 50,
             "do_sample": False,
             "eos_token_id": tokenizer.eos_token_id,
+            **(generation_kwargs or {}),
         }
 
         print(f"Generating VL response ({stage_name})...")
@@ -189,6 +199,8 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name, trust_re
         return response
 
     except Exception as e:
+        if (generation_kwargs or {}).get("synced_gpus"):
+            raise  # the other ranks of a sharded model would wait for this one in lockstep
         print(f"❌ VL preview generation {stage_name} failed: {e}")
         print("This may indicate issues with the quantized model")
         return None
@@ -266,5 +278,7 @@ def run_text_only_generation(
             return output_text[0]
 
     except Exception as e:
+        if generation_config.get("synced_gpus"):
+            raise  # the other ranks of a sharded model would wait for this one in lockstep
         print(f"Text-only generation failed: {e}")
         return None
