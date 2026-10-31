@@ -254,6 +254,11 @@ class GGMLFormat:
     unpack_int8: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
     # Whether ``quantize`` takes a per-input-column ``importance`` that weights its search.
     weighted: bool = False
+    # Each block picks one of ``num_choices`` options -- a local scale, and for IQ1_S its delta --
+    # for each of its ``choice_groups`` groups; ``quantize`` takes them as ``choices``. Zero for
+    # formats without one.
+    choice_groups: int = 0
+    num_choices: int = 0
 
     @property
     def effective_bits(self) -> float:
@@ -481,6 +486,33 @@ def importance_blocks(
     if not (torch.isfinite(importance) & (importance >= 0)).all():
         raise ValueError(f"{format_name} importance must be finite and non-negative")
     return importance.reshape(-1, GGML_BLOCK_SIZE)
+
+
+def choice_blocks(
+    choices: torch.Tensor | None,
+    weight: torch.Tensor,
+    groups: int,
+    num_choices: int,
+    format_name: str,
+) -> torch.Tensor | None:
+    """Per-group ``choices`` as validated ``[weight.numel() // 256, groups]`` int64 rows.
+
+    ``choices`` is shaped ``[*weight.shape[:-1], weight.shape[-1] // 256, groups]``. A given choice
+    replaces the encoder's own pick for that group; the codebook entries and signs are still
+    searched under it.
+    """
+    if choices is None:
+        return None
+    expected = (*weight.shape[:-1], weight.shape[-1] // GGML_BLOCK_SIZE, groups)
+    if tuple(choices.shape) != expected or choices.is_floating_point() or choices.is_complex():
+        raise ValueError(
+            f"{format_name} choices must be an integer {list(expected)} tensor, got "
+            f"{choices.dtype} {tuple(choices.shape)}"
+        )
+    choices = choices.to(device=weight.device, dtype=torch.int64).reshape(-1, groups)
+    if not ((choices >= 0) & (choices < num_choices)).all():
+        raise ValueError(f"{format_name} choices must lie in [0, {num_choices})")
+    return choices
 
 
 def chunk_importance(
