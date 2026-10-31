@@ -139,7 +139,7 @@ default for short model-bound tasks and override the outliers:
 | --- | --- | --- |
 | Model / GPU KV (short) | `ns_gpqa`, `ns_ifbench` | top-level default (preemption-free KV-fit) |
 | Long-context KV (~120K) | `ns_aa_lcr` | **low** override — prefill thrash; MLA ≫ GQA |
-| Judge / user-sim rate limit | `ns_hle_aa`, `ns_aa_lcr`, `tau2_bench_telecom` | judge endpoint 429s, **not** the model |
+| Judge / user-sim rate limit | `ns_hle_aa`, `ns_aa_lcr`, `tau2_bench_telecom`, Tau3-Banking (gym) | judge / user-sim endpoint 429s, **not** the model |
 | Sandbox execution | `ns_scicode` | sandbox slots |
 
 - Judge/sandbox tasks bottleneck **before** the model — over-parallelizing yields
