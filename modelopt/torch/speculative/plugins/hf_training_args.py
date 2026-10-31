@@ -135,3 +135,6 @@ class TrainingArguments(BaseModel):
     answer_only_loss: bool = False
     cp_size: int = 1
     dp_shard_size: int | None = None
+    # Off: take batches as workers finish them so one slow fetch does not stall every DDP rank;
+    # CP forces it on. Mirrors HF's field (transformers>=5.15) so older versions accept it.
+    dataloader_in_order: bool = False
