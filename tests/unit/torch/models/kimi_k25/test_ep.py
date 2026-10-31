@@ -107,8 +107,9 @@ def test_prepare_rebuilds_the_language_model_config_as_native_deepseek_v3(
     """The text config becomes transformers' own ``DeepseekV3Config`` (no remote ``auto_map``, no
     stale ``quantization_config``) with an EP plan for the fused experts, naming the experts the
     spec states for a run that skips prepare; the decompressor is installed for compressed-tensors
-    experts only, while the text config it replaces still carries their scheme; the remote-code
-    staging shim is left installed."""
+    experts only, while the text config it replaces still carries their scheme, and exactly for the
+    formats the spec states it decompresses, which the plan decision counts loadable before prepare
+    runs; the remote-code staging shim is left installed."""
     installs = []
     monkeypatch.setattr(
         _onfly_decompress,
@@ -133,7 +134,9 @@ def test_prepare_rebuilds_the_language_model_config_as_native_deepseek_v3(
     assert _routed_expert_keys(text.base_model_ep_plan) == _routed_expert_keys(
         get_spec("kimi_k25").ep_spec.prepared_ep_plan
     )
-    assert installs == ([QUANT] if quantization_config is QUANT else [])
+    decompressed = get_spec("kimi_k25").ep_spec.decompressed_formats
+    expected = (quantization_config or {}).get("quant_method") in decompressed
+    assert installs == ([QUANT] if expected else [])
     assert dmu.get_cached_module_file is not staging
 
 
