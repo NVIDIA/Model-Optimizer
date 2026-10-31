@@ -1325,9 +1325,11 @@ def test_a_remote_kimi_k3_whose_prepare_attaches_its_plan_left_whole_is_an_error
     code builds, so whole on every rank they are refused like Qwen3-MoE: a ValueError, or the
     RuntimeError naming the release when this transformers is below what their spec needs."""
     monkeypatch.setenv("MODELOPT_EP_DEGREE", "1")
-    monkeypatch.setattr(
-        get_spec("kimi_k3").ep_spec, "prepare", lambda *a, **k: pytest.fail("ran prepare")
-    )
+    spec = get_spec("kimi_k3").ep_spec
+    monkeypatch.setattr(spec, "prepare", lambda *a, **k: pytest.fail("ran prepare"))
+    # The build step's own work is tested with Kimi-K3's code; here, that the decision runs it.
+    built = []
+    monkeypatch.setattr(spec, "make_buildable", lambda hf_config, **kwargs: built.append(kwargs))
     monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi_k3())
     run_as(4)
     serve(SimpleNamespace(model_type="kimi_k3", text_config=SimpleNamespace(num_experts=8)))
@@ -1338,6 +1340,7 @@ def test_a_remote_kimi_k3_whose_prepare_attaches_its_plan_left_whole_is_an_error
         match="can be expert-parallel, but the plan resolved",
     ):
         resolve_distribution_plan(str(tmp_path))
+    assert len(built) == 1
 
 
 def test_a_packed_kimi_k3_loaded_through_another_class_is_planned_without_its_spec(

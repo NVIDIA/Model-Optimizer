@@ -268,12 +268,13 @@ def make_buildable(
 
     Its imports (:func:`_make_importable`), and its VLM class's ``tie_weights`` taking the keyword
     arguments transformers' ``post_init`` passes it. None of it changes what the model computes or
-    loads, so the plan decision runs it before ``prepare``, whatever plan comes out. Code this load
-    may not run has nothing to build. Idempotent.
+    loads, so the plan decision runs it before ``prepare``, whatever plan comes out. With no
+    checkpoint, or code this load may not run, there is nothing to build, and it installs nothing.
+    Idempotent.
     """
-    _make_importable()
     if ckpt_path is None or not trust_remote_code:
         return
+    # Makes the code importable first.
     package = _force_load_remote_modeling(hf_config, ckpt_path, trust_remote_code).__module__
     _shim_tie_weights_kwargs(package.rpartition(".")[0])
 
