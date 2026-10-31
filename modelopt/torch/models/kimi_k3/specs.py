@@ -20,7 +20,7 @@ decompressed at load.
 """
 
 from ..specs import EPSpec, ModelSpec, register
-from .ep import BASE_MODEL_EP_PLAN, MODEL_TYPE, make_buildable, prepare
+from .ep import BASE_MODEL_EP_PLAN, MODEL_TYPE, PATCHED_EVERY_LOAD, make_buildable, prepare
 
 __all__: list[str] = []
 
@@ -33,7 +33,7 @@ register(
             prepared_ep_plan=BASE_MODEL_EP_PLAN,
             plan_config_attr="text_config",
             make_buildable=make_buildable,
-            prepare_patches_every_load=True,
+            prepare_patches_every_load=PATCHED_EVERY_LOAD,
             decompressed_formats=("compressed-tensors",),
             # prepare's patches to the checkpoint's remote code were validated on this release.
             requires_transformers="5.13",

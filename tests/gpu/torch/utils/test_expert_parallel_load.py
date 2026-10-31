@@ -910,7 +910,8 @@ def _kimi_k3_expert_parallel_job(rank, size, ckpt_dir):
             dist.all_gather_object(gathered, problems)
     finally:
         mu.get_model_conversion_mapping, cml.spawn_materialize = hooks
-        moe._PATCHED_EVERY_LOAD.discard("kimi_k3")  # the workers outlive the job
+        # The workers outlive the job: prepare recorded Kimi-K3 and its kimi_linear backbone.
+        moe._PATCHED_EVERY_LOAD.difference_update({"kimi_k3", "kimi_linear"})
     found = [problem for rank_problems in gathered for problem in rank_problems]
     assert not found, "\n".join(found[:20])
 

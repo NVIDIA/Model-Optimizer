@@ -257,9 +257,9 @@ def check_not_patched_by_prepare(model_type: str) -> None:
     """
     if model_type in _PATCHED_EVERY_LOAD:
         raise NotImplementedError(
-            f"An expert-parallel load of {model_type} in this process patched its modeling code "
-            "for every later load of it, which a whole-model or FSDP2-sharded load cannot build "
-            "from. Load it in a new process."
+            f"An expert-parallel load in this process, of {model_type} or of a model built on it, "
+            "patched its modeling code for every later load of it, which a whole-model or "
+            "FSDP2-sharded load cannot build from. Load it in a new process."
         )
 
 
@@ -332,8 +332,8 @@ def apply_distributed_support(
 
     if prepare and ep.prepare is not None:
         hf_config = ep.prepare(hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code)
-        if ep.prepare_patches_every_load:
-            mark_patched_every_load(model_type)
+        for patched in ep.prepare_patches_every_load:
+            mark_patched_every_load(patched)
         # The load builds from the config prepare returns: a bad one would fail only there, far
         # from the spec at fault.
         if hf_config is None:

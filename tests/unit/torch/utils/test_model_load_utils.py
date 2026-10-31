@@ -1247,28 +1247,34 @@ def test_a_remote_moe_whose_prepare_attaches_its_plan_left_whole_is_an_error(
     reason="Kimi-K3's expert parallelism needs a later transformers",
 )
 @pytest.mark.parametrize(
-    ("distribution", "auto_class"),
-    [(DistributionPlan(2, 1, "replicate"), AutoModel), (DistributionPlan(2, dense="fsdp"), None)],
-    ids=["whole", "fsdp2"],
+    ("model_type", "distribution", "auto_class"),
+    [
+        ("kimi_k3", DistributionPlan(2, 1, "replicate"), AutoModel),
+        ("kimi_k3", DistributionPlan(2, dense="fsdp"), None),
+        ("kimi_linear", DistributionPlan(2, 1, "replicate"), AutoModel),
+    ],
+    ids=["whole", "fsdp2", "its-backbone-whole"],
 )
 def test_a_load_after_a_prepare_that_patched_every_load_is_refused(
-    run_as, serve, loaders, monkeypatch, tmp_path, distribution, auto_class
+    run_as, serve, loaders, monkeypatch, tmp_path, model_type, distribution, auto_class
 ):
     """Kimi-K3's ``prepare`` patches its remote MoE block for every later load in the process, and
-    its spec says so. Once it ran, as it does for an expert-parallel load, a whole-model or
-    FSDP2-sharded load of Kimi-K3 in the process is refused before anything is built: it would build
-    the patched block and load the checkpoint's experts into it wrong."""
+    registers its fused-expert converters under its backbone's type, kimi_linear, and its spec says
+    so. Once it ran, as it does for an expert-parallel load, a whole-model or FSDP2-sharded load of
+    Kimi-K3 in the process is refused before anything is built: it would build the patched block and
+    load the checkpoint's experts into it wrong. So is one of a text-only kimi_linear checkpoint,
+    whose own unpatched block the converters would load newly initialized experts into."""
     monkeypatch.setattr(moe, "_PATCHED_EVERY_LOAD", set())
     monkeypatch.setattr(
         get_spec("kimi_k3").ep_spec, "prepare", lambda hf_config, **kwargs: hf_config
     )
     run_as(2)
-    config = serve(SimpleNamespace(model_type="kimi_k3", text_config=SimpleNamespace()))
+    config = serve(SimpleNamespace(model_type=model_type, text_config=SimpleNamespace()))
     moe.apply_distributed_support(
         "kimi_k3", copy.deepcopy(config), ckpt_path=str(tmp_path), trust_remote_code=True
     )
 
-    with pytest.raises(NotImplementedError, match="patched its modeling code"):
+    with pytest.raises(NotImplementedError, match=r"patched its modeling code.*a new process"):
         load_pretrained(
             str(tmp_path), auto_class, distribution=distribution, trust_remote_code=True
         )
