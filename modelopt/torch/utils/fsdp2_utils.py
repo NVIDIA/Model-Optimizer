@@ -91,6 +91,11 @@ def _move_to_fsdp_device(model, params: set[torch.nn.Parameter]) -> None:
 def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):
     """Auto-detect a HF causal-LM's decoder layers and FSDP2 ``fully_shard`` each one.
 
+    Its callers load causal LMs and text-only VLMs; the expert-parallel dense load, which also takes
+    VLMs, picks its blocks through
+    :func:`~modelopt.torch.utils.plugins.model_load_utils._fsdp2_wrap_modules`, keeping a vision
+    tower replicated.
+
     By default (``shard_root=True``) the root module is wrapped too, so embed/lm_head/norm are
     sharded instead of replicated per rank; pass ``shard_root=False`` to leave the root replicated
     (only decoder layers sharded). Returns the detected decoder layers so callers can reuse the
