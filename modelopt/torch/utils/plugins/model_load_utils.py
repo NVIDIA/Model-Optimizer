@@ -485,6 +485,11 @@ def _read_config(path, auto_class, trust_remote_code: bool = False, **hub_option
     return AutoConfig.from_pretrained(path, trust_remote_code=trust_remote_code, **hub_options)
 
 
+def _init_quantized_weights() -> bool:
+    """Whether ``init_quantized_weights`` patched ``from_pretrained`` to quantize and place."""
+    return getattr(AutoModelForCausalLM.from_pretrained, "_modelopt_init_quantized_weights", False)
+
+
 def _whole_instead(decided: bool) -> str:
     """How to have every rank load the model whole: the knob counts only for a decided plan."""
     plan = f"distribution=DistributionPlan({dist.size()}, dense='replicate')"
@@ -507,8 +512,7 @@ def _refuse_sharded_load_options(
             f"a layout, and by rank 0's GPU memory the model does not fit one GPU, so the {route} "
             f"load shards it. To load it whole on every rank: {_whole_instead(decided)}."
         )
-    if getattr(AutoModelForCausalLM.from_pretrained, "_modelopt_init_quantized_weights", False):
-        # Its from_pretrained quantizes and compresses the model; a sharded load never calls it.
+    if _init_quantized_weights():
         raise NotImplementedError(
             f"The {route} load builds the model without from_pretrained, so it would skip "
             "init_quantized_weights' quantization; load the model whole on every rank: "
@@ -546,8 +550,7 @@ def _sharded_load_kwargs(
     # Past the refusal, anything else is a dtype the load keeps or an option at its default, None.
     kwargs = {k: v for k, v in kwargs.items() if k in _SHARDED_LOAD_OPTIONS[route]}
     if checkpoint_has_mtp(model_type, ckpt_path):
-        # prepare_model_for_loading builds the head on a whole model only; carried over, the
-        # head would be exported unquantized.
+        # The head is built on a whole model only; carried over, it would export unquantized.
         raise NotImplementedError(
             f"The {route} load cannot build the MTP head this {model_type} checkpoint carries. To "
             f"load it whole on every rank: {_whole_instead(decided)}."
@@ -560,8 +563,7 @@ def _sharded_load_kwargs(
         )
     nested = (getattr(hf_config, name, None) for name in ("text_config", "llm_config"))
     if any(getattr(c, "quantization_config", None) is not None for c in (hf_config, *nested)):
-        # It reads the tensors as stored: quantized weights, a VLM's language model's included,
-        # would load as if they were not.
+        # Read as stored, quantized weights (a VLM's language model's too) would load as if not.
         raise NotImplementedError(
             f"The {route} load cannot dequantize this {model_type} checkpoint. To load it whole on "
             f"every rank: {_whole_instead(decided)}."
@@ -584,8 +586,7 @@ def _sharded_load_kwargs(
             "started without a launcher cannot set up; launch it with `torchrun --nproc_per_node=1`."
         )
     if not _has_own_gpu():
-        # Refused here, with the other ranks, rather than inside the load, where they would wait
-        # for this rank in its broadcasts.
+        # Refused with the other ranks, not inside the load, where they would wait for this one.
         raise RuntimeError(
             f"The {route} load shards onto each rank's own GPU, and this rank has none: it sees "
             f"{torch.cuda.device_count()} GPU(s) as local rank {dist.local_rank()}. To load it "
@@ -645,8 +646,7 @@ def load_pretrained(
       placement or ``dtype``, and refuses a quantized checkpoint.
     * otherwise ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
       ``AutoModelForCausalLM``); on a distributed run every rank loads the whole model, onto its own
-      GPU unless ``device_map`` is passed. Pass ``device_map=None`` where the model is placed
-      otherwise, as under ``init_quantized_weights``, which refuses a device map.
+      GPU unless ``device_map`` is passed or ``init_quantized_weights`` places it.
 
     No load here shards the routed experts: a plan with ``ep_size > 1`` is refused. A refusal on any
     rank raises on every rank, before the load. The plan is recorded on the model
@@ -728,12 +728,10 @@ def load_pretrained(
     }
     revision = {"revision": kwargs.pop("revision")} if "revision" in kwargs else {}
     decided = plan is None and dist.size() > 1
-    # Each rank's arguments are its own, so each rank checks its own, and a refusal on one fails
-    # every rank before the checkpoint is fetched.
+    # Each rank checks its own arguments; a refusal on one fails every rank before the fetch.
     with _refused_together("load arguments", alone):
-        # No load here shards the routed experts yet: an EP degree left to the decision is 1, and
-        # one MODELOPT_EP_DEGREE asks for is refused. Parsed here, so a knob one rank cannot parse
-        # fails every rank rather than leave the others in the decision's collectives.
+        # No load here shards the routed experts yet, so an EP degree left to the decision is 1.
+        # Parsed in this check, a knob one rank cannot parse fails every rank.
         ep_size = 1 if decided and _ep_degree(None) == "auto" else None
         if kwargs.pop("output_loading_info", False):
             raise ValueError(
@@ -837,11 +835,13 @@ def load_pretrained(
         # A sharded load finds the unplaced keys while it places the weights.
         keys = model._modelopt_unplaced_source_keys
     else:
-        if plan.world_size > 1 and (index := _own_gpu_index()) is not None:
+        # init_quantized_weights computes the device map itself, and refuses one it is passed.
+        spread = plan.world_size > 1 and not _init_quantized_weights()
+        if spread and (index := _own_gpu_index()) is not None:
             # Each rank takes the whole model onto its own GPU: under "auto", every rank's
             # accelerate could pick the same idle GPU.
             kwargs.setdefault("device_map", {"": f"cuda:{index}"})
-        elif plan.world_size > 1 and "device_map" not in kwargs:
+        elif spread and "device_map" not in kwargs:
             # This rank says so itself: rank 0 may have a GPU of its own, and nothing to say.
             warnings.warn(
                 f"Rank {dist.rank()} has no GPU of its own: it sees {torch.cuda.device_count()} "
@@ -1407,11 +1407,11 @@ def _decide_distribution(
     ep_size = _ep_degree(ep_size)
     dense = _dense_from_env(world_size) if dense is None else dense
     if (
-        auto_class not in (None, AutoModelForCausalLM)
+        (auto_class not in (None, AutoModelForCausalLM) or _init_quantized_weights())
         and ep_size in ("auto", 1)
         and dense in ("auto", "replicate")
     ):
-        # The sharded loads refuse this class: with nothing asking to shard, load it whole, unbuilt.
+        # The sharded loads refuse this class and init_quantized_weights: load it whole, unbuilt.
         return DistributionPlan(world_size)
     if auto_class not in (None, AutoModelForCausalLM):
         # Refused here, rather than build the decision's own pick of class, which may not build.
@@ -1539,8 +1539,9 @@ def resolve_distribution_plan(
     the snapshot the load reads.
 
     ``config``, the caller's own config, is decided from instead of the checkpoint's. ``auto_class``
-    is the class the load builds with: with one the sharded loads refuse, and nothing asking to
-    shard, the plan loads the model whole, decided without a build.
+    is the class the load builds with: with one the sharded loads refuse, or inside
+    ``init_quantized_weights``, and nothing asking to shard, the plan loads the model whole, decided
+    without a build.
     """
     # Each rank reads the checkpoint for itself. One that cannot must fail every rank here, rather
     # than leave the others waiting in a broadcast below for a rank that already raised.

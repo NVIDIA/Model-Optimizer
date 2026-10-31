@@ -62,6 +62,7 @@ from transformers import (
 import modelopt.torch.models.hf as models_hf
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.quantization.plugins import accelerate as accelerate_plugin
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
@@ -1586,23 +1587,46 @@ def test_an_automatic_layout_says_so_when_it_refuses_a_placement(
     assert loaders == {}
 
 
-@pytest.mark.parametrize("handed", [False, True], ids=["automatic", "handed"])
+class _ContextLoadReachedError(Exception):
+    """Raised where init_quantized_weights' from_pretrained builds the model, past its checks."""
+
+
+@pytest.mark.parametrize("memory", [1 << 50, 1], ids=["fits", "too-big"])
+def test_a_load_it_decides_inside_init_quantized_weights_is_whole_and_unplaced(
+    run_as, loaders, process_group, monkeypatch, tmp_path, memory
+):
+    """Inside init_quantized_weights, with nothing asking to shard, every rank gets the whole model,
+    whatever rank 0's GPU memory, and the load leaves the device map to the context, which computes
+    it and refuses one passed: the context's from_pretrained gets past that refusal."""
+    run_as(2, rank=1)
+    LlamaConfig(**_TINY).save_pretrained(tmp_path)  # read from disk, as the context reads it too
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: memory)
+    monkeypatch.setattr(
+        accelerate_plugin, "init_empty_weights", mock.Mock(side_effect=_ContextLoadReachedError)
+    )
+
+    with init_quantized_weights(mtq.INT8_DEFAULT_CFG), pytest.raises(_ContextLoadReachedError):
+        load_pretrained(str(tmp_path))
+    assert loaders == {}
+
+
+@pytest.mark.parametrize("handed", [False, True], ids=["knob", "handed"])
 def test_a_sharded_load_is_refused_inside_init_quantized_weights(
     run_as, serve, loaders, process_group, monkeypatch, tmp_path, handed
 ):
     """init_quantized_weights quantizes and compresses in the from_pretrained it patches, which the
-    FSDP2 load never calls: a layout that shards there, rank 0's GPU memory's or a handed plan's,
-    is refused rather than return the model unquantized."""
+    FSDP2 load never calls: a knob or a plan asking to shard there is refused rather than return the
+    model unquantized."""
     run_as(2, rank=1)
     serve(LlamaConfig(**_TINY))
-    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: 1)
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
     plan = {"distribution": DistributionPlan(2, dense="fsdp")} if handed else {}
 
     with (
         init_quantized_weights(mtq.INT8_DEFAULT_CFG),
         pytest.raises(NotImplementedError, match=r"init_quantized_weights.*dense='replicate'"),
     ):
-        load_pretrained(str(tmp_path), device_map=None, **plan)
+        load_pretrained(str(tmp_path), **plan)
     assert loaders == {}
 
 
