@@ -304,6 +304,12 @@ _CHECKPOINT_QUANTIZED = kimi_k3._checkpoint_quantized
 
 
 @pytest.fixture(autouse=True)
+def no_load_patched_for_good(monkeypatch):
+    """Each test starts in a process no expert-parallel Kimi-K3 load has patched, and leaves none."""
+    monkeypatch.setattr(moe, "_PATCHED_EVERY_LOAD", set())
+
+
+@pytest.fixture(autouse=True)
 def unquantized_checkpoints_on_disk(monkeypatch):
     """The checkpoints these tests name are stand-ins with no ``config.json``: prepare reads each as
     an unquantized one. The test of that read puts the real one back."""
@@ -632,7 +638,7 @@ def test_prepare_lets_an_error_reading_the_quant_config_through(
 
 
 @pytest.mark.usefixtures("private_conversion_registry", "restore_loader_hooks")
-@pytest.mark.parametrize("level", ["top", "text"])
+@pytest.mark.parametrize("level", ["top", "text", "llm"])
 def test_a_config_that_lost_its_quantization_config_is_refused_by_the_checkpoints(
     monkeypatch, remote_checkpoint, tmp_path, level
 ):
@@ -642,11 +648,11 @@ def test_a_config_that_lost_its_quantization_config_is_refused_by_the_checkpoint
     and the decompressor refuses the config before prepare patches anything."""
     monkeypatch.setattr(kimi_k3, "_checkpoint_quantized", _CHECKPOINT_QUANTIZED)
     scheme = {"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"}
-    stored = (
-        {"quantization_config": scheme}
-        if level == "top"
-        else {"text_config": {"quantization_config": scheme}}
-    )
+    stored = {
+        "top": {"quantization_config": scheme},
+        "text": {"text_config": {"quantization_config": scheme}},
+        "llm": {"llm_config": {"quantization_config": scheme}},
+    }[level]
     (tmp_path / "config.json").write_text(json.dumps(stored))
     # What the load returns as model.config: prepared, with its scheme dropped, and the mark cleared.
     text = SimpleNamespace(
@@ -730,6 +736,9 @@ def test_only_an_expert_parallel_plan_patches_kimi_k3s_code(
         assert plan.is_expert_parallel == (outcome == "expert-parallel")
     expert_parallel = outcome == "expert-parallel"
     assert hasattr(hf_generic, "OutputRecorder")  # importable on every plan
+    tie = vars(remote_checkpoint.KimiK3ForConditionalGeneration)["tie_weights"]
+    assert getattr(tie, "_kimi_k3_kwargs_shim", False)  # and buildable on every plan
+    assert ("kimi_k3" in moe._PATCHED_EVERY_LOAD) == expert_parallel
     fused = not isinstance(remote_checkpoint.KimiSparseMoeBlock(_config()).experts, nn.ModuleList)
     assert fused == expert_parallel
     registered = cm.get_checkpoint_conversion_mapping("kimi_linear") or []
