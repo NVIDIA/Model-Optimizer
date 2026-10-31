@@ -824,15 +824,14 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     kernel) backends are not intercepted; ``normalize_experts_impl_on_the_fly``
     redirects them to ``grouped_mm`` before calibration.
 
-    The non-gated variant (``up_proj`` instead of ``gate_up_proj``, used by
-    NemotronH) is handled by :class:`_QuantNonGatedFusedExperts` via the
+    A non-gated layout (a single ``up_proj``) is handled by a subclass that overrides the
     ``_first_proj_attr`` / ``_is_gated`` hooks below; each layout names the
     first-projection quantizers after its backing parameter.
     """
 
     # Name of the 3-D weight parameter feeding the first ``F.linear`` per expert.
     # Gated experts fuse gate+up into ``gate_up_proj``; non-gated experts use a
-    # single ``up_proj`` (see _QuantNonGatedFusedExperts).
+    # single ``up_proj``, which their subclass names here.
     _first_proj_attr = "gate_up_proj"
     # Whether the first projection packs a gate half that must be split on export.
     _is_gated = True
@@ -887,6 +886,14 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         return idx
 
     def _setup(self):
+        # Each expert's weight is sliced as (out_dim, in_dim), and a transposed container would be
+        # sliced wrong with nothing in the shapes to catch it. register_fused_experts_on_the_fly skips
+        # such containers; this refuses them for the wrappers registered explicitly (FP8, Nemotron-H).
+        if getattr(self, "is_transposed", False):
+            raise NotImplementedError(
+                f"{type(self).__name__} quantizes expert weights stored (num_experts, out_dim, "
+                "in_dim), but these experts are marked is_transposed."
+            )
         n = self.num_experts
         setattr(self, self._first_proj_input_quantizer_attr, TensorQuantizer())
         setattr(
@@ -1210,28 +1217,13 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
                 self._fold_weight_quantizer(q, (weight_slice,), keep_attrs)
 
 
-class _QuantNonGatedFusedExperts(_QuantFusedExperts):
-    """Quantized wrapper for non-gated fused MoE experts.
-
-    Used by NemotronH (transformers 5.5+ ``NemotronHExperts``), whose experts
-    are a *non-gated* MLP: a single ``up_proj`` (no gate half) and a ``down_proj``,
-    both stored as 3-D ``nn.Parameter`` s indexed per expert.
-    """
-
-    _first_proj_attr = "up_proj"
-    _is_gated = False
-    # The grouped_mm interception is validated for the gated layout only, so these keep
-    # calibrating on the eager forward.
-    _eager_only = True
-
-
 class _QuantFP8Experts(_QuantFusedExperts):
     """Scale-aware PTQ for native Transformers FP8 experts, dequantized per expert."""
 
     # The block scales apply in get_expert_weight, which only the eager forward reaches: transformers'
-    # FP8 grouped_mm forward runs its own kernels, which nothing here intercepts. So, unlike for the
-    # non-gated wrapper, the grouped interceptor's refusal never fires for these: what keeps them on
-    # eager is normalize_experts_impl_on_the_fly, which runs on convert and on restore.
+    # FP8 grouped_mm forward runs its own kernels, which nothing here intercepts. So the grouped
+    # interceptor's refusal never fires for these: what keeps them on eager is
+    # normalize_experts_impl_on_the_fly, which runs on convert and on restore.
     _eager_only = True
 
     @property
@@ -1617,17 +1609,13 @@ def register_sparse_moe_on_the_fly(model):
 
 
 def _fused_experts_wrapper(module):
-    """Return the ``_QuantFusedExperts`` subclass for a fused-MoE-experts module, else None.
+    """Return :class:`_QuantFusedExperts` for a fused-MoE-experts module, else None.
 
     Detects the standardized HuggingFace transformers 5.0+ fused expert pattern: ``num_experts``,
-    a 3-D ``down_proj`` and a 3-D first projection, either
-
-    * gated (:class:`_QuantFusedExperts`): a 3-D ``gate_up_proj`` fusing gate+up. Matches
-      ``MixtralExperts``, ``Qwen2MoeExperts``, ``Qwen3MoeExperts``,
-      ``Qwen3_5MoeExperts``, ``DeepseekV3NaiveMoe``, ``JambaExperts``,
-      ``OlmoeExperts``, ``MiniMaxM2Experts``, ``MiniMaxM3VLExperts``, etc.
-    * non-gated (``_QuantNonGatedFusedExperts``): a 3-D ``up_proj`` with no
-      ``gate_proj`` and no ``gate_up_proj``. Matches NemotronH ``NemotronHExperts``.
+    a 3-D ``down_proj`` and a 3-D ``gate_up_proj`` fusing gate+up. Matches ``MixtralExperts``,
+    ``Qwen2MoeExperts``, ``Qwen3MoeExperts``, ``Qwen3_5MoeExperts``, ``DeepseekV3NaiveMoe``,
+    ``JambaExperts``, ``OlmoeExperts``, ``MiniMaxM2Experts``, ``MiniMaxM3VLExperts``, etc. Experts
+    of another layout register a wrapper of their own, as Nemotron-H's non-gated ones do.
 
     Matching is by shape alone, so GptOss and Llama4TextExperts -- transposed layouts with their own
     explicit registrations -- match too; :func:`register_fused_experts_on_the_fly` never reaches
@@ -1645,24 +1633,23 @@ def _fused_experts_wrapper(module):
     gate_up = getattr(module, "gate_up_proj", None)
     if isinstance(gate_up, (nn.Parameter, Tensor)) and gate_up.dim() == 3:
         return _QuantFusedExperts
-    up = getattr(module, "up_proj", None)
-    if isinstance(up, (nn.Parameter, Tensor)) and up.dim() == 3:
-        # Only claim non-gated experts that alternate up_proj then down_proj.
-        if getattr(module, "gate_proj", None) is None and gate_up is None:
-            return _QuantNonGatedFusedExperts
     return None
 
 
 def _is_fused_experts_module(module):
     """Check if a module is a fused MoE expert container compatible with _QuantFusedExperts.
 
-    See :func:`_fused_experts_wrapper` for the recognized layouts (gated
-    ``gate_up_proj`` and non-gated ``up_proj``). Transposed containers match too, though
-    registration skips them: :func:`normalize_experts_impl_on_the_fly` must still find them, to keep
-    GPT-OSS's own wrapper on eager, the only forward on which it quantizes ``down_proj``'s input (it
-    intercepts the eager forward's ``bmm``/``matmul``).
+    That is one :func:`_fused_experts_wrapper` detects, or one whose class registered a subclass of
+    it, as Nemotron-H's non-gated experts and transformers' FP8 experts do.
+    Transposed containers match too, though registration skips them:
+    :func:`normalize_experts_impl_on_the_fly` must still find them, to keep GPT-OSS's own wrapper on
+    eager, the only forward on which it quantizes ``down_proj``'s input (it intercepts the eager
+    forward's ``bmm``/``matmul``).
     """
-    return _fused_experts_wrapper(module) is not None
+    if _fused_experts_wrapper(module) is not None:
+        return True
+    wrapper = QuantModuleRegistry.get(type(module)) if hasattr(module, "num_experts") else None
+    return wrapper is not None and issubclass(wrapper, _QuantFusedExperts)
 
 
 def register_fused_experts_on_the_fly(model):
@@ -1688,9 +1675,8 @@ def register_fused_experts_on_the_fly(model):
         if wrapper is not None and (
             getattr(module, "is_transposed", False)
             # Stored `(num_experts, out_dim, in_dim)`, the first projection takes the dim down_proj
-            # puts out. That separates the layouts for a gated container, whose first projection is
-            # `2 * intermediate`, whether it says so or not; a non-gated one's two layouts have the
-            # same shapes, so only its own `is_transposed` gives it away.
+            # puts out. A gated container's first projection is `2 * intermediate`, so its shapes
+            # give a transposed layout away whether it says so or not.
             or getattr(module, wrapper._first_proj_attr).shape[-1] != module.down_proj.shape[1]
         ):
             # `_fused_experts_wrapper` matches on parameter SHAPE only, so it also claims a
@@ -1755,15 +1741,14 @@ def normalize_experts_impl_on_the_fly(model):
     fallback_impl = "grouped_mm" if _HAS_GROUPED_LINEAR else "eager"
     # A class with its own quantized wrapper -- GPT-OSS's quantizes down_proj's input by intercepting
     # the eager forward's bmm/matmul -- only works on the eager forward, and so does a fused-experts
-    # wrapper that says so (FP8's), so keep main's forced eager for such a model. The plugins run in
-    # no set order, so a class register_fused_experts_on_the_fly registers may not be registered yet:
-    # the wrapper it will get decides then.
+    # wrapper that says so (FP8's), so keep main's forced eager for such a model. Those register
+    # when their module is imported; register_fused_experts_on_the_fly, which may run after this,
+    # registers only the generic wrapper, which is not eager-only.
     eager_only = sorted(
         {
             type(module).__name__
             for module in fused_experts
-            if (wrapper := QuantModuleRegistry.get(type(module)) or _fused_experts_wrapper(module))
-            is not None
+            if (wrapper := QuantModuleRegistry.get(type(module))) is not None
             and (not issubclass(wrapper, _QuantFusedExperts) or wrapper._eager_only)
         }
     )
