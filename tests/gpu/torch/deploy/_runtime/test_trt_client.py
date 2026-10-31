@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import pytest
+import torch
 from _test_utils.import_helper import skip_if_no_tensorrt, skip_if_no_trtexec
 from _test_utils.torch.deploy.lib_test_models import (
     LeNet5,
@@ -24,8 +25,7 @@ from _test_utils.torch.deploy.lib_test_models import (
 from _test_utils.torch.misc import compare_outputs
 from _test_utils.torch.vision_models import get_vision_models, process_model_and_inputs
 
-skip_if_no_tensorrt()
-skip_if_no_trtexec()
+trt = pytest.importorskip("tensorrt")
 
 
 from modelopt.torch._deploy._runtime.trt_client import TRTLocalClient
@@ -67,6 +67,8 @@ def test_compile_and_profile_benchmark_models(get_model_and_input):
 
 
 def _compile_and_profile(model, args, kwargs):
+    skip_if_no_tensorrt()
+    skip_if_no_trtexec()
     device_model = compile(model, (*args, kwargs), deployment)
     assert isinstance(device_model.client, TRTLocalClient)
     latency, detailed_results = device_model.profile()
@@ -76,3 +78,61 @@ def _compile_and_profile(model, args, kwargs):
     assert detailed_results is not None
     assert device_model is not None
     compare_outputs(device_model_outputs, torch_model_outputs, rtol=1e-2, atol=1e-1)
+
+
+@pytest.mark.parametrize("input_kind", ["static", "static_inferred", "dynamic", "shape_tensor"])
+def test_trt_session_inference(input_kind):
+    logger = trt.Logger(trt.Logger.ERROR)
+    builder = trt.Builder(logger)
+    network = builder.create_network(0)
+    config = builder.create_builder_config()
+    dynamic = input_kind == "dynamic"
+    x = network.add_input("input", trt.float32, (-1, 4) if dynamic else (1, 4))
+    batch = 2 if dynamic else 1
+    inputs = [torch.arange(batch * 4, dtype=torch.float32, device="cuda").reshape(batch, 4)]
+    io_shapes = {"input": [batch, 4], "output": [batch, 4]}
+    if dynamic:
+        profile = builder.create_optimization_profile()
+        profile.set_shape("input", (1, 4), (2, 4), (4, 4))
+        config.add_optimization_profile(profile)
+    if input_kind == "shape_tensor":
+        shape = network.add_input("shape", trt.int32, (2,))
+        layer = network.add_shuffle(x)
+        layer.set_input(1, shape)
+        profile = builder.create_optimization_profile()
+        profile.set_shape_input("shape", (1, 1), (2, 2), (4, 4))
+        config.add_optimization_profile(profile)
+        inputs.append(torch.tensor([2, 2], dtype=torch.int32))
+        io_shapes.update({"shape": [2], "output": [2, 2]})
+    else:
+        layer = network.add_identity(x)
+    output = layer.get_output(0)
+    output.name = "output"
+    network.mark_output(output)
+    serialized = builder.build_serialized_network(network, config)
+    assert serialized is not None
+    runtime = trt.Runtime(logger)
+    session = TRTLocalClient.TRTSession(
+        bytes(serialized),
+        runtime,
+        torch.cuda.Stream(),
+        "cuda",
+        {} if input_kind == "static_inferred" else io_shapes,
+    )
+    result = session.run(inputs)[0]
+    torch.testing.assert_close(result, inputs[0].reshape(io_shapes["output"]))
+    with pytest.raises(AssertionError, match="input tensors"):
+        session.run(inputs[:-1])
+    if input_kind == "shape_tensor":
+        inputs[1] = torch.tensor([3, 3], dtype=torch.int32)
+        with pytest.raises(RuntimeError, match="infer_shapes"):
+            session.run(inputs)
+    if dynamic:
+        with pytest.raises(AssertionError, match="Invalid shape for input tensor input"):
+            TRTLocalClient.TRTSession(
+                bytes(serialized),
+                runtime,
+                torch.cuda.Stream(),
+                "cuda",
+                {"input": [5, 4], "output": [5, 4]},
+            )

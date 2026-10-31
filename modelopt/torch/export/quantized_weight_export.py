@@ -550,11 +550,16 @@ def capture_kv_cache_export_state(
     """Capture the ``k_scale`` / ``v_scale`` of one attention module, or ``None`` when not quantized.
 
     ``clamp_fp8_scales`` raises FP8 cache scales to at least 1.0, as the other exporters do.
+    With ``cpu=False``, constants follow a calibrated peer or attention tensor's device;
+    a stateless, parameterless attention module with no buffers falls back to CPU.
     """
     quantization_format = get_kv_cache_export_spec(attention)
     if quantization_format is None:
         return None
-    k_scale, v_scale = get_kv_cache_scaling_factor(attention, clamp_fp8_scales=clamp_fp8_scales)
+    scales = get_kv_cache_scaling_factor(
+        attention, clamp_fp8_scales=clamp_fp8_scales, resolve_constant_amax=True
+    )
+    k_scale, v_scale = scales
     if k_scale is None or v_scale is None:
         raise RuntimeError("Missing calibrated KV-cache scales")
     if cpu:

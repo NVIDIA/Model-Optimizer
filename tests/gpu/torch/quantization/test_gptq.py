@@ -81,6 +81,52 @@ def test_hessian_of_a_full_gpu_falls_back_to_the_cpu(need_2_gpus, monkeypatch, b
     assert helper.hessian.device == torch.device("cpu")
 
 
+def test_bf16_hessian_input_gives_the_float32_hessian():
+    """``input_dtype=torch.bfloat16`` gives the float32 Hessian, on the inputs' GPU or the CPU,
+    and with float32-output GEMMs makes no float32 copy of the inputs."""
+    torch.manual_seed(0)
+    batches = [torch.randn(4096, 1024, device="cuda", dtype=torch.bfloat16) for _ in range(3)]
+    inputs = torch.cat(batches).double()
+    expected = 2 * inputs.t() @ inputs / inputs.shape[0]
+    fast = calib_utils._has_float32_out_gemm(batches[0].device)
+
+    for device in ("cuda", "cpu"):
+        hessian, n_samples = torch.zeros(1024, 1024, device=device), 0
+        for batch in batches:
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            base = torch.cuda.memory_allocated()
+            hessian, n_samples = update_hessian(batch, hessian, n_samples, torch.bfloat16)
+            growth = torch.cuda.max_memory_allocated() - base
+        # Tensor cores round float32 sums their own way: ~1e-5 of the diagonal (2), not BF16's 1e-2.
+        torch.testing.assert_close(hessian.cuda().double(), expected, rtol=0, atol=1e-4)
+        if device == "cuda" and fast:
+            assert growth < batch.numel() * 4
+
+
+def test_gptq_hessian_input_dtype_reaches_the_hessian(monkeypatch):
+    """A recipe's ``hessian_input_dtype: bfloat16`` drops the float32 copy of each batch that the
+    default float32 Hessian GEMM makes."""
+    if not calib_utils._has_float32_out_gemm(torch.device("cuda", torch.cuda.current_device())):
+        pytest.skip("needs CUDA GEMMs that take out_dtype")
+    inputs = torch.randn(4, 1024, 2048, device="cuda", dtype=torch.bfloat16)
+    peaks = {}
+    for hessian_input_dtype in ("float32", "bfloat16"):
+        monkeypatch.setattr(calib_utils, "_calib_forward_peak", {})
+        model = torch.nn.Linear(2048, 16, bias=False, device="cuda", dtype=torch.bfloat16)
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            ],
+            "algorithm": {"method": "gptq", "hessian_input_dtype": hessian_input_dtype},
+        }
+        mtq.quantize(model, quant_cfg, forward_loop=lambda m: m(inputs))
+        peaks[hessian_input_dtype] = calib_utils._calib_forward_peak[torch.cuda.current_device()]
+    # The float32 GEMM reads a float32 copy of the batch: 4 bytes per element.
+    assert peaks["float32"] - peaks["bfloat16"] >= inputs.numel() * 2
+
+
 @pytest.mark.parametrize(
     ("measured_fraction", "stays"),
     [(None, False), (0.05, True), (0.25, False)],

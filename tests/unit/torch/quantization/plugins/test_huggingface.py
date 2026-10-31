@@ -29,7 +29,6 @@ from _test_utils.torch.transformers_models import (
     get_tiny_qwen3_moe,
     tf_modelopt_state_and_output_tester,
 )
-from packaging.version import Version
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe.loader import load_recipe
@@ -194,9 +193,6 @@ def test_nemotron_h_experts_only_recipes_target_routed_experts(recipe_path):
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
 @pytest.mark.parametrize("model_provider", [get_tiny_llama, get_tiny_qwen3_moe])
 def test_autoquantize_huggingface(model_provider, method):
-    if model_provider == get_tiny_qwen3_moe and Version(torch.__version__) < Version("2.9"):
-        pytest.skip("torch 2.8 grouped_mm is CUDA-only")
-
     model = model_provider()
     input_ids = model.dummy_inputs["input_ids"]
 

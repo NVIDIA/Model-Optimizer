@@ -47,12 +47,12 @@ docker run \
   ${DOCKER_IMAGE} bash
 ```
 
-Some features (e.g. [`--vllm_fakequant_export`](#evaluating-a-qad-checkpoint-in-vllm-with-fake-quantization)) need a newer Megatron-Bridge than the one in `nvcr.io/nvidia/nemo:26.08`. Until a NeMo container includes it, check out Megatron-Bridge at the commit ModelOpt's CI tests against, together with its Megatron-LM submodule:
+Some features (e.g. [`--vllm_fakequant_export`](#evaluating-a-qad-checkpoint-in-vllm-with-fake-quantization) and `--fake_quant_weight_cache`) need a newer Megatron-Bridge than the one in `nvcr.io/nvidia/nemo:26.08`. Until a NeMo container includes it, check out Megatron-Bridge at the commit ModelOpt's CI tests against, together with its Megatron-LM submodule:
 
 ```bash
 export MBRIDGE_DIR=${PWD}/Megatron-Bridge
 git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git ${MBRIDGE_DIR}
-git -C ${MBRIDGE_DIR} checkout 1d9caf7324e608aca7181de40be26a6387976210
+git -C ${MBRIDGE_DIR} checkout 0652ea797ab629e6451c64e1c92f976501b3b8b3
 git -C ${MBRIDGE_DIR} submodule update --init 3rdparty/Megatron-LM
 ```
 
@@ -408,6 +408,12 @@ Qwen3-8B (36 layers) on 4 pipeline stages, this places 10/10/10/6 layers:
 
 The split applies to both student and teacher, so it must be valid for each. The best values depend on the model,
 sequence length, and GPU memory: measure per-stage time and memory over a few iterations before choosing them.
+
+Each micro-batch forward, and each activation recomputation, fake-quantizes all student weights again, although they
+only change at the optimizer step. `--fake_quant_weight_cache` fake-quantizes each weight once per step and reuses it.
+This keeps an extra BF16 copy of the student's quantized weights on every GPU. The step is bit-identical to an
+uncached one. It needs a straight-through weight gradient (`pass_through_bwd`, the default). The more micro-batches
+per step, and the more expensive the weight format, the more it saves. It needs a [newer Megatron-Bridge](#pre-requisites) than `nemo:26.08`.
 
 The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `${OUTPUT_ROOT:-/output}/qwen3_8b_nvfp4_qad/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
 

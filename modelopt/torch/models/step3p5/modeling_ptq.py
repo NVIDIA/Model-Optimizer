@@ -137,7 +137,7 @@ def _is_expert_indexed_moe_linear(module: nn.Module) -> bool:
     ``weight`` of shape ``[num_experts, out_features, in_features]``, whose
     ``forward(x, expert_id)`` runs ``F.linear`` against the selected expert's slice. The
     weights therefore live on the projection submodule rather than on the expert container,
-    which is what :func:`_fused_experts_wrapper_class` looks for, and the module is not an
+    which is what :func:`_fused_experts_wrapper` looks for, and the module is not an
     ``nn.Linear``, so neither the fused-experts path nor the plain linear path claims it.
 
     Detection is structural rather than keyed on class names so new Step revisions are picked

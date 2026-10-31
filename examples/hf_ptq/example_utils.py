@@ -44,6 +44,8 @@ from transformers import (
     ProcessorMixin,
 )
 
+from modelopt.recipe import load_recipe
+from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
 from modelopt.torch.models import hf_model_type
@@ -52,9 +54,10 @@ from modelopt.torch.models.hf import (
     prefers_bundled_code,
     prepare_model_for_loading,
 )
+from modelopt.torch.quantization.mode import get_modelike_from_algo_cfg
 from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
-from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
+from modelopt.torch.utils.plugins.model_load_utils import is_fsdp2_text_only_vlm, load_pretrained
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +78,7 @@ def setup_distributed_args(args):
     """Initialize and attach ``args.dist_state`` (single-process if FSDP2 off)."""
     if getattr(args, "use_fsdp2", False):
         # Raise the collective timeout above NCCL's 30-min default: rank 0's checkpoint write can
-        # exceed it, and PyTorch 2.8 has no per-call barrier() timeout (must be set at PG creation).
+        # exceed it, and barrier() has no per-call timeout (it must be set at PG creation).
         dist_utils.setup(timeout=timedelta(hours=2))
         rank = dist_utils.rank()
         args.dist_state = DistributedState(
@@ -94,19 +97,52 @@ def cleanup_distributed(args):
         dist_utils.cleanup()
 
 
+def _awq_calibrations(args) -> set[str]:
+    """The AWQ calibrations (``awq_lite``, ``awq_full``) the run's --recipe or --qformat uses."""
+    if getattr(args, "recipe", None) is not None:
+        recipe = load_recipe(args.recipe)
+        configs = [getattr(recipe, "quantize", None)]
+        search = getattr(recipe, "auto_quantize", None)  # the KV-cache search allows only max
+        if search is not None:
+            configs += search.candidate_formats
+            configs += [c for space in search.module_search_spaces for c in space.candidate_formats]
+        algorithms = [config.algorithm for config in configs if config is not None]
+    else:
+        preset = QUANT_CFG_CHOICES.get(getattr(args, "qformat", None) or "")
+        algorithms = [preset.get("algorithm")] if preset is not None else []
+    methods = {
+        mode.removesuffix("_calibrate")
+        for algorithm in algorithms
+        for mode, _ in get_modelike_from_algo_cfg(algorithm)
+    }
+    return methods & {"awq_lite", "awq_full"}
+
+
 def validate_fsdp2_supported(args, config):
     """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
     issues = []
     if "vila" in args.local_checkpoint_path.lower():
         issues.append("VILA (custom builder + non-standard layer layout)")
-    if is_nemotron_vl(config) or _is_multimodal_config(config):
+    if is_fsdp2_text_only_vlm(config):
+        if getattr(args, "calib_with_images", False):
+            issues.append("image-text calibration (Qwen FSDP2 currently supports text-only inputs)")
+    elif is_nemotron_vl(config) or _is_multimodal_config(config):
         issues.append("multimodal / VL models (decoder layers not auto-detectable)")
-    if getattr(config, "quantization_config", None) is not None:
+    if any(
+        getattr(cfg, "quantization_config", None) is not None
+        for cfg in (config, getattr(config, "text_config", None))
+    ):
         issues.append("pack-quantized / compressed-tensors checkpoints")
     if getattr(args, "specdec_offline_dataset", None) is not None:
         issues.append("speculative decoding (--specdec_offline_dataset)")
     if getattr(args, "low_memory_mode", False):
         issues.append("--low_memory_mode (redundant with FSDP2)")
+    if dist_utils.size() > 1 and (awq := _awq_calibrations(args)):
+        issues.append(
+            f"AWQ calibration ({', '.join(sorted(awq))}) on more than one rank: each rank would fold "
+            "its own smoothing scale into its weight shard (drop --use_fsdp2, run on one rank, or "
+            "use a non-AWQ format)"
+        )
     if not issues and checkpoint_has_mtp(config.model_type, args.local_checkpoint_path):
         issues.append("Nemotron-H MTP (auxiliary modules are not constructed by the FSDP2 loader)")
 
@@ -564,6 +600,7 @@ def get_model(
     trust_remote_code=False,
     use_seq_device_map=False,
     attn_implementation=None,
+    experts_implementation=None,
     offload_folder=None,
     max_cpu_memory_gb=None,
     max_gpu_memory_gb=None,
@@ -605,6 +642,11 @@ def get_model(
     # Note: Forcibly converting the model precision between bf16 and fp16 may introduce accuracy drop
     model_kwargs = config_kwargs.copy()
     model_kwargs.setdefault("dtype", "auto")
+    # Only when asked, on every load below: an explicit None is a value transformers stores.
+    experts_kwargs = (
+        {} if experts_implementation is None else {"experts_implementation": experts_implementation}
+    )
+    model_kwargs.update(experts_kwargs)
 
     # DiffusionGemma ties encoder/decoder weights. device_map "auto" (balanced) can split
     # a tied pair across GPUs, leaving one side on the meta device and breaking generation.
@@ -684,6 +726,7 @@ def get_model(
                 device_map="auto",
                 trust_remote_code=trust_remote_code,
                 dtype="auto",
+                **experts_kwargs,
             )
     elif get_original_hf_quant_method(hf_config) == "mxfp4":
         # Native MXFP4 checkpoints (e.g. openai/gpt-oss-*) must be dequantized to

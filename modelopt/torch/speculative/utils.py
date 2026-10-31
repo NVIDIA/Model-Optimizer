@@ -778,13 +778,7 @@ def load_vlm_or_llm(
         return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
 
     if _is_vlm:
-        # Transformers 5 renamed AutoModelForVision2Seq to
-        # AutoModelForImageTextToText.  Prefer the pre-5 name so this loader
-        # continues to support the Transformers 4 environments used by older
-        # speculative-decoding jobs.
-        model_cls = getattr(transformers, "AutoModelForVision2Seq", None)
-        if model_cls is None:
-            model_cls = transformers.AutoModelForImageTextToText
+        model_cls = transformers.AutoModelForImageTextToText
     else:
         model_cls = transformers.AutoModelForCausalLM
 

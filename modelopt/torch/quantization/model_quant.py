@@ -18,6 +18,7 @@
 import fnmatch
 import inspect
 import os
+import sys
 import warnings
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
@@ -25,6 +26,7 @@ from typing import Any, cast
 
 import torch
 import torch.nn as nn
+from torch.distributed.fsdp import FSDPModule
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
@@ -54,6 +56,7 @@ from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_s
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized
+from .utils.core_utils import _get_fsdp2_mesh
 
 __all__ = [
     "auto_quantize",
@@ -68,6 +71,31 @@ __all__ = [
     "quantize",
     "temporarily_fold_weights",
 ]
+
+
+def _refuse_awq_on_a_sharded_fsdp2_model(
+    model: nn.Module, algorithm: QuantizeAlgoCfgType, candidate: str | None = None
+) -> None:
+    """Refuse AWQ calibration of an FSDP2 model sharded over several ranks, before it starts.
+
+    Each rank calibrates on its own data and folds the AWQ scale it picks into its own weight
+    shard, so the shards would not match. Every rank decides alike, from the run and the model.
+    """
+    if dist.size() == 1 or not dist.is_fsdp2_model(model):
+        return
+    methods = [mode.removesuffix("_calibrate") for mode, _ in get_modelike_from_algo_cfg(algorithm)]
+    awq = [method for method in methods if method in ("awq_lite", "awq_full")]
+    if awq:
+        # For the message only: the FSDP2 shard mesh can be narrower than the run (HSDP, 2D).
+        mesh = _get_fsdp2_mesh(next(m for m in model.modules() if isinstance(m, FSDPModule)))
+        ranks = mesh.size(-1) if mesh is not None else dist.size()
+        what = f"AutoQuantize candidate {candidate!r} calibrates" if candidate else "Calibrating"
+        raise NotImplementedError(
+            f"{what} with {', '.join(awq)}, which is not supported yet on an FSDP2 model sharded "
+            f"over {ranks} ranks: each rank calibrates on its own data and folds the AWQ scale it "
+            "picks into its own weight shard, so the shards would not match. Calibrate in a single "
+            "process, or with an algorithm other than AWQ."
+        )
 
 
 # TODO: Descriptors for the supported algorithms
@@ -99,6 +127,7 @@ def calibrate(
 
     Returns: The calibrated pytorch model.
     """
+    _refuse_awq_on_a_sharded_fsdp2_model(model, algorithm)
     if forward_loop is not None:
         # get the number of arguments of forward_loop
         num_args = len(inspect.signature(forward_loop).parameters)
@@ -114,6 +143,25 @@ def calibrate(
 
             def forward_loop(model):
                 return original_forward_loop()  # type: ignore[call-arg]
+
+    # Whether the algorithm actually invoked the loop. `max_calibrate` may skip it
+    # (`skip_forward_without_activation_calib`) when no enabled quantizer needs activation
+    # statistics, and a post-calibration check that assumed it ran would fire on every
+    # weight-only calibration.
+    forward_loop_ran = False
+    if forward_loop is not None:
+        _requested_forward_loop = forward_loop
+
+        def forward_loop(model):
+            nonlocal forward_loop_ran
+            forward_loop_ran = True
+            return _requested_forward_loop(model)
+
+        # The fused-experts interception check below judges this calibration's forwards alone.
+        for module in model.modules():
+            if hasattr(module, "_intercept_count"):
+                module._intercept_count = module._forward_count = 0
+                module._weight_input_capture = False
 
     # move the model to eval mode, remembering each module's mode; quantizers, and plain containers of them,
     # follow the module they quantize instead
@@ -140,6 +188,20 @@ def calibrate(
     # clear_cuda_cache()
 
     _restore_training_modes(model, training_modes)
+
+    if forward_loop_ran:
+        # A fused-experts module whose forward ran past both interception hooks collected
+        # nothing. Surface it here rather than let the export emit weight-derived fallback scales
+        # under a warning that blames the size of the calibration set. Raised once the model is
+        # back in its mode, for a caller that catches it to calibrate again. Only a loaded HF plugin
+        # installs fused-experts wrappers; importing it here would rerun one that failed to load,
+        # which import_plugin only warns about, and fail every calibration with its error. Both
+        # conditions must come out the same on every rank: under expert parallelism the check
+        # all-reduces over the experts' group, and a rank that skipped it would leave its peers
+        # waiting there.
+        huggingface = sys.modules.get("modelopt.torch.quantization.plugins.huggingface")
+        if huggingface is not None:
+            huggingface.assert_fused_experts_intercepted(model)
 
     return model
 
@@ -439,6 +501,7 @@ def quantize(
     Returns: A pytorch model which has been quantized and calibrated.
     """
     quantize_config = QuantizeConfig(**dict(config))
+    _refuse_awq_on_a_sharded_fsdp2_model(model, config.get("algorithm"))
     if not is_quantized(model):
         model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
     else:
@@ -996,6 +1059,8 @@ def auto_quantize(
                 "Please run auto_quantize with 'max' or 'mse' calibration and use "
                 "get_auto_quantize_config() to obtain a config for mtq.quantize()."
             )
+        # Every candidate, before the search calibrates any: calibrate() would refuse mid-search.
+        _refuse_awq_on_a_sharded_fsdp2_model(model, algo, candidate=name)
 
     # Select the appropriate searcher based on method
     if method_name not in AUTO_QUANTIZE_SEARCHERS:

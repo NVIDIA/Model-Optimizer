@@ -19,6 +19,7 @@ import fnmatch
 import logging
 from collections import defaultdict
 from collections.abc import Generator
+from itertools import chain
 from typing import Any
 from warnings import warn
 
@@ -41,6 +42,7 @@ from modelopt.torch.quantization.qtensor import (
     NVFP4QTensor,
     QTensorWrapper,
 )
+from modelopt.torch.quantization.qtensor.base_qtensor import _refuse_dtensor
 from modelopt.torch.quantization.utils import (
     quantizer_attr_names,
     representative_weight_quantizer,
@@ -299,13 +301,18 @@ def get_kv_cache_bias(kv_module: nn.Module) -> list[torch.Tensor]:
 
 
 def get_kv_cache_scaling_factor(
-    self_attention_module: nn.Module, clamp_fp8_scales: bool = True
+    self_attention_module: nn.Module,
+    clamp_fp8_scales: bool = True,
+    *,
+    resolve_constant_amax: bool = False,
 ) -> list[torch.Tensor | None]:
     """Get the K and V BMM scaling factors for the self attention module.
 
     Args:
         self_attention_module: The self attention module to get the K and V BMM scaling factors from.
         clamp_fp8_scales: Whether to clamp FP8 KV cache scaling factors to at least 1.0.
+        resolve_constant_amax: Resolve fixed forward ranges for functional capture. Defaults to
+            False to preserve legacy exporters' omission of stateless scales.
 
     Returns:
         The K and V BMM scaling factors.
@@ -318,9 +325,31 @@ def get_kv_cache_scaling_factor(
     # Both FP8 and NVFP4 cache scales are amax / 448, as the HF exporter writes them and
     # vLLM / TensorRT-LLM read them.
     scaling_factors = []
-    for quantizer_name in ("k_bmm_quantizer", "v_bmm_quantizer"):
-        quantizer = getattr(self_attention_module, quantizer_name)
-        amax = quantizer.export_amax() if quantizer.is_enabled else None
+    quantizers = [self_attention_module.k_bmm_quantizer, self_attention_module.v_bmm_quantizer]
+    reference = None
+    if resolve_constant_amax:
+        reference = next(
+            (
+                quantizer.amax
+                for quantizer in quantizers
+                if quantizer.is_enabled
+                and not quantizer._use_constant_amax
+                and quantizer.amax is not None
+            ),
+            None,
+        )
+        if reference is None:
+            reference = next(
+                chain(self_attention_module.parameters(), self_attention_module.buffers()),
+                torch.empty(0),
+            )
+    for quantizer in quantizers:
+        if not quantizer.is_enabled:
+            amax = None
+        elif resolve_constant_amax and quantizer._use_constant_amax and not quantizer.is_mx_format:
+            amax = quantizer._get_amax(reference).reshape(1)
+        else:
+            amax = quantizer.export_amax()
         scaling_factors.append(None if amax is None else amax.float() / 448.0)
 
     # For FP8, we recommend default KV-cache scaling factor to be 1. The
@@ -338,7 +367,9 @@ def get_kv_cache_scaling_factor(
         factor = scaling_factors[i]
         if factor is None:
             continue
-        if _has_large_fp8_scale(factor):
+        if not (
+            resolve_constant_amax and quantizers[i]._use_constant_amax
+        ) and _has_large_fp8_scale(factor):
             warn(
                 "Warning: Large KV activation detected. "
                 "Quantized KV cache may lead to higher accuracy drop."
@@ -686,12 +717,14 @@ def process_layer_quant_config(layer_config_dict):
     exclude_modules = []
 
     for k, v in layer_config_dict.items():
-        if "awq_block_size" in k:
+        if "awq_block_size" in k or k.endswith(".pre_quant_scale"):
             continue
 
         # Get layer name for constructing quantized_layers dictionary under per_layer_config
         prefix = ".".join(k.rsplit(".", 1)[:-1])
         awq_key = prefix + ".awq_block_size"
+        # Only promise the tensor for layers that have one (see ``_has_pre_quant_scale``).
+        has_pre_quant_scale = layer_config_dict.get(prefix + ".pre_quant_scale", True)
 
         # Get the corresponding AWQ block size
         block_size_value = layer_config_dict.get(awq_key, 0)
@@ -710,14 +743,14 @@ def process_layer_quant_config(layer_config_dict):
                 "quant_algo": "W4A16_AWQ",
                 "group_size": block_size_value,
                 "has_zero_point": False,
-                "pre_quant_scale": True,
+                "pre_quant_scale": has_pre_quant_scale,
             }
         elif v == "w4a8_awq":
             layer_config = {
                 "quant_algo": "W4A8_AWQ",
                 "group_size": block_size_value,
                 "has_zero_point": False,
-                "pre_quant_scale": True,
+                "pre_quant_scale": has_pre_quant_scale,
             }
         elif v == "int8_wo":
             layer_config = {"quant_algo": "W8A16"}
@@ -826,6 +859,7 @@ def _validate_int4_block_size(in_dim, block_size):
 
 def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
     """Packs the INT4 weights into uint8 tensor."""
+    _refuse_dtensor(weight, "INT4 packing")
     out_dim = weight.shape[-2]
     assert out_dim % 2 == 0, f"Cannot pack weight. Out dimension {out_dim} is not an even number."
     in_dim = weight.shape[-1]
@@ -849,7 +883,7 @@ def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
         # Pack two 4-bit values (val0,val1) into a single byte:
         val0 = transpose[..., 0] & 0x0F
         val1 = transpose[..., 1] & 0x0F
-        packed_byte = val0 | (val1 << 4)
+        packed_byte = val0 | torch.bitwise_left_shift(val1, 4)
 
         # Transpose back to the shape (experts, out_dim // 2, in_dim)
         return packed_byte.permute(0, 2, 1).contiguous().view(torch.uint8)
@@ -862,7 +896,7 @@ def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
         # Pack two 4-bit values into one byte
         val0 = reshaped[..., 0] & 0x0F
         val1 = reshaped[..., 1] & 0x0F
-        packed_byte = val0 | (val1 << 4)
+        packed_byte = val0 | torch.bitwise_left_shift(val1, 4)
 
         # Return shape (out_dim // 2, in_dim)
         return packed_byte.T.contiguous().view(torch.uint8)
@@ -1764,6 +1798,27 @@ def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
     return router_names
 
 
+def _has_pre_quant_scale(module: nn.Module, weight_names: list[str]) -> bool:
+    """Whether the export writes a ``pre_quant_scale`` for ``module``.
+
+    AWQ leaves it on every input quantizer of the module, or fuses it into a sibling and marks the
+    module (loaders accept the missing tensor there). Without AWQ (max calibration) there is none,
+    even though the INT4 label is ``*_AWQ``. Fused experts never get one: AWQ skips them and
+    ``_export_fused_experts`` does not write the scale even if an input quantizer held one.
+    """
+    if any(hasattr(module, f"{wn}_weight_quantizers") for wn in weight_names):
+        return False
+    return getattr(module, "fused_with_prequant", False) or (
+        bool(weight_names)
+        and all(
+            hasattr(
+                getattr(module, quantizer_attr_names(wn).input_quantizer, None), "_pre_quant_scale"
+            )
+            for wn in weight_names
+        )
+    )
+
+
 def get_quant_config(
     model: nn.Module,
     is_modelopt_qlora: bool = False,
@@ -1880,6 +1935,11 @@ def get_quant_config(
             # Construct per layer config dictionary
             layer_config_dict[name + ".quantization"] = quantization_format
             layer_config_dict[name + ".awq_block_size"] = block_size
+            if quantization_format in (
+                QUANTIZATION_INT4_AWQ,
+                QUANTIZATION_W4A8_AWQ,
+            ) and not _has_pre_quant_scale(module, weight_names):
+                layer_config_dict[name + ".pre_quant_scale"] = False
 
         # Find kv cache quant format
         is_language_model_module = (

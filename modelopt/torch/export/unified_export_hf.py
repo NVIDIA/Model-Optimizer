@@ -75,6 +75,10 @@ except ImportError:
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
+from modelopt.torch.quantization.algorithms import (
+    _linear_attn_ba_group_key,
+    _linear_attn_qkvz_group_key,
+)
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
@@ -100,7 +104,7 @@ except ImportError:
     export_sparse_attention_config = None
 
 # Importing the built-in handlers installs their entries in the two registries.
-from . import hf_export_handlers as _hf_export_handlers  # noqa: F401
+from . import hf_export_handlers as _hf_export_handlers
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import get_experts_list, is_layernorm, is_quantlinear, sync_moe_gate_up_amax
 from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
@@ -374,6 +378,23 @@ def collect_shared_input_modules(
     return input_to_linear, output_to_layernorm
 
 
+def _shared_input_fusion_groups(model, input_to_linear):
+    """Keep Qwen's QKVZ and BA runtime groups separate despite their shared input."""
+    for tensor, modules in input_to_linear.items():
+        groups = defaultdict(list)
+        for module in modules:
+            name = getattr(module, "name", "")
+            key = _linear_attn_qkvz_group_key(model, name) or _linear_attn_ba_group_key(model, name)
+            groups[key].append(module)
+        for key, group in groups.items():
+            if key is not None:
+                assert len({get_quantization_format(module) for module in group}) == 1, (
+                    "Modules have different quantization formats"
+                )
+        for group in groups.values():
+            yield tensor, group, len(groups) == 1
+
+
 def _fuse_shared_input_modules(
     model: nn.Module,
     input_to_linear: dict,
@@ -403,7 +424,7 @@ def _fuse_shared_input_modules(
     fused_linears = {}
     fused_count = 0
 
-    for tensor, modules in input_to_linear.items():
+    for tensor, modules, can_fuse_layernorm in _shared_input_fusion_groups(model, input_to_linear):
         # Get quantization format for this group of modules
         # (must be re-evaluated per group as different modules may have different formats)
         group_quant_format = get_quantization_format(modules[0]) if modules else quantization_format
@@ -437,6 +458,7 @@ def _fuse_shared_input_modules(
             # Fuse layernorms (for AWQ)
             if (
                 fuse_layernorms
+                and can_fuse_layernorm
                 and output_to_layernorm is not None
                 and group_quant_format is not None
                 and group_quant_format != QUANTIZATION_NONE
@@ -613,6 +635,12 @@ def _export_quantized_weight(
 
     The export includes converting weight tensor to correct quantized values and quantized dtype,
     and registering scaling factors.
+
+    An export handler packs through ``hf_export_handlers._export_weight`` rather than calling this
+    directly: on the keep-fused export an FSDP2-owned weight must be packed inside its unit's
+    weight-update window, which that helper (or the fused-experts handler, around its fold) opens.
+    Packed outside it, the unit's next reshard puts FSDP2's unquantized shard back, and the
+    checkpoint is written unquantized.
 
     Tied-weight dedup is not handled here: both sides of a tie are packed independently
     (identically, once ``sync_tied_input_amax`` has equalized their scales), and the
@@ -881,7 +909,7 @@ def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContex
 
 def _resolve_export_dtype(model: nn.Module, dtype: torch.dtype | None) -> torch.dtype:
     """Return the export dtype, defaulting to the model's own and warning on a mismatch."""
-    configured_dtype = getattr(model.config, "torch_dtype", None)
+    configured_dtype = getattr(model.config, "dtype", None)
     if dtype is None:
         if configured_dtype is not None:
             return configured_dtype
@@ -974,8 +1002,12 @@ def _process_quantized_modules(
         model_type=hf_model_type(model),
     )
 
-    for name, sub_module in model.named_modules():
-        _dispatch_export_handler(name, sub_module, ctx)
+    # For the no-gather export, which is to set keep_fused_experts on this context and let a sharded
+    # model past the assert above: each FSDP2 unit's modules are then packed in one weight window,
+    # held across them. Until then no window opens here.
+    with _hf_export_handlers.held_fsdp2_weight_windows(ctx):
+        for name, sub_module in model.named_modules():
+            _dispatch_export_handler(name, sub_module, ctx)
 
 
 def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
@@ -1333,7 +1365,7 @@ def _export_diffusers_checkpoint(
             # Image-conditioned Wan also requires a successful dummy forward for fusion.
             is_wan_i2v_component = (
                 HAS_DIFFUSERS
-                and isinstance(component, getattr(diffusers, "WanTransformer3DModel", ()))
+                and isinstance(component, diffusers.WanTransformer3DModel)
                 and getattr(getattr(component, "config", None), "image_dim", None) is not None
             )
             _fuse_qkv_linears_diffusion(component, strict=is_qwen_component or is_wan_i2v_component)
@@ -1952,6 +1984,11 @@ def export_hf_checkpoint(
 
     exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
     if exporter is not None:
+        if save_modelopt_state:
+            warnings.warn(
+                "save_modelopt_state=True is not supported in the layerwise export "
+                "path and will be ignored."
+            )
         # Per-layer export wrote the shards during calibration; this writes the rest.
         exporter.finalize(extra_state_dict=extra_state_dict)
         # Into the exporter's directory, which is where finalize() wrote: export_dir may differ
