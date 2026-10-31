@@ -75,16 +75,17 @@ def search_choices(
         chunk = rows[start : start + step]
         count = chunk.shape[0]
         reference = chunk.float().reshape(count, blocks, groups, group_size)
-        errors = torch.empty(
-            (ggml_format.num_choices, *reference.shape), dtype=torch.float32, device=weight.device
+        packed, _ = ggml_format.quantize(
+            chunk, importance=importance, every_choice=True, **chunk_args
         )
-        for choice in range(ggml_format.num_choices):
-            fixed = torch.full((count, blocks, groups), choice, device=weight.device)
-            packed, shape = ggml_format.quantize(
-                chunk, importance=importance, choices=fixed, **chunk_args
-            )
-            decoded = ggml_format.dequantize(packed, shape, dtype=torch.float32, **decode_args)
-            torch.sub(decoded.reshape(reference.shape), reference, out=errors[choice])
+        shape = torch.tensor([ggml_format.num_choices * count, weight.shape[-1]])
+        errors = ggml_format.dequantize(
+            packed.reshape(-1, blocks, ggml_format.block_bytes),
+            shape,
+            dtype=torch.float32,
+            **decode_args,
+        ).reshape(ggml_format.num_choices, *reference.shape)
+        errors -= reference
 
         pick = torch.einsum("crngi,ngij,crngj->crng", errors, group_hessian, errors).argmin(0)
         current = errors.gather(0, pick[None, ..., None].expand(1, *pick.shape, group_size))[0]

@@ -291,26 +291,134 @@ __global__ void iq2_encode(const scalar_t *input, int64_t num_blocks, const floa
   Format::store(payload, entries, signs, locals);
 }
 
+// Every local scale's encoding of each block, in one pass over the codebook: for each local scale,
+// each vector's best entry under it, written as that scale's payload -- the bytes iq2_encode writes
+// when given that choice for every group. output holds kIq2LocalScales x num_blocks payloads.
+template <typename Format, bool kWeighted, typename scalar_t>
+__global__ void iq2_encode_every_choice(const scalar_t *input, int64_t num_blocks,
+                                        const float *grid, const __half *scales,
+                                        const float *importance, int64_t blocks_per_row,
+                                        uint8_t *output) {
+  constexpr int kEntries = Format::kEntries;
+  constexpr int kGroups = Format::kGroups;
+  constexpr int kVectorsPerGroup = Format::kVectorsPerGroup;
+  constexpr bool kParitySigns = Format::kParitySigns;
+
+  __shared__ float shared_grid[kEntries * kVectorSize];
+  __shared__ float grid_norm[kEntries];
+  __shared__ unsigned long long warp_keys[kWarps * kIq2LocalScales];
+  __shared__ unsigned long long best[kIq2LocalScales];
+  __shared__ uint8_t locals[kIq2LocalScales][kGroups];
+  __shared__ uint16_t entries[kIq2LocalScales][kVectorsPerBlock];
+  __shared__ uint8_t signs[kIq2LocalScales][kVectorsPerBlock];
+
+  const int tid = threadIdx.x;
+  const int64_t block = blockIdx.x;
+  if (block >= num_blocks)
+    return;
+
+  for (int i = tid; i < kEntries * kVectorSize; i += blockDim.x)
+    shared_grid[i] = grid[i];
+  __syncthreads();
+  for (int entry = tid; entry < kEntries; entry += blockDim.x) {
+    float norm = 0.0f;
+#pragma unroll
+    for (int j = 0; j < kVectorSize; ++j) {
+      const float q = shared_grid[entry * kVectorSize + j];
+      norm = fmaf(q, q, norm);
+    }
+    grid_norm[entry] = norm;
+  }
+  for (int i = tid; i < kIq2LocalScales * kGroups; i += blockDim.x)
+    locals[i / kGroups][i % kGroups] = static_cast<uint8_t>(i / kGroups);
+  __syncthreads();
+
+  const scalar_t *source = input + block * kBlockSize;
+  const float *weights = kWeighted ? importance + (block % blocks_per_row) * kBlockSize : nullptr;
+  const __half d_half = scales[block];
+  const uint16_t d_bits = __half_as_ushort(d_half);
+  const float d = __half2float(d_half);
+  bool nonzero = true;
+  for (int local = 0; local < kIq2LocalScales; ++local)
+    nonzero = store_block_scale<Format::kPayloadBytes>(
+        output + (local * num_blocks + block) * Format::kPayloadBytes, d_bits);
+  if (!nonzero)
+    return;
+
+  // The scoring pass of iq2_encode, keeping each scale's best entry rather than only its error.
+#pragma unroll 1
+  for (int slot = 0; slot < kVectorsPerBlock; ++slot) {
+    float x[kVectorSize];
+    float w[kVectorSize];
+    float xnorm;
+    const bool odd_parity = load_signed_vector(source + slot * kVectorSize, x, xnorm);
+    load_importance<kWeighted>(weights, slot, x, w, xnorm);
+    unsigned long long keys[kIq2LocalScales];
+#pragma unroll
+    for (int local = 0; local < kIq2LocalScales; ++local)
+      keys[local] = ~0ULL;
+    for (int entry = tid; entry < kEntries; entry += blockDim.x) {
+      float qnorm;
+      const float dot = iq2_terms<kParitySigns, kWeighted>(x, w, shared_grid + entry * kVectorSize,
+                                                           grid_norm[entry], odd_parity, qnorm);
+#pragma unroll
+      for (int local = 0; local < kIq2LocalScales; ++local) {
+        const float scale = d * (2 * local + 1) * kIq2LocalScaleStep;
+        const unsigned long long key =
+            error_key(clamped_quant_error(xnorm, dot, qnorm, scale), entry);
+        keys[local] = key < keys[local] ? key : keys[local];
+      }
+    }
+    block_min_keys<kIq2LocalScales>(keys, warp_keys, best);
+    if (tid < kIq2LocalScales) {
+      const int entry = static_cast<int>(best[tid] & (kEntries - 1));
+      entries[tid][slot] = static_cast<uint16_t>(entry);
+      signs[tid][slot] = iq2_sign_mask<kParitySigns, kWeighted>(
+          x, w, shared_grid + entry * kVectorSize, odd_parity);
+    }
+  }
+  __syncthreads();
+  static_assert(kGroups * kVectorsPerGroup == kVectorsPerBlock, "groups must cover the block");
+  for (int local = 0; local < kIq2LocalScales; ++local)
+    Format::store(output + (local * num_blocks + block) * Format::kPayloadBytes, entries[local],
+                  signs[local], locals[local]);
+}
+
 // Packs one IQ2 format, once check_scaled_pack_inputs (and check_importance, if given) accepted it.
+// With every_choice, returns every local scale's payload, [kIq2LocalScales, blocks, payload bytes].
 template <typename Format>
 at::Tensor iq2_encode_blocks(const at::Tensor &input, const at::Tensor &grid,
                              const at::Tensor &scales, const std::optional<at::Tensor> &importance,
-                             const at::Tensor &choices) {
+                             const at::Tensor &choices, bool every_choice = false) {
   const auto values = input.contiguous();
   const auto table = grid.contiguous();
   const auto block_scales = scales.contiguous();
   const auto weights = importance.has_value() ? importance->contiguous() : at::Tensor();
   c10::cuda::CUDAGuard guard(values.device());
   const int64_t num_blocks = values.numel() / kBlockSize;
-  at::Tensor output =
-      at::empty({num_blocks, Format::kPayloadBytes}, values.options().dtype(at::kByte));
+  at::Tensor output = every_choice ? at::empty({kIq2LocalScales, num_blocks, Format::kPayloadBytes},
+                                               values.options().dtype(at::kByte))
+                                   : at::empty({num_blocks, Format::kPayloadBytes},
+                                               values.options().dtype(at::kByte));
   const auto stream = c10::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, values.scalar_type(), "iq2_pack", [&] {
         const auto *half_scales =
             reinterpret_cast<const __half *>(block_scales.data_ptr<at::Half>());
         const uint8_t *fixed = choices.defined() ? choices.data_ptr<uint8_t>() : nullptr;
-        if (weights.defined()) {
+        const float *imp = weights.defined() ? weights.data_ptr<float>() : nullptr;
+        const int64_t rows = weights.defined() ? weights.size(0) : 1;
+        if (every_choice && weights.defined()) {
+          iq2_encode_every_choice<Format, true, scalar_t>
+              <<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
+                  values.data_ptr<scalar_t>(), num_blocks, table.data_ptr<float>(), half_scales,
+                  imp, rows, output.data_ptr<uint8_t>());
+        } else if (every_choice) {
+          iq2_encode_every_choice<Format, false, scalar_t>
+              <<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
+                  values.data_ptr<scalar_t>(), num_blocks, table.data_ptr<float>(), half_scales,
+                  imp, rows, output.data_ptr<uint8_t>());
+        } else if (weights.defined()) {
           iq2_encode<Format, true, scalar_t><<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
               values.data_ptr<scalar_t>(), num_blocks, table.data_ptr<float>(), half_scales,
               weights.data_ptr<float>(), weights.size(0), fixed, output.data_ptr<uint8_t>());

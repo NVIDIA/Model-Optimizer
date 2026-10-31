@@ -494,13 +494,16 @@ def choice_blocks(
     groups: int,
     num_choices: int,
     format_name: str,
+    every_choice: bool = False,
 ) -> torch.Tensor | None:
     """Per-group ``choices`` as validated ``[weight.numel() // 256, groups]`` int64 rows.
 
     ``choices`` is shaped ``[*weight.shape[:-1], weight.shape[-1] // 256, groups]``. A given choice
     replaces the encoder's own pick for that group; the codebook entries and signs are still
-    searched under it.
+    searched under it. ``every_choice`` requests every choice's payload instead, so excludes it.
     """
+    if every_choice and choices is not None:
+        raise ValueError(f"{format_name} takes choices or every_choice, not both")
     if choices is None:
         return None
     expected = (*weight.shape[:-1], weight.shape[-1] // GGML_BLOCK_SIZE, groups)
@@ -513,6 +516,27 @@ def choice_blocks(
     if not ((choices >= 0) & (choices < num_choices)).all():
         raise ValueError(f"{format_name} choices must lie in [0, {num_choices})")
     return choices
+
+
+def encode_every_choice(
+    quantize: Callable[..., tuple[torch.Tensor, torch.Tensor]],
+    weight: torch.Tensor,
+    groups: int,
+    num_choices: int,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``quantize``'s payload with each choice taken by every group, ``[num_choices, *packed]``.
+
+    The torch encoders' path to ``every_choice``, one encode per choice; the CUDA encoders produce
+    the same payloads in one pass over the codebook.
+    """
+    fixed = torch.empty(
+        (*weight.shape[:-1], weight.shape[-1] // GGML_BLOCK_SIZE, groups),
+        dtype=torch.int64,
+        device=weight.device,
+    )
+    payloads = [quantize(weight, choices=fixed.fill_(c), **kwargs)[0] for c in range(num_choices)]
+    return torch.stack(payloads), torch.tensor(weight.shape, dtype=torch.int64)
 
 
 def chunk_importance(
