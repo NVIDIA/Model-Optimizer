@@ -248,15 +248,31 @@ def _patch_kimi_moe_block(kmod) -> None:
     print_rank_0("[kimi_k3] patched KimiSparseMoeBlock: fused experts + ExpertsInterface forward")
 
 
-def make_importable() -> None:
-    """What Kimi-K3's own code needs to import on this transformers, and nothing more.
+def _make_importable() -> None:
+    """Make Kimi-K3's code import: the ``OutputRecorder`` it imports, and its imports staged.
 
-    The ``OutputRecorder`` it imports from where transformers no longer keeps it, and its relative
-    imports staged. It patches no class, config, converter or loader hook, so the plan decision runs
-    it before ``prepare``, whatever plan comes out. Idempotent.
+    transformers no longer keeps ``OutputRecorder`` where the code imports it from, and stages only
+    the direct relative imports.
     """
     _install_output_recorder_shim()
     stage_full_remote_closure()
+
+
+def make_buildable(
+    hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool = False, **_
+) -> None:
+    """What Kimi-K3's own code needs to import and build on this transformers, and nothing more.
+
+    Its imports (:func:`_make_importable`), and its VLM class's ``tie_weights`` taking the keyword
+    arguments transformers' ``post_init`` passes it. None of it changes what the model computes or
+    loads, so the plan decision runs it before ``prepare``, whatever plan comes out. Code this load
+    may not run has nothing to build. Idempotent.
+    """
+    _make_importable()
+    if ckpt_path is None or not trust_remote_code:
+        return
+    package = _force_load_remote_modeling(hf_config, ckpt_path, trust_remote_code).__module__
+    _shim_tie_weights_kwargs(package.rpartition(".")[0])
 
 
 def _force_load_remote_modeling(hf_config, ckpt_path: str, trust_remote_code: bool) -> type:
@@ -267,7 +283,7 @@ def _force_load_remote_modeling(hf_config, ckpt_path: str, trust_remote_code: bo
     declares in its ``auto_map`` -- no hardcoded remote file/module name. Makes the code importable
     first. Returns that class, whose package holds this checkpoint's remote code.
     """
-    make_importable()
+    _make_importable()
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
     auto_map = getattr(hf_config, "auto_map", None) or {}
@@ -281,7 +297,7 @@ def _force_load_remote_modeling(hf_config, ckpt_path: str, trust_remote_code: bo
 
 
 def _checkpoint_quantized(ckpt_path: str) -> bool:
-    """Whether the checkpoint's own ``config.json`` has a ``quantization_config``, top or text level.
+    """Whether the checkpoint's own ``config.json`` has a ``quantization_config``, at any level.
 
     The config ``prepare`` is handed cannot always say: ``prepare`` drops its quantization_config,
     and the decompressor clears its mark at the load, so a config prepared and loaded before has
@@ -289,10 +305,13 @@ def _checkpoint_quantized(ckpt_path: str) -> bool:
     """
     from transformers import PretrainedConfig
 
+    # Not at module scope: the model registry imports this module, and moe imports the registry.
+    from modelopt.torch.utils.moe import _SUB_CONFIG_ATTRS
+
     stored, _ = PretrainedConfig.get_config_dict(ckpt_path)
     return any(
         isinstance(level, dict) and level.get("quantization_config") is not None
-        for level in (stored, stored.get("text_config"))
+        for level in (stored, *(stored.get(attr) for attr in _SUB_CONFIG_ATTRS))
     )
 
 
@@ -368,9 +387,9 @@ def prepare(
     inserts/calibrates/folds the fp8/nvfp4 quantizers on those bf16 params. That is ~4x the packed HBM
     (the memory bottleneck), but PTQ needs the bf16 weights.
 
-    Only an expert-parallel plan runs it, but its patches are process-wide and stay after that load:
-    a later load of the same checkpoint in the same process, after an expert-parallel load, runs on
-    the patched code.
+    Only an expert-parallel plan runs it, but its patches are process-wide and stay after that load,
+    which the spec states (``prepare_patches_every_load``): a later whole-model or FSDP2-sharded load
+    of Kimi-K3 in the same process is refused before anything is built.
     """
     # Not at module scope: the model registry imports this module, and modelopt.torch.utils.moe
     # imports the registry.

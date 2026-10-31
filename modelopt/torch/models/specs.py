@@ -243,6 +243,12 @@ class EPSpec(SpecSection):
     expert parallelism ``prepare`` then refuses on every rank; one asked for meets the refusal from
     ``prepare``."""
 
+    prepare_patches_every_load: bool = False
+    """Whether ``prepare`` patches the model's code for every later load of it in the process, not
+    only for the expert-parallel load it ran for (Kimi-K3's swaps its remote MoE block's class).
+    Once such a ``prepare`` has run, a whole-model or FSDP2-sharded load of the model in the process
+    is refused before anything is built."""
+
     decompressed_formats: tuple[str, ...] = ()
     """The checkpoint formats (a ``quantization_config``'s ``quant_method``) whose experts
     ``prepare`` has decompress as they load, which the expert-parallel load then takes beside
