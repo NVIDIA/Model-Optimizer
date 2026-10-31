@@ -500,13 +500,12 @@ def _refuse_sharded_load_options(
     unknown = sorted(passed - _SHARDED_LOAD_OPTIONS[route] - {"dtype", "torch_dtype"})
     # torch_dtype is from_pretrained's older name for dtype, and None means "auto" to it.
     dtypes = [name for name in ("dtype", "torch_dtype") if kwargs.get(name) not in (None, "auto")]
-    if measured and (placed := sorted({*unknown, *dtypes})):
+    if measured and (refused := sorted({*unknown, *dtypes})):
         # Say so, rather than refuse the options below as if the caller had asked for this load.
         raise TypeError(
-            f"{placed} place a whole model, but no plan or MODELOPT_FSDP_SIZE asked for a layout, "
-            f"and by rank 0's GPU memory the model does not fit one GPU, so the {route} load "
-            f"shards it. To load it whole on every rank and place it yourself: "
-            f"{_whole_instead(decided)}."
+            f"{refused} do not apply to a sharded load, but no plan or MODELOPT_FSDP_SIZE asked for "
+            f"a layout, and by rank 0's GPU memory the model does not fit one GPU, so the {route} "
+            f"load shards it. To load it whole on every rank: {_whole_instead(decided)}."
         )
     if auto_class not in (None, AutoModelForCausalLM):
         name = getattr(auto_class, "__name__", repr(auto_class))

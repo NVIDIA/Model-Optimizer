@@ -1568,9 +1568,9 @@ def test_an_automatic_layout_says_so_when_it_refuses_a_placement(
     run_as, serve, loaders, process_group, monkeypatch, tmp_path, device_map
 ):
     """With neither a plan nor MODELOPT_FSDP_SIZE, rank 0's GPU memory decides to shard a model too
-    big for it, and the sharded load refuses options that place a whole model. The refusal says the
-    layout was decided rather than asked for, and how to keep the load whole. device_map=None, as
-    hf_ptq passes it, places nothing, and the model is sharded."""
+    big for it, and the sharded load refuses options it does not take. The refusal says the layout
+    was decided rather than asked for, and how to keep the load whole. device_map=None, as hf_ptq
+    passes it, places nothing, and the model is sharded."""
     run_as(2, rank=1)
     serve(LlamaConfig(**_TINY))
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: 1)
@@ -1579,7 +1579,7 @@ def test_an_automatic_layout_says_so_when_it_refuses_a_placement(
         load_pretrained(str(tmp_path), AutoModelForCausalLM, device_map=None, dtype="auto")
         assert "fsdp2" in loaders
         return
-    with pytest.raises(TypeError, match=r"\['device_map'\] place.*MODELOPT_FSDP_SIZE=1"):
+    with pytest.raises(TypeError, match=r"\['device_map'\] do not apply.*MODELOPT_FSDP_SIZE=1"):
         load_pretrained(str(tmp_path), device_map="auto")
     assert loaders == {}
 
