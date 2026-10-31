@@ -2125,11 +2125,11 @@ def export_hf_checkpoint(
     # Either form of sharding, including the hybrid where both hold: a model can be FSDP2-dense AND
     # expert-parallel, so these are tracked separately rather than as an either/or.
     _sharded_export = _ep_sharded or _fsdp2_sharded
-    # A sharded export writes the carried weights from rank 0 alone. This has to cover EP as well as
-    # FSDP2: under EP every OTHER rank's experts are absent from this rank's model, so they read as
-    # unplaced and each rank would carry them -- 889 tensors per rank on GLM-5.3-Flash. Every rank
-    # then hands them to the writer, whose point-to-point protocol expects one sender, and the export
-    # deadlocks with rank 0 inside the writer and the rest parked in the barrier below.
+    # A sharded export reads and hands over the carried weights on rank 0 alone, since both sharded
+    # writers take extra_state_dict from that one sender: on any other rank, reading them (889
+    # tensors on GLM-5.3-Flash, its MTP layer) would be host memory spent for nothing. This gates
+    # the tensors only. Every rank still resolves their names, which _modelopt_carried_over_names
+    # below records alike on every rank for the quant config.
     _writes_extra = not _sharded_export or torch.distributed.get_rank() == 0
     _carried: dict = {}
 
