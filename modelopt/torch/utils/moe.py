@@ -156,6 +156,30 @@ def _ep_spec(model_type: str):
     return getattr(get_spec(model_type), "ep_spec", None)
 
 
+def _ep_floor(model_type: str) -> str:
+    """The transformers release ``model_type``'s expert parallelism needs.
+
+    The expert-parallel load's own, or its spec's when that is later. A model whose spec states no
+    release, or that has no spec, still needs the load's: auto must pick no EP degree below it,
+    rather than reach the load and fail there.
+    """
+    ep = _ep_spec(model_type)
+    stated = ep.requires_transformers if ep is not None else None
+    return max(_EP_MIN_TRANSFORMERS, stated or _EP_MIN_TRANSFORMERS, key=parse)
+
+
+def _fsdp2_way_out(fsdp: str = "MODELOPT_FSDP_SIZE=world") -> str:
+    """FSDP2 as a refusal names it, the way around expert parallelism ``fsdp`` asks for."""
+    # The FSDP2 load builds a causal LM and reads its tensors as stored, so a quantized or
+    # multimodal checkpoint (GPT-OSS's MXFP4, Llama-4's) needs a single process, as does one with
+    # an MTP head the load cannot build (--use_fsdp2 refuses Nemotron-H's).
+    return (
+        f"(--use_fsdp2 in examples/hf_ptq/hf_ptq.py, or {fsdp}) if the FSDP2 load supports the "
+        "checkpoint, which takes an unquantized causal LM with no MTP head it cannot build (such "
+        "as Nemotron-H's)"
+    )
+
+
 def check_distributed_support(model_type: str) -> None:
     """Refuse ``model_type``'s expert parallelism if its spec does, or below its transformers floor.
 
@@ -167,26 +191,16 @@ def check_distributed_support(model_type: str) -> None:
     expert-parallel plan handed in, meets these errors; both name the way around expert parallelism.
     """
     ep = _ep_spec(model_type)
-    # The FSDP2 load builds a causal LM and reads its tensors as stored, so a quantized or
-    # multimodal checkpoint (GPT-OSS's MXFP4, Llama-4's) needs a single process, as does one with
-    # an MTP head the load cannot build (--use_fsdp2 refuses Nemotron-H's).
     without_ep = (
-        "without expert parallelism: in a single process, or FSDP2-sharded (--use_fsdp2 in "
-        "examples/hf_ptq/hf_ptq.py, or MODELOPT_FSDP_SIZE=world) if the FSDP2 load supports the "
-        "checkpoint, which takes an unquantized causal LM with no MTP head it cannot build (such "
-        "as Nemotron-H's)"
+        f"without expert parallelism: in a single process, or FSDP2-sharded {_fsdp2_way_out()}"
     )
     if ep is not None and ep.unsupported:
         raise NotImplementedError(
             f"{model_type} cannot be quantized expert-parallel yet: {ep.unsupported} Quantize it "
             f"{without_ep}."
         )
-    # A model whose spec states no release, or that has no spec, still needs the load's floor: auto
-    # must pick no EP degree below it, rather than reach the load and fail there.
-    stated = ep.requires_transformers if ep is not None else None
-    floor = max(_EP_MIN_TRANSFORMERS, stated or _EP_MIN_TRANSFORMERS, key=parse)
     try:
-        require_transformers(floor, f"{model_type} expert-parallel PTQ")
+        require_transformers(_ep_floor(model_type), f"{model_type} expert-parallel PTQ")
     except RuntimeError as e:
         raise RuntimeError(f"{e} Or quantize it {without_ep}.") from None
 

@@ -110,7 +110,8 @@ Configs
 ``hf_config`` is the config ``resolve_distribution_plan`` returned with the plan handed in as
 ``distribution``: the load builds from it as given, so without that plan it is refused. A
 ``config`` passed for the load, or a path to one, is the one the plan is decided from, and a sharded
-load takes it as its ``hf_config``.
+load takes it as its ``hf_config``: the expert-parallel load a copy of it the model spec prepares
+(``apply_distributed_support``), as deciding does.
 
 Hub options
 ===========
