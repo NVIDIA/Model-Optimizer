@@ -456,3 +456,50 @@ reasoning_off_messages.{bin,idx}
 reasoning_on_messages.{bin,idx}
 nvidia--Nemotron-Agentic-v1_tool_calling_messages.{bin,idx}
 ```
+
+### Reproducible question-isolated chat blends
+
+Set `group_split: true` in a chat JSONL configuration to enable complete-record
+deduplication and question-isolated train/validation selection. Every source must
+specify a full `revision` commit SHA. `validation_samples` defaults to 1,000;
+`shuffle_buffer_size` defaults to 10,000 and applies to both HF splits and JSONL
+files when `shuffle: true`. This is bounded buffer shuffling, not uniform sampling
+from the entire repository. Configuration and dependency versions must remain
+fixed to reproduce the same result.
+
+This mode retains different answers/reasoning for the same input, but assigns
+whole known question groups to one split. Validation uses one record per group,
+stratified within each source by document/single-turn/multi-turn format and
+reasoning presence where available. Other versions of validation questions are
+reserved, not used for training. Without a reliable problem ID, grouping uses
+exact task inputs; translations and paraphrases can remain undetected.
+
+Optional `filter_image_references`, `filter_tool_calls` and
+`filter_invalid_reasoning` flags reject image-marked text (including HTML/code
+examples), tool interactions, and unbalanced inline `<think>` tags respectively.
+Structured media is always rejected by Bridge's text-only filter. These checks
+do not establish answer correctness or completeness of a nonempty problem.
+
+`question_sources` maps indexed Nemotron competitive-programming source names
+(`taco`, `apps`, `code_contests`, `open-r1/codeforces`) to `hf_dataset` and pinned
+`revision` values. Missing `"-"` prompts are recovered from those indexed sources;
+an unavailable or ambiguous original question fails generation rather than
+silently training the placeholder. See the Nemotron 3.5 Super VL tutorial's
+`data_blend.yaml` for the full configuration, including schema-safe JSONL file
+selection for instruction-following reasoning-on/off data.
+
+Rejected, duplicate and validation-reserved records are replenished from the
+same source. Exhaustion produces a warning and a smaller result, never automatic
+cross-source redistribution; network/authentication failures still fail the run.
+Inspect `report.json` for requested/actual source counts, shortfalls, format
+counts, dependency versions and output hashes. `manifest.jsonl` records selected
+source revisions, sampled positions, IDs, restoration keys and group membership.
+Cross-source duplicates are attributed using a stable source-configuration hash
+order, independently of YAML source order. `config.yaml` preserves the recipe.
+A completed result is reused only when its configuration, pipeline/dependency
+fingerprint and output hashes match; interrupted selection restarts from the
+same seed. The selected data is held in memory, so size `target_samples` accordingly.
+
+Grouped selection writes master records and does not support `max_length` or
+`pack_max_tokens`: sequence-length-specific filtering/packing remains a separate
+step. It does not modify training loss masks or guarantee benchmark decontamination.
