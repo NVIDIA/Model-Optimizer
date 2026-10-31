@@ -42,7 +42,7 @@ from _test_utils.torch.megatron.utils import (
     save_distributed_checkpoint,
     sharded_state_dict_test_helper,
 )
-from _test_utils.torch.misc import set_seed
+from _test_utils.torch.misc import is_blackwell, set_seed
 from _test_utils.torch.quantization.models import RegularQuantModelForTP
 from _test_utils.torch.quantization.quant_utils import get_model_size
 from _test_utils.torch.quantization.quantize_common import (
@@ -67,12 +67,14 @@ from megatron.core.transformer.moe.router import TopKRouter
 import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
 )
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
+from modelopt.torch.quantization.ggml.common import PINNED_PAYLOAD_PREFIX
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.plugins.megatron import (
@@ -97,7 +99,9 @@ from modelopt.torch.quantization.plugins.transformer_engine import (
 )
 from modelopt.torch.quantization.qtensor import QTensorWrapper
 from modelopt.torch.quantization.utils import is_quantized_linear
+from modelopt.torch.quantization.utils.calib_utils import GPTQHelper
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.utils.plugins.megatron_generate import megatron_prefill
 
 try:
     from megatron.core.extensions.transformer_engine import TERowParallelLinear
@@ -114,15 +118,6 @@ except ImportError:
     HAS_HADAMARD = False
 
 SEED = 1234
-
-# TODO: re-enable the marked tests once fixed. Blackwell (sm_120, e.g. RTX PRO 6000) with the
-# nemo:26.06 / TE 2.16 / CUDA 13 stack hits a flaky, intermittent CUDA "illegal memory access" in
-# several tests: When fails, it poisons the process CUDA context and cascades hang across subsequent tests.
-# Passes locally on different GPUs. Likely an upstream TE/CUDA-13 kernel bug, not modelopt logic.
-skip_flaky_on_blackwell = pytest.mark.skipif(
-    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12,
-    reason="Flaky CUDA illegal memory access on Blackwell (nemo:26.06 / TE 2.16 / CUDA 13)",
-)
 
 
 def test_convert_megatron_parallel_linear(distributed_setup_size_1):
@@ -493,7 +488,6 @@ FP8_GEMM_KV_CFG["quant_cfg"].extend(mtq.FP8_KV_CFG["quant_cfg"])
 )
 @pytest.mark.parametrize("meta_device", [False, True])
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
-@skip_flaky_on_blackwell
 def test_homogeneous_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -519,9 +513,6 @@ def test_homogeneous_sharded_state_dict(
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
 @pytest.mark.timeout(240)
 # Compressed state dict takes longer due to real quant conversion & saving/loading
-# Its real mtq.compress() path exercises the same TE/CUDA-13 kernels that trip the flaky
-# Blackwell (sm_120) illegal-memory-access; #1901 skipped the fake-quant sibling but missed this one.
-@skip_flaky_on_blackwell
 def test_homogeneous_compressed_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -603,7 +594,6 @@ def test_homogeneous_sharded_state_dict_hybrid(dist_workers, tmp_path, config):
         mixed_block_size_config,
     ],
 )
-@skip_flaky_on_blackwell
 def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     dist_workers.run(
         partial(_test_sharded_state_dict, tmp_path, config, 256, None, False, False, {}),
@@ -614,7 +604,13 @@ def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     "hidden_size",
     [
         256,
-        pytest.param(320, marks=skip_flaky_on_blackwell),
+        # Runs in the pytest process, so a Blackwell CUDA crash here would break every later test
+        pytest.param(
+            320,
+            marks=pytest.mark.skipif(
+                is_blackwell(), reason="Flaky CUDA illegal memory access on Blackwell"
+            ),
+        ),
     ],
 )
 def test_regular_state_dict(distributed_setup_size_1, hidden_size):
@@ -1524,6 +1520,53 @@ def _test_gptq_mamba_hybrid(rank, size):
     assert torch.isfinite(forward(model)).all()
 
 
+def test_gptq_hessian_sync_across_dp(dist_workers_size_2):
+    """GPTQ at DP2 must use the Hessian of both ranks' calibration data and agree across ranks."""
+    dist_workers_size_2.run(_test_gptq_hessian_sync_across_dp)
+
+
+def _test_gptq_hessian_sync_across_dp(rank, size):
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    model = get_mcore_gpt_model(tensor_model_parallel_size=1, num_layers=1).cuda()
+    ref_model = get_mcore_gpt_model(tensor_model_parallel_size=1, num_layers=1).cuda()
+    ref_model.load_state_dict(model.state_dict())
+
+    torch.manual_seed(SEED + rank)
+    batch = get_batch(model, batch_size=2)
+    all_input_ids = [torch.empty_like(batch[0]) for _ in range(size)]
+    torch.distributed.all_gather(all_input_ids, batch[0])
+
+    def forward(model, input_ids_list):
+        for input_ids in input_ids_list:
+            model(input_ids, *batch[2:4], labels=batch[1], loss_mask=batch[4])
+
+    hessians = {}
+    update_weights = GPTQHelper.update_weights
+
+    def capture_hessian(self, *args, **kwargs):
+        hessians[self.name] = self.hessian.clone()
+        return update_weights(self, *args, **kwargs)
+
+    quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
+    quant_cfg["algorithm"] = {"method": "gptq"}
+    with patch.object(GPTQHelper, "update_weights", capture_hessian):
+        mtq.quantize(model, quant_cfg, partial(forward, input_ids_list=[batch[0]]))
+        dp_hessians = dict(hessians)
+        # Every rank calibrates on the union of the data, so its Hessian is the full-data one.
+        mtq.quantize(ref_model, quant_cfg, partial(forward, input_ids_list=all_input_ids))
+
+    assert dp_hessians
+    for name, hessian in dp_hessians.items():
+        # TF32 matmuls in the Hessian update leave ~1e-4 relative noise between the two runs.
+        assert (hessian - hessians[name]).norm() < 1e-3 * hessians[name].norm(), name
+
+    for name, m in model.named_modules():
+        if is_quantized_linear(m) and m.weight_quantizer.is_enabled:
+            weights = [torch.empty_like(m.weight) for _ in range(size)]
+            torch.distributed.all_gather(weights, m.weight.contiguous())
+            assert all(torch.equal(w, weights[0]) for w in weights), f"{name} differs across ranks"
+
+
 def _auto_quantize_mamba_hybrid_cost_helper(rank, size, expert_model_parallel_size, result_path):
     initialize_for_megatron(
         tensor_model_parallel_size=1,
@@ -1638,6 +1681,76 @@ def _test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(rank, size):
 
 def test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(dist_workers_size_1):
     dist_workers_size_1.run(_test_mcore_layerwise_calibration_layers_do_not_mutate_decoder)
+
+
+class _VLMWrapper(MegatronModule):
+    """A VLM root that, like Megatron-Bridge's GLM-5.3-Flash model, has no ``decoder`` of its own."""
+
+    def __init__(self, language_model):
+        super().__init__(config=language_model.config)
+        self.language_model = language_model
+
+    def forward(self, *args, **kwargs):
+        # Post-processes the language model's output, as real wrappers do.
+        return self.language_model(*args, **kwargs).float()
+
+
+def _test_layerwise_calibrate_vlm_text_forward_loop(drive_wrapper, rank, size):
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    language_model = _gpt_model_provider(tp_size=1, hidden_size=64)
+    model = _VLMWrapper(language_model)
+    tokens = torch.randint(0, language_model.vocab_size, (2, 16), device="cuda")
+
+    # Text calibration in examples/megatron_bridge/quantize.py drives the inner language model; image-text
+    # calibration drives the wrapper, so both patched forwards are on the stack when the stop is raised.
+    def forward_loop(_model):
+        megatron_prefill(
+            model if drive_wrapper else language_model, tokens, skip_return_logits=True
+        )
+
+    config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    config["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
+    mtq.quantize(model, config, forward_loop)
+
+    calibrated = [m for m in language_model.decoder.modules() if is_quantized_linear(m)]
+    assert calibrated
+    assert all(m.input_quantizer.amax is not None for m in calibrated)
+
+
+@pytest.mark.parametrize("drive_wrapper", [False, True])
+def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wrapper):
+    dist_workers_size_1.run(partial(_test_layerwise_calibrate_vlm_text_forward_loop, drive_wrapper))
+
+
+def _test_ggml_gptq_payload_sharded_state_dict(tmp_path, rank, size):
+    initialize_for_megatron(tensor_model_parallel_size=size, seed=SEED)
+    model_ref = _gpt_model_provider(tp_size=size)
+    model_test = _gpt_model_provider(tp_size=size)
+
+    config = load_recipe("general/ptq/iq2_xs").quantize.model_dump()
+    gptq = next(algo for algo in config["algorithm"] if algo["method"] == "gptq")
+    config["algorithm"] = {**gptq, "layerwise": {"enable": False}}
+    mtq.quantize(model_ref, config, get_forward(model_ref))
+    pinned = {k: v for k, v in model_ref.state_dict().items() if PINNED_PAYLOAD_PREFIX in k}
+    assert pinned, "GPTQ pinned no GGML payload"
+
+    save_distributed_checkpoint(tmp_path, model_ref)
+    save_sharded_modelopt_state([model_ref], tmp_path)
+    restore_sharded_modelopt_state([model_test], tmp_path)
+    model_test = load_distributed_checkpoint(tmp_path, model_test)
+
+    restored = model_test.state_dict()
+    matches = torch.tensor(
+        all(k in restored and torch.equal(v, restored[k]) for k, v in pinned.items()), device="cuda"
+    )
+    # Agree across ranks before asserting, so a mismatch on one rank fails instead of hanging.
+    torch.distributed.all_reduce(matches, op=torch.distributed.ReduceOp.MIN)
+    assert matches.item(), "GPTQ's pinned GGML payloads did not survive the checkpoint"
+
+
+def test_ggml_gptq_payload_sharded_state_dict(dist_workers, tmp_path):
+    """GPTQ's pinned GGML codes are saved, so a reload exports them instead of re-encoding."""
+    dist_workers.run(partial(_test_ggml_gptq_payload_sharded_state_dict, tmp_path))
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
@@ -2525,3 +2638,38 @@ class TestKeepGptOutputLayerExtraState:
     )
     def test_extra_state_has_data(self, entry, expected):
         assert _output_layer_extra_state_has_data(entry) is expected
+
+
+@pytest.mark.parametrize(
+    "quant_cfg", ["FP8_DEFAULT_CFG", "NVFP4_DEFAULT_CFG", "NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG"]
+)
+def test_mla_fused_down_projections_share_ranges(distributed_setup_size_1, quant_cfg):
+    """vLLM and TRT-LLM fuse MLA's q_down and kv_down into one GEMM with one scale per tensor."""
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    try:
+        model = get_mcore_gpt_model(
+            hidden_size=128,
+            num_attention_heads=2,
+            vocab_size=128,
+            max_sequence_length=32,
+            transformer_impl="transformer_engine",
+            multi_latent_attention=True,
+        ).cuda()
+        attentions = [layer.self_attention for layer in model.decoder.layers]
+        with torch.no_grad():  # give the two weights different ranges
+            for attention in attentions:
+                attention.linear_kv_down_proj.weight.mul_(4)
+
+        model = mtq.quantize(model, copy.deepcopy(getattr(mtq, quant_cfg)), get_forward(model))
+
+        for attention in attentions:
+            q_down, kv_down = attention.linear_q_down_proj, attention.linear_kv_down_proj
+            assert torch.equal(q_down.input_quantizer.amax, kv_down.input_quantizer.amax)
+            if q_down.weight_quantizer.is_nvfp4_static:
+                assert torch.equal(
+                    q_down.weight_quantizer.global_amax, kv_down.weight_quantizer.global_amax
+                )
+            else:
+                assert torch.equal(q_down.weight_quantizer.amax, kv_down.weight_quantizer.amax)
+    finally:
+        destroy_model_parallel()  # not a spawned process

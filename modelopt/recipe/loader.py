@@ -16,11 +16,7 @@
 """Recipe loading utilities."""
 
 import warnings
-
-try:
-    from importlib.resources.abc import Traversable
-except ImportError:  # Python < 3.11
-    from importlib.abc import Traversable
+from importlib.resources.abc import Traversable
 from pathlib import Path
 
 from omegaconf import OmegaConf
@@ -52,6 +48,7 @@ _REQUIRED_SECTION_PER_RECIPE_TYPE: dict[RecipeType, str] = {
     RecipeType.SPECULATIVE_EAGLE: "eagle",
     RecipeType.SPECULATIVE_DFLASH: "dflash",
     RecipeType.SPECULATIVE_MEDUSA: "medusa",
+    RecipeType.SPECULATIVE_EXTERNAL: "external",
 }
 
 

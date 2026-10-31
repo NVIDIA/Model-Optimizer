@@ -1,6 +1,8 @@
 # nel-next (nemo-evaluator 0.4.x) agentic AA eval template — NOT the 0.2.6 schema.
 # Read references/nel-next.md + recipes/tasks/aa_next/<benchmark>.md first.
 # Benchmark shown = Terminal-Bench 2.1; swap the `benchmarks:` block per the recipe.
+# Apply the selected task's generation policy before model-card budgets or fallbacks:
+# references/model-card-research.md#max_new_tokens--mandatory-model-card-lookup.
 #
 # Run via the isolated nel-next venv:
 #   "$SKILL_DIR/scripts/nel-next.sh" --setup-only
@@ -41,7 +43,7 @@ services:
     container_mounts:                # source dirs MUST pre-exist (pyxis won't create them): ssh <login> 'mkdir -p <lustre>/<user>/.cache/{vllm,huggingface}'
       - ???:/cache/vllm
       - ???:/cache/huggingface
-    generation: {temperature: 1.0, top_p: 0.95}   # from model card (reasoning mode); adjust per card — mandatory lookup (references/model-card-research.md), same as 0.2.6
+    generation: {temperature: 1.0, top_p: 0.95}   # mandatory model-card sampling lookup; output budgets follow task policy
     proxy:
       request_timeout: 3600                      # ALWAYS set (else inherits the model fragment); MUST be >= benchmarks[].solver.agent_kwargs.llm_kwargs.timeout
       extra_body:                                # card extras only, no no-op defaults; reasoning toggles in chat_template_kwargs
@@ -50,7 +52,7 @@ services:
       model_traffic: {capture_request_body: true}  # per service, never in a shared block
       interceptors:                              # lists REPLACE on merge — restate the whole chain
         # SWE-bench prepends system_message + turn_counter — see swebench_verified.md
-        - name: drop_params                        # agents send max_tokens; many servers reject it
+        - name: drop_params                        # agents send max_tokens; many servers reject it. Output caps follow task policy
           # last two are sent by the 0.5.x harbor eval image; vLLM 400s on them unless stripped
           config: {params: [max_tokens, max_completion_tokens, max_input_tokens_per_task, no_rebuild]}
         - name: consolidate_system

@@ -34,14 +34,13 @@ Math is a close port of ``FastGen/fastgen/methods/distribution_matching/dmd2.py`
 45-455). See the docstrings on the individual methods for line-level references.
 """
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 import torch.distributed as dist
 from torch import nn
 
+from ..config import DMDConfig
 from ..ema import ExponentialMovingAverage
 from ..flow_matching import (
     add_noise,
@@ -56,9 +55,6 @@ from ..flow_matching import (
 from ..losses import dsm_loss, gan_disc_loss, gan_gen_loss, r1_loss, vsd_loss
 from ..pipeline import DistillationPipeline
 from ..utils import classifier_free_guidance
-
-if TYPE_CHECKING:
-    from ..config import DMDConfig
 
 __all__ = ["DMDPipeline"]
 

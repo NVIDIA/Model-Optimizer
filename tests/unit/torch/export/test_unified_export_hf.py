@@ -17,6 +17,7 @@
 
 import importlib.util
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -38,7 +39,13 @@ from modelopt.torch.export.quant_utils import (
     postprocess_state_dict,
     sync_tied_input_amax,
 )
-from modelopt.torch.export.unified_export_hf import _resolve_export_dtype, read_unplaced_weights
+from modelopt.torch.export.unified_export_hf import (
+    _fuse_shared_input_modules,
+    _resolve_export_dtype,
+    _source_checkpoint,
+    collect_shared_input_modules,
+    read_unplaced_weights,
+)
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
@@ -101,7 +108,7 @@ def test_language_model_extraction_rejects_competing_roots_when_strict():
 def test_resolve_export_dtype(configured_dtype, dtype, expected_dtype, warning_count, recwarn):
     model = torch.nn.Linear(1, 1)
     model.config = (
-        SimpleNamespace(torch_dtype=configured_dtype) if configured_dtype is not None else object()
+        SimpleNamespace(dtype=configured_dtype) if configured_dtype is not None else object()
     )
 
     assert _resolve_export_dtype(model, dtype) == expected_dtype
@@ -129,9 +136,7 @@ def test_hf_all_tied_weights_keys_contract():
     (``tie_word_embeddings=True`` -> lm_head aliases the embedding). If transformers renames it or
     flips the direction, this breaks instead of silently skipping tied-weight dedup.
     """
-    pytest.importorskip(
-        "transformers", minversion="5.0"
-    )  # attribute only exists on transformers>=5.0
+    pytest.importorskip("transformers")
     from transformers import AutoModelForCausalLM, LlamaConfig
 
     cfg = LlamaConfig(
@@ -548,6 +553,85 @@ def _linear_with_input_quantizer():
     return linear
 
 
+class _LinearAttention(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        for name in ("in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b"):
+            setattr(self, name, torch.nn.Linear(32, 32))
+
+    def forward(self, inputs):
+        return sum(module(inputs) for module in self.children())
+
+
+@pytest.mark.parametrize("mismatch_within_pair", [None, "qkvz", "ba", "ba_reverse"])
+def test_export_preserves_linear_attention_runtime_groups(mismatch_within_pair):
+    model = torch.nn.Sequential()
+    model.add_module("decoder", torch.nn.Module())
+    model.decoder.add_module("linear_attn", _LinearAttention())
+    inputs = torch.randn(1, 8, 32)
+    for name, module in list(model.decoder.linear_attn.named_children()):
+        fp8 = name in {"in_proj_a", "in_proj_b"} or (
+            mismatch_within_pair == "qkvz" and name == "in_proj_z"
+        )
+        if mismatch_within_pair == "ba":
+            fp8 = name == "in_proj_a"
+        elif mismatch_within_pair == "ba_reverse":
+            fp8 = name == "in_proj_b"
+        mtq.quantize(
+            module, mtq.FP8_DEFAULT_CFG if fp8 else mtq.INT8_DEFAULT_CFG, lambda m: m(inputs)
+        )
+    groups, norms = collect_shared_input_modules(model, lambda: model.decoder.linear_attn(inputs))
+    assert any(len(modules) == 4 for modules in groups.values())
+    if mismatch_within_pair:
+        with pytest.raises(AssertionError, match="different quantization formats"):
+            _fuse_shared_input_modules(model, groups, norms)
+    else:
+        fused = _fuse_shared_input_modules(model, groups, norms)
+        assert {frozenset(names) for names in fused.values()} == {
+            frozenset({"decoder.linear_attn.in_proj_qkv", "decoder.linear_attn.in_proj_z"}),
+        }
+
+
+@pytest.mark.parametrize("partitioned", [True, False])
+def test_shared_layernorm_awq_fusion_respects_runtime_groups(partitioned):
+    model = torch.nn.Sequential()
+    model.add_module("decoder", torch.nn.Sequential())
+    norm = torch.nn.LayerNorm(32)
+    model.decoder.add_module("norm", norm)
+    projections = _LinearAttention()
+    model.decoder.add_module("linear_attn" if partitioned else "attention", projections)
+    with torch.no_grad():
+        norm.weight.copy_(torch.linspace(0.7, 1.3, 32))
+        norm.bias.copy_(torch.linspace(-0.2, 0.2, 32))
+    inputs = torch.randn(1, 8, 32)
+    config = deepcopy(mtq.INT4_AWQ_CFG)
+    config["algorithm"] = "max"
+    for entry in config["quant_cfg"]:
+        if entry.get("quantizer_name") == "*weight_quantizer":
+            entry["cfg"]["block_sizes"][-1] = 16
+    config["quant_cfg"].append({"quantizer_name": "*in_proj_[ab].weight_quantizer", "enable": True})
+    mtq.quantize(model, config, lambda m: m(inputs))
+    scale = torch.linspace(1.0, 2.0, 32)
+    # Fixed AWQ smoothing scales isolate export fusion from the calibration search.
+    for name, module in projections.named_children():
+        module.input_quantizer.pre_quant_scale = scale * (
+            2 if partitioned and name in {"in_proj_a", "in_proj_b"} else 1
+        )
+    weight, bias = norm.weight.detach().clone(), norm.bias.detach().clone()
+    groups, norms = collect_shared_input_modules(
+        model, lambda: model(inputs), collect_layernorms=True
+    )
+
+    fused = _fuse_shared_input_modules(model, groups, norms, fuse_layernorms=True)
+
+    assert sorted(len(group) for group in fused.values()) == ([2, 2] if partitioned else [4])
+    torch.testing.assert_close(norm.weight, weight if partitioned else weight * scale)
+    torch.testing.assert_close(norm.bias, bias if partitioned else bias * scale)
+    for module in projections.children():
+        assert hasattr(module.input_quantizer, "_pre_quant_scale") == partitioned
+        assert getattr(module, "fused_with_prequant", False) == (not partitioned)
+
+
 def test_fuse_prequant_layernorm_skips_modules_without_pre_quant_scale():
     layernorm = torch.nn.LayerNorm(4)
     original_weight = layernorm.weight.detach().clone()
@@ -596,9 +680,9 @@ class _ProvenanceModel(torch.nn.Module):
         super().__init__()
         self.lin = torch.nn.Linear(2, 2)
         # Sentinel already-placed weights this file's checkpoints use to stand in for "the
-        # model loaded this one fine": real parameters, so the union's structural pass does
-        # not also flag them as unplaced (it only knows a checkpoint key by whether the model
-        # has a matching parameter, not by which test wrote it).
+        # model loaded this one fine": real parameters, so the derivation an unrecorded model
+        # gets at export does not flag them as unplaced (it only knows a checkpoint key by
+        # whether the model has a matching parameter, not by which test wrote it).
         self.a = torch.nn.Linear(1, 1)
         self.other = torch.nn.Linear(1, 1)
         if keys is not None:
@@ -610,9 +694,13 @@ class _ProvenanceModel(torch.nn.Module):
 
 
 @requires_accelerate
-def test_carry_over_returns_nothing_when_the_loader_placed_everything():
-    """A recorded empty list means the question was asked and answered -- do not re-derive."""
-    model = _ProvenanceModel(keys=[], ckpt="/anywhere")
+def test_carry_over_returns_nothing_when_the_loader_placed_everything(tmp_path):
+    """A recorded empty list means the question was asked and answered -- do not re-derive.
+
+    Deriving again would find the stray tensor, which the model has no parameter for, and carry it.
+    """
+    save_file({"stray.weight": torch.zeros(2)}, str(tmp_path / "model.safetensors"))
+    model = _ProvenanceModel(keys=[], ckpt=tmp_path)
     assert read_unplaced_weights(model) == {}
 
 
@@ -668,10 +756,9 @@ def test_carry_over_handler_survives_failing_before_the_keys_are_known(tmp_path,
     (tmp_path / "model.safetensors.index.json").write_text('{"weight_map": {}}')
     model = _ProvenanceModel(name_or_path=tmp_path)
 
-    # The message changed with the union derivation, deliberately: the structural pass failing
-    # is not the same as "could not copy N weights" -- with nothing recorded we do not know that
-    # anything is missing, only that we could not check. What must still hold is that the handler
-    # does not throw from inside itself.
+    # Deliberately not "could not copy N weights": with nothing recorded we do not know that
+    # anything is missing, only that we could not check. What must hold is that the handler does
+    # not throw from inside itself.
     with pytest.warns(UserWarning, match="Could not derive unplaced source keys"):
         assert read_unplaced_weights(model) == {}
 
@@ -890,9 +977,9 @@ def test_exporters_warn_rather_than_fetch_for_a_hub_source(tmp_path, monkeypatch
 def test_carries_a_key_the_index_does_not_list(tmp_path):
     """A tensor inside a main shard but absent from weight_map must still be carried.
 
-    model.safetensors.index.json is not a complete inventory. Transformers enumerates the contents
-    of each shard it opens, so it reports such a tensor in unexpected_keys and it reaches
-    _modelopt_unplaced_source_keys -- but resolving the file purely through weight_map finds
+    model.safetensors.index.json is not a complete inventory. The loader sees the contents of each
+    shard it opens, so such a tensor is recorded in _modelopt_unplaced_source_keys like any other
+    -- but resolving the file purely through weight_map finds
     nothing and used to drop it silently, with the --vllm_fakequant_export guard staying quiet
     too because it shared that lookup. An MTP head stored in a main shard is exactly this shape:
     when MTP is not quantized the loader never places it, so it is the case the carry-over exists
@@ -946,8 +1033,9 @@ def test_warns_when_a_recorded_key_is_in_no_shard(tmp_path):
 def test_carry_over_works_without_the_loader_dependencies(tmp_path, monkeypatch):
     """Recorded keys must carry where transformers/accelerate are absent.
 
-    Only the `keys is None` fallback needs model_load_utils. Importing it unconditionally made the
-    recorded-keys path -- which needs nothing from it -- fail in the partial-install environments,
+    Only deriving the keys of an unrecorded model needs model_load_utils. Importing it
+    unconditionally made the recorded-keys path -- which needs nothing from it -- fail in the
+    partial-install environments,
     where the handler reported "could not copy" and dropped every carried weight. The sibling test
     pins this for carryable_unplaced_keys; this pins the carry itself, which is what actually writes.
     """
@@ -975,103 +1063,35 @@ def test_carry_over_works_without_the_loader_dependencies(tmp_path, monkeypatch)
     assert "model.mtp.eh_proj.weight" in carried, "recorded keys must not need the loader imports"
 
 
-def test_union_survives_an_architecture_that_ignores_its_mtp_keys(tmp_path, monkeypatch):
-    """An empty loader report must not mean "nothing to carry".
+def test_an_unrecorded_model_derives_its_unplaced_keys_once(tmp_path, monkeypatch):
+    """A model loaded without ModelOpt's loaders has no record: the export derives it, once.
 
-    Transformers filters unexpected_keys through _keys_to_ignore_on_load_unexpected, and
-    Qwen3-Next ignores ^mtp.*, DeepSeek-V3 and GLM their own MTP prefixes. So for exactly the
-    heads this mechanism exists to carry, the report comes back EMPTY -- and an earlier revision
-    treated [] as authoritative and shipped the export without them. The structural pass has no
-    such blind spot, because it asks whether the model has a parameter rather than what the
-    loader chose to mention.
+    Its MTP head must not drop out of the export silently, but nothing should work the list out
+    twice either: the derivation is recorded, and every later reader reads the record.
     """
-    # monkeypatch.setattr on a dotted path imports the module for real to resolve it, and
-    # model_load_utils genuinely needs transformers (this test pins behaviour of ITS loader,
-    # ignore rules included) -- so there is nothing meaningful to assert without it.
     pytest.importorskip("transformers")
-    from safetensors.torch import save_file
-
     from modelopt.torch.export.unified_export_hf import read_unplaced_weights
+    from modelopt.torch.utils.plugins import model_load_utils
 
     shard, mtp = "model-00001-of-00001.safetensors", "mtp.fc.weight"
     save_file({"a.weight": torch.zeros(2), mtp: torch.full((2,), 5.0)}, str(tmp_path / shard))
     (tmp_path / "model.safetensors.index.json").write_text(
         json.dumps({"weight_map": {"a.weight": shard, mtp: shard}})
     )
-
-    model = _ProvenanceModel(name_or_path=tmp_path)
-    model._modelopt_source_checkpoint = str(tmp_path)
-    # What an architecture with an ^mtp.* ignore rule leaves behind.
-    model._modelopt_unplaced_source_keys = []
-
+    derived_from = []
     monkeypatch.setattr(
-        "modelopt.torch.utils.plugins.model_load_utils.unplaced_source_keys",
-        lambda m, c: [mtp],
+        model_load_utils, "unplaced_source_keys", lambda m, c: derived_from.append(c) or [mtp]
     )
-    carried = read_unplaced_weights(model)
-    assert mtp in carried, f"an ignored MTP key was dropped from the export: {sorted(carried)}"
-    assert torch.equal(carried[mtp], torch.full((2,), 5.0))
-
-
-def test_union_prefers_source_keys_over_converted_names(tmp_path, monkeypatch):
-    """A fused target name is not a checkpoint key and cannot be located.
-
-    The loader can report a post-conversion name (``...experts.gate_up_proj``) that exists in no
-    shard, standing for several source tensors. The structural pass resolves in the other
-    direction -- source key through the converters to a target -- so it names the tensors that are
-    actually on disk, and the union carries them.
-    """
-    # Same reasoning as test_union_survives_an_architecture_that_ignores_its_mtp_keys above:
-    # the converter resolution this test pins is transformers', not ours.
-    pytest.importorskip("transformers")
-    from safetensors.torch import save_file
-
-    from modelopt.torch.export.unified_export_hf import read_unplaced_weights
-
-    shard = "model-00001-of-00001.safetensors"
-    g = "model.layers.1.mlp.experts.0.gate_proj.weight"
-    u = "model.layers.1.mlp.experts.0.up_proj.weight"
-    save_file({g: torch.ones(2), u: torch.full((2,), 2.0)}, str(tmp_path / shard))
-    (tmp_path / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": {g: shard, u: shard}})
-    )
-
     model = _ProvenanceModel(name_or_path=tmp_path)
-    model._modelopt_source_checkpoint = str(tmp_path)
-    # The loader reports the FUSED name, which is in neither the index nor any shard.
-    model._modelopt_unplaced_source_keys = ["model.layers.1.mlp.experts.gate_up_proj"]
 
-    monkeypatch.setattr(
-        "modelopt.torch.utils.plugins.model_load_utils.unplaced_source_keys",
-        lambda m, c: [g, u],
-    )
-    with pytest.warns(UserWarning, match="in no safetensors file"):
+    for _ in range(2):
         carried = read_unplaced_weights(model)
-    assert {g, u} <= set(carried), f"fused name stranded its sources: {sorted(carried)}"
-    assert torch.equal(carried[g], torch.ones(2))
-    assert torch.equal(carried[u], torch.full((2,), 2.0))
+        assert torch.equal(carried[mtp], torch.full((2,), 5.0))
+    assert derived_from == [str(tmp_path)], "derived once, then read back"
+    assert model._modelopt_unplaced_source_keys == [mtp]
 
 
-def test_union_degrades_to_the_recorded_set_without_the_loader(tmp_path, monkeypatch):
-    """Where transformers/accelerate are absent the structural pass cannot run.
-
-    The recorded set then stands alone -- worse than the union, but the export must still carry
-    what it can rather than refuse outright.
-    """
-    import sys as _sys
-
-    from safetensors.torch import save_file
-
-    from modelopt.torch.export.unified_export_hf import read_unplaced_weights
-
-    shard, key = "model-00001-of-00001.safetensors", "model.mtp.eh_proj.weight"
-    save_file({key: torch.full((2,), 3.0)}, str(tmp_path / shard))
-    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {key: shard}}))
-
-    monkeypatch.setitem(_sys.modules, "modelopt.torch.utils.plugins.model_load_utils", None)
-    model = _ProvenanceModel(name_or_path=tmp_path)
-    model._modelopt_source_checkpoint = str(tmp_path)
-    model._modelopt_unplaced_source_keys = [key]
-
-    carried = read_unplaced_weights(model)
-    assert key in carried, "recorded keys must still carry when the structural pass is unavailable"
+def test_source_checkpoint_is_none_for_a_model_built_from_config():
+    """``from_config`` leaves ``_name_or_path`` empty; it must not resolve to the working directory,
+    or every export would copy the cwd as the "source checkpoint"."""
+    assert _source_checkpoint(SimpleNamespace(config=SimpleNamespace(_name_or_path=""))) is None

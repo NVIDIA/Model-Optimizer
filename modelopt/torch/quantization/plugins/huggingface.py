@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,11 +24,13 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import transformers
 from torch import Tensor
+from torch.distributed.tensor import DTensor, Shard
 from torch.nn.functional import linear
-from transformers.integrations.finegrained_fp8 import FP8Linear
+from transformers.integrations.finegrained_fp8 import FP8Experts, FP8Linear
 from transformers.models.t5.modeling_t5 import T5Attention
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_FA_AVAILABLE
@@ -38,12 +40,14 @@ from modelopt.torch.kernels.common.attention import (
 )
 from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_AVAILABLE
 from modelopt.torch.opt.dynamic import DynamicModule
+from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.distributed import ParallelState
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import register
 from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import _QuantLinear
+from ..nn.modules.tensor_quantizer import _try_stacked_fake_quant
 from ..utils import replace_function, sync_moe_expert_amax
 from ..utils.layerwise_calib import LayerActivationCollector
 from .attention import register_attention_for_kv_quant
@@ -52,9 +56,15 @@ from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
 logger = logging.getLogger(__name__)
 
 try:
-    from torch.distributed.tensor import Shard
+    import transformers.integrations.moe as _transformers_moe
 except ImportError:
-    Shard = None
+    _transformers_moe = None
+
+# Whether transformers has the grouped experts forward's `_grouped_linear`, the call _QuantFusedExperts
+# intercepts on it: without it nothing intercepts grouped_mm, so calibration cannot use that backend.
+_HAS_GROUPED_LINEAR = _transformers_moe is not None and hasattr(
+    _transformers_moe, "_grouped_linear"
+)
 
 try:
     import kitchen
@@ -524,12 +534,12 @@ class HFParallelLinear(torch.nn.Linear, DynamicModule):
 
 class HFColumnParallelLinear(HFParallelLinear):
     supported_hf_tp_plans = ["colwise", "colwise_rep"]
-    shard = (Shard(0),) if Shard is not None else None
+    shard = (Shard(0),)
 
 
 class HFRowParallelLinear(HFParallelLinear):
     supported_hf_tp_plans = ["rowwise", "rowwise_rep"]
-    shard = (Shard(1),) if Shard is not None else None
+    shard = (Shard(1),)
 
 
 class _QuantHFParallelLinear(_ParallelLinear):
@@ -796,9 +806,23 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     Verified compatible models: Mixtral, Qwen2-MoE, Qwen3-MoE, Qwen3.5-MoE,
     DeepSeek-V3, Jamba, OLMoE.
 
-    Limitation: only works when ``experts_implementation="eager"`` (default).
-    ``batched_mm`` / ``grouped_mm`` backends use ``torch.bmm`` /
-    ``torch._grouped_mm`` instead of ``F.linear`` and are not intercepted.
+    Backends: both the ``eager`` (per-expert ``F.linear``) and ``grouped_mm``
+    (``transformers.integrations.moe._grouped_linear`` →
+    ``torch._grouped_mm`` / ``torch.nn.functional.grouped_mm`` / fallback)
+    forwards are intercepted. Both calibrate the same per-expert weight quantizers
+    and shared input quantizers, and export the same keys; the activation scales
+    they calibrate can differ, so ``eager`` is the way to calibrate as before
+    ``grouped_mm`` was intercepted. Only one backend's hook fires per forward
+    (selected by ``config._experts_implementation``), so installing both is safe:
+    the ``grouped_mm`` fallback does not call ``F.linear``, which the CPU tests that
+    run it pin.
+
+    Limitation: the ``grouped_mm`` path assumes the non-transposed weight layout
+    ``(num_experts, out_dim, in_dim)`` used by all standard fused experts. The
+    transposed layout (e.g. GptOss, which has its own quantized wrapper) is not
+    handled here. ``batched_mm`` (``torch.bmm``) and ``sonicmoe`` (opaque CUDA
+    kernel) backends are not intercepted; ``normalize_experts_impl_on_the_fly``
+    redirects them to ``grouped_mm`` before calibration.
 
     The non-gated variant (``up_proj`` instead of ``gate_up_proj``, used by
     NemotronH) is handled by :class:`_QuantNonGatedFusedExperts` via the
@@ -812,6 +836,25 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     _first_proj_attr = "gate_up_proj"
     # Whether the first projection packs a gate half that must be split on export.
     _is_gated = True
+    # Under expert parallelism each rank's experts see only the tokens routed to them, so calibration
+    # shares the layer's input amax over the expert-parallel group (see max_calibrate).
+    _share_input_amax_across_ep = True
+    # Whether the wrapper quantizes only on the eager per-expert forward, so a model holding it must
+    # calibrate there (see normalize_experts_impl_on_the_fly).
+    _eager_only = False
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # The grouped_mm forward quantizes the stored weight and never reaches get_expert_weight, so
+        # a wrapper that defines its weight domain there would calibrate the wrong weights on it.
+        if (
+            cls.get_expert_weight is not _QuantFusedExperts.get_expert_weight
+            and not cls._eager_only
+        ):
+            raise TypeError(
+                f"{cls.__name__} overrides get_expert_weight, which the grouped_mm forward bypasses; "
+                "set _eager_only = True so that its models calibrate on the eager forward."
+            )
 
     @property
     def _first_proj_input_quantizer_attr(self) -> str:
@@ -822,7 +865,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         return f"{self._first_proj_attr}_weight_quantizers"
 
     def _get_expert_idx_from_first_proj(self, weight: torch.Tensor) -> int:
-        """Recover expert index from a first-projection weight slice's storage offset.
+        """Recover expert index from the first-projection weight slice's storage offset.
 
         When HF indexes ``<first_proj>[idx]``, the result is a view sharing the
         same underlying storage.  The offset delta divided by the stride along
@@ -856,34 +899,266 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
         self._register_temp_attribute("_down_proj_linear", False)
         self._register_temp_attribute("_current_expert_idx", 0)
+        # Per forward: each projection's experts, fake-quantized together (see _quantized_weight).
+        self._register_temp_attribute("_stacked_weights", {})
+        # Cumulative tokens-per-expert offsets of the grouped forward in flight (grouped_mm or
+        # torch_a2a), None on the eager path: tells a weight-input capture (local Hessian, imatrix,
+        # GPTQ) which forward ran and how to split the expert-sorted batch. Cleared when forward
+        # returns, so a capture reached outside one skips rather than splitting by stale offsets.
+        self._register_temp_attribute("_grouped_offs", None)
+        # How many times an interception hook fired for this module. Still zero after a
+        # calibration forward means the active experts backend reached neither `F.linear` nor
+        # `_grouped_linear`, so no quantizer ever saw data -- `assert_fused_experts_intercepted`
+        # turns that into an error instead of an export full of fallback scales.
+        self._register_temp_attribute("_intercept_count", 0)
+        # How many times this module's forward ran: an experts module that no calibration token
+        # reached (e.g. vision experts under text-only calibration) has nothing to intercept.
+        self._register_temp_attribute("_forward_count", 0)
+        # Whether this calibration captures the experts' inputs to calibrate their weights (GPTQ,
+        # local Hessian, imatrix), so that the weight quantizers need the interception too.
+        self._register_temp_attribute("_weight_input_capture", False)
+
+    @property
+    def _running_grouped_mm(self) -> bool:
+        """Whether this module's forward runs its expert matmuls through ``_grouped_linear``.
+
+        The ``grouped_mm`` backend and the ``torch_a2a`` expert-parallel forward both do, handing each
+        projection one expert-sorted batch rather than one ``F.linear`` call per expert.
+        """
+        cfg = getattr(self, "config", None)
+        return getattr(cfg, "_experts_implementation", None) in ("grouped_mm", "torch_a2a")
+
+    def _local_experts(self, weight: torch.Tensor) -> torch.Tensor:
+        """``weight`` indexed the way the per-expert quantizers are: by this module's own experts.
+
+        Under expert parallelism transformers 5.16 and later keep a fused expert weight as a DTensor
+        sharded over the experts (earlier ones keep a plain tensor of this rank's experts) and set
+        ``num_experts`` to the local count, so indexing the DTensor would read the GLOBAL expert: from
+        rank 1 on, another rank's. Its local shard holds this rank's experts in quantizer order. A
+        DTensor holding every expert (FSDP2) is indexed as it is, and one whose local shard holds
+        another number of experts than the quantizers is refused.
+        """
+        if isinstance(weight, DTensor) and weight.shape[0] != self.num_experts:
+            local = weight.to_local()
+            if local.shape[0] != self.num_experts:
+                raise RuntimeError(
+                    f"{type(self).__name__} has {self.num_experts} experts, but its expert weight, a "
+                    f"DTensor placed {weight.placements}, holds {local.shape[0]} on this rank: only a "
+                    "weight sharded over the experts can be indexed by local expert."
+                )
+            return local
+        return weight
+
+    def _quantize_grouped_weight(self, weight: torch.Tensor, quantizers: nn.ModuleList):
+        """Fake-quantize a fused 3-D weight per expert.
+
+        Each expert slice passes through its own weight quantizer (collecting
+        ``amax`` during calibration, fake-quantizing afterwards), matching the
+        eager per-expert ``F.linear`` semantics. Returns the weight untouched when every
+        quantizer would pass its slice through unchanged, so passthrough stays exact (and cheap):
+        a disabled quantizer, or one that only collects statistics, as in calibration.
+
+        Reached only inside the experts forward, around which transformers swaps an expert-parallel
+        DTensor weight for this rank's local shard, so the weight is already indexed by local expert.
+        """
+        # A quantizer that is disabled, or that collects statistics without quantizing, hands its
+        # slice back unchanged, unless it applies a pre-quant scale or a rotation (a disabled one
+        # still does, as on the eager path). Then the result is the weight itself: building it
+        # slice by slice would copy every expert's weight on each calibration forward.
+        if all(
+            isinstance(q, TensorQuantizer)
+            and not (q.is_enabled and q._if_quant)
+            and q.pre_quant_scale is None
+            and not q.rotate_is_enabled
+            for q in quantizers
+        ):
+            # Only a calibrating quantizer does anything with its slice: one whose amax is constant
+            # (enable_stats_collection leaves it neither quantizing nor calibrating) would not.
+            collecting = [q.is_enabled and q._if_calib for q in quantizers]
+            if any(collecting):
+                for q, w, collects in zip(quantizers, weight, collecting, strict=True):
+                    if collects:
+                        q(w)  # collects this expert's statistics
+            return weight
+        # One kernel launch for every expert where the format has one. Unlike the eager path, which
+        # without autograd quantizes only the routed experts, this one quantizes every expert either
+        # way, and the kernel's one output is the buffer the slice-by-slice path below fills.
+        stacked = _try_stacked_fake_quant(weight, quantizers)
+        if stacked is not None:
+            return stacked
+        if torch.is_grad_enabled():
+            # Slices written into one buffer would chain a full-size gradient copy per expert into
+            # the backward (QAT), so stack them there.
+            return torch.stack([q(w) for q, w in zip(quantizers, weight, strict=True)])
+        # Each slice goes into the output as it is made: a stack would hold all of them beside it.
+        # Strict, so every row of the output is written or the call fails. The output takes the
+        # dtype the stack promotes the slices to: a pre-quant scale can widen one, and narrowing
+        # it here would compute from other weights than with autograd.
+        out: torch.Tensor | None = None
+        for idx, (q, w) in enumerate(zip(quantizers, weight, strict=True)):
+            quantized = q(w)
+            if out is None:
+                out = torch.empty_like(weight, dtype=quantized.dtype)
+            elif quantized.dtype != out.dtype:
+                out = out.to(torch.promote_types(out.dtype, quantized.dtype))
+            out[idx] = quantized
+            del quantized  # not alive beside the next slice
+        return out
 
     @property
     def functionals_to_replace(self):
         _orig_linear = torch.nn.functional.linear
+        # First-projection quantizers, by layout: gate_up_proj_* (gated) or up_proj_* (non-gated).
+        # Bound once; the objects are stable across the forward.
+        first_input_q = getattr(self, self._first_proj_input_quantizer_attr)
+        first_weight_qs = getattr(self, self._first_proj_weight_quantizers_attr)
 
         # The HF fused expert forward calls F.linear exactly twice per expert
-        # in strict alternation: first for gate_up_proj, then for down_proj.
+        # in strict alternation: first the up/gate_up projection, then down_proj.
         # forward() resets the toggle before each call to super().forward().
         def _quantized_linear(input, weight, bias=None):
+            self._intercept_count += 1
+            # The eager path: no expert-sorted batch for a capture hook to split.
+            self._grouped_offs = None
             if self._down_proj_linear:
                 idx = self._current_expert_idx
                 input = self.down_proj_input_quantizer(input)
-                weight = self.down_proj_weight_quantizers[idx](weight)
+                weight = self._quantized_weight(
+                    "down_proj", self.down_proj_weight_quantizers, idx, input.dtype
+                )
             else:
                 idx = self._get_expert_idx_from_first_proj(weight)
                 self._current_expert_idx = idx
-                input = getattr(self, self._first_proj_input_quantizer_attr)(input)
-                weight = getattr(self, self._first_proj_weight_quantizers_attr)[idx](weight)
+                input = first_input_q(input)
+                weight = self._quantized_weight(
+                    self._first_proj_attr,
+                    first_weight_qs,
+                    idx,
+                    input.dtype,
+                )
             self._down_proj_linear = not self._down_proj_linear
             return _orig_linear(input, weight, bias)
 
-        return [
-            (torch.nn.functional, "linear", _quantized_linear),
-        ]
+        replacements: list[tuple] = [(torch.nn.functional, "linear", _quantized_linear)]
+
+        # grouped_mm backend: HF's grouped_mm_experts_forward calls the module-level
+        # _grouped_linear exactly twice (gate_up then down) with the FULL 3-D weight
+        # in the same (num_experts, out, in) layout as eager F.linear, so the same
+        # per-expert weight quantizers / shared input quantizers apply. Only one
+        # backend's hook fires per forward, so patching both F.linear and
+        # _grouped_linear is safe.
+        if _HAS_GROUPED_LINEAR:
+            _orig_grouped_linear = _transformers_moe._grouped_linear
+
+            def _quantized_grouped_linear(input, weight, offs, bias=None, is_transposed=False):
+                if self._eager_only:
+                    # Quantizing the stored weight here would bypass get_expert_weight, which defines
+                    # this wrapper's weights; normalize_experts_impl_on_the_fly pins its model to eager.
+                    raise RuntimeError(
+                        f"{type(self).__name__} quantizes on the eager experts forward only, but its "
+                        'grouped_mm forward ran. Load the model with experts_implementation="eager", '
+                        "and without expert parallelism, whose forward runs it too."
+                    )
+                self._intercept_count += 1
+                # The batch holds every expert's rows, so no expert for the eager loop's index to name.
+                # The offsets, recorded before quantizing input, let a capture hook on the input
+                # quantizer split the expert-sorted batch back per expert.
+                self._current_expert_idx = None
+                self._grouped_offs = offs
+                quantizers = (
+                    self.down_proj_weight_quantizers if self._down_proj_linear else first_weight_qs
+                )
+                input_quantizer = (
+                    self.down_proj_input_quantizer if self._down_proj_linear else first_input_q
+                )
+                input = self._quantize_grouped_input(input, offs, input_quantizer)
+                weight = self._quantize_grouped_weight(weight, quantizers)
+                self._down_proj_linear = not self._down_proj_linear
+                return _orig_grouped_linear(
+                    input, weight, offs, bias=bias, is_transposed=is_transposed
+                )
+
+            replacements.append((_transformers_moe, "_grouped_linear", _quantized_grouped_linear))
+
+        return replacements
+
+    @staticmethod
+    def _quantize_grouped_input(input, offs, quantizer):
+        """Quantize a grouped projection's input, collecting statistics on the rows it computes only.
+
+        Rows past ``offs[-1]`` belong to no expert of this module: under transformers' own expert
+        parallelism they are the rows routed to other ranks' experts, sorted to the tail, which the
+        grouped GEMM neither reads nor writes. Before transformers 5.17 the down projection's input
+        holds them uninitialized, so a calibrating quantizer sees only the rows before them; the tail
+        passes through unread. Finding where it starts costs a host sync, so it is skipped while the
+        quantizer collects nothing.
+        """
+        if getattr(quantizer, "is_enabled", False) and getattr(quantizer, "_if_calib", False):
+            routed = int(offs[-1]) if offs.numel() else 0
+            if routed < input.shape[0]:
+                computed = quantizer(input[:routed])
+                return torch.cat([computed, input[routed:].to(computed.dtype)])
+        return quantizer(input)
+
+    def _quantized_weight(self, name, quantizers, idx, dtype):
+        """Expert ``idx``'s ``name`` projection, fake-quantized by its own weight quantizer.
+
+        When :func:`_try_stacked_fake_quant` supports the experts' quantizers, all experts are
+        fake-quantized at once, by one kernel launch on the projection's first call of the forward,
+        instead of one launch per expert.
+        """
+        if name not in self._stacked_weights:
+            # Without autograd the per-expert path is cheaper: it quantizes only the routed experts,
+            # one at a time. A subclass that rebuilds each expert's weight (FP8 dequant) keeps it too.
+            stacked = (
+                _try_stacked_fake_quant(getattr(self, name), quantizers)
+                if torch.is_grad_enabled()
+                and type(self).get_expert_weight is _QuantFusedExperts.get_expert_weight
+                else None
+            )
+            # unbind's backward writes one gradient for all experts; weight[idx] per expert would
+            # write a full-size one each.
+            self._stacked_weights[name] = None if stacked is None else stacked.unbind(0)
+        stacked = self._stacked_weights[name]
+        if stacked is None:
+            return quantizers[idx](self.get_expert_weight(name, idx, dtype))
+        return stacked[idx]
 
     def forward(self, *args, **kwargs):
         self._down_proj_linear = False
-        return super().forward(*args, **kwargs)
+        # Only a forward that makes a projection call is work the interception check expects. The
+        # eager path makes one per expert some row was routed to: none for a forward with no rows, nor
+        # for one whose rows transformers' expert parallelism routed to other ranks' experts (masked
+        # to num_experts). The grouped paths call _grouped_linear whatever rows they are handed.
+        # Once a hook has fired the check passes, so stop counting: the routing test syncs the host.
+        if self._intercept_count == 0:
+            hidden_states = args[0] if args else kwargs.get("hidden_states")
+            top_k_index = args[1] if len(args) > 1 else kwargs.get("top_k_index")
+            if hidden_states is None or (
+                hidden_states.numel()
+                and (
+                    self._running_grouped_mm
+                    or not isinstance(top_k_index, torch.Tensor)
+                    or bool((top_k_index < self.num_experts).any())
+                )
+            ):
+                self._forward_count += 1
+        self._stacked_weights = {}
+        try:
+            return super().forward(*args, **kwargs)
+        finally:
+            # Autograd keeps what backward needs; holding more would pin every expert's copy.
+            self._stacked_weights = {}
+            # A capture reached outside a forward must not split its input by this forward's offsets.
+            self._grouped_offs = None
+
+    def get_expert_weight(self, name, idx, dtype=None):
+        """Return one expert's projection in the calibration/export weight domain.
+
+        Indexed by this module's own experts, as the per-expert quantizers are (see
+        :meth:`_local_experts`).
+        """
+        return self._local_experts(getattr(self, name))[idx]
 
     def iter_weights_for_calibration(self):
         """Yield ``(weight_slice, quantizer)`` per-expert pairs.
@@ -901,7 +1176,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             if weight is None or quantizers is None:
                 continue
             for idx, q in enumerate(quantizers):
-                yield weight[idx], q
+                yield self.get_expert_weight(weight_name, idx), q
 
     def iter_weight_quantizers_for_calibration(self):
         """Yield the per-expert weight quantizers without slicing the fused 3-D weight.
@@ -945,6 +1220,76 @@ class _QuantNonGatedFusedExperts(_QuantFusedExperts):
 
     _first_proj_attr = "up_proj"
     _is_gated = False
+    # The grouped_mm interception is validated for the gated layout only, so these keep
+    # calibrating on the eager forward.
+    _eager_only = True
+
+
+class _QuantFP8Experts(_QuantFusedExperts):
+    """Scale-aware PTQ for native Transformers FP8 experts, dequantized per expert."""
+
+    # The block scales apply in get_expert_weight, which only the eager forward reaches: transformers'
+    # FP8 grouped_mm forward runs its own kernels, which nothing here intercepts. So, unlike for the
+    # non-gated wrapper, the grouped interceptor's refusal never fires for these: what keeps them on
+    # eager is normalize_experts_impl_on_the_fly, which runs on convert and on restore.
+    _eager_only = True
+
+    @property
+    def _first_proj_attr(self):
+        return "gate_up_proj" if self.has_gate else "up_proj"
+
+    @property
+    def _is_gated(self):
+        return self.has_gate
+
+    def _setup(self):
+        if getattr(self.config, "expert_dtype", "fp8") != "fp8":
+            raise NotImplementedError("Only FP8 E4M3 native expert weights are supported")
+        super()._setup()
+
+    def get_expert_weight(self, name, idx, dtype=None):
+        weight = self._local_experts(getattr(self, name))[idx]
+        if weight.element_size() > 1:
+            return weight if dtype is None else weight.to(dtype)
+        dtype = dtype or torch.get_default_dtype()
+        scales = self._local_experts(getattr(self, f"{name}_scale_inv"))[idx].float()
+        rows, cols = self.block_size or (weight.shape[0] // scales.shape[0], weight.shape[1])
+        scales = scales.repeat_interleave(rows, 0).repeat_interleave(cols, 1)
+        return (weight.float() * scales[: weight.shape[0], : weight.shape[1]]).to(dtype)
+
+    def linear(self, input, weight, weight_scale_inv, activation_scale=None):
+        # Preserve the FP8 view's storage offset for the per-expert quantizer lookup.
+        return torch.nn.functional.linear(input, weight)
+
+    def _validate_fold_weight(self):
+        if any(
+            getattr(self, name).element_size() == 1 for name in (self._first_proj_attr, "down_proj")
+        ):
+            raise ValueError("Call unpack_weight() before folding native FP8 expert weights.")
+        super()._validate_fold_weight()
+
+    def fold_weight(self, keep_attrs: bool = False):
+        self._validate_fold_weight()
+        super().fold_weight(keep_attrs)
+
+    def unpack_weight(self):
+        """Materialize floating weights before folding; retain scales for native forward."""
+        names = [
+            n for n in (self._first_proj_attr, "down_proj") if getattr(self, n).element_size() == 1
+        ]
+        # Sharded over the experts, one unpacked parameter would have to stay sharded too. Checked for
+        # both projections before either is unpacked, so a refusal leaves the module as it was.
+        if any(self._local_experts(getattr(self, n)) is not getattr(self, n) for n in names):
+            raise NotImplementedError(
+                f"{type(self).__name__} cannot unpack native FP8 expert weights sharded over the "
+                "experts. Quantize the model without expert parallelism."
+            )
+        for name in names:
+            weight = getattr(self, name)
+            unpacked = torch.empty_like(weight, dtype=torch.get_default_dtype())
+            for idx in range(self.num_experts):
+                unpacked[idx].copy_(self.get_expert_weight(name, idx))
+            setattr(self, name, nn.Parameter(unpacked, requires_grad=False))
 
 
 def _get_fused_experts_quantizer_attr_names(module):
@@ -1199,6 +1544,9 @@ try:
 except ImportError:
     pass
 
+if FP8Experts not in QuantModuleRegistry:
+    QuantModuleRegistry.register({FP8Experts: "hf.FP8Experts"})(_QuantFP8Experts)
+
 if FP8Linear not in QuantModuleRegistry:
     QuantModuleRegistry.register({FP8Linear: "hf.FP8Linear"})(_QuantFP8Linear)
 
@@ -1268,21 +1616,22 @@ def register_sparse_moe_on_the_fly(model):
             )
 
 
-def _fused_experts_wrapper_class(module):
-    """Return the _QuantFusedExperts subclass for a fused MoE expert container, or None.
+def _fused_experts_wrapper(module):
+    """Return the ``_QuantFusedExperts`` subclass for a fused-MoE-experts module, else None.
 
-    Two 3-D fused layouts are recognized, both requiring ``num_experts`` and a
-    3-D ``down_proj`` parameter:
+    Detects the standardized HuggingFace transformers 5.0+ fused expert pattern: ``num_experts``,
+    a 3-D ``down_proj`` and a 3-D first projection, either
 
-    * gated (``_QuantFusedExperts``): a 3-D ``gate_up_proj`` fusing gate+up. Matches
+    * gated (:class:`_QuantFusedExperts`): a 3-D ``gate_up_proj`` fusing gate+up. Matches
       ``MixtralExperts``, ``Qwen2MoeExperts``, ``Qwen3MoeExperts``,
       ``Qwen3_5MoeExperts``, ``DeepseekV3NaiveMoe``, ``JambaExperts``,
       ``OlmoeExperts``, ``MiniMaxM2Experts``, ``MiniMaxM3VLExperts``, etc.
     * non-gated (``_QuantNonGatedFusedExperts``): a 3-D ``up_proj`` with no
       ``gate_proj`` and no ``gate_up_proj``. Matches NemotronH ``NemotronHExperts``.
 
-    Returns ``None`` for non-standard layouts (GptOss, GraniteMoE,
-    Llama4TextExperts) which have their own explicit registrations.
+    Matching is by shape alone, so GptOss and Llama4TextExperts -- transposed layouts with their own
+    explicit registrations -- match too; :func:`register_fused_experts_on_the_fly` never reaches
+    them while those registrations stand.
 
     ``act_fn`` is not required: these wrappers only intercept the two ``F.linear``
     calls, so modules with a custom gated activation (e.g. ``MiniMaxM3VLExperts``)
@@ -1307,10 +1656,13 @@ def _fused_experts_wrapper_class(module):
 def _is_fused_experts_module(module):
     """Check if a module is a fused MoE expert container compatible with _QuantFusedExperts.
 
-    See :func:`_fused_experts_wrapper_class` for the recognized layouts (gated
-    ``gate_up_proj`` and non-gated ``up_proj``).
+    See :func:`_fused_experts_wrapper` for the recognized layouts (gated
+    ``gate_up_proj`` and non-gated ``up_proj``). Transposed containers match too, though
+    registration skips them: :func:`normalize_experts_impl_on_the_fly` must still find them, to keep
+    GPT-OSS's own wrapper on eager, the only forward on which it quantizes ``down_proj``'s input (it
+    intercepts the eager forward's ``bmm``/``matmul``).
     """
-    return _fused_experts_wrapper_class(module) is not None
+    return _fused_experts_wrapper(module) is not None
 
 
 def register_fused_experts_on_the_fly(model):
@@ -1332,52 +1684,238 @@ def register_fused_experts_on_the_fly(model):
 
         visited_types.add(mod_type)
 
-        wrapper_cls = _fused_experts_wrapper_class(module)
-        if wrapper_cls is not None:
+        wrapper = _fused_experts_wrapper(module)
+        if wrapper is not None and (
+            getattr(module, "is_transposed", False)
+            # Stored `(num_experts, out_dim, in_dim)`, the first projection takes the dim down_proj
+            # puts out. That separates the layouts for a gated container, whose first projection is
+            # `2 * intermediate`, whether it says so or not; a non-gated one's two layouts have the
+            # same shapes, so only its own `is_transposed` gives it away.
+            or getattr(module, wrapper._first_proj_attr).shape[-1] != module.down_proj.shape[1]
+        ):
+            # `_fused_experts_wrapper` matches on parameter SHAPE only, so it also claims a
+            # transposed `(num_experts, in_dim, out_dim)` container. The fused-experts export
+            # (export/moe_utils.py) then splits gate/up by slicing dim 1 at `intermediate_dim`, the
+            # wrong axis for that layout, and writes silently wrong weights. Leave it unquantized.
+            warnings.warn(
+                f"Fused MoE experts '{name}' ({mod_type.__name__}) store their weights transposed "
+                "(num_experts, in_dim, out_dim), which the generic _QuantFusedExperts export path "
+                "does not support: it splits gate/up along dim 1, which is the input dim for this "
+                "layout. Leaving them unquantized, so export_hf_checkpoint will refuse their MoE "
+                "block; such a class needs its own quantized wrapper, as GptOssExperts and "
+                "Llama4TextExperts have."
+            )
+            continue
+        if wrapper is not None:
             print(
                 f"\033[1mDetected fused MoE experts '{name}' of type {mod_type.__name__}, "
-                f"registering with {wrapper_cls.__name__}.\033[0m"
+                f"registering with {wrapper.__name__}.\033[0m"
             )
-            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(wrapper_cls)
+            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(wrapper)
 
 
-def force_eager_experts_impl_on_the_fly(model):
-    """Force HF fused-experts modules onto the eager ``F.linear``-based forward.
+def normalize_experts_impl_on_the_fly(model):
+    """Redirect HF fused-experts modules onto a quantization-supported backend.
 
     HF transformers 5.0+ decorates fused-experts forwards with
-    ``@use_experts_implementation``, which may dispatch to ``torch._grouped_mm``
-    or ``torch.bmm`` backends. Those backends bypass ``F.linear`` and so bypass
-    ``_QuantFusedExperts``'s input/weight quantizer hooks — calibration silently
-    does nothing, no ``input_scale`` / ``amax`` is collected, and the exported
-    checkpoint produces garbage at inference.
+    ``@use_experts_implementation``, which dispatches on
+    ``config._experts_implementation``. ``_QuantFusedExperts`` intercepts the
+    ``eager`` (per-expert ``F.linear``) and ``grouped_mm``
+    (``transformers.integrations.moe._grouped_linear``) forwards. The remaining
+    backends — ``batched_mm`` (``torch.bmm``), ``sonicmoe`` (opaque CUDA kernel),
+    ``kernels``/hub, etc. — bypass those hooks, so calibration silently collects
+    nothing and the exported checkpoint produces garbage at inference.
 
-    Sets ``config._experts_implementation = "eager"`` on the model config (and
-    recursively on ``text_config`` / ``vision_config`` / ``audio_config`` /
-    ``speech_config``) whenever a fused-experts module is present.
+    To avoid that while keeping the fast grouped path, this redirects any
+    unsupported backend to ``grouped_mm`` (which has a CPU / old-HW fallback, so
+    it is universally runnable), or to ``eager`` on a transformers without the
+    ``_grouped_linear`` grouped_mm is intercepted at. ``eager``, ``grouped_mm`` and ``torch_a2a`` are
+    left untouched, and so is ``None``, which dispatches to the eager ``F.linear``
+    forward -- but transformers resolves an unrequested backend to ``grouped_mm``
+    wherever that can dispatch, when it builds the model, so a model calibrates on
+    the grouped path unless ``eager`` was asked for. Applied to the model config
+    and recursively to ``text_config`` / ``vision_config`` / ``audio_config`` /
+    ``speech_config`` whenever a fused-experts module is present.
+
+    Experts that quantize only on the eager forward are refused on ``torch_a2a``, the
+    expert-parallel forward, which cannot fall back to eager; no config is changed then.
     """
     fused_experts = [module for module in model.modules() if _is_fused_experts_module(module)]
     if not fused_experts:
         return
 
     nested_cfg_attrs = ("text_config", "vision_config", "audio_config", "speech_config")
+    # Backends already intercepted by _QuantFusedExperts (None => eager F.linear forward). `torch_a2a`
+    # (all-to-all DP=EP) runs its local experts through the same `_grouped_linear`, so _QuantFusedExperts
+    # intercepts it too -- don't clobber it back to grouped_mm. Without `_grouped_linear` grouped_mm is
+    # intercepted nowhere, so it is neither kept nor redirected to: main's eager is.
+    supported_impls = (None, "eager", "torch_a2a") + (
+        ("grouped_mm",) if _HAS_GROUPED_LINEAR else ()
+    )
+    fallback_impl = "grouped_mm" if _HAS_GROUPED_LINEAR else "eager"
+    # A class with its own quantized wrapper -- GPT-OSS's quantizes down_proj's input by intercepting
+    # the eager forward's bmm/matmul -- only works on the eager forward, and so does a fused-experts
+    # wrapper that says so (FP8's), so keep main's forced eager for such a model. The plugins run in
+    # no set order, so a class register_fused_experts_on_the_fly registers may not be registered yet:
+    # the wrapper it will get decides then.
+    eager_only = sorted(
+        {
+            type(module).__name__
+            for module in fused_experts
+            if (wrapper := QuantModuleRegistry.get(type(module)) or _fused_experts_wrapper(module))
+            is not None
+            and (not issubclass(wrapper, _QuantFusedExperts) or wrapper._eager_only)
+        }
+    )
 
-    def _force(cfg):
-        if cfg is None:
-            return
-        if hasattr(cfg, "_experts_implementation"):
-            cfg._experts_implementation = "eager"
-        for sub in nested_cfg_attrs:
-            if hasattr(cfg, sub):
-                _force(getattr(cfg, sub))
-
-    if hasattr(model, "config"):
-        _force(model.config)
+    def _configs(cfg):
+        if cfg is not None:
+            yield cfg
+            for sub in nested_cfg_attrs:
+                yield from _configs(getattr(cfg, sub, None))
 
     # Some models construct auxiliary blocks from a deep copy of the root config.
     # Nemotron-H MTP does this, so updating only ``model.config`` leaves its fused
-    # experts on grouped_mm/batched_mm and bypasses the F.linear quantizer hooks.
-    for module in fused_experts:
-        _force(getattr(module, "config", None))
+    # experts on an unsupported backend that bypasses the quantizer hooks.
+    roots = [getattr(model, "config", None)] + [getattr(m, "config", None) for m in fused_experts]
+    configs = [c for root in roots for c in _configs(root) if hasattr(c, "_experts_implementation")]
+    if eager_only and any(c._experts_implementation == "torch_a2a" for c in configs):
+        raise NotImplementedError(
+            f"{', '.join(eager_only)} quantize only on the eager experts forward, but this model runs "
+            "its experts on `torch_a2a`, the expert-parallel forward, which cannot fall back to "
+            "eager. Quantize the model without expert parallelism."
+        )
+    moved = {}  # (was, now), once each: the root config and its sub-configs often agree
+    for cfg in configs:
+        was = cfg._experts_implementation
+        if eager_only:
+            cfg._experts_implementation = "eager"
+        elif was not in supported_impls:
+            cfg._experts_implementation = fallback_impl
+        # None already dispatches to the eager F.linear forward: pinning it to eager moves nothing.
+        if cfg._experts_implementation != was and was is not None:
+            moved[(was, cfg._experts_implementation)] = None
+    reason = (
+        f"{', '.join(eager_only)} quantize on the eager forward only"
+        if eager_only
+        else "nothing intercepts that backend"
+    )
+    for was, now in moved:
+        # The caller may have asked for it (a load's experts_implementation, hf_ptq's flag). Every
+        # rank redirects alike, so one says so.
+        warn_rank_0(
+            f"Quantizing the fused experts on {now!r} instead of experts_implementation={was!r}: "
+            f"{reason}."
+        )
+
+
+def _bypassed_both_hooks(module) -> bool:
+    """Whether ``module``'s forward ran past both hooks, with a quantizer that needed them.
+
+    See :func:`assert_fused_experts_intercepted`.
+    """
+    # A missing attribute (rather than 0) means it was already cleaned up -- say nothing.
+    if getattr(module, "_intercept_count", None) != 0 or not getattr(module, "_forward_count", 0):
+        return False
+    first = module._first_proj_attr
+    quantizers = [getattr(module, f"{first}_input_quantizer", None)]
+    quantizers.append(getattr(module, "down_proj_input_quantizer", None))
+    if getattr(module, "_weight_input_capture", False):
+        for attr in (f"{first}_weight_quantizers", "down_proj_weight_quantizers"):
+            quantizers.extend(getattr(module, attr, None) or [])
+    return any(getattr(q, "is_enabled", False) for q in quantizers)
+
+
+def _expert_parallel_group(module):
+    """The process group ``module``'s experts are sharded over (expert parallelism), else ``None``.
+
+    Read from the experts' weight, a DTensor sharded over the experts under the expert parallelism of
+    transformers 5.16 and later. Earlier versions keep each rank's experts as a plain tensor, which
+    names no group.
+    """
+    weight = getattr(module, module._first_proj_attr, None)
+    if not isinstance(weight, DTensor) or weight.shape[0] == module.num_experts:
+        return None
+    dims = [dim for dim, placement in enumerate(weight.placements) if placement == Shard(0)]
+    return weight.device_mesh.get_group(dims[0]) if dims else None
+
+
+def assert_fused_experts_intercepted(model):
+    """Raise if a quantized fused-experts module was never reached by an interception hook.
+
+    :class:`_QuantFusedExperts` collects statistics by intercepting the calls the experts
+    forward makes -- ``F.linear`` per expert on the eager path, ``_grouped_linear`` once per
+    projection on the grouped_mm path. A backend that uses neither bypasses both hooks
+    *silently*: no quantizer is invoked, no amax is collected, and the export then falls back
+    to weight-derived scales while warning about calibration size -- which points at the
+    dataset when the fault is in the dispatch.
+
+    The mismatch is structural. :func:`register_fused_experts_on_the_fly` claims a module on
+    the *shape* of its parameters, but the hooks depend on the *behavior* of a forward that
+    nothing enforces, and "eager" is not a shared implementation -- it is whatever the model
+    author wrote. :func:`normalize_experts_impl_on_the_fly` can redirect a class that carries
+    ``@use_experts_implementation``, but a class without it ignores
+    ``config._experts_implementation`` entirely, so no config change can rescue it. Checking
+    the hit count is a direct test of the thing actually depended on.
+
+    Only modules whose forward ran and that have a quantizer needing it are reported: an enabled
+    input quantizer, or an enabled weight quantizer when the calibration captured the experts'
+    inputs to calibrate their weights (GPTQ, local Hessian, imatrix). Otherwise a weight quantizer
+    calibrates on its weight alone (:func:`weight_only_quantize`), so weight-only experts lose
+    nothing by not being intercepted, and neither do experts the recipe leaves unquantized. An
+    experts module no calibration token reached (vision experts under text-only calibration) falls
+    back to weight-derived scales as before.
+
+    Under the expert parallelism of transformers 5.16 and later, a module's verdict is reduced over
+    the group its experts are sharded over, which every member already joins in the experts'
+    forward, so the whole group raises together. Otherwise the check is rank-local, also under
+    earlier versions' expert parallelism, whose plain-tensor shards name no group: it raises on the
+    ranks whose experts saw rows, and a rank whose experts saw none goes on to its next collective
+    and waits there until the launcher stops it or the collective times out, so the error is in
+    another rank's log.
+    """
+    experts = [
+        (name, module, _bypassed_both_hooks(module), _expert_parallel_group(module))
+        for name, module in model.named_modules()
+        if isinstance(module, _QuantFusedExperts)
+    ]
+    bypassed = [here for _, _, here, _ in experts]
+    # Each member of an expert-parallel group holds the same experts modules in the same order, so
+    # one reduction per group, whatever this rank found, tells it what any member found.
+    for group in dict.fromkeys(group for *_, group in experts if group is not None):
+        members = [i for i, (*_, g) in enumerate(experts) if g is group]
+        device = experts[members[0]][1].down_proj.device  # where the group's backend reads it
+        flags = torch.tensor([bypassed[i] for i in members], dtype=torch.int32, device=device)
+        dist.all_reduce(flags, op=dist.ReduceOp.MAX, group=group)
+        for i, flag in zip(members, flags.tolist()):
+            bypassed[i] = bool(flag)
+
+    missed = []
+    for (name, module, here, _), anywhere in zip(experts, bypassed):
+        if anywhere:
+            impl = getattr(getattr(module, "config", None), "_experts_implementation", None)
+            where = "" if here else ", on another rank of its expert-parallel group"
+            missed.append(
+                f"  {name} ({type(module).__name__}, experts_implementation={impl!r}{where})"
+            )
+
+    if not missed:
+        return
+
+    raise RuntimeError(
+        "Fused-experts calibration collected nothing: the forward of the module(s) below reached "
+        "neither `F.linear` nor `_grouped_linear`, so no calibration batch reached their quantizers: "
+        "their input scales would fall back to weight-derived values, and a weight calibration that "
+        "reads the experts' inputs got none.\n"
+        + "\n".join(missed)
+        + "\n\nTheir forward ran, but the active experts backend bypasses both hooks -- "
+        "`batched_mm`, `sonicmoe`, or a hand-written `bmm`/`matmul` forward on a class without "
+        "`@use_experts_implementation`, which `normalize_experts_impl_on_the_fly` cannot "
+        "redirect. Check the module's `forward` and `config._experts_implementation`. A class no "
+        "backend change redirects needs its own quantized wrapper, as GptOssExperts has; to "
+        "quantize the rest of the model meanwhile, disable these modules' quantizers in the quant "
+        "config."
+    )
 
 
 def _is_supported_hf_model(model):
@@ -1495,7 +2033,7 @@ LayerActivationCollector.register_decoder_layer_support(
 CUSTOM_MODEL_PLUGINS.update(
     [
         register_fused_experts_on_the_fly,
-        force_eager_experts_impl_on_the_fly,
+        normalize_experts_impl_on_the_fly,
         register_sparse_moe_on_the_fly,
         register_hf_attentions_on_the_fly,
         convert_hf_parallel_linears_on_the_fly,

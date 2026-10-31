@@ -15,13 +15,12 @@
 
 """Pinned AutoModel compatibility seam for Qwen-Image PDD setup."""
 
-from __future__ import annotations
-
 import inspect
 import logging
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import nemo_automodel
 import nemo_automodel.recipes.diffusion.train as automodel_diffusion_train
@@ -29,9 +28,6 @@ import torch
 from torch.distributed.fsdp import MixedPrecisionPolicy
 
 from modelopt.torch.fastgen.plugins.qwen_image_pdd import freeze_qwen_image_pdd_unused_parameters
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 __all__ = ["automodel_pdd_setup"]
 

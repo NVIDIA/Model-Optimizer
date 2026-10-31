@@ -18,7 +18,7 @@
 # ruff: noqa: E501, W291, W293, PLR1704
 import random
 import re
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, get_args
 
@@ -46,7 +46,7 @@ config_type = Literal[
 TURNS_PLACEHOLDER = "FULL BENCHMARK DATA SHOULD BE FETCHED FROM THE SOURCE USING SPECDEC_BENCH"
 
 
-class BenchmarkDataset(str, Enum):
+class BenchmarkDataset(StrEnum):
     """Enum for benchmark datasets used in SPEED-Bench.
 
     Each enum value represents a HuggingFace dataset identifier used for

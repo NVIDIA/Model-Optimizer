@@ -27,15 +27,18 @@ from modelopt.torch.opt import apply_mode
 from modelopt.torch.opt.conversion import ModelLikeModule, ModeloptStateManager
 from modelopt.torch.opt.dynamic import _DMRegistryCls
 from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
+from modelopt.torch.utils.import_utils import import_plugin
 
 from .backends.gemm_registry import disable_real_quant_gemm, enable_real_quant_gemm
 from .config import CompressCfgType, CompressConfig
 from .conversion import _replace_quant_module, set_quantizer_attributes_partial
+from .nn import SequentialQuantizer
 from .nn.modules.quant_linear import RealQuantLinear
 from .qtensor import QTensorWrapper, pack_real_quantize_weight
 from .utils import is_quantized_linear
 
-try:
+mcore_available = False
+with import_plugin("megatron"):
     from .plugins.megatron import (
         _MegatronColumnParallelLinear,
         _MegatronRowParallelLinear,
@@ -44,8 +47,6 @@ try:
     )
 
     mcore_available = True
-except ImportError:
-    mcore_available = False
 
 RealQuantModuleRegistry = _DMRegistryCls("RealQuant")
 
@@ -69,6 +70,16 @@ def compress_convert(
     Returns:
         The compressed model.
     """
+    # Compressed, a SequentialQuantizer weight cannot run forward; compressed or excluded, its
+    # RealQuantLinear can neither be restored nor take a new weight.
+    for name, module in model.named_modules():
+        if is_quantized_linear(module) and any(
+            isinstance(q, SequentialQuantizer) for q in module.weight_quantizer.modules()
+        ):
+            raise NotImplementedError(
+                f"{name}: compressing a sequential weight quantizer (as in W4A8) is not supported, "
+                "even when the compress config excludes the layer."
+            )
     for _, module in model.named_modules():
         if is_quantized_linear(module) and type(module) not in RealQuantModuleRegistry:
             class_to_register = RealQuantLinear

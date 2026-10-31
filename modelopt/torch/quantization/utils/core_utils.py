@@ -18,6 +18,7 @@
 import copy
 import itertools
 import warnings
+import weakref
 from collections import namedtuple
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -394,9 +395,12 @@ def replace_function(package, name, new_func, og_func_cache_name=None):
     old_func = getattr(package, name)
     setattr(package, name, new_func)
     setattr(package, og_func_cache_name, old_func)
-    yield
-    setattr(package, name, old_func)
-    delattr(package, og_func_cache_name)
+    try:
+        yield
+    finally:
+        # Also when the body raises: a replacement left behind would stay patched process-wide.
+        setattr(package, name, old_func)
+        delattr(package, og_func_cache_name)
 
 
 @contextmanager
@@ -433,12 +437,7 @@ def is_pow2(n):
 
 def _get_fsdp2_mesh(module: nn.Module):
     """Get the mesh info of the model."""
-    try:
-        from torch.distributed._composable_state import _get_module_state
-    except ImportError:
-        return None
-
-    fsdp_state = _get_module_state(module)
+    fsdp_state = fully_shard.state(module)
     pg = fsdp_state._fsdp_param_group
     if pg is None:
         return None
@@ -532,6 +531,56 @@ def _fsdp2_unshard_context(fsdp_module: FSDPModule):
             fsdp_module.reshard()
 
 
+def _fsdp2_param_groups(module: nn.Module):
+    """The distinct FSDP2 param groups of the units in ``module``, its own included."""
+    return {
+        id(group): group  # ``fully_shard([a, b])`` gives several modules one group
+        for unit in module.modules()
+        if isinstance(unit, FSDPModule)
+        and (group := fully_shard.state(unit)._fsdp_param_group) is not None
+    }.values()
+
+
+# Per FSDP2 unit, the parameters _fsdp2_owned_params found: the weight-access window opens once per
+# quantized module, and a scan walks the unit's whole parameter group.
+_FSDP2_OWNED_PARAMS: "weakref.WeakKeyDictionary[nn.Module, dict[int, weakref.ref]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> dict[int, weakref.ref]:
+    """The parameters FSDP2 manages in ``fsdp_module``'s unit and in the units inside it, by id.
+
+    FSDP2 registers a different parameter object in each shard state -- sharded, resharded after the
+    forward, unsharded -- so all of them count, whichever the unit is in. A DTensor parameter outside
+    them is not FSDP2's to gather, whatever its mesh is named: an expert-parallel weight
+    ``fully_shard`` was told to ignore, say. They are kept per unit; ``refresh`` scans again, for a
+    state's parameter FSDP2 has made since. Weak references, checked by :func:`_fsdp2_owns`, keep no
+    parameter alive and let an id a freed parameter left behind match nothing.
+    """
+    owned = None if refresh else _FSDP2_OWNED_PARAMS.get(fsdp_module)
+    if owned is None:
+        owned = {}
+        for group in _fsdp2_param_groups(fsdp_module):
+            for fsdp_param in group.fsdp_params:
+                # The last two exist once their state is first entered.
+                for state_param in (
+                    fsdp_param.sharded_param,
+                    getattr(fsdp_param, "_sharded_post_forward_param", None),
+                    getattr(fsdp_param, "_unsharded_param", None),
+                ):
+                    if state_param is not None:
+                        owned[id(state_param)] = weakref.ref(state_param)
+        _FSDP2_OWNED_PARAMS[fsdp_module] = owned
+    return owned
+
+
+def _fsdp2_owns(owned: dict[int, weakref.ref], param: nn.Parameter) -> bool:
+    """Whether ``param`` itself, not just an object at its address, is among ``owned``."""
+    ref = owned.get(id(param))
+    return ref is not None and ref() is param
+
+
 @contextmanager
 def fsdp2_weight_access_and_writeback_context(
     module: nn.Module,
@@ -543,7 +592,9 @@ def fsdp2_weight_access_and_writeback_context(
 
     Gathers sharded DTensor parameters across FSDP/HSDP shards so they can be
     read or modified. Works for both leaf modules (single ``weight``) and
-    composite modules like decoder layers (all ``named_parameters``).
+    composite modules like decoder layers (all ``named_parameters``). Only the
+    parameters FSDP2 manages are gathered: a DTensor it does not own (an
+    expert-parallel weight ``fully_shard`` was told to ignore, say) stays sharded.
 
     If TP is implemented with DTensor, the weight will be a local tensor of the
     TP DTensor under this context.
@@ -561,8 +612,19 @@ def fsdp2_weight_access_and_writeback_context(
 
     # Collect all DTensor parameters, replacing them with local replicated copies.
     originals: dict[str, tuple] = {}
+    owned = _fsdp2_owned_params(fsdp_module)
+    refreshed = False
     for name, param in module.named_parameters():
         if not isinstance(param, torch.distributed.tensor.DTensor):
+            continue
+        if not _fsdp2_owns(owned, param) and not refreshed:
+            # Once per window: nothing here changes a unit's state, and a DTensor FSDP2 does not own
+            # (every expert-parallel weight) misses each time.
+            owned, refreshed = _fsdp2_owned_params(fsdp_module, refresh=True), True
+        if not _fsdp2_owns(owned, param):
+            # Not FSDP's shard: a DTensor FSDP2 does not manage, such as an expert-parallel weight
+            # that fully_shard was told to ignore. Gathering it would hand every rank every expert,
+            # which its module indexes by local expert.
             continue
         original_placements = param.placements
         original_device_mesh = param.device_mesh
@@ -621,7 +683,8 @@ def enable_weight_access_and_writeback(
     """Enable weight access and writeback for a module.
 
     Useful for modules with weight not intact such as Linear layer in FSDP wrapped model or
-    HF accelerate offloaded models (CPU or disk).
+    HF accelerate offloaded models (CPU or disk). Under FSDP2 only the parameters FSDP2 manages
+    are gathered (see :func:`fsdp2_weight_access_and_writeback_context`).
 
     Args:
         module: The module to access weights for.
@@ -828,20 +891,32 @@ def patch_fsdp_mp_dtypes():
 
 @contextmanager
 def _disable_fsdp_unshard_reshard(layer):
-    """Disable FSDP2 unshard/reshard if *layer* is FSDP-wrapped."""
-    if isinstance(layer, FSDPModule):
-        _pg_cls = torch.distributed.fsdp._fully_shard._fsdp_param_group.FSDPParamGroup
-        orig_unshard = _pg_cls.unshard
-        orig_reshard = _pg_cls.reshard
-        _pg_cls.unshard = lambda self, async_op=False: None
-        _pg_cls.reshard = lambda self: None
-        try:
-            yield
-        finally:
-            _pg_cls.unshard = orig_unshard
-            _pg_cls.reshard = orig_reshard
-    else:
+    """Make the FSDP2 param groups inside *layer* skip unshard/reshard (already gathered).
+
+    Patched per group instance, not on ``FSDPParamGroup``: the rest of the model still runs forward
+    (e.g. while collecting the next layer's inputs) and must unshard as usual.
+    """
+    if not isinstance(layer, FSDPModule):  # nothing was gathered for its FSDP submodules
         yield
+        return
+    groups = _fsdp2_param_groups(layer)
+    # Contexts nest (``persistent_materialization(writeback=False)`` enters this twice), so restore
+    # whatever instance attributes were there before instead of deleting them.
+    saved = [
+        (group, {k: group.__dict__.get(k) for k in ("unshard", "reshard")}) for group in groups
+    ]
+    for group in groups:
+        group.unshard = lambda async_op=False: None
+        group.reshard = lambda: None
+    try:
+        yield
+    finally:
+        for group, prior in saved:
+            for name, value in prior.items():
+                if value is None:
+                    del group.__dict__[name]
+                else:
+                    setattr(group, name, value)
 
 
 def build_param_index(model):
@@ -867,7 +942,17 @@ def get_prefixed_param_names(parent_model, target_module, param_index=None):
     target_ids = {id(p) for p in target_module.parameters()}
     # Lowest position == first in named_parameters() order, matching a linear scan's result.
     match = min((param_index[pid] for pid in target_ids if pid in param_index), default=None)
-    return match[1].rsplit(".", 1)[0] if match is not None else None
+    # "" for a parameter the parent owns itself.
+    return match[1].rpartition(".")[0] if match is not None else None
+
+
+def _param_key(module_name: str | None, param_name: str) -> str:
+    """The full name of ``module_name``'s parameter ``param_name``; ``""`` names the root module.
+
+    A module the name map does not know (``None``) keeps the ``None.`` key no parameter has, so it is
+    skipped rather than taken for the root.
+    """
+    return param_name if module_name == "" else f"{module_name}.{param_name}"
 
 
 def create_fsdp_param_mapping(fsdp_param_list, model):
@@ -891,8 +976,7 @@ def create_fsdp_param_mapping(fsdp_param_list, model):
         if module_name is not None:
             # Get the parameter name from _module_info and construct full param name
             param_name = param._module_info.param_name
-            full_param_name = f"{module_name}.{param_name}"
-            mapping[full_param_name] = param
+            mapping[_param_key(module_name, param_name)] = param
     return mapping
 
 
@@ -921,17 +1005,26 @@ def no_requires_grad():
 def enable_fake_quant(module):
     """Temporarily set the fake_quant attribute of a module to True.
 
-    This is used to prevent weight compression from being triggered during an unshard() call.
+    This is used to prevent weight compression from being triggered during an unshard() call. A
+    sequential weight quantizer (W4A8) holds the flag on each of its stages.
     """
-    original_fake_quant = []
-    for m in module.modules():
-        if hasattr(m, "weight_quantizer"):
-            original_fake_quant.append(m.weight_quantizer._fake_quant)
-            m.weight_quantizer._fake_quant = True
-    yield
-    for m in module.modules():
-        if hasattr(m, "weight_quantizer"):
-            m.weight_quantizer._fake_quant = original_fake_quant.pop(0)
+    from ..nn import TensorQuantizer  # local: ..nn imports this utils package at module scope
+
+    quantizers = [
+        q
+        for m in module.modules()
+        if hasattr(m, "weight_quantizer")
+        for q in m.weight_quantizer.modules()
+        if isinstance(q, TensorQuantizer)
+    ]
+    original_fake_quant = [q._fake_quant for q in quantizers]
+    for q in quantizers:
+        q._fake_quant = True
+    try:
+        yield
+    finally:
+        for q, fake_quant in zip(quantizers, original_fake_quant):
+            q._fake_quant = fake_quant
 
 
 @contextmanager
@@ -947,6 +1040,25 @@ def enable_quant(quantizer):
         yield
     finally:
         quantizer._if_quant = original_if_quant
+
+
+def apply_without_qdq(quantizer, inputs: torch.Tensor) -> torch.Tensor:
+    """Apply ``quantizer``'s pre-quant scale and rotation to ``inputs``, without quantizing them.
+
+    For rows a quantized module computes in high precision, so they keep the transforms (e.g.
+    an AWQ / SmoothQuant scale that the stored weight compensates for) of the quantized rows.
+    """
+    from ..nn import SequentialQuantizer  # local import: ..nn imports this module
+
+    members = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
+    for member in members:
+        disabled = member._disabled
+        member._disabled = True
+        try:
+            inputs = member(inputs)
+        finally:
+            member._disabled = disabled
+    return inputs
 
 
 @contextmanager
@@ -979,12 +1091,17 @@ def fsdp2_aware_weight_update(
     Args:
         root_model (nn.Module): The root model of the FSDPModule.
         modules_to_update (list): The list of modules to update which should be a list of modules that are
-            direct children of the FSDPModule.
+            direct children of the FSDPModule. A list is read again when the context exits, so a caller
+            may append modules of the same FSDP unit to it inside the context, and their weights are
+            re-registered with FSDP2 too (the export's held weight windows rely on this).
         reshard (bool): Whether to reshard the FSDP root module after the weight update.
 
     Returns:
         None
     """
+    # Bound only once setup succeeds; the finally skips FSDP bookkeeping until then so an
+    # early error (e.g. an OOM from the unshard below) propagates and FSDP state stays intact.
+    fsdp_param_group = None
     try:
         if isinstance(root_model, FSDPModule):
             # Get FSDP root module, if none is returned, then the update is not made to a submodule of an FSDPModule
@@ -1006,8 +1123,9 @@ def fsdp2_aware_weight_update(
                     root_module.unshard()
 
             # Get FSDPParam list
-            fsdp_param_group = fully_shard.state(root_module)._fsdp_param_group
-            fsdp_param_mapping = create_fsdp_param_mapping(fsdp_param_group.fsdp_params, root_model)
+            param_group = fully_shard.state(root_module)._fsdp_param_group
+            fsdp_param_mapping = create_fsdp_param_mapping(param_group.fsdp_params, root_model)
+            fsdp_param_group = param_group
 
             # Assert that all the modules in the module list are present in this fsdp_param_group
             if len(modules_to_update) > 1:
@@ -1015,7 +1133,7 @@ def fsdp2_aware_weight_update(
                     module_name = _get_module_name(module, root_model, names)
                     # Check if any parameter from this module is in the mapping
                     module_params_in_mapping = any(
-                        f"{module_name}.{n}" in fsdp_param_mapping
+                        _param_key(module_name, n) in fsdp_param_mapping
                         for n, _ in module.named_parameters()
                     )
                     assert module_params_in_mapping, (
@@ -1027,12 +1145,11 @@ def fsdp2_aware_weight_update(
     finally:
         from modelopt.torch.quantization.qtensor.base_qtensor import QFSDPParam, QTensorWrapper
 
-        if isinstance(root_model, FSDPModule):
+        if fsdp_param_group is not None:
             # Update FSDPParam list
             for module in modules_to_update:
                 for param_name, param in module.named_parameters():
-                    name = _get_module_name(module, root_model, names)
-                    name = f"{name}.{param_name}"
+                    name = _param_key(_get_module_name(module, root_model, names), param_name)
                     if name not in fsdp_param_mapping:
                         continue
 

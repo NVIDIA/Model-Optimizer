@@ -70,15 +70,20 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
         ),
     ],
 )
-def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_config):
+def test_prune_minitron(
+    tmp_path, num_gpus, create_teacher, expected_pruned_config, fake_hub_checkpoint
+):
+    """The teacher is passed as a Hub ID (see ``fake_hub_checkpoint``): it is pruned from its local
+    copy, and the HF output carries that copy's non-model files."""
     teacher_hf_path, teacher_model = create_teacher(tmp_path, num_gpus)
+    teacher_arg = fake_hub_checkpoint.serve(teacher_hf_path, "prune_minitron.py", nproc=num_gpus)
     teacher_params = sum(p.numel() for p in teacher_model.parameters())
     prune_target_params = int(teacher_params * 0.8)
 
     pruned_path = tmp_path / "pruned"
     prune_command_parts = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py"],
-        hf_model_name_or_path=teacher_hf_path,
+        hf_model_name_or_path=teacher_arg,
         output_hf_path=pruned_path,
         pp_size=num_gpus,
         calib_dataset_name="cnn_dailymail",
@@ -94,6 +99,8 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_conf
     run_example_command(prune_command_parts, example_path="megatron_bridge")
 
     assert (pruned_path / "config.json").exists()
+    if fake_hub_checkpoint.active:
+        assert (pruned_path / fake_hub_checkpoint.marker).exists()
     pruned_model = AutoModelForCausalLM.from_pretrained(pruned_path)
     assert sum(p.numel() for p in pruned_model.parameters()) <= prune_target_params
     for field, expected in expected_pruned_config.items():

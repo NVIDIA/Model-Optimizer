@@ -17,7 +17,6 @@ import json
 
 import pytest
 import torch
-import transformers
 from _test_utils.torch import transformers_models
 from safetensors import safe_open
 
@@ -32,8 +31,6 @@ _JOINT_RECIPE = "fp8_vision_lm-kv_fp8_cast"
 def _get_tiny_qwen_vlm(model_type):
     if model_type == "qwen3_vl":
         return transformers_models.get_tiny_qwen3vl()
-    if not all(hasattr(transformers, name) for name in ("Qwen3_5Config", "Qwen3_5MoeConfig")):
-        pytest.skip("Qwen3.5-VL requires a newer Transformers release")
     return transformers_models.get_tiny_qwen3_5_vl_offline()
 
 
@@ -92,7 +89,7 @@ def test_qwen_vision_recipe_calibrates_and_exports(
     scale_names = {name for name in tensor_names if name.endswith(("input_scale", "weight_scale"))}
     assert scale_names
     assert any(name.startswith("model.visual.") for name in scale_names)
-    assert any(".attn.qkv.weight_scale" in name for name in scale_names)
+    assert not any(".blocks." in name for name in scale_names)
     assert any(".merger.linear_fc1.weight_scale" in name for name in scale_names)
     if model_type == "qwen3_vl":
         assert any(

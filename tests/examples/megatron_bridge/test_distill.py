@@ -18,6 +18,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -26,34 +27,57 @@ from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model
 from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_5_vl_dir,
     create_tiny_qwen3_dir,
+    create_tiny_qwen3_moe_dir,
     get_tiny_tokenizer,
 )
+from megatron.core.datasets.gpt_dataset import GPTDataset
 from transformers import AutoModelForImageTextToText
 
 from modelopt.torch.puzzletron.anymodel import convert_model
+from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_preprocess_data
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "examples" / "megatron_bridge"))
 
-from distill import HAS_DIRECT_HF_SFT, _hf_source
+from distill import HAS_DIRECT_HF_SFT, _add_document_boundaries, _document_eod_id, _hf_source
 from export_distilled_megatron_to_hf import _get_checkpoint_export_paths
 
 
 @pytest.mark.timeout(360)  # distill + inline HF export + export of every iteration
-def test_distill_llm_hf_export(tmp_path, num_gpus):
-    """Distill with an inline HF export, then re-export every saved iteration standalone."""
-    teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
+    """Distill with an inline HF export, then re-export every saved iteration standalone.
+
+    Distillation runs with --document_boundaries, so each EOD-separated document of a window trains
+    as its own THD segment. Both exports read the student from the copy ``ensure_local_checkpoint``
+    resolved (see ``fake_hub_checkpoint``). distill.py keeps the local path on its command line,
+    since get_args() loads the tokenizer from it; the standalone export is passed the Hub ID.
+    """
+    # head_dim=8: TE's unfused attention, the only backend for head_dim 2, rejects THD input.
+    teacher_hf_path = create_tiny_qwen3_dir(
+        tmp_path, with_tokenizer=True, head_dim=8, max_position_embeddings=2048
+    )
+    student_export_arg = fake_hub_checkpoint.serve(
+        teacher_hf_path, "distill.py", "export_distilled_megatron_to_hf.py", nproc=num_gpus
+    )
     train_iters = 2
     distill_output_dir = tmp_path / "distill_output"
     distilled_hf_path = tmp_path / "distilled_hf"
     all_exports = tmp_path / "all_exports"
     distill_cmd_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"],
+        [
+            "torchrun",
+            f"--nproc_per_node={num_gpus}",
+            "distill.py",
+            "--use_mock_data",
+            "--document_boundaries",
+        ],
         student_hf_path=teacher_hf_path,
         teacher_hf_path=teacher_hf_path,
         output_dir=distill_output_dir,
         tp_size=num_gpus,
         pp_size=1,
-        seq_length=16,
+        # Mock token ids cycle through the 128-token vocab, so the EOD id recurs every 128 tokens
+        # and each window trains as ~17 THD segments.
+        seq_length=2048,
         mbs=1,
         gbs=4,
         train_iters=train_iters,
@@ -69,11 +93,13 @@ def test_distill_llm_hf_export(tmp_path, num_gpus):
     checkpoint_root = distill_output_dir / "checkpoints"
     assert (checkpoint_root / f"iter_{train_iters:07d}").exists()
     assert (distilled_hf_path / "config.json").exists()
+    if fake_hub_checkpoint.active:
+        assert (distilled_hf_path / fake_hub_checkpoint.marker).exists()
 
     # export_distilled_megatron_to_hf.py converts any saved iteration, not just the final one.
     all_export_cmd_parts = extend_cmd_parts(
         ["torchrun", "--nproc_per_node=1", "export_distilled_megatron_to_hf.py"],
-        student_hf_path=teacher_hf_path,
+        student_hf_path=student_export_arg,
         megatron_path=checkpoint_root,
         hf_export_path=all_exports,
         export_iterations="all",
@@ -82,6 +108,85 @@ def test_distill_llm_hf_export(tmp_path, num_gpus):
 
     for it in range(1, train_iters + 1):
         assert (all_exports / f"iter_{it:07d}/config.json").exists()
+        if fake_hub_checkpoint.active:
+            assert (all_exports / f"iter_{it:07d}" / fake_hub_checkpoint.marker).exists()
+
+
+@pytest.mark.parametrize("append_eod", [True, False])
+def test_document_eod_id(tmp_path, append_eod):
+    """Document boundaries use the EOS --append_eod wrote, and fail on data without it."""
+    tokenizer = get_tiny_tokenizer()
+    tokenizer.save_pretrained(tmp_path / "tokenizer")
+    jsonl = tmp_path / "docs.jsonl"
+    jsonl.write_text("".join(json.dumps({"text": f"document number {i}"}) + "\n" for i in range(4)))
+    (prefix,) = megatron_preprocess_data(
+        jsonl_paths=jsonl,
+        output_dir=tmp_path / "data",
+        tokenizer_name_or_path=str(tmp_path / "tokenizer"),
+        append_eod=append_eod,
+    )
+    args = argparse.Namespace(
+        student_hf_path=str(tmp_path / "tokenizer"),
+        trust_remote_code=False,
+        data_paths=["1.0", prefix],
+    )
+    if append_eod:
+        assert _document_eod_id(args) == tokenizer.eos_token_id
+    else:
+        with pytest.raises(ValueError, match="--append_eod"):
+            _document_eod_id(args)
+
+
+@pytest.mark.parametrize(
+    ("tokens", "cu_seqlens"),
+    [
+        ([1, 2, 9, 3, 4, 5, 9, 6], [0, 3, 7, 8]),  # EOD mid-window
+        ([1, 2, 3, 9, 4, 5, 6, 9], [0, 4, 8]),  # EOD as the last token
+        ([9, 1, 2, 3, 4, 5, 6, 7], [0, 1, 8]),  # EOD as the first token
+        ([1, 2, 3, 4, 5, 6, 7, 8], [0, 8]),  # no EOD
+    ],
+)
+def test_document_boundaries_cu_seqlens(monkeypatch, tokens, cu_seqlens):
+    """Each EOD ends a THD segment; the window's end closes the last one."""
+    monkeypatch.setattr(
+        GPTDataset, "__getitem__", lambda self, idx: {"tokens": torch.tensor(tokens)}
+    )
+    _add_document_boundaries()  # monkeypatch restores the original __getitem__ on teardown
+    dataset = SimpleNamespace(config=SimpleNamespace(tokenizer=SimpleNamespace(eod=9)))
+    sample = GPTDataset.__getitem__(dataset, 0)
+    expected = torch.tensor(cu_seqlens, dtype=torch.int32)
+    assert torch.equal(sample["cu_seqlens_q"], expected)
+    assert sample["max_seqlen_q"] == (expected[1:] - expected[:-1]).max()
+
+
+def test_distill_uneven_pipeline_per_stage_recompute(tmp_path, num_gpus):
+    """An uneven student/teacher layer split with a different recompute depth on each stage."""
+    if num_gpus < 2:
+        pytest.skip("needs 2 GPUs for pipeline parallelism")
+    teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, num_hidden_layers=3)
+    distill_output_dir = tmp_path / "distill_output"
+    distill_cmd_parts = extend_cmd_parts(
+        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"],
+        student_hf_path=teacher_hf_path,
+        teacher_hf_path=teacher_hf_path,
+        output_dir=distill_output_dir,
+        pp_size=2,
+        num_layers_in_first_pipeline_stage=2,
+        num_layers_in_last_pipeline_stage=1,
+        recompute_granularity="full",
+        recompute_method="block",
+        seq_length=16,
+        mbs=1,
+        gbs=4,
+        train_iters=2,
+        lr_warmup_iters=1,
+        eval_interval=2,
+        eval_iters=1,
+        log_interval=1,
+    )
+    distill_cmd_parts += ["--recompute_num_layers_per_stage", "2", "0"]
+    run_example_command(distill_cmd_parts, example_path="megatron_bridge", setup_free_port=True)
+    assert (distill_output_dir / "checkpoints" / "iter_0000002").exists()
 
 
 def test_distill_llm_sft(tmp_path, num_gpus):
@@ -122,9 +227,18 @@ def test_distill_llm_sft(tmp_path, num_gpus):
 
 
 @pytest.mark.skipif(not HAS_DIRECT_HF_SFT, reason="Megatron-Bridge lacks DirectHFSFTDatasetConfig")
-def test_distill_llm_sft_hf_chat(tmp_path, num_gpus):
-    """--sft_hf_dataset distills on chat jsonl rendered by the model's chat template."""
-    teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+@pytest.mark.parametrize("packed", [False, True])
+def test_distill_llm_sft_hf_chat(tmp_path, num_gpus, packed):
+    """--sft_hf_dataset distills on chat jsonl rendered by the model's chat template.
+
+    ``packed`` runs an MoE student with conversations packed per micro-batch and the aux loss off.
+    """
+    create_dir = create_tiny_qwen3_moe_dir if packed else create_tiny_qwen3_dir
+    # The default head_dim=2 leaves only TE's unfused attention, which the 2-GPU sm_120 runner
+    # rejects for packed (THD) input; head_dim=8 also qualifies the flash and cuDNN backends.
+    teacher_hf_path = create_dir(
+        tmp_path, with_tokenizer=True, **({"head_dim": 8} if packed else {})
+    )
     train_iters = 2
     gbs = 4
     # More records than train_iters * gbs so the sampler does not run dry; every 4th is multi-turn.
@@ -146,8 +260,10 @@ def test_distill_llm_sft_hf_chat(tmp_path, num_gpus):
         data_files[split].write_text("\n".join(json.dumps(r) for r in records) + "\n")
 
     distill_output_dir = tmp_path / "distill_output"
+    packing = {"moe_aux_loss_coeff": 0} if packed else {}
     distill_cmd_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--sft"],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--sft"]
+        + (["--sft_in_batch_packing"] if packed else []),
         student_hf_path=teacher_hf_path,
         teacher_hf_path=teacher_hf_path,
         sft_hf_dataset=data_files["train"],
@@ -156,7 +272,8 @@ def test_distill_llm_sft_hf_chat(tmp_path, num_gpus):
         tp_size=num_gpus,
         pp_size=1,
         seq_length=64,
-        mbs=1,
+        mbs=2 if packed else 1,
+        **packing,
         gbs=gbs,
         train_iters=train_iters,
         lr_warmup_iters=1,
@@ -228,7 +345,7 @@ def test_distill_validate_only(tmp_path, num_gpus):
 
 # NOTE: Qwen3.5-VL-MoE covered by test_qad.py
 @pytest.mark.timeout(420)  # sometimes times out in CI env with default 300s timeout
-def test_distill_vlm(tmp_path, num_gpus):
+def test_distill_vlm(tmp_path, num_gpus, fake_hub_checkpoint):
     # Self-distillation of a tiny VLM: only the language model is distilled; the vision tower and the
     # vision->language projector must be left byte-for-byte untouched.
     tp_size = num_gpus
@@ -280,10 +397,14 @@ def test_distill_vlm(tmp_path, num_gpus):
     megatron_ckpt = distill_output_dir / f"checkpoints/iter_{train_iters:07d}"
     assert megatron_ckpt.exists()
 
-    # Separately convert the distilled Megatron checkpoint to HF with the standalone export script
+    # Separately convert the distilled Megatron checkpoint to HF with the standalone export script,
+    # passing the student as a Hub ID (see ``fake_hub_checkpoint``).
+    student_export_arg = fake_hub_checkpoint.serve(
+        vlm_hf_path, "export_distilled_megatron_to_hf.py", nproc=num_gpus
+    )
     export_cmd_parts = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "export_distilled_megatron_to_hf.py"],
-        student_hf_path=vlm_hf_path,
+        student_hf_path=student_export_arg,
         megatron_path=megatron_ckpt,
         hf_export_path=distilled_hf_path,
         tp_size=tp_size,
@@ -292,6 +413,8 @@ def test_distill_vlm(tmp_path, num_gpus):
     run_example_command(export_cmd_parts, example_path="megatron_bridge")
 
     assert (distilled_hf_path / "config.json").exists()
+    if fake_hub_checkpoint.active:
+        assert (distilled_hf_path / fake_hub_checkpoint.marker).exists()
 
     # from_pretrained (default strict load) verifies the saved weights match the (unchanged) config.
     distilled_model = AutoModelForImageTextToText.from_pretrained(distilled_hf_path)

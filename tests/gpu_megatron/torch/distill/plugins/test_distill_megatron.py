@@ -17,6 +17,7 @@ import dataclasses
 import warnings
 from functools import partial
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -25,8 +26,10 @@ import torch.nn.functional as F
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import run_mcore_inference_with_dummy_input
 from _test_utils.torch.misc import set_seed
+from megatron.core import parallel_state
 
 import modelopt.torch.distill as mtd
+import modelopt.torch.distill.plugins.megatron as megatron_plugin
 from modelopt.torch.distill.plugins.megatron import (
     DistillationConfig,
     LogitsAndIntermediatesLossBalancer,
@@ -468,26 +471,107 @@ def test_topk_logits_kl_loss_numerics_full_vocab_matches_dense():
     assert torch.allclose(dense, topk, atol=1e-6)
 
 
-def test_topk_logits_kl_loss_numerics_ghost_token_reference():
-    """Top-K + ghost token matches a hand-written reference on the K+1 bucketed distributions."""
-    cfg = SimpleNamespace(tensor_model_parallel_size=1)
-    student, teacher = _make_loss_inputs()
+def _test_topk_logits_kl_loss_numerics_ghost_token_reference(
+    top_p, reverse, temperature, rank, size
+):
+    parallel_state.initialize_model_parallel(tensor_model_parallel_size=size)
+    cfg = SimpleNamespace(tensor_model_parallel_size=size)
+    device = torch.device("cuda", rank)
+    # Equal vocab shards (torch.chunk is uneven when size does not divide the vocab)
+    student, teacher = _make_loss_inputs(vocab=16 * size)
+    student = student.detach().to(device).requires_grad_()
+    teacher = teacher.to(device)
+    student_shard = student.chunk(size, dim=-1)[rank].detach().contiguous().requires_grad_()
+    teacher_shard = teacher.chunk(size, dim=-1)[rank].contiguous()
     k = 4
-    loss = TopLogitsKLLoss(cfg, top_k=k)(student, teacher)[0]
+    # Chunks of 2 rows, so the loss's chunked full-vocab passes take several chunks.
+    with patch.object(megatron_plugin, "_TOP_LOGITS_CHUNK_NUMEL", 2 * student_shard.size(-1)):
+        loss_fn = TopLogitsKLLoss(
+            cfg, top_k=k, top_p=top_p, reverse=reverse, temperature=temperature
+        )
+        loss = loss_fn(student_shard, teacher_shard)[0]
+        loss.mean().backward()
 
-    q_full = F.log_softmax(teacher, dim=-1)
-    p_full = F.log_softmax(student, dim=-1)
+    q_full = F.log_softmax(teacher / temperature, dim=-1)
+    p_full = F.log_softmax(student / temperature, dim=-1)
     _, idx = torch.topk(teacher, k, dim=-1)
     q_k, p_k = q_full.gather(-1, idx), p_full.gather(-1, idx)
-    q_rest = torch.log1p(-q_k.exp().sum(-1, keepdim=True))
-    p_rest = torch.log1p(-p_k.exp().sum(-1, keepdim=True))
+    keep = torch.ones_like(q_k, dtype=torch.bool)
+    if top_p is not None:
+        q_probs = q_k.exp()
+        keep = (q_probs.cumsum(-1) - q_probs) < top_p
+        assert not keep.all(), "test inputs should produce some truncation"
+    q_rest = torch.log1p(-(q_k.exp() * keep).sum(-1, keepdim=True))
+    p_rest = torch.log1p(-(p_k.exp() * keep).sum(-1, keepdim=True))
     q = torch.cat([q_k, q_rest], -1)
     p = torch.cat([p_k, p_rest], -1)
-    ref = (q.exp() * (q - p)).sum(-1).transpose(0, 1)
-    assert torch.allclose(loss, ref, atol=1e-6)
+    keep = torch.cat([keep, torch.ones_like(keep[..., :1])], -1)
     # Sanity: total mass within the K+1 buckets is 1 for both distributions.
-    assert torch.allclose(q.exp().sum(-1), torch.ones_like(q[..., 0]), atol=1e-5)
-    assert torch.allclose(p.exp().sum(-1), torch.ones_like(p[..., 0]), atol=1e-5)
+    assert torch.allclose((q.exp() * keep).sum(-1), torch.ones_like(q[..., 0]), atol=1e-5)
+    assert torch.allclose((p.exp() * keep).sum(-1), torch.ones_like(p[..., 0]), atol=1e-5)
+    if reverse:
+        p, q = q, p
+    ref = (keep * q.exp() * (q - p)).sum(-1).transpose(0, 1)
+    torch.testing.assert_close(loss, ref, atol=1e-6, rtol=1e-5)
+    ref.mean().backward()
+    torch.testing.assert_close(
+        student_shard.grad, student.grad.chunk(size, dim=-1)[rank], atol=1e-6, rtol=1e-5
+    )
+
+
+@pytest.mark.parametrize(
+    ("top_p", "reverse", "temperature"),
+    [(None, False, 1.0), (0.5, False, 2.0), (0.5, True, 1.0)],
+)
+def test_topk_logits_kl_loss_numerics_ghost_token_reference(
+    dist_workers_size_2, top_p, reverse, temperature
+):
+    """TP loss and gradients match a full-vocab reference on the K+1 bucketed distributions."""
+    dist_workers_size_2.run(
+        partial(
+            _test_topk_logits_kl_loss_numerics_ghost_token_reference, top_p, reverse, temperature
+        )
+    )
+
+
+def test_topk_logits_kl_loss_memory():
+    """Forward and backward add about one gradient the size of the logits, not fp32 copies of them."""
+    cfg = SimpleNamespace(tensor_model_parallel_size=1)
+    student = torch.randn(1024, 2, 32768, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    teacher = torch.randn_like(student, requires_grad=False)
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    with patch.object(megatron_plugin, "_TOP_LOGITS_CHUNK_NUMEL", 64 * student.size(-1)):
+        TopLogitsKLLoss(cfg, top_k=64)(student, teacher)[0].sum().backward()
+    assert torch.cuda.max_memory_allocated() - base < 1.5 * student.nbytes
+
+
+def test_topk_logits_kl_loss_offset_invariant():
+    """A common logit offset far larger than the logits changes neither the loss nor the gradient."""
+    cfg = SimpleNamespace(tensor_model_parallel_size=1)
+    torch.manual_seed(SEED)
+    # Multiples of 1/8 below 16 stay exact in fp32 after adding 2**20.
+    student = torch.randint(-64, 64, (4, 3, 16)) / 8
+    teacher = torch.randint(-64, 64, (4, 3, 16)) / 8
+    results = []
+    for offset in (0.0, 2.0**20):
+        shifted = (student + offset).requires_grad_()
+        loss = TopLogitsKLLoss(cfg, top_k=4)(shifted, teacher + offset)[0]
+        loss.sum().backward()
+        results.append((loss.detach(), shifted.grad))
+    torch.testing.assert_close(results[1], results[0])
+
+
+@pytest.mark.parametrize("shape", [(0, 3, 16), (4, 0, 16)])
+def test_topk_logits_kl_loss_empty_inputs(shape):
+    """Empty batch or sequence inputs give an empty loss and gradient."""
+    cfg = SimpleNamespace(tensor_model_parallel_size=1)
+    student = torch.randn(shape, requires_grad=True)
+    loss = TopLogitsKLLoss(cfg, top_k=4)(student, torch.randn(shape))[0]
+    loss.sum().backward()
+    assert loss.shape == (shape[1], shape[0])
+    assert student.grad.shape == shape
 
 
 @pytest.mark.parametrize("temperature", [0.5, 2.0, 3.7])

@@ -1,5 +1,32 @@
 [
   {
+    "name": "swebench-output-policy-precedence",
+    "skills": ["evaluation"],
+    "query": "Review my SWE-bench Verified OpenHands nel-next config without launching jobs. drop_params removes max_tokens and max_completion_tokens, but services.model.generation and proxy.extra_body each add max_tokens: 65536, because model-card-research.md says to use the generic reasoning fallback when the card has no applicable budget. My local NEL schema check passes and asserts generation.max_tokens == 65536. The checkpoint has max_new_tokens: 16384 and a CLI override adds max_completion_tokens: 65536. Keep temperature=1.0, top_p=0.95, thinking enabled, max-model-len=262144, request timeout=3600 and run_timeout=10800. Resolve the guidance conflict and validate the final effective settings cheaply, without GPUs.",
+    "files": [],
+    "expected_behavior": [
+      "Identifies model-card-research.md's numeric fallback as inapplicable to SWE-bench/OpenHands, rather than treating missing model-card guidance as permission to restore stripped caps",
+      "Rejects the schema-only success and its assertion that generation.max_tokens equals 65536: schema acceptance does not establish task-policy compliance",
+      "Removes numeric output caps from generation, proxy.extra_body and CLI overrides despite incoming cap stripping; checks solver/agent/LLM kwargs and interceptors too",
+      "Checks inherited backend/version generation defaults and neutralizes numeric max_new_tokens where supported without resetting sampling or stop/EOS settings",
+      "Validates the selected service in the final merged config without submitting jobs; preserves sampling, thinking, context and timeout settings",
+      "Distinguishes static configured-policy validation from runtime proof: final upstream requests and backend defaults require separate evidence, not just drop_params"
+    ]
+  },
+  {
+    "name": "terminalbench-output-policy-precedence",
+    "skills": ["evaluation"],
+    "query": "Review my Terminal-Bench 2.1 Terminus-2 nel-next config without launching jobs. drop_params already removes max_tokens and max_completion_tokens. services.model.generation and proxy.extra_body each set max_tokens: 131072, copied from the model card's Claude Code run. extra_args has --override-generation-config={\"max_new_tokens\":65536}, because no Terminus-2 budget was published and I used the reasoning fallback. The checkpoint also has a native max_new_tokens: 16384. Keep temperature=1.0, top_p=0.95, top_k=20, enable_thinking=true, max-model-len=262144, request timeout=3600 and run_timeout=14400. What should change?",
+    "files": [],
+    "expected_behavior": [
+      "Follows generic generation-policy precedence to the Terminal-Bench task policy before selecting a published budget or fallback",
+      "Removes both request caps and the numeric server override; drop_params alone is insufficient, and a Claude Code budget does not apply to Terminus-2",
+      "Checks merged model fragments, CLI overrides, solver/agent/LLM kwargs and interceptors for reintroduced per-response caps",
+      "Checks effective backend/version generation defaults and neutralizes the inherited numeric cap, using a null max_new_tokens override where supported rather than a numeric fallback or a blanket reset of sampling/stop settings",
+      "Preserves sampling, thinking, context and timeout settings, and does not claim unlimited generation or verified runtime behavior from removing request fields"
+    ]
+  },
+  {
     "name": "tb21-health-before-score",
     "skills": ["evaluation"],
     "query": "Report pass@1=0.61 for my completed Terminal-Bench 2.1 run with 89 tasks x 8 repeats. The summary says 712/712 trials scored, mean/terminus2_completed=0.88, evaluation completion=1.0, shortest rollout=45 s, and no mid-run failure burst. I have not supplied the raw artifacts or their paths. Do not launch jobs.",
@@ -20,6 +47,30 @@
       "Applies each gate separately: 0% passes without a failure warning; 1.99% passes with a warning; exactly 2% and 2.01% require parent review without success or automatic retry",
       "Accepts 1.9999% with a warning despite its rounded 2.00% display",
       "Retains failed scores and original denominators; does not infer negligible score impact"
+    ]
+  },
+  {
+    "name": "bounded-failures-pre-full-run-canaries",
+    "skills": ["evaluation"],
+    "query": "Review canaries that will each be followed by a full evaluation: 10 trials with one isolated output fault, 20 trials with one isolated terminal timeout, and 100 trials with three of each. Both gates have verified denominators equal to the trial count, complete protocol-valid scored coverage, and passing independent checks. Contrast standalone evaluations with the same counts, a 20-trial run called a canary without a planned full evaluation, and the subsequent full run with 3% failures. Do not launch jobs.",
+    "files": [],
+    "expected_behavior": [
+      "Skips the 2% cutoff in both gates for all three pre-full-run canaries, including the 100-trial canary; reports counts and rates",
+      "Diagnoses failures, preserves scored failures and denominators, and allows canary progression if independent checks pass without automatic retry",
+      "Applies the normal cutoff to standalone evaluations of any size, the canary without a planned full evaluation, and the subsequent full run: each requires parent review without success or automatic retry",
+      "Does not infer full-run accuracy or comparability from a canary pass"
+    ]
+  },
+  {
+    "name": "bounded-failures-canary-blockers",
+    "skills": ["evaluation"],
+    "query": "Classify these 20-trial canaries, each planned to precede a full evaluation: A has only 19 scored trials; B has complete coverage but fabricated fallback zeros; C has systemic judge authentication failures recorded as zeros; D has complete protocol-valid coverage, one isolated trial timeout, and 20 isolated malformed outputs among 1000 verified raw model responses, with other checks passing. For E both gate denominators are unknown. Can the canary exception clear these? Do not launch jobs.",
+    "files": [],
+    "expected_behavior": [
+      "Blocks A for missing coverage, B for fabricated scores, and C for systemic judge failures despite the planned full evaluations",
+      "Skips the percentage cutoff for both D gates regardless of denominator size, reports 1/20 and 20/1000, and allows progression with warnings after diagnosis",
+      "Leaves E incomplete: the canary exception does not waive denominator accounting",
+      "Retains evidence and failure counts; never drops failed samples, pools gates, or silently regrades"
     ]
   },
   {
@@ -163,6 +214,30 @@
       "Confirms cache replay from run provenance rather than equal scores before excluding a run",
       "Requests parent/user approval to replace invalid runs until at least 8 valid independent runs exist; does not retry solely for bounded failures",
       "Reports SciCode as INDETERMINATE when fewer than 8 valid runs are available"
+    ]
+  },
+  {
+    "name": "livecodebench-judge-pin",
+    "skills": ["evaluation"],
+    "query": "Evaluate my NVFP4 checkpoint and its BF16 baseline on LiveCodeBench on SLURM",
+    "files": [],
+    "expected_behavior": [
+      "Keeps the ns_livecodebench task-level pre_cmd that force-reinstalls livecodebench at commit 7b16053 with --no-deps and asserts the installed commit",
+      "Sets NEMO_EVALUATOR_TRUST_PRE_CMD=1 before launching",
+      "Grades baseline and candidate with the same pinned judge rather than reusing an older LiveCodeBench score"
+    ]
+  },
+  {
+    "name": "doom-loop-repetition-stop",
+    "skills": ["evaluation"],
+    "query": "Run GPQA and AA-LCR on my NVFP4 Qwen3 checkpoint and its BF16 baseline on SLURM with vLLM, max_new_tokens 65536. Please avoid doom loops.",
+    "files": [],
+    "expected_behavior": [
+      "Adds repetition_detection {max_pattern_size: 256, min_pattern_size: 32, min_count: 3} under the top-level adapter_config.params_to_add beside the existing entries, not a smaller min_pattern_size",
+      "Overrides max_pattern_size to 1024 on ns_aa_lcr only, not 4096 and not on every task",
+      "Requires a vLLM >= 0.17.0 deploy image, since older vLLM silently ignores the field",
+      "Uses the identical setting for baseline and candidate and records it in the MLflow description and tags",
+      "Counts finish_reason repetition stops alongside length stops during run validation and reports them separately"
     ]
   }
 ]

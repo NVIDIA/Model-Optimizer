@@ -118,7 +118,7 @@ class _QuantConv3d(QuantLinearConvBase):
             padding=self.padding,
             dilation=self.dilation,
             act_amax=act_amax,
-            quant_act=self.input_quantizer.is_enabled,
+            quant_act=self.input_quantizer.is_enabled and self.input_quantizer._if_quant,
             fp4_block_size=fp4_block_size,
         )
         return self.output_quantizer(output)

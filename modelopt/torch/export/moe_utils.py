@@ -21,6 +21,9 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor, Replicate, Shard
+
+from modelopt.torch.export.quant_format import GGML_FORMATS
 
 
 def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
@@ -40,6 +43,360 @@ def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
         "down_proj",
         "down_proj_weight_quantizers",
         "down_proj_input_quantizer",
+        f"{first_proj_attr}_scale_inv",
+        "down_proj_scale_inv",
+        "gate_up_proj_activation_scale",
+        "up_proj_activation_scale",
+        "down_proj_activation_scale",
+    ):
+        if hasattr(module, attr):
+            delattr(module, attr)
+
+
+def _tensor_quantizers(quantizer) -> list:
+    """The ``TensorQuantizer`` stages of ``quantizer`` (several for W4A8's SequentialQuantizer).
+
+    A SequentialQuantizer has no ``_amax`` of its own and forwards ``amax`` writes to every
+    stage, so each stage must be checked and set on its own.
+    """
+    # Deferred: ``export/__init__`` star-imports this module, so keep quantization out of its
+    # import-time dependencies.
+    from modelopt.torch.quantization.nn import SequentialQuantizer
+
+    return list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
+
+
+def _is_uncalibrated(quantizer) -> bool:
+    amax = getattr(quantizer, "_amax", None)
+    return getattr(quantizer, "is_enabled", False) and (amax is None or bool(torch.all(amax == 0)))
+
+
+def _fallback_amax(weight: torch.Tensor, quantizer) -> torch.Tensor:
+    """Weight-derived amax for an uncalibrated expert, in the shape export expects.
+
+    The amax setter rejects shape changes, and a block/channel-wise quantizer (e.g. the INT4
+    stage of W4A8 AWQ) keeps a zero ``_amax`` of that shape, so a scalar fallback would raise.
+    A missing ``_amax`` on an INT4 block quantizer still needs per-block ``(rows, blocks)``.
+    """
+    like = getattr(quantizer, "_amax", None)
+    block_sizes = getattr(quantizer, "block_sizes", None)
+    block = block_sizes.get(-1) if block_sizes and block_sizes.get("type") == "static" else None
+    # Integer static-block stages (INT4 of W4A8) need a per-block amax. Float-block formats
+    # (NVFP4) keep a per-tensor amax plus separate block scales, so they take the scalar path.
+    if like is None and isinstance(quantizer.num_bits, int) and block:
+        if weight.shape[-1] % block:
+            raise ValueError(
+                f"Weight of shape {tuple(weight.shape)} is not divisible into blocks of {block}."
+            )
+        like = weight.new_empty(weight.shape[0], weight.shape[-1] // block)
+    if like is None or like.numel() == 1:
+        amax = torch.maximum(weight.amax(), -weight.amin()).float()
+        return amax if like is None else amax.view_as(like)
+    # Block-quant calibration records the flat (rows * blocks, 1); also accept (rows, blocks) and
+    # a per-row (rows,). Refuse any other layout (e.g. per input channel) rather than guess its
+    # grouping.
+    rows = weight.shape[0]
+    if like.dim() == 1 and like.shape[0] == rows:
+        blocks = 1
+    elif like.dim() == 2 and like.shape[-1] == 1 and like.shape[0] % rows == 0:
+        blocks = like.shape[0] // rows
+    elif like.dim() == 2 and like.shape[0] == rows:
+        blocks = like.shape[1]
+    else:
+        blocks = 0
+    if not blocks or weight.shape[-1] % blocks:
+        raise ValueError(
+            f"Cannot derive amax of shape {tuple(like.shape)} from a weight of shape "
+            f"{tuple(weight.shape)}."
+        )
+    groups = weight.reshape(rows, blocks, -1)
+    return torch.maximum(groups.amax(dim=-1), -groups.amin(dim=-1)).float().reshape(like.shape)
+
+
+def _rewrap_expert_rows(local: torch.Tensor, mesh, placements, num_experts: int):
+    """Wrap this rank's experts as a DTensor spanning ``num_experts`` rows on the expert axis."""
+    shape = torch.Size((num_experts, *local.shape[1:]))
+    stride = torch.empty(shape, device="meta").stride()
+    return DTensor.from_local(local, mesh, placements, run_check=False, shape=shape, stride=stride)
+
+
+class _LocalRows:
+    """``module``, with its fused ``proj`` replaced by this rank's rows of it."""
+
+    def __init__(self, module: nn.Module, proj: str, local: torch.Tensor):
+        self._module, self._proj, self._local = module, proj, local
+
+    def __getattr__(self, name: str):
+        return self._local if name == self._proj else getattr(self._module, name)
+
+
+def _local_expert_weight(module: nn.Module, proj: str, local: torch.Tensor, idx: int, dtype):
+    """``module.get_expert_weight(proj, idx, dtype)``, read from ``local`` rather than the module.
+
+    The per-expert export packs each expert as that accessor returns it, which casts unpacked native
+    FP8 experts, held at the default dtype, to the export dtype. The accessor indexes the fused
+    parameter itself, a sharded DTensor here, so it is handed this rank's rows instead. Whatever
+    else it reads, such as how it picks this rank's experts out of a weight, is the module's own.
+    The rows stand in for ``self.<proj>`` only where the accessor reads it itself: a method it calls
+    is bound to the module, and would read the whole fused DTensor.
+    """
+    return type(module).get_expert_weight(_LocalRows(module, proj, local), proj, idx, dtype)
+
+
+def _stack_row(stack: torch.Tensor | None, idx: int, row: torch.Tensor, rows: int, device):
+    """Write ``row`` as row ``idx`` of a ``rows``-row stack, made on ``device`` for the first row.
+
+    The fold packs one expert at a time: copied into one stack as each is packed, the projection is
+    held once, where a list of the packed experts and their ``torch.stack`` would hold it twice.
+    """
+    if stack is None:
+        stack = torch.empty((rows, *row.shape), dtype=row.dtype, device=device)
+    elif row.shape != stack.shape[1:] or row.dtype != stack.dtype:
+        raise ValueError(
+            f"Expert {idx} packs to {row.dtype} {tuple(row.shape)}, the experts before it to "
+            f"{stack.dtype} {tuple(stack.shape[1:])}; they cannot be stacked."
+        )
+    stack[idx].copy_(row)
+    return stack
+
+
+def _refuse_unfoldable_shards(module: nn.Module, proj: str, weight, num_quantizers: int) -> None:
+    """Refuse a sharded fused expert weight the keep-fused fold cannot fold, on every rank alike.
+
+    Every rank reaches the same verdict: the global shape and the mesh are the same on all of them,
+    and their quantizer counts differ only where each keeps its own experts' quantizers of an uneven
+    shard, which the checks below refuse on every rank.
+    """
+    name = f"{type(module).__name__}.{proj}"
+    sharded = [placement for placement in weight.placements if isinstance(placement, Shard)]
+    if len(sharded) > 1 or any(placement.dim != 0 for placement in sharded):
+        # The fold shards the scales on the expert axis alone, and the ranks agree on their experts'
+        # quantization over the one mesh dim that shards it.
+        raise NotImplementedError(
+            f"{name}: placements {weight.placements}; the keep-fused fold needs the experts (dim 0) "
+            "sharded over one mesh dim and no other dim sharded."
+        )
+    shards = 1
+    for mdim, placement in enumerate(weight.placements):
+        if isinstance(placement, Shard) and placement.dim == 0:
+            size = weight.device_mesh.size(mdim)
+            # A rank holding no experts would stack none and register no input scale, so the ranks'
+            # state dicts would differ for the DCP write. The experts are chunked as torch does.
+            chunk = -(-weight.shape[0] // size)
+            if not chunk or -(-weight.shape[0] // chunk) < size:
+                raise NotImplementedError(
+                    f"{name}: {weight.shape[0]} experts over {size} shards leaves a rank none; the "
+                    "keep-fused fold needs every rank to hold an expert."
+                )
+            shards *= size
+    # FSDP2 keeps every expert's quantizer on every rank; expert parallelism keeps only this rank's,
+    # in the order of its shard: transformers sets num_experts to the local count, so the quantized
+    # module makes one quantizer per expert of its local weight, which its forward picks by offset.
+    if num_quantizers != weight.shape[0] and num_quantizers * shards != weight.shape[0]:
+        raise NotImplementedError(
+            f"{name}: {num_quantizers} weight quantizers for {weight.shape[0]} experts in {shards} "
+            "shards; the keep-fused fold needs one per expert, or one per expert of this rank's shard."
+        )
+
+
+def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> None:
+    """Fold per-expert quantizers into the FUSED 3-D expert weights *in place*, staying sharded.
+
+    Distributed (DCP) counterpart to :func:`_export_fused_experts`. That function slices the fused
+    weight into full per-expert tensors -- under FSDP2 it must first all-gather the ``Shard(0)``
+    fused weight (via the export handler's ``unshard``) and then materializes every expert on every
+    rank, putting the whole model on each GPU (OOMs at 235B/480B). This keeps each projection a
+    single fused param: on a ``Shard(0)`` DTensor it quantizes ONLY this rank's local experts
+    (``to_local()``, each with its own weight quantizer: by global index where every rank keeps every
+    expert's, by position in the shard where a rank keeps only its own) and rewraps the result
+    ``Shard(0)``, so the model stays sharded and DCP writes per-rank shards. Where a rank keeps only
+    its own experts' quantizers, the ranks first gather each projection's quantizer states
+    (collective over the expert mesh dim), so every rank folds, leaves or refuses it alike.
+    On a plain tensor (single process) it quantizes all ``num_experts`` -- identical to the in-model
+    path. Quantizing the fused ``<proj>[i]`` slice with its per-expert quantizer is byte-identical to
+    the split-then-quantize, so ``_export_fused_experts_keep_fused`` + :func:`split_fused_experts_state_dict`
+    reproduce :func:`_export_fused_experts`'s output exactly. Registers, per quantized projection ``P``:
+    ``module.<P>`` (quantized fused weight), ``module.<P>_weight_scale`` (stacked per-expert scales),
+    ``module.<P>_weight_scale_2`` (NVFP4 per-expert scalar), ``module.<P>_input_scale`` (shared).
+    """
+    from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+
+    first = getattr(module, "_first_proj_attr", "gate_up_proj")
+    n = module.num_experts
+    # One fused tensor cannot hold quantized and unquantized experts side by side, so a projection
+    # is folded only when all its experts are quantized; one with none quantized stays as it is,
+    # which is what the per-expert export writes for it. Every refusal comes before either is
+    # folded, so it leaves the module untouched.
+    folded = []
+    for proj in (first, "down_proj"):
+        weight_quantizers = getattr(module, f"{proj}_weight_quantizers")
+        enabled = [q.is_enabled for q in weight_quantizers]
+        wdata = getattr(module, proj).data
+        if wdata.element_size() == 1:
+            # get_expert_weight dequantizes these with their scale_inv, which the fold drops below
+            # whether it folds the projection or leaves it as it is.
+            raise NotImplementedError(
+                f"{type(module).__name__}.{proj}: native FP8 expert weights cannot be exported as "
+                "stored, since the fold drops their scale_inv; dequantize them first "
+                "(unpack_weight())."
+            )
+        is_dt = isinstance(wdata, DTensor)
+        if is_dt:
+            _refuse_unfoldable_shards(module, proj, wdata, len(weight_quantizers))
+            if len(weight_quantizers) != wdata.shape[0]:
+                # Expert parallelism leaves each rank only its own experts' quantizers, so the ranks
+                # decide on the projection together: alone, one rank could fold it while another
+                # leaves it as it is or refuses it. Joined by offset rather than by group rank.
+                mdim = next(i for i, p in enumerate(wdata.placements) if isinstance(p, Shard))
+                gathered: list = [None] * wdata.device_mesh.size(mdim)
+                torch.distributed.all_gather_object(
+                    gathered,
+                    (_dtensor_dim0_offset(wdata), enabled),
+                    group=wdata.device_mesh.get_group(mdim),
+                )
+                enabled = [e for _, shard in sorted(gathered) for e in shard]
+        if any(enabled) and any(
+            getattr(q, "num_bits", None) in GGML_FORMATS for q in weight_quantizers
+        ):
+            # A GGML format packs each expert's weight into its blocks and registers no weight_scale
+            # for the fold to stack. Decided on the gathered states and on the format, which a recipe
+            # sets by module name and so is the same for every expert on every rank: every rank
+            # refuses alike.
+            raise NotImplementedError(
+                f"{type(module).__name__}.{proj}: GGML formats pack each expert's weight with no "
+                "weight_scale, which the keep-fused fold cannot stack; only the per-expert export "
+                "writes them."
+            )
+        if all(enabled):
+            if not is_dt and not len(weight_quantizers) == wdata.shape[0] == n:
+                raise NotImplementedError(
+                    f"{type(module).__name__}.{proj}: num_experts is {n}, but the unsharded weight "
+                    f"holds {wdata.shape[0]} experts and there are {len(weight_quantizers)} weight "
+                    "quantizers; the keep-fused fold needs the three equal."
+                )
+            folded.append(proj)
+        elif any(enabled):
+            raise NotImplementedError(
+                f"{type(module).__name__}.{proj}: weight quantizers "
+                f"{[i for i, e in enumerate(enabled) if not e]} of {len(enabled)} are disabled and "
+                "the rest are not; a fused expert weight cannot mix quantized and unquantized experts."
+            )
+    for proj in folded:
+        weight = getattr(module, proj)
+        weight_quantizers = getattr(module, f"{proj}_weight_quantizers")
+        input_quantizer = getattr(module, f"{proj}_input_quantizer", None)
+
+        # A fused 3-D weight sharded on dim 0 (the expert axis) is a DTensor: quantize ONLY this
+        # rank's local experts and rewrap the result sharded identically -- indexing the DTensor
+        # (weight[i]) would all-gather the whole fused weight onto every rank, de-sharding the model
+        # and OOMing the GPU at scale. A plain tensor (a single process, or FSDP2's unsharded weight
+        # inside a weight window): all experts.
+        wdata = weight.data
+        is_dt = isinstance(wdata, DTensor)
+        quantizers_are_global = True
+        if is_dt:
+            mesh, placements = wdata.device_mesh, wdata.placements
+            local_w = wdata.to_local()
+            offset = _dtensor_dim0_offset(wdata)
+            scale_placements = [
+                p if (isinstance(p, Shard) and p.dim == 0) else Replicate() for p in placements
+            ]
+            local_indices = list(range(offset, offset + local_w.shape[0]))
+            # Every expert's quantizers (FSDP2), or only this rank's, in shard order (expert
+            # parallelism): _refuse_unfoldable_shards allows no other count.
+            quantizers_are_global = len(weight_quantizers) == wdata.shape[0]
+        else:
+            local_w = wdata
+            local_indices = list(range(n))
+
+        local_fp8: torch.Tensor | None = None
+        local_ws: torch.Tensor | None = None
+        weight_scale_2s: list[torch.Tensor] = []
+        input_scale: torch.Tensor | None = None
+        for local_idx, global_idx in enumerate(local_indices):
+            w_quantizer = weight_quantizers[global_idx if quantizers_are_global else local_idx]
+            w_slice = _local_expert_weight(module, proj, local_w, local_idx, dtype)
+            # Uncalibrated-expert fallback: derive amax from this expert's local weight slice
+            # (matches _export_fused_experts), so a never-routed expert still exports sane scales.
+            # Per stage, in the shape each expects (W4A8's SequentialQuantizer, block-wise INT4).
+            uncalibrated = [q for q in _tensor_quantizers(w_quantizer) if _is_uncalibrated(q)]
+            for q in uncalibrated:
+                q.amax = _fallback_amax(w_slice, q)
+            if uncalibrated:
+                warnings.warn(
+                    f"Expert {global_idx} {proj} weight quantizer was not calibrated (amax missing "
+                    f"or zero); using weight-derived amax. Increase calibration size to activate all "
+                    f"experts.",
+                    stacklevel=2,
+                )
+            wrapper = nn.Module()
+            wrapper.weight = nn.Parameter(w_slice.contiguous(), requires_grad=False)
+            wrapper.weight_quantizer = w_quantizer
+            if input_quantizer is not None:
+                wrapper.input_quantizer = input_quantizer
+            _export_quantized_weight(wrapper, dtype)
+            rows = len(local_indices)
+            packed = wrapper.weight.data
+            local_fp8 = _stack_row(local_fp8, local_idx, packed, rows, packed.device)
+            # On the weight's device: per-tensor FP8 builds each expert's scale from a Python float,
+            # on the CPU, and a DTensor rewrap would label a CPU shard with the weight's device mesh.
+            local_ws = _stack_row(local_ws, local_idx, wrapper.weight_scale, rows, local_w.device)
+            # NVFP4 carries a SECOND per-tensor weight scale (weight_scale_2) that dequantizes the
+            # per-block weight_scale; FP8 has none. Keep it so the fused buffer (and the per-expert
+            # split) stay dequantizable.
+            if hasattr(wrapper, "weight_scale_2"):
+                weight_scale_2s.append(wrapper.weight_scale_2)
+            if hasattr(wrapper, "input_scale"):
+                input_scale = wrapper.input_scale
+        # Every rank holds an expert (_refuse_unfoldable_shards), so both stacks have a row.
+        assert local_fp8 is not None and local_ws is not None
+        if is_dt:
+            # Keep the global expert count: from_local would infer it as local x world, which is
+            # wrong for an uneven shard (3 experts on 2 ranks) and misnumbers the experts.
+            local_fp8 = _rewrap_expert_rows(local_fp8, mesh, placements, wdata.shape[0])
+            local_ws = _rewrap_expert_rows(local_ws, mesh, scale_placements, wdata.shape[0])
+        setattr(module, proj, nn.Parameter(local_fp8, requires_grad=False))
+        module.register_buffer(f"{proj}_weight_scale", local_ws)
+        if weight_scale_2s:
+            # Per-expert scalar (E,) -- shards on the expert axis exactly like the weight scale.
+            local_ws2 = torch.stack(weight_scale_2s, dim=0).to(local_w.device)
+            if is_dt:
+                local_ws2 = _rewrap_expert_rows(local_ws2, mesh, scale_placements, wdata.shape[0])
+            module.register_buffer(f"{proj}_weight_scale_2", local_ws2)
+        if input_scale is not None:
+            # Replicated, not sharded like the rest: calibration syncs the shared input quantizer's
+            # amax over the data-parallel ranks and, under expert parallelism, over the
+            # expert-parallel group (max_calibrate), so every rank registers the same value.
+            module.register_buffer(f"{proj}_input_scale", input_scale)
+
+    # A projection left as it is goes out in the weight domain the per-expert export writes it in.
+    for proj in (first, "down_proj"):
+        if proj in folded:
+            continue
+        wdata = getattr(module, proj).data
+        is_dt = isinstance(wdata, DTensor)
+        local = wdata.to_local() if is_dt else wdata
+        domain = _local_expert_weight(module, proj, local, 0, dtype).dtype
+        if domain != local.dtype:
+            local = local.to(domain)
+            if is_dt:
+                local = _rewrap_expert_rows(
+                    local, wdata.device_mesh, wdata.placements, wdata.shape[0]
+                )
+            setattr(module, proj, nn.Parameter(local, requires_grad=False))
+
+    # Drop the quantizer modules -- their info now lives in the fused weight + scale buffers -- and
+    # the source checkpoint's scales, which described the weights the fold replaced, as the
+    # per-expert export does (_delete_fused_moe_source_attrs).
+    for attr in (
+        f"{first}_weight_quantizers",
+        f"{first}_input_quantizer",
+        "down_proj_weight_quantizers",
+        "down_proj_input_quantizer",
+        f"{first}_scale_inv",
+        "down_proj_scale_inv",
+        f"{first}_activation_scale",
+        "down_proj_activation_scale",
     ):
         if hasattr(module, attr):
             delattr(module, attr)
@@ -100,6 +457,8 @@ def _export_fused_experts(
 
     for idx in range(n):
         expert = nn.Module()
+        first_weight = module.get_expert_weight(first_proj_attr, idx, dtype)
+        down_weight = module.get_expert_weight("down_proj", idx, dtype)
 
         # If the gate_up source quantizer was never calibrated (rare expert
         # that received no calibration tokens), derive its amax once from the
@@ -111,17 +470,18 @@ def _export_fused_experts(
         # mismatched weight_scale_2 and garbled MoE output at inference.
         # Non-gated experts have no gate/up fusion, so this shared-amax step is
         # skipped — their single up_proj uses the generic per-projection fallback.
-        first_proj_q = first_proj_weight_quantizers[idx]
-        if (
-            is_gated
-            and getattr(first_proj_q, "is_enabled", False)
-            and (
-                not hasattr(first_proj_q, "_amax")
-                or first_proj_q._amax is None
-                or torch.all(first_proj_q._amax == 0)
-            )
-        ):
-            first_proj_q.amax = first_proj[idx].abs().amax().to(torch.float32)
+        uncalibrated_stages = (
+            [
+                q
+                for q in _tensor_quantizers(first_proj_weight_quantizers[idx])
+                if _is_uncalibrated(q)
+            ]
+            if is_gated
+            else []
+        )
+        for q in uncalibrated_stages:
+            q.amax = _fallback_amax(first_weight, q)
+        if uncalibrated_stages:
             warnings.warn(
                 f"Expert {idx} gate_up_proj weight quantizer was not calibrated "
                 f"(amax missing or zero). Using fused-tensor amax as fallback "
@@ -132,16 +492,16 @@ def _export_fused_experts(
 
         if is_gated:
             projections = [
-                ("gate_proj", first_proj[idx, :expert_dim, :], 0, fused_dim0, True),
-                ("up_proj", first_proj[idx, expert_dim:, :], expert_dim, fused_dim0, True),
-                ("down_proj", down[idx], 0, down.shape[1], False),
+                ("gate_proj", first_weight[:expert_dim, :], 0, fused_dim0, True),
+                ("up_proj", first_weight[expert_dim:, :], expert_dim, fused_dim0, True),
+                ("down_proj", down_weight, 0, down.shape[1], False),
             ]
         else:
             # Non-gated: the single up_proj maps 1:1 to its weight quantizer, so it
             # is exported whole (no dim-0 split, no shared gate/up weight_scale_2).
             projections = [
-                ("up_proj", first_proj[idx], 0, fused_dim0, True),
-                ("down_proj", down[idx], 0, down.shape[1], False),
+                ("up_proj", first_weight, 0, fused_dim0, True),
+                ("down_proj", down_weight, 0, down.shape[1], False),
             ]
 
         for (
@@ -163,52 +523,45 @@ def _export_fused_experts(
                 copy.deepcopy(w_quantizer_src) if uses_first_proj_quantizers else w_quantizer_src
             )
 
-            # For per-channel amax (dim >= 1), proportionally slice dim-0
-            # to match the split weight.
-            if (
-                hasattr(w_quantizer, "_amax")
-                and w_quantizer._amax is not None
-                and w_quantizer._amax.dim() >= 1
-            ):
-                amax = w_quantizer._amax
-                # Per-block _amax (NVFP4 static) collapses the row axis we want
-                # to slice on; restore it so dim-0 slicing splits gate/up.
-                if amax.numel() != fused_total and amax.numel() % fused_total == 0:
-                    amax = amax.contiguous().view(fused_total, amax.numel() // fused_total)
-                amax_dim0 = amax.shape[0]
-                if fused_total % amax_dim0 == 0:
-                    slice_start = fused_start * amax_dim0 // fused_total
-                    slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
-                    sliced = amax[slice_start:slice_end].contiguous()
-                    # The amax setter refuses shape changes; drop _amax first.
-                    if hasattr(w_quantizer, "_amax"):
-                        delattr(w_quantizer, "_amax")
-                    w_quantizer.amax = sliced
-                else:
+            for stage in _tensor_quantizers(w_quantizer):
+                # For per-channel amax (dim >= 1), proportionally slice dim-0
+                # to match the split weight.
+                if getattr(stage, "_amax", None) is not None and stage._amax.numel() > 1:
+                    amax = stage._amax
+                    # Per-block _amax (NVFP4 static) collapses the row axis we want
+                    # to slice on; restore it so dim-0 slicing splits gate/up.
+                    if amax.numel() != fused_total and amax.numel() % fused_total == 0:
+                        amax = amax.contiguous().view(fused_total, amax.numel() // fused_total)
+                    amax_dim0 = amax.shape[0]
+                    if fused_total % amax_dim0 == 0:
+                        slice_start = fused_start * amax_dim0 // fused_total
+                        slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
+                        sliced = amax[slice_start:slice_end].contiguous()
+                        # The amax setter refuses shape changes; drop _amax first.
+                        delattr(stage, "_amax")
+                        stage.amax = sliced
+                        # Block-quant calibration recorded the fused amax's row count here, and
+                        # export_amax() reshapes to it, undoing the slice.
+                        export_shape = getattr(stage, "_amax_shape_for_export", None)
+                        if export_shape is not None and export_shape[0] == amax_dim0:
+                            stage._amax_shape_for_export = (sliced.shape[0], *export_shape[1:])
+                    else:
+                        warnings.warn(
+                            f"Expert {idx} {proj_name}: fused amax dim0 ({amax_dim0}) does not "
+                            f"evenly divide fused_total ({fused_total}). Skipping amax slicing, "
+                            f"which may produce incorrect quantization scales.",
+                            stacklevel=2,
+                        )
+
+                # If the weight quantizer was never calibrated, compute amax from weights.
+                if _is_uncalibrated(stage):
+                    stage.amax = _fallback_amax(weight_slice, stage)
                     warnings.warn(
-                        f"Expert {idx} {proj_name}: fused amax dim0 ({amax_dim0}) does not "
-                        f"evenly divide fused_total ({fused_total}). Skipping amax slicing, "
-                        f"which may produce incorrect quantization scales.",
+                        f"Expert {idx} {proj_name} weight quantizer was not calibrated "
+                        f"(amax missing or zero). Using weight-derived amax as fallback. "
+                        f"Consider using more calibration data to activate all experts.",
                         stacklevel=2,
                     )
-
-            # If the weight quantizer was never calibrated, compute amax from weights.
-            if (
-                hasattr(w_quantizer, "is_enabled")
-                and w_quantizer.is_enabled
-                and (
-                    not hasattr(w_quantizer, "_amax")
-                    or w_quantizer._amax is None
-                    or torch.all(w_quantizer._amax == 0)
-                )
-            ):
-                w_quantizer.amax = weight_slice.abs().amax().to(torch.float32)
-                warnings.warn(
-                    f"Expert {idx} {proj_name} weight quantizer was not calibrated "
-                    f"(amax missing or zero). Using weight-derived amax as fallback. "
-                    f"Consider using more calibration data to activate all experts.",
-                    stacklevel=2,
-                )
 
             wrapper = nn.Module()
             wrapper.weight = nn.Parameter(weight_slice.contiguous(), requires_grad=False)
@@ -286,3 +639,165 @@ def save_expert_token_count_table(model: nn.Module, output_dir: str | Path | Non
     output_path = Path(output_dir) / ".moe.html"
     output_path.write_text(html_content, encoding="utf-8")
     print(f"\033[1mExpert token count table saved to {output_path}\033[0m")
+
+
+# ----- Distributed-export helpers (fused-experts split for the no-gather FSDP2 write) -----
+_FUSED_PROJ = ("gate_up_proj", "up_proj", "down_proj")
+
+
+def _fused_experts_prefixes(state_dict: dict) -> list[str]:
+    """Return the prefixes of the modules holding a fused 3-D expert weight.
+
+    Return the sorted set of ``...experts`` prefixes that carry a fused 3-D expert weight
+    (``<prefix>.gate_up_proj`` / ``up_proj`` / ``down_proj``) in ``state_dict``.
+    """
+    prefixes: set[str] = set()
+    for key, tensor in state_dict.items():
+        for proj in _FUSED_PROJ:
+            if key.endswith(f".experts.{proj}") and hasattr(tensor, "dim") and tensor.dim() == 3:
+                prefixes.add(key[: -(len(proj) + 1)])
+                break
+    return sorted(prefixes)
+
+
+def split_fused_experts_state_dict(state_dict: dict) -> dict:
+    """Rewrite the fused-experts entries of a state dict into per-expert entries.
+
+    The distributed export writes experts *fused* (3-D ``experts.<proj>`` weights + fused scale
+    buffers, kept sharded for DCP). This post-pass splits them into the same per-expert layout the
+    in-model :func:`_export_fused_experts` produces, so the two export paths yield identical
+    checkpoints. Operates on the (already folded/quantized) tensors only -- pure slicing, no
+    quantization. Non-fused-experts keys pass through unchanged. Every emitted tensor is a copy and
+    the input keeps its fused tensors, so the experts are held twice until it returns: pass one
+    module's tensors at a time, not a whole model's. Each module's experts are numbered from 0 by
+    their row in the tensors given, which must be plain: whole ones get their global numbers, and a
+    caller splitting a rank's local shard (``to_local()``) shifts each by the shard's global offset.
+
+    Per fused-experts prefix ``P`` (``...experts``), inputs are (gated shown; ungated drops the gate split):
+      ``P.gate_up_proj`` ``(E, 2*I, H)`` + ``P.gate_up_proj_weight_scale`` + ``P.gate_up_proj_input_scale``
+      ``P.down_proj``    ``(E, O, I)``   + ``P.down_proj_weight_scale``    + ``P.down_proj_input_scale``
+    Outputs, for each expert ``i``:
+      ``P.{i}.gate_proj.weight`` ``(I, H)`` (+ ``.weight_scale``/``.input_scale``)   [gated only]
+      ``P.{i}.up_proj.weight``   ``(I, H)`` (+ ``.weight_scale``/``.input_scale``)
+      ``P.{i}.down_proj.weight`` ``(O, I)`` (+ ``.weight_scale``/``.input_scale``)
+    """
+    prefixes = _fused_experts_prefixes(state_dict)
+    if not prefixes:
+        return state_dict
+
+    # Keys consumed (and thus removed) while emitting per-expert keys.
+    consumed: set[str] = set()
+    out: dict = {}
+
+    for prefix in prefixes:
+        gated = f"{prefix}.gate_up_proj" in state_dict
+        first = "gate_up_proj" if gated else "up_proj"
+        first_w = state_dict[f"{prefix}.{first}"]
+        down_w = state_dict[f"{prefix}.down_proj"]
+        n_experts = first_w.shape[0]
+        if down_w.shape[0] != n_experts:
+            raise ValueError(f"{prefix}: {n_experts} {first} experts, {down_w.shape[0]} down_proj.")
+
+        def _scales(proj_name):
+            ws = state_dict.get(f"{prefix}.{proj_name}_weight_scale")
+            ins = state_dict.get(f"{prefix}.{proj_name}_input_scale")
+            # NVFP4 second-level (per-tensor) weight scale; None for FP8. (E,) one scalar per expert.
+            ws2 = state_dict.get(f"{prefix}.{proj_name}_weight_scale_2")
+            return ws, ins, ws2
+
+        first_ws, first_in, first_ws2 = _scales(first)
+        down_ws, down_in, down_ws2 = _scales("down_proj")
+
+        def _slice_weight_scale(ws, expert_idx, row_slice, rows):
+            # A per-expert scalar as is; else the expert's scale rows covering ``row_slice``, a cut of
+            # the fused gate|up's ``rows`` rows, in proportion (only gate and up are cut): an INT4
+            # weight packs two rows a byte while its scales stay per row, an FP8 2-D block 128 rows.
+            if ws is None:
+                return None
+            if ws.dim() <= 1:  # (E,) one scalar per expert
+                return ws[expert_idx]
+            sub = ws[expert_idx]
+            if row_slice is None:
+                return sub
+            start, stop, _ = row_slice.indices(rows)
+            n = sub.shape[0]
+            # Exact only for scale rows spread evenly over the weight rows, with the cut between
+            # two of them; otherwise a block of rows sharing one scale straddles gate and up.
+            if (rows % n and n % rows) or start * n % rows or stop * n % rows:
+                raise NotImplementedError(
+                    f"A {n}-row weight scale over {rows} weight rows cannot be split at the gate|up "
+                    f"boundary, row {start or stop}: a block of rows sharing one scale crosses it."
+                )
+            return sub[start * n // rows : stop * n // rows]
+
+        for expert_idx in range(n_experts):
+            if gated:
+                inter = first_w.shape[1] // 2
+                # gate and up are halves of the fused gate_up: they share its single per-tensor
+                # weight_scale_2 (first_ws2), matching the in-model export + vLLM's W1/W3 fusion.
+                projections = [
+                    (
+                        "gate_proj",
+                        first_w[expert_idx, :inter, :],
+                        first_ws,
+                        first_in,
+                        first_ws2,
+                        slice(0, inter),
+                    ),
+                    (
+                        "up_proj",
+                        first_w[expert_idx, inter:, :],
+                        first_ws,
+                        first_in,
+                        first_ws2,
+                        slice(inter, None),
+                    ),
+                    ("down_proj", down_w[expert_idx], down_ws, down_in, down_ws2, None),
+                ]
+            else:
+                projections = [
+                    ("up_proj", first_w[expert_idx], first_ws, first_in, first_ws2, None),
+                    ("down_proj", down_w[expert_idx], down_ws, down_in, down_ws2, None),
+                ]
+            for proj_name, weight, ws, ins, ws2, row_slice in projections:
+                base = f"{prefix}.{expert_idx}.{proj_name}"
+                # .clone() every emitted tensor so no two keys share storage. gate/up share the
+                # per-tensor scale object (and slices alias the fused parent); without cloning,
+                # safetensors/save_pretrained shared-tensor dedup silently drops the duplicate
+                # (e.g. up_proj.weight_scale/input_scale would go missing).
+                out[f"{base}.weight"] = weight.detach().clone().contiguous()
+                sliced_ws = _slice_weight_scale(ws, expert_idx, row_slice, first_w.shape[1])
+                if sliced_ws is not None:
+                    out[f"{base}.weight_scale"] = sliced_ws.detach().clone().contiguous()
+                # weight_scale_2 is a per-expert scalar (shared by gate/up): _slice_weight_scale's
+                # dim<=1 branch returns ws2[expert_idx] regardless of row_slice. NVFP4 only; None for FP8.
+                sliced_ws2 = _slice_weight_scale(ws2, expert_idx, row_slice, first_w.shape[1])
+                if sliced_ws2 is not None:
+                    out[f"{base}.weight_scale_2"] = sliced_ws2.detach().clone().contiguous()
+                if ins is not None:
+                    out[f"{base}.input_scale"] = ins.detach().clone()
+
+        # Mark the fused tensors + their scale buffers consumed.
+        for proj in (first, "down_proj"):
+            for suffix in ("", "_weight_scale", "_weight_scale_2", "_input_scale"):
+                consumed.add(f"{prefix}.{proj}{suffix}")
+
+    out.update({key: tensor for key, tensor in state_dict.items() if key not in consumed})
+    return out
+
+
+def _dtensor_dim0_offset(dt) -> int:
+    """Global dim-0 start index of this rank's local shard of a ``Shard(0)`` DTensor."""
+    mesh, placements = dt.device_mesh, dt.placements
+    try:
+        from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+
+        _, global_offset = compute_local_shape_and_global_offset(tuple(dt.shape), mesh, placements)
+        return int(global_offset[0])
+    except Exception:
+        n = dt.shape[0]
+        for mdim, p in enumerate(placements):
+            if isinstance(p, Shard) and p.dim == 0:
+                nshards = mesh.size(mdim)
+                return mesh.get_local_rank(mdim) * ((n + nshards - 1) // nshards)
+        return 0

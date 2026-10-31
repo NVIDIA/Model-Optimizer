@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import random
 
 import pytest
@@ -27,7 +28,7 @@ def compare_outputs(out1, out2, rtol=1e-5, atol=1e-8):
     for i, (t1, t2) in enumerate(zip(out1, out2)):
         try:
             assert torch.allclose(t1.to(torch.float32), t2.to(torch.float32), rtol, atol)
-        except AssertionError:  # noqa: PERF203
+        except AssertionError:
             diff = torch.abs(t1 - t2)
             print(f"\n{i=}")
             print(f"{t1=}")
@@ -51,6 +52,12 @@ def set_seed(seed_value=42):
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
     random.seed(seed_value)
+
+
+@functools.cache
+def is_blackwell():
+    """Whether the GPU is sm_120 or newer (e.g. RTX PRO 6000), as on the GPU CI runners."""
+    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12
 
 
 def minimum_sm(sm):
