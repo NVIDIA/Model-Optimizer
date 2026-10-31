@@ -51,9 +51,9 @@ from modelopt.torch.utils.distributed import (
     DistributionPlan,
     barrier,
     broadcast_state_dict,
-    fsdp2_wrap,
     is_initialized,
 )
+from modelopt.torch.utils.fsdp2_utils import fsdp2_wrap
 from modelopt.torch.utils.logging import print_rank_0, warn_rank_0
 from modelopt.torch.utils.moe import (
     _choose_ep_degree,
