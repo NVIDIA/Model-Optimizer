@@ -21,7 +21,8 @@ expert parallelism cannot shard. The adapters point that name at transformers' n
 keep the vision tower and projector from the checkpoint's code.
 """
 
-# modelopt.torch.utils is imported inside the functions: the model registry imports this module.
+# modelopt.torch.utils and transformers are imported inside the functions: the model registry imports
+# this module, and it must import without transformers, the optional [hf] extra.
 from ._remote_code import keep_patched
 
 
@@ -60,10 +61,9 @@ def checkpoint_to_patch(
 def refuse_quantization_only_on_text_config(label: str, hf_config) -> None:
     """Refuse a checkpoint whose ``quantization_config`` only its ``text_config`` declares.
 
-    The adapter replaces ``text_config`` with a native config without it. Unless the experts
-    decompress as they load, the expert-parallel load then reads the checkpoint's quantization off
-    the top-level config, which Kimi-K2.5's config class copies it to; without that copy, the load
-    would read quantized experts as stored.
+    The adapter replaces ``text_config`` with a native config without it, and the expert-parallel
+    load would then read the quantized experts as stored. It loads unquantized checkpoints only, so
+    the way in is an unquantized copy of the model.
     """
     if (
         getattr(hf_config.text_config, "quantization_config", None) is not None
@@ -72,8 +72,7 @@ def refuse_quantization_only_on_text_config(label: str, hf_config) -> None:
         raise ValueError(
             f"{label}: the checkpoint declares quantization_config on text_config only, which the "
             "native deepseek_v3 config replacing it drops, so the expert-parallel load would read "
-            "its experts as stored. Declare it on the top-level config too, or start from an "
-            "unquantized copy of the model."
+            "its experts as stored. Start from an unquantized copy of the model."
         )
 
 
