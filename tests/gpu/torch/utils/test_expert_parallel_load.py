@@ -665,6 +665,7 @@ def test_kimi_k3_packed_experts_load_calibrate_and_name_back_expert_parallel(
     another load, the returned model's config is refused rather than read as bf16 experts."""
     pytest.importorskip(
         "compressed_tensors",
+        minversion="0.16",
         reason="compressed-tensors is needed: the checkpoint's experts are compressed",
     )
     if Version(transformers.__version__) < Version("5.16"):
