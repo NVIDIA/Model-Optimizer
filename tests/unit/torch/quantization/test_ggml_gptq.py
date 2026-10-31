@@ -498,3 +498,64 @@ def test_row_keys_do_not_depend_on_the_batch_a_row_is_hashed_in(dtype):
     assert torch.equal(_row_keys(table[index]), keys[index])
     assert all(torch.equal(_row_keys(table[i : i + 1]), keys[i : i + 1]) for i in index.tolist())
     assert len(keys.unique()) == len(table)
+
+
+def _search(model, inputs, formats, effective_bits):
+    def recipe(algorithm, num_bits):
+        config = _iq_config(algorithm, num_bits)
+        weight_cfg = config["quant_cfg"][1]["cfg"]
+        weight_cfg["effective_bits"] = GGML_FORMAT_REGISTRY[num_bits].effective_bits
+        return config, num_bits
+
+    _, state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": effective_bits},
+        quantization_formats=[recipe(*f) for f in formats],
+        data_loader=[inputs],
+        forward_step=lambda m, x: m(x),
+        loss_func=lambda output, x: output.square().sum(),
+        num_calib_steps=1,
+        num_score_steps=1,
+    )
+    return state
+
+
+def _two_layers():
+    torch.manual_seed(0)
+    return torch.nn.Sequential(
+        torch.nn.Linear(512, 512, bias=False), torch.nn.Linear(512, 256, bias=False)
+    )
+
+
+def _raw_scores(state, recipe_name):
+    return [
+        stats["raw_scores"][[str(f).split("(")[0] for f in stats["formats"]].index(recipe_name)]
+        for stats in state["candidate_stats"].values()
+    ]
+
+
+def test_auto_quantize_scores_other_candidates_on_the_source_weights_gptq_rewrote():
+    inputs = _inputs()
+    source = _two_layers()
+    alone = _search(copy.deepcopy(source), inputs, [("max", "iq2_s")], 16.0)
+    model = copy.deepcopy(source)
+    state = _search(model, inputs, [(GPTQ, "iq2_xxs"), ("max", "iq2_s")], 16.0)
+
+    assert _raw_scores(state, "iq2_s") == pytest.approx(_raw_scores(alone, "iq2_s"))
+    # 16 bits selects BF16 everywhere, so the source weights come back untouched.
+    for selected, original in zip(model.parameters(), source.parameters()):
+        assert torch.equal(selected, original)
+
+
+def test_auto_quantize_selects_the_codes_gptq_chose():
+    inputs = _inputs()
+    source = _two_layers()
+    model = copy.deepcopy(source)
+    _search(model, inputs, [(GPTQ, "iq2_xxs")], GGML_FORMAT_REGISTRY["iq2_xxs"].effective_bits)
+
+    iq2_xxs = GGML_FORMAT_REGISTRY["iq2_xxs"]
+    for layer, original in zip(model, source):
+        pinned = pinned_packed_weight(layer.weight_quantizer, "iq2_xxs")
+        decoded = iq2_xxs.dequantize(pinned, torch.tensor(layer.weight.shape), dtype=torch.float32)
+        assert torch.equal(layer.weight, decoded)
+        assert not torch.equal(pinned, iq2_xxs.quantize(original.weight.detach())[0])
