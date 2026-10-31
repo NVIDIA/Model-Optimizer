@@ -41,7 +41,8 @@ import base64
 import os
 import re
 import time
-from typing import TypedDict
+from collections.abc import Iterable, Sequence
+from typing import TypedDict, cast
 
 import httpx
 import torch
@@ -199,7 +200,7 @@ class StreamingDataset(Dataset):
 
     def __init__(
         self,
-        entries: list[dict],
+        entries: Iterable[dict],
         tokenizer,
         config: StreamingConfig | None = None,
     ):
@@ -213,6 +214,9 @@ class StreamingDataset(Dataset):
         Args:
             entries: Untokenized per-sample dicts from the input jsonl. Schema is
                 subclass-defined (see :meth:`_tokenize_entry`); passed to :meth:`_fetch`.
+                A sized, indexable source (e.g. an Arrow-backed ``datasets.Dataset``) is
+                kept as is, so its rows stay memory-mapped; any other iterable is
+                materialized into a list.
             tokenizer: HF tokenizer; used for client-side tokenization and the
                 server/client loss-mask alignment in :meth:`_fetch`.
             config: Tuning knobs (timeout, answer_only_loss, ...); defaults to
@@ -223,7 +227,7 @@ class StreamingDataset(Dataset):
         # Keep an indexable source (e.g. an Arrow-backed datasets.Dataset) as is: list()
         # would copy every row into each rank, and each forked worker would copy it again.
         if hasattr(entries, "__len__") and hasattr(entries, "__getitem__"):
-            self.entries = entries
+            self.entries = cast("Sequence[dict]", entries)
         else:
             self.entries = list(entries)
         if len(self.entries) == 0:
@@ -409,7 +413,7 @@ class EagleVllmStreamingDataset(StreamingDataset):
 
     def __init__(
         self,
-        entries: list[dict],
+        entries: Iterable[dict],
         tokenizer,
         config: EagleVllmStreamingConfig,
     ):
