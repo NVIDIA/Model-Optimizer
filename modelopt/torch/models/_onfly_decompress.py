@@ -16,17 +16,25 @@
 """Decompress a compressed-tensors MoE checkpoint's experts as ``from_pretrained`` loads them.
 
 Each rank decompresses only its own experts, with the ``compressed_tensors`` library, so expert-parallel
-PTQ runs on the original checkpoint. Needs transformers 5.8, whose ``Concatenate`` reads only its keys.
+PTQ runs on the original checkpoint. Needs transformers 5.8, whose ``Concatenate`` reads only its keys,
+and compressed-tensors 0.16, whose compressors decompress one weight by its scheme.
 """
 
 import functools
 import os
 
 import torch
+from packaging.version import parse
 from safetensors import safe_open
 
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.moe import _SUB_CONFIG_ATTRS, require_transformers
+
+# The first compressed-tensors whose compressors decompress one weight by its scheme, through the
+# classmethods compression_param_names(scheme) and decompress(state_dict, scheme). Before it, a
+# compressor is built from the whole config, and states its parameter names as a property (to 0.14)
+# or not at all (0.15).
+_MIN_COMPRESSED_TENSORS = "0.16.0"
 
 
 def to_native_backbone_config(
@@ -96,14 +104,23 @@ def _read_compression(hf_config):
     if quantization_config is None:
         return None
     try:
-        from compressed_tensors.compressors.base import BaseCompressor
-        from compressed_tensors.quantization import QuantizationConfig
+        import compressed_tensors
     except ImportError as e:
         # No pip extra of ModelOpt installs it: only a compressed checkpoint needs it.
         raise ImportError(
             "On-the-fly decompression of a compressed-tensors checkpoint needs the "
-            "compressed-tensors package. Install it with: pip install compressed-tensors"
+            "compressed-tensors package. Install it with: "
+            f"pip install 'compressed-tensors>={_MIN_COMPRESSED_TENSORS}'"
         ) from e
+    have = compressed_tensors.__version__
+    if parse(have) < parse(_MIN_COMPRESSED_TENSORS):
+        raise RuntimeError(
+            "On-the-fly decompression of a compressed-tensors checkpoint requires "
+            f"compressed-tensors >= {_MIN_COMPRESSED_TENSORS}, but {have} is installed. Upgrade "
+            f"with: pip install -U 'compressed-tensors>={_MIN_COMPRESSED_TENSORS}'."
+        )
+    from compressed_tensors.compressors.base import BaseCompressor
+    from compressed_tensors.quantization import QuantizationConfig
 
     qconfig = QuantizationConfig.model_validate(quantization_config)
     groups = qconfig.config_groups
