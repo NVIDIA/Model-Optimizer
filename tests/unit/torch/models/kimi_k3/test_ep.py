@@ -631,7 +631,7 @@ def test_prepare_lets_an_error_reading_the_quant_config_through(
     Dropped after that, the config would load the experts newly initialized. The refusal comes
     before prepare changes anything, so a process that goes on after it is unchanged: the remote
     block, the config, the converter registry, the experts implementations and the loader hooks."""
-    pytest.importorskip("compressed_tensors")
+    pytest.importorskip("compressed_tensors", minversion="0.16")
     scheme = {"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"}
     config = SimpleNamespace(
         text_config=SimpleNamespace(quantization_config=scheme),
