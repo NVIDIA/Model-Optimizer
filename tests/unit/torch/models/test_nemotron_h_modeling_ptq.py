@@ -169,12 +169,13 @@ def test_forward_passthrough_matches(impl):
         torch.testing.assert_close(converted(*batch), reference(*batch))
 
 
-def test_calibration_matches_eager():
-    """grouped_mm calibrates every expert's quantizers to what eager does.
+def test_grouped_mm_and_eager_calibrate_each_expert_alike():
+    """grouped_mm and eager calibrate every expert's quantizers alike.
 
     The same weights and routing give the shared input quantizers the same activations and each
-    per-expert weight quantizer the same slice; only down_proj's input passes through a GEMM, hence
-    the tolerance on its amax.
+    per-expert weight quantizer the same slice. Only down_proj's input comes out of a GEMM, which
+    the two backends compute in different orders that round differently: hence the tolerance on
+    its amax.
     """
     eager, grouped = _eager_and_grouped()
     for model in (eager, grouped):
@@ -197,8 +198,8 @@ def test_calibration_matches_eager():
             torch.testing.assert_close(gq.amax, eq.amax)
 
 
-def test_gptq_hessians_match_eager(monkeypatch):
-    """GPTQ gives each expert the Hessian of only its own tokens under grouped_mm, as eager."""
+def test_gptq_hessians_agree_across_backends(monkeypatch):
+    """GPTQ gives each expert the Hessian of only its own tokens, on both backends alike."""
     hessians = {}
     free = GPTQHelper.free
 
