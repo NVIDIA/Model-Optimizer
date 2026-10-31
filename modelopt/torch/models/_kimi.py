@@ -142,7 +142,10 @@ def make_buildable(
     get_class_from_dynamic_module(
         f"{modeling}.{vlm_class}", ckpt_path, trust_remote_code=trust_remote_code
     )
-    # Remote code only: transformers' own port of a model can share the module's name.
+    # Once, not kept (keep_patched): the builds that follow resolve the class from this same local
+    # path, so transformers reuses the module, re-executing it only if its files change, and keeping
+    # it would hook the loader, which the build step never does. Remote code only: transformers' own
+    # port of a model can share the module's name.
     _apply(f".{modeling}", lambda module: _shim_tie_weights(module, vlm_class))
 
 
