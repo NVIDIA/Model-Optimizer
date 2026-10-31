@@ -25,6 +25,7 @@ tests of each part use a process group, two gloo ranks.
 import inspect
 import math
 import os
+import warnings
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
@@ -1427,6 +1428,42 @@ def test_a_whole_load_that_fails_on_one_rank_fails_every_rank(cpu_dist_workers, 
     to wait for it in the next one, calibration's or the export's."""
     LlamaConfig(**_TINY).save_pretrained(tmp_path)
     cpu_dist_workers.run(_one_rank_fails_to_load_job, ckpt=str(tmp_path))
+
+
+def _one_rank_warns_as_an_error_job(rank, size, ckpt):
+    refused = None
+    with (
+        bounded_collectives(),
+        pytest.MonkeyPatch.context() as cuda,
+        warnings.catch_warnings(),
+        mock.patch.object(model_load_utils, "ensure_local_checkpoint", _fetched_in_step),
+    ):
+        # Rank 0 has a GPU of its own; rank 1 sees one GPU only, which is not its own, and turns
+        # the warning that says so into an error.
+        _pin_cuda(cuda, 2 if rank == 0 else 1)
+        if rank == 1:
+            warnings.simplefilter("error")
+        try:  # not pytest.raises: its failure would end the pooled worker instead of the job
+            load_pretrained(ckpt, _LoadsWhole, distribution=DistributionPlan(2))
+        except Exception as error:
+            refused = str(error)
+    # Rank 1's warning on both ranks, rather than rank 0 left alone in the next collective.
+    assert refused is not None and "has no GPU of its own" in refused, (rank, refused)
+
+
+class _LoadsWhole:
+    """A model class whose whole-model load succeeds on every rank."""
+
+    @classmethod
+    def from_pretrained(cls, ckpt_path, **kwargs):
+        return torch.nn.Linear(1, 1)
+
+
+def test_a_placement_warning_raised_on_one_rank_fails_every_rank(cpu_dist_workers, tmp_path):
+    """Placing the whole model, and the warning a rank without a GPU of its own gives, run on each
+    rank before the load: raised as an error on one rank, the warning fails every rank."""
+    LlamaConfig(**_TINY).save_pretrained(tmp_path)
+    cpu_dist_workers.run(_one_rank_warns_as_an_error_job, ckpt=str(tmp_path))
 
 
 @pytest.mark.parametrize(

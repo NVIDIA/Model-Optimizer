@@ -835,32 +835,30 @@ def load_pretrained(
         # A sharded load finds the unplaced keys while it places the weights.
         keys = model._modelopt_unplaced_source_keys
     else:
-        # init_quantized_weights computes the device map itself, and refuses one it is passed.
-        spread = plan.world_size > 1 and not _init_quantized_weights()
-        if spread and (index := _own_gpu_index()) is not None:
-            # Each rank takes the whole model onto its own GPU: under "auto", every rank's
-            # accelerate could pick the same idle GPU.
-            kwargs.setdefault("device_map", {"": f"cuda:{index}"})
-        elif spread and "device_map" not in kwargs:
-            # This rank says so itself: rank 0 may have a GPU of its own, and nothing to say.
-            warnings.warn(
-                f"Rank {dist.rank()} has no GPU of its own: it sees {torch.cuda.device_count()} "
-                f"GPU(s) as local rank {dist.local_rank()}, so it loads the whole model where "
-                "from_pretrained places it without a device_map, on the CPU.",
-                stacklevel=2,
-            )
         auto_class = auto_class or AutoModelForCausalLM
-        # It runs no collective, so a rank failing in it alone would leave the others in the next.
-        with (
-            _refused_together("whole-model load", alone),
-            prepare_model_for_loading(
-                model_type,
-                ckpt_path,
-                trust_remote_code,
-                model_class=None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class,
-            ),
-        ):
-            model = auto_class.from_pretrained(ckpt_path, **hub_options, **kwargs)
+        # No collective runs here, so a rank failing alone, placing or loading the model, would
+        # leave the others in the next one.
+        with _refused_together("whole-model load", alone):
+            # init_quantized_weights computes the device map itself, and refuses one it is passed.
+            spread = plan.world_size > 1 and not _init_quantized_weights()
+            if spread and (index := _own_gpu_index()) is not None:
+                # Each rank takes the whole model onto its own GPU: under "auto", every rank's
+                # accelerate could pick the same idle GPU.
+                kwargs.setdefault("device_map", {"": f"cuda:{index}"})
+            elif spread and "device_map" not in kwargs:
+                # This rank says so itself: rank 0 may have a GPU of its own, and nothing to say.
+                warnings.warn(
+                    f"Rank {dist.rank()} has no GPU of its own: it sees "
+                    f"{torch.cuda.device_count()} GPU(s) as local rank {dist.local_rank()}, so it "
+                    "loads the whole model where from_pretrained places it without a device_map, "
+                    "on the CPU.",
+                    stacklevel=2,
+                )
+            whole = None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class
+            with prepare_model_for_loading(
+                model_type, ckpt_path, trust_remote_code, model_class=whole
+            ):
+                model = auto_class.from_pretrained(ckpt_path, **hub_options, **kwargs)
         keys = None
     set_distribution_plan(model, plan)
     unplaced = record_unplaced_source_keys(model, ckpt_path, keys)
