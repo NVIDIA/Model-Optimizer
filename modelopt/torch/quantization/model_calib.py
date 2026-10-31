@@ -21,7 +21,6 @@ import time
 import warnings
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from functools import partial
 from typing import Any, TypeAlias
@@ -79,6 +78,7 @@ from .utils.calib_utils import (
     _IMATRIX_ENCODER_REGISTRY,
     GPTQHelper,
     bfloat16_hessian_gemm,
+    run_on_each_gpu,
     track_calib_forward_memory,
     update_expert_weights,
 )
@@ -2797,25 +2797,11 @@ def _encode_on_each_gpu(by_device, encode):
         if device not in gpus:
             for item in items:
                 encode(*item)
-    if not gpus:
-        return
-    # The first encode runs here, so lazy setup that is not thread-safe, such as loading a format's
-    # CUDA extension, happens once before the workers start.
-    first, *by_device[gpus[0]] = by_device[gpus[0]]
-    encode(*first)
-    inference = torch.is_inference_mode_enabled()
-
-    def worker(device):
-        # The device, grad mode and inference mode are per thread: take the caller's.
-        torch.cuda.set_device(device)
-        with torch.inference_mode() if inference else torch.no_grad():
-            for item in by_device[device]:
-                encode(*item)
-        torch.cuda.synchronize(device)
-
-    with ThreadPoolExecutor(len(gpus)) as pool:
-        for future in [pool.submit(worker, gpu) for gpu in gpus]:
-            future.result()
+    if gpus:
+        pending = {device: iter(by_device[device]) for device in gpus}
+        run_on_each_gpu(
+            gpus, lambda device: next(pending[device], None), lambda item, _: encode(*item)
+        )
 
 
 def _run_weight_scale_calibration(model, forward_loop, scale_algorithm):

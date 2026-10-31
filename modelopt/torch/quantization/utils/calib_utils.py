@@ -148,46 +148,61 @@ def update_expert_weights(work, block_size, perc_damp):
     movable = [(h, w) for h, w in work if w.is_cuda and h.updates_on_any_device()]
     # A worker holds one expert at a time.
     room = max((_update_room(h, w, block_size) for h, w in movable), default=0)
-    gpus = [gpu for gpu in _own_gpus() if get_available_gpu_memory(gpu) > room]
+    gpus = [torch.device("cuda", g) for g in _own_gpus() if get_available_gpu_memory(g) > room]
     if len(gpus) < 2 or len(movable) < 2:
         movable = []
+
+    def update(item, device):
+        helper, weight = item
+        helper.update_weights(block_size, perc_damp, weight, device=device)
+        helper.free()
+
     moved = {id(helper) for helper, _ in movable}
-    for helper, weight in work:
-        if id(helper) not in moved:
-            helper.update_weights(block_size, perc_damp, weight)
-            helper.free()
+    for item in work:
+        if id(item[0]) not in moved:
+            update(item, None)
     if not movable:
         return
 
-    # The first update runs here, so lazy setup such as loading a format's CUDA extension, which is
-    # not thread-safe, happens once before the workers start.
-    helper, weight = movable[0]
-    helper.update_weights(block_size, perc_damp, weight)
-    helper.free()
     pending: queue.SimpleQueue = queue.SimpleQueue()
-    for item in movable[1:]:
+    for item in movable:
         pending.put(item)
+
+    def next_item(device):
+        try:
+            return pending.get_nowait()
+        except queue.Empty:
+            return None
+
+    run_on_each_gpu(gpus, next_item, update)
+    for device in {weight.device for _, weight in movable}:
+        torch.cuda.synchronize(device)
+
+
+def run_on_each_gpu(gpus, next_item, run):
+    """Call ``run(item, device)`` on the items ``next_item(device)`` hands out, one thread per GPU.
+
+    ``next_item`` returns the next item for that GPU, or ``None`` when there is none left; each GPU's
+    items can be its own or come from a queue all of them share. The first item runs in the caller's
+    thread with ``device=None``, on the device its data is on, so lazy setup that is not thread-safe,
+    such as loading a format's CUDA extension, happens once before the workers start.
+    """
+    first = next_item(gpus[0])
+    if first is not None:
+        run(first, None)
     inference = torch.is_inference_mode_enabled()
 
-    def worker(gpu):
+    def worker(device):
         # The device, grad mode and inference mode are per thread: take the caller's.
-        torch.cuda.set_device(gpu)
-        device = torch.device("cuda", gpu)
+        torch.cuda.set_device(device)
         with torch.inference_mode() if inference else torch.no_grad():
-            while True:
-                try:
-                    helper, weight = pending.get_nowait()
-                except queue.Empty:
-                    break
-                helper.update_weights(block_size, perc_damp, weight, device=device)
-                helper.free()
+            while (item := next_item(device)) is not None:
+                run(item, device)
         torch.cuda.synchronize(device)
 
     with ThreadPoolExecutor(len(gpus)) as pool:
-        for future in [pool.submit(worker, gpu) for gpu in gpus]:
+        for future in [pool.submit(worker, device) for device in gpus]:
             future.result()
-    for device in {weight.device for _, weight in movable}:
-        torch.cuda.synchronize(device)
 
 
 def update_hessian(input, hessian, n_samples, input_dtype=torch.float32):
