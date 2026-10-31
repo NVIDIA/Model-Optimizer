@@ -1162,7 +1162,11 @@ def _slice_batch(batch_data, start, end):
 
 
 def _process_batch(
-    batch_data, infer_method, max_working_batch_size=None, allowed_non_tensor_keys=None
+    batch_data,
+    infer_method,
+    max_working_batch_size=None,
+    allowed_non_tensor_keys=None,
+    split_on_oom=True,
 ):
     """Process a batch of data through the model's inference method.
 
@@ -1171,6 +1175,8 @@ def _process_batch(
         infer_method: Model's inference method (either forward or generate)
         max_working_batch_size: Maximum batch size known to work without OOM
         allowed_non_tensor_keys: Set of key names whose values may be non-tensor types
+        split_on_oom: Whether a batch that runs out of GPU memory is retried as two halves;
+            otherwise the error is raised
 
     Returns:
         The maximum batch size that worked successfully
@@ -1193,7 +1199,11 @@ def _process_batch(
             width = min(max_working_batch_size, batch_size - offset)
             split_data = _slice_batch(batch_data, offset, offset + width)
             max_working_batch_size = _process_batch(
-                split_data, infer_method, max_working_batch_size, allowed_non_tensor_keys
+                split_data,
+                infer_method,
+                max_working_batch_size,
+                allowed_non_tensor_keys,
+                split_on_oom,
             )
             offset += width
 
@@ -1208,6 +1218,8 @@ def _process_batch(
             else max(batch_size, max_working_batch_size)
         )  # This batch size worked successfully
     except torch.cuda.OutOfMemoryError:
+        if not split_on_oom:
+            raise
         assert batch_size > 1, (
             "CUDA out of memory error occurred while processing a single sample. "
             "This indicates the model is too large for the available GPU memory. "
@@ -1245,6 +1257,11 @@ def _forward_loop(
         dataloader: DataLoader containing the batched input data
         allowed_non_tensor_keys: Set of key names whose values may be non-tensor types
     """
+    # A batch that runs out of GPU memory is retried in halves, except for a model whose recorded plan
+    # spans several ranks: its forward can hold collectives, and a rank that retried would run more
+    # forwards than its peers, which would wait in them.
+    plan = recorded_distribution_plan(model)
+    split_on_oom = plan is None or plan.world_size == 1
     with _disable_use_cache(model), torch.no_grad():
         is_enc_dec = model_type_is_enc_dec(model)
         # Call the module (not .forward) so nn.Module.__call__ runs pre/post-forward hooks — this is
@@ -1255,7 +1272,7 @@ def _forward_loop(
         for _, data in enumerate(tqdm(dataloader)):
             # Process batch and update max working batch size
             max_working_batch_size = _process_batch(
-                data, infer_method, max_working_batch_size, allowed_non_tensor_keys
+                data, infer_method, max_working_batch_size, allowed_non_tensor_keys, split_on_oom
             )
 
 

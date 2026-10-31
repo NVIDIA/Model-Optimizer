@@ -17,14 +17,14 @@
 
 The no-gather writer never splits a fused 3-D expert weight while the model is sharded:
 ``_export_fused_experts_keep_fused`` folds every expert's quantizer into the fused weight in place,
-and ``split_fused_experts_state_dict`` cuts the result into per-expert keys later. That pipeline
-must write exactly what the single-process ``_export_fused_experts`` writes, so most tests compare
-the two byte for byte on a tiny synthetic fused-experts module quantized with FP8 and NVFP4.
+and ``split_fused_experts_state_dict`` / ``_split_local_fused_module`` cut the result into
+per-expert keys later. That pipeline must write exactly what the single-process
+``_export_fused_experts`` writes, so most tests compare the two byte for byte on a tiny synthetic
+fused-experts module quantized with FP8 and NVFP4.
 Sharded cases run on a gloo process group: one rank in process, and two spawned ranks where a
 non-zero expert offset matters.
 """
 
-import contextlib
 import copy
 import math
 import re
@@ -43,20 +43,19 @@ from safetensors.torch import load_file, save_file
 from transformers import NemotronHConfig, PretrainedConfig
 from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHExperts
 
-import modelopt.torch.export.hf_export_handlers as handlers
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.moe_utils import (
     _dtensor_dim0_offset,
     _export_fused_experts,
     _export_fused_experts_keep_fused,
     _fused_experts_prefixes,
+    _split_local_fused_module,
     split_fused_experts_state_dict,
 )
 from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
-from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 NUM_EXPERTS = 4
 HIDDEN_DIM = 32
@@ -631,6 +630,22 @@ def _two_rank_fold_job(rank, world_size):
         # Gathered whole, the ranks' folds split into exactly what the per-expert export writes.
         whole = {key: _whole(value) for key, value in fused.items()}
         _assert_byte_identical(split_fused_experts_state_dict(whole), want)
+        mine = {
+            k: v
+            for k, v in want.items()
+            if offset <= int(k[len(PREFIX) + 1 :].split(".")[0]) < offset + n_local
+        }
+        assert mine, "this rank owns no experts"
+
+        _assert_byte_identical(_split_local_fused_module(PREFIX, fused), mine)
+
+        # A per-expert scale held as a plain tensor over ALL experts (as keep-fused emits it for an
+        # unsharded weight) must be cut to this rank's experts before pairing.
+        plain_scales = {
+            k: plain[k] if k.endswith(("_weight_scale", "_weight_scale_2")) else v
+            for k, v in fused.items()
+        }
+        _assert_byte_identical(_split_local_fused_module(PREFIX, plain_scales), mine)
 
     # One expert over two ranks leaves rank 1 none: both ranks refuse, rather than rank 1 alone
     # failing while rank 0 goes on to write.
@@ -686,10 +701,11 @@ def _two_rank_fold_job(rank, world_size):
 def test_two_ranks_fold_their_own_experts_under_global_indices(cpu_dist_workers):
     """Rank 1 holds experts 2-3: each must be folded with ITS quantizer at its global offset, and the
     fused tensors stay sharded on the expert axis at their global shape, an uneven shard included;
-    gathered, they split into the per-expert export. Its quantizers are every expert's (FSDP2) or,
-    under expert parallelism, its own two, and then the ranks decide on each projection's
-    quantization together. A layout that leaves a rank no expert, or quantizers that are neither,
-    is refused on every rank."""
+    gathered, they split into the per-expert export, and each rank's own split, numbered globally,
+    into its experts' part of it. Its quantizers are every expert's (FSDP2) or, under expert
+    parallelism, its own two, and then the ranks decide on each projection's quantization together.
+    A layout that leaves a rank no expert, or quantizers that are neither, is refused on every
+    rank."""
     cpu_dist_workers.run(_two_rank_fold_job)
 
 
@@ -749,36 +765,6 @@ def test_keep_fused_refuses_fused_experts_not_named_experts():
         ExportModuleRegistry.match(experts)("model.layers.0.mlp.moe", experts, ctx)
 
     torch.testing.assert_close(experts.state_dict(), before, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("dense", ["fsdp", "replicate"])
-def test_fused_experts_fold_in_a_weight_window_when_the_plan_shards_the_dense_part(
-    monkeypatch, dense
-):
-    """FSDP2 owns the fused weights when it shards the dense part around them: folded outside a
-    weight-update window, they would be overwritten with its original shards at the next reshard.
-    Outside held windows the handler closes the window itself."""
-    events = []
-
-    @contextlib.contextmanager
-    def window(root, modules, names=None):
-        events.append("open")
-        yield
-        events.append("close")
-
-    monkeypatch.setattr(handlers, "fsdp2_aware_weight_update", window)
-    monkeypatch.setattr(
-        handlers, "_export_fused_experts_keep_fused", lambda module, dtype: events.append("fold")
-    )
-    experts = _quantized_experts(_KeepFusedGatedExperts, mtq.FP8_DEFAULT_CFG)
-    container = nn.Module()
-    container.experts = experts
-    set_distribution_plan(container, DistributionPlan(2, ep_size=2, dense=dense))
-    ctx = ExportContext(model=container, dtype=torch.bfloat16, keep_fused_experts=True)
-
-    ExportModuleRegistry.match(experts)(PREFIX, experts, ctx)
-
-    assert events == (["open", "fold", "close"] if dense == "fsdp" else ["fold"])
 
 
 class GptOssExperts(nn.Module):

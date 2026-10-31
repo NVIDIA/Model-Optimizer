@@ -376,6 +376,33 @@ def test_forward_loop_runs_under_disabled_use_cache():
     assert model.config.use_cache is True
 
 
+@pytest.mark.parametrize("world_size", [None, 1, 2], ids=["no-plan", "one-rank", "two-ranks"])
+def test_forward_loop_raises_out_of_memory_for_a_model_over_several_ranks(world_size):
+    """A model distributed over several ranks can run collectives in its forward, so a rank must not
+    retry a smaller batch after running out of memory: it would run more forwards than its peers.
+    Any other model splits the batch, as before."""
+    batch_sizes = []
+
+    class _Model(torch.nn.Module):
+        def forward(self, input_ids):
+            batch_sizes.append(input_ids.shape[0])
+            if input_ids.shape[0] > 2:
+                raise torch.cuda.OutOfMemoryError
+
+    model = _Model()
+    if world_size is not None:
+        set_distribution_plan(model, DistributionPlan(world_size, dense="fsdp"))
+    loader = DataLoader([{"input_ids": torch.zeros(8, dtype=torch.long)}] * 4, batch_size=4)
+
+    if world_size == 2:
+        with pytest.raises(torch.cuda.OutOfMemoryError):
+            _forward_loop(model, loader)
+        assert batch_sizes == [4]
+    else:
+        _forward_loop(model, loader)
+        assert batch_sizes == [4, 2, 2]
+
+
 def test_disable_use_cache_restores_on_exception():
     """Restore must run even if the with-block raises."""
     model = torch.nn.Linear(4, 4)
