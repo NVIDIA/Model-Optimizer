@@ -841,7 +841,7 @@ def test_a_checkpoint_its_spec_decompresses_is_decided_expert_parallel(
     expert-parallel load would refuse it."""
     spec = get_spec(model_type).ep_spec
     monkeypatch.setattr(spec, "prepare", lambda hf_config, **kwargs: hf_config)
-    monkeypatch.setattr(spec, "make_importable", lambda: None)
+    monkeypatch.setattr(spec, "make_buildable", lambda *args, **kwargs: None)
     monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi())
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
     run_as(4)

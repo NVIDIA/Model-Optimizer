@@ -23,6 +23,22 @@ vision tower and projector from that code. It needs trusted remote code and tran
 from .. import _kimi, _onfly_decompress
 
 
+def make_buildable(
+    hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool = False, **_
+) -> None:
+    """Have the checkpoint's own code import and build on this transformers.
+
+    The plan decision needs it before ``prepare``; it changes nothing the model computes or loads.
+    """
+    _kimi.make_buildable(
+        "modeling_kimi_vl",
+        "KimiVLForConditionalGeneration",
+        hf_config,
+        ckpt_path,
+        trust_remote_code,
+    )
+
+
 def prepare(hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool = False, **_):
     """Load Kimi-VL's language model as the transformers-native deepseek_v3.
 
@@ -37,7 +53,7 @@ def prepare(hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool 
     ckpt_path = _kimi.checkpoint_to_patch("kimi_vl", hf_config, ckpt_path, trust_remote_code)
     _kimi.refuse_quantization_only_on_text_config("kimi_vl", hf_config)
 
-    _kimi.make_importable()
+    _kimi.make_importable()  # the swap below loads the code and adapts its tie_weights
 
     # Native deepseek_v3 config for the LM (drops the remote auto_map so the native class is used).
     hf_config.text_config = _onfly_decompress.to_native_backbone_config(hf_config)
