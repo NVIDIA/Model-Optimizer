@@ -34,7 +34,6 @@ import torch.distributed.checkpoint as dcp
 import torch.nn as nn
 import transformers.distributed as hf_distributed
 from huggingface_hub import snapshot_download
-from packaging.version import parse
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -55,7 +54,6 @@ from transformers import (
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
 
-from modelopt.torch.models.specs import get_spec
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import env, moe
 from modelopt.torch.utils.distributed import (
@@ -2004,21 +2002,11 @@ def _ep_plan_refusal(ep_plan: dict[str, str]) -> str | None:
 def _ep_load_refusal(hf_config, ep_plan: dict[str, str]) -> Exception | None:
     """The error the expert-parallel load refuses this model with, by its config, or ``None``.
 
-    A model spec that rules it out (``NotImplementedError``), the load's transformers floor or the
-    spec's later one (``RuntimeError``), a checkpoint format the load does not take
-    (``NotImplementedError``), and the plan's styles (``ValueError``); the rest shows only as the
-    experts load.
+    A checkpoint format the load does not take (``NotImplementedError``) and the plan's styles
+    (``ValueError``); the rest shows only as the experts load. A model spec ruling expert
+    parallelism out, or the transformers release it needs, is not asked here: the plan decision asks
+    the spec first (``_spec_refuses_ep``).
     """
-    spec = get_spec(hf_config.model_type)
-    ep = spec.ep_spec if spec is not None else None
-    if ep is not None and ep.unsupported:
-        return NotImplementedError(ep.unsupported)
-    stated = ep.requires_transformers if ep is not None else None
-    floor = max(_EP_MIN_TRANSFORMERS, stated or _EP_MIN_TRANSFORMERS, key=parse)
-    try:
-        moe.require_transformers(floor, f"{hf_config.model_type}'s expert-parallel load")
-    except RuntimeError as e:
-        return e
     if (method := _ckpt_quant_method(hf_config)) not in _EP_SOURCE_FORMATS:
         return NotImplementedError(
             f"The expert-parallel load cannot dequantize a {method!r} checkpoint."

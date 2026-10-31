@@ -75,7 +75,7 @@ import modelopt.torch.models.hf as models_hf
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 import modelopt.torch.utils.moe as moe
-from modelopt.torch.models import EPSpec, ModelSpec, get_spec
+from modelopt.torch.models import get_spec
 from modelopt.torch.quantization.plugins import accelerate as accelerate_plugin
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -711,7 +711,10 @@ _NEEDS_LATER_AND_A_DEGREE = (
             id="explicit_degree_one_spec_plan",
         ),
         pytest.param(
-            GptOssConfig(num_local_experts=4, **_TINY),
+            # MXFP4, as GPT-OSS's checkpoints are, which the expert-parallel load refuses too.
+            GptOssConfig(
+                num_local_experts=4, quantization_config={"quant_method": "mxfp4"}, **_TINY
+            ),
             None,
             _NO_EP_YET,
             None,
@@ -751,8 +754,9 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
     degree of 1 skips (DeepSeek-V3). With nothing sharded either, every rank would hold the whole
     MoE: that must fail, not run, and name the expert count an EP degree has to divide. GPT-OSS
     carries a plan too, but its spec refuses expert parallelism, so auto picks no EP degree for it
-    and this check refuses it as an MoE that cannot be expert-parallel yet, offering every other
-    way out (FSDP2 only for an unquantized causal LM); the spec's own refusal, a
+    and this check refuses it as an MoE that cannot be expert-parallel yet, whatever else the
+    expert-parallel load refuses it for, offering every other way out (FSDP2 only for an
+    unquantized causal LM); the spec's own refusal, a
     NotImplementedError and so a RuntimeError too, words it differently. Below the transformers
     release expert parallelism needs, no EP degree is offered, since none would load: upgrading
     is, where an EP degree divides the experts; where none does, upgrading would not shard them.
@@ -788,22 +792,18 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
 
 @needs_qwen3_moe_ep_plan
 @pytest.mark.parametrize("ep_degree", [None, "1"], ids=["auto", "set-to-1"])
-@pytest.mark.parametrize(
-    "refused_by",
-    ["its-plan", "its-format", "its-spec", "its-transformers", "its-specs-transformers"],
-)
+@pytest.mark.parametrize("refused_by", ["its-plan", "its-format", "its-transformers"])
 def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     run_as, serve, monkeypatch, tmp_path, refused_by, ep_degree
 ):
-    """Left to the decision, an MoE the expert-parallel load would refuse -- by a plan that
-    shards no expert weights through grouped_gemm, a checkpoint format it does not load, a model
-    spec ruling it out (Llama-4's, GPT-OSS's), or a transformers below its floor or below the
-    later one the spec states (MiniMax-M3-VL's) -- is planned without expert parallelism rather
-    than committed to a load that refuses it, for some reasons only after the download. Nor is it
-    refused for being left whole, whether the decision or the caller made its EP degree 1: it
-    cannot be expert-parallel here. Below the floor its spec states, though, the decision's own
-    refusal names the upgrade, as one would shard it, and an EP degree the caller set to 1 to
-    raise."""
+    """Left to the decision, an MoE the expert-parallel load would refuse -- by a plan that shards no
+    expert weights through grouped_gemm or a checkpoint format it does not load -- is planned
+    without expert parallelism rather than committed to a load that refuses it, for some reasons
+    only after the download. Nor is it refused for being left whole, whether the decision or the
+    caller made its EP degree 1: it cannot be expert-parallel here. Below the floor its spec
+    states, though, the decision's own refusal names the upgrade, as one would shard it, and an EP
+    degree the caller set to 1 to raise; a spec ruling expert parallelism out has a refusal of its
+    own (GPT-OSS's, in test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error)."""
     if ep_degree is not None:
         monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
     run_as(2)
@@ -812,14 +812,6 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
         config.base_model_ep_plan = {"layers.*.mlp.experts": "moe_tp_experts"}
     elif refused_by == "its-format":
         config.quantization_config = {"quant_method": "fp8"}
-    elif refused_by == "its-spec":
-        spec = ModelSpec(model_type="qwen3_moe", ep_spec=EPSpec(unsupported="Not yet."))
-        monkeypatch.setattr(model_load_utils, "get_spec", lambda model_type: spec)
-    elif refused_by == "its-specs-transformers":
-        # Above the load's own 5.7 by version, as 5.10 is not, though not as strings compare.
-        spec = ModelSpec(model_type="qwen3_moe", ep_spec=EPSpec(requires_transformers="5.13"))
-        monkeypatch.setattr(model_load_utils, "get_spec", lambda model_type: spec)
-        monkeypatch.setattr(transformers, "__version__", "5.10.0")
     else:
         monkeypatch.setattr(transformers, "__version__", "5.6.2")
     serve(config)
