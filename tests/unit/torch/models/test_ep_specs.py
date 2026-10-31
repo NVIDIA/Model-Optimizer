@@ -200,6 +200,18 @@ def test_a_missing_nested_config_is_an_error_not_a_silent_skip(monkeypatch, by_p
 
 
 @needs_ep_transformers
+def test_a_plan_at_the_root_needs_no_nested_config():
+    """A config carrying a plan of its own at its root keeps it, as an existing plan does wherever it
+    sits, and the expert-parallel load reads it there: the nested config the spec's own plan would
+    go on is not required."""
+    plan = {"layers.*.experts": "grouped_gemm"}
+    config = cfg(base_model_ep_plan=dict(plan))
+
+    assert apply_distributed_support("nemotron_h_omni", config) is config
+    assert config.base_model_ep_plan == plan
+
+
+@needs_ep_transformers
 @pytest.mark.parametrize(
     "supplied",
     [

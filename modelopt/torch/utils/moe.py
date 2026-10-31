@@ -233,7 +233,8 @@ def apply_distributed_support(
         return hf_config
 
     # The spellings of the config the plan goes on; the first this config has takes it. Checked for
-    # every spec, before anything is attached or prepared, whatever supplies the plan.
+    # every spec, before anything is attached or prepared, whatever supplies the plan, but for a
+    # config carrying a plan of its own, which wins wherever it sits and needs no nested config.
     attrs = ep.plan_config_attr or ()
     if isinstance(attrs, str):
         attrs = (attrs,)
@@ -244,17 +245,19 @@ def apply_distributed_support(
             f"config.{' or config.'.join(unread)}, where the expert-parallel load does not read "
             f"one; it reads config.{' and config.'.join(_SUB_CONFIG_ATTRS)}."
         )
+    existing = getattr(_ep_config(hf_config), "base_model_ep_plan", None)
     target = hf_config
-    if attrs:
+    if attrs and not existing:
         target = next(
             (sub for attr in attrs if (sub := getattr(hf_config, attr, None)) is not None), None
         )
         if target is None:
             raise ValueError(
                 f"{model_type} expects its expert-parallel plan on "
-                f"config.{' or config.'.join(attrs)}, which this config does not have."
+                f"config.{' or config.'.join(attrs)}, which this config does not have, nor a plan "
+                "of its own."
             )
-    if ep.base_model_ep_plan and not getattr(_ep_config(hf_config), "base_model_ep_plan", None):
+    if ep.base_model_ep_plan and not existing:
         target.base_model_ep_plan = dict(ep.base_model_ep_plan)
 
     if ep.prepare is not None:
