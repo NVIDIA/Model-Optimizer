@@ -72,6 +72,7 @@ import modelopt.torch.models.hf as models_hf
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 import modelopt.torch.utils.moe as moe
+from modelopt.torch.models import EPSpec, ModelSpec
 from modelopt.torch.quantization.plugins import accelerate as accelerate_plugin
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -601,20 +602,26 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
 
 
 @needs_qwen3_moe_ep_plan
-@pytest.mark.parametrize("refused_by", ["its-plan", "its-format"])
+@pytest.mark.parametrize("refused_by", ["its-plan", "its-format", "its-spec", "its-transformers"])
 def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     run_as, serve, monkeypatch, tmp_path, refused_by
 ):
-    """Left to the decision, an MoE the expert-parallel load would refuse, by a plan that shards no
-    expert weights through grouped_gemm or a checkpoint format it does not load, is planned without
-    expert parallelism rather than committed to a load that refuses it, for some reasons only after
-    the download. Nor is it refused for being left whole: it cannot be expert-parallel here."""
+    """Left to the decision, an MoE the expert-parallel load would refuse -- by a plan that shards no
+    expert weights through grouped_gemm, a checkpoint format it does not load, a model spec ruling
+    it out (Llama-4's, GPT-OSS's) or a transformers below its floor -- is planned without expert
+    parallelism rather than committed to a load that refuses it, for some reasons only after the
+    download. Nor is it refused for being left whole: it cannot be expert-parallel here."""
     run_as(2)
     config = _qwen3_moe(num_experts=8)
     if refused_by == "its-plan":
         config.base_model_ep_plan = {"layers.*.mlp.experts": "moe_tp_experts"}
-    else:
+    elif refused_by == "its-format":
         config.quantization_config = {"quant_method": "fp8"}
+    elif refused_by == "its-spec":
+        spec = ModelSpec(model_type="qwen3_moe", ep_spec=EPSpec(unsupported="Not yet."))
+        monkeypatch.setattr(model_load_utils, "get_spec", lambda model_type: spec)
+    else:
+        monkeypatch.setattr(transformers, "__version__", "5.6.2")
     serve(config)
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
 
@@ -813,6 +820,7 @@ def test_the_expert_count_is_read_from_the_config_holding_the_plan(
     built = model_with_decoder_at("model.")
     built.tie_weights = lambda: None  # a PreTrainedModel's; nothing here is tied
     monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: built)
+    monkeypatch.setattr(transformers, "__version__", "5.7.0")  # one the expert-parallel load takes
     run_as(4)
 
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4)

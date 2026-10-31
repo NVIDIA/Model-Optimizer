@@ -33,6 +33,7 @@ import torch.distributed.checkpoint as dcp
 import torch.nn as nn
 import transformers.distributed as hf_distributed
 from huggingface_hub import snapshot_download
+from packaging.version import parse
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -53,6 +54,7 @@ from transformers import (
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
 
+from modelopt.torch.models.specs import get_spec
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import env, moe
 from modelopt.torch.utils.distributed import (
@@ -1618,12 +1620,13 @@ def _decide_distribution(
     loadable = True  # whether the expert-parallel load takes this model
     if ep_size == "auto":
         ep_size = _choose_ep_degree(world_size, num_experts)
-        if ep_size > 1 and (
-            _ckpt_quant_method(hf_config) not in _EP_SOURCE_FORMATS
-            or _ep_plan_refusal(ep_plan) is not None
-        ):
+        if ep_size > 1 and (refusal := _ep_load_refusal(hf_config, ep_plan)) is not None:
             # The expert-parallel load would refuse this model, for some reasons only after the
             # checkpoint's download: with nothing asking for expert parallelism, plan without it.
+            print_rank_0(
+                f"{hf_config.model_type}: planned without expert parallelism, which its load "
+                f"would refuse: {refusal}"
+            )
             ep_size, loadable = 1, False
     elif ep_size > 1 and world_size % ep_size:
         raise ValueError(f"{knob}={ep_size} must divide the world size ({world_size}).")
@@ -1632,6 +1635,7 @@ def _decide_distribution(
             f"{knob}={ep_size} must divide the routed experts {hf_config.model_type} shards "
             f"({num_experts})."
         )
+    dense_chosen = dense == "auto"  # a dense layout no knob or argument set
     if dense == "auto":
         # A rank holds a whole copy of what expert parallelism does not shard, and its 1/ep_size
         # share of the routed experts it does.
@@ -1648,6 +1652,14 @@ def _decide_distribution(
     if chosen and ep_size > 1 and dense == "fsdp":
         # The expert-parallel load replicates the dense part, and no load shards both yet: with
         # nothing asking for expert parallelism, FSDP2-shard the whole model instead.
+        why = (
+            "would not fit one GPU beside a rank's experts" if dense_chosen else "is to be sharded"
+        )
+        print_rank_0(
+            f"{hf_config.model_type}: FSDP2-sharded whole, without expert parallelism, as the "
+            f"expert-parallel load replicates the dense part, which {why}. To shard the experts "
+            f"anyway, the dense part replicated: {knob}={ep_size} with {replicate}."
+        )
         ep_size = 1
     if experts and asked_to_replicate:
         print_rank_0(
@@ -1854,6 +1866,27 @@ def _ep_plan_refusal(ep_plan: dict[str, str]) -> str | None:
             "siblings."
         )
     return None
+
+
+def _ep_load_refusal(hf_config, ep_plan: dict[str, str]) -> str | None:
+    """Why the expert-parallel load refuses this model, as far as its config tells, or ``None``.
+
+    A model spec that rules it out, the load's transformers floor or the spec's later one, a
+    checkpoint format the load does not take, and the plan's styles; the rest shows only as the
+    experts load.
+    """
+    spec = get_spec(hf_config.model_type)
+    ep = spec.ep_spec if spec is not None else None
+    if ep is not None and ep.unsupported:
+        return ep.unsupported
+    floor = max("5.7", (ep.requires_transformers if ep is not None else None) or "5.7", key=parse)
+    try:
+        moe.require_transformers(floor, f"{hf_config.model_type}'s expert-parallel load")
+    except RuntimeError as e:
+        return str(e)
+    if (method := _ckpt_quant_method(hf_config)) not in _EP_SOURCE_FORMATS:
+        return f"The expert-parallel load cannot dequantize a {method!r} checkpoint."
+    return _ep_plan_refusal(ep_plan)
 
 
 def _ckpt_quant_method(cfg):
