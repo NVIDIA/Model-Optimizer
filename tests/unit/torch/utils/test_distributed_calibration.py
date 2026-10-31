@@ -414,7 +414,20 @@ def test_reinstall_skips_styles_whose_transforms_are_pre_hooks(monkeypatch, expe
         styles={"torch_a2a_experts": experts_style, "torch_a2a_router": _PreHookStyle()},
         where=_LEGACY_TP_MODULE,
     )
-    assert _reinstall_a2a_forwards(_MoEModel(), _FakeMesh()) == planted
+    model = _MoEModel()
+    for layer in model.layers:  # quantizer insertion rebinds the planned modules' forwards
+        _drop_tp_wrapper(layer.gate)
+        _drop_tp_wrapper(layer.experts)
+    assert _reinstall_a2a_forwards(model, _FakeMesh()) == planted
+
+
+def test_reinstall_leaves_a_module_the_load_did_not_wrap(monkeypatch):
+    """Only a forward quantizer insertion rebound is planted again: a planned module whose forward
+    the load did not wrap keeps running as it did, without the style's transforms."""
+    styles = _install_fake_tp(monkeypatch)
+
+    assert _reinstall_a2a_forwards(_MoEModel(), _FakeMesh()) == 0
+    assert not any(style.installed for style in styles.values())
 
 
 # ------------------------------------------------------------------------- distributed_forward_loop
