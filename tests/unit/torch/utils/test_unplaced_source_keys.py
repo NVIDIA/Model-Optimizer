@@ -391,3 +391,83 @@ def test_mxfp4_expert_blocks_folded_in_at_load_are_placed(tmp_path):
     model = _load(tmp_path, quantization_config=Mxfp4Config(dequantize=True), dtype=torch.bfloat16)
 
     assert model._modelopt_unplaced_source_keys == [STRAY]
+
+
+def test_compressed_experts_decompressed_at_load_are_placed(tmp_path, monkeypatch):
+    """The on-the-fly decompressor feeds each expert's stored ``weight_packed``/``weight_scale``/
+    ``weight_shape`` into the fused weights. A built layer's are placed, through the converters
+    ``from_pretrained`` recorded (the stock mapping places none of them), so the expert-parallel load
+    passes them; only a layer the model does not build (an MTP layer) keeps its own, which that load
+    refuses to carry."""
+    pytest.importorskip(
+        "compressed_tensors",
+        minversion="0.16",
+        reason="needs compressed-tensors (CI's unit session installs it)",
+    )
+    import transformers.core_model_loading as cml
+    import transformers.modeling_utils as mu
+    from packaging.version import Version
+    from transformers import __version__ as transformers_version
+
+    from modelopt.torch.models import _onfly_decompress
+
+    if Version(transformers_version) < Version("5.8"):
+        pytest.skip("the on-the-fly decompression needs transformers >= 5.8")
+    # The decompressor's hooks are process-wide: undone after the test.
+    for owner, name in ((cml, "spawn_materialize"), (mu, "get_model_conversion_mapping")):
+        monkeypatch.setattr(owner, name, getattr(owner, name))
+    monkeypatch.setattr(_onfly_decompress, "_LOAD", {"decompressing": False})
+    hidden, inter, experts = 64, 32, 2
+    config = AutoConfig.for_model(
+        "qwen3_moe",
+        vocab_size=64,
+        hidden_size=hidden,
+        intermediate_size=64,
+        moe_intermediate_size=inter,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        num_experts=experts,
+        num_experts_per_tok=1,
+        tie_word_embeddings=False,
+        architectures=["Qwen3MoeForCausalLM"],
+    )
+    group = {"num_bits": 4, "type": "int", "symmetric": True, "strategy": "group", "group_size": 32}
+    config.quantization_config = {
+        "quant_method": "compressed-tensors",
+        "format": "pack-quantized",
+        "config_groups": {"experts": {"targets": ["re:.*experts.*"], "weights": group}},
+    }
+    compressor, scheme, stored_as, _ = _onfly_decompress._read_compression(config)
+    shapes = {
+        "gate_proj": (inter, hidden),
+        "up_proj": (inter, hidden),
+        "down_proj": (hidden, inter),
+    }
+    state, mtp = {}, []
+    for layer in (0, 1):  # layer 1 is past num_hidden_layers: an MTP layer, say
+        for e in range(experts):
+            for proj, (rows, cols) in shapes.items():
+                weight = {
+                    "weight": torch.ones(rows, cols),
+                    "weight_scale": torch.ones(rows, cols // 32),
+                }
+                stem = f"model.layers.{layer}.mlp.experts.{e}.{proj}."
+                for name, tensor in compressor.compress(weight, scheme).items():
+                    state[stem + name] = tensor
+                    if layer:
+                        mtp.append(stem + name)
+    for name, tensor in AutoModelForCausalLM.from_config(config).state_dict().items():
+        if ".experts." not in name:
+            state[name] = tensor.to(torch.bfloat16)
+    _save(tmp_path, config, state, config.quantization_config)
+    _onfly_decompress.install_onfly_decompress(config)
+    del config.quantization_config  # as the expert-parallel load does once the hooks are in
+
+    model = AutoModelForCausalLM.from_pretrained(str(tmp_path), config=config, dtype=torch.bfloat16)
+    if getattr(model, "_weight_conversions", None) is None:
+        pytest.skip("this transformers does not record the conversions from_pretrained ran")
+
+    assert sorted(stored_as) == ["weight_packed", "weight_scale", "weight_shape"]
+    assert model_load_utils.unplaced_source_keys(model, str(tmp_path)) == sorted(mtp)
