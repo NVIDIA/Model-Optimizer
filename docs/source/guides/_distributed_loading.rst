@@ -43,11 +43,11 @@ a model yourself, load it with ``from_pretrained``.
 Whole-model loads
 =================
 
-* On a distributed run, each rank loads the model onto its own GPU when it has one and no
-  ``device_map`` is passed: the GPU its process is bound to once CUDA is set up, else the one its
-  local rank numbers. ``device_map=None``, ``from_pretrained``'s own default, loads it on the CPU
-  for the caller to place. A rank without a GPU of its own warns and loads where
-  ``from_pretrained`` places it.
+* On a distributed run, each rank loads the model onto its own GPU when it has one, no
+  ``device_map`` is passed and ``init_quantized_weights`` does not place it: the GPU its process is
+  bound to once CUDA is set up, else the one its local rank numbers. ``device_map=None``,
+  ``from_pretrained``'s own default, loads it on the CPU for the caller to place. A rank without a
+  GPU of its own warns and loads where ``from_pretrained`` places it.
 * The options only the FSDP2 load takes are refused, except at the FSDP2 load's own defaults
   (``cpu_offload=False``, ``mp_policy=None``, ``broadcast_chunk_size=8``) or
   ``cpu_offload=None``, which ask nothing of a whole-model load, so a caller can forward them
@@ -113,6 +113,7 @@ Inside ``init_quantized_weights``
 =================================
 
 ``init_quantized_weights`` (see :doc:`_compress_quantized_models`) quantizes and compresses the
-model in the ``from_pretrained`` it patches, which the FSDP2 load never calls, so a sharded load is
-refused inside it. A whole-model load there passes ``device_map=None``, as ``init_quantized_weights``
-computes the device map itself and refuses one.
+model in the ``from_pretrained`` it patches, which the FSDP2 load never calls. Inside it, a plan
+the load decides gives every rank the whole model, with nothing to measure, and the load leaves
+the device map to ``init_quantized_weights``, which computes it and refuses one it is passed. A
+knob or a plan that asks to shard is refused there.
