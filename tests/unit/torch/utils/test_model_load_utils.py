@@ -2777,7 +2777,7 @@ def test_the_model_keeps_the_plan_its_checkpoint_declares(
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: None)
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
 
     class _Config(transformers.PretrainedConfig):
@@ -2839,7 +2839,7 @@ def test_a_loaded_model_keeps_its_sharding_styles_out_of_its_saved_config(
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: mesh
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: None)
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
     config = Qwen3MoeConfig(
         hidden_size=16,
@@ -2912,6 +2912,157 @@ def test_the_weights_load_in_the_checkpoints_dtype_through_its_class(ep_world_of
     assert downloads == [{"local_files_only": True}]
     assert loaded["local_files_only"] is True
     assert classes == [True]
+
+
+def test_a_compressed_checkpoint_a_spec_decompresses_as_it_loads_passes(
+    ep_world_of_two, monkeypatch, tmp_path
+):
+    """A model spec that installs the on-the-fly decompressor (Kimi-K2.5's) marks the config; that
+    checkpoint passes the format check and loads without its quantization_config, at every level,
+    which would build transformers' own compressed-tensors quantizer to compete with the
+    decompressor. The same checkpoint unmarked is refused, and the caller's config keeps its own.
+    So is one that compresses more than its experts, by the names it stores, before it loads, and a
+    config whose class keeps quantization_config, which the load cannot clear; one whose class only
+    forwards its text config's loads."""
+    from modelopt.torch.models import _onfly_decompress
+
+    class _LoadedError(Exception):
+        """Stops the load at from_pretrained."""
+
+    loaded = {}
+
+    class _Loader:
+        @staticmethod
+        def from_pretrained(path, **kwargs):
+            loaded.update(kwargs)
+            raise _LoadedError
+
+    monkeypatch.setattr(
+        "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
+    )
+    monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
+    stored_as = {"weight_packed": torch.int32, "weight_scale": torch.bfloat16}
+    expert, attention = "model.layers.1.mlp.experts.0.up_proj", "model.layers.1.self_attn.o_proj"
+    for name, compressed in (("experts", [expert]), ("more", [expert, attention])):
+        stored = {
+            f"{m}.{n}": torch.ones(1, dtype=d) for m in compressed for n, d in stored_as.items()
+        }
+        (tmp_path / name).mkdir()
+        save_file(stored, str(tmp_path / name / "model.safetensors"))
+    quantization_config = {"quant_method": "compressed-tensors"}
+    text = SimpleNamespace(quantization_config=quantization_config, base_model_ep_plan=_EP_PLAN)
+    llm = SimpleNamespace(quantization_config=quantization_config)
+    config = SimpleNamespace(
+        model_type=_NO_SPEC,
+        quantization_config=quantization_config,
+        text_config=text,
+        llm_config=llm,
+    )
+    plan = DistributionPlan(2, ep_size=2)
+
+    with pytest.raises(NotImplementedError, match="cannot dequantize"):
+        load_and_prepare_ep(str(tmp_path / "experts"), plan, hf_config=config)
+    _onfly_decompress._mark(config, tuple(stored_as))
+    with pytest.raises(NotImplementedError, match="1 of them outside the experts"):
+        load_and_prepare_ep(str(tmp_path / "more"), plan, hf_config=config)
+    assert not loaded
+    with pytest.raises(_LoadedError):
+        load_and_prepare_ep(str(tmp_path / "experts"), plan, hf_config=config)
+
+    for level in (loaded["config"], loaded["config"].text_config, loaded["config"].llm_config):
+        assert not hasattr(level, "quantization_config")
+    assert config.quantization_config is text.quantization_config is quantization_config
+    assert llm.quantization_config is quantization_config
+
+    # A config class that keeps quantization_config as a class attribute cannot have it cleared.
+    typed_config = type("_Typed", (SimpleNamespace,), {"quantization_config": quantization_config})
+    typed = typed_config(
+        model_type=_NO_SPEC, text_config=SimpleNamespace(base_model_ep_plan=_EP_PLAN)
+    )
+    _onfly_decompress._mark(typed, tuple(stored_as))
+    loaded.clear()
+    with pytest.raises(NotImplementedError, match="keeps quantization_config off its instance"):
+        load_and_prepare_ep(str(tmp_path / "experts"), plan, hf_config=typed)
+    assert not loaded
+
+    # One whose class forwards the text config's, as Kimi-K2.5's copies it, loads once both are gone.
+    class _Forwarding(SimpleNamespace):
+        @property
+        def quantization_config(self):
+            return self.text_config.quantization_config
+
+    text = SimpleNamespace(quantization_config=quantization_config, base_model_ep_plan=_EP_PLAN)
+    forwarding = _Forwarding(model_type=_NO_SPEC, text_config=text)
+    _onfly_decompress._mark(forwarding, tuple(stored_as))
+    with pytest.raises(_LoadedError):
+        load_and_prepare_ep(str(tmp_path / "experts"), plan, hf_config=forwarding)
+
+
+@pytest.mark.parametrize(
+    ("compressed", "layers"),
+    [(False, 3), (True, 3), (True, 2)],
+    ids=["uncompressed", "compressed", "compressed-past-the-layers"],
+)
+def test_a_decompressed_load_refuses_compressed_tensors_its_model_does_not_place(
+    ep_world_of_two, monkeypatch, tmp_path, compressed, layers
+):
+    """The export copies the tensors the model has no parameter for as stored, and this load dropped
+    the quantization_config that reads a compressed one: an unplaced tensor under a stored name the
+    mark holds (an MTP layer's compressed experts) is refused, one under the plain ``weight`` name is
+    not. Compressed experts stored past the config's decoder layers are refused before anything
+    loads. Which keys go unplaced is stood in for here; a real decompressed load's are pinned in
+    test_unplaced_source_keys.py."""
+    from modelopt.torch.models import _onfly_decompress
+
+    class _PastError(Exception):
+        """Raised by the load's next check."""
+
+    def next_check(*args, **kwargs):
+        raise _PastError
+
+    model = model_with_decoder_at("model.")
+    loads = []
+
+    class _Loader:
+        @staticmethod
+        def from_pretrained(path, config, **kwargs):
+            loads.append(path)
+            model.config = copy.deepcopy(config)
+            return model
+
+    mtp = "model.layers.2.mlp.experts.0.up_proj"  # unplaced, as an MTP layer's are
+    stored_as = {"weight_packed": torch.int32, "weight_scale": torch.bfloat16}
+    names = list(stored_as) if compressed else ["weight"]
+    stored = {f"{m}.{n}": torch.ones(1, dtype=d) for m in (mtp,) for n, d in stored_as.items()}
+    save_file(stored, str(tmp_path / "model.safetensors"))
+    monkeypatch.setattr(
+        "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
+    )
+    monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
+    monkeypatch.setattr(
+        model_load_utils, "unplaced_source_keys", lambda *args: [f"{mtp}.{n}" for n in names]
+    )
+    monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
+    config = SimpleNamespace(
+        model_type=_NO_SPEC,
+        num_experts=8,
+        num_hidden_layers=layers,
+        base_model_ep_plan=dict(_EP_PLAN),
+        quantization_config={"quant_method": "compressed-tensors"},
+    )
+    _onfly_decompress._mark(config, tuple(stored_as))
+
+    with pytest.raises(NotImplementedError if compressed else _PastError) as refused:
+        load_and_prepare_ep(str(tmp_path), DistributionPlan(2, ep_size=2), hf_config=config)
+    if layers == 2:
+        assert not loads
+        assert f"2 compressed tensors past the model's 2 decoder layers, such as {mtp}." in str(
+            refused.value
+        )
+    elif compressed:
+        assert f"2 compressed tensors the model has no parameter for, such as {mtp}" in str(
+            refused.value
+        )
 
 
 # ----------------------------------------------------------------------- _seed_parallel_states

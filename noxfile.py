@@ -66,7 +66,11 @@ _CPU_ONLY_ENV = {"CUDA_VISIBLE_DEVICES": ""}
 @nox.parametrize("torch_ver", [nox.param(k, id=k) for k in TORCH_VERSIONS])
 def unit(session, torch_ver, tf_ver):
     """Unit tests — parametrized over torch and transformers versions."""
-    session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]")
+    # compressed-tensors runs the real-library tests of on-the-fly expert decompression; it goes in
+    # with the torchvision pin so the resolver keeps the leg's torch. Not in dev-test: the
+    # transformers-free partial_unit(torch) lane installs that extra, and compressed-tensors pulls in
+    # transformers.
+    session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]", "compressed-tensors")
     tf_pins = TRANSFORMERS_VERSIONS[tf_ver]
     if tf_pins:
         session.install(*tf_pins)

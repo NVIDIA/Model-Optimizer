@@ -64,6 +64,12 @@ def require_transformers(min_version: str, feature: str) -> None:
 _SUB_CONFIG_ATTRS = ("text_config", "llm_config")
 
 
+def config_levels(hf_config) -> list:
+    """``hf_config`` and its nested language-model configs, those it has, which may carry its settings."""
+    nested = (getattr(hf_config, attr, None) for attr in _SUB_CONFIG_ATTRS)
+    return [c for c in (hf_config, *nested) if c is not None]
+
+
 def _ep_config(hf_config):
     """Return the config that carries the EP plan / expert count.
 
