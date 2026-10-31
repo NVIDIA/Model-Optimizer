@@ -60,7 +60,9 @@ from transformers import (
 )
 
 import modelopt.torch.models.hf as models_hf
+import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.plugins import model_load_utils
@@ -1581,6 +1583,26 @@ def test_an_automatic_layout_says_so_when_it_refuses_a_placement(
         return
     with pytest.raises(TypeError, match=r"\['device_map'\] do not apply.*MODELOPT_FSDP_SIZE=1"):
         load_pretrained(str(tmp_path), device_map="auto")
+    assert loaders == {}
+
+
+@pytest.mark.parametrize("handed", [False, True], ids=["automatic", "handed"])
+def test_a_sharded_load_is_refused_inside_init_quantized_weights(
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, handed
+):
+    """init_quantized_weights quantizes and compresses in the from_pretrained it patches, which the
+    FSDP2 load never calls: a layout that shards there, rank 0's GPU memory's or a handed plan's,
+    is refused rather than return the model unquantized."""
+    run_as(2, rank=1)
+    serve(LlamaConfig(**_TINY))
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: 1)
+    plan = {"distribution": DistributionPlan(2, dense="fsdp")} if handed else {}
+
+    with (
+        init_quantized_weights(mtq.INT8_DEFAULT_CFG),
+        pytest.raises(NotImplementedError, match=r"init_quantized_weights.*dense='replicate'"),
+    ):
+        load_pretrained(str(tmp_path), device_map=None, **plan)
     assert loaders == {}
 
 

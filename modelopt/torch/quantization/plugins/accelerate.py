@@ -358,6 +358,8 @@ def init_quantized_weights(
             **dispatch_kwargs,
         )
 
+    # A sharded load_pretrained builds the model without from_pretrained, so it reads this mark.
+    patched_from_pretrained._modelopt_init_quantized_weights = True  # type: ignore[attr-defined]
     try:
         # Apply our patches
         transformers.AutoModelForCausalLM.from_pretrained = classmethod(patched_from_pretrained)
