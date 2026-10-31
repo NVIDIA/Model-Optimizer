@@ -115,15 +115,55 @@ def install_compat_import_shims() -> None:
 
 
 def make_importable() -> None:
-    """What both checkpoints' own code needs to import on this transformers, and nothing more.
-
-    The names newer transformers dropped, and the code's two-deep relative imports staged. It patches
-    no class, config, converter or loader hook, so the plan decision runs it before ``prepare``,
-    whatever plan comes out. Idempotent.
-    """
+    """The names newer transformers dropped, and the code's two-deep relative imports staged."""
     install_compat_import_shims()
     # transformers stages only 1-hop relative imports; Kimi's remote code is 2 hops deep.
     stage_full_remote_closure()
+
+
+def make_buildable(
+    modeling: str, vlm_class: str, hf_config, ckpt_path: str | None, trust_remote_code: bool
+) -> None:
+    """What both checkpoints' own code needs to import and build on this transformers, and no more.
+
+    The names newer transformers dropped, the code's two-deep relative imports staged, and the VLM
+    class's ``tie_weights`` taking the keyword arguments transformers' ``post_init`` passes it. None
+    of it changes what the model computes or loads, so the plan decision runs it before ``prepare``,
+    whatever plan comes out. A config of transformers' own port, or code this load may not run, has
+    nothing of the checkpoint's to build. Idempotent.
+    """
+    import sys
+
+    from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+    make_importable()
+    if type(hf_config).__module__.startswith("transformers.") or ckpt_path is None:
+        return
+    if not trust_remote_code:
+        return
+    get_class_from_dynamic_module(
+        f"{modeling}.{vlm_class}", ckpt_path, trust_remote_code=trust_remote_code
+    )
+    for name, module in list(sys.modules.items()):
+        if name.endswith(f".{modeling}") and module is not None:
+            _shim_tie_weights(module, vlm_class)
+
+
+def _shim_tie_weights(module, vlm_class: str) -> bool:
+    """Have ``module``'s VLM class take the keyword arguments transformers passes ``tie_weights``.
+
+    The remote ``tie_weights()`` takes none, but transformers' ``post_init`` and load call
+    ``tie_weights(recompute_mapping=False)``: a TypeError at construction. Returns whether it changed
+    the class.
+    """
+    kimi_cls = getattr(module, vlm_class, None)
+    if kimi_cls is None:
+        return False
+    own_tie = vars(kimi_cls).get("tie_weights")
+    if own_tie is None or getattr(own_tie, "_kimi_tie_weights_shim", False):
+        return False
+    kimi_cls.tie_weights = _drop_tie_weights_kwargs(own_tie)
+    return True
 
 
 def _drop_tie_weights_kwargs(orig_tie):
@@ -195,13 +235,7 @@ def patch_language_model_to_native(
         module.DeepseekV3ForCausalLM = _native_for_the_prepared_config(
             current, NativeDeepseekV3ForCausalLM
         )
-        # The remote tie_weights() takes no kwargs, but transformers' post_init and load call
-        # tie_weights(recompute_mapping=False) -> TypeError.
-        kimi_cls = getattr(module, vlm_class, None)
-        if kimi_cls is not None:
-            own_tie = vars(kimi_cls).get("tie_weights")
-            if own_tie is not None and not getattr(own_tie, "_kimi_tie_weights_shim", False):
-                kimi_cls.tie_weights = _drop_tie_weights_kwargs(own_tie)
+        _shim_tie_weights(module, vlm_class)
         return True
 
     # The dynamic-module loader names the module like

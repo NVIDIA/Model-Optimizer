@@ -21,8 +21,11 @@ stub the dynamic-module loader with a stand-in remote module. Every process-wide
 after each test.
 """
 
+import contextlib
 import copy
 import importlib
+import json
+import shutil
 import sys
 import types
 from types import SimpleNamespace
@@ -41,8 +44,15 @@ import transformers.core_model_loading as cml
 import transformers.dynamic_module_utils as dmu
 import transformers.modeling_utils as mu
 import transformers.utils.import_utils as import_utils
+from _test_utils.torch import kimi_vl_tiny_modeling
 from torch import nn
-from transformers import DeepseekV3Config, DeepseekV3ForCausalLM, PretrainedConfig
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    DeepseekV3Config,
+    DeepseekV3ForCausalLM,
+    PretrainedConfig,
+)
 
 from modelopt.torch.models import _onfly_decompress, _remote_code, get_spec
 from modelopt.torch.models.kimi_k25 import ep as kimi_k25
@@ -272,6 +282,7 @@ def test_only_an_expert_parallel_plan_patches_the_checkpoint_s_code(
         )
         assert plan.is_expert_parallel == (outcome == "expert-parallel")
     assert import_utils.is_torch_fx_available() is False  # importable on every plan
+    assert getattr(vars(remote.vlm)["tie_weights"], "_kimi_tie_weights_shim", False)  # buildable
     assert (remote.DeepseekV3ForCausalLM is remote.remote_lm) == (outcome != "expert-parallel")
     if outcome == "expert-parallel":
         assert type(config.text_config) is DeepseekV3Config
@@ -281,6 +292,34 @@ def test_only_an_expert_parallel_plan_patches_the_checkpoint_s_code(
     if outcome == "fsdp2":
         assert type(config.text_config) is _RemoteTextConfig
         assert config.text_config.base_model_ep_plan is None
+
+
+def test_the_build_step_lets_the_checkpoint_s_own_vlm_build_on_this_transformers(
+    monkeypatch, tmp_path
+):
+    """The plan decision builds the checkpoint's own code on the meta device before ``prepare``
+    runs, and Kimi-VL's VLM class has a ``tie_weights`` that takes none of the keyword arguments
+    transformers' ``post_init`` passes it. ``make_buildable`` adapts it, and swaps nothing: the
+    module still builds the language model from its own ``DeepseekV3ForCausalLM``."""
+    for module_name, name in COMPAT_SYMBOLS:
+        with contextlib.suppress(ImportError):
+            _restore(monkeypatch, importlib.import_module(module_name), name)
+    monkeypatch.setattr(dmu, "get_cached_module_file", dmu.get_cached_module_file)
+    shutil.copy(kimi_vl_tiny_modeling.__file__, tmp_path / "modeling_kimi_vl.py")
+    remote = "modeling_kimi_vl.KimiVLForConditionalGeneration"
+    auto_map = {"AutoConfig": "modeling_kimi_vl.KimiVLConfig", "AutoModelForCausalLM": remote}
+    text = {"model_type": "deepseek_v3", "hidden_size": 16, "num_hidden_layers": 1}
+    stored = {"model_type": "kimi_vl", "auto_map": auto_map, "text_config": text}
+    (tmp_path / "config.json").write_text(json.dumps(stored))
+    config = AutoConfig.from_pretrained(tmp_path, trust_remote_code=True)
+
+    kimi_vl.make_buildable(config, ckpt_path=str(tmp_path), trust_remote_code=True)
+    model = model_load_utils.build_meta_causal_lm(
+        str(tmp_path), True, None, copy.deepcopy(config), auto_class=AutoModelForCausalLM
+    )
+
+    assert type(model).tie_weights._kimi_tie_weights_shim
+    assert sys.modules[type(model).__module__].DeepseekV3ForCausalLM is DeepseekV3ForCausalLM
 
 
 @_BOTH_ADAPTERS
