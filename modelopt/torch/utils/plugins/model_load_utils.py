@@ -1604,6 +1604,47 @@ def resolve_distribution_plan(
     return plan, hf_config
 
 
+def _refuse_unquantizable_experts(expert_modules) -> None:
+    """Refuse routed experts that expert-parallel PTQ would quantize wrong.
+
+    It quantizes the routed experts as they are, through the grouped GEMM of their ``torch_a2a``
+    forward (as for DeepSeek, GLM and MiniMax). Experts stored transposed, ``(num_experts, in_dim,
+    out_dim)`` like GPT-OSS's, that would leave unquantized. Experts ModelOpt quantizes through a
+    wrapper of their own, like Llama4's, ``mtq.quantize`` would convert to it, and its forward drops
+    the process group the all-to-all transport passes in. The generic fused-experts wrapper is no
+    bar: it quantizes through the grouped GEMM, and ``mtq.quantize`` registers it, for the whole
+    process, for every fused-experts class it meets, so a second load of the same class sees it. A
+    fused-experts wrapper that quantizes on the eager forward only, like FP8's, is refused: the
+    transport runs the grouped GEMM.
+    """
+    # Imported here: the HF quantization plugin loads under import_plugin, so a release it cannot
+    # load leaves this module's other loaders working; only this refusal needs it.
+    from modelopt.torch.quantization.plugins.huggingface import (
+        _eager_only_experts,
+        _transposed_experts,
+    )
+
+    # Read once per rule: a one-shot iterable would let the second rule pass on nothing.
+    expert_modules = tuple(expert_modules)
+    # Quantization's own rules: it leaves transposed experts unquantized, and its torch_a2a check
+    # refuses eager-only ones. This refuses both at load.
+    transposed = _transposed_experts(expert_modules)
+    if transposed:
+        raise NotImplementedError(
+            f"Expert-parallel PTQ cannot quantize {', '.join(transposed)}: these experts store their "
+            "weights transposed, which the grouped quantization leaves unquantized. Quantize the "
+            "model without expert parallelism."
+        )
+    wrapped = _eager_only_experts(expert_modules)
+    if wrapped:
+        raise NotImplementedError(
+            f"Expert-parallel PTQ cannot quantize {', '.join(wrapped)}: ModelOpt quantizes these "
+            "experts through a wrapper of their own, whose forward drops the expert-parallel "
+            "transport, or on their eager forward only, which the transport does not run. Quantize "
+            "the model without expert parallelism."
+        )
+
+
 def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_state) -> None:
     """Seed every module's ``_parallel_state`` for calibration's amax sync.
 
@@ -1936,6 +1977,71 @@ def load_and_prepare_ep(
                 f"{type(model).__name__} matches, so calibration would reduce the experts' amax over "
                 "ranks holding different experts. Quantize the model without expert parallelism."
             )
+        # Calibration tells routed experts by their names, and reduces any other module's weight amax
+        # over the expert-parallel group, which would merge the scales of different experts. Imported
+        # here, as fsdp2_wrap does: the quantization package sits above this module.
+        from modelopt.torch.quantization.model_calib import _is_routed_expert
+
+        unnamed = [name for name in expert_modules if not _is_routed_expert(name)]
+        if unnamed:
+            raise NotImplementedError(
+                f"Expert-parallel PTQ cannot calibrate {len(unnamed)} routed-expert container(s), e.g. "
+                f"{unnamed[0]}: calibration tells routed experts by an 'experts' in their names, so it "
+                "would merge their weight scales over ranks holding different experts. Quantize the "
+                "model without expert parallelism."
+            )
+        if not num_experts:
+            # The config names no count for the check before the load: the experts' weights carry it
+            # whole as DTensors (transformers 5.16 on; 5.16.0 splits an uneven count without an error).
+            # A count they do not show either is refused, as the distribution plan's decision refuses
+            # a count it cannot read.
+            counts = {
+                param.shape[0]
+                for module in expert_modules.values()
+                for param in module.parameters(recurse=False)
+                if isinstance(param, DTensor)
+            }
+            if not counts or any(count % ep_degree for count in counts):
+                raise ValueError(
+                    f"{plan!r}: ep_size={ep_degree} must divide the routed experts, which the all-to-all "
+                    "transport shares out equally over the expert-parallel ranks; the config names no "
+                    f"count, and the loaded experts' weights show {sorted(counts) or 'none'}."
+                )
+        # Each rank must hold its share of every container's experts, num_experts // ep_size: the share the
+        # all-to-all transport routes tokens by. A load that leaves them whole on every rank (a plan whose
+        # expert weights no style shards) or shards them over a mesh of another size would run without an
+        # error, computing tokens against other experts' weights and merging the scales of different
+        # experts. The check compares counts: it catches a wrong share, not a same-size mesh. A DTensor
+        # (transformers 5.16 on) shows the whole count and this rank's share; a plain tensor shows the
+        # share, checked against the config's count when it names one. A model whose containers show
+        # neither, as containers owning no weights themselves would, is refused too: an unchecked share
+        # passes as a correct one. The check reads the containers' weights together, so it relies on a
+        # model's routed experts sharing one layout, as every transformers MoE's do.
+        # Every rank refuses alike, whichever ranks hold a wrong share: the guard tells every rank.
+        held = [
+            (param.shape[0], param.to_local().shape[0])
+            if isinstance(param, DTensor)
+            else (num_experts, param.shape[0])
+            for module in expert_modules.values()
+            for param in module.parameters(recurse=False)
+            if isinstance(param, DTensor) or num_experts
+        ]
+        if not held:
+            raise RuntimeError(
+                f"{plan!r}: no routed-expert weight shows how its experts are shared out over the "
+                "expert-parallel ranks, so the all-to-all transport's expert-to-rank mapping cannot "
+                "be checked. Quantize the model without expert parallelism."
+            )
+        wrong = sorted({(whole, share) for whole, share in held if share * ep_degree != whole})
+        if wrong:
+            whole, share = wrong[0]
+            raise RuntimeError(
+                f"{plan!r}: this rank holds {share} of a routed-expert container's {whole} experts, "
+                f"not {whole // ep_degree}: they are not sharded over this rank's expert-parallel "
+                "group, so the all-to-all transport would send tokens to ranks without their "
+                "experts, and calibration would merge the scales of different experts."
+            )
+        _refuse_unquantizable_experts(expert_modules.values())
 
     # Each module's ParallelState for calibration's amax sync: dense modules reduce over the whole world;
     # routed experts reduce over their expert-data-parallel replicas, and share one input amax across the
