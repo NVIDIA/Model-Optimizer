@@ -88,16 +88,17 @@ below, tell the user and offer to address it before pushing; do not push as-is.
 
 ## Sizing and splitting PRs
 
-- **Keep each PR that goes up for review under ~500 added lines of source.**
-  Large PRs stall in review; exceed the budget only when the change genuinely
-  cannot be split — a mechanical rename, generated files, or a self-contained
-  drop such as a new example or a new model/backend that has no working
-  intermediate state. Deletions, tests, and docs don't count; check the
-  insertions from `git diff --shortstat <base>...HEAD -- . ':!tests' ':!docs'`
-  before opening.
-- **Propose the split before opening an oversized PR.** When the work in flight
-  is already over budget, offer a series of smaller PRs and, once the user
-  agrees, do the split — don't open the big one and ask afterwards.
+- **Aim for a PR a reviewer can hold in their head.** A few hundred added lines
+  of source is typical, and ~500 is a rough guide, not a limit. It prompts a
+  question: is there a seam — a file, directory, or module that could land first
+  and stand alone with its tests? Split when there is one. Don't split a
+  cohesive change just to hit a number, and don't pad a PR to stay under it.
+  Deletions, tests, and docs don't count; for a rough count run
+  `git diff --shortstat <base>...HEAD -- . ':!tests' ':!docs'`.
+- **When a PR is well past the guide and has an obvious seam, propose the split
+  before opening it.** Offer a series of smaller PRs and, once the user agrees,
+  do the split — don't open the big one and ask afterwards. With no seam, say in
+  the PR description why it is a single unit.
 - **Split on structure first, features second.** Look for a file, directory, or
   module boundary that carves the change into independent pieces. Only when no
   such boundary exists, split by feature: land the enabling refactor or
