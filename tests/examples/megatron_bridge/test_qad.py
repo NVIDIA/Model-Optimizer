@@ -34,6 +34,7 @@ from _test_utils.torch.megatron.modelopt_state import (
 from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_5_moe_vl_dir,
     create_tiny_qwen3_dir,
+    create_tiny_qwen3_moe_dir,
 )
 from torch.distributed.checkpoint import FileSystemReader
 
@@ -302,3 +303,76 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
         state = torch.load(fakequant_path / "quantizer_state.pth", weights_only=True)
         assert any(name.endswith("k_bmm_quantizer") for name in recipe["quantizers"])
         assert {key.rpartition(".")[0] for key in state} <= recipe["quantizers"].keys()
+
+
+@pytest.mark.timeout(720)
+def test_qad_train_moe_expert_fc_only(tmp_path: Path, num_gpus):
+    """--train_moe_expert_fc_only survives the QAD restore: only the expert FC weights train.
+
+    The freeze hook runs before the quantized student is restored (--student_megatron_path), so
+    this checks the restore leaves every other parameter frozen.
+    """
+    # head_dim=8 so TE has a fused-attention backend on the CI runner (see test_distill.py).
+    hf_model_path = create_tiny_qwen3_moe_dir(tmp_path, with_tokenizer=True, head_dim=8)
+    quantized_megatron_path = tmp_path / "quantized_megatron"
+    distill_output_dir = tmp_path / "qad_output"
+    # A local calibration set keeps the test independent of dataset downloads on the GPU node.
+    calib_path = tmp_path / "calibration.jsonl"
+    calib_path.write_text(
+        "\n".join(
+            json.dumps({"text": f"Sample {i}: " + "The quick brown fox. " * 8}) for i in range(8)
+        ),
+        encoding="utf-8",
+    )
+    quantize_cmd = extend_cmd_parts(
+        ["torchrun", f"--nproc_per_node={num_gpus}", "quantize.py", "--skip_generate"],
+        hf_model_name_or_path=hf_model_path,
+        recipe="general/ptq/fp8_default-kv_fp8",
+        tp_size=num_gpus,
+        pp_size=1,
+        calib_dataset_name=str(calib_path),
+        calib_num_samples=8,
+        calib_batch_size=2,
+        seq_length=16,
+        export_megatron_path=quantized_megatron_path,
+    )
+    run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)
+
+    distill_cmd = extend_cmd_parts(
+        [
+            "torchrun",
+            f"--nproc_per_node={num_gpus}",
+            "distill.py",
+            "--use_mock_data",
+            "--train_moe_expert_fc_only",
+        ],
+        student_hf_path=hf_model_path,
+        student_megatron_path=quantized_megatron_path,
+        teacher_hf_path=hf_model_path,
+        output_dir=distill_output_dir,
+        tp_size=num_gpus,
+        pp_size=1,
+        seq_length=16,
+        mbs=1,
+        gbs=4,
+        moe_aux_loss_coeff=0,
+        train_iters=3,
+        lr_warmup_iters=1,
+        eval_interval=3,
+        eval_iters=1,
+        save_interval=1,
+        log_interval=1,
+    )
+    run_example_command(distill_cmd, example_path="megatron_bridge", setup_free_port=True)
+
+    first, last = (
+        _load_checkpoint_tensors(distill_output_dir / "checkpoints" / f"iter_{i:07d}")
+        for i in (1, 3)
+    )
+    assert first.keys() == last.keys()
+    # The helper keeps keys like ``chained_0.optimizer...``, whose state changes on every step.
+    trained = {n for n in first if "optimizer" not in n and not torch.equal(first[n], last[n])}
+    assert any(".mlp.experts." in n for n in trained), "no expert weight trained"
+    # The final norm is the one dense parameter that stays trainable.
+    stray = {n for n in trained if ".mlp.experts." not in n and "final_layernorm" not in n}
+    assert not stray, f"non-expert tensors changed in expert-only QAD: {sorted(stray)[:5]}"
