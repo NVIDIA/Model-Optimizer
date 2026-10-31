@@ -61,6 +61,7 @@ from transformers.core_model_loading import (
     WeightRenaming,
 )
 
+from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
 from modelopt.torch.models import _onfly_decompress as onfly
 
 PACKED = ("weight_packed", "weight_scale", "weight_shape")  # what pack-quantized stores per weight
@@ -261,6 +262,8 @@ def test_integer_checkpoint_tensors_keep_their_dtype_on_load(tmp_path):
     save_file({"packed": PACKED_INT32}, str(tmp_path / "packed.safetensors"))
     onfly._install_keep_int_native()
     assert _read(tmp_path / "packed.safetensors").dtype == torch.bfloat16
+    # Outside a decompressing load the hook looks at nothing it is handed.
+    cml.spawn_materialize(None, object(), "cpu", torch.bfloat16)
     onfly._LOAD["decompressing"] = True
 
     kept = _read(tmp_path / "packed.safetensors")
@@ -985,8 +988,6 @@ def test_a_compressed_checkpoint_loads_exactly_and_saves_under_its_own_names(tmp
         minversion="0.16",
         reason="needs compressed-tensors (CI's unit session installs it)",
     )
-    from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
-
     config, dense = _compressed_mixtral(tmp_path, fmt)
     onfly.install_onfly_decompress(config)
     del config.quantization_config  # as the expert-parallel load does: no quantizer competes
