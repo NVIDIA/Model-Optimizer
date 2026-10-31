@@ -276,11 +276,11 @@ def _install_keep_int_native():
 
     # Any other argument passes through, positionally or by keyword: a release may add some.
     def spawn_materialize(thread_pool, tensor, device=None, dtype=None, *args, **kwargs):
-        # A safetensors slice is judged by its stored dtype, without reading it.
-        stored = tensor.get_dtype() if hasattr(tensor, "get_dtype") else None
-        floats = stored.startswith(("F", "BF")) if stored else tensor.is_floating_point()
-        if _LOAD["decompressing"] and dtype is not None and dtype.is_floating_point and not floats:
-            dtype = None  # keep packed/shape/zero-point/g_idx integers native
+        if _LOAD["decompressing"] and dtype is not None and dtype.is_floating_point:
+            # A safetensors slice is judged by its stored dtype, without reading it.
+            stored = tensor.get_dtype() if hasattr(tensor, "get_dtype") else None
+            if not (stored.startswith(("F", "BF")) if stored else tensor.is_floating_point()):
+                dtype = None  # keep packed/shape/zero-point/g_idx integers native
         return orig(thread_pool, tensor, device, dtype, *args, **kwargs)
 
     setattr(spawn_materialize, "_onfly_patched", True)
