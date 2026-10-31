@@ -873,8 +873,7 @@ def _reinstall_a2a_forwards(model, ep_mesh) -> int:
             continue
         # install_forward stores a plain function as the instance's forward, and quantizer
         # insertion (bind_forward_method) a bound method over it: only the latter lost its wrapper.
-        current = vars(mod).get("forward")
-        if current is not None and not isinstance(current, types.MethodType):
+        if not isinstance(vars(mod).get("forward"), types.MethodType):
             continue
         style.install_forward(mod, ep_mesh)
         n += 1
