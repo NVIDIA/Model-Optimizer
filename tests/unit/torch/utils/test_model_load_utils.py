@@ -674,7 +674,7 @@ def test_a_run_without_expert_parallelism_needs_no_spec(
 # The refusals of an MoE left whole on every rank, by whether its spec allows expert parallelism.
 _CAN_BE_EP = "can be expert-parallel, but the plan resolved .* divid(?:es|ing) both its {} experts"
 _NO_EP_YET = (
-    "cannot be quantized expert-parallel yet, and the plan replicates .* FSDP2 .* if the "
+    "cannot be quantized expert-parallel yet: .* The plan replicates .* FSDP2 .* if the "
     "FSDP2 load supports the checkpoint, which takes .*, load it in a single process, or "
     r"replicate .*DistributionPlan\(2, 1, 'replicate'\)"
 )
