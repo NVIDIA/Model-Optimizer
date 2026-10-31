@@ -2632,13 +2632,13 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
     [
         *(
             (
-                SimpleNamespace(quantization_config={"quant_method": method}),
+                SimpleNamespace(model_type=_NO_SPEC, quantization_config={"quant_method": method}),
                 NotImplementedError,
                 f"cannot dequantize a '{method}'",
             )
             for method in ("gptq", "modelopt", "compressed-tensors", "mxfp4")
         ),
-        (SimpleNamespace(), ValueError, "declare base_model_ep_plan"),
+        (SimpleNamespace(model_type=_NO_SPEC), ValueError, "declare base_model_ep_plan"),
         (
             SimpleNamespace(
                 model_type=_NO_SPEC, base_model_ep_plan={"layers.*.self_attn.q_proj": "colwise"}
@@ -2666,7 +2666,8 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
             r"styles layers\.\*\.mlp\.experts\.down_proj by a style this load drops",
         ),
         (
-            SimpleNamespace(model_type="gpt_oss", base_model_ep_plan=_EP_PLAN),
+            # An MXFP4 checkpoint with no plan, refused by its spec before either.
+            SimpleNamespace(model_type="gpt_oss", quantization_config={"quant_method": "mxfp4"}),
             NotImplementedError,
             "gpt_oss cannot be quantized expert-parallel yet: .* cannot write that layout",
         ),
@@ -2692,8 +2693,9 @@ def test_a_config_the_load_cannot_take_is_refused_before_anything_loads(
     that leaves the experts whole on every rank: one naming no routed experts, or none of
     whose entries shards their weights by grouped_gemm, the only expert-weight style the load
     shards by, or one that styles some of their weights otherwise. So is a model whose spec rules
-    expert parallelism out (GPT-OSS's), as load_pretrained refuses it: a plan handed to this load
-    meets that refusal here. The load refuses each before it reads anything."""
+    expert parallelism out (GPT-OSS's), as load_pretrained refuses it, before its checkpoint's
+    format or plan is looked at: a plan handed to this load meets that refusal here. The load
+    refuses each before it reads anything."""
     with pytest.raises(error, match=match):
         load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
     assert ep_world_of_two == []

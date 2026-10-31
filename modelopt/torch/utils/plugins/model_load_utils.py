@@ -2004,8 +2004,8 @@ def _ep_load_refusal(hf_config, ep_plan: dict[str, str]) -> Exception | None:
 
     A checkpoint format the load does not take (``NotImplementedError``) and the plan's styles
     (``ValueError``); the rest shows only as the experts load. A model spec ruling expert
-    parallelism out, or the transformers release it needs, is not asked here: the plan decision asks
-    the spec first (``_spec_refuses_ep``).
+    parallelism out, or the transformers release it needs, is not asked here: the plan decision and
+    the load ask the spec first (:func:`~modelopt.torch.utils.moe.check_distributed_support`).
     """
     if (method := _ckpt_quant_method(hf_config)) not in _EP_SOURCE_FORMATS:
         return NotImplementedError(
@@ -2165,6 +2165,10 @@ def load_and_prepare_ep(
             if attn_implementation is not None:
                 config_kwargs["attn_implementation"] = attn_implementation
             hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
+        # A model spec ruling expert parallelism out, or stating a later transformers, refuses it
+        # first, as load_pretrained does, for an EP degree asked for or a plan handed in: no other
+        # checkpoint of the model, nor a plan of its own, would load.
+        check_distributed_support(hf_config.model_type)
         quant_method = _ckpt_quant_method(hf_config)
         if quant_method not in _EP_SOURCE_FORMATS:
             # transformers' own quantizer would load it as stored, for PTQ to treat as plain weights.
@@ -2182,10 +2186,7 @@ def load_and_prepare_ep(
         ep_plan = dict(getattr(ep_cfg, "base_model_ep_plan", None) or {})
         if not ep_plan:
             raise ValueError("expert-parallel PTQ requires the model to declare base_model_ep_plan")
-        # What the plan decision refuses or gives way for, which an EP degree asked for, or a plan
-        # handed in, meets here: a model spec ruling expert parallelism out or stating a later
-        # transformers (refused as load_pretrained refuses it), and the plan's styles.
-        check_distributed_support(hf_config.model_type)
+        # The plan's styles, which the plan decision gives way for too.
         if (refusal := _ep_load_refusal(hf_config, ep_plan)) is not None:
             raise refusal
         # The all-to-all transport needs every rank to hold as many experts, counted as the plan's
