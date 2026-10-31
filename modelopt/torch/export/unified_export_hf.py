@@ -2091,9 +2091,9 @@ def export_hf_checkpoint(
             _qlora = kwargs.get("is_modelopt_qlora", False)
             # The writer builds its own name-based tied-weight map, so this one is not handed down.
             _dtype, _, hf_quant_config = _prepare_model_for_export(model, dtype, _qlora)
-            # main split preparation from packing, so pack explicitly. keep_fused_experts leaves
-            # MoE experts fused + sharded through the fold, so each rank folds only its LOCAL
-            # experts; the writer splits them after consolidation.
+            # Preparing the model does not pack its weights, so pack them here. keep_fused_experts
+            # leaves the MoE experts fused and sharded through the fold, so each rank folds only
+            # its local experts; the writer then splits each rank's experts into per-expert tensors.
             pack_quantized_weights(model, _dtype, _qlora, keep_fused_experts=True)
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
