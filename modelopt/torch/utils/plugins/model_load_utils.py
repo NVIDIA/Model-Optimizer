@@ -2052,7 +2052,7 @@ def _declared_ep_plan(ckpt_dir: str, hf_config, ep_cfg):
         "from it writes none"
     )
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             source = json.load(f)
     except (OSError, ValueError) as e:
         warnings.warn(f"Cannot read {path} ({e}), {keeps_none}.")
