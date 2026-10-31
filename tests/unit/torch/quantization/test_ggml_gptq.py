@@ -302,7 +302,8 @@ def test_gptq_drops_each_fused_experts_weights_before_the_next_window(monkeypatc
     window = model_calib.enable_weight_access_and_writeback
 
     def recording_update_expert_weights(work, *args):
-        updated.extend(weakref.ref(weight) for _, weight in work)
+        # Fused experts' slices; a linear's weight is its module's own parameter.
+        updated.extend(weakref.ref(w) for _, w in work if not isinstance(w, torch.nn.Parameter))
         update_expert_weights(work, *args)
 
     @contextlib.contextmanager
