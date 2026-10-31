@@ -642,10 +642,15 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
 
 
 @needs_qwen3_moe_ep_plan
-def test_an_ep_capable_moe_may_be_fsdp2_sharded_instead(run_as, serve, monkeypatch, tmp_path):
-    """Asked for no expert parallelism but for dense sharding, the MoE is sharded whole by FSDP2,
-    which is not the waste of a replica on every rank."""
-    monkeypatch.setenv("MODELOPT_EP_DEGREE", "1")
+@pytest.mark.parametrize("ep_degree", [None, "1"], ids=["auto", "set-to-1"])
+def test_an_ep_capable_moe_may_be_fsdp2_sharded_instead(
+    run_as, serve, monkeypatch, tmp_path, ep_degree
+):
+    """Asked for dense sharding, the MoE is sharded whole by FSDP2, which is not the waste of a
+    replica on every rank: an EP degree left to the decision gives way, as the expert-parallel
+    load replicates the dense part."""
+    if ep_degree is not None:
+        monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
     run_as(2)
     serve(_qwen3_moe(num_experts=8))
