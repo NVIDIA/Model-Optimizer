@@ -507,6 +507,13 @@ def _refuse_sharded_load_options(
             f"a layout, and by rank 0's GPU memory the model does not fit one GPU, so the {route} "
             f"load shards it. To load it whole on every rank: {_whole_instead(decided)}."
         )
+    if getattr(AutoModelForCausalLM.from_pretrained, "_modelopt_init_quantized_weights", False):
+        # Its from_pretrained quantizes and compresses the model; a sharded load never calls it.
+        raise NotImplementedError(
+            f"The {route} load builds the model without from_pretrained, so it would skip "
+            "init_quantized_weights' quantization; load the model whole on every rank: "
+            f"{_whole_instead(decided)}."
+        )
     if auto_class not in (None, AutoModelForCausalLM):
         name = getattr(auto_class, "__name__", repr(auto_class))
         raise NotImplementedError(
