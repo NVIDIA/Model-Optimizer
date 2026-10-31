@@ -27,6 +27,7 @@ import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
@@ -55,6 +56,7 @@ from transformers import (
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
 from modelopt.torch.models import _onfly_decompress
+from modelopt.torch.models._kimi import _drop_tie_weights_kwargs
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils import moe
 from modelopt.torch.utils.distributed import (
@@ -748,8 +750,12 @@ def _save_tiny_kimi_k3(ckpt_dir):
     compressor, scheme, stored_as, _ = _onfly_decompress._read_compression(
         SimpleNamespace(quantization_config=KIMI_K3_MXFP4)
     )
-    with torch.device("meta"):
-        shapes = kimi_k3_tiny_modeling.KimiK3ForConditionalGeneration(
+    # Its tie_weights takes no keyword arguments, as Kimi-K3's own does, and transformers passes some
+    # at construction: built with the adapter's build-step shim, kept to this build.
+    vlm = kimi_k3_tiny_modeling.KimiK3ForConditionalGeneration
+    shim = _drop_tie_weights_kwargs(vlm.tie_weights)
+    with torch.device("meta"), mock.patch.object(vlm, "tie_weights", shim):
+        shapes = vlm(
             kimi_k3_tiny_modeling.KimiK3Config(text_config=dict(KIMI_K3_DIMS))
         ).state_dict()
     gen = torch.Generator().manual_seed(0)
