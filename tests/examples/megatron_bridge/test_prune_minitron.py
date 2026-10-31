@@ -14,8 +14,12 @@
 # limitations under the License.
 """Tests for prune_minitron.py and distill.py scripts."""
 
+import json
+from pathlib import Path
+
 import pytest
 import torch
+from _test_utils.examples.readme import readme_command
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import (
     create_tiny_deepseek_v3_dir,
@@ -28,7 +32,7 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 
 @pytest.mark.parametrize(
-    ("create_teacher", "expected_pruned_config"),
+    ("create_teacher", "expected_pruned_config", "readme_snippet"),
     [
         # Dense Qwen3 LM.
         pytest.param(
@@ -36,7 +40,20 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
                 tmp_path, with_tokenizer=True, return_model=True, num_hidden_layers=num_gpus
             ),
             {},
+            "bridge-prune-params",
             id="qwen3",
+        ),
+        pytest.param(
+            lambda tmp_path, num_gpus: create_tiny_qwen3_dir(
+                tmp_path,
+                with_tokenizer=True,
+                return_model=True,
+                num_hidden_layers=num_gpus,
+                intermediate_size=128,
+            ),
+            {"intermediate_size": 64},
+            "bridge-prune-manual",
+            id="readme-manual",
         ),
         # NemotronH (nemotron-3-nano): Mamba + attention + MoE hybrid.
         # MTP heads are enabled so the run covers dropping them during calibration.
@@ -49,6 +66,7 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
                 mtp_hybrid_override_pattern="*E",
             ),
             {"n_shared_experts": 1},
+            None,
             id="nemotron_h",
         ),
         # DeepSeek-V3: MLA (Q-LoRA) + MoE sizing the shared expert as
@@ -66,12 +84,13 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
                 topk_group=1,
             ),
             {"n_shared_experts": 1},
+            None,
             id="deepseek_v3",
         ),
     ],
 )
 def test_prune_minitron(
-    tmp_path, num_gpus, create_teacher, expected_pruned_config, fake_hub_checkpoint
+    tmp_path, num_gpus, create_teacher, expected_pruned_config, readme_snippet, fake_hub_checkpoint
 ):
     """The teacher is passed as a Hub ID (see ``fake_hub_checkpoint``): it is pruned from its local
     copy, and the HF output carries that copy's non-model files."""
@@ -81,28 +100,45 @@ def test_prune_minitron(
     prune_target_params = int(teacher_params * 0.8)
 
     pruned_path = tmp_path / "pruned"
-    prune_command_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py"],
-        hf_model_name_or_path=teacher_arg,
-        output_hf_path=pruned_path,
-        pp_size=num_gpus,
-        calib_dataset_name="cnn_dailymail",
-        calib_num_samples=8,
-        seq_length=16,
-        prune_target_params=prune_target_params,
-        prune_score_func="mmlu_1pct_bs32",
-        score_lower_bound=0.0,  # exercise the score-gate path without coupling to the model's acc
-        ss_channel_divisor=4,
-        hparams_to_skip="num_attention_heads",
-        top_k=1,
-    )
+    options = {
+        "hf_model_name_or_path": teacher_arg,
+        "output_hf_path": pruned_path,
+        "pp_size": num_gpus,
+        "calib_dataset_name": "cnn_dailymail",
+        "calib_num_samples": 8,
+        "seq_length": 16,
+    }
+    if readme_snippet == "bridge-prune-manual":
+        options["prune_export_config"] = json.dumps({"ffn_hidden_size": 64})
+    else:
+        options.update(
+            prune_target_params=prune_target_params,
+            prune_score_func="mmlu_1pct_bs32",
+            score_lower_bound=0.0,  # exercise the score gate without coupling to model accuracy
+            ss_channel_divisor=4,
+            top_k=1,
+        )
+    if readme_snippet is not None:
+        prune_command_parts = readme_command(
+            Path(__file__).resolve().parents[3] / "examples/megatron_bridge/README.md",
+            readme_snippet,
+            "prune_minitron.py",
+            overrides={"nproc_per_node": num_gpus, **options},
+        )
+    else:
+        prune_command_parts = extend_cmd_parts(
+            ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py"],
+            **options,
+            hparams_to_skip="num_attention_heads",
+        )
     run_example_command(prune_command_parts, example_path="megatron_bridge")
 
     assert (pruned_path / "config.json").exists()
     if fake_hub_checkpoint.active:
         assert (pruned_path / fake_hub_checkpoint.marker).exists()
     pruned_model = AutoModelForCausalLM.from_pretrained(pruned_path)
-    assert sum(p.numel() for p in pruned_model.parameters()) <= prune_target_params
+    if readme_snippet != "bridge-prune-manual":
+        assert sum(p.numel() for p in pruned_model.parameters()) <= prune_target_params
     for field, expected in expected_pruned_config.items():
         assert getattr(pruned_model.config, field) == expected
 

@@ -94,6 +94,18 @@ jobs:
             echo "PIP_CONSTRAINT=/tmp/pip-constraints.txt" >> "$GITHUB_ENV"
           fi
 
+          # Preserve the QAT container's matching Torch/FlashAttention binaries.
+          if [[ "${{ inputs.example }}" == "llm_qat" ]]; then
+            python3 -c 'import torch; import flash_attn_2_cuda'
+
+            export PIP_CONSTRAINT="$RUNNER_TEMP/qat-constraints.txt"
+            python3 -c '
+          from importlib.metadata import version
+          for name in ("torch", "flash-attn"):
+              print(f"{name}=={version(name)}")
+          ' > "$PIP_CONSTRAINT"
+          fi
+
           # Use `python3 -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
           # Editable install so example scripts launched as subprocesses resolve modelopt to the same source path as the test process
           python3 -m pip install -e ".${{ inputs.pip_install_extras }}"

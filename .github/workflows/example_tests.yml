@@ -76,6 +76,8 @@ jobs:
               - examples/dataset/** # data prep for llm_qat and speculative_decoding
               - examples/hf_ptq/** # the speculative_decoding test drives hf_ptq
               - "!**/*.{md,rst,png,ipynb}"
+            torch_docs:
+              - examples/llm_qat/README.md
             vllm:
               - "{examples,tests/examples}/vllm_serve/**"
               - examples/hf_ptq/convert_ggml_to_int8.py # tests/examples/vllm_serve serves its output
@@ -87,6 +89,8 @@ jobs:
             megatron:
               - "{examples,tests/examples}/megatron_bridge/**"
               - "!**/*.{md,rst,png,ipynb}"
+            megatron_docs:
+              - examples/megatron_bridge/README.md
             diffusers:
               - "{examples,tests/examples}/diffusers/**"
               - "!**/*.{md,rst,png,ipynb}"
@@ -101,10 +105,10 @@ jobs:
           # Stacked PRs (base is another PR's branch) skip GPU tests; only the bottom PR runs them.
           STACKED: ${{ steps.base.outputs.stacked }}
           COMMON: ${{ steps.changed.outputs.common_any_modified }}
-          TORCH: ${{ steps.changed.outputs.torch_any_modified }}
+          TORCH: ${{ steps.changed.outputs.torch_any_modified == 'true' || steps.changed.outputs.torch_docs_any_modified == 'true' }}
           VLLM: ${{ steps.changed.outputs.vllm_any_modified }}
           TRTLLM: ${{ steps.changed.outputs.trtllm_any_modified }}
-          MEGATRON: ${{ steps.changed.outputs.megatron_any_modified }}
+          MEGATRON: ${{ steps.changed.outputs.megatron_any_modified == 'true' || steps.changed.outputs.megatron_docs_any_modified == 'true' }}
           DIFFUSERS: ${{ steps.changed.outputs.diffusers_any_modified }}
           ONNX: ${{ steps.changed.outputs.onnx_any_modified }}
         run: |
