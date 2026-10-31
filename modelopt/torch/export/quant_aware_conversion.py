@@ -176,7 +176,18 @@ def _apply_split_rule(state_dict: dict[str, torch.Tensor], rule: SplitRule) -> N
     for module, leaf, key in fused_keys:
         tensor = state_dict.pop(key)
         # A 3-D expert tensor here means stacked experts (MergeModulelist) — out of scope.
-        if leaf == ".weight" and tensor.dim() >= 3:
+        # Unquantized dense 3-D weights (e.g. GLM-5.3 KDA depthwise conv1d [C, 1, K], fused
+        # from q/k/v convs) chunk cleanly along the output dim, so only reject experts or
+        # quantized modules.
+        fused_module = key[: -len(leaf)]
+        if (
+            leaf == ".weight"
+            and tensor.dim() >= 3
+            and (
+                ".experts" in fused_module
+                or any(fused_module + s in state_dict for s in _QUANT_STATE_SUFFIXES)
+            )
+        ):
             raise QuantConversionUnsupportedError(
                 f"stacked 3-D expert tensor '{key}' (ndim={tensor.dim()}) is not supported; "
                 "un-stacking experts + their scales is a follow-up"
