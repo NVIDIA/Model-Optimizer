@@ -121,6 +121,51 @@ def test_expert_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, i
             )
 
 
+@pytest.mark.parametrize("inference_mode", [False, True])
+def test_linear_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, inference_mode):
+    """GGML updates of plain linears, a sequential MoE's experts among them, spread over two GPUs
+    as fused experts' do, and give the one-GPU weights and codes, pinned at home."""
+    get_cuda_ext_ggml(raise_if_failed=True)  # updates move only with the CUDA encoders
+    width = 512  # two GGML groups per input, so the Hessian carries the first group's error
+    shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"},
+            },
+        ],
+        "algorithm": {"method": "gptq", "block_size": 256, "perc_damp": 0.3},
+    }
+    devices = []
+    update_weights = GGMLGPTQHelper.update_weights
+
+    def recording_update_weights(self, *args, device=None, **kwargs):
+        devices.append(device)
+        return update_weights(self, *args, device=device, **kwargs)
+
+    monkeypatch.setattr(GGMLGPTQHelper, "update_weights", recording_update_weights)
+    models = []
+    with torch.inference_mode(inference_mode):
+        inputs = torch.randn(96, width, device="cuda")
+        for gpus in ([0], [0, 1]):
+            monkeypatch.setattr(calib_utils, "get_process_gpus", lambda gpus=gpus: gpus)
+            torch.manual_seed(RAND_SEED)
+            model = torch.nn.Sequential(
+                *(torch.nn.Linear(width, width, bias=False) for _ in range(4))
+            ).cuda()
+            mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+            models.append(model)
+
+    assert torch.device("cuda", 1) in devices
+    for one_gpu, two_gpus in zip(*models):
+        assert torch.equal(one_gpu.weight, two_gpus.weight)
+        codes = pinned_packed_weight(two_gpus.weight_quantizer, "iq2_xxs")
+        assert codes.device == two_gpus.weight.device
+        assert torch.equal(pinned_packed_weight(one_gpu.weight_quantizer, "iq2_xxs"), codes)
+
+
 @pytest.mark.parametrize(
     ("num_bits", "shape", "cuda_extension"),
     [

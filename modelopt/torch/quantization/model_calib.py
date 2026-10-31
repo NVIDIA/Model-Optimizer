@@ -2698,7 +2698,21 @@ def gptq(
         handle.sync_hessian_across_dp()
 
     print_rank_0("Updating weights using GPTQ algorithm...")
-    for handle in gptq_handles.values():
+    # Linears whose weights are readable as they are, such as a layerwise run's materialized
+    # layer, whose sequential-MoE experts are each a linear, update spread over the GPUs as fused
+    # experts do below; the rest, tensor-parallel shards included, each open their weight window.
+    readable = {
+        name: handle
+        for name, handle in gptq_handles.items()
+        if not requires_weight_materialization(handle.module, model, names)
+        and not is_quantized_parallel_linear(handle.module)
+    }
+    update_expert_weights(
+        [(handle, handle.module.weight) for handle in readable.values()], block_size, perc_damp
+    )
+    for name, handle in gptq_handles.items():
+        if name in readable:
+            continue
         with enable_weight_access_and_writeback(handle.module, model, names):
             handle.update_weights(block_size, perc_damp)
         handle.free()
