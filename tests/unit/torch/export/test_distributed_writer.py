@@ -64,7 +64,7 @@ from modelopt.torch.export.unified_export_hf import (
     _export_transformers_checkpoint,
     export_hf_checkpoint,
 )
-from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
+from modelopt.torch.utils.distributed import DistributionPlan, ParallelState, set_distribution_plan
 
 _WRITER = "modelopt.torch.export.distributed_writer"
 
@@ -175,6 +175,51 @@ def _fsdp2_shard(model, mesh, wrap_root=True):
         fully_shard(model, mesh=mesh)
     set_distribution_plan(model, DistributionPlan(mesh.size(), dense="fsdp"))
     return model
+
+
+def test_an_expert_parallel_plan_needs_its_experts_expert_parallel_group(
+    gloo_world_of_one, tmp_path
+):
+    """Without the group the writer could not offset each EP rank's experts, and every rank would
+    write experts 0..n-1 over the others'."""
+    model = _load(_save(_llama_config(), tmp_path / "src"))
+    set_distribution_plan(model, DistributionPlan(2, ep_size=2))
+
+    with pytest.raises(RuntimeError, match="no routed expert carries its expert-parallel group"):
+        _write(model, tmp_path / "export")
+
+
+def _expert_parallel_groups_job(rank, world_size, tmp_dir):
+    for name, data_parallel_group, refused in (
+        # Left at its default, the data-parallel group is the whole world.
+        ("default-data-parallel-group", None, True),
+        # The plan's single replica leaves the experts' data-parallel group unused.
+        ("unused-data-parallel-group", -1, False),
+    ):
+        model = _load(tmp_dir / "src")
+        set_distribution_plan(model, DistributionPlan(world_size, ep_size=world_size))
+        model.model.layers[0].mlp._parallel_state = ParallelState(
+            data_parallel_group=data_parallel_group, expert_model_parallel_group=dist.group.WORLD
+        )
+        try:
+            with bounded_collectives():
+                _write(model, tmp_dir / name)
+        except RuntimeError as error:
+            raised = str(error)
+        else:
+            raised = "no error"
+        assert ("ep_size=2 and edp=1" in raised) if refused else raised == "no error", raised
+
+
+def test_an_expert_parallel_export_checks_its_experts_groups_against_the_plan(
+    cpu_dist_workers, tmp_path
+):
+    """Each rank's expert coordinates come from the routed experts' groups. Taken as the replica
+    index, a data-parallel group left at its default, the whole world, would leave every rank but
+    rank 0 out of the expert write with no error, so every rank refuses it; the plan's own groups
+    pass."""
+    _save(_llama_config(), tmp_path / "src")
+    cpu_dist_workers.run(_expert_parallel_groups_job, tmp_dir=tmp_path)
 
 
 # FP8 weights, with an FP8 KV cache in layer 0 and an NVFP4 one in layer 1: a mixed-precision KV
