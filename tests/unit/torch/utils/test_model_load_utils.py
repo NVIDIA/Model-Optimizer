@@ -602,15 +602,19 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
 
 
 @needs_qwen3_moe_ep_plan
+@pytest.mark.parametrize("ep_degree", [None, "1"], ids=["auto", "set-to-1"])
 @pytest.mark.parametrize("refused_by", ["its-plan", "its-format", "its-spec", "its-transformers"])
 def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
-    run_as, serve, monkeypatch, tmp_path, refused_by
+    run_as, serve, monkeypatch, tmp_path, refused_by, ep_degree
 ):
     """Left to the decision, an MoE the expert-parallel load would refuse -- by a plan that shards no
     expert weights through grouped_gemm, a checkpoint format it does not load, a model spec ruling
     it out (Llama-4's, GPT-OSS's) or a transformers below its floor -- is planned without expert
     parallelism rather than committed to a load that refuses it, for some reasons only after the
-    download. Nor is it refused for being left whole: it cannot be expert-parallel here."""
+    download. Nor is it refused for being left whole, whether the decision or the caller made its
+    EP degree 1: it cannot be expert-parallel here."""
+    if ep_degree is not None:
+        monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
     run_as(2)
     config = _qwen3_moe(num_experts=8)
     if refused_by == "its-plan":

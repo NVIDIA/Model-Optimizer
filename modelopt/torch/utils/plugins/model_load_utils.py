@@ -1617,17 +1617,19 @@ def _decide_distribution(
             f"{replicate} to load it without expert parallelism, whole on every rank."
         )
     chosen = ep_size == "auto"  # an EP degree no knob or argument set
-    loadable = True  # whether the expert-parallel load takes this model
+    # Why the expert-parallel load would refuse this MoE, or None, whatever EP degree is set: an MoE
+    # it refuses cannot be expert-parallel here, so is not refused below for being left whole.
+    refusal = _ep_load_refusal(hf_config, ep_plan) if experts else None
     if ep_size == "auto":
         ep_size = _choose_ep_degree(world_size, num_experts)
-        if ep_size > 1 and (refusal := _ep_load_refusal(hf_config, ep_plan)) is not None:
+        if ep_size > 1 and refusal is not None:
             # The expert-parallel load would refuse this model, for some reasons only after the
             # checkpoint's download: with nothing asking for expert parallelism, plan without it.
             print_rank_0(
                 f"{hf_config.model_type}: planned without expert parallelism, which its load "
                 f"would refuse: {refusal}"
             )
-            ep_size, loadable = 1, False
+            ep_size = 1
     elif ep_size > 1 and world_size % ep_size:
         raise ValueError(f"{knob}={ep_size} must divide the world size ({world_size}).")
     elif ep_size > 1 and (num_experts == 0 or num_experts % ep_size):
@@ -1666,7 +1668,7 @@ def _decide_distribution(
             f"{hf_config.model_type}: ep_size=1 and dense='replicate' as asked, so every rank "
             "holds the whole MoE."
         )
-    elif experts and loadable and ep_size == 1 and dense == "replicate":
+    elif experts and refusal is None and ep_size == 1 and dense == "replicate":
         # Name a way to shard the experts only where one exists: a count the config spells none of
         # the ways ModelOpt reads leaves no EP degree to name, as does one sharing no factor above 1
         # with the world size.
