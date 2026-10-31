@@ -1291,22 +1291,24 @@ def _loaded_in_step(*args, **kwargs):
     return _Loaded()
 
 
-def _one_rank_refused_job(rank, size, ckpt, refused_on_1, gpus_on_1, match):
+_FSDP2_PLAN = DistributionPlan(2, dense="fsdp")
+
+
+def _one_rank_refused_job(
+    rank, size, ckpt, refused_on_1, gpus_on_1, match, knobs_on_1=None, plan=_FSDP2_PLAN
+):
     refused = None
     gpus = size if rank == 0 else gpus_on_1  # what this rank's host shows it
     with (
         bounded_collectives(),
         pytest.MonkeyPatch.context() as cuda,
+        mock.patch.dict(os.environ, (knobs_on_1 or {}) if rank == 1 else {}),
         mock.patch.object(model_load_utils, "ensure_local_checkpoint", _fetched_in_step),
         mock.patch.object(model_load_utils, "parallel_load_and_prepare_fsdp2", _loaded_in_step),
     ):
         _pin_cuda(cuda, gpus)  # the pooled worker's own CUDA state is whatever an earlier job left
         try:  # not pytest.raises: its failure would end the pooled worker instead of the job
-            load_pretrained(
-                ckpt,
-                distribution=DistributionPlan(2, dense="fsdp"),
-                **(refused_on_1 if rank == 1 else {}),
-            )
+            load_pretrained(ckpt, distribution=plan, **(refused_on_1 if rank == 1 else {}))
         except Exception as error:
             refused = str(error)
     # Rank 1's refusal on both ranks, rather than rank 0 failing at the group's timeout.
@@ -1347,6 +1349,21 @@ def test_a_load_refused_on_one_rank_fails_every_rank(
         refused_on_1=refused_on_1,
         gpus_on_1=gpus_on_1,
         match=match,
+    )
+
+
+def test_a_knob_one_rank_cannot_parse_fails_every_rank(cpu_dist_workers, tmp_path):
+    """With no plan handed, rank 1 alone reads a malformed MODELOPT_EP_DEGREE: every rank raises it,
+    rather than leave rank 0 waiting in the plan decision's collectives."""
+    LlamaConfig(**_TINY).save_pretrained(tmp_path)
+    cpu_dist_workers.run(
+        _one_rank_refused_job,
+        ckpt=str(tmp_path),
+        refused_on_1={},
+        gpus_on_1=2,
+        match="MODELOPT_EP_DEGREE='eigth'",
+        knobs_on_1={"MODELOPT_EP_DEGREE": "eigth"},
+        plan=None,
     )
 
 

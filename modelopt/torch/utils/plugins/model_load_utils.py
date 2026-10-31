@@ -787,9 +787,14 @@ def load_pretrained(
         k: kwargs.pop(k) for k in ("token", "cache_dir", "local_files_only") if k in kwargs
     }
     revision = {"revision": kwargs.pop("revision")} if "revision" in kwargs else {}
+    decided = plan is None and dist.size() > 1
     # Each rank's arguments are its own, so each rank checks its own, and a refusal on one fails
     # every rank before the checkpoint is fetched.
     with _refused_together("load arguments", alone):
+        # No load here shards the routed experts yet: an EP degree left to the decision is 1, and
+        # one MODELOPT_EP_DEGREE asks for is refused. Parsed here, so a knob one rank cannot parse
+        # fails every rank rather than leave the others in the decision's collectives.
+        ep_size = 1 if decided and _ep_degree(None) == "auto" else None
         if kwargs.pop("output_loading_info", False):
             raise ValueError(
                 "load_pretrained returns the model alone and does not take "
@@ -839,17 +844,13 @@ def load_pretrained(
         ckpt_path = os.path.join(ckpt_path, subfolder)
     trust_remote_code = kwargs.get("trust_remote_code", False)
     hf_config = kwargs.get("hf_config")
-    decided = plan is None and dist.size() > 1
     if decided:
         plan, hf_config = resolve_distribution_plan(
             ckpt_path,
             config=config,
             auto_class=auto_class,
             trust_remote_code=trust_remote_code,
-            # No load here shards the routed experts yet: an EP degree left to the decision is 1,
-            # rather than a layout this function would refuse; one MODELOPT_EP_DEGREE asks for, as
-            # a plan handed in, is still refused.
-            ep_size=1 if _ep_degree(None) == "auto" else None,
+            ep_size=ep_size,
             **hub_options,
         )
         if _route(plan) is not None:
