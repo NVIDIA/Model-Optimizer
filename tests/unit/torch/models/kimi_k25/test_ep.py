@@ -108,8 +108,8 @@ def test_prepare_rebuilds_the_language_model_config_as_native_deepseek_v3(
     stale ``quantization_config``) with an EP plan for the fused experts, naming the experts the
     spec states for a run that skips prepare; the decompressor is installed for compressed-tensors
     experts only, while the text config it replaces still carries their scheme, and exactly for the
-    formats the spec states it decompresses, which the plan decision counts loadable before prepare
-    runs; the remote-code staging shim is left installed."""
+    formats the spec states it decompresses, which the plan decision, made before prepare runs, does
+    not hold against the expert-parallel load; the remote-code staging shim is left installed."""
     installs = []
     monkeypatch.setattr(
         _onfly_decompress,
