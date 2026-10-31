@@ -66,6 +66,7 @@ venv/
 .claude/settings.local.json
 .claude/agents/*
 !.claude/agents/modelopt-model-deployer.md
+!.claude/agents/modelopt-model-distiller.md
 !.claude/agents/modelopt-model-downloader.md
 !.claude/agents/modelopt-model-evaluator.md
 !.claude/agents/modelopt-model-performance-benchmarker.md
