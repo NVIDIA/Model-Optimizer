@@ -2258,7 +2258,7 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
         ),
         (
             SimpleNamespace(model_type="gpt_oss", base_model_ep_plan=_EP_PLAN),
-            ValueError,
+            NotImplementedError,
             "the expert-parallel export cannot write that layout",
         ),
     ],

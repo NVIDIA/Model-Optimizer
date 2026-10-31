@@ -1874,26 +1874,30 @@ def _ep_plan_refusal(ep_plan: dict[str, str]) -> str | None:
     return None
 
 
-def _ep_load_refusal(hf_config, ep_plan: dict[str, str]) -> str | None:
-    """Why the expert-parallel load refuses this model, as far as its config tells, or ``None``.
+def _ep_load_refusal(hf_config, ep_plan: dict[str, str]) -> Exception | None:
+    """The error the expert-parallel load refuses this model with, by its config, or ``None``.
 
-    A model spec that rules it out, the load's transformers floor or the spec's later one, a
-    checkpoint format the load does not take, and the plan's styles; the rest shows only as the
+    A model spec that rules it out (``NotImplementedError``), the load's transformers floor or the
+    spec's later one (``RuntimeError``), a checkpoint format the load does not take
+    (``NotImplementedError``), and the plan's styles (``ValueError``); the rest shows only as the
     experts load.
     """
     spec = get_spec(hf_config.model_type)
     ep = spec.ep_spec if spec is not None else None
     if ep is not None and ep.unsupported:
-        return ep.unsupported
+        return NotImplementedError(ep.unsupported)
     stated = ep.requires_transformers if ep is not None else None
     floor = max(_EP_MIN_TRANSFORMERS, stated or _EP_MIN_TRANSFORMERS, key=parse)
     try:
         moe.require_transformers(floor, f"{hf_config.model_type}'s expert-parallel load")
     except RuntimeError as e:
-        return str(e)
+        return e
     if (method := _ckpt_quant_method(hf_config)) not in _EP_SOURCE_FORMATS:
-        return f"The expert-parallel load cannot dequantize a {method!r} checkpoint."
-    return _ep_plan_refusal(ep_plan)
+        return NotImplementedError(
+            f"The expert-parallel load cannot dequantize a {method!r} checkpoint."
+        )
+    refusal = _ep_plan_refusal(ep_plan)
+    return ValueError(refusal) if refusal is not None else None
 
 
 def _ckpt_quant_method(cfg):
@@ -2030,7 +2034,7 @@ def load_and_prepare_ep(
         # handed in, meets here: a model spec ruling expert parallelism out or stating a later
         # transformers, and the plan's styles.
         if (refusal := _ep_load_refusal(hf_config, ep_plan)) is not None:
-            raise ValueError(refusal)
+            raise refusal
         # The all-to-all transport needs every rank to hold as many experts, counted as the plan's
         # decision counts them; a count the config does not name is checked once the experts load.
         num_experts = _num_experts_from_config(ep_cfg)
