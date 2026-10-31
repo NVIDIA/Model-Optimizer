@@ -13,34 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DP=EP a2a support for Kimi-VL-A3B (``kimi_vl``).
+"""Expert-parallel preparation for remote-code Kimi-VL (``kimi_vl``).
 
-a remote-code VLM whose text backbone is a Moonlight (DeepSeek-V3-lite: MLA, ``q_lora_rank=None``, 64 routed experts, 2
-shared) MoE and whose vision tower is MoonViT. The bf16 sibling of ``kimi_k25`` -- SAME shape, but NO compressed-tensors
-decompressor (the checkpoint ships plain bf16 per-expert weights).
-
-Challenge (identical to kimi_k25): the bundled ``modeling_kimi_vl.py`` builds its language model from
-an INLINE ``DeepseekV3ForCausalLM`` whose ``DeepseekV3MoE`` is an ``nn.ModuleList`` of per-expert
-``gate_proj``/``up_proj``/``down_proj`` Linears -- incompatible with transformers' EP machinery, which
-needs the FUSED 3-D ``gate_up_proj``/``down_proj`` Parameters the transformers-native ``deepseek_v3``
-modeling ships.
-
-Solution (mirrors kimi_k25):
-  1. Shim the import symbols ``modeling_kimi_vl`` needs that newer transformers dropped (e.g.
-     ``is_torch_fx_available``) so the module IMPORTS -- they only guard torch.fx / legacy attn-mask
-     paths that our native-LM + MoonViT forward never execute.
-  2. Swap ``hf_config.text_config`` to a transformers-native ``DeepseekV3Config`` (drops the remote
-     ``auto_map`` so the native class -- and its ``base_model_ep_plan`` -- is used for the LM).
-  3. Apply the deepseek_v3 EP plan to that native ``text_config`` (post_init prefixes it to the VLM
-     root as ``language_model.model.layers.*.mlp.experts.{gate_up_proj,down_proj}``).
-  4. Monkey-patch ``modeling_kimi_vl.DeepseekV3ForCausalLM`` -> the transformers-native class, so
-     ``KimiVLForConditionalGeneration.__init__`` (``self.language_model = DeepseekV3ForCausalLM(
-     config.text_config)``) builds the EP-capable native LM while MoonViT + the KimiVL wrapper stay
-     from the bundled code. Native deepseek_v3's per-expert WeightConverter fuses the checkpoint's
-     per-expert ``.weight`` tensors into the 3-D params on load (no decompressor -- weights are bf16).
-
-Version: no floor beyond the EP framework's 5.7; validated on transformers 5.9.0. The compat shims
-stand in for the symbols the remote code imports that later releases dropped.
+``prepare`` replaces the per-expert DeepSeek-V3 language model the checkpoint's own code builds with
+transformers' native DeepSeek-V3, whose experts the expert-parallel load can shard, and keeps the
+vision tower and projector from that code. It needs trusted remote code and transformers 5.7.
 """
 
 from .. import _kimi, _onfly_decompress
