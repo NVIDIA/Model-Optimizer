@@ -2067,6 +2067,9 @@ def test_what_needs_the_group_is_refused_in_a_launch_that_sets_none_up(
 
 # ------------------------------------------------------------------------------- the plan
 
+# The model type of the configs that stand in for a checkpoint's here: no model spec names it.
+_NO_SPEC = "toy_moe"
+
 _EP_PLAN = {
     "layers.*.mlp.gate": "ep_router",
     "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
@@ -2184,7 +2187,7 @@ def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch, gloo_world_
         load_and_prepare_ep(
             "org/model",
             DistributionPlan(2, ep_size=2),
-            hf_config=SimpleNamespace(base_model_ep_plan=_EP_PLAN),
+            hf_config=SimpleNamespace(model_type=_NO_SPEC, base_model_ep_plan=_EP_PLAN),
         )
 
     assert resolved == ["org/model"]
@@ -2211,7 +2214,7 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
         load_and_prepare_ep(
             "org/model",
             DistributionPlan(4, ep_size=4),
-            hf_config=SimpleNamespace(text_config=text, num_experts=3),
+            hf_config=SimpleNamespace(model_type=_NO_SPEC, text_config=text, num_experts=3),
         )
 
 
@@ -2228,14 +2231,17 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
         ),
         (SimpleNamespace(), ValueError, "declare base_model_ep_plan"),
         (
-            SimpleNamespace(base_model_ep_plan={"layers.*.self_attn.q_proj": "colwise"}),
+            SimpleNamespace(
+                model_type=_NO_SPEC, base_model_ep_plan={"layers.*.self_attn.q_proj": "colwise"}
+            ),
             ValueError,
             "styles no routed experts",
         ),
         *(
             (
                 SimpleNamespace(
-                    base_model_ep_plan={"layers.*.mlp.experts": "moe_tp_experts", **params}
+                    model_type=_NO_SPEC,
+                    base_model_ep_plan={"layers.*.mlp.experts": "moe_tp_experts", **params},
                 ),
                 ValueError,
                 r"shards no weights of layers\.\*\.mlp\.experts through grouped_gemm",
@@ -2244,10 +2250,16 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
         ),
         (
             SimpleNamespace(
-                base_model_ep_plan={**_EP_PLAN, "layers.*.mlp.experts.down_proj": "packed_rowwise"}
+                model_type=_NO_SPEC,
+                base_model_ep_plan={**_EP_PLAN, "layers.*.mlp.experts.down_proj": "packed_rowwise"},
             ),
             ValueError,
             r"styles layers\.\*\.mlp\.experts\.down_proj by a style this load drops",
+        ),
+        (
+            SimpleNamespace(model_type="gpt_oss", base_model_ep_plan=_EP_PLAN),
+            ValueError,
+            "the expert-parallel export cannot write that layout",
         ),
     ],
     ids=[
@@ -2260,6 +2272,7 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
         "experts-container-only",
         "experts-sharded-otherwise",
         "experts-sharded-partly-otherwise",
+        "spec-refuses-ep",
     ],
 )
 def test_a_config_the_load_cannot_take_is_refused_before_anything_loads(
@@ -2269,8 +2282,10 @@ def test_a_config_the_load_cannot_take_is_refused_before_anything_loads(
     or, MXFP4, dequantize into GPT-OSS's transposed expert layout whatever the model's, or a plan
     that leaves the experts whole on every rank: one naming no routed experts, or none of
     whose entries shards their weights by grouped_gemm, the only expert-weight style the load
-    shards by, or one that styles some of their weights otherwise. The load refuses each before it
-    reads anything."""
+    shards by, or one that styles some of their weights otherwise. So is a model whose spec rules
+    expert parallelism out (GPT-OSS's), which the plan decision plans without it: an EP degree asked
+    for, or a plan handed in, meets that refusal here. The load refuses each before it reads
+    anything."""
     with pytest.raises(error, match=match):
         load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
     assert ep_world_of_two == []
@@ -2282,7 +2297,7 @@ def test_an_ep_size_that_does_not_divide_the_experts_is_refused_before_anything_
     """The all-to-all transport finds an expert's rank by dividing its id by this rank's share of
     the experts: with 3 experts over 2 ranks the ranks would disagree on who holds which, and send
     tokens to the wrong experts."""
-    config = SimpleNamespace(base_model_ep_plan=_EP_PLAN, num_experts=3)
+    config = SimpleNamespace(model_type=_NO_SPEC, base_model_ep_plan=_EP_PLAN, num_experts=3)
 
     with pytest.raises(ValueError, match="ep_size=2 must divide the 3 routed experts"):
         load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
@@ -2305,7 +2320,8 @@ def test_a_plan_whose_expert_containers_match_no_module_is_refused(ep_world_of_t
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
     monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
     config = SimpleNamespace(
-        base_model_ep_plan={"layers.*.mlp.experts.*.gate_up_proj": "grouped_gemm"}
+        model_type=_NO_SPEC,
+        base_model_ep_plan={"layers.*.mlp.experts.*.gate_up_proj": "grouped_gemm"},
     )
 
     with pytest.raises(ValueError, match="that no module of"):
@@ -2342,6 +2358,7 @@ def test_the_model_keeps_the_plan_its_checkpoint_declares(
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
 
     class _Config(SimpleNamespace):
+        model_type = _NO_SPEC
         base_model_ep_plan = _EP_PLAN
 
     # 8 experts over 2 ranks: the stand-in model holds this rank's 4.
@@ -2442,7 +2459,7 @@ def test_the_weights_load_in_the_checkpoints_dtype_through_its_class(ep_world_of
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", auto_class)
-    config = SimpleNamespace(dtype=torch.float16, base_model_ep_plan=_EP_PLAN)
+    config = SimpleNamespace(model_type=_NO_SPEC, dtype=torch.float16, base_model_ep_plan=_EP_PLAN)
     reads, downloads = [], []
     monkeypatch.setattr(
         "transformers.AutoConfig.from_pretrained", lambda *a, **k: reads.append(k) or config
@@ -2628,7 +2645,7 @@ def test_each_load_argument_goes_where_this_transformers_takes_it(
         load_and_prepare_ep(
             "org/model",
             DistributionPlan(2, ep_size=2),
-            hf_config=SimpleNamespace(base_model_ep_plan=_EP_PLAN),
+            hf_config=SimpleNamespace(model_type=_NO_SPEC, base_model_ep_plan=_EP_PLAN),
         )
 
     given = {k: v for k, v in vars(loaded["distributed_config"]).items() if v is not None}
@@ -2652,7 +2669,9 @@ def _meshes_in_step(*args, **kwargs):
 def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
     path, hf_config, patches = ckpt, None, []
     if failure != "unreadable-config":
-        hf_config = SimpleNamespace(base_model_ep_plan=dict(_EP_PLAN), num_experts=4)
+        hf_config = SimpleNamespace(
+            model_type=_NO_SPEC, base_model_ep_plan=dict(_EP_PLAN), num_experts=4
+        )
     if failure != "unseen-checkpoint":
         local = mock.patch.object(
             model_load_utils, "ensure_local_checkpoint", side_effect=lambda p, **k: (None, p)
@@ -2735,7 +2754,9 @@ def test_a_load_failing_on_one_rank_fails_every_rank(
 
 
 def _gpu_layout_job(rank, size, visible, bound, shared, refused):
-    hf_config = SimpleNamespace(base_model_ep_plan=dict(_EP_PLAN), num_experts=4)
+    hf_config = SimpleNamespace(
+        model_type=_NO_SPEC, base_model_ep_plan=dict(_EP_PLAN), num_experts=4
+    )
     reached = None
     with bounded_collectives(), ExitStack() as stack:
         # This rank is on cuda:0, bound to it or not yet; the local ranks run 0 and 1.
