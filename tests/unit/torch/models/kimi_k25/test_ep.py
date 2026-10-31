@@ -154,6 +154,25 @@ def test_the_swap_leaves_a_sibling_remote_module_alone(monkeypatch, remote):
     assert bystander.DeepseekV3ForCausalLM is remote_lm
 
 
+def test_the_build_step_leaves_transformers_own_port_alone(monkeypatch, remote):
+    """From 5.13 transformers ships its own Kimi-K2.5, whose module shares the remote one's name
+    (``transformers.models.kimi_k25.modeling_kimi_k25``). The build step adapts the remote VLM
+    class's ``tie_weights`` and must not reach the port's, which a later load of it would use."""
+
+    def own_tie(self):
+        return "tied"
+
+    port = types.ModuleType("transformers.models.kimi_k25.modeling_kimi_k25")
+    port.KimiK25ForConditionalGeneration = type("Port", (), {"tie_weights": own_tie})
+    monkeypatch.setitem(sys.modules, port.__name__, port)
+    remote.KimiK25ForConditionalGeneration = type("Remote", (), {"tie_weights": own_tie})
+
+    kimi_k25.make_buildable(_vlm_config(), ckpt_path="/ckpt", trust_remote_code=True)
+
+    assert vars(port.KimiK25ForConditionalGeneration)["tie_weights"] is own_tie
+    assert vars(remote.KimiK25ForConditionalGeneration)["tie_weights"]._kimi_tie_weights_shim
+
+
 def test_a_checkpoint_the_decompressor_refuses_is_refused_before_anything_changes(
     monkeypatch, remote
 ):

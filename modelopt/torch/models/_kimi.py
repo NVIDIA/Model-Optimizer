@@ -23,7 +23,7 @@ keep the vision tower and projector from the checkpoint's code.
 
 # modelopt.torch.utils and transformers are imported inside the functions: the model registry imports
 # this module, and it must import without transformers, the optional [hf] extra.
-from ._remote_code import keep_patched, stage_full_remote_closure
+from ._remote_code import _apply, keep_patched, stage_full_remote_closure
 
 
 def checkpoint_to_patch(
@@ -132,8 +132,6 @@ def make_buildable(
     whatever plan comes out. A config of transformers' own port, or code this load may not run, has
     nothing of the checkpoint's to build. Idempotent.
     """
-    import sys
-
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
     if type(hf_config).__module__.startswith("transformers.") or ckpt_path is None:
@@ -144,9 +142,8 @@ def make_buildable(
     get_class_from_dynamic_module(
         f"{modeling}.{vlm_class}", ckpt_path, trust_remote_code=trust_remote_code
     )
-    for name, module in list(sys.modules.items()):
-        if name.endswith(f".{modeling}") and module is not None:
-            _shim_tie_weights(module, vlm_class)
+    # Remote code only: transformers' own port of a model can share the module's name.
+    _apply(f".{modeling}", lambda module: _shim_tie_weights(module, vlm_class))
 
 
 def _shim_tie_weights(module, vlm_class: str) -> bool:
