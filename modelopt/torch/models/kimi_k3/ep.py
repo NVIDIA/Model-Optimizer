@@ -301,7 +301,8 @@ def _checkpoint_quantized(ckpt_path: str) -> bool:
 
     The config ``prepare`` is handed cannot always say: ``prepare`` drops its quantization_config,
     and the decompressor clears its mark at the load, so a config prepared and loaded before has
-    neither.
+    neither. ``prepare`` is handed no hub options, so a hub id is read at its default revision; a
+    local checkpoint, the usual case, is read as it is.
     """
     from transformers import PretrainedConfig
 
@@ -393,7 +394,7 @@ def prepare(
     """
     # Not at module scope: the model registry imports this module, and modelopt.torch.utils.moe
     # imports the registry.
-    from modelopt.torch.utils.moe import register_torch_a2a
+    from modelopt.torch.utils.moe import mark_patched_every_load, register_torch_a2a
 
     if ckpt_path is None:
         raise ValueError(
@@ -433,6 +434,8 @@ def prepare(
             "kimi_k3: could not locate the loaded remote module defining KimiSparseMoeBlock to patch"
         )
     _patch_kimi_moe_block(kmod)
+    # Recorded at the first patch that lasts, so a step below that raises still leaves the record.
+    mark_patched_every_load("kimi_k3")
     _patch_kda_a_log(kmod)
     _patch_kda_beta_sigmoid(kmod)
     _shim_create_causal_mask(kmod)
