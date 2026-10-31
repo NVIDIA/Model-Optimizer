@@ -1112,8 +1112,8 @@ def _process_hf_model_for_export(
     The processing half of an export, for a caller that serializes the model itself: the no-gather
     writer, which writes each rank's shard. Afterwards the model's own state dict holds the
     deployment weights. Nothing is gathered, so it runs on a live FSDP2 or expert-parallel model;
-    there the fused MoE experts stay fused, since each rank folds only its local shard and the
-    writer splits them after consolidation.
+    there the fused MoE experts stay fused, since each rank folds only its local shard, and the
+    writer then splits each rank's experts into per-expert tensors.
     """
     dtype, _, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
     # Only the no-gather writer calls this, and only for a sharded model, so the experts stay fused
@@ -2246,7 +2246,8 @@ def export_hf_checkpoint(
 
             _qlora = kwargs.get("is_modelopt_qlora", False)
             # Folds in place; the model is sharded here, so the MoE experts stay fused and each rank
-            # folds only its LOCAL experts. The writer splits them after consolidation.
+            # folds only its local experts. The writer then splits each rank's experts into
+            # per-expert tensors.
             hf_quant_config = _process_together(model, dtype, _qlora)
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
