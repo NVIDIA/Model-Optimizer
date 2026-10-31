@@ -1,0 +1,365 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Unified HuggingFace Checkpoint &mdash; Model Optimizer 0.0.1.dev1+g881967daf</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="All GitHub Examples" href="../examples/0_all_examples.html" />
+    <link rel="prev" title="Onnxruntime" href="2_onnxruntime.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Unified HuggingFace Checkpoint</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#export-quantized-model">Export Quantized Model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#deployment-support-matrix">Deployment Support Matrix</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#supported-quantization-formats">Supported Quantization Formats</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#framework-specific-support">Framework-Specific Support</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#tensorrt-llm">TensorRT-LLM</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#vllm">vLLM</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#sglang">SGLang</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#deployment-with-selected-inference-frameworks">Deployment with Selected Inference Frameworks</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Unified HuggingFace Checkpoint</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/deployment/3_unified_hf.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="unified-huggingface-checkpoint">
+<h1>Unified HuggingFace Checkpoint<a class="headerlink" href="#unified-huggingface-checkpoint" title="Link to this heading"></a></h1>
+<p>We support exporting modelopt-optimized Hugging Face models (transformers and diffusers pipelines/components) and Megatron Core models to a unified checkpoint format that can be deployed in various inference frameworks such as TensorRT-LLM, vLLM, and SGLang.</p>
+<p>The workflow is as follows:</p>
+<ol class="arabic simple">
+<li><p>Load the Huggingface models or Megatron Core models, <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq#ptq-post-training-quantization" rel="noopener noreferrer" target="_blank">quantize with modelopt</a> , and export to the unified checkpoint format, where the layer structures and tensor names are aligned with the original checkpoint.</p></li>
+<li><p>Load the unified checkpoint in the supported inference framework for accelerated inference.</p></li>
+</ol>
+<section id="export-quantized-model">
+<h2>Export Quantized Model<a class="headerlink" href="#export-quantized-model" title="Link to this heading"></a></h2>
+<p>The modelopt quantized model can be exported to the unified checkpoint format stored as</p>
+<ol class="arabic simple">
+<li><p>A group of safetensors files, containing quantized model weights and scaling factors.</p></li>
+<li><p>A <code class="docutils literal notranslate"><span class="pre">hf_quant_config.json</span></code> file containing quantization configurations.</p></li>
+<li><p>Other json files that store the model structure information, tokenizer information, and metadata.</p></li>
+</ol>
+<p>The export API (<a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_hf.html#modelopt.torch.export.unified_export_hf.export_hf_checkpoint" title="modelopt.torch.export.unified_export_hf.export_hf_checkpoint"><code class="xref py py-meth docutils literal notranslate"><span class="pre">export_hf_checkpoint</span></code></a>) can be used as follows:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.export</span><span class="w"> </span><span class="kn">import</span> <span class="n">export_hf_checkpoint</span>
+
+<span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">inference_mode</span><span class="p">():</span>
+    <span class="n">export_hf_checkpoint</span><span class="p">(</span>
+        <span class="n">model</span><span class="p">,</span>  <span class="c1"># The quantized model.</span>
+        <span class="n">export_dir</span><span class="p">,</span>  <span class="c1"># The directory where the exported files will be stored.</span>
+    <span class="p">)</span>
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><code class="docutils literal notranslate"><span class="pre">export_hf_checkpoint</span></code> also supports diffusers pipelines and components (e.g., UNet/transformer). See the
+diffusers quantization examples for end-to-end workflows and CLI usage.</p>
+</div>
+</section>
+<section id="deployment-support-matrix">
+<h2>Deployment Support Matrix<a class="headerlink" href="#deployment-support-matrix" title="Link to this heading"></a></h2>
+<section id="supported-quantization-formats">
+<h3>Supported Quantization Formats<a class="headerlink" href="#supported-quantization-formats" title="Link to this heading"></a></h3>
+<p>The unified HF export API supports the following quantization formats:</p>
+<ol class="arabic simple">
+<li><p>FP8 - 8-bit floating point</p></li>
+<li><p>FP8_PB - 8-bit floating point with per-block scaling</p></li>
+<li><p>NVFP4 - NVIDIA 4-bit floating point</p></li>
+<li><p>NVFP4_AWQ - NVIDIA 4-bit floating point with AWQ optimization</p></li>
+<li><p>INT4_AWQ - 4-bit integer with AWQ optimization</p></li>
+<li><p>W4A8_AWQ - 4-bit weights and 8-bit activations with AWQ optimization</p></li>
+</ol>
+</section>
+<section id="framework-specific-support">
+<h3>Framework-Specific Support<a class="headerlink" href="#framework-specific-support" title="Link to this heading"></a></h3>
+<section id="tensorrt-llm">
+<h4>TensorRT-LLM<a class="headerlink" href="#tensorrt-llm" title="Link to this heading"></a></h4>
+<dl class="simple">
+<dt>Models:</dt><dd><ul class="simple">
+<li><p>Llama 4, 3.x (FP8, NVFP4)</p></li>
+<li><p>Qwen 3, 2.5 (FP8, NVFP4)</p></li>
+<li><p>Qwen 3 MoE (FP8, NVFP4)</p></li>
+<li><p>Deepseek R1/V3 (NVFP4)</p></li>
+<li><p>Mixtral 8x7B (FP8, NVFP4)</p></li>
+<li><p>Medusa (FP8)</p></li>
+<li><p>Eagle (FP8)</p></li>
+</ul>
+</dd>
+</dl>
+<p>Requirements: TensorRT-LLM v0.17.0 or later</p>
+</section>
+<section id="vllm">
+<h4>vLLM<a class="headerlink" href="#vllm" title="Link to this heading"></a></h4>
+<dl class="simple">
+<dt>Models:</dt><dd><ul class="simple">
+<li><p>Llama 4, 3.x (FP8, NVFP4)</p></li>
+<li><p>Qwen 3, 2.5 (FP8, NVFP4)</p></li>
+<li><p>Qwen 3 MoE (FP8, NVFP4)</p></li>
+<li><p>Mixtral 8x7B (FP8)</p></li>
+<li><p>Deepseek R1/V3 (NVFP4)</p></li>
+</ul>
+</dd>
+</dl>
+<p>Requirements: vLLM v0.10.1 or later</p>
+</section>
+<section id="sglang">
+<h4>SGLang<a class="headerlink" href="#sglang" title="Link to this heading"></a></h4>
+<dl class="simple">
+<dt>Models:</dt><dd><ul class="simple">
+<li><p>Llama 4, 3.x (FP8, NVFP4)</p></li>
+<li><p>Qwen 3, 2.5 (FP8, NVFP4)</p></li>
+<li><p>Qwen 3 MoE (FP8, NVFP4)</p></li>
+<li><p>Deepseek R1/V3 (NVFP4)</p></li>
+</ul>
+</dd>
+</dl>
+<p>Requirements: SGLang v0.4.10 or later</p>
+<p>Note: While other models and quantization formats may work, they have not been thoroughly tested and validated.</p>
+</section>
+</section>
+</section>
+<section id="deployment-with-selected-inference-frameworks">
+<h2>Deployment with Selected Inference Frameworks<a class="headerlink" href="#deployment-with-selected-inference-frameworks" title="Link to this heading"></a></h2>
+<div class="tab-set docutils container">
+<input checked="True" class="tab-input" id="tab-set--0-input--1" name="tab-set--0" type="radio" /><label class="tab-label" for="tab-set--0-input--1">TensorRT-LLM</label><div class="tab-content docutils container">
+<p>Follow the <a class="reference external" href="https://nvidia.github.io/TensorRT-LLM/quick-start-guide.html#installation" rel="noopener noreferrer" target="_blank">TensorRT-LLM installation instructions.</a></p>
+<p>Currently we support fp8 and nvfp4 quantized models for TensorRT-LLM deployment, you need v0.17.0 or later version of TensorRT-LLM.</p>
+<p>To run modelopt quantized model from Huggingface model hub, e.g., <a class="reference external" href="https://huggingface.co/nvidia/Llama-3.1-8B-Instruct-FP8" rel="noopener noreferrer" target="_blank">nvidia/Llama-3.1-8B-Instruct-FP8</a>, refer to the sample code below:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">tensorrt_llm</span><span class="w"> </span><span class="kn">import</span> <span class="n">LLM</span><span class="p">,</span> <span class="n">SamplingParams</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+
+    <span class="n">prompts</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="s2">&quot;Hello, my name is&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;The president of the United States is&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;The capital of France is&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;The future of AI is&quot;</span><span class="p">,</span>
+    <span class="p">]</span>
+    <span class="n">sampling_params</span> <span class="o">=</span> <span class="n">SamplingParams</span><span class="p">(</span><span class="n">temperature</span><span class="o">=</span><span class="mf">0.8</span><span class="p">,</span> <span class="n">top_p</span><span class="o">=</span><span class="mf">0.95</span><span class="p">)</span>
+
+    <span class="n">llm</span> <span class="o">=</span> <span class="n">LLM</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;nvidia/Llama-3.1-8B-Instruct-FP8&quot;</span><span class="p">)</span>
+
+    <span class="n">outputs</span> <span class="o">=</span> <span class="n">llm</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="n">prompts</span><span class="p">,</span> <span class="n">sampling_params</span><span class="p">)</span>
+
+    <span class="k">for</span> <span class="n">output</span> <span class="ow">in</span> <span class="n">outputs</span><span class="p">:</span>
+        <span class="n">prompt</span> <span class="o">=</span> <span class="n">output</span><span class="o">.</span><span class="n">prompt</span>
+        <span class="n">generated_text</span> <span class="o">=</span> <span class="n">output</span><span class="o">.</span><span class="n">outputs</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">text</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Prompt: </span><span class="si">{</span><span class="n">prompt</span><span class="si">!r}</span><span class="s2">, Generated text: </span><span class="si">{</span><span class="n">generated_text</span><span class="si">!r}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">&#39;__main__&#39;</span><span class="p">:</span>
+    <span class="n">main</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>
+<input class="tab-input" id="tab-set--0-input--2" name="tab-set--0" type="radio" /><label class="tab-label" for="tab-set--0-input--2">vLLM</label><div class="tab-content docutils container">
+<p>Follow <a class="reference external" href="https://github.com/vllm-project/vllm?tab=readme-ov-file#getting-started" rel="noopener noreferrer" target="_blank">vLLM installation instructions.</a></p>
+<p>Currently we support fp8 quantized models (without fp8 kv cache) for vLLM deployment, you need v0.6.5 or later version of vLLM.</p>
+<p>To run modelopt quantized model from Huggingface model hub, e.g., <a class="reference external" href="https://huggingface.co/nvidia/Llama-3.1-8B-Instruct-FP8" rel="noopener noreferrer" target="_blank">nvidia/Llama-3.1-8B-Instruct-FP8</a>, refer to the sample code below:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">vllm</span><span class="w"> </span><span class="kn">import</span> <span class="n">LLM</span><span class="p">,</span> <span class="n">SamplingParams</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+
+    <span class="n">model_id</span> <span class="o">=</span> <span class="s2">&quot;nvidia/Llama-3.1-8B-Instruct-FP8&quot;</span>
+    <span class="n">sampling_params</span> <span class="o">=</span> <span class="n">SamplingParams</span><span class="p">(</span><span class="n">temperature</span><span class="o">=</span><span class="mf">0.8</span><span class="p">,</span> <span class="n">top_p</span><span class="o">=</span><span class="mf">0.9</span><span class="p">)</span>
+
+    <span class="n">prompts</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="s2">&quot;Hello, my name is&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;The president of the United States is&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;The capital of France is&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;The future of AI is&quot;</span><span class="p">,</span>
+    <span class="p">]</span>
+
+    <span class="n">llm</span> <span class="o">=</span> <span class="n">LLM</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="n">model_id</span><span class="p">,</span> <span class="n">quantization</span><span class="o">=</span><span class="s2">&quot;modelopt&quot;</span><span class="p">)</span>
+    <span class="n">outputs</span> <span class="o">=</span> <span class="n">llm</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="n">prompts</span><span class="p">,</span> <span class="n">sampling_params</span><span class="p">)</span>
+
+    <span class="k">for</span> <span class="n">output</span> <span class="ow">in</span> <span class="n">outputs</span><span class="p">:</span>
+        <span class="n">prompt</span> <span class="o">=</span> <span class="n">output</span><span class="o">.</span><span class="n">prompt</span>
+        <span class="n">generated_text</span> <span class="o">=</span> <span class="n">output</span><span class="o">.</span><span class="n">outputs</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">text</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Prompt: </span><span class="si">{</span><span class="n">prompt</span><span class="si">!r}</span><span class="s2">, Generated text: </span><span class="si">{</span><span class="n">generated_text</span><span class="si">!r}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+    <span class="n">main</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>
+<input class="tab-input" id="tab-set--0-input--3" name="tab-set--0" type="radio" /><label class="tab-label" for="tab-set--0-input--3">SGLang</label><div class="tab-content docutils container">
+<p>Follow the <a class="reference external" href="https://docs.sglang.ai/get_started/install.html" rel="noopener noreferrer" target="_blank">SGLang installation instructions.</a></p>
+<p>Currently we support fp8 quantized models (without fp8 kv cache) for SGLang deployment, you need to use the main branch of SGLang (since Jan 6, 2025) and build it from source.</p>
+<p>To run modelopt quantized model from Huggingface model hub, e.g., <a class="reference external" href="https://huggingface.co/nvidia/Llama-3.1-8B-Instruct-FP8" rel="noopener noreferrer" target="_blank">nvidia/Llama-3.1-8B-Instruct-FP8</a>, refer to the sample code below:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">sglang</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">sgl</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+
+    <span class="n">prompts</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="s2">&quot;Hello, my name is&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;The president of the United States is&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;The capital of France is&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;The future of AI is&quot;</span><span class="p">,</span>
+    <span class="p">]</span>
+    <span class="n">sampling_params</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;temperature&quot;</span><span class="p">:</span> <span class="mf">0.8</span><span class="p">,</span> <span class="s2">&quot;top_p&quot;</span><span class="p">:</span> <span class="mf">0.95</span><span class="p">}</span>
+    <span class="n">llm</span> <span class="o">=</span> <span class="n">sgl</span><span class="o">.</span><span class="n">Engine</span><span class="p">(</span><span class="n">model_path</span><span class="o">=</span><span class="s2">&quot;nvidia/Llama-3.1-8B-Instruct-FP8&quot;</span><span class="p">,</span> <span class="n">quantization</span><span class="o">=</span><span class="s2">&quot;modelopt&quot;</span><span class="p">)</span>
+
+    <span class="n">outputs</span> <span class="o">=</span> <span class="n">llm</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="n">prompts</span><span class="p">,</span> <span class="n">sampling_params</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">prompt</span><span class="p">,</span> <span class="n">output</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">prompts</span><span class="p">,</span> <span class="n">outputs</span><span class="p">):</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;===============================&quot;</span><span class="p">)</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Prompt: </span><span class="si">{</span><span class="n">prompt</span><span class="si">}</span><span class="se">\n</span><span class="s2">Generated text: </span><span class="si">{</span><span class="n">output</span><span class="p">[</span><span class="s1">&#39;text&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+    <span class="n">main</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>
+</div>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="2_onnxruntime.html" class="btn btn-neutral float-left" title="Onnxruntime" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="../examples/0_all_examples.html" class="btn btn-neutral float-right" title="All GitHub Examples" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

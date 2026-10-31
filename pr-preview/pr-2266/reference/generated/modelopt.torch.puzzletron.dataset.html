@@ -1,0 +1,1462 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="green" data-content_root="../../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>dataset - Model Optimizer 0.0.1.dev1+g5e39d4ca1</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="depth" href="modelopt.torch.puzzletron.depth.html" /><link rel="prev" title="checkpoint_transactions" href="modelopt.torch.puzzletron.checkpoint_transactions.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../../_static/shibuya.css?v=2ceb65ce" />
+    <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+    <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+    <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+    <link media="print" rel="stylesheet" type="text/css" href="../../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=948f803c" />
+    <link rel="stylesheet" type="text/css" href="../../_static/announcements.css?v=3c458a87" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="dataset"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../../index.html">
+      
+      
+      <strong>Model Optimizer</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials"></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="1"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Announcements</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../index.html">Announcements</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../getting_started/_installation_for_Linux.html">Installation for Linux</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../getting_started/windows/_installation_for_Windows.html">Installation for Windows</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../getting_started/windows/_installation_standalone.html">Install ModelOpt-Windows as a Standalone Toolkit</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../getting_started/windows/_installation_with_olive.html">Install ModelOpt-Windows with Olive</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_quant_cfg.html">Quantization Configuration (quant_cfg)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1 _expand"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.deploy.llm.html">llm</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.deploy.llm.generate.html">generate</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.autocast.html">autocast</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.graphsanitizer.html">graphsanitizer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.logging_config.html">logging_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.nodeclassifier.html">nodeclassifier</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.precisionconverter.html">precisionconverter</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.referencerunner.html">referencerunner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.llm_export_utils.html">llm_export_utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.export_utils.html">export_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.quantization_utils.html">quantization_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.surgeon_utils.html">surgeon_utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.autotune.html">autotune</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.calib_utils.html">calib_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.fp8.html">fp8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.graph_utils.html">graph_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.gs_patching.html">gs_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.qdq_utils.html">qdq_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quantize.html">modelopt.onnx.quantization.quantize</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.distillation_model.html">distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.layerwise_distillation_model.html">layerwise_distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.loss_balancers.html">loss_balancers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.registry.html">registry</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.convert_hf_config.html">convert_hf_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.diffusers_utils.html">diffusers_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.distribute.html">distribute</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.hf_config_map.html">hf_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.hf_export_handlers.html">hf_export_handlers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.layer_utils.html">layer_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.mcore_config_map.html">mcore_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config.html">model_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config_export.html">model_config_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config_utils.html">model_config_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_utils.html">model_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.moe_utils.html">moe_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.postprocess.html">postprocess</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.tensorrt_llm_type.html">tensorrt_llm_type</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.tensorrt_llm_utils.html">tensorrt_llm_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_hf.html">unified_export_hf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_hf_streaming.html">unified_export_hf_streaming</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_megatron.html">unified_export_megatron</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.fastgen.html">fastgen</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.discriminators.html">discriminators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.ema.html">ema</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.factory.html">factory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.flow_matching.html">flow_matching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.loader.html">loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.methods.html">methods</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.pipeline.html">pipeline</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.common.html">common</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.quantization.html">quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.sparsity.html">sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.autonas.html">autonas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.hparams.html">hparams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.patch.html">patch</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.traced_hp.html">traced_hp</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.config_loader.html">config_loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.dynamic.html">dynamic</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.hparam.html">hparam</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.searcher.html">searcher</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.custom.html">custom</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.lora.html">lora</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.mode.html">mode</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.fastnas.html">fastnas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.importance_hooks.html">importance_hooks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.pruning.html">pruning</a></li>
+</ul>
+</li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_coverage.html">artifact_coverage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import.html">artifact_import</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import_contract.html">artifact_import_contract</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_inventory.html">artifact_inventory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.benchmarks.html">benchmarks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.campaigns.html">campaigns</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.candidates.html">candidates</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.checkpoint_transactions.html">checkpoint_transactions</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.depth.html">depth</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.diagnostics.html">diagnostics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distributed_eval.html">distributed_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.evaluation.html">evaluation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.execution_record.html">execution_record</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.export.html">export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.granularity.html">granularity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.identity.html">identity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.manifest.html">manifest</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.orchestration.html">orchestration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pipeline_config.html">pipeline_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.post_mip.html">post_mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.rpc_eval.html">rpc_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.sampling.html">sampling</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scenarios.html">scenarios</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring_parent.html">scoring_parent</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.security_policy.html">security_policy</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.solution_registry.html">solution_registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stage_runner.html">stage_runner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stages.html">stages</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.sparsity.attention_sparsity.html">attention_sparsity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.sparsity.weight_sparsity.html">weight_sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.dflash.html">dflash</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.medusa.html">medusa</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.speculative_decoding.html">speculative_decoding</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.analyzer.html">analyzer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.symbols.html">symbols</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.tracer.html">tracer</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.cpp_extension.html">cpp_extension</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.dataset_utils.html">dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.distributed.html">distributed</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.graph.html">graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.import_utils.html">import_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.list.html">list</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.logging.html">logging</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.random.html">random</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.regex.html">regex</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.robust_json.html">robust_json</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.serialization.html">serialization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.speech_dataset_utils.html">speech_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.tensor.html">tensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.vlm_dataset_utils.html">vlm_dataset_utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.DataLayout"><code class="docutils literal notranslate"><span class="pre">DataLayout</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.DataLayout.FIXED"><code class="docutils literal notranslate"><span class="pre">DataLayout.FIXED</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.DataLayout.PACKED_VARLEN"><code class="docutils literal notranslate"><span class="pre">DataLayout.PACKED_VARLEN</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.DataLayout.PADDED_VARLEN"><code class="docutils literal notranslate"><span class="pre">DataLayout.PADDED_VARLEN</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.DataLayout.__new__"><code class="docutils literal notranslate"><span class="pre">DataLayout.__new__()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.Modality"><code class="docutils literal notranslate"><span class="pre">Modality</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.Modality.MULTIMODAL"><code class="docutils literal notranslate"><span class="pre">Modality.MULTIMODAL</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.Modality.TEXT"><code class="docutils literal notranslate"><span class="pre">Modality.TEXT</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.Modality.__new__"><code class="docutils literal notranslate"><span class="pre">Modality.__new__()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata"><code class="docutils literal notranslate"><span class="pre">PackedSequenceMetadata</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.__init__"><code class="docutils literal notranslate"><span class="pre">PackedSequenceMetadata.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.cp_rank"><code class="docutils literal notranslate"><span class="pre">PackedSequenceMetadata.cp_rank</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.cp_size"><code class="docutils literal notranslate"><span class="pre">PackedSequenceMetadata.cp_size</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.global_cu_seqlens"><code class="docutils literal notranslate"><span class="pre">PackedSequenceMetadata.global_cu_seqlens</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.local_cu_seqlens"><code class="docutils literal notranslate"><span class="pre">PackedSequenceMetadata.local_cu_seqlens</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.max_seqlen"><code class="docutils literal notranslate"><span class="pre">PackedSequenceMetadata.max_seqlen</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.media_counts"><code class="docutils literal notranslate"><span class="pre">PackedSequenceMetadata.media_counts</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.media_offsets"><code class="docutils literal notranslate"><span class="pre">PackedSequenceMetadata.media_offsets</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.sample_offsets"><code class="docutils literal notranslate"><span class="pre">PackedSequenceMetadata.sample_offsets</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.seq_ids"><code class="docutils literal notranslate"><span class="pre">PackedSequenceMetadata.seq_ids</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackingSpec"><code class="docutils literal notranslate"><span class="pre">PackingSpec</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackingSpec.__init__"><code class="docutils literal notranslate"><span class="pre">PackingSpec.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackingSpec.drop_long_samples"><code class="docutils literal notranslate"><span class="pre">PackingSpec.drop_long_samples</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackingSpec.pack_size"><code class="docutils literal notranslate"><span class="pre">PackingSpec.pack_size</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackingSpec.packing_ratio"><code class="docutils literal notranslate"><span class="pre">PackingSpec.packing_ratio</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.__init__"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.batch_size"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.batch_size</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.ce_mask"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.ce_mask</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.cp_partition"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.cp_partition()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.dp_slice"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.dp_slice()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.fingerprint"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.fingerprint</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.hidden_mask"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.hidden_mask</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.input_ids"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.input_ids</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.kd_mask"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.kd_mask</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.labels"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.labels</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.layout"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.layout</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.modality"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.modality</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.model_kwargs"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.model_kwargs</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.pad_batch_to_multiple"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.pad_batch_to_multiple()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.pp_microbatches"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.pp_microbatches()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.replace_model_kwargs"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.replace_model_kwargs()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.sample_ids"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.sample_ids</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.sequence"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.sequence</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.sequence_length"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.sequence_length</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.source_metadata"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.source_metadata</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.to"><code class="docutils literal notranslate"><span class="pre">PuzzletronBatch.to()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec"><code class="docutils literal notranslate"><span class="pre">PuzzletronDataSpec</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.__init__"><code class="docutils literal notranslate"><span class="pre">PuzzletronDataSpec.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.from_mapping"><code class="docutils literal notranslate"><span class="pre">PuzzletronDataSpec.from_mapping()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.layout"><code class="docutils literal notranslate"><span class="pre">PuzzletronDataSpec.layout</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.legacy_varlen"><code class="docutils literal notranslate"><span class="pre">PuzzletronDataSpec.legacy_varlen</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.max_sample_length"><code class="docutils literal notranslate"><span class="pre">PuzzletronDataSpec.max_sample_length</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.modality"><code class="docutils literal notranslate"><span class="pre">PuzzletronDataSpec.modality</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.packing"><code class="docutils literal notranslate"><span class="pre">PuzzletronDataSpec.packing</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.sequence_length"><code class="docutils literal notranslate"><span class="pre">PuzzletronDataSpec.sequence_length</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec"><code class="docutils literal notranslate"><span class="pre">TextAcquisitionSpec</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.__init__"><code class="docutils literal notranslate"><span class="pre">TextAcquisitionSpec.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.identity"><code class="docutils literal notranslate"><span class="pre">TextAcquisitionSpec.identity()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.output_dir"><code class="docutils literal notranslate"><span class="pre">TextAcquisitionSpec.output_dir</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.revision"><code class="docutils literal notranslate"><span class="pre">TextAcquisitionSpec.revision</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.seed"><code class="docutils literal notranslate"><span class="pre">TextAcquisitionSpec.seed</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.source"><code class="docutils literal notranslate"><span class="pre">TextAcquisitionSpec.source</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.train_samples"><code class="docutils literal notranslate"><span class="pre">TextAcquisitionSpec.train_samples</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.validation_samples"><code class="docutils literal notranslate"><span class="pre">TextAcquisitionSpec.validation_samples</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec"><code class="docutils literal notranslate"><span class="pre">VlmAcquisitionSpec</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.__init__"><code class="docutils literal notranslate"><span class="pre">VlmAcquisitionSpec.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.identity"><code class="docutils literal notranslate"><span class="pre">VlmAcquisitionSpec.identity()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.max_shards_per_subset"><code class="docutils literal notranslate"><span class="pre">VlmAcquisitionSpec.max_shards_per_subset</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.num_samples"><code class="docutils literal notranslate"><span class="pre">VlmAcquisitionSpec.num_samples</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.output_dir"><code class="docutils literal notranslate"><span class="pre">VlmAcquisitionSpec.output_dir</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.revision"><code class="docutils literal notranslate"><span class="pre">VlmAcquisitionSpec.revision</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.seed"><code class="docutils literal notranslate"><span class="pre">VlmAcquisitionSpec.seed</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.source"><code class="docutils literal notranslate"><span class="pre">VlmAcquisitionSpec.source</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.subset_rows"><code class="docutils literal notranslate"><span class="pre">VlmAcquisitionSpec.subset_rows</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.subsets"><code class="docutils literal notranslate"><span class="pre">VlmAcquisitionSpec.subsets</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.batch_from_automodel"><code class="docutils literal notranslate"><span class="pre">batch_from_automodel()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.load_materialized_conversation_dataset"><code class="docutils literal notranslate"><span class="pre">load_materialized_conversation_dataset()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.load_materialized_conversation_subset"><code class="docutils literal notranslate"><span class="pre">load_materialized_conversation_subset()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.load_materialized_intersyn_subset"><code class="docutils literal notranslate"><span class="pre">load_materialized_intersyn_subset()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.materialize_intersyn_subset"><code class="docutils literal notranslate"><span class="pre">materialize_intersyn_subset()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.materialize_nemotron_vlm_dataset"><code class="docutils literal notranslate"><span class="pre">materialize_nemotron_vlm_dataset()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.materialize_normalized_conversation_samples"><code class="docutils literal notranslate"><span class="pre">materialize_normalized_conversation_samples()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.materialize_normalized_intersyn_samples"><code class="docutils literal notranslate"><span class="pre">materialize_normalized_intersyn_samples()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.materialize_puzzle_kd_dataset"><code class="docutils literal notranslate"><span class="pre">materialize_puzzle_kd_dataset()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.normalize_intersyn_multi"><code class="docutils literal notranslate"><span class="pre">normalize_intersyn_multi()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.normalize_intersyn_single"><code class="docutils literal notranslate"><span class="pre">normalize_intersyn_single()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.normalize_nemotron_vlm_sample"><code class="docutils literal notranslate"><span class="pre">normalize_nemotron_vlm_sample()</span></code></a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../../index.html"><span itemprop="name">Model Optimizer</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../1_modelopt_api.html"><span itemprop="name">modelopt API</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="2" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="modelopt.torch.html"><span itemprop="name">torch</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="3" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="modelopt.torch.puzzletron.html"><span itemprop="name">puzzletron</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="4" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">dataset</strong>
+        <meta itemprop="position" content="5" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue dark-code" role="main">
+          <section id="dataset">
+<h1>dataset<a class="headerlink" href="#dataset" title="Link to this heading">#</a></h1>
+<p id="module-modelopt.torch.puzzletron.dataset">Dataset preparation utilities for Puzzletron.</p>
+<p class="rubric">Classes</p>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.DataLayout" title="modelopt.torch.puzzletron.dataset.DataLayout"><code class="xref py py-obj docutils literal notranslate"><span class="pre">DataLayout</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.Modality" title="modelopt.torch.puzzletron.dataset.Modality"><code class="xref py py-obj docutils literal notranslate"><span class="pre">Modality</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata" title="modelopt.torch.puzzletron.dataset.PackedSequenceMetadata"><code class="xref py py-obj docutils literal notranslate"><span class="pre">PackedSequenceMetadata</span></code></a></p></td>
+<td><p>Sequence and media boundaries retained across distributed partitions.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch" title="modelopt.torch.puzzletron.dataset.PuzzletronBatch"><code class="xref py py-obj docutils literal notranslate"><span class="pre">PuzzletronBatch</span></code></a></p></td>
+<td><p>The only model-input contract shared by Puzzletron stages.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackingSpec" title="modelopt.torch.puzzletron.dataset.PackingSpec"><code class="xref py py-obj docutils literal notranslate"><span class="pre">PackingSpec</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec" title="modelopt.torch.puzzletron.dataset.PuzzletronDataSpec"><code class="xref py py-obj docutils literal notranslate"><span class="pre">PuzzletronDataSpec</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec" title="modelopt.torch.puzzletron.dataset.TextAcquisitionSpec"><code class="xref py py-obj docutils literal notranslate"><span class="pre">TextAcquisitionSpec</span></code></a></p></td>
+<td><p>A bounded local snapshot of Puzzle-KD's two canonical splits.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec" title="modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec"><code class="xref py py-obj docutils literal notranslate"><span class="pre">VlmAcquisitionSpec</span></code></a></p></td>
+<td><p>A bounded local image-conversation snapshot of Nemotron-VLM v2.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p class="rubric">Functions</p>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.batch_from_automodel" title="modelopt.torch.puzzletron.dataset.batch_from_automodel"><code class="xref py py-obj docutils literal notranslate"><span class="pre">batch_from_automodel</span></code></a></p></td>
+<td><p>Normalize an AutoModel VLM/text collator result into <code class="docutils literal notranslate"><span class="pre">PuzzletronBatch</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.load_materialized_conversation_dataset" title="modelopt.torch.puzzletron.dataset.load_materialized_conversation_dataset"><code class="xref py py-obj docutils literal notranslate"><span class="pre">load_materialized_conversation_dataset</span></code></a></p></td>
+<td><p>Hydra-friendly AutoModel VLM dataset factory for the offline subset.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.load_materialized_conversation_subset" title="modelopt.torch.puzzletron.dataset.load_materialized_conversation_subset"><code class="xref py py-obj docutils literal notranslate"><span class="pre">load_materialized_conversation_subset</span></code></a></p></td>
+<td><p>Load a materialized conversation subset without contacting Hugging Face.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.load_materialized_intersyn_subset" title="modelopt.torch.puzzletron.dataset.load_materialized_intersyn_subset"><code class="xref py py-obj docutils literal notranslate"><span class="pre">load_materialized_intersyn_subset</span></code></a></p></td>
+<td><p>Compatibility wrapper for the original InterSyn loader.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.materialize_intersyn_subset" title="modelopt.torch.puzzletron.dataset.materialize_intersyn_subset"><code class="xref py py-obj docutils literal notranslate"><span class="pre">materialize_intersyn_subset</span></code></a></p></td>
+<td><p>Download once, validate, and cache the pinned 8+8 InterSyn acceptance set.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.materialize_nemotron_vlm_dataset" title="modelopt.torch.puzzletron.dataset.materialize_nemotron_vlm_dataset"><code class="xref py py-obj docutils literal notranslate"><span class="pre">materialize_nemotron_vlm_dataset</span></code></a></p></td>
+<td><p>Materialize a bounded, row-proportional Nemotron image-conversation subset.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.materialize_normalized_conversation_samples" title="modelopt.torch.puzzletron.dataset.materialize_normalized_conversation_samples"><code class="xref py py-obj docutils literal notranslate"><span class="pre">materialize_normalized_conversation_samples</span></code></a></p></td>
+<td><p>Stream normalized conversations into an atomically published offline subset.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.materialize_normalized_intersyn_samples" title="modelopt.torch.puzzletron.dataset.materialize_normalized_intersyn_samples"><code class="xref py py-obj docutils literal notranslate"><span class="pre">materialize_normalized_intersyn_samples</span></code></a></p></td>
+<td><p>Compatibility wrapper for the original InterSyn materializer.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.materialize_puzzle_kd_dataset" title="modelopt.torch.puzzletron.dataset.materialize_puzzle_kd_dataset"><code class="xref py py-obj docutils literal notranslate"><span class="pre">materialize_puzzle_kd_dataset</span></code></a></p></td>
+<td><p>Materialize bounded Puzzle-KD train/validation splits for offline tokenization.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.normalize_intersyn_multi" title="modelopt.torch.puzzletron.dataset.normalize_intersyn_multi"><code class="xref py py-obj docutils literal notranslate"><span class="pre">normalize_intersyn_multi</span></code></a></p></td>
+<td><p>Convert the five-column-group InterSyn multi-turn schema without reordering turns.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.normalize_intersyn_single" title="modelopt.torch.puzzletron.dataset.normalize_intersyn_single"><code class="xref py py-obj docutils literal notranslate"><span class="pre">normalize_intersyn_single</span></code></a></p></td>
+<td><p>Convert one real InterSyn single-turn row to AutoModel conversation form.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.normalize_nemotron_vlm_sample" title="modelopt.torch.puzzletron.dataset.normalize_nemotron_vlm_sample"><code class="xref py py-obj docutils literal notranslate"><span class="pre">normalize_nemotron_vlm_sample</span></code></a></p></td>
+<td><p>Preserve a complete Nemotron conversation while attaching its matched image.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.DataLayout">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">DataLayout</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.DataLayout" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.DataLayout.FIXED">
+<span class="sig-name descname"><span class="pre">FIXED</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'fixed'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.DataLayout.FIXED" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.DataLayout.PACKED_VARLEN">
+<span class="sig-name descname"><span class="pre">PACKED_VARLEN</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'packed_varlen'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.DataLayout.PACKED_VARLEN" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.DataLayout.PADDED_VARLEN">
+<span class="sig-name descname"><span class="pre">PADDED_VARLEN</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'padded_varlen'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.DataLayout.PADDED_VARLEN" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.DataLayout.__new__">
+<span class="sig-name descname"><span class="pre">__new__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.DataLayout.__new__" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.Modality">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">Modality</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.Modality" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.Modality.MULTIMODAL">
+<span class="sig-name descname"><span class="pre">MULTIMODAL</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'multimodal'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.Modality.MULTIMODAL" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.Modality.TEXT">
+<span class="sig-name descname"><span class="pre">TEXT</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'text'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.Modality.TEXT" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.Modality.__new__">
+<span class="sig-name descname"><span class="pre">__new__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.Modality.__new__" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackedSequenceMetadata">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">PackedSequenceMetadata</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Sequence and media boundaries retained across distributed partitions.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">global_cu_seqlens</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">local_cu_seqlens</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_seqlen</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">seq_ids</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sample_offsets</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">media_counts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">media_offsets</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cp_rank</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cp_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>global_cu_seqlens</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>local_cu_seqlens</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>max_seqlen</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>seq_ids</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>sample_offsets</strong> (<em>tuple</em><em>[</em><em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>media_counts</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>media_offsets</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>cp_rank</strong> (<em>int</em>)</p></li>
+<li><p><strong>cp_size</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.cp_rank">
+<span class="sig-name descname"><span class="pre">cp_rank</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.cp_rank" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.cp_size">
+<span class="sig-name descname"><span class="pre">cp_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.cp_size" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.global_cu_seqlens">
+<span class="sig-name descname"><span class="pre">global_cu_seqlens</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Tensor</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.global_cu_seqlens" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.local_cu_seqlens">
+<span class="sig-name descname"><span class="pre">local_cu_seqlens</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Tensor</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.local_cu_seqlens" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.max_seqlen">
+<span class="sig-name descname"><span class="pre">max_seqlen</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.max_seqlen" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.media_counts">
+<span class="sig-name descname"><span class="pre">media_counts</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Tensor</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.media_counts" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.media_offsets">
+<span class="sig-name descname"><span class="pre">media_offsets</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Tensor</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.media_offsets" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.sample_offsets">
+<span class="sig-name descname"><span class="pre">sample_offsets</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">int</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.sample_offsets" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.seq_ids">
+<span class="sig-name descname"><span class="pre">seq_ids</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Tensor</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata.seq_ids" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackingSpec">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">PackingSpec</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackingSpec" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackingSpec.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pack_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">packing_ratio</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">drop_long_samples</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackingSpec.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>pack_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>packing_ratio</strong> (<em>float</em>)</p></li>
+<li><p><strong>drop_long_samples</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackingSpec.drop_long_samples">
+<span class="sig-name descname"><span class="pre">drop_long_samples</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackingSpec.drop_long_samples" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackingSpec.pack_size">
+<span class="sig-name descname"><span class="pre">pack_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackingSpec.pack_size" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PackingSpec.packing_ratio">
+<span class="sig-name descname"><span class="pre">packing_ratio</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1.0</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PackingSpec.packing_ratio" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">PuzzletronBatch</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>The only model-input contract shared by Puzzletron stages.</p>
+<p>The batch remains backend-neutral: descriptor/stage adapters decide which
+validated <code class="docutils literal notranslate"><span class="pre">model_kwargs</span></code> are consumed by a particular model forward.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_kwargs</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">labels</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ce_mask</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kd_mask</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hidden_mask</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sequence</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sample_ids</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">source_metadata</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">modality</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">Modality.TEXT</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">DataLayout.FIXED</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_kwargs</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>labels</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>ce_mask</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>kd_mask</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>hidden_mask</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>sequence</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata" title="modelopt.torch.puzzletron.dataset.batch.PackedSequenceMetadata"><em>PackedSequenceMetadata</em></a>)</p></li>
+<li><p><strong>sample_ids</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>source_metadata</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>modality</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.dataset.Modality" title="modelopt.torch.puzzletron.dataset.batch.Modality"><em>Modality</em></a>)</p></li>
+<li><p><strong>layout</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.dataset.DataLayout" title="modelopt.torch.puzzletron.dataset.batch.DataLayout"><em>DataLayout</em></a>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.batch_size">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">batch_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.batch_size" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.ce_mask">
+<span class="sig-name descname"><span class="pre">ce_mask</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Tensor</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.ce_mask" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.cp_partition">
+<span class="sig-name descname"><span class="pre">cp_partition</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">token_indices</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">cp_rank</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cp_size</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.cp_partition" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>token_indices</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>cp_rank</strong> (<em>int</em>)</p></li>
+<li><p><strong>cp_size</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch" title="modelopt.torch.puzzletron.dataset.batch.PuzzletronBatch"><em>PuzzletronBatch</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.dp_slice">
+<span class="sig-name descname"><span class="pre">dp_slice</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">dp_rank</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dp_size</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.dp_slice" title="Link to this definition">#</a></dt>
+<dd><p>Return one disjoint contiguous DP shard without duplicating samples/media.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>dp_rank</strong> (<em>int</em>)</p></li>
+<li><p><strong>dp_size</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch" title="modelopt.torch.puzzletron.dataset.batch.PuzzletronBatch"><em>PuzzletronBatch</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.fingerprint">
+<span class="sig-name descname"><span class="pre">fingerprint</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.fingerprint" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.hidden_mask">
+<span class="sig-name descname"><span class="pre">hidden_mask</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Tensor</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.hidden_mask" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.input_ids">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">input_ids</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Tensor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.input_ids" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.kd_mask">
+<span class="sig-name descname"><span class="pre">kd_mask</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Tensor</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.kd_mask" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.labels">
+<span class="sig-name descname"><span class="pre">labels</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Tensor</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.labels" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.layout">
+<span class="sig-name descname"><span class="pre">layout</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.DataLayout" title="modelopt.torch.puzzletron.dataset.batch.DataLayout"><span class="pre">DataLayout</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'fixed'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.layout" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.modality">
+<span class="sig-name descname"><span class="pre">modality</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.Modality" title="modelopt.torch.puzzletron.dataset.batch.Modality"><span class="pre">Modality</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'text'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.modality" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.model_kwargs">
+<span class="sig-name descname"><span class="pre">model_kwargs</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Mapping</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.model_kwargs" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.pad_batch_to_multiple">
+<span class="sig-name descname"><span class="pre">pad_batch_to_multiple</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">multiple</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.pad_batch_to_multiple" title="Link to this definition">#</a></dt>
+<dd><p>Append fully masked rows for a static PP schedule without copying media.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>multiple</strong> (<em>int</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch" title="modelopt.torch.puzzletron.dataset.batch.PuzzletronBatch"><em>PuzzletronBatch</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.pp_microbatches">
+<span class="sig-name descname"><span class="pre">pp_microbatches</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">n_microbatches</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.pp_microbatches" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>n_microbatches</strong> (<em>int</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch" title="modelopt.torch.puzzletron.dataset.batch.PuzzletronBatch"><em>PuzzletronBatch</em></a>, …]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.replace_model_kwargs">
+<span class="sig-name descname"><span class="pre">replace_model_kwargs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">updates</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.replace_model_kwargs" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>updates</strong> (<em>Any</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch" title="modelopt.torch.puzzletron.dataset.batch.PuzzletronBatch"><em>PuzzletronBatch</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.sample_ids">
+<span class="sig-name descname"><span class="pre">sample_ids</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.sample_ids" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.sequence">
+<span class="sig-name descname"><span class="pre">sequence</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackedSequenceMetadata" title="modelopt.torch.puzzletron.dataset.batch.PackedSequenceMetadata"><span class="pre">PackedSequenceMetadata</span></a></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.sequence" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.sequence_length">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">sequence_length</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.sequence_length" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.source_metadata">
+<span class="sig-name descname"><span class="pre">source_metadata</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Mapping</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.source_metadata" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronBatch.to">
+<span class="sig-name descname"><span class="pre">to</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch.to" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch" title="modelopt.torch.puzzletron.dataset.batch.PuzzletronBatch"><em>PuzzletronBatch</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronDataSpec">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">PuzzletronDataSpec</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">modality</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layout</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_sample_length</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">packing</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>modality</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.dataset.Modality" title="modelopt.torch.puzzletron.dataset.batch.Modality"><em>Modality</em></a>)</p></li>
+<li><p><strong>layout</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.dataset.DataLayout" title="modelopt.torch.puzzletron.dataset.batch.DataLayout"><em>DataLayout</em></a>)</p></li>
+<li><p><strong>max_sample_length</strong> (<em>int</em>)</p></li>
+<li><p><strong>packing</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackingSpec" title="modelopt.torch.puzzletron.dataset.config.PackingSpec"><em>PackingSpec</em></a><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.from_mapping">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">from_mapping</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">raw</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.from_mapping" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>raw</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec" title="modelopt.torch.puzzletron.dataset.config.PuzzletronDataSpec"><em>PuzzletronDataSpec</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.layout">
+<span class="sig-name descname"><span class="pre">layout</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.DataLayout" title="modelopt.torch.puzzletron.dataset.batch.DataLayout"><span class="pre">DataLayout</span></a></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.layout" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.legacy_varlen">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">legacy_varlen</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.legacy_varlen" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.max_sample_length">
+<span class="sig-name descname"><span class="pre">max_sample_length</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.max_sample_length" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.modality">
+<span class="sig-name descname"><span class="pre">modality</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.Modality" title="modelopt.torch.puzzletron.dataset.batch.Modality"><span class="pre">Modality</span></a></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.modality" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.packing">
+<span class="sig-name descname"><span class="pre">packing</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PackingSpec" title="modelopt.torch.puzzletron.dataset.config.PackingSpec"><span class="pre">PackingSpec</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.packing" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.sequence_length">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">sequence_length</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.PuzzletronDataSpec.sequence_length" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.TextAcquisitionSpec">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">TextAcquisitionSpec</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>A bounded local snapshot of Puzzle-KD’s two canonical splits.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">train_samples</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">8192</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">validation_samples</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1024</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">seed</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">408</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">revision</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">source</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>output_dir</strong> (<em>Path</em>)</p></li>
+<li><p><strong>train_samples</strong> (<em>int</em>)</p></li>
+<li><p><strong>validation_samples</strong> (<em>int</em>)</p></li>
+<li><p><strong>seed</strong> (<em>int</em>)</p></li>
+<li><p><strong>revision</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>source</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.identity">
+<span class="sig-name descname"><span class="pre">identity</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">revision</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.identity" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>revision</strong> (<em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.output_dir">
+<span class="sig-name descname"><span class="pre">output_dir</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Path</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.output_dir" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.revision">
+<span class="sig-name descname"><span class="pre">revision</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.revision" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.seed">
+<span class="sig-name descname"><span class="pre">seed</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">408</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.seed" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.source">
+<span class="sig-name descname"><span class="pre">source</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.source" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.train_samples">
+<span class="sig-name descname"><span class="pre">train_samples</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">8192</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.train_samples" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.validation_samples">
+<span class="sig-name descname"><span class="pre">validation_samples</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1024</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec.validation_samples" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">VlmAcquisitionSpec</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>A bounded local image-conversation snapshot of Nemotron-VLM v2.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">subsets</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">('sparsetables',</span> <span class="pre">'plotqa_cot',</span> <span class="pre">'wiki_en')</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">subset_rows</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_samples</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">512</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">seed</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">42</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_shards_per_subset</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">revision</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">source</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'nvidia/Nemotron-VLM-Dataset-v2'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>output_dir</strong> (<em>Path</em>)</p></li>
+<li><p><strong>subsets</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>subset_rows</strong> (<em>tuple</em><em>[</em><em>tuple</em><em>[</em><em>str</em><em>, </em><em>int</em><em>]</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>num_samples</strong> (<em>int</em>)</p></li>
+<li><p><strong>seed</strong> (<em>int</em>)</p></li>
+<li><p><strong>max_shards_per_subset</strong> (<em>int</em>)</p></li>
+<li><p><strong>revision</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>source</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.identity">
+<span class="sig-name descname"><span class="pre">identity</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">revision</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.identity" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>revision</strong> (<em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.max_shards_per_subset">
+<span class="sig-name descname"><span class="pre">max_shards_per_subset</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.max_shards_per_subset" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.num_samples">
+<span class="sig-name descname"><span class="pre">num_samples</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">512</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.num_samples" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.output_dir">
+<span class="sig-name descname"><span class="pre">output_dir</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Path</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.output_dir" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.revision">
+<span class="sig-name descname"><span class="pre">revision</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.revision" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.seed">
+<span class="sig-name descname"><span class="pre">seed</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">42</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.seed" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.source">
+<span class="sig-name descname"><span class="pre">source</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'nvidia/Nemotron-VLM-Dataset-v2'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.source" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.subset_rows">
+<span class="sig-name descname"><span class="pre">subset_rows</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">int</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.subset_rows" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.subsets">
+<span class="sig-name descname"><span class="pre">subsets</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('sparsetables',</span> <span class="pre">'plotqa_cot',</span> <span class="pre">'wiki_en')</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec.subsets" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.batch_from_automodel">
+<span class="sig-name descname"><span class="pre">batch_from_automodel</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">collated</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">sample_ids</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">source_metadata</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layout</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.batch_from_automodel" title="Link to this definition">#</a></dt>
+<dd><p>Normalize an AutoModel VLM/text collator result into <code class="docutils literal notranslate"><span class="pre">PuzzletronBatch</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>collated</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>sample_ids</strong> (<em>Sequence</em><em>[</em><em>str</em><em>]</em>)</p></li>
+<li><p><strong>source_metadata</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>layout</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.dataset.DataLayout" title="modelopt.torch.puzzletron.dataset.batch.DataLayout"><em>DataLayout</em></a><em> | </em><em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.dataset.PuzzletronBatch" title="modelopt.torch.puzzletron.dataset.batch.PuzzletronBatch"><em>PuzzletronBatch</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.load_materialized_conversation_dataset">
+<span class="sig-name descname"><span class="pre">load_materialized_conversation_dataset</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path_or_dataset</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_samples</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">seq_length</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pretokenize</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">truncate</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_fake_images</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_length</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">unknown</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.load_materialized_conversation_dataset" title="Link to this definition">#</a></dt>
+<dd><p>Hydra-friendly AutoModel VLM dataset factory for the offline subset.</p>
+<p>AutoModel passes the complete <code class="docutils literal notranslate"><span class="pre">dataset</span></code> config to its dataset target,
+including processor/collator controls that it consumes after construction.
+Accept those declared controls explicitly so config composition stays
+transparent, but reject misspelled or otherwise unknown fields.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>path_or_dataset</strong> (<em>str</em><em> | </em><em>Path</em>)</p></li>
+<li><p><strong>num_samples</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>seq_length</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>pretokenize</strong> (<em>bool</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>truncate</strong> (<em>bool</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>inject_fake_images</strong> (<em>bool</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>max_length</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>unknown</strong> (<em>Any</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.load_materialized_conversation_subset">
+<span class="sig-name descname"><span class="pre">load_materialized_conversation_subset</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">output_dir</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.load_materialized_conversation_subset" title="Link to this definition">#</a></dt>
+<dd><p>Load a materialized conversation subset without contacting Hugging Face.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>output_dir</strong> (<em>str</em><em> | </em><em>Path</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>dict</em>[<em>str</em>, <em>Any</em>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.load_materialized_intersyn_subset">
+<span class="sig-name descname"><span class="pre">load_materialized_intersyn_subset</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">output_dir</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.load_materialized_intersyn_subset" title="Link to this definition">#</a></dt>
+<dd><p>Compatibility wrapper for the original InterSyn loader.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>output_dir</strong> (<em>str</em><em> | </em><em>Path</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>dict</em>[<em>str</em>, <em>Any</em>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.materialize_intersyn_subset">
+<span class="sig-name descname"><span class="pre">materialize_intersyn_subset</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">output_dir</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">rows_per_source</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">8</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dataset_loader</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.materialize_intersyn_subset" title="Link to this definition">#</a></dt>
+<dd><p>Download once, validate, and cache the pinned 8+8 InterSyn acceptance set.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>output_dir</strong> (<em>str</em><em> | </em><em>Path</em>)</p></li>
+<li><p><strong>rows_per_source</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.materialize_nemotron_vlm_dataset">
+<span class="sig-name descname"><span class="pre">materialize_nemotron_vlm_dataset</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">spec</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sample_loader</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">revision_resolver</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;function</span> <span class="pre">_resolve_revision&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.materialize_nemotron_vlm_dataset" title="Link to this definition">#</a></dt>
+<dd><p>Materialize a bounded, row-proportional Nemotron image-conversation subset.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>spec</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec" title="modelopt.torch.puzzletron.dataset.VlmAcquisitionSpec"><em>VlmAcquisitionSpec</em></a>)</p></li>
+<li><p><strong>sample_loader</strong> (<em>Callable</em><em>[</em><em>...</em><em>, </em><em>Iterable</em><em>[</em><em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>]</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>revision_resolver</strong> (<em>Callable</em><em>[</em><em>[</em><em>str</em><em>, </em><em>str</em><em> | </em><em>None</em><em>]</em><em>, </em><em>str</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.materialize_normalized_conversation_samples">
+<span class="sig-name descname"><span class="pre">materialize_normalized_conversation_samples</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">samples</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_dir</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">acquisition</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">diagnostics</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expected_count</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.materialize_normalized_conversation_samples" title="Link to this definition">#</a></dt>
+<dd><p>Stream normalized conversations into an atomically published offline subset.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>samples</strong> (<em>Iterable</em><em>[</em><em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>]</em>)</p></li>
+<li><p><strong>output_dir</strong> (<em>str</em><em> | </em><em>Path</em>)</p></li>
+<li><p><strong>acquisition</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>diagnostics</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>expected_count</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.materialize_normalized_intersyn_samples">
+<span class="sig-name descname"><span class="pre">materialize_normalized_intersyn_samples</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">samples</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_dir</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.materialize_normalized_intersyn_samples" title="Link to this definition">#</a></dt>
+<dd><p>Compatibility wrapper for the original InterSyn materializer.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>samples</strong> (<em>Sequence</em><em>[</em><em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>]</em>)</p></li>
+<li><p><strong>output_dir</strong> (<em>str</em><em> | </em><em>Path</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.materialize_puzzle_kd_dataset">
+<span class="sig-name descname"><span class="pre">materialize_puzzle_kd_dataset</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">spec</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dataset_loader</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">revision_resolver</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;function</span> <span class="pre">_resolve_revision&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.materialize_puzzle_kd_dataset" title="Link to this definition">#</a></dt>
+<dd><p>Materialize bounded Puzzle-KD train/validation splits for offline tokenization.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>spec</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.dataset.TextAcquisitionSpec" title="modelopt.torch.puzzletron.dataset.TextAcquisitionSpec"><em>TextAcquisitionSpec</em></a>)</p></li>
+<li><p><strong>dataset_loader</strong> (<em>Callable</em><em>[</em><em>...</em><em>, </em><em>Iterable</em><em>[</em><em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>]</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>revision_resolver</strong> (<em>Callable</em><em>[</em><em>[</em><em>str</em><em>, </em><em>str</em><em> | </em><em>None</em><em>]</em><em>, </em><em>str</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.normalize_intersyn_multi">
+<span class="sig-name descname"><span class="pre">normalize_intersyn_multi</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">row</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.normalize_intersyn_multi" title="Link to this definition">#</a></dt>
+<dd><p>Convert the five-column-group InterSyn multi-turn schema without reordering turns.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>row</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.normalize_intersyn_single">
+<span class="sig-name descname"><span class="pre">normalize_intersyn_single</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">row</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.normalize_intersyn_single" title="Link to this definition">#</a></dt>
+<dd><p>Convert one real InterSyn single-turn row to AutoModel conversation form.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>row</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.dataset.normalize_nemotron_vlm_sample">
+<span class="sig-name descname"><span class="pre">normalize_nemotron_vlm_sample</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">row</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">subset</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">revision</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.dataset.normalize_nemotron_vlm_sample" title="Link to this definition">#</a></dt>
+<dd><p>Preserve a complete Nemotron conversation while attaching its matched image.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>row</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>subset</strong> (<em>str</em>)</p></li>
+<li><p><strong>revision</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="modelopt.torch.puzzletron.checkpoint_transactions.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">checkpoint_transactions</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="modelopt.torch.puzzletron.depth.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">depth</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2023-2025, NVIDIA Corporation</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials"></div>
+    </div>
+  </div>
+</footer>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script src="../../_static/shibuya.js?v=50760d75"></script>
+      <script src="../../_static/announcements.js?v=d94b986f"></script></body>
+</html>
