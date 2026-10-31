@@ -75,7 +75,7 @@ import modelopt.torch.models.hf as models_hf
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 import modelopt.torch.utils.moe as moe
-from modelopt.torch.models import get_spec
+from modelopt.torch.models import _onfly_decompress, get_spec
 from modelopt.torch.quantization.plugins import accelerate as accelerate_plugin
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -895,6 +895,39 @@ def test_a_remote_moe_whose_prepare_attaches_its_plan_left_whole_is_an_error(
         resolve_distribution_plan(str(tmp_path))
 
 
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version(_ep_floor("kimi_k3")),
+    reason="Kimi-K3's expert parallelism needs a later transformers",
+)
+@pytest.mark.parametrize(
+    ("distribution", "auto_class"),
+    [(DistributionPlan(2, 1, "replicate"), AutoModel), (DistributionPlan(2, dense="fsdp"), None)],
+    ids=["whole", "fsdp2"],
+)
+def test_a_load_after_a_prepare_that_patched_every_load_is_refused(
+    run_as, serve, loaders, monkeypatch, tmp_path, distribution, auto_class
+):
+    """Kimi-K3's ``prepare`` patches its remote MoE block for every later load in the process, and
+    its spec says so. Once it ran, as it does for an expert-parallel load, a whole-model or
+    FSDP2-sharded load of Kimi-K3 in the process is refused before anything is built: it would build
+    the patched block and load the checkpoint's experts into it wrong."""
+    monkeypatch.setattr(moe, "_PATCHED_EVERY_LOAD", set())
+    monkeypatch.setattr(
+        get_spec("kimi_k3").ep_spec, "prepare", lambda hf_config, **kwargs: hf_config
+    )
+    run_as(2)
+    config = serve(SimpleNamespace(model_type="kimi_k3", text_config=SimpleNamespace()))
+    moe.apply_distributed_support(
+        "kimi_k3", copy.deepcopy(config), ckpt_path=str(tmp_path), trust_remote_code=True
+    )
+
+    with pytest.raises(NotImplementedError, match="patched its modeling code"):
+        load_pretrained(
+            str(tmp_path), auto_class, distribution=distribution, trust_remote_code=True
+        )
+    assert loaders == {}
+
+
 def test_an_ep_capable_moe_may_be_fsdp2_sharded_instead(run_as, serve, monkeypatch, tmp_path):
     """Asked for no expert parallelism but for dense sharding, the MoE is sharded whole by FSDP2,
     which is not the waste of a replica on every rank."""
@@ -904,6 +937,80 @@ def test_an_ep_capable_moe_may_be_fsdp2_sharded_instead(run_as, serve, monkeypat
     serve(_deepseek_v3(n_routed_experts=8))
 
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2, dense="fsdp")
+
+
+def _remote_kimi_k3():
+    """A remote-code Kimi VLM as the checkpoint's own code builds it, unpatched by its spec's
+    ``prepare``: each MoE layer of its language model holds its routed experts as per-expert
+    modules in an ``nn.ModuleList``, at ``language_model.model.layers.<i>.<moe>.experts``."""
+
+    def layer():
+        block = nn.Module()
+        block.gate = nn.Linear(2, 4, bias=False)
+        block.experts = nn.ModuleList(nn.Linear(2, 2, bias=False) for _ in range(4))
+        return nn.ModuleDict({"block_sparse_moe": block})
+
+    model = nn.Module()
+    model.language_model = nn.Module()
+    model.language_model.model = nn.Module()
+    model.language_model.model.layers = nn.ModuleList(layer() for _ in range(2))
+    model.tie_weights = lambda: None  # a PreTrainedModel's; nothing here is tied
+    return model
+
+
+def test_a_remote_kimi_k3_whose_prepare_attaches_its_plan_left_whole_is_an_error(
+    run_as, serve, monkeypatch, tmp_path
+):
+    """Remote-code Kimi checkpoints get their plan from their spec's ``prepare``, which an EP degree
+    of 1 skips: it patches their code. The plan their spec states still finds the experts their own
+    code builds, so whole on every rank they are refused like Qwen3-MoE: a ValueError, or the
+    RuntimeError naming the release when this transformers is below what their spec needs."""
+    monkeypatch.setenv("MODELOPT_EP_DEGREE", "1")
+    monkeypatch.setattr(
+        get_spec("kimi_k3").ep_spec, "prepare", lambda *a, **k: pytest.fail("ran prepare")
+    )
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi_k3())
+    run_as(4)
+    serve(SimpleNamespace(model_type="kimi_k3", text_config=SimpleNamespace(num_experts=8)))
+    below_floor = Version(transformers.__version__) < Version(_ep_floor("kimi_k3"))
+
+    with pytest.raises(
+        RuntimeError if below_floor else ValueError,
+        match="can be expert-parallel, but the plan resolved",
+    ):
+        resolve_distribution_plan(str(tmp_path))
+
+
+def test_a_packed_kimi_k3_loaded_through_another_class_is_planned_without_its_spec(
+    run_as, serve, monkeypatch, tmp_path
+):
+    """A model class the sharded loads refuse is planned whole on every rank, never expert-parallel,
+    so a packed Kimi-K3 loaded through one (``AutoModel``) gets no ``prepare``, which patches the
+    checkpoint's own code for the process and marks only its copy of the config for the experts'
+    decompression. The whole load then reads the config as the checkpoint holds it: unmarked, and
+    with the compressed-tensors scheme transformers' own quantizer loads the experts by."""
+    monkeypatch.setattr(
+        get_spec("kimi_k3").ep_spec, "prepare", lambda *a, **k: pytest.fail("ran prepare")
+    )
+    monkeypatch.setattr(
+        model_load_utils, "build_meta_causal_lm", lambda *a, **k: pytest.fail("built a model")
+    )
+    # As on a transformers new enough for Kimi-K3's expert parallelism, which would rule it out here.
+    monkeypatch.setattr(model_load_utils, "_spec_refuses_ep", lambda model_type: False)
+    run_as(4)
+    scheme = {"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"}
+    text = SimpleNamespace(num_experts=8, quantization_config=scheme)
+    # Kimi-K3's own config class copies its language model's scheme to the top level.
+    config = serve(
+        SimpleNamespace(model_type="kimi_k3", text_config=text, quantization_config=scheme)
+    )
+
+    plan, planned = resolve_distribution_plan(str(tmp_path), auto_class=AutoModel)
+
+    assert plan == DistributionPlan(4)
+    assert planned is config and not _onfly_decompress.is_marked(planned)
+    assert planned.quantization_config is scheme
+    assert planned.text_config.quantization_config is scheme
 
 
 @needs_qwen3_moe_ep_plan
