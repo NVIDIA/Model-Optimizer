@@ -804,10 +804,11 @@ def _distributed_save_hf_checkpoint_impl(
     # set so _materialize_owned can tell disjoint experts from replicated dense.
     expert_key_set = set(local_sd)
 
-    # (2) Dense / non-expert: leave sharded for now -- FSDP2 leaves DTensors (dim-0 shard); EP leaves
-    # plain replicated tensors. Do NOT gather to rank 0; _materialize_owned below moves each tensor to
-    # a single OWNER rank instead, so the set stays spread across ranks. postprocess runs on every rank
-    # (dict-level key renaming + small scalar scale math -- safe on DTensors).
+    # (2) Dense / non-expert: leave them as they are for now -- FSDP2 leaves DTensors (dim-0 shard),
+    # and what it does not shard stays a plain tensor, the same on every rank. Do NOT gather to rank
+    # 0; _materialize_owned below moves each tensor to a single OWNER rank instead, so the set stays
+    # spread across ranks. postprocess runs on every rank (dict-level key renaming + small scalar
+    # scale math -- safe on DTensors).
     nonexpert_keys = [k for k in sharded_sd if not _is_expert_key(k)]
     dense_sd = {k: sharded_sd[k] for k in nonexpert_keys}
     dense_sd = postprocess_state_dict(
@@ -827,14 +828,14 @@ def _distributed_save_hf_checkpoint_impl(
     reverted = _revert_whole_sd(model, local_sd)
 
     # Tensors the model does not own -- whatever the caller hands in via extra_state_dict, e.g.
-    # weights read straight off the source checkpoint that the FSDP2 loader drops. They are plain
-    # CPU tensors, already whole and identical on every rank, so ONE rank adds them to its
-    # write set; the index union and
-    # the cross-rank duplicate check below then treat them like any other owned key. Rank 0 takes
-    # them wholesale: they are small next to the model, and spreading them would cost a collective
-    # to agree on the split. They go in AFTER the reverse conversion because they carry their
-    # original hub names and were never converted -- reverting them would rename them wrongly. This
-    # mirrors the gather path, which merges extra_state_dict into the already-reverted dict.
+    # weights read straight off the source checkpoint that the FSDP2 loader drops. They are plain,
+    # whole CPU tensors, and only rank 0 adds them to its write set (the export entry hands them to
+    # rank 0 alone); the index union and the cross-rank duplicate check below then treat them like
+    # any other owned key. Rank 0 takes them wholesale: they are small next to the model, and
+    # spreading them would cost a collective to agree on the split. They go in AFTER the reverse
+    # conversion because they carry their original hub names and were never converted -- reverting
+    # them would rename them wrongly. This mirrors the gather path, which merges extra_state_dict
+    # into the already-reverted dict.
     def check_no_overlap() -> None:
         if rank != 0 or not extra_state_dict:
             return
