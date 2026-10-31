@@ -269,3 +269,6 @@ class KimiK3ForConditionalGeneration(KimiK3PreTrainedModel):
 
     def forward(self, input_ids=None, **kwargs):
         return self.language_model(input_ids=input_ids)
+
+    def tie_weights(self):  # as Kimi-K3's own: no keyword arguments
+        return self.language_model.tie_weights()
