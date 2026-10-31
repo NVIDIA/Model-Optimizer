@@ -58,6 +58,7 @@ def test_empty_corpus_raises():
 
 def test_an_indexable_corpus_is_kept_and_an_iterator_materialized():
     """An Arrow-backed corpus stays memory-mapped instead of being copied into every rank."""
+    # datasets is an optional dependency; skip only this test without it.
     datasets = pytest.importorskip("datasets")
     corpus = datasets.Dataset.from_list(_entries(5))
     ds = StreamingDataset(corpus, tokenizer=MagicMock(), config=StreamingConfig())
