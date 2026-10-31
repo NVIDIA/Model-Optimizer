@@ -15,25 +15,25 @@
 
 """HuggingFace-coupled MoE expert-parallel (EP) helpers.
 
-Finding a model's routed experts, choosing the EP degree they are sharded over, and the DP=EP
-all-to-all expert transport (``torch_a2a``).
+Finding a model's routed experts, choosing the EP degree they are sharded over, the DP=EP
+all-to-all expert transport (``torch_a2a``). The expert-parallel model loader is
+:func:`~modelopt.torch.utils.plugins.model_load_utils.load_and_prepare_ep`.
 
 The all-to-all transport is plain ``torch.distributed.all_to_all_single`` (NCCL) wrapped around
-transformers' quantizable ``_grouped_linear``. ``register_torch_a2a()`` registers it into
-transformers' ``ExpertsInterface`` lazily -- never at import time, so importing this module has no
-transformers-``ExpertsInterface`` side effect.
+transformers' quantizable ``_grouped_linear``. ``register_torch_a2a()`` registers
+it into transformers' ``ExpertsInterface`` (lazily, from ``load_and_prepare_ep``'s a2a path -- never at
+import time, so importing this module has no transformers-``ExpertsInterface`` side effect).
 """
 
 import warnings
-from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from packaging.version import parse
 from torch.distributed.nn.functional import all_to_all_single as autograd_all_to_all_single
 
-if TYPE_CHECKING:
-    from torch import nn
+from .distributed import distribution_plan
 
 
 def require_transformers(min_version: str, feature: str) -> None:
@@ -406,7 +406,9 @@ def register_torch_a2a():
     These two styles are functionally transformers' ``megamoe_router`` / ``megamoe_experts`` (added
     in 5.10.4 for DeepGEMM Mega-MoE), reimplemented here so the transport works below 5.10.4 too.
     The base classes (``RouterParallel``, ``TensorParallelLayer``) are stock wherever the EP infra
-    exists (transformers >= 5.6); ``grouped_gemm`` (expert weight sharding) is stock too.
+    exists (transformers >= 5.6); ``grouped_gemm`` (expert weight sharding) is stock too. A model
+    builds with ``torch_a2a`` only from 5.7, the floor ``load_and_prepare_ep`` enforces: 5.6 accepts
+    only the experts implementations it ships.
     """
     global _TORCH_A2A_REGISTERED
     if _TORCH_A2A_REGISTERED:
@@ -473,3 +475,23 @@ def register_torch_a2a():
     ALL_PARALLEL_STYLES.register("torch_a2a_router", TorchA2ARouter())
     ALL_PARALLEL_STYLES.register("torch_a2a_experts", TorchA2AExperts())
     _TORCH_A2A_REGISTERED = True
+
+
+def expert_parallel_mesh(model: nn.Module):
+    """The mesh ``model``'s routed experts are sharded over, or ``None`` if its plan shards none.
+
+    :func:`~modelopt.torch.utils.plugins.model_load_utils.load_and_prepare_ep` loads the model over
+    its expert-parallel submesh, and keeps that submesh on the model as ``_device_mesh``.
+    Calibration takes the mesh to re-install the all-to-all forwards
+    (:func:`~modelopt.torch.utils.distributed.distributed_forward_loop`).
+    """
+    if not distribution_plan(model).is_expert_parallel:
+        return None
+    mesh = getattr(model, "_device_mesh", None)
+    if mesh is None:
+        raise RuntimeError(
+            f"{type(model).__name__} is planned expert-parallel but carries no device mesh. Pass "
+            "the model load_and_prepare_ep returned, not a submodule of it: the loader keeps the "
+            "mesh it shards the experts over on that model alone."
+        )
+    return mesh

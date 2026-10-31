@@ -41,7 +41,7 @@ from modelopt.torch.kernels.common.attention import (
 from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_AVAILABLE
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils import warn_rank_0
-from modelopt.torch.utils.distributed import ParallelState
+from modelopt.torch.utils.distributed import ParallelState, recorded_distribution_plan
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import register
@@ -596,7 +596,9 @@ def convert_hf_parallel_linears_on_the_fly(model):
         elif HFRowParallelLinear.is_compatible(module, tp_mesh):
             HFRowParallelLinear.convert(module)
             converted = True
-    if tp_mesh is not None and not converted:
+    # An expert-parallel load keeps its experts' mesh there too, and shards no Linear by design.
+    plan = recorded_distribution_plan(model)
+    if tp_mesh is not None and not converted and not (plan is not None and plan.is_expert_parallel):
         warnings.warn(
             "Found a transformers tensor-parallel mesh but no TP-sharded linear layer; they will be"
             " quantized as unsharded layers."
