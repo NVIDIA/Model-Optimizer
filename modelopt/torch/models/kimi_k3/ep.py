@@ -107,6 +107,11 @@ from ._remote_fixes import (
 # No `ep_router` entry: KimiMoEGate runs inline over the replicated router weight and emits GLOBAL ids.
 # The model type the spec registers, and the early record of prepare's lasting patch keys on.
 MODEL_TYPE = "kimi_k3"
+# Its kimi_linear backbone's model type, which the fused-expert converters register under.
+BACKBONE_MODEL_TYPE = "kimi_linear"
+# The model types every later load of which prepare spoils: the converters apply to any
+# kimi_linear checkpoint, a text-only one too, whose own MoE block was never patched.
+PATCHED_EVERY_LOAD = (MODEL_TYPE, BACKBONE_MODEL_TYPE)
 
 BASE_MODEL_EP_PLAN = {
     "layers.*.block_sparse_moe.experts.gate_up_proj": "grouped_gemm",
@@ -215,8 +220,8 @@ def _patch_kimi_moe_block(kmod) -> None:
     _orig_init = Block.__init__
     _orig_forward = Block.forward
 
-    def _init(self, config):
-        _orig_init(self, config)
+    def _init(self, config, *args, **kwargs):
+        _orig_init(self, config, *args, **kwargs)
         # Replace the ModuleList of per-expert MLPs with the fused grouped-param module (EP-capable), as
         # wide as the space the block runs its experts in. The block decides latent MoE itself (Kimi-K3's
         # config has no use_latent_moe field) and the forward below follows it, so read it off the block.
@@ -365,7 +370,7 @@ def _register_kimi_k3_conversions() -> None:
     # and the inner submodule is de-duplicated (ancestor already claimed the model_type). Registering the
     # CLASS names too would apply it a second time at `language_model.model.` scope -> the same expert keys
     # converted twice -> conflict at load.
-    register_checkpoint_conversion_mapping("kimi_linear", _mapping(), overwrite=True)
+    register_checkpoint_conversion_mapping(BACKBONE_MODEL_TYPE, _mapping(), overwrite=True)
     print_rank_0(
         "[kimi_k3] registered per-expert w1/w3/w2 -> gate_up_proj/down_proj fusion for kimi_linear "
         "(custom-code conversion; tf>=5.13 skips these otherwise)"
@@ -394,7 +399,8 @@ def prepare(
 
     Only an expert-parallel plan runs it, but its patches are process-wide and stay after that load,
     which the spec states (``prepare_patches_every_load``): a later whole-model or FSDP2-sharded load
-    of Kimi-K3 in the same process is refused before it builds or loads the model.
+    of Kimi-K3, or of any kimi_linear checkpoint, in the same process is refused before it builds or
+    loads the model.
     """
     # Not at module scope: the model registry imports this module, and modelopt.torch.utils.moe
     # imports the registry.
@@ -439,7 +445,8 @@ def prepare(
         )
     _patch_kimi_moe_block(kmod)
     # Recorded at the first patch that lasts, so a step below that raises still leaves the record.
-    mark_patched_every_load(MODEL_TYPE)
+    for patched in PATCHED_EVERY_LOAD:
+        mark_patched_every_load(patched)
     _patch_kda_a_log(kmod)
     _patch_kda_beta_sigmoid(kmod)
     _shim_create_causal_mask(kmod)

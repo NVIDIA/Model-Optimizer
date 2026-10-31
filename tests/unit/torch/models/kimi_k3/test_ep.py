@@ -611,7 +611,27 @@ def test_a_prepare_that_raises_after_patching_still_records_it(monkeypatch):
 
     with pytest.raises(RuntimeError, match="no kernels to wrap"):
         _prepare(SimpleNamespace(text_config=SimpleNamespace(), auto_map=_AUTO_MAP))
-    assert get_spec("kimi_k3").model_type in moe._PATCHED_EVERY_LOAD
+    # Its backbone's too: the fused-expert converters apply to any kimi_linear load.
+    assert {get_spec("kimi_k3").model_type, "kimi_linear"} <= moe._PATCHED_EVERY_LOAD
+
+
+def test_the_patched_block_takes_what_else_the_remote_one_takes():
+    """A revision of the code whose MoE block takes more than its config, a layer index as many
+    DeepSeek-V3-style blocks do, builds through the patch as it does without it."""
+    remote = remote_module("transformers_modules.stub_layer_idx.modeling_kimi_k3")
+    own_init = remote.KimiSparseMoeBlock.__init__
+
+    def init(self, config, layer_idx=None):
+        own_init(self, config)
+        self.layer_idx = layer_idx
+
+    remote.KimiSparseMoeBlock.__init__ = init
+    kimi_k3._patch_kimi_moe_block(remote)
+
+    block = remote.KimiSparseMoeBlock(_config(), layer_idx=3)
+
+    assert block.layer_idx == 3
+    assert not isinstance(block.experts, nn.ModuleList)
 
 
 @pytest.mark.usefixtures(
