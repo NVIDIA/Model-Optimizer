@@ -365,10 +365,10 @@ def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> Non
     """Record that ``model`` is distributed as ``plan``, on it and on every submodule it has now.
 
     Code handed a submodule, such as a VLM's language model, then reads the same plan as code handed
-    the whole model; a module added afterwards records none. ``load_pretrained`` records the plan it
-    loaded by, once the model is built; code that distributes a model itself records it here before
-    calibrating or exporting the model. The plan says how the model is placed over the run; the
-    :class:`ParallelState` a quantized module holds names the process groups its collectives run on.
+    the whole model; a module added afterwards records none. Code that distributes a model records
+    its plan here before calibrating or exporting the model. The plan says how the model is placed
+    over the run; the :class:`ParallelState` a quantized module holds names the process groups its
+    collectives run on.
 
     A model is distributed once, and its plan recorded once: recording a plan on a model that, or
     any of whose submodules, already records one raises, the same plan included, and leaves the

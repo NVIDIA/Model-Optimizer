@@ -652,15 +652,16 @@ def load_pretrained(
     rank raises on every rank, before the load. The plan is recorded on the model
     (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`) for calibration and export, so
     :func:`~modelopt.torch.utils.fsdp2_utils.fsdp2_wrap` refuses it: to shard a model yourself,
-    load it with ``from_pretrained``. Around the load:
+    load it with ``from_pretrained``. :doc:`/guides/_distributed_loading` has the routing in full.
+    Around the load:
 
     * A Hub model ID is made local first (:func:`ensure_local_checkpoint`, which takes the
       ``revision``, ``token``, ``cache_dir`` and ``local_files_only`` ``kwargs``): the export reads
       the source checkpoint from disk. Under ``torch.distributed`` every rank must call this. The
-      config and model loads still take all but ``revision``: an ``auto_map`` entry can name
-      custom code in another Hub repo, which Transformers fetches with them. A ``subfolder`` is
-      part of where the checkpoint is: the config, the loading hook and the record below read it,
-      as the load does.
+      config read and a whole-model load still take all but ``revision``: an ``auto_map`` entry can
+      name custom code in another Hub repo, which Transformers fetches with them. A sharded load
+      builds the model with ``from_config``, which takes none. A ``subfolder`` is part of where the
+      checkpoint is: the config, the loading hook and the record below read it, as the load does.
     * The model type's loading hook runs
       (:func:`~modelopt.torch.models.hf.prepare_model_for_loading`), e.g. to keep the MTP head a
       Nemotron-H checkpoint carries. ``model_type`` selects it; when omitted, the type of the
