@@ -54,6 +54,7 @@ from transformers import (
     AutoModelForImageTextToText,
     AutoModelForSeq2SeqLM,
     AutoModelForSpeechSeq2Seq,
+    DeepseekV3Config,
     FineGrainedFP8Config,
     LlamaConfig,
     LlamaForCausalLM,
@@ -71,6 +72,7 @@ import modelopt.torch.models.hf as models_hf
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 import modelopt.torch.utils.moe as moe
+from modelopt.torch.models import EPSpec, ModelSpec
 from modelopt.torch.quantization.plugins import accelerate as accelerate_plugin
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -231,6 +233,24 @@ needs_qwen3_moe_ep_plan = pytest.mark.skipif(
 def _qwen3_moe(num_experts=8):
     """Qwen3-MoE, whose base_model_ep_plan ships with transformers itself."""
     return Qwen3MoeConfig(num_experts=num_experts, moe_intermediate_size=8, **_TINY)
+
+
+def _deepseek_v3(n_routed_experts=8):
+    """DeepSeek-V3 without a plan of its own, so only its model spec can make it EP-capable.
+
+    Its one layer is an MoE layer: DeepSeek-V3's first layers are dense by default.
+    """
+    config = DeepseekV3Config(
+        n_routed_experts=n_routed_experts,
+        first_k_dense_replace=0,
+        moe_intermediate_size=8,
+        n_group=1,
+        topk_group=1,
+        num_experts_per_tok=1,
+        **_TINY,
+    )
+    config.base_model_ep_plan = None  # holds even if a later transformers ships a plan
+    return config
 
 
 def _bytes(module):
@@ -440,14 +460,6 @@ def test_an_ep_capable_moe_is_planned_expert_parallel(run_as, serve, tmp_path, c
     assert ("Distribution:" in capsys.readouterr().out) == (rank == 0)
 
 
-@needs_qwen3_moe_ep_plan
-def test_no_ep_degree_dividing_the_experts_leaves_them_whole(run_as, serve, tmp_path):
-    run_as(2)
-    serve(_qwen3_moe(num_experts=3))
-
-    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
-
-
 def test_an_moe_without_an_ep_plan_is_not_expert_parallel(run_as, serve, tmp_path):
     """The config counts 8 experts, but with no base_model_ep_plan nothing could shard them."""
     run_as(4)
@@ -464,17 +476,22 @@ def test_an_ep_plan_naming_no_module_of_the_model_is_refused(
 ):
     """A plan whose expert containers match no module of the built model (a renamed submodule, a
     hand-written plan) leaves no expert to count or shard: the automatic degree would replicate
-    every expert on every rank without a word. A degree set to 1 asks for exactly that."""
+    every expert on every rank without a word. A degree of 1 with the dense part replicated asks
+    for exactly that."""
     run_as(4)
     config = _qwen3_moe(num_experts=8)
     config.base_model_ep_plan = {"layers.*.mlp.renamed_experts": "moe_tp_experts"}
     serve(config)
 
     if degree is None:
-        with pytest.raises(ValueError, match=r"renamed_experts\) names .* MODELOPT_EP_DEGREE=1"):
+        with pytest.raises(
+            ValueError,
+            match=r"renamed_experts\) names .* MODELOPT_EP_DEGREE=1 and MODELOPT_FSDP_SIZE=1",
+        ):
             resolve_distribution_plan(str(tmp_path))
     else:
         monkeypatch.setenv("MODELOPT_EP_DEGREE", degree)
+        monkeypatch.setenv("MODELOPT_FSDP_SIZE", "1")
         assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4)
 
 
@@ -484,7 +501,7 @@ def test_routed_experts_the_config_does_not_count_are_refused(
 ):
     """The mirror case: the plan's containers are in the built model, but the config counts its
     experts under no field the decision reads, which would leave every expert replicated on every
-    rank without a word. A degree set to 1 asks for exactly that."""
+    rank without a word. A degree of 1 with the dense part replicated asks for exactly that."""
     plan = {"layers.*.mlp.experts": "moe_tp_experts"}
     serve(SimpleNamespace(model_type="moe", architectures=[], base_model_ep_plan=plan))
     built = model_with_decoder_at("model.")
@@ -493,10 +510,13 @@ def test_routed_experts_the_config_does_not_count_are_refused(
     run_as(4)
 
     if degree is None:
-        with pytest.raises(ValueError, match=r"no expert count .* MODELOPT_EP_DEGREE=1"):
+        with pytest.raises(
+            ValueError, match=r"no expert count .* MODELOPT_EP_DEGREE=1 and MODELOPT_FSDP_SIZE=1"
+        ):
             resolve_distribution_plan(str(tmp_path))
     else:
         monkeypatch.setenv("MODELOPT_EP_DEGREE", degree)
+        monkeypatch.setenv("MODELOPT_FSDP_SIZE", "1")
         assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4)
 
 
@@ -553,6 +573,107 @@ def test_an_ep_degree_that_is_not_a_number_names_where_it_came_from(
 
 @needs_qwen3_moe_ep_plan
 @pytest.mark.parametrize(
+    ("config", "ep_degree"),
+    [
+        pytest.param(_qwen3_moe(num_experts=3), None, id="auto_finds_no_degree"),
+        pytest.param(_qwen3_moe(num_experts=8), "1", id="explicit_degree_one"),
+        pytest.param(_qwen3_moe(num_experts=8), 1, id="explicit_degree_one_as_an_argument"),
+    ],
+)
+def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
+    run_as, serve, monkeypatch, tmp_path, config, ep_degree
+):
+    """No EP degree above 1 divides 3 experts over 2 ranks, and an explicit 1 asks for none. With
+    nothing sharded either, every rank would hold the whole MoE: that must fail, not run. The ways
+    out are named as the caller set the plan, so arguments, which override the knobs, are named."""
+    if isinstance(ep_degree, str):
+        monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
+    arguments = {"ep_size": ep_degree, "dense": "auto"} if isinstance(ep_degree, int) else {}
+    run_as(2)
+    serve(config)
+
+    with pytest.raises(
+        ValueError, match="can be expert-parallel, but the plan resolved"
+    ) as refused:
+        resolve_distribution_plan(str(tmp_path), **arguments)
+    if arguments:  # a knob the arguments override would lead straight back here
+        assert "ep_size=1 with dense='replicate'" in str(refused.value), refused.value
+        assert "MODELOPT_" not in str(refused.value), refused.value
+
+
+@needs_qwen3_moe_ep_plan
+@pytest.mark.parametrize("ep_degree", [None, "1"], ids=["auto", "set-to-1"])
+@pytest.mark.parametrize(
+    "refused_by",
+    ["its-plan", "its-format", "its-spec", "its-transformers", "its-specs-transformers"],
+)
+def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
+    run_as, serve, monkeypatch, tmp_path, refused_by, ep_degree
+):
+    """Left to the decision, an MoE the expert-parallel load would refuse -- by a plan that
+    shards no expert weights through grouped_gemm, a checkpoint format it does not load, a model
+    spec ruling it out (Llama-4's, GPT-OSS's), or a transformers below its floor or below the
+    later one the spec states (MiniMax-M3-VL's) -- is planned without expert parallelism rather
+    than committed to a load that refuses it, for some reasons only after the download. Nor is it
+    refused for being left whole, whether the decision or the caller made its EP degree 1: it
+    cannot be expert-parallel here."""
+    if ep_degree is not None:
+        monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
+    run_as(2)
+    config = _qwen3_moe(num_experts=8)
+    if refused_by == "its-plan":
+        config.base_model_ep_plan = {"layers.*.mlp.experts": "moe_tp_experts"}
+    elif refused_by == "its-format":
+        config.quantization_config = {"quant_method": "fp8"}
+    elif refused_by == "its-spec":
+        spec = ModelSpec(model_type="qwen3_moe", ep_spec=EPSpec(unsupported="Not yet."))
+        monkeypatch.setattr(model_load_utils, "get_spec", lambda model_type: spec)
+    elif refused_by == "its-specs-transformers":
+        # Above the load's own 5.7 by version, as 5.10 is not, though not as strings compare.
+        spec = ModelSpec(model_type="qwen3_moe", ep_spec=EPSpec(requires_transformers="5.13"))
+        monkeypatch.setattr(model_load_utils, "get_spec", lambda model_type: spec)
+        monkeypatch.setattr(transformers, "__version__", "5.10.0")
+    else:
+        monkeypatch.setattr(transformers, "__version__", "5.6.2")
+    serve(config)
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+
+    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
+
+
+@needs_qwen3_moe_ep_plan
+@pytest.mark.parametrize("ep_degree", [None, "1"], ids=["auto", "set-to-1"])
+def test_an_ep_capable_moe_may_be_fsdp2_sharded_instead(
+    run_as, serve, monkeypatch, tmp_path, ep_degree
+):
+    """Asked for dense sharding, the MoE is sharded whole by FSDP2, which is not the waste of a
+    replica on every rank: an EP degree left to the decision gives way, as the expert-parallel
+    load replicates the dense part."""
+    if ep_degree is not None:
+        monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    run_as(2)
+    serve(_qwen3_moe(num_experts=8))
+
+    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2, dense="fsdp")
+
+
+@needs_qwen3_moe_ep_plan
+def test_an_ep_capable_moe_is_replicated_when_both_knobs_ask_for_it(
+    run_as, serve, monkeypatch, tmp_path
+):
+    """Both knobs asking to shard nothing is a replication the caller chose, not one the plan
+    reached on its own: every rank holds the whole MoE."""
+    monkeypatch.setenv("MODELOPT_EP_DEGREE", "1")
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "1")
+    run_as(2)
+    serve(_qwen3_moe(num_experts=8))
+
+    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
+
+
+@needs_qwen3_moe_ep_plan
+@pytest.mark.parametrize(
     "value",
     ["0", "", " ", "AUTO", " auto "],
     ids=["zero", "exported-empty", "exported-blank", "capitals", "padded"],
@@ -595,7 +716,9 @@ def test_what_a_rank_holds_with_the_dense_part_replicated_must_fit(
 ):
     """At EP 4 a rank holds the rest of the model whole and a quarter of the routed experts, so the
     dense part is sharded when that does not fit one GPU, however small the rest; with no EP the
-    whole MoE must fit, and here it does not."""
+    whole MoE must fit, and here it does not. The expert-parallel load replicates the dense part,
+    so an EP degree left to the decision gives way to FSDP2 for the whole model, where one asked
+    for stands, for the load to refuse."""
     run_as(4)
     config = serve(_qwen3_moe(num_experts=8))
     model = _meta(config)
@@ -603,7 +726,9 @@ def test_what_a_rank_holds_with_the_dense_part_replicated_must_fit(
     # A GPU 60% of which holds the rest of the model and that share of the experts.
     gpu_memory(int((_bytes(model) - experts + experts_fitting * experts) / 0.6))
 
-    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4, dense)
+    decided = DistributionPlan(4, 4) if dense == "replicate" else DistributionPlan(4, dense="fsdp")
+    assert resolve_distribution_plan(str(tmp_path))[0] == decided
+    assert resolve_distribution_plan(str(tmp_path), ep_size=4)[0] == DistributionPlan(4, 4, dense)
     assert resolve_distribution_plan(str(tmp_path), ep_size=1)[0] == DistributionPlan(
         4, dense="fsdp"
     )
@@ -703,13 +828,17 @@ def test_the_expert_count_is_read_from_the_config_holding_the_plan(
 ):
     """A VLM whose nested config holds the MoE and its plan counts the experts there, not by an
     expert-ish field on its root config."""
-    text = SimpleNamespace(
-        base_model_ep_plan={"layers.*.mlp.experts": "moe_tp_experts"}, num_experts=8
-    )
+    plan = {
+        "layers.*.mlp.experts": "moe_tp_experts",
+        "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+        "layers.*.mlp.experts.down_proj": "grouped_gemm",
+    }
+    text = SimpleNamespace(base_model_ep_plan=plan, num_experts=8)
     serve(SimpleNamespace(model_type="vlm", architectures=[], text_config=text, num_experts=3))
     built = model_with_decoder_at("model.")
     built.tie_weights = lambda: None  # a PreTrainedModel's; nothing here is tied
     monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: built)
+    monkeypatch.setattr(transformers, "__version__", "5.7.0")  # one the expert-parallel load takes
     run_as(4)
 
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4)
@@ -903,6 +1032,11 @@ def loaders(monkeypatch):
 
         return stub
 
+    monkeypatch.setattr(
+        model_load_utils,
+        "load_and_prepare_ep",
+        recording("ep", model_load_utils.load_and_prepare_ep),
+    )
     monkeypatch.setattr(
         model_load_utils,
         "parallel_load_and_prepare_fsdp2",
@@ -1224,36 +1358,65 @@ def test_a_model_class_given_by_name_is_refused_by_name(
 
 @needs_qwen3_moe_ep_plan
 @pytest.mark.parametrize("knob", [None, "4"], ids=["left-to-decide", "asked-for"])
-def test_a_load_it_decides_keeps_the_experts_whole(
-    run_as, serve, loaders, monkeypatch, tmp_path, knob
+def test_a_load_it_decides_shards_the_experts(
+    run_as, serve, loaders, a_gpu, monkeypatch, tmp_path, knob
 ):
-    """No load here shards the routed experts yet, so an MoE whose EP degree is left to the decision
-    is decided without expert parallelism and loads, where an automatic degree would be one the
-    load refuses; a degree MODELOPT_EP_DEGREE asks for is still refused, not ignored."""
+    """An MoE whose EP degree is left to the decision is decided expert-parallel and loads through
+    the expert-parallel load, as one MODELOPT_EP_DEGREE asks for does."""
     run_as(4)
     serve(_qwen3_moe())
     if knob is not None:
         monkeypatch.setenv("MODELOPT_EP_DEGREE", knob)
-    monkeypatch.setattr(
-        transformers.AutoModelForCausalLM,
-        "from_pretrained",
-        classmethod(lambda cls, *a, **k: torch.nn.Linear(1, 1)),
-    )
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
 
-    if knob is not None:
-        with pytest.raises(NotImplementedError, match=r"ep_size=4.*MODELOPT_EP_DEGREE=1"):
-            load_pretrained(str(tmp_path))
-        return
-    assert distribution_plan(load_pretrained(str(tmp_path))) == DistributionPlan(4)
+    model = load_pretrained(str(tmp_path))
+    assert loaders["ep"]["plan"] == DistributionPlan(4, ep_size=4)
+    assert distribution_plan(model) == DistributionPlan(4, ep_size=4)
 
 
-def test_an_expert_parallel_plan_is_refused(run_as, serve, loaders, auto_class, tmp_path):
-    """No load here shards the routed experts: an EP plan fails before anything loads."""
-    run_as(2)
-    serve(Qwen3MoeConfig(num_experts=8, moe_intermediate_size=8, **_TINY))
+@pytest.mark.parametrize(
+    ("dense", "one_gpu_per_process"),
+    [("replicate", False), ("fsdp", False), ("replicate", True)],
+    ids=["replicate", "fsdp", "one-gpu-per-process"],
+)
+def test_an_expert_parallel_plan_loads_through_the_ep_loader(
+    run_as, serve, loaders, auto_class, a_gpu, monkeypatch, tmp_path, dense, one_gpu_per_process
+):
+    """An EP plan loads through load_and_prepare_ep, with the plan and the Hub options the load was
+    given, and the checkpoint's config, read once for both, and through no other load. It returns
+    the model unfrozen, as the other loads do, and an option passed as None asks nothing of it. That
+    load replicates the dense part, so a plan that also FSDP2-shards it is refused before anything
+    loads, naming the ways out. A launch that shows each process one GPU, bound to cuda:0, gives a
+    rank of any local rank a GPU of its own."""
+    run_as(4, rank=1 if one_gpu_per_process else 0)
+    if one_gpu_per_process:
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+        monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+        monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    config = serve(_deepseek_v3(n_routed_experts=8))
+    plan = DistributionPlan(4, ep_size=4, dense=dense)
+    options = {
+        "trust_remote_code": True,
+        "attn_implementation": "eager",
+        "require_lm_head": None,
+        "local_files_only": True,
+    }
 
-    with pytest.raises(NotImplementedError, match=r"ep_size=2.*MODELOPT_EP_DEGREE=1"):
-        load_pretrained(str(tmp_path), auto_class, distribution=DistributionPlan(2, ep_size=2))
+    if dense == "fsdp":
+        with pytest.raises(
+            NotImplementedError, match=r"load replicates it on every rank\..*\(MODELOPT_FSDP_SIZE=1"
+        ):
+            load_pretrained(str(tmp_path), distribution=plan, **options)
+    else:
+        model = load_pretrained(str(tmp_path), distribution=plan, **options)
+        call = loaders.pop("ep")
+        assert (call["ckpt_path"], call["plan"]) == (str(tmp_path), plan)
+        assert (call["trust_remote_code"], call["attn_implementation"]) == (True, "eager")
+        assert call["freeze"] is False
+        assert "require_lm_head" not in call  # its default, not None read as False
+        assert call["hub_options"] == {"local_files_only": True}
+        assert call["hf_config"] is config
+        assert distribution_plan(model) == plan
     assert loaders == {}
     assert auto_class.calls == []
 
@@ -1443,6 +1606,7 @@ def test_a_whole_load_that_fails_on_one_rank_fails_every_rank(cpu_dist_workers, 
     cpu_dist_workers.run(_one_rank_fails_to_load_job, ckpt=str(tmp_path))
 
 
+@pytest.mark.parametrize("sharding", ["expert-parallel", "fsdp2"])
 @pytest.mark.parametrize(
     ("change", "error", "match"),
     [
@@ -1456,7 +1620,7 @@ def test_a_whole_load_that_fails_on_one_rank_fails_every_rank(cpu_dist_workers, 
         (
             {"auto_class": AutoModel},
             NotImplementedError,
-            r"auto_class=AutoModel: leave it out.*DistributionPlan\(2, dense='replicate'\)",
+            r"auto_class=AutoModel: leave it out.*DistributionPlan\(2, (1, |dense=)'replicate'\)",
         ),
         ({"mtp": True}, NotImplementedError, "MTP head"),
         (
@@ -1464,27 +1628,37 @@ def test_a_whole_load_that_fails_on_one_rank_fails_every_rank(cpu_dist_workers, 
             TypeError,
             "config and hf_config",
         ),
+        ({"gpus": 0}, RuntimeError, "this rank has none"),
     ],
-    ids=["placement", "dtype", "torch_dtype", "model_class", "mtp_head", "two_configs"],
+    ids=["placement", "dtype", "torch_dtype", "model_class", "mtp_head", "two_configs", "no_gpu"],
 )
 def test_a_sharded_load_refuses_what_it_cannot_honor(
-    run_as, serve, loaders, process_group, monkeypatch, tmp_path, change, error, match
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, sharding, change, error, match
 ):
-    """Placement, a model class, a head only a whole model builds, two configs to load with: none
-    reaches a sharded load, which fails before it starts rather than load something other than
-    what was asked."""
+    """Placement, a model class, a head only a whole model builds, two configs to load with, a rank
+    without a GPU of its own: none reaches a sharded load, which fails before it starts rather than
+    load something other than what was asked."""
     run_as(2)
-    serve(LlamaConfig(**_TINY))
+    expert_parallel = sharding == "expert-parallel"
+    serve(_deepseek_v3() if expert_parallel else LlamaConfig(**_TINY))
     if change.get("mtp"):
         monkeypatch.setattr(models_hf, "checkpoint_has_mtp", lambda *a: True)
+    if "gpus" in change:  # a host that shows this rank no GPU
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: change["gpus"])
+    plan = DistributionPlan(2, ep_size=2) if expert_parallel else DistributionPlan(2, dense="fsdp")
 
-    with pytest.raises(error, match=match):
+    with pytest.raises(error, match=match) as refused:
         load_pretrained(
-            str(tmp_path),
-            change.get("auto_class"),
-            distribution=DistributionPlan(2, dense="fsdp"),
-            **change.get("kwargs", {}),
+            str(tmp_path), change.get("auto_class"), distribution=plan, **change.get("kwargs", {})
         )
+    if "device_map" in change.get("kwargs", {}) or "gpus" in change:
+        # The way to a whole model it names, for the plan handed in: an expert-parallel MoE's is a
+        # plan with an EP degree of 1.
+        whole_moe = "DistributionPlan(2, 1, 'replicate')"
+        assert (whole_moe in str(refused.value)) == expert_parallel, refused.value
+    if {"dtype", "torch_dtype"} & set(change.get("kwargs", {})):
+        # Only the FSDP2 load takes an mp_policy to compute in another dtype.
+        assert ("mp_policy" in str(refused.value)) != expert_parallel, refused.value
     assert loaders == {}
 
 
@@ -1534,6 +1708,33 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
             TypeError,
             r"\['cpu_offload'\] only apply",
         ),
+        (
+            DistributionPlan(2),
+            "causal-lm",
+            {"freeze": False},
+            TypeError,
+            r"\['freeze'\] only apply to the expert-parallel load",
+        ),
+        (
+            DistributionPlan(2, dense="fsdp"),
+            "causal-lm",
+            {"require_lm_head": False},
+            TypeError,
+            (
+                r"\['require_lm_head'\] only apply to the expert-parallel load, and the FSDP2 "
+                r"load .*; drop them, or pass a plan with ep_size > 1"
+            ),
+        ),
+        (
+            DistributionPlan(2, ep_size=2),
+            "causal-lm",
+            {"broadcast_chunk_size": None},
+            TypeError,
+            (
+                r"\['broadcast_chunk_size'\] only apply to the FSDP2 load, and the "
+                r"expert-parallel load .*; drop them, or pass a plan with ep_size=1 and dense='fsdp'"
+            ),
+        ),
     ],
     ids=[
         "another-world",
@@ -1543,6 +1744,9 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
         "not-a-plan",
         "hf-config-on-a-whole-load",
         "fsdp2-option-on-a-whole-load",
+        "ep-option-on-a-whole-load",
+        "ep-option-on-the-fsdp2-load",
+        "fsdp2-chunking-as-none-on-the-ep-load",
     ],
 )
 def test_a_load_refuses_what_it_cannot_load(
@@ -1562,8 +1766,8 @@ def test_a_load_refuses_what_it_cannot_load(
     read as stored, even when only a VLM's language model is quantized and its remote code builds it
     as a causal LM; a VLM but a text-only one it supports, which FSDP2 would build through
     AutoModelForCausalLM, refused or as its language model alone; anything but a plan; and the
-    sharded loads' config, or an option only the FSDP2 load takes, which from_pretrained would take
-    for a model argument and fail far from here, or drop."""
+    sharded loads' config, or an option only one sharded load takes, which from_pretrained would
+    take for a model argument and fail far from here, or drop."""
     run_as(2)
     config = serve(transformers.LlavaConfig() if checkpoint == "vlm" else LlamaConfig(**_TINY))
     if checkpoint == "quantized":
@@ -1641,6 +1845,58 @@ def test_a_sharded_load_is_refused_inside_init_quantized_weights(
         pytest.raises(NotImplementedError, match=r"init_quantized_weights.*dense='replicate'"),
     ):
         load_pretrained(str(tmp_path), **plan)
+    assert loaders == {}
+
+
+@needs_qwen3_moe_ep_plan
+@pytest.mark.parametrize("handed", [False, True], ids=["knob", "handed"])
+def test_an_expert_parallel_load_is_refused_inside_init_quantized_weights(
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, handed
+):
+    """The expert-parallel load never calls from_pretrained either, and its way to a whole model on
+    every rank sets the EP degree to 1 as well, as the decision refuses to replicate an MoE unasked."""
+    run_as(2, rank=1)
+    serve(_qwen3_moe(num_experts=8))
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+    monkeypatch.setenv("MODELOPT_EP_DEGREE", "2")
+    plan = {"distribution": DistributionPlan(2, 2)} if handed else {}
+
+    with (
+        init_quantized_weights(mtq.INT8_DEFAULT_CFG),
+        pytest.raises(
+            NotImplementedError,
+            match=r"expert-parallel load .*init_quantized_weights.*DistributionPlan\(2, 1, 'replicate'\)",
+        ),
+    ):
+        load_pretrained(str(tmp_path), **plan)
+    assert loaders == {}
+
+
+@needs_qwen3_moe_ep_plan
+@pytest.mark.parametrize(
+    "options",
+    [{"device_map": "auto"}, {"freeze": True, "require_lm_head": False}],
+    ids=["placement", "its-own-options"],
+)
+def test_an_automatic_expert_parallel_layout_says_so_when_it_refuses_a_placement(
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, options
+):
+    """With neither a plan nor MODELOPT_EP_DEGREE, the decision shards an MoE's experts, and the
+    expert-parallel load refuses options that place a whole model. The refusal says the layout was
+    decided rather than asked for, and how to keep the load whole. The load's own options place
+    nothing, and reach it."""
+    run_as(2, rank=1)
+    serve(_qwen3_moe(num_experts=8))
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+
+    if "device_map" not in options:
+        load_pretrained(str(tmp_path), **options)
+        assert {name: loaders["ep"][name] for name in options} == options
+        return
+    with pytest.raises(
+        TypeError, match=r"\['device_map'\] do not apply.*no plan or MODELOPT_EP_DEGREE"
+    ):
+        load_pretrained(str(tmp_path), **options)
     assert loaders == {}
 
 
@@ -1809,12 +2065,7 @@ def test_a_launch_that_sets_no_group_up_loads_whole_on_each_process(
             RuntimeError,
             "MODELOPT_FSDP_SIZE=world",
         ),
-        (
-            None,
-            {"MODELOPT_EP_DEGREE": "4"},
-            RuntimeError,
-            r"MODELOPT_EP_DEGREE=4 .*distributed_run\(\).*MODELOPT_EP_DEGREE=1",
-        ),
+        (None, {"MODELOPT_EP_DEGREE": "4"}, RuntimeError, "MODELOPT_EP_DEGREE=4"),
         (None, {"MODELOPT_EP_DEGREE": "eigth"}, ValueError, "MODELOPT_EP_DEGREE='eigth'"),
     ],
     ids=["several-ranks", "sharded", "fsdp-knob", "ep-knob", "ep-knob-not-a-degree"],
@@ -1853,6 +2104,9 @@ def test_what_needs_the_group_is_refused_in_a_launch_that_sets_none_up(
 # but the bounded two-rank tests at the end.
 
 # ------------------------------------------------------------------------------- the plan
+
+# The model type of the configs that stand in for a checkpoint's here: no model spec names it.
+_NO_SPEC = "toy_moe"
 
 _EP_PLAN = {
     "layers.*.mlp.gate": "ep_router",
@@ -1971,7 +2225,7 @@ def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch, gloo_world_
         load_and_prepare_ep(
             "org/model",
             DistributionPlan(2, ep_size=2),
-            hf_config=SimpleNamespace(base_model_ep_plan=_EP_PLAN),
+            hf_config=SimpleNamespace(model_type=_NO_SPEC, base_model_ep_plan=_EP_PLAN),
         )
 
     assert resolved == ["org/model"]
@@ -1998,7 +2252,7 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
         load_and_prepare_ep(
             "org/model",
             DistributionPlan(4, ep_size=4),
-            hf_config=SimpleNamespace(text_config=text, num_experts=3),
+            hf_config=SimpleNamespace(model_type=_NO_SPEC, text_config=text, num_experts=3),
         )
 
 
@@ -2015,14 +2269,17 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
         ),
         (SimpleNamespace(), ValueError, "declare base_model_ep_plan"),
         (
-            SimpleNamespace(base_model_ep_plan={"layers.*.self_attn.q_proj": "colwise"}),
+            SimpleNamespace(
+                model_type=_NO_SPEC, base_model_ep_plan={"layers.*.self_attn.q_proj": "colwise"}
+            ),
             ValueError,
             "styles no routed experts",
         ),
         *(
             (
                 SimpleNamespace(
-                    base_model_ep_plan={"layers.*.mlp.experts": "moe_tp_experts", **params}
+                    model_type=_NO_SPEC,
+                    base_model_ep_plan={"layers.*.mlp.experts": "moe_tp_experts", **params},
                 ),
                 ValueError,
                 r"shards no weights of layers\.\*\.mlp\.experts through grouped_gemm",
@@ -2031,10 +2288,16 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
         ),
         (
             SimpleNamespace(
-                base_model_ep_plan={**_EP_PLAN, "layers.*.mlp.experts.down_proj": "packed_rowwise"}
+                model_type=_NO_SPEC,
+                base_model_ep_plan={**_EP_PLAN, "layers.*.mlp.experts.down_proj": "packed_rowwise"},
             ),
             ValueError,
             r"styles layers\.\*\.mlp\.experts\.down_proj by a style this load drops",
+        ),
+        (
+            SimpleNamespace(model_type="gpt_oss", base_model_ep_plan=_EP_PLAN),
+            NotImplementedError,
+            "the expert-parallel export cannot write that layout",
         ),
     ],
     ids=[
@@ -2047,6 +2310,7 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
         "experts-container-only",
         "experts-sharded-otherwise",
         "experts-sharded-partly-otherwise",
+        "spec-refuses-ep",
     ],
 )
 def test_a_config_the_load_cannot_take_is_refused_before_anything_loads(
@@ -2056,8 +2320,10 @@ def test_a_config_the_load_cannot_take_is_refused_before_anything_loads(
     or, MXFP4, dequantize into GPT-OSS's transposed expert layout whatever the model's, or a plan
     that leaves the experts whole on every rank: one naming no routed experts, or none of
     whose entries shards their weights by grouped_gemm, the only expert-weight style the load
-    shards by, or one that styles some of their weights otherwise. The load refuses each before it
-    reads anything."""
+    shards by, or one that styles some of their weights otherwise. So is a model whose spec rules
+    expert parallelism out (GPT-OSS's), which the plan decision plans without it: an EP degree asked
+    for, or a plan handed in, meets that refusal here. The load refuses each before it reads
+    anything."""
     with pytest.raises(error, match=match):
         load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
     assert ep_world_of_two == []
@@ -2069,7 +2335,7 @@ def test_an_ep_size_that_does_not_divide_the_experts_is_refused_before_anything_
     """The all-to-all transport finds an expert's rank by dividing its id by this rank's share of
     the experts: with 3 experts over 2 ranks the ranks would disagree on who holds which, and send
     tokens to the wrong experts."""
-    config = SimpleNamespace(base_model_ep_plan=_EP_PLAN, num_experts=3)
+    config = SimpleNamespace(model_type=_NO_SPEC, base_model_ep_plan=_EP_PLAN, num_experts=3)
 
     with pytest.raises(ValueError, match="ep_size=2 must divide the 3 routed experts"):
         load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
@@ -2092,7 +2358,8 @@ def test_a_plan_whose_expert_containers_match_no_module_is_refused(ep_world_of_t
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
     monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
     config = SimpleNamespace(
-        base_model_ep_plan={"layers.*.mlp.experts.*.gate_up_proj": "grouped_gemm"}
+        model_type=_NO_SPEC,
+        base_model_ep_plan={"layers.*.mlp.experts.*.gate_up_proj": "grouped_gemm"},
     )
 
     with pytest.raises(ValueError, match="that no module of"):
@@ -2129,6 +2396,7 @@ def test_the_model_keeps_the_plan_its_checkpoint_declares(
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
 
     class _Config(SimpleNamespace):
+        model_type = _NO_SPEC
         base_model_ep_plan = _EP_PLAN
 
     # 8 experts over 2 ranks: the stand-in model holds this rank's 4.
@@ -2206,7 +2474,9 @@ def test_a_loaded_model_keeps_its_sharding_styles_out_of_its_saved_config(
 
 def test_the_weights_load_in_the_checkpoints_dtype_through_its_class(ep_world_of_two, monkeypatch):
     """The checkpoint's ``dtype`` reaches ``from_pretrained``, and the class that builds it is chosen
-    with the trust the caller gave its code."""
+    with the trust the caller gave its code. The Hub options reach the checkpoint's download, the
+    config read and ``from_pretrained``, which fetch the custom code an ``auto_map`` names in another
+    repo."""
 
     class _LoadedError(Exception):
         """Stops the load at from_pretrained."""
@@ -2227,13 +2497,28 @@ def test_the_weights_load_in_the_checkpoints_dtype_through_its_class(ep_world_of
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", auto_class)
-    config = SimpleNamespace(dtype=torch.float16, base_model_ep_plan=_EP_PLAN)
+    config = SimpleNamespace(model_type=_NO_SPEC, dtype=torch.float16, base_model_ep_plan=_EP_PLAN)
+    reads, downloads = [], []
+    monkeypatch.setattr(
+        "transformers.AutoConfig.from_pretrained", lambda *a, **k: reads.append(k) or config
+    )
+    monkeypatch.setattr(
+        model_load_utils,
+        "ensure_local_checkpoint",
+        lambda p, **k: downloads.append(k) or (None, p),
+    )
 
     with pytest.raises(_LoadedError):
         load_and_prepare_ep(
-            "org/model", DistributionPlan(2, ep_size=2), trust_remote_code=True, hf_config=config
+            "org/model",
+            DistributionPlan(2, ep_size=2),
+            trust_remote_code=True,
+            hub_options={"local_files_only": True},
         )
     assert loaded["dtype"] is torch.float16
+    assert [read["local_files_only"] for read in reads] == [True]
+    assert downloads == [{"local_files_only": True}]
+    assert loaded["local_files_only"] is True
     assert classes == [True]
 
 
@@ -2398,7 +2683,7 @@ def test_each_load_argument_goes_where_this_transformers_takes_it(
         load_and_prepare_ep(
             "org/model",
             DistributionPlan(2, ep_size=2),
-            hf_config=SimpleNamespace(base_model_ep_plan=_EP_PLAN),
+            hf_config=SimpleNamespace(model_type=_NO_SPEC, base_model_ep_plan=_EP_PLAN),
         )
 
     given = {k: v for k, v in vars(loaded["distributed_config"]).items() if v is not None}
@@ -2422,7 +2707,9 @@ def _meshes_in_step(*args, **kwargs):
 def _one_rank_fails_job(rank, size, ckpt, failure, failing_rank, match):
     path, hf_config, patches = ckpt, None, []
     if failure != "unreadable-config":
-        hf_config = SimpleNamespace(base_model_ep_plan=dict(_EP_PLAN), num_experts=4)
+        hf_config = SimpleNamespace(
+            model_type=_NO_SPEC, base_model_ep_plan=dict(_EP_PLAN), num_experts=4
+        )
     if failure != "unseen-checkpoint":
         local = mock.patch.object(
             model_load_utils, "ensure_local_checkpoint", side_effect=lambda p, **k: (None, p)
@@ -2505,7 +2792,9 @@ def test_a_load_failing_on_one_rank_fails_every_rank(
 
 
 def _gpu_layout_job(rank, size, visible, bound, shared, refused):
-    hf_config = SimpleNamespace(base_model_ep_plan=dict(_EP_PLAN), num_experts=4)
+    hf_config = SimpleNamespace(
+        model_type=_NO_SPEC, base_model_ep_plan=dict(_EP_PLAN), num_experts=4
+    )
     reached = None
     with bounded_collectives(), ExitStack() as stack:
         # This rank is on cuda:0, bound to it or not yet; the local ranks run 0 and 1.
