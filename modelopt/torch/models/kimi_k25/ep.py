@@ -53,6 +53,22 @@ transformers' still-evolving ``WeightConverter`` conversion-ops API.
 from .. import _kimi, _onfly_decompress
 
 
+def make_buildable(
+    hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool = False, **_
+) -> None:
+    """Have the checkpoint's own code import and build on this transformers.
+
+    The plan decision needs it before ``prepare``; it changes nothing the model computes or loads.
+    """
+    _kimi.make_buildable(
+        "modeling_kimi_k25",
+        "KimiK25ForConditionalGeneration",
+        hf_config,
+        ckpt_path,
+        trust_remote_code,
+    )
+
+
 def prepare(hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool = False, **_):
     """Load Kimi-K2.5's language model as the transformers-native deepseek_v3.
 
@@ -82,7 +98,7 @@ def prepare(hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool 
 
     # Before any remote-code load: this plugin's get_class_from_dynamic_module below, and
     # from_pretrained later in load_and_prepare_ep.
-    _kimi.make_importable()
+    _kimi.make_importable()  # the swap below loads the code and adapts its tie_weights
 
     # 2. Replace text_config with a transformers-native DeepseekV3Config built from the same fields.
     #    Kimi's __init__ passes config.text_config to DeepseekV3ForCausalLM; the native class rejects

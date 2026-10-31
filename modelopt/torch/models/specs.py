@@ -219,14 +219,16 @@ class EPSpec(SpecSection):
     own checks, the GPU refusal included. It may patch the model's code, which is why nothing else
     runs it. It may run more than once in a process."""
 
-    make_importable: "Callable[[], Any] | None" = None
-    """For a checkpoint carrying its own modeling code: what that code needs to import on the
-    installed transformers, so the plan decision can build the model before ``prepare`` runs.
+    make_buildable: "Callable[..., Any] | None" = None
+    """For a checkpoint carrying its own modeling code: what that code needs to import and build on
+    the installed transformers, so the plan decision can build the model before ``prepare`` runs.
 
-    Called with no arguments, on every rank, before the plan is decided, for every plan that could
-    still be expert-parallel, whatever plan comes out. So it must be idempotent, and may only import
-    or stage the code (shim names transformers dropped, stage the modules it imports): it patches no
-    class, config, converter or loader hook."""
+    Called as ``make_buildable(hf_config, ckpt_path=..., trust_remote_code=...)``, on every rank,
+    before the plan is decided, for every plan that could still be expert-parallel, whatever plan
+    comes out. So it must be idempotent and change nothing the model computes or loads: it may shim
+    names transformers dropped, wrap the remote-code staging to reach the modules the code imports,
+    and adapt a method to the arguments transformers now passes it, but patches no MoE or expert
+    class, config, weight converter or weight-loading hook."""
 
     decompressed_formats: tuple[str, ...] = ()
     """The checkpoint formats (a ``quantization_config``'s ``quant_method``) whose experts
