@@ -846,7 +846,9 @@ def test_a_checkpoint_whose_experts_are_not_its_one_compressed_group_is_refused(
     initialized, a group guessed for the experts would decompress them with the wrong scheme, and
     experts no group targets are stored as plain weights the rewritten converters would not find."""
     pytest.importorskip(
-        "compressed_tensors", reason="needs compressed-tensors (CI's unit session installs it)"
+        "compressed_tensors",
+        minversion=onfly._MIN_COMPRESSED_TENSORS,
+        reason="needs compressed-tensors (CI's unit session installs it)",
     )
     config = SimpleNamespace(quantization_config=_pack_quantized(**groups))
 
@@ -864,7 +866,9 @@ def test_the_format_is_the_one_group_s_own_and_must_have_a_compressor(top, group
     format; the one group's format is the one to decompress with. A format nothing registers is
     refused by this module, rather than failing inside the library's registry."""
     pytest.importorskip(
-        "compressed_tensors", reason="needs compressed-tensors (CI's unit session installs it)"
+        "compressed_tensors",
+        minversion=onfly._MIN_COMPRESSED_TENSORS,
+        reason="needs compressed-tensors (CI's unit session installs it)",
     )
     experts = _int4(True, EXPERTS)
     if group is not None:
@@ -876,6 +880,31 @@ def test_the_format_is_the_one_group_s_own_and_must_have_a_compressor(top, group
     else:
         with pytest.raises(NotImplementedError, match=match):
             onfly._read_compression(config)
+
+
+def test_a_compressed_tensors_before_per_scheme_compressors_is_refused_by_its_release(monkeypatch):
+    """compressed-tensors 0.13 states a compressor's parameter names as a property, which a call
+    by scheme fails on deep in the setup; such a release is refused first, naming the one needed."""
+    ct = pytest.importorskip(
+        "compressed_tensors", reason="needs compressed-tensors (CI's unit session installs it)"
+    )
+    from compressed_tensors.compressors.base import BaseCompressor
+
+    class _PropertyForm:
+        """A compressor as compressed-tensors 0.13 registers one."""
+
+        @property
+        def compression_param_names(self):
+            return ("weight_packed", "weight_scale")
+
+    monkeypatch.setattr(ct, "__version__", "0.13.0")
+    monkeypatch.setattr(
+        BaseCompressor, "get_value_from_registry", staticmethod(lambda name: _PropertyForm)
+    )
+    config = SimpleNamespace(quantization_config=_pack_quantized(moe=_int4(True, EXPERTS)))
+
+    with pytest.raises(RuntimeError, match=r"compressed-tensors >= 0\.16\.0, but 0\.13\.0"):
+        onfly._read_compression(config)
 
 
 # The compressions the published Kimi checkpoints use: INT4 (Kimi-K2.5) and MXFP4 (Kimi-K3), each
@@ -946,7 +975,9 @@ def test_a_compressed_checkpoint_loads_exactly_and_saves_under_its_own_names(tmp
     save writes the experts back as the checkpoint's own ``w1``/``w3``/``w2`` weights, decompressed,
     and the export names its expanded experts after them."""
     pytest.importorskip(
-        "compressed_tensors", reason="needs compressed-tensors (CI's unit session installs it)"
+        "compressed_tensors",
+        minversion=onfly._MIN_COMPRESSED_TENSORS,
+        reason="needs compressed-tensors (CI's unit session installs it)",
     )
     from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
 
@@ -976,7 +1007,9 @@ def test_a_load_the_decompressor_did_not_mark_casts_as_before(tmp_path):
     """The hooks are process-wide, but only a decompressing load keeps an integer source integer:
     a later load of a model no config of which was marked casts it to its float parameter."""
     pytest.importorskip(
-        "compressed_tensors", reason="needs compressed-tensors (CI's unit session installs it)"
+        "compressed_tensors",
+        minversion=onfly._MIN_COMPRESSED_TENSORS,
+        reason="needs compressed-tensors (CI's unit session installs it)",
     )
     onfly.install_onfly_decompress(
         SimpleNamespace(quantization_config=_pack_quantized(experts=_int4(True, ["Linear"])))
