@@ -92,7 +92,7 @@ __device__ __forceinline__ void iq1_grid_terms(const float (&x)[kVectorSize],
 template <typename Format, bool kWeighted, typename scalar_t>
 __global__ void iq1_encode(const scalar_t *input, int64_t num_blocks, const float *grid,
                            const __half *scales, const float *importance, int64_t blocks_per_row,
-                           uint8_t *output) {
+                           const uint8_t *fixed_choices, uint8_t *output) {
   constexpr int kGroups = Format::kGroups;
   constexpr int kVectorsPerGroup = Format::kVectorsPerGroup;
   constexpr int kChoices = Format::kChoices;
@@ -129,9 +129,10 @@ __global__ void iq1_encode(const scalar_t *input, int64_t num_blocks, const floa
     __syncthreads();
 
     // Score every choice: each vector's best error under it, summed over the group. With a
-    // per-vector shift, a vector takes the better of the two before the group chooses.
+    // per-vector shift, a vector takes the better of the two before the group chooses. A given
+    // choice skips this search; the entries are still searched under it below.
 #pragma unroll
-    for (int vector = 0; vector < kVectorsPerGroup; ++vector) {
+    for (int vector = 0; fixed_choices == nullptr && vector < kVectorsPerGroup; ++vector) {
       const int slot = group * kVectorsPerGroup + vector;
       float x[kVectorSize], w[kVectorSize];
       float xnorm, xsum, weight_sum = kVectorSize;
@@ -163,7 +164,10 @@ __global__ void iq1_encode(const scalar_t *input, int64_t num_blocks, const floa
       block_min_accumulate<kChoices>(local_best, warp_best, group_error);
     }
 
-    if (tid == 0) {
+    if (tid == 0 && fixed_choices != nullptr) {
+      selected_choice = fixed_choices[block * kGroups + group];
+      choices[group] = static_cast<uint8_t>(selected_choice);
+    } else if (tid == 0) {
       selected_choice = 0;
       float best = group_error[0];
 #pragma unroll
@@ -219,8 +223,8 @@ __global__ void iq1_encode(const scalar_t *input, int64_t num_blocks, const floa
 // given) have been validated.
 template <typename Format>
 at::Tensor iq1_encode_blocks(const at::Tensor &input, const at::Tensor &grid,
-                             const at::Tensor &scales,
-                             const std::optional<at::Tensor> &importance) {
+                             const at::Tensor &scales, const std::optional<at::Tensor> &importance,
+                             const at::Tensor &choices) {
   const auto values = input.contiguous();
   const auto table = grid.contiguous();
   const auto block_scales = scales.contiguous();
@@ -234,15 +238,16 @@ at::Tensor iq1_encode_blocks(const at::Tensor &input, const at::Tensor &grid,
       at::ScalarType::Half, at::ScalarType::BFloat16, values.scalar_type(), "iq1_pack", [&] {
         const auto *half_scales =
             reinterpret_cast<const __half *>(block_scales.data_ptr<at::Half>());
+        const uint8_t *fixed = choices.defined() ? choices.data_ptr<uint8_t>() : nullptr;
         if (weights.defined()) {
           iq1_encode<Format, true, scalar_t><<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
               values.data_ptr<scalar_t>(), num_blocks, table.data_ptr<float>(), half_scales,
-              weights.data_ptr<float>(), weights.size(0), output.data_ptr<uint8_t>());
+              weights.data_ptr<float>(), weights.size(0), fixed, output.data_ptr<uint8_t>());
         } else {
           iq1_encode<Format, false, scalar_t>
               <<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
                   values.data_ptr<scalar_t>(), num_blocks, table.data_ptr<float>(), half_scales,
-                  nullptr, 1, output.data_ptr<uint8_t>());
+                  nullptr, 1, fixed, output.data_ptr<uint8_t>());
         }
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       });

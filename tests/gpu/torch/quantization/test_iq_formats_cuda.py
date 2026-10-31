@@ -97,6 +97,19 @@ def test_cuda_pack_matches_pytorch_encoder_and_is_decodable(monkeypatch, name):
 
 
 @pytest.mark.parametrize("name", sorted(FORMATS))
+def test_cuda_fixed_choices_match_pytorch_encoder(monkeypatch, name):
+    fmt = IQ_FORMAT_REGISTRY[name]
+    generator = torch.Generator(device="cuda").manual_seed(5)
+    weight = torch.randn((8, 512), generator=generator, device="cuda", dtype=torch.bfloat16)
+    shape = (8, 2, fmt.choice_groups)
+    choices = torch.randint(0, fmt.num_choices, shape, generator=generator, device="cuda")
+
+    packed, _ = fmt.quantize(weight, choices=choices)
+    monkeypatch.setattr(FORMATS[name][0], "get_cuda_ext_ggml", lambda: None)
+    assert torch.equal(packed, fmt.quantize(weight, choices=choices)[0])
+
+
+@pytest.mark.parametrize("name", sorted(FORMATS))
 def test_cuda_pack_is_deterministic_on_one_device(name):
     """The contract reproducibility actually needs: same machine, same bytes."""
     generator = torch.Generator(device="cuda").manual_seed(7)
