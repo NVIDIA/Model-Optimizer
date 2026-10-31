@@ -669,9 +669,10 @@ def split_fused_experts_state_dict(state_dict: dict) -> dict:
     checkpoints. Operates on the (already folded/quantized) tensors only -- pure slicing, no
     quantization. Non-fused-experts keys pass through unchanged. Every emitted tensor is a copy and
     the input keeps its fused tensors, so the experts are held twice until it returns: pass one
-    module's tensors at a time, not a whole model's. Each module's experts are numbered from 0 by
-    their row in the tensors given, which must be plain: whole ones get their global numbers, and a
-    caller splitting a rank's local shard (``to_local()``) shifts each by the shard's global offset.
+    module's tensors at a time, as :func:`_split_local_fused_module` does, not a whole model's.
+    Each module's experts are numbered from 0 by their row in the tensors given, which must be
+    plain: whole ones get their global numbers, and a caller splitting a rank's local shard
+    (``to_local()``) shifts each by the shard's global offset, as that function does.
 
     Per fused-experts prefix ``P`` (``...experts``), inputs are (gated shown; ungated drops the gate split):
       ``P.gate_up_proj`` ``(E, 2*I, H)`` + ``P.gate_up_proj_weight_scale`` + ``P.gate_up_proj_input_scale``
@@ -801,3 +802,93 @@ def _dtensor_dim0_offset(dt) -> int:
                 nshards = mesh.size(mdim)
                 return mesh.get_local_rank(mdim) * ((n + nshards - 1) // nshards)
         return 0
+
+
+def _split_local_fused_module(
+    prefix: str, sharded_sd: dict, ep_rank: int = 0, total_experts: int = 0
+) -> dict:
+    """Split this rank's local shard of a fused-experts module into per-expert keys.
+
+    Split THIS rank's *local* shard of one fused-experts module into per-expert keys with GLOBAL
+    expert indices (plain, local tensors -- no all-gather).
+
+    FSDP2/EP shard the fused 3-D expert weight on dim 0 (the expert axis), so every expert this rank
+    owns is whole and local. We reuse :func:`split_fused_experts_state_dict` on the ``to_local()``
+    shard (which numbers experts ``0..E_local-1``) and then shift each expert index by the rank's
+    global dim-0 offset, so the resulting per-expert keys match the single-process export and stay
+    on this rank for a direct distributed write (no consolidation).
+
+    The fused expert tensor can arrive in two EP layouts, distinguished by its dim-0 size vs
+    ``total_experts`` (the config expert count):
+      * **per-EP-group** (size < total): transformers pre-sliced the param to this rank's EP group
+        (FSDP x EP -> a dp-sharded DTensor of the group; or a plain ep-shard). ``_dtensor_dim0_offset``
+        only gives the WITHIN-group offset, so we add the EP block base ``ep_rank * group_size``.
+      * **all-experts** (size == total): an EP DTensor sharded across the ep mesh spanning all experts
+        (classic DP x EP). ``_dtensor_dim0_offset`` already returns the TRUE global offset -> no base.
+    ``total_experts == 0``, a count the caller could not read off the model's config, takes the
+    tensor for a per-EP-group slice.
+    """
+    gated = f"{prefix}.gate_up_proj" in sharded_sd
+    first = "gate_up_proj" if gated else "up_proj"
+    fw = sharded_sd[f"{prefix}.{first}"]
+    # dp_offset: this rank's dim-0 start WITHIN its DTensor; n_local: experts it owns.
+    dp_offset = _dtensor_dim0_offset(fw) if isinstance(fw, DTensor) else 0
+    n_local = fw.to_local().shape[0] if isinstance(fw, DTensor) else fw.shape[0]
+    group_size = int(fw.shape[0])
+    # Add the EP block base only when the tensor is a per-EP-group slice (size < total_experts) or
+    # total is unknown (0). When it spans all experts, dp_offset is already global.
+    add_ep_base = (
+        bool(ep_rank) and group_size > 0 and (total_experts == 0 or group_size < total_experts)
+    )
+    offset = dp_offset + (ep_rank * group_size if add_ep_base else 0)
+
+    def _loc(key):
+        v = sharded_sd.get(key)
+        if v is None:
+            return None
+        return v.to_local() if isinstance(v, DTensor) else v
+
+    def _loc_scale(key):
+        # Weight scales are dim-0 (per-expert) tensors. A DTensor scale shards with the weight ->
+        # to_local() aligns. The keep-fused fold emits DTensor scales for a sharded weight, but a
+        # scale handed in as a PLAIN tensor over every expert of the group is accepted too: slice
+        # it by the weight's within-group dp_offset so each scale pairs with its own dp-local expert.
+        v = sharded_sd.get(key)
+        if v is None:
+            return None
+        if isinstance(v, DTensor):
+            return v.to_local()
+        if v.dim() >= 1 and v.shape[0] > n_local and dp_offset + n_local <= v.shape[0]:
+            return v[dp_offset : dp_offset + n_local]
+        return v
+
+    # Build a fused sub-dict of this rank's local experts (plain), then split + reindex.
+    local_fused: dict = {
+        f"{prefix}.{first}": _loc(f"{prefix}.{first}"),
+        f"{prefix}.down_proj": _loc(f"{prefix}.down_proj"),
+    }
+    for proj in (first, "down_proj"):
+        ws = _loc_scale(f"{prefix}.{proj}_weight_scale")
+        if ws is not None:
+            local_fused[f"{prefix}.{proj}_weight_scale"] = ws
+        # NVFP4 second-level per-tensor weight scale: also a per-expert (dim-0) tensor, so the same
+        # dp-offset slicing pairs each scalar with its dp-local expert. None for FP8.
+        ws2 = _loc_scale(f"{prefix}.{proj}_weight_scale_2")
+        if ws2 is not None:
+            local_fused[f"{prefix}.{proj}_weight_scale_2"] = ws2
+        ins = sharded_sd.get(f"{prefix}.{proj}_input_scale")  # shared scalar (replicated)
+        if ins is not None:
+            local_fused[f"{prefix}.{proj}_input_scale"] = ins
+
+    split_local = split_fused_experts_state_dict(
+        local_fused
+    )  # keys {prefix}.{i}.* (i in 0..E_local-1)
+    if offset == 0:
+        return split_local
+
+    plen = len(prefix) + 1
+    out: dict = {}
+    for key, val in split_local.items():
+        i_str, tail = key[plen:].split(".", 1)
+        out[f"{prefix}.{int(i_str) + offset}.{tail}"] = val
+    return out

@@ -37,16 +37,23 @@ import pytest
 import torch
 from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.moe_models import model_with_decoder_at
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from torch import nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import FSDPModule
+from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 
 pytest.importorskip("accelerate")
 transformers = pytest.importorskip("transformers")
+import transformers.core_model_loading as core_model_loading
 import transformers.distributed as hf_distributed
+import transformers.modeling_utils as modeling_utils
 from _test_utils.torch.transformers_models import (
     _TinyQwen35Tokenizer,
+    get_tiny_llama,
     get_tiny_qwen3_5_moe_vl,
     get_tiny_qwen3_5_vl,
+    get_tiny_qwen3_moe,
 )
 from packaging.version import Version
 from transformers import (
@@ -87,7 +94,12 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _ckpt_quant_method,
     _conversion_plan,
     _convert_keys,
+    _ep_aware_caching_allocator_warmup,
+    _ep_dense_meta_load,
     _experts_sharded_over,
+    _fsdp2_shard_dense,
+    _load_ep_dense_distributed,
+    _make_expert_param_matcher,
     _resolve_target,
     _seed_parallel_states,
     _transformers_mesh_builder,
@@ -907,9 +919,7 @@ def test_what_a_rank_holds_with_the_dense_part_replicated_must_fit(
 ):
     """At EP 4 a rank holds the rest of the model whole and a quarter of the routed experts, so the
     dense part is sharded when that does not fit one GPU, however small the rest; with no EP the
-    whole MoE must fit, and here it does not. The expert-parallel load replicates the dense part,
-    so an EP degree left to the decision gives way to FSDP2 for the whole model, where one asked
-    for stands, for the load to refuse."""
+    whole MoE must fit, and here it does not. An EP degree asked for gives the same plan."""
     run_as(4)
     config = serve(_qwen3_moe(num_experts=8))
     model = _meta(config)
@@ -917,8 +927,7 @@ def test_what_a_rank_holds_with_the_dense_part_replicated_must_fit(
     # A GPU 60% of which holds the rest of the model and that share of the experts.
     gpu_memory(int((_bytes(model) - experts + experts_fitting * experts) / 0.6))
 
-    decided = DistributionPlan(4, 4) if dense == "replicate" else DistributionPlan(4, dense="fsdp")
-    assert resolve_distribution_plan(str(tmp_path))[0] == decided
+    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4, dense)
     assert resolve_distribution_plan(str(tmp_path), ep_size=4)[0] == DistributionPlan(4, 4, dense)
     assert resolve_distribution_plan(str(tmp_path), ep_size=1)[0] == DistributionPlan(
         4, dense="fsdp"
@@ -926,13 +935,43 @@ def test_what_a_rank_holds_with_the_dense_part_replicated_must_fit(
 
 
 @needs_qwen3_moe_ep_plan
-def test_the_env_knobs_override_the_automatic_plan(run_as, serve, monkeypatch, tmp_path):
-    monkeypatch.setenv("MODELOPT_EP_DEGREE", "2")
-    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+def test_a_dense_part_the_expert_parallel_load_cannot_shard_is_replicated(
+    run_as, serve, gpu_memory, tmp_path
+):
+    """The expert-parallel load cannot shard the dense part within several EP groups, which the
+    export cannot write: 2 experts over 4 ranks. Left to decide, the plan replicates it however
+    big, warning with the way out; asked to shard it, it refuses. Without expert parallelism the
+    rule does not apply."""
+    run_as(4)
+    serve(_qwen3_moe(num_experts=2))
+    gpu_memory(1)
+
+    with pytest.warns(UserWarning, match="may run out of memory. Set MODELOPT_EP_DEGREE"):
+        assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 2)
+    with pytest.raises(NotImplementedError, match="2 expert-data-parallel replicas"):
+        resolve_distribution_plan(str(tmp_path), dense="fsdp")
+    assert resolve_distribution_plan(str(tmp_path), ep_size=1)[0] == DistributionPlan(
+        4, dense="fsdp"
+    )
+
+
+@needs_qwen3_moe_ep_plan
+@pytest.mark.parametrize(
+    ("knob", "value", "plan"),
+    [
+        ("MODELOPT_EP_DEGREE", "2", DistributionPlan(4, 2)),
+        ("MODELOPT_FSDP_SIZE", "world", DistributionPlan(4, 4, "fsdp")),
+    ],
+    ids=["ep-degree", "fsdp-size"],
+)
+def test_the_env_knobs_override_the_automatic_plan(
+    run_as, serve, monkeypatch, tmp_path, knob, value, plan
+):
+    monkeypatch.setenv(knob, value)
     run_as(4)
     serve(_qwen3_moe(num_experts=8))
 
-    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 2, "fsdp")
+    assert resolve_distribution_plan(str(tmp_path))[0] == plan
 
 
 @needs_qwen3_moe_ep_plan
@@ -1619,13 +1658,9 @@ def test_an_expert_parallel_plan_loads_through_the_ep_loader(
     """Decided automatically, an EP plan loads through load_and_prepare_ep -- with the plan, the
     spec-prepared config and the Hub options the load was given -- and through no other load. It
     returns the model unfrozen, as the other loads do, and an option passed as None asks nothing
-    of it. That load replicates the dense part, so a plan that asks for expert parallelism and
-    FSDP2-shards the dense part too is refused before anything loads, naming the ways out. A launch
-    that shows each process one GPU, bound to cuda:0, gives a rank of any local rank a GPU of its
-    own."""
+    of it, whether the plan replicates the dense part or FSDP2-shards it. A launch that shows each
+    process one GPU, bound to cuda:0, gives a rank of any local rank a GPU of its own."""
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", {"replicate": "1", "fsdp": "world"}[dense])
-    if dense == "fsdp":  # left to the decision, the EP degree would give way to FSDP2
-        monkeypatch.setenv("MODELOPT_EP_DEGREE", "4")
     run_as(4, rank=1 if one_gpu_per_process else 0)
     if one_gpu_per_process:
         monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
@@ -1639,26 +1674,20 @@ def test_an_expert_parallel_plan_loads_through_the_ep_loader(
         "local_files_only": True,
     }
 
-    if dense == "fsdp":
-        with pytest.raises(
-            NotImplementedError, match=r"load replicates it on every rank\..*\(MODELOPT_FSDP_SIZE=1"
-        ):
-            load_pretrained(str(tmp_path), **options)
-    else:
-        model = load_pretrained(str(tmp_path), **options)
-        call = loaders.pop("ep")
-        plan = DistributionPlan(4, ep_size=4, dense=dense)
-        assert (call["ckpt_path"], call["plan"]) == (str(tmp_path), plan)
-        assert (call["trust_remote_code"], call["attn_implementation"]) == (True, "eager")
-        assert call["freeze"] is False
-        assert "require_lm_head" not in call  # its default, not None read as False
-        assert call["hub_options"] == {"local_files_only": True}
-        assert (
-            call["hf_config"].base_model_ep_plan
-            == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
-        )
-        assert served.base_model_ep_plan is None
-        assert distribution_plan(model) == plan
+    model = load_pretrained(str(tmp_path), **options)
+
+    call = loaders.pop("ep")
+    plan = DistributionPlan(4, ep_size=4, dense=dense)
+    assert (call["ckpt_path"], call["plan"]) == (str(tmp_path), plan)
+    assert (call["trust_remote_code"], call["attn_implementation"]) == (True, "eager")
+    assert call["freeze"] is False
+    assert "require_lm_head" not in call  # its default, not None read as False
+    assert call["hub_options"] == {"local_files_only": True}
+    assert (
+        call["hf_config"].base_model_ep_plan == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
+    )
+    assert served.base_model_ep_plan is None
+    assert distribution_plan(model) == plan
     assert loaders == {}
     assert auto_class.calls == []
 
@@ -2543,12 +2572,17 @@ def ep_world_of_two(monkeypatch, gloo_world_of_one):
 @pytest.mark.parametrize(
     ("plan", "error", "match"),
     [
-        (DistributionPlan(2), ValueError, "shards no routed experts"),
-        (DistributionPlan(2, ep_size=2, dense="fsdp"), NotImplementedError, "replicates the dense"),
+        pytest.param(DistributionPlan(2), ValueError, "shards no routed experts", id="no-experts"),
+        # FSDP2 within each of several expert-parallel groups: a layout the export cannot write.
+        pytest.param(
+            DistributionPlan(4, 2, "fsdp"),
+            NotImplementedError,
+            "expert-data-parallel",
+            id="dense-hsdp",
+        ),
     ],
-    ids=["no-expert-parallelism", "sharded-dense"],
 )
-def test_the_loader_refuses_a_plan_it_cannot_load_by(plan, error, match):
+def test_the_loader_refuses_a_plan_it_cannot_carry_out(plan, error, match):
     """Before anything else: no process group, transformers release or checkpoint is looked at."""
     with pytest.raises(error, match=match):
         load_and_prepare_ep("unused", plan)
@@ -3273,3 +3307,708 @@ def test_each_rank_builds_the_meshes_on_a_gpu_of_its_own(
     cpu_dist_workers.run(
         _gpu_layout_job, visible=visible, bound=bound, shared=shared, refused=refused
     )
+
+
+# ------------------------------------------------------- the expert-parallel load's dense part
+# ``from_pretrained`` always EP-shards the experts. ``_make_expert_param_matcher`` tells their params
+# from the dense ones, the distribution plan says whether the dense part is replicated or sharded,
+# ``_ep_dense_meta_load`` keeps the dense weights off the device during ``from_pretrained`` when they
+# are sharded, and ``_fsdp2_shard_dense`` / ``_load_ep_dense_distributed`` FSDP2-shard them around
+# the experts. The FSDP2 cases run on a one-rank gloo process group on CPU.
+
+# ------------------------------------------------------------------ _make_expert_param_matcher
+
+# The plan load_and_prepare_ep shards with after the a2a swap: base-relative keys (no ``model.``).
+_A2A_PLAN = {
+    "layers.*.mlp.gate": "torch_a2a_router",
+    "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+    "layers.*.mlp.experts.down_proj": "grouped_gemm",
+    "layers.*.mlp.experts": "torch_a2a_experts",
+}
+
+
+# Only the per-parameter keys: a container key would match the same names on its own.
+_PARAM_KEYS = {k: v for k, v in _A2A_PLAN.items() if v == "grouped_gemm"}
+
+
+@pytest.mark.parametrize(
+    ("plan", "name", "expected"),
+    [
+        pytest.param(_PARAM_KEYS, "layers.0.mlp.experts.gate_up_proj", True, id="key-unprefixed"),
+        pytest.param(
+            _PARAM_KEYS, "model.language_model.layers.3.mlp.experts.down_proj", True, id="vlm"
+        ),
+        pytest.param(
+            _PARAM_KEYS,
+            "language_model.model.layers.3.mlp.experts.gate_up_proj",
+            True,
+            id="vlm-wrapper",
+        ),
+        # NemotronH tags only the container; every param under it is an expert's.
+        pytest.param(
+            {"layers.*.mixer.experts": "torch_a2a_experts"},
+            "backbone.layers.1.mixer.experts.3.down_proj.weight",
+            True,
+            id="under-a-container",
+        ),
+        pytest.param(
+            _A2A_PLAN, "model.layers.0.mlp.shared_experts.gate_proj.weight", False, id="shared"
+        ),
+        pytest.param(
+            {"layers.*.mlp.gate": "ep_router"}, "model.layers.0.mlp.gate.weight", False, id="router"
+        ),
+        # No EP credit then: the load-time warmup falls back to stock sizing.
+        pytest.param(None, "model.layers.0.mlp.experts.gate_up_proj", False, id="no-plan"),
+    ],
+)
+def test_expert_param_matcher(plan, name, expected):
+    """A param is an expert's when the plan says so, under any prefix the base-relative keys omit;
+    a router is replicated whatever its style. The warmup sizing tests classify a whole MoE's
+    experts, router, attention, embedding and head with the same matcher."""
+    assert _make_expert_param_matcher(plan)(name) is expected
+
+
+# ------------------------------------------------------------------ a block-fp8 checkpoint
+
+
+def test_a_block_fp8_checkpoint_is_refused_as_a_format_whatever_its_dense_layout(
+    monkeypatch, gloo_world_of_one
+):
+    """This load does not dequantize block-fp8 checkpoints at all, so that is the refusal a plan
+    sharding their dense part meets, not one advising to replicate it."""
+    monkeypatch.setattr("modelopt.torch.utils.distributed.is_initialized", lambda: True)
+    monkeypatch.setattr("modelopt.torch.utils.distributed.size", lambda group=None: 2)
+    monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
+    config = SimpleNamespace(model_type=_NO_SPEC, quantization_config={"quant_method": "fp8"})
+
+    with pytest.raises(NotImplementedError, match="cannot dequantize a 'fp8' checkpoint"):
+        load_and_prepare_ep("unused", DistributionPlan(2, 2, "fsdp"), hf_config=config)
+
+
+# ------------------------------------------------------------------------- _ep_dense_meta_load
+
+
+def _is_expert(name):
+    return ".experts." in name
+
+
+def _get_device_lookups():
+    """The modules whose ``get_device`` global the state-dict loaders call."""
+    return modeling_utils, core_model_loading
+
+
+def test_dense_weights_resolve_to_meta_and_the_rest_to_the_stock_device(monkeypatch):
+    """Only a dense ``.weight`` / ``.bias`` is sent to meta. An expert param or a buffer goes to
+    the stock lookup, with the caller's arguments, in both modules the loaders read it from."""
+    stock_calls = []
+
+    def stock_get_device(device_map, key, *args, **kwargs):
+        stock_calls.append((key, args, kwargs))
+        return device_map[""]
+
+    lookups = _get_device_lookups()
+    for module in lookups:
+        monkeypatch.setattr(module, "get_device", stock_get_device)
+    device_map = {"": "cuda:0"}
+    expert = "model.layers.0.mlp.experts.0.gate_proj.weight"
+    buffer = "model.layers.0.mlp.gate.e_score_correction_bias"
+
+    with _ep_dense_meta_load(_is_expert):
+        for module in lookups:
+            assert module.get_device(device_map, "model.layers.0.self_attn.q_proj.weight") == "meta"
+            assert module.get_device(device_map, "model.layers.0.self_attn.q_proj.bias") == "meta"
+            assert module.get_device(device_map, expert, valid_torch_device=True) == "cuda:0"
+            assert module.get_device(device_map, buffer) == "cuda:0"
+
+    assert stock_calls == [(expert, (), {"valid_torch_device": True}), (buffer, (), {})] * 2
+
+
+def test_the_dense_load_refuses_a_transformers_without_its_get_device_hook(monkeypatch):
+    """Without the hook the dense part would load whole on every rank, the memory sharding it saves."""
+    for module in _get_device_lookups():
+        monkeypatch.delattr(module, "get_device", raising=False)
+
+    with pytest.raises(RuntimeError, match="get_device"), _ep_dense_meta_load(_is_expert):
+        pass
+
+
+def _get_device_patch():
+    return _ep_dense_meta_load(_is_expert), [(m, "get_device") for m in _get_device_lookups()]
+
+
+def _warmup_sizing_patch():
+    if not hasattr(modeling_utils, "get_total_byte_count"):
+        pytest.skip("transformers has no get_total_byte_count to size")
+    sizing = _ep_aware_caching_allocator_warmup(4, _A2A_PLAN)
+    return sizing, [(modeling_utils, "get_total_byte_count")]
+
+
+@pytest.mark.parametrize(
+    "patch", [_get_device_patch, _warmup_sizing_patch], ids=lambda f: f.__name__
+)
+def test_a_load_time_patch_is_undone_even_when_the_load_raises(patch):
+    """``from_pretrained`` reads these transformers globals; a failed load leaves stock ones."""
+    context, patched = patch()
+    stock = [getattr(module, attr) for module, attr in patched]
+
+    with pytest.raises(RuntimeError, match="load failed"), context:
+        assert all(getattr(m, a) is not f for (m, a), f in zip(patched, stock))
+        raise RuntimeError("load failed")
+
+    assert all(getattr(m, a) is f for (m, a), f in zip(patched, stock))
+
+
+def test_from_pretrained_leaves_the_dense_weights_on_meta_and_loads_the_rest(tmp_path):
+    """Through a real CPU ``from_pretrained``: every dense weight stays on meta for the FSDP2 +
+    DCP load to fill, while the MLPs (standing in for experts) and the rotary buffers load."""
+    src = get_tiny_llama()
+    src.save_pretrained(tmp_path)
+
+    with _ep_dense_meta_load(lambda name: ".mlp." in name):
+        model = AutoModelForCausalLM.from_pretrained(tmp_path)
+
+    ref_params, ref_buffers = src.state_dict(), dict(src.named_buffers())
+    for name, param in model.named_parameters():
+        if ".mlp." in name:
+            assert torch.equal(param, ref_params[name]), name
+        else:
+            assert param.is_meta, name
+    for name, buffer in model.named_buffers():
+        assert torch.equal(buffer, ref_buffers[name]), name
+
+
+# ------------------------------------------------------------------------- _fsdp2_shard_dense
+
+
+@pytest.fixture
+def fsdp_mesh(skip_on_windows, tmp_path_factory):
+    """The dense FSDP mesh of a one-rank gloo process group (FSDP2 needs a process group)."""
+    store = tmp_path_factory.mktemp("pg") / "store"
+    torch.distributed.init_process_group("gloo", init_method=store.as_uri(), rank=0, world_size=1)
+    yield init_device_mesh("cpu", (1,), mesh_dim_names=("dp",))
+    torch.distributed.destroy_process_group()
+
+
+class _LayerExperts(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate_up_proj = nn.Parameter(torch.randn(4, 8, 4))
+        self.down_proj = nn.Parameter(torch.randn(4, 4, 4))
+
+
+class _DecoderLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.self_attn = nn.Linear(4, 4)
+        self.mlp = nn.Module()
+        self.mlp.gate = nn.Linear(4, 4, bias=False)  # the router: dense, sharded with its layer
+        self.mlp.experts = _LayerExperts()
+        self.input_layernorm = nn.LayerNorm(4)
+
+
+class _MoeLM(nn.Module):
+    """A causal-LM-shaped MoE whose ``_no_split_modules`` names its decoder layer, as HF's do."""
+
+    _no_split_modules = ["_DecoderLayer"]
+
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.embed_tokens = nn.Embedding(16, 4)
+        self.model.layers = nn.ModuleList(_DecoderLayer() for _ in range(2))
+        self.model.norm = nn.LayerNorm(4)
+        self.lm_head = nn.Linear(4, 16, bias=False)
+
+    def experts(self):
+        return [layer.mlp.experts for layer in self.model.layers]
+
+
+def test_each_decoder_layer_is_sharded_around_its_experts(fsdp_mesh):
+    """A layer's dense params (attention, router, norms) become shards on the FSDP mesh; its
+    experts stay as loaded, for EP. The root's embedding, final norm and head stay replicated, and
+    a layer's submodules keep their classes (modelopt recognizes them by class)."""
+    model = _MoeLM()
+    before = {name: param.detach().clone() for name, param in model.named_parameters()}
+    experts = {name: param for name, param in model.named_parameters() if _is_expert(name)}
+
+    assert _fsdp2_shard_dense(model, fsdp_mesh, model.experts()) == 2
+
+    assert all(isinstance(layer, FSDPModule) for layer in model.model.layers)
+    assert not isinstance(model, FSDPModule)
+    assert type(model.model.layers[0].self_attn) is nn.Linear
+    for name, param in model.named_parameters():
+        if name in experts:
+            assert param is experts[name] and not isinstance(param, DTensor), name
+        elif name.startswith("model.layers."):
+            assert isinstance(param, DTensor), name
+            assert param.device_mesh == fsdp_mesh and param.placements == (Shard(0),), name
+            assert torch.equal(param.full_tensor(), before[name]), name
+        else:
+            assert not isinstance(param, DTensor), name
+
+
+def test_a_param_off_the_models_dtype_stays_replicated(fsdp_mesh):
+    """FSDP2 shards one dtype per group, and HF keeps a few params in fp32, as a router: such a
+    param stays replicated, as the pure-FSDP2 wrap leaves it, and its layer still unshards."""
+    model = _MoeLM().to(torch.bfloat16)
+    gate = model.model.layers[0].mlp.gate.float()
+
+    assert _fsdp2_shard_dense(model, fsdp_mesh, model.experts()) == 2
+
+    assert not isinstance(gate.weight, DTensor) and gate.weight.dtype == torch.float32
+    for layer in model.model.layers:
+        layer.unshard()  # FSDP2 checks a group's dtypes here
+
+
+def test_a_layer_holding_only_experts_is_left_unwrapped(fsdp_mesh):
+    model = _MoeLM()
+    bare = model.model.layers[1]
+    bare.self_attn = bare.mlp.gate = bare.input_layernorm = nn.Identity()
+
+    assert _fsdp2_shard_dense(model, fsdp_mesh, model.experts()) == 1
+    assert not isinstance(bare, FSDPModule)
+
+
+def test_a_dense_part_left_with_nothing_to_shard_is_refused(fsdp_mesh):
+    """Experts outweighing the dense part in another dtype put every dense param off the model's
+    dominant dtype, out of the shard groups: no layer is left to shard, and the load would hold the
+    whole dense part on every rank."""
+    model = _MoeLM()
+    for experts in model.experts():
+        experts.to(torch.bfloat16)
+
+    with pytest.raises(RuntimeError, match="no dense parameter to shard"):
+        _fsdp2_shard_dense(model, fsdp_mesh, model.experts())
+
+
+def test_a_dense_param_the_loader_already_sharded_stays_as_it_is(fsdp_mesh):
+    """A dense param that arrives as a ``Shard`` DTensor of the loader's own plan is not resharded;
+    the rest of its layer still is."""
+    tp_mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("tp",))
+    model = _MoeLM()
+    attn = model.model.layers[0].self_attn
+    attn.weight = nn.Parameter(distribute_tensor(attn.weight.detach(), tp_mesh, [Shard(1)]))
+    presharded = attn.weight
+
+    assert _fsdp2_shard_dense(model, fsdp_mesh, model.experts()) == 2
+
+    assert attn.weight is presharded and attn.weight.placements == (Shard(1),)
+    assert model.model.layers[0].mlp.gate.weight.placements == (Shard(0),)
+
+
+def test_a_replicated_dense_param_is_sharded_over_the_fsdp_mesh_like_a_plain_one(fsdp_mesh):
+    ep_mesh = init_device_mesh("cpu", (1, 1), mesh_dim_names=("edp", "ep"))["ep"]
+    model = _MoeLM()
+    gate = model.model.layers[0].mlp.gate
+    weight = gate.weight.detach().clone()
+    gate.weight = nn.Parameter(distribute_tensor(weight, ep_mesh, [Replicate()]))
+
+    _fsdp2_shard_dense(model, fsdp_mesh, model.experts())
+
+    assert gate.weight.device_mesh == fsdp_mesh and gate.weight.placements == (Shard(0),)
+    assert torch.equal(gate.weight.full_tensor(), weight)
+
+
+class _VisionBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(4, 4)
+
+
+class _VisionTower(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.blocks = nn.ModuleList(_VisionBlock() for _ in range(2))
+
+
+class _MoeVlm(_MoeLM):
+    """Kimi's MoonViT style: ``_no_split_modules`` lists the vision tower *and* its blocks."""
+
+    _no_split_modules = ["_VisionTower", "_VisionBlock", "_DecoderLayer"]
+
+    def __init__(self):
+        super().__init__()
+        self.vision_tower = _VisionTower()
+
+
+def test_a_listed_container_is_wrapped_once_not_again_through_its_blocks(fsdp_mesh):
+    model = _MoeVlm()
+
+    assert _fsdp2_shard_dense(model, fsdp_mesh, model.experts()) == 3
+
+    assert isinstance(model.vision_tower, FSDPModule)
+    assert not any(isinstance(block, FSDPModule) for block in model.vision_tower.blocks)
+
+
+class _ShardMesh:
+    """The meshes, as far as the loader reads them before it loads the dense part."""
+
+    device_type = "cpu"
+
+    def __getitem__(self, name):
+        return self
+
+    def size(self):
+        return 2
+
+    def get_group(self):
+        return -1
+
+
+def test_a_dense_part_from_pretrained_did_not_leave_on_meta_is_refused(
+    monkeypatch, gloo_world_of_one
+):
+    """A transformers that places the dense part without asking ``get_device`` loads it whole on every
+    rank, the memory this layout exists to save: the load refuses that before sharding anything."""
+
+    class _DenseLoadedError(Exception):
+        """Raised by the dense load: the loader got past the check."""
+
+    def dense_load(*args, **kwargs):
+        raise _DenseLoadedError
+
+    loader = SimpleNamespace(__name__="Loader", from_pretrained=lambda path, **kwargs: _MoeLM())
+    monkeypatch.setattr("modelopt.torch.utils.distributed.is_initialized", lambda: True)
+    monkeypatch.setattr("modelopt.torch.utils.distributed.size", lambda group=None: 2)
+    monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
+    monkeypatch.setattr(
+        "torch.distributed.device_mesh.init_device_mesh", lambda *a, **k: _ShardMesh()
+    )
+    monkeypatch.setattr(model_load_utils, "ensure_local_checkpoint", lambda p, **k: (None, p))
+    monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: loader)
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
+    monkeypatch.setattr(model_load_utils, "_load_ep_dense_distributed", dense_load)
+    config = SimpleNamespace(
+        model_type=_NO_SPEC,
+        base_model_ep_plan={
+            "layers.*.mlp.gate": "ep_router",
+            "layers.*.mlp.experts": "moe_tp_experts",
+            "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+            "layers.*.mlp.experts.down_proj": "grouped_gemm",
+        },
+        num_experts=4,
+    )
+
+    with pytest.raises(RuntimeError, match="no dense param came back on meta"):
+        load_and_prepare_ep("unused", DistributionPlan(2, 2, "fsdp"), hf_config=config)
+
+
+# ------------------------------------------------------------------ _load_ep_dense_distributed
+
+
+def test_the_dense_load_shards_first_then_asks_for_exactly_the_meta_dense_params(
+    fsdp_mesh, monkeypatch, tmp_path
+):
+    """As ``_ep_dense_meta_load`` leaves the model: dense weights on meta; experts loaded, here
+    per-expert ``nn.Linear``s, whose ``.weight`` only the expert matcher tells from a dense one;
+    and a Mamba-style ``A_log`` (no ``.weight`` / ``.bias`` suffix) loaded too. The dense layers
+    are FSDP2-sharded before the shared meta+DCP loader runs, and it is asked for exactly the meta
+    dense params, on the mesh's device. A recorder stands in for that load."""
+    with torch.device("meta"):
+        model = _MoeLM()
+    for layer in model.model.layers:
+        layer.mlp.experts = nn.ModuleList(nn.Linear(4, 4, bias=False) for _ in range(4))
+        layer.A_log = nn.Parameter(torch.zeros(4))
+    loads = []
+
+    def record_load(loaded, local_dir, device, *, load_names):
+        sharded = [isinstance(layer.self_attn.weight, DTensor) for layer in loaded.model.layers]
+        loads.append((local_dir, device, load_names, sharded))
+
+    monkeypatch.setattr(model_load_utils, "_meta_dcp_load", record_load)
+
+    wrapped = _load_ep_dense_distributed(
+        model, fsdp_mesh, str(tmp_path), _is_expert, model.experts()
+    )
+
+    assert wrapped == 2
+    meta_dense = {name for name, param in model.named_parameters() if param.is_meta}
+    assert loads == [(str(tmp_path), torch.device("cpu"), meta_dense, [True, True])]
+    assert not any(_is_expert(name) or name.endswith("A_log") for name in meta_dense)
+
+
+def test_the_dense_load_materializes_on_the_gpu_the_rank_is_bound_to(fsdp_mesh, monkeypatch):
+    """Not on the one its local rank numbers: a launch that shows each process one GPU binds every
+    rank to cuda:0 while the local ranks run 0, 1, ..., and the experts and FSDP2's compute are on
+    the bound one."""
+    loads = []
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    for name, value in [
+        ("is_available", True),
+        ("is_initialized", True),
+        ("current_device", 0),
+        ("device_count", 1),
+    ]:
+        monkeypatch.setattr(torch.cuda, name, lambda value=value: value)
+    monkeypatch.setattr(model_load_utils, "_fsdp2_shard_dense", lambda *args: 0)
+
+    def record_load(model, local_dir, device, *, load_names):
+        loads.append(device)
+
+    monkeypatch.setattr(model_load_utils, "_meta_dcp_load", record_load)
+
+    _load_ep_dense_distributed(
+        nn.Linear(2, 2), SimpleNamespace(device_type="cuda"), "unused", lambda name: False, []
+    )
+
+    assert loads == [torch.device("cuda", 0)]
+
+
+class _PastTheWrappingError(Exception):
+    """Raised in DCP's place: the rank went on past the wrapping."""
+
+
+def _one_rank_fails_the_wrapping_job(rank, size):
+    def wrap(*args):
+        if rank == 1:
+            raise MemoryError("out of memory sharding a dense layer")
+        return 0
+
+    def dcp_load(*args, **kwargs):
+        torch.distributed.barrier()  # DCP's collectives: a rank in them waits for every peer
+        raise _PastTheWrappingError
+
+    refused = None
+    with (
+        bounded_collectives(),
+        mock.patch.object(model_load_utils, "_fsdp2_shard_dense", wrap),
+        mock.patch.object(model_load_utils, "_meta_dcp_load", dcp_load),
+    ):
+        try:  # not pytest.raises: its failure would end the pooled worker instead of the job
+            _load_ep_dense_distributed(
+                nn.Linear(2, 2), SimpleNamespace(device_type="cpu"), "unused", lambda n: False, []
+            )
+        except Exception as error:
+            refused = f"{type(error).__name__}: {error}"
+    assert refused is not None and "out of memory sharding a dense layer" in refused, (
+        rank,
+        refused,
+    )
+    assert rank == 1 or "rank 1 failed" in refused, refused
+
+
+def test_a_rank_failing_to_wrap_the_dense_part_fails_every_rank(cpu_dist_workers):
+    """Wrapping allocates each rank's shards on its own, so it can fail on one rank alone; every
+    rank then raises that failure, rather than leave the others waiting for it in DCP's
+    collectives (stood in by a bounded barrier)."""
+    cpu_dist_workers.run(_one_rank_fails_the_wrapping_job)
+
+
+def test_a_tied_head_the_checkpoint_stores_alone_reaches_both_aliases(fsdp_mesh, tmp_path):
+    """A tied checkpoint can store the pair as ``lm_head.weight`` alone, which ``from_pretrained``
+    loads into both aliases. With a tied MoE as the expert-parallel load leaves it -- the dense part
+    on meta and tied, the experts loaded -- the dense load fills both aliases with it too."""
+    src = get_tiny_qwen3_moe(tie_word_embeddings=True)
+    src.save_pretrained(tmp_path)
+    weights = tmp_path / "model.safetensors"
+    stored = load_file(weights)
+    stored["lm_head.weight"] = stored.pop("model.embed_tokens.weight")
+    save_file(stored, weights, metadata={"format": "pt"})
+    with _ep_dense_meta_load(_is_expert):
+        model = AutoModelForCausalLM.from_pretrained(tmp_path)
+    model.tie_weights()  # as load_and_prepare_ep does once the weights load
+    assert model.lm_head.weight is model.model.embed_tokens.weight
+    assert model.lm_head.weight.is_meta
+
+    experts = [layer.mlp.experts for layer in model.model.layers]
+    _load_ep_dense_distributed(model, fsdp_mesh, str(tmp_path), _is_expert, experts)
+
+    for alias in (model.lm_head.weight, model.model.embed_tokens.weight):
+        assert torch.equal(alias, src.lm_head.weight)
+
+
+# ------------------------------------------------- the expert-parallel load's allocator warmup
+# ``from_pretrained`` reserves the bytes ``get_total_byte_count`` reports for each device in one
+# allocation. Under the EP load it would count every expert at full size (the experts are most of a
+# large MoE), so ``_ep_aware_caching_allocator_warmup`` swaps in a sizing that counts one EP shard of
+# each expert. The sizing is called directly here, and once through ``caching_allocator_warmup`` with
+# the CUDA queries and the allocation faked.
+
+needs_sizing_hook = pytest.mark.skipif(
+    not hasattr(modeling_utils, "get_total_byte_count"),
+    reason="transformers has no get_total_byte_count to size",
+)
+
+_GPU = torch.device("cuda", 0)
+
+# _TinyMoe's fp32 bytes: the fused experts; the dense params (embedding, attention weight + bias,
+# router); the router's persistent ``e_score_correction_bias`` buffer. The tied head adds none.
+_EXPERT_BYTES = 4 * (4 * 16 * 8 + 4 * 8 * 8)
+_DENSE_BYTES = 4 * (16 * 8 + 8 * 8 + 8 + 4 * 8)
+_BUFFER_BYTES = 4 * 4
+_ATTN_BYTES = 4 * (8 * 8 + 8)
+
+
+class _TinyMoe(nn.Module):
+    """One MoE decoder layer, a head tied to the embedding, and a persistent router buffer."""
+
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.embed_tokens = nn.Embedding(16, 8)
+        layer = nn.Module()
+        layer.self_attn = nn.Linear(8, 8)
+        layer.mlp = nn.Module()
+        layer.mlp.gate = nn.Linear(8, 4, bias=False)
+        layer.mlp.gate.register_buffer("e_score_correction_bias", torch.zeros(4))
+        layer.mlp.experts = nn.Module()
+        layer.mlp.experts.gate_up_proj = nn.Parameter(torch.zeros(4, 16, 8))
+        layer.mlp.experts.down_proj = nn.Parameter(torch.zeros(4, 8, 8))
+        self.model.layers = nn.ModuleList([layer])
+        self.lm_head = nn.Linear(8, 16, bias=False)
+        self.lm_head.weight = self.model.embed_tokens.weight
+        self.all_tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
+
+    def get_parameter_or_buffer(self, name):
+        """``PreTrainedModel``'s lookup, which the sizing goes through."""
+        try:
+            return self.get_parameter(name)
+        except AttributeError:
+            return self.get_buffer(name)
+
+    def device_map(self):
+        """Every param and persistent buffer on one GPU, as ``from_pretrained`` expands it."""
+        names = [name for name, _ in self.named_parameters(remove_duplicate=False)]
+        names += [name for name, _ in self.named_buffers()]
+        return dict.fromkeys(names, _GPU)
+
+
+class _OneBytePerElement:
+    def param_element_size(self, model, name, param):
+        return 1
+
+
+_ALL_BYTES = _EXPERT_BYTES + _DENSE_BYTES + _BUFFER_BYTES
+
+
+@needs_sizing_hook
+@pytest.mark.parametrize(
+    ("dense_on_meta", "quantizer", "stock_bytes", "per_rank_bytes"),
+    [
+        # Experts count one EP shard; the router is replicated, so it counts in full like the rest.
+        pytest.param(
+            False,
+            None,
+            _ALL_BYTES,
+            _EXPERT_BYTES // 4 + _DENSE_BYTES + _BUFFER_BYTES,
+            id="dense-replicated",
+        ),
+        # Sharded dense: every dense .weight / .bias stays on meta during from_pretrained, while
+        # persistent buffers still load onto the device.
+        pytest.param(
+            True, None, _ALL_BYTES, _EXPERT_BYTES // 4 + _BUFFER_BYTES, id="dense-on-meta"
+        ),
+        # The quantizer sizes the elements: one byte each where fp32 takes four.
+        pytest.param(
+            False,
+            _OneBytePerElement(),
+            _ALL_BYTES // 4,
+            (_EXPERT_BYTES // 4 + _DENSE_BYTES + _BUFFER_BYTES) // 4,
+            id="quantizer",
+        ),
+    ],
+)
+def test_transformers_reserves_only_the_per_rank_footprint(
+    monkeypatch, dense_on_meta, quantizer, stock_bytes, per_rank_bytes
+):
+    """End to end: the one up-front allocation ``caching_allocator_warmup`` makes shrinks from the
+    whole model (stock sizing, which also checks the byte counts above) to what this EP rank
+    holds."""
+    reserved = []
+
+    def fake_empty(numel, *, dtype, device, **kwargs):
+        reserved.append((numel * torch.tensor([], dtype=dtype).element_size(), device))
+
+    model = _TinyMoe()
+    with monkeypatch.context() as m:
+        m.setattr(torch.cuda, "mem_get_info", lambda index: (80 * 1024**3, 80 * 1024**3))
+        m.setattr(torch.cuda, "memory_reserved", lambda index: 0)
+        m.setattr(torch.cuda, "memory_allocated", lambda index: 0)
+        m.setattr(torch, "empty", fake_empty)
+        modeling_utils.caching_allocator_warmup(model, model.device_map(), quantizer)
+        with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN, dense_on_meta=dense_on_meta):
+            modeling_utils.caching_allocator_warmup(model, model.device_map(), quantizer)
+
+    assert reserved == [(stock_bytes, _GPU), (per_rank_bytes, _GPU)]
+
+
+@needs_sizing_hook
+def test_a_tp_planned_dense_param_keeps_its_tp_share_while_the_rest_stays_on_meta(monkeypatch):
+    """transformers places a TP-planned param itself, never asking where the dense part goes, so it
+    is on the device at its TP share even when the rest of the dense part stays on meta. The share
+    is of the ep submesh it is placed over, not of the world, which holds two of them here."""
+    model = _TinyMoe()
+    model._tp_plan = {"model.layers.*.self_attn": "colwise"}
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 8)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
+
+    with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN, dense_on_meta=True):
+        total = modeling_utils.get_total_byte_count(model, model.device_map())
+
+    assert total == {_GPU: _EXPERT_BYTES // 4 + _ATTN_BYTES // 4 + _BUFFER_BYTES}
+
+
+@needs_sizing_hook
+def test_an_error_while_sizing_falls_back_to_the_stock_sizing(monkeypatch):
+    """The warmup only sizes an allocator reservation, so whatever the EP-aware sizing cannot
+    handle gets transformers' own number instead of failing the load, with whatever else a later
+    release passes the hook, and a warning: that number can reserve most of the device."""
+    stock_calls = []
+
+    def stock_sizing(model, accelerator_device_map, hf_quantizer=None, *args, **kwargs):
+        stock_calls.append((model, accelerator_device_map, hf_quantizer, args, kwargs))
+        return {_GPU: 123}
+
+    class _UnsupportedQuantizer:
+        def param_element_size(self, model, name, param):
+            raise TypeError("unsupported param")
+
+    monkeypatch.setattr(modeling_utils, "get_total_byte_count", stock_sizing)
+    model, quantizer = _TinyMoe(), _UnsupportedQuantizer()
+    device_map = model.device_map()
+
+    with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN):
+        with pytest.warns(UserWarning, match="EP-aware warmup sizing failed"):
+            sizing = modeling_utils.get_total_byte_count(model, device_map, quantizer, 1, flag=True)
+        assert sizing == {_GPU: 123}
+
+    assert stock_calls == [(model, device_map, quantizer, (1,), {"flag": True})]
+
+
+@needs_sizing_hook
+def test_a_sizing_hook_with_other_parameters_keeps_the_stock_sizing(monkeypatch):
+    """A release whose hook takes other leading parameters keeps transformers' own sizing: the
+    replacement would not know how the hook is called. It says so, since that sizing may reserve
+    most of the device."""
+
+    def stock_sizing(model, device_map, quantizer=None):
+        return {_GPU: 123}
+
+    monkeypatch.setattr(modeling_utils, "get_total_byte_count", stock_sizing)
+
+    with (
+        pytest.warns(UserWarning, match="using its full-model sizing"),
+        _ep_aware_caching_allocator_warmup(4, _A2A_PLAN),
+    ):
+        assert modeling_utils.get_total_byte_count is stock_sizing
+
+
+@needs_sizing_hook
+@pytest.mark.parametrize("ep_degree", [1, 0])
+def test_without_expert_parallelism_the_stock_sizing_stays(ep_degree):
+    stock = modeling_utils.get_total_byte_count
+
+    with _ep_aware_caching_allocator_warmup(ep_degree, _A2A_PLAN):
+        assert modeling_utils.get_total_byte_count is stock
+
+
+@needs_sizing_hook
+def test_a_transformers_without_the_sizing_hook_is_left_alone(monkeypatch):
+    monkeypatch.delattr(modeling_utils, "get_total_byte_count")
+
+    with (
+        pytest.warns(UserWarning, match="has no get_total_byte_count"),
+        _ep_aware_caching_allocator_warmup(4, _A2A_PLAN),
+    ):
+        assert not hasattr(modeling_utils, "get_total_byte_count")

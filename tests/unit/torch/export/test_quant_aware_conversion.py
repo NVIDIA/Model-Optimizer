@@ -23,6 +23,7 @@ across platforms) — only shapes and the scalar-vs-blocked distinction matter.
 """
 
 import json
+import sys
 import types
 import warnings
 from fnmatch import fnmatchcase
@@ -40,6 +41,7 @@ from modelopt.torch.export.quant_aware_conversion import (
     SplitRule,
     _assert_experts_pre_expanded,
     _build_reverse_rules,
+    _dense_split_rule,
     _source_checkpoint_keys,
     _SourceAwareRenamer,
     apply_reverse_rules,
@@ -1281,3 +1283,145 @@ def test_revert_quant_config_names_mapper():
     q2 = {"exclude_modules": ["x*"]}
     revert_quant_config_names(q2, None)
     assert q2["exclude_modules"] == ["x*"]
+
+
+def _as_loading_rewrote(conversions, siblings):
+    """``conversions`` with every expert converter's ``.weight`` sources expanded the way a
+    load-time rewrite expands them: one anchored source per checkpoint tensor it consumes."""
+    # Local import: optional dependency; every caller importorskips transformers first.
+    from transformers.core_model_loading import WeightConverter
+
+    rewritten = []
+    for conv in conversions:
+        sources = conv.source_patterns if isinstance(conv.source_patterns, list) else []
+        if not isinstance(conv, WeightConverter) or not any(".experts." in s for s in sources):
+            rewritten.append(conv)
+            continue
+        stems = [s.removesuffix("$").removesuffix(".weight") for s in sources]
+        rewritten.append(
+            WeightConverter(
+                source_patterns=[f"{stem}.{leaf}$" for leaf in siblings for stem in stems],
+                target_patterns=getattr(conv, "_original_target_patterns", conv.target_patterns),
+                operations=list(conv.operations),
+            )
+        )
+    return rewritten
+
+
+@pytest.mark.parametrize(
+    "siblings",
+    [("weight", "weight_scale_inv"), ("weight_packed", "weight_scale", "weight_global_scale")],
+    ids=["fp8-dequantize", "compressed-tensors-decompress"],
+)
+def test_experts_revert_through_converters_loading_rewrote(siblings):
+    """The export replays the conversions ``from_pretrained`` recorded. After a dequantizing or
+    decompressing load, each expert converter lists every checkpoint tensor it consumed, so the
+    same leaf repeats; the expert reverse used to bail on that and leave every name in-memory.
+
+    A FineGrainedFP8 ``dequantize=True`` load also adds a converter that only decodes each weight
+    in place. It renames nothing, so it must neither abort the reverse of the model's real
+    conversions (MiniMax-M2.7 kept its in-memory expert names) nor re-encode a weight.
+    """
+    pytest.importorskip("transformers")
+    # Local import: optional dependency, guarded by the importorskip above.
+    from _test_utils.torch.transformers_models import get_tiny_mixtral
+
+    try:
+        from transformers.conversion_mapping import get_model_conversion_mapping
+    except ImportError:
+        pytest.skip("transformers build has no conversion_mapping API")
+    model = get_tiny_mixtral(**_MIXTRAL_KWARGS)
+    stock = get_model_conversion_mapping(model, add_legacy=False)
+    if not any(".experts." in str(c.source_patterns) for c in stock):
+        pytest.skip("transformers build has no mixtral expert conversion")
+    model._weight_conversions = _as_loading_rewrote(stock, siblings)
+    if "weight_scale_inv" in siblings:
+        fp8 = pytest.importorskip("transformers.integrations.finegrained_fp8")
+        from transformers.core_model_loading import WeightConverter
+
+        model._weight_conversions.append(
+            WeightConverter(
+                source_patterns=["weight$", "weight_scale_inv", "activation_scale"],
+                target_patterns="weight",
+                operations=[fp8.Fp8Dequantize(None)],
+            )
+        )
+
+    p = "model.layers.0"
+    sd = {
+        f"{p}.mlp.gate.weight": torch.randn(2, 32),
+        f"{p}.self_attn.q_proj.weight": torch.randn(8, 16, dtype=torch.bfloat16),
+    }
+    for e in range(2):
+        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.gate_proj", 64, 32))
+        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.up_proj", 64, 32))
+        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.down_proj", 32, 64))
+
+    out = revert_weight_conversion_quant_aware(model, sd)
+
+    for e in range(2):
+        base = f"{p}.block_sparse_moe.experts.{e}"
+        assert f"{base}.w1.weight" in out
+        assert f"{base}.w3.weight" in out
+        assert f"{base}.w2.weight" in out
+        assert f"{base}.w1.weight_scale_2" in out
+    assert out[f"{p}.self_attn.q_proj.weight"].dtype == torch.bfloat16
+    assert not any(".mlp.experts." in k or k.endswith("weight_scale_inv") for k in out)
+
+
+def test_the_identity_decode_is_known_without_the_fp8_integration(monkeypatch):
+    """transformers 5.5 imports triton atop its FP8 integration, so without triton that import
+    fails. The identity op 5.5 and 5.6 reverse ``Fp8Dequantize`` into is ``core_model_loading``'s,
+    and must still read as a decode in place, or the whole reverse of a dequantizing load aborts."""
+    core = pytest.importorskip("transformers.core_model_loading")
+    if not hasattr(core, "_IdentityOp"):
+        pytest.skip("transformers build has no _IdentityOp")
+    integrations = pytest.importorskip("transformers.integrations")
+    monkeypatch.delattr(integrations, "finegrained_fp8", raising=False)
+    monkeypatch.setitem(sys.modules, "transformers.integrations.finegrained_fp8", None)
+    quant_aware_conversion._quantization_codec_ops.cache_clear()
+    try:
+        rev = types.SimpleNamespace(source_patterns=["weight$"], target_patterns="weight")
+        assert quant_aware_conversion._decodes_in_place(rev, [core._IdentityOp()])
+    finally:
+        quant_aware_conversion._quantization_codec_ops.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("sources", "targets", "in_place"),
+    [
+        # A dequantizing FP8 load, reversed: the weight and the scales folded into it.
+        (["weight$"], ["weight$", "weight_scale_inv", "activation_scale"], True),
+        (["mlp.up_proj.weight$"], ["mlp.up_proj.weight$", "mlp.up_proj.weight_scale_inv"], True),
+        # A later target names another module, so the converter renames it.
+        (["mlp.up_proj.weight$"], ["mlp.up_proj.weight$", "mlp.gate_proj.weight"], False),
+    ],
+    ids=["bare-siblings", "module-siblings", "another-module"],
+)
+def test_a_codec_converter_decodes_in_place_only_if_it_names_one_module(sources, targets, in_place):
+    """A converter skipped as a decode in place gives up its reverse rules, so it must rename
+    nothing: a target naming another module is kept, to be reversed or refused."""
+    core = pytest.importorskip("transformers.core_model_loading")
+    if not hasattr(core, "_IdentityOp"):
+        pytest.skip("transformers build has no _IdentityOp")
+    rev = types.SimpleNamespace(source_patterns=sources, target_patterns=targets)
+    assert quant_aware_conversion._decodes_in_place(rev, [core._IdentityOp()]) is in_place
+
+
+def test_dense_split_names_each_part_once_through_load_siblings():
+    """A dense fused converter that a dequantizing load rewrote still un-fuses into one part per
+    module, not one per checkpoint tensor the load consumed."""
+    pytest.importorskip("transformers")
+    # Local import: optional dependency, guarded by the importorskip above.
+    from transformers.core_model_loading import Concatenate, WeightConverter
+
+    modules = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")
+    leaves = ("weight", "weight_scale_inv")
+    conv = WeightConverter(
+        source_patterns=[f"{m}.{leaf}$" for leaf in leaves for m in modules],
+        target_patterns="self_attn.qkv_proj",
+        operations=[Concatenate(dim=0)],
+    )
+    rev = conv.reverse_transform()
+    rule = _dense_split_rule(rev, list(rev.operations))
+    assert rule.part_suffixes == (".q_proj", ".k_proj", ".v_proj")

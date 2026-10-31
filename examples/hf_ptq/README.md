@@ -610,13 +610,17 @@ mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
 
 ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for distributed model sharding and calibration, exposed via the `--use_fsdp2` flag on the standard `hf_ptq.py` entry point.
 
-> *Weight and KV-cache AutoQuantize with `--use_fsdp2` are experimental.*
+> *Weight and KV-cache AutoQuantize with `--use_fsdp2` are experimental, and refused when a candidate format is one of those refused below.*
 
 > *Nemotron-H checkpoints containing MTP weights are not supported with `--use_fsdp2` and are rejected before distributed model loading. Remove `--use_fsdp2` to load and calibrate the MTP modules; the distributed loader does not construct them.*
 
 > *AWQ calibration (`awq_lite`, `awq_full`), as the AWQ formats and recipes use, AutoQuantize candidates included, is not supported with `--use_fsdp2` on more than one rank and is rejected before distributed model loading: each rank would fold its own smoothing scale into its weight shard. Drop `--use_fsdp2` (the single-process `device_map` still spreads the model over all the GPUs), run on one rank, or use a non-AWQ format.*
 
+> *With `--use_fsdp2` on more than one GPU, calibration other than AWQ that keeps its statistics on each rank is refused when quantization starts: SVDQuant (`--qformat nvfp4_svdquant`), local Hessian (`nvfp4_w4a4_weight_local_hessian`), imatrix (the `iq*` formats), the recipes that use them, and AutoQuantize recipes with such a candidate format. Each rank calibrates on its own share of the data, so the ranks would calibrate their shards of a weight differently. Run these without `--use_fsdp2`. For AWQ, see the note above.*
+
 > *`nvfp4_awq_clip` still works with `--use_fsdp2` on more than one GPU: it calibrates with AWQ-Clip alone, which folds no smoothing scale into the weights, and its clip search averages each candidate clip's loss over the ranks, so every rank takes the same clip.*
+
+> *With `--use_fsdp2` on more than one GPU, a calibration batch that runs out of memory is not retried in smaller pieces, since a rank that runs out of memory partway through a forward would leave the others waiting in its collectives. With `--batch_size 0`, each rank estimates the batch size from one forward and the ranks use the smallest, which is not probed for out-of-memory either: set `--batch_size` if calibration runs out of memory.*
 
 ### Usage
 
@@ -653,6 +657,8 @@ See [Recipe-based Quantization](#recipe-based-quantization) for the recipe forma
 Qwen checkpoints with `model_type` `qwen3_5` or `qwen3_5_moe` support this path for **text-only calibration**. The loader retains the conditional-generation architecture and vision tower, but `--calib_with_images` remains unsupported with FSDP2. During mixed-format export, linear-attention QKV/Z and B/A projections retain their separate runtime-fusion groups. Weight AutoQuantize with FSDP2 remains experimental.
 
 > *Performance Note: FSDP2 is designed for training workloads and may result in longer calibration and export times. For faster calibration, maximize the batch size based on available GPU memory and choose the right number of GPUs to avoid unnecessary communication.*
+
+> *Set `MODELOPT_FSDP2_EXPORT=nogather` to have every rank write its own shards of the checkpoint in parallel instead of gathering the full state dict on one host. It does not overwrite a checkpoint already in the export directory.*
 
 ## Evaluate Accuracy
 

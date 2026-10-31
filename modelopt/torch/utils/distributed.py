@@ -57,6 +57,7 @@ __all__ = [
     "distributed_forward_loop",
     "distributed_run",
     "distribution_plan",
+    "expert_parallel_state",
     "fsdp2_wrap",
     "gather_bytes",
     "gather_state_dicts",
@@ -699,6 +700,19 @@ def distributed_run(
             _destroy_group(exc)
 
 
+def expert_parallel_state(model: torch.nn.Module) -> "ParallelState | None":
+    """Return the ``ParallelState`` of the model's routed experts, or ``None`` if none has one.
+
+    An expert-parallel load seeds every routed-expert module with a ``ParallelState`` that carries the
+    expert-model-parallel group; no other module of a HuggingFace model has one.
+    """
+    for module in model.modules():
+        state = getattr(module, "_parallel_state", None)
+        if state is not None and state.expert_model_parallel_group.is_initialized():
+            return state
+    return None
+
+
 class _StridedIterableShard(IterableDataset):
     """Rank-strided shard of a streaming ``IterableDataset`` (no ``len()`` required).
 
@@ -910,14 +924,16 @@ def distributed_forward_loop(
     dataloader: DataLoader,
     device: torch.device | str | None = None,
     ep_mesh: "torch.distributed.device_mesh.DeviceMesh | None" = None,
+    forward: Callable[[dict], object] | None = None,
 ) -> Callable[[torch.nn.Module], None]:
     """Build an ``mtq.quantize`` ``forward_loop`` for a distributed (e.g. expert-parallel) model.
 
     Moves each batch onto ``device``, when given, and runs the captured ``model`` forward (the EP
-    all-reduce / all-to-all collectives fire inside that forward). A model whose plan
-    (:func:`distribution_plan`) is expert-parallel passes the ``ep_mesh`` its experts are sharded
-    over, for the all-to-all forwards that quantizer insertion drops to be re-installed before the
-    first forward; any other model passes none. ``mtq.quantize`` hands the
+    all-reduce / all-to-all collectives fire inside that forward), or ``forward(batch)`` when given,
+    for batches that need their own call into ``model``, such as a VLM's image-text batches. A
+    model whose plan (:func:`distribution_plan`) is expert-parallel passes the ``ep_mesh`` its
+    experts are sharded over, for the all-to-all forwards that quantizer insertion drops to be
+    re-installed before the first forward; any other model passes none. ``mtq.quantize`` hands the
     ``forward_loop`` callback an inner module that this closure ignores, calling the captured
     top-level ``model`` instead so the full distributed forward (and its collectives) runs.
 
@@ -955,7 +971,10 @@ def distributed_forward_loop(
                         k: (v.to(device) if isinstance(v, torch.Tensor) else v)
                         for k, v in batch.items()
                     }
-                model(**batch)
+                if forward is None:
+                    model(**batch)
+                else:
+                    forward(batch)
             # Again for what runs next (amax sync, export collectives), past the forwards' pool.
             _release_cached_cuda_memory()
 
