@@ -222,6 +222,7 @@ def test_compressed_experts_load_expert_parallel_each_rank_decompressing_its_own
     rank's checks are gathered before any rank fails, so a regression fails instead of hanging."""
     pytest.importorskip(
         "compressed_tensors",
+        minversion="0.16",
         reason="compressed-tensors is needed: the checkpoint's experts are compressed",
     )
     if Version(transformers.__version__) < Version("5.8"):
