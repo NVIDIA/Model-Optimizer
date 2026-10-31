@@ -638,7 +638,7 @@ def _export_quantized_weight(
 
     An export handler packs through ``hf_export_handlers._export_weight`` rather than calling this
     directly: on the keep-fused export an FSDP2-owned weight must be packed inside its unit's
-    weight-update window, which that helper opens.
+    weight-update window, which that helper (or the fused-experts handler, around its fold) opens.
     Packed outside it, the unit's next reshard puts FSDP2's unquantized shard back, and the
     checkpoint is written unquantized.
 

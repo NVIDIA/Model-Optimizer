@@ -28,7 +28,7 @@ from modelopt.torch.quantization.utils.core_utils import ModuleNames, _get_enclo
 from modelopt.torch.utils.distributed import distribution_plan
 
 from .layer_utils import get_expert_linear_names, is_quantlinear, set_expert_quantizer_amax
-from .moe_utils import _export_fused_experts
+from .moe_utils import _export_fused_experts, _export_fused_experts_keep_fused
 from .quant_format import QUANTIZATION_NONE
 from .quant_utils import get_quantization_format
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
@@ -226,13 +226,37 @@ def _export_moe_linear(name: str, module: nn.Module, ctx: ExportContext) -> None
 def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Split and quantize a fused-experts module with plural weight quantizers.
 
-    Under FSDP2 each rank holds only some experts, so it packs just those (kept fused) and the
-    split into per-expert keys is deferred until the gather brings all experts together.
-
     Tied experts are packed independently and their duplicate keys are dropped by name
     in postprocess_state_dict; no per-module dedup cache is used.
+
+    Distributed no-gather export (``ctx.keep_fused_experts``) folds the quantizers into the fused
+    weight IN PLACE, quantizing only this rank's local experts and keeping the result ``Shard(0)`` --
+    the per-expert split happens later on the sharded weight (``split_fused_experts_state_dict``).
+    Otherwise (single process, or gather export) it splits into full per-expert submodules here.
     """
-    _export_fused_experts(module, ctx.dtype)
+    attr = name.rpartition(".")[2]
+    if ctx.keep_fused_experts and attr != "experts":
+        # The split into per-expert keys finds a fused weight by its ``experts.<proj>`` key, as the
+        # writer does, so one named otherwise would be written fused and fail only at load.
+        raise NotImplementedError(
+            f"{name}: the keep-fused export splits fused experts into per-expert keys by their "
+            f"`experts` attribute name, and this module is named {attr!r}."
+        )
+    if ctx.keep_fused_experts and distribution_plan(ctx.model).is_fsdp_dense:
+        # FSDP2 owns the fused weights here: fold them inside a weight-update window, which hands
+        # FSDP2 the packed weights. Replaced behind its back, they would be overwritten with its
+        # original shards the next time the layer reshards, and exported unquantized. The window
+        # unshards FSDP2's params, so under FSDP2 alone each rank folds every expert of the unit, one
+        # unit at a time as a forward holds it; expert weights FSDP2 does not shard, as expert
+        # parallelism keeps them, stay sharded over the experts, and each rank folds its own.
+        with _fsdp2_weight_window(ctx, module):
+            _export_fused_experts_keep_fused(module, ctx.dtype)
+    elif ctx.keep_fused_experts:
+        # No-gather distributed export: fold each rank's LOCAL experts and leave the weight
+        # fused + sharded; the per-expert split happens after consolidation.
+        _export_fused_experts_keep_fused(module, ctx.dtype)
+    else:
+        _export_fused_experts(module, ctx.dtype)
 
 
 @ExportModuleRegistry.register(predicate=is_quantlinear)
@@ -286,9 +310,19 @@ def _export_quant_embedding(name: str, module: nn.Module, ctx: ExportContext) ->
 def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Export fused BMM-style expert weights (Llama4 / GPT-OSS).
 
-    Its weight quantizer has one amax covering all experts, so under FSDP2 each rank can pack
-    just the experts it owns and produce identical bytes -- no gather or unshard needed.
+    Their weight quantizer has one amax covering all experts. The keep-fused export refuses them,
+    since they store their experts transposed.
     """
+    if ctx.keep_fused_experts:
+        # The keep-fused export leaves fused experts for the writer to split by their
+        # ``experts.<proj>`` key, as ``(num_experts, out_dim, in_dim)`` weights. These store theirs
+        # transposed (GPT-OSS also interleaves gate and up, and keeps biases), so the split would cut
+        # every expert wrong, quantized or not.
+        raise NotImplementedError(
+            f"{name}: the keep-fused export splits fused experts stored (num_experts, out_dim, "
+            f"in_dim), and {type(module).__name__} stores its experts transposed; export it through "
+            "the gather export instead."
+        )
     if get_quantization_format(module) == QUANTIZATION_NONE:
         return
     # TODO: consolidate uncalibrated experts handling logic

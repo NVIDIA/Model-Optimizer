@@ -66,7 +66,9 @@ class ExportContext:
 
     keep_fused_experts: bool = False
     """Marks the distributed no-gather export, whose handlers pack while the model is still sharded:
-    an FSDP2-owned weight is packed inside its unit's weight-update window."""
+    an FSDP2-owned weight is packed inside its unit's weight-update window, and fused MoE experts are
+    folded in place and kept fused and sharded rather than split into whole per-expert tensors,
+    which :func:`~modelopt.torch.export.moe_utils.split_fused_experts_state_dict` does later."""
 
     module_names: "ModuleNames | None" = None
     """``model``'s name maps, built once per export by the first handler that looks a module up

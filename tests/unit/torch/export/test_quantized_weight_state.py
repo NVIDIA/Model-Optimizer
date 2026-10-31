@@ -207,9 +207,16 @@ def _capture_linear(quantization_format):
     return module
 
 
-@pytest.mark.parametrize("quantization_format", _CAPTURE_FORMAT_CONFIGS)
-def test_capture_preserves_format_state_and_detaches_tensors(quantization_format):
+@pytest.mark.parametrize(
+    ("quantization_format", "constant_amax"),
+    [(name, False) for name in _CAPTURE_FORMAT_CONFIGS] + [("mxfp4", True), ("mxfp8", True)],
+)
+def test_capture_preserves_format_state_and_detaches_tensors(quantization_format, constant_amax):
     module = _capture_linear(quantization_format)
+    if constant_amax:
+        for quantizer in (module.weight_quantizer, module.input_quantizer):
+            quantizer.set_from_attribute_config({"use_constant_amax": True})
+            assert quantizer.export_amax() is None
     cfg = _CAPTURE_FORMAT_CONFIGS[quantization_format]
     expected = {}
     if quantization_format == "fp8_pc_pt":
@@ -739,18 +746,49 @@ def _kv_attention(k_cfg, v_cfg, k_amax=896.0, v_amax=224.0) -> nn.Module:
         (_FP8_KV, _NVFP4_KV, "FP8_K_NVFP4_V", 2.0, 0.5),
     ],
 )
-def test_kv_cache_capture(k_cfg, v_cfg, quantization_format, k_scale, v_scale):
+@pytest.mark.parametrize(
+    ("constant_axes", "keep_amax"),
+    [((), False), (("k", "v"), False), (("k", "v"), True), (("k",), False), (("v",), True)],
+)
+def test_kv_cache_capture(
+    k_cfg, v_cfg, quantization_format, k_scale, v_scale, constant_axes, keep_amax, recwarn
+):
     attention = _kv_attention(k_cfg, v_cfg)
+    for axis in constant_axes:
+        quantizer = getattr(attention, f"{axis}_bmm_quantizer")
+        quantizer.set_from_attribute_config({"use_constant_amax": True})
+        if not keep_amax:
+            del quantizer._amax
+            assert quantizer.export_amax() is None
+    k_scale = 1.0 if "k" in constant_axes else k_scale
+    v_scale = 1.0 if "v" in constant_axes else v_scale
+    original_buffers = {name: value.clone() for name, value in attention.named_buffers()}
 
     state = capture_kv_cache_export_state(attention)
 
+    calibrated_fp8_k = quantization_format in {"FP8", "FP8_K_NVFP4_V"} and "k" not in constant_axes
+    assert sum("Large KV activation" in str(w.message) for w in recwarn) == int(calibrated_fp8_k)
     assert get_kv_cache_export_spec(attention) == state.quantization_format == quantization_format
     torch.testing.assert_close(state.k_scale.squeeze(), torch.tensor(k_scale))
     torch.testing.assert_close(state.v_scale.squeeze(), torch.tensor(v_scale))
     assert not state.k_scale.requires_grad and state.k_scale.device.type == "cpu"
     if quantization_format == "FP8":
         unclamped = capture_kv_cache_export_state(attention, clamp_fp8_scales=False)
-        assert unclamped.v_scale.item() == 0.5
+        assert unclamped.v_scale.item() == (1.0 if "v" in constant_axes else 0.5)
+    assert set(dict(attention.named_buffers())) == set(original_buffers)
+    for name, value in attention.named_buffers():
+        torch.testing.assert_close(value, original_buffers[name])
+
+
+def test_kv_cache_capture_ignores_stale_dynamic_constant_amax():
+    cfg = {**_FP8_KV, "type": "dynamic", "use_constant_amax": True}
+    attention = _kv_attention(cfg, _FP8_KV)
+
+    state = capture_kv_cache_export_state(attention, clamp_fp8_scales=False)
+
+    assert state.k_scale.item() == 1.0
+    assert state.v_scale.item() == 0.5
+    assert attention.k_bmm_quantizer._amax.item() == 896.0
 
 
 def test_kv_cache_spec_rejects_what_it_cannot_export():
@@ -768,6 +806,10 @@ def test_kv_cache_spec_rejects_what_it_cannot_export():
     attention = _kv_attention({"num_bits": 8}, {"num_bits": 8})
     with pytest.raises(NotImplementedError, match="'INT8' KV cache"):
         get_kv_cache_export_spec(attention)
+
+    mx = {**_CAPTURE_FORMAT_CONFIGS["mxfp8"], "use_constant_amax": True}
+    with pytest.raises(RuntimeError, match="Missing calibrated KV-cache scales"):
+        capture_kv_cache_export_state(_kv_attention(mx, mx))
 
     affine_fp8 = {**_FP8_KV, "bias": {-2: None, -4: None, "type": "static"}}
     attention = _kv_attention(affine_fp8, affine_fp8)

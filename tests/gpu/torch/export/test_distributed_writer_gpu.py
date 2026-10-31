@@ -15,16 +15,18 @@
 
 """The no-gather writer's transport and shard writing over NCCL, on every visible GPU."""
 
+import json
 import os
 import threading
 
 import pytest
 import torch
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
+from safetensors.torch import load_file
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
-from modelopt.torch.export.distributed_writer import _materialize_owned
+from modelopt.torch.export.distributed_writer import _materialize_owned, _write_even_shards
 
 
 def _raw_bytes(tensor):
@@ -92,6 +94,31 @@ def test_materialize_owned_moves_uneven_and_empty_shards_over_nccl(need_2_gpus, 
     """Every key ends whole, byte for byte, on exactly one rank: BF16, FP8 and uint8 shards of
     uneven extent, empty ones included, a tensor with no rows, a replicated and a plain one."""
     dist_workers.run(_materialize_job)
+
+
+def _materialize_and_write_job(rank, world_size, tmp_dir):
+    full = _full_tensors(world_size)
+    sd = _sharded(full, rank, world_size)
+
+    _materialize_owned(sd, set(), rank, world_size)
+    # 256 bytes fits two of the 4x16 BF16 layers: an owner of several writes several files.
+    _write_even_shards(sd, tmp_dir, "256", rank, world_size)
+
+    assert not sd
+    index = json.loads((tmp_dir / "model.safetensors.index.json").read_text())
+    loaded = {}
+    for shard in sorted(set(index["weight_map"].values())):
+        loaded.update(load_file(str(tmp_dir / shard)))
+    assert sorted(loaded) == sorted(full)
+    for key, tensor in full.items():
+        assert torch.equal(_raw_bytes(loaded[key]), _raw_bytes(tensor)), key
+    assert not list(tmp_dir.glob("*.tmp"))
+
+
+def test_write_even_shards_writes_every_rank_s_files_over_nccl(need_2_gpus, dist_workers, tmp_path):
+    """Moved to their owners and written there, several files per rank, the checkpoint holds every
+    tensor byte for byte, and no temporary file is left."""
+    dist_workers.run(_materialize_and_write_job, tmp_dir=tmp_path)
 
 
 def _sparse_first_transfer_job(rank, world_size):

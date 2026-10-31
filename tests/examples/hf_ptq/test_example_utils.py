@@ -28,7 +28,7 @@ from unittest.mock import patch
 import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
-from _test_utils.torch.transformers_models import get_tiny_nemotron_h
+from _test_utils.torch.transformers_models import create_tiny_qwen3_moe_dir, get_tiny_nemotron_h
 from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM, LlamaConfig
 
@@ -56,6 +56,29 @@ def test_fsdp2_qwen_vlm_requires_text_only_calibration(
     expected = pytest.raises(NotImplementedError, match=error) if error else nullcontext()
     with expected:
         example_utils.validate_fsdp2_supported(args, config)
+
+
+@pytest.mark.parametrize(
+    ("ranks", "qformat", "recipe", "refused"),
+    [
+        (2, "w4a8_awq_beta", None, True),
+        (2, "fp8", "general/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits", True),
+        (2, "fp8", None, False),
+        (1, "w4a8_awq_beta", None, False),
+    ],
+)
+def test_fsdp2_refuses_awq_on_several_ranks_before_loading(
+    monkeypatch, ranks, qformat, recipe, refused
+):
+    """Each rank would fold its own AWQ scale into its weight shard, which the library refuses
+    only once the model is loaded: the example refuses at argument validation."""
+    monkeypatch.setattr(example_utils.dist_utils, "size", lambda: ranks)
+    args = SimpleNamespace(local_checkpoint_path="local-model", qformat=qformat, recipe=recipe)
+    expected = (
+        pytest.raises(NotImplementedError, match="AWQ calibration") if refused else nullcontext()
+    )
+    with expected:
+        example_utils.validate_fsdp2_supported(args, SimpleNamespace(model_type="llama"))
 
 
 def _write_safetensors(path, tensors):
@@ -112,6 +135,14 @@ def test_mtp_preparation_matches_loader(tmp_path, loader, trust_remote_code):
     for name, value in source.state_dict().items():
         torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
     assert not any("MTP weights may remain unquantized" in str(w.message) for w in caught)
+
+
+def test_get_model_loads_with_the_requested_experts_implementation(tmp_path):
+    """hf_ptq's --experts_implementation reaches the fused experts: eager calibrates them as earlier
+    releases did, where transformers would pick grouped_mm for this model."""
+    path = create_tiny_qwen3_moe_dir(tmp_path)
+    model = example_utils.get_model(str(path), device="cpu", experts_implementation="eager")
+    assert model.config._experts_implementation == "eager"
 
 
 @pytest.mark.parametrize("failure_at", [1, 2])

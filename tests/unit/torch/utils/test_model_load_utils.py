@@ -305,20 +305,35 @@ _REMOTE_IMAGE_TEXT_VLM = {
 
 
 @pytest.mark.parametrize(
-    ("config", "trust_remote_code", "expected"),
+    ("config", "require_lm_head", "trust_remote_code", "expected"),
     [
-        (SimpleNamespace(architectures=["LlamaForCausalLM"]), False, AutoModelForCausalLM),
-        (_vlm_config(auto_map=_REMOTE_VLM), True, AutoModelForCausalLM),
-        (_vlm_config(auto_map=_REMOTE_VLM), False, AutoModel),
-        (_vlm_config(auto_map=_REMOTE_IMAGE_TEXT_VLM), True, AutoModelForImageTextToText),
-        (_tiny_qwen2_5_vl(), False, AutoModelForImageTextToText),
-        (Phi4MultimodalConfig(), False, AutoModelForCausalLM),
-        (_vlm_config(), False, AutoModel),
-        (T5Config(architectures=["T5ForConditionalGeneration"]), False, AutoModelForSeq2SeqLM),
-        (WhisperConfig(), False, AutoModelForSpeechSeq2Seq),
+        (SimpleNamespace(architectures=["LlamaForCausalLM"]), True, False, AutoModelForCausalLM),
+        (_tiny_qwen2_5_vl(), False, False, AutoModel),
+        (_vlm_config(auto_map=_REMOTE_VLM), True, True, AutoModelForCausalLM),
+        (_vlm_config(auto_map=_REMOTE_VLM), True, False, AutoModel),
+        (_vlm_config(auto_map=_REMOTE_IMAGE_TEXT_VLM), True, True, AutoModelForImageTextToText),
+        (_tiny_qwen2_5_vl(), True, False, AutoModelForImageTextToText),
+        (Phi4MultimodalConfig(), True, False, AutoModelForCausalLM),
+        (_vlm_config(), True, False, AutoModel),
+        (
+            T5Config(architectures=["T5ForConditionalGeneration"]),
+            True,
+            False,
+            AutoModelForSeq2SeqLM,
+        ),
+        (WhisperConfig(), True, False, AutoModelForSpeechSeq2Seq),
+        (T5Config(architectures=["T5ForConditionalGeneration"]), False, False, AutoModel),
+        (_vlm_config(auto_map=_REMOTE_VLM), False, True, AutoModelForCausalLM),
+        (
+            _vlm_config(auto_map={**_REMOTE_VLM, "AutoModel": "m.KimiK25Model"}),
+            False,
+            True,
+            AutoModel,
+        ),
     ],
     ids=[
         "causal-lm",
+        "vlm-backbone",
         "remote-vlm-with-head",
         "remote-vlm-untrusted",
         "remote-image-text-vlm",
@@ -327,14 +342,20 @@ _REMOTE_IMAGE_TEXT_VLM = {
         "unknown-vlm",
         "encoder-decoder",
         "speech-encoder-decoder",
+        "encoder-decoder-backbone",
+        "remote-vlm-without-a-base-class",
+        "remote-vlm-backbone",
     ],
 )
-def test_the_class_that_builds_the_whole_model(config, trust_remote_code, expected):
-    """A VLM's AutoModel leaves the LM head out: it builds through the class that carries the head,
-    keeping the headless backbone only when no class recognizes the config. A remote class counts
-    only when the checkpoint's code is trusted. An encoder-decoder model's architecture reads like a
-    VLM's, but its seq2seq class carries its head, also for a config that names no architecture."""
-    assert _auto_class(config, trust_remote_code) is expected
+def test_the_class_that_builds_the_whole_model(
+    config, require_lm_head, trust_remote_code, expected
+):
+    """A VLM's AutoModel leaves the LM head out: with the head required it builds through the class
+    that carries it, keeping the headless backbone only when no class recognizes the config. A remote
+    class counts only when the checkpoint's code is trusted. An encoder-decoder model's architecture
+    reads like a VLM's, but its seq2seq class carries its head, also for a config that names no
+    architecture."""
+    assert _auto_class(config, require_lm_head, trust_remote_code=trust_remote_code) is expected
 
 
 # -------------------------------------------------------------------------------- the decision

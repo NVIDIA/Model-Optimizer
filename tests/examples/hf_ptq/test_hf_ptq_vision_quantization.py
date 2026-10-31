@@ -56,6 +56,7 @@ def test_image_calibration_model_target_follows_recipe(
         trust_remote_code=False,
         use_seq_device_map=False,
         attn_implementation=None,
+        experts_implementation=None,
         offload_folder=None,
         max_cpu_memory_gb=None,
         max_gpu_memory_gb=None,

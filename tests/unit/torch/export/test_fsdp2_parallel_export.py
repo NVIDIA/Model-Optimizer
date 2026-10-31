@@ -42,13 +42,13 @@ transformers = pytest.importorskip("transformers")
 from transformers import AutoModelForCausalLM, LlamaConfig
 
 
-def _tiny_quantized_llama(quant_cfg=None, tie=True, mesh=None):
+def _tiny_quantized_llama(quant_cfg=None, tie=True, mesh=None, hidden_size=64):
     mto.enable_huggingface_checkpointing()
     torch.manual_seed(0)
     cfg = LlamaConfig(
         vocab_size=128,
-        hidden_size=64,
-        intermediate_size=128,
+        hidden_size=hidden_size,
+        intermediate_size=2 * hidden_size,
         num_hidden_layers=2,
         num_attention_heads=4,
         num_key_value_heads=4,
@@ -92,6 +92,27 @@ def test_streaming_export_matches_resident_path(tmp_path):
     assert set(streamed) == set(ref)
     for key in ref:
         assert torch.equal(streamed[key].float(), ref[key].cpu().float()), key
+
+
+def test_streaming_export_of_a_sharded_w4a8_model(tmp_path, gloo_world_of_one):
+    """An FSDP2 model calibrated with W4A8 AWQ on one rank exports what the unsharded model does.
+
+    W4A8's weight quantizer is a ``SequentialQuantizer``, which the weight-update window the AWQ
+    resmooth opens on each sharded layer must handle. AWQ calibration of an FSDP2 model is refused
+    only over several ranks.
+    """
+    # 128 wide, so that W4A8's 128-wide INT4 blocks tile every weight.
+    ref_model = _tiny_quantized_llama(mtq.W4A8_AWQ_BETA_CFG, hidden_size=128)
+    ref, _ = _export_transformers_checkpoint(ref_model, torch.bfloat16)
+    # Sharded before it is calibrated, as hf_ptq --use_fsdp2 does on one GPU.
+    model = _tiny_quantized_llama(mtq.W4A8_AWQ_BETA_CFG, hidden_size=128, mesh=gloo_world_of_one)
+
+    _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=tmp_path)
+
+    streamed = _load_all(tmp_path)
+    assert set(streamed) == set(ref)
+    for key in ref:
+        assert torch.equal(streamed[key], ref[key].cpu()), key
 
 
 def test_streaming_export_drops_tied_alias_and_writes_config(tmp_path):
