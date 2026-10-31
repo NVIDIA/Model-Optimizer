@@ -105,6 +105,9 @@ from ._remote_fixes import (
 # `layers.*.block_sparse_moe` (NOT `.mlp`; layer 0 is dense `.mlp`). Fused expert params shard dim-0 via
 # grouped_gemm; the experts container gets the EP group via moe_tp_experts (-> torch_a2a_experts for a2a).
 # No `ep_router` entry: KimiMoEGate runs inline over the replicated router weight and emits GLOBAL ids.
+# The model type the spec registers, and the early record of prepare's lasting patch keys on.
+MODEL_TYPE = "kimi_k3"
+
 BASE_MODEL_EP_PLAN = {
     "layers.*.block_sparse_moe.experts.gate_up_proj": "grouped_gemm",
     "layers.*.block_sparse_moe.experts.down_proj": "grouped_gemm",
@@ -390,7 +393,7 @@ def prepare(
 
     Only an expert-parallel plan runs it, but its patches are process-wide and stay after that load,
     which the spec states (``prepare_patches_every_load``): a later whole-model or FSDP2-sharded load
-    of Kimi-K3 in the same process is refused before anything is built.
+    of Kimi-K3 in the same process is refused before it builds or loads the model.
     """
     # Not at module scope: the model registry imports this module, and modelopt.torch.utils.moe
     # imports the registry.
@@ -435,7 +438,7 @@ def prepare(
         )
     _patch_kimi_moe_block(kmod)
     # Recorded at the first patch that lasts, so a step below that raises still leaves the record.
-    mark_patched_every_load("kimi_k3")
+    mark_patched_every_load(MODEL_TYPE)
     _patch_kda_a_log(kmod)
     _patch_kda_beta_sigmoid(kmod)
     _shim_create_causal_mask(kmod)
