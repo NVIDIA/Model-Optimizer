@@ -2729,6 +2729,31 @@ def gptq(
 # Calibration rows squared at a time, bounding imatrix's float32 temporaries to this slice of an
 # input rather than twice the whole of it.
 _IMATRIX_ROW_CHUNK = 1024
+# CUDA reductions over about 1,024 rows or more stage partial sums in a global buffer that grows
+# with the input, so longer GPU inputs are reduced in groups of this many rows.
+_IMATRIX_GPU_GROUP = 512
+
+
+def _imatrix_sum_of_squares(x: torch.Tensor) -> torch.Tensor:
+    """Per-column sum of squares of the rows of ``x``, in float32."""
+    if not (x.is_cuda and x.dtype in (torch.bfloat16, torch.float16, torch.float32)):
+        # On a CPU vector_norm copies the whole input to float32 first, and it rejects float64,
+        # so square float32 slices of the input instead.
+        return sum(rows.float().square().sum(dim=0) for rows in x.split(_IMATRIX_ROW_CHUNK))
+    if x.shape[0] > _IMATRIX_GPU_GROUP**2:
+        # Bound the group sums, and the reduction over them, to _IMATRIX_GPU_GROUP rows too.
+        return sum(_imatrix_sum_of_squares(rows) for rows in x.split(_IMATRIX_GPU_GROUP**2))
+    # On a GPU vector_norm squares and sums in float32 inside the kernel, without a float32 copy.
+    if x.shape[0] <= 3 * _IMATRIX_GPU_GROUP:
+        # Launches dominate at this size, so one reduction is fastest, and up to here it stages no
+        # more than squaring float32 slices would.
+        return torch.linalg.vector_norm(x, 2, dim=0, dtype=torch.float32).square_()
+    full = x.shape[0] // _IMATRIX_GPU_GROUP * _IMATRIX_GPU_GROUP
+    groups = x[:full].reshape(-1, _IMATRIX_GPU_GROUP, x.shape[1])
+    sum_sq = torch.linalg.vector_norm(groups, 2, dim=1, dtype=torch.float32).square_().sum(dim=0)
+    if full < x.shape[0]:
+        sum_sq += torch.linalg.vector_norm(x[full:], 2, dim=0, dtype=torch.float32).square_()
+    return sum_sq
 
 
 @torch.no_grad()
@@ -2798,7 +2823,7 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
         x = inputs.detach().reshape(-1, inputs.shape[-1])
         if x.shape[0] == 0:
             return
-        sum_sq = sum(rows.float().square().sum(dim=0) for rows in x.split(_IMATRIX_ROW_CHUNK))
+        sum_sq = _imatrix_sum_of_squares(x)
         entry[0] = sum_sq if entry[0] is None else entry[0] + sum_sq
         entry[1] += x.shape[0]
 

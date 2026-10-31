@@ -81,12 +81,14 @@ def _decoded(quantizer, shape):
     return IQ2_XXS.dequantize(pinned, torch.tensor(shape), dtype=torch.float32)
 
 
-def test_imatrix_weights_the_search_by_the_root_of_the_inputs_second_moments(monkeypatch):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_imatrix_weights_the_search_by_the_root_of_the_inputs_second_moments(monkeypatch, dtype):
     calls = _record_importance(monkeypatch)
-    inputs = _inputs(rows=2500)  # more rows than the hook squares at a time
-    mtq.quantize(nn.Linear(512, 8, bias=False), _config(IMATRIX), forward_loop=lambda m: m(inputs))
+    inputs = _inputs(rows=2500).to(dtype)  # more rows than the hook squares at a time
+    model = nn.Linear(512, 8, bias=False, dtype=dtype)
+    mtq.quantize(model, _config(IMATRIX), forward_loop=lambda m: m(inputs))
 
-    torch.testing.assert_close(calls[-1], _importance(inputs.square().mean(dim=0)))
+    torch.testing.assert_close(calls[-1], _importance(inputs.float().square().mean(dim=0)))
 
 
 def test_imatrix_pins_the_codes_it_chose():
