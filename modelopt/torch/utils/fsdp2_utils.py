@@ -101,15 +101,12 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     replicated and are moved onto the shards' device, which ``fully_shard`` does not do for the
     params it ignores.
 
-    It records no distribution plan: a caller wrapping a model itself records one once it is wrapped
-    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`). It refuses a model that, or
-    any of whose submodules, already records a plan, as a model ``load_pretrained`` returned does: a
-    plan is recorded once, so wrap a model loaded with ``from_pretrained`` instead.
+    It records no distribution plan, and refuses a model that, or any of whose submodules, records
+    one, as a model ``load_pretrained`` returned does: wrap one loaded with ``from_pretrained``.
     """
     if (found := _recorded_plan(model)) is not None:
-        # The record would no longer hold: a model recorded as replicated would read as replicated
-        # while sharded, which the export would believe, and one recorded as sharded is wrapped
-        # already. A ValueError, as set_distribution_plan raises for the same record.
+        # A model recorded as replicated would read so while sharded, misleading the export, and one
+        # recorded as sharded is wrapped already. A ValueError, as set_distribution_plan raises.
         where, recorded = found
         raise ValueError(
             f"{where} is already recorded as distributed by {recorded!r}, and a plan is recorded "
