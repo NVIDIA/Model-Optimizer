@@ -2668,7 +2668,7 @@ def test_the_experts_are_counted_in_the_config_holding_the_plan(monkeypatch, glo
         (
             SimpleNamespace(model_type="gpt_oss", base_model_ep_plan=_EP_PLAN),
             NotImplementedError,
-            "the expert-parallel export cannot write that layout",
+            "gpt_oss cannot be quantized expert-parallel yet: .* cannot write that layout",
         ),
     ],
     ids=[
@@ -2692,9 +2692,8 @@ def test_a_config_the_load_cannot_take_is_refused_before_anything_loads(
     that leaves the experts whole on every rank: one naming no routed experts, or none of
     whose entries shards their weights by grouped_gemm, the only expert-weight style the load
     shards by, or one that styles some of their weights otherwise. So is a model whose spec rules
-    expert parallelism out (GPT-OSS's), which the plan decision plans without it: an EP degree asked
-    for, or a plan handed in, meets that refusal here. The load refuses each before it reads
-    anything."""
+    expert parallelism out (GPT-OSS's), as load_pretrained refuses it: a plan handed to this load
+    meets that refusal here. The load refuses each before it reads anything."""
     with pytest.raises(error, match=match):
         load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
     assert ep_world_of_two == []

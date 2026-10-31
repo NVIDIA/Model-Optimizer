@@ -2182,9 +2182,10 @@ def load_and_prepare_ep(
         ep_plan = dict(getattr(ep_cfg, "base_model_ep_plan", None) or {})
         if not ep_plan:
             raise ValueError("expert-parallel PTQ requires the model to declare base_model_ep_plan")
-        # The refusals the plan decision gives way for, which an EP degree asked for, or a plan
+        # What the plan decision refuses or gives way for, which an EP degree asked for, or a plan
         # handed in, meets here: a model spec ruling expert parallelism out or stating a later
-        # transformers, and the plan's styles.
+        # transformers (refused as load_pretrained refuses it), and the plan's styles.
+        check_distributed_support(hf_config.model_type)
         if (refusal := _ep_load_refusal(hf_config, ep_plan)) is not None:
             raise refusal
         # The all-to-all transport needs every rank to hold as many experts, counted as the plan's
