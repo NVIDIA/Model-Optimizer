@@ -773,6 +773,26 @@ def test_only_an_expert_parallel_plan_patches_kimi_k3s_code(
 
 
 @pytest.mark.parametrize(
+    "kwargs",
+    [{"ckpt_path": None, "trust_remote_code": True}, {"ckpt_path": "/ckpt"}],
+    ids=["no-checkpoint", "untrusted"],
+)
+def test_the_build_step_installs_nothing_when_there_is_nothing_to_build(monkeypatch, kwargs):
+    """With no checkpoint, or code this load may not run, nothing of Kimi-K3's is imported or built,
+    so the build step installs no import shim and no staging either: a plan decision that runs it
+    leaves the process as it found it."""
+    _restore(monkeypatch, hf_generic, "OutputRecorder")
+    monkeypatch.delattr(hf_generic, "OutputRecorder", raising=False)
+    staging = dmu.get_cached_module_file
+    monkeypatch.setattr(dmu, "get_cached_module_file", staging)
+
+    kimi_k3.make_buildable(SimpleNamespace(auto_map=_AUTO_MAP), **kwargs)
+
+    assert dmu.get_cached_module_file is staging
+    assert not hasattr(hf_generic, "OutputRecorder")
+
+
+@pytest.mark.parametrize(
     ("dense", "fsdp2"), [("auto", False), ("fsdp", True)], ids=["whole", "fsdp2"]
 )
 def test_an_ep_degree_of_1_builds_kimi_k3s_own_code_to_decide(monkeypatch, tmp_path, dense, fsdp2):
