@@ -134,6 +134,61 @@ if [ -n "${ACCELERATE_CONFIG:-}" ] && [ -f "${ACCELERATE_CONFIG}" ]; then
     echo "Using accelerate config: ${ACCELERATE_CONFIG}"
 fi
 
+# Config creation precedes serialization, so existence alone does not prove completion.
+export_complete() {
+    python3 - "$1/config.json" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1]) as f:
+        config = json.load(f)
+except (OSError, ValueError):
+    sys.exit(1)
+
+sys.exit(0 if isinstance(config, dict) and config else 1)
+PY
+}
+
+recover_export() {
+    local destination=$1 backup="$1.old"
+
+    [ -e "$backup" ] || return 0
+    if [ -e "$destination" ]; then
+        # Only a complete publication supersedes the backup.
+        export_complete "$destination" || return 1
+        rm -rf "$backup" || return 1
+    else
+        mv -T "$backup" "$destination" || return 1
+    fi
+}
+
+export_draft() {
+    local source=$1 destination=$2
+    local scratch="$2.tmp" backup="$2.old"
+
+    # Callers use ||, which suppresses ERR handling inside this function.
+    recover_export "$destination" || return 1
+    rm -rf "$scratch" || return 1
+    echo "=== Exporting: ${source} → ${destination} ==="
+    CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
+        --model_path "$source" \
+        --export_path "$scratch" \
+        --trust_remote_code || return 1
+    if ! export_complete "$scratch"; then
+        echo "ERROR: export produced an invalid config: ${scratch}" >&2
+        return 1
+    fi
+    if [ -e "$destination" ]; then
+        mv -T "$destination" "$backup" || return 1
+    fi
+    if ! mv -T "$scratch" "$destination"; then
+        recover_export "$destination" || return 1
+        return 1
+    fi
+    rm -rf "$backup" || return 1
+}
+
 set -x
 start_time=$(date +%s)
 # The ERR trap only records a failure and lets the script go on, so test the status here:
@@ -156,28 +211,63 @@ elif [ "${SLURM_PROCID:-0}" = "0" ]; then
     if [ -n "$OUTPUT_DIR" ]; then
         # Export all checkpoints that don't already have an exported version
         EXPORTED=0
-        for CKPT in $(ls -d ${OUTPUT_DIR}/checkpoint-* 2>/dev/null | sort -t- -k2 -n); do
+        for BACKUP in "${OUTPUT_DIR}"/exported-checkpoint-*.old; do
+            [ -d "$BACKUP" ] || continue
+            recover_export "${BACKUP%.old}" || exit 1
+        done
+        for CKPT in "${OUTPUT_DIR}"/checkpoint-*; do
+            [ -d "$CKPT" ] || continue
             STEP=$(basename "$CKPT" | sed 's/checkpoint-//')
             EXPORT_DIR="${OUTPUT_DIR}/exported-checkpoint-${STEP}"
-            if [ -d "$EXPORT_DIR" ]; then
+            if export_complete "$EXPORT_DIR"; then
                 echo "Already exported: ${EXPORT_DIR}"
                 continue
             fi
-            echo "=== Exporting: ${CKPT} → ${EXPORT_DIR} ==="
-            CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
-                --model_path "${CKPT}" \
-                --export_path "${EXPORT_DIR}" \
-                --trust_remote_code
+            if compgen -G "${CKPT}/pytorch_model_fsdp_*" >/dev/null; then
+                echo "WARNING: cannot re-export FSDP shards in ${CKPT}; checking the required export below." >&2
+                continue
+            fi
+            export_draft "$CKPT" "$EXPORT_DIR" || exit 1
             EXPORTED=$((EXPORTED + 1))
         done
-        # Also export final model if saved directly to output_dir
-        if [ -f "${OUTPUT_DIR}/modelopt_state.pth" ] && [ ! -d "${OUTPUT_DIR}/exported-checkpoint-final" ]; then
-            echo "=== Exporting: ${OUTPUT_DIR} → ${OUTPUT_DIR}/exported-checkpoint-final ==="
-            CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
-                --model_path "${OUTPUT_DIR}" \
-                --export_path "${OUTPUT_DIR}/exported-checkpoint-final" \
-                --trust_remote_code
-            EXPORTED=$((EXPORTED + 1))
+        LATEST_CKPT=$(latest_checkpoint "$OUTPUT_DIR" checkpoint-)
+        LATEST_SAVE="${LATEST_CKPT}/trainer_state.json"
+        if [ ! -f "$LATEST_SAVE" ]; then
+            LATEST_SAVE="$LATEST_CKPT"
+        fi
+
+        # Equal timestamps cannot establish ordering; only a newer checkpoint makes the root stale.
+        FINAL_IS_CURRENT=0
+        if [ -f "${OUTPUT_DIR}/modelopt_state.pth" ] && {
+            [ -z "$LATEST_CKPT" ] ||
+            ! [ "$LATEST_SAVE" -nt "${OUTPUT_DIR}/modelopt_state.pth" ]
+        }; then
+            FINAL_IS_CURRENT=1
+        fi
+
+        # Skipped sharded exports are safe only if the current serving artifact is available.
+        if [ "$FINAL_IS_CURRENT" != 1 ] && [ -n "$LATEST_CKPT" ] &&
+            ! export_complete "${OUTPUT_DIR}/exported-${LATEST_CKPT##*/}"; then
+            echo "ERROR: newest checkpoint has no complete export: ${LATEST_CKPT}" >&2
+            exit 1
+        fi
+
+        FINAL_EXPORT="${OUTPUT_DIR}/exported-checkpoint-final"
+        if [ "$FINAL_IS_CURRENT" = 1 ]; then
+            if ! export_complete "$FINAL_EXPORT" ||
+                [ "${OUTPUT_DIR}/modelopt_state.pth" -nt "${FINAL_EXPORT}/config.json" ]; then
+                export_draft "$OUTPUT_DIR" "$FINAL_EXPORT" || exit 1
+                EXPORTED=$((EXPORTED + 1))
+            fi
+        elif [ -e "$FINAL_EXPORT" ]; then
+            # Retire an obsolete final only once its replacement is available.
+            if [ -z "$LATEST_CKPT" ] ||
+                ! export_complete "${OUTPUT_DIR}/exported-${LATEST_CKPT##*/}"; then
+                echo "ERROR: obsolete final export has no complete newest-step replacement." >&2
+                exit 1
+            fi
+            echo "Removing obsolete final export: ${FINAL_EXPORT}"
+            rm -rf "$FINAL_EXPORT" || exit 1
         fi
         if [ "$EXPORTED" -eq 0 ]; then
             echo "No new checkpoints to export in ${OUTPUT_DIR}"
