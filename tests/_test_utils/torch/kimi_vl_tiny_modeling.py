@@ -17,13 +17,27 @@
 
 It has what the Kimi-VL adapter patches, as the checkpoint's own code has it: a VLM class that builds
 its language model, at construction, from the module-level name ``DeepseekV3ForCausalLM``, beside a
-vision tower and a projector of its own, and whose ``tie_weights`` takes no arguments. The
-checkpoint's own language model is a DeepSeek-V3 whose MoE holds per-expert Linears; here the name is
-transformers' DeepSeek-V3 itself, since only the native class the adapter swaps in is built.
+vision tower and a projector of its own, and whose ``tie_weights`` takes no arguments. The name is
+the checkpoint's own DeepSeek-V3, whose MoE holds its routed experts as per-expert Linears that expert
+parallelism cannot shard: only a swap that misses builds it, and a test then meets its layout.
 """
 
 from torch import nn
-from transformers import DeepseekV3Config, DeepseekV3ForCausalLM, PretrainedConfig, PreTrainedModel
+from transformers import DeepseekV3Config, PretrainedConfig, PreTrainedModel
+from transformers import DeepseekV3ForCausalLM as _NativeDeepseekV3ForCausalLM
+
+
+class DeepseekV3ForCausalLM(_NativeDeepseekV3ForCausalLM):
+    """The checkpoint's own: routed experts as per-expert Linears, which expert parallelism cannot shard."""
+
+    def __init__(self, config):
+        super().__init__(config)
+        for layer in self.model.layers:
+            if hasattr(layer.mlp, "experts"):
+                layer.mlp.experts = nn.ModuleList(
+                    nn.Linear(config.hidden_size, config.moe_intermediate_size, bias=False)
+                    for _ in range(config.n_routed_experts)
+                )
 
 
 class KimiVLConfig(PretrainedConfig):
