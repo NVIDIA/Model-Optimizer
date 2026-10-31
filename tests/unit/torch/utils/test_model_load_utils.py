@@ -603,16 +603,20 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
 
 @needs_qwen3_moe_ep_plan
 @pytest.mark.parametrize("ep_degree", [None, "1"], ids=["auto", "set-to-1"])
-@pytest.mark.parametrize("refused_by", ["its-plan", "its-format", "its-spec", "its-transformers"])
+@pytest.mark.parametrize(
+    "refused_by",
+    ["its-plan", "its-format", "its-spec", "its-transformers", "its-specs-transformers"],
+)
 def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     run_as, serve, monkeypatch, tmp_path, refused_by, ep_degree
 ):
-    """Left to the decision, an MoE the expert-parallel load would refuse -- by a plan that shards no
-    expert weights through grouped_gemm, a checkpoint format it does not load, a model spec ruling
-    it out (Llama-4's, GPT-OSS's) or a transformers below its floor -- is planned without expert
-    parallelism rather than committed to a load that refuses it, for some reasons only after the
-    download. Nor is it refused for being left whole, whether the decision or the caller made its
-    EP degree 1: it cannot be expert-parallel here."""
+    """Left to the decision, an MoE the expert-parallel load would refuse -- by a plan that
+    shards no expert weights through grouped_gemm, a checkpoint format it does not load, a model
+    spec ruling it out (Llama-4's, GPT-OSS's), or a transformers below its floor or below the
+    later one the spec states (MiniMax-M3-VL's) -- is planned without expert parallelism rather
+    than committed to a load that refuses it, for some reasons only after the download. Nor is it
+    refused for being left whole, whether the decision or the caller made its EP degree 1: it
+    cannot be expert-parallel here."""
     if ep_degree is not None:
         monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
     run_as(2)
@@ -624,6 +628,11 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     elif refused_by == "its-spec":
         spec = ModelSpec(model_type="qwen3_moe", ep_spec=EPSpec(unsupported="Not yet."))
         monkeypatch.setattr(model_load_utils, "get_spec", lambda model_type: spec)
+    elif refused_by == "its-specs-transformers":
+        # Above the load's own 5.7 by version, as 5.10 is not, though not as strings compare.
+        spec = ModelSpec(model_type="qwen3_moe", ep_spec=EPSpec(requires_transformers="5.13"))
+        monkeypatch.setattr(model_load_utils, "get_spec", lambda model_type: spec)
+        monkeypatch.setattr(transformers, "__version__", "5.10.0")
     else:
         monkeypatch.setattr(transformers, "__version__", "5.6.2")
     serve(config)
