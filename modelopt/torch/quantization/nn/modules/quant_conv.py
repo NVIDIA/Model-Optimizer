@@ -93,12 +93,16 @@ class _QuantConv3d(QuantLinearConvBase):
     default_quant_desc_weight = tensor_quant.QUANT_DESC_8BIT_CONV3D_WEIGHT_PER_CHANNEL
 
     def _should_use_implicit_gemm(self):
-        """Check if both quantizers are NVFP4 and the implicit GEMM kernel is available."""
+        """Check if both quantizers are NVFP4, at least one quantizes, and the kernel applies."""
         return (
             hasattr(self, "input_quantizer")
             and hasattr(self, "weight_quantizer")
             and _is_nvfp4_quantizer(self.input_quantizer)
             and _is_nvfp4_quantizer(self.weight_quantizer)
+            and (
+                self.weight_quantizer.is_enabled
+                or (self.input_quantizer.is_enabled and self.input_quantizer._if_quant)
+            )
             and self.groups == 1
         )
 
