@@ -801,7 +801,9 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     later one the spec states (MiniMax-M3-VL's) -- is planned without expert parallelism rather
     than committed to a load that refuses it, for some reasons only after the download. Nor is it
     refused for being left whole, whether the decision or the caller made its EP degree 1: it
-    cannot be expert-parallel here."""
+    cannot be expert-parallel here. Below the floor its spec states, though, the decision's own
+    refusal names the upgrade, as one would shard it, and an EP degree the caller set to 1 to
+    raise."""
     if ep_degree is not None:
         monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
     run_as(2)
@@ -823,6 +825,11 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     serve(config)
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
 
+    if refused_by == "its-transformers":
+        refusal = _NEEDS_LATER if ep_degree is None else _NEEDS_LATER_AND_A_DEGREE
+        with pytest.raises(RuntimeError, match=refusal):
+            resolve_distribution_plan(str(tmp_path))
+        return
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
 
 
