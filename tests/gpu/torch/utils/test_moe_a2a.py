@@ -45,7 +45,6 @@ TOKENS, HIDDEN, EXPERTS, TOP_K = 4096, 1024, 16, 8
 
 
 def _grouped_mm_bit_for_bit_job(rank, size):
-    from transformers import Qwen3MoeConfig
     from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
 
     moe.register_torch_a2a()
