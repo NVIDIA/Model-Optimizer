@@ -400,7 +400,9 @@ def test_compressed_experts_decompressed_at_load_are_placed(tmp_path, monkeypatc
     passes them; only a layer the model does not build (an MTP layer) keeps its own, which that load
     refuses to carry."""
     pytest.importorskip(
-        "compressed_tensors", reason="needs compressed-tensors (CI's unit session installs it)"
+        "compressed_tensors",
+        minversion="0.16",
+        reason="needs compressed-tensors (CI's unit session installs it)",
     )
     import transformers.core_model_loading as cml
     import transformers.modeling_utils as mu
