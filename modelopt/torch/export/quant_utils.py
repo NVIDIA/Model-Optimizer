@@ -922,6 +922,11 @@ def to_quantized_weight(
             _validate_int4_block_size(weight.metadata["shape"][-1], block_size)
         return weight.data
 
+    if weight.dim() == 3:
+        # for MOE stacked weights
+        # Clear GPU cache to avoid pontential GPU OOM issues for large models.
+        clear_cuda_cache()
+
     if quantization == QUANTIZATION_FP8:
         # Fix RuntimeError: Promotion for Float8 Types is not supported, attempted to promote Float8_e4m3fn and Float
         # in speculative decoding fp8 model export
@@ -930,9 +935,6 @@ def to_quantized_weight(
             return weight
 
         if weight.dim() == 3:
-            # for MOE stacked weights
-            # Clear GPU cache to avoid pontential GPU OOM issues for large models.
-            clear_cuda_cache()
             return (weight / weights_scaling_factor.unsqueeze(-1)).to(torch.float8_e4m3fn)
         # A 0-d scale would not promote a bf16 weight, so the division would round in bf16 instead of
         # float32 like fake quantization. A 1-d scale promotes in-kernel, without a float32 copy.
