@@ -1812,6 +1812,10 @@ def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_st
         )
 
 
+# The transformers release the expert-parallel load needs, for every model: 5.6 builds a model only
+# with the experts implementations it ships, never torch_a2a. A model spec may need a later one.
+_EP_MIN_TRANSFORMERS = "5.7"
+
 # The checkpoint formats load_and_prepare_ep dequantizes as it loads, beside unquantized ones (None).
 # Not MXFP4: transformers dequantizes it into GPT-OSS's transposed expert layout, whatever the model's.
 _EP_SOURCE_FORMATS: frozenset[str | None] = frozenset({None})
@@ -1879,7 +1883,8 @@ def _ep_load_refusal(hf_config, ep_plan: dict[str, str]) -> str | None:
     ep = spec.ep_spec if spec is not None else None
     if ep is not None and ep.unsupported:
         return ep.unsupported
-    floor = max("5.7", (ep.requires_transformers if ep is not None else None) or "5.7", key=parse)
+    stated = ep.requires_transformers if ep is not None else None
+    floor = max(_EP_MIN_TRANSFORMERS, stated or _EP_MIN_TRANSFORMERS, key=parse)
     try:
         moe.require_transformers(floor, f"{hf_config.model_type}'s expert-parallel load")
     except RuntimeError as e:
@@ -1994,7 +1999,8 @@ def load_and_prepare_ep(
     with _refused_together("the expert-parallel load's checks", alone=False):
         # 5.7 is the first release that builds a model with the torch_a2a experts.
         moe.require_transformers(
-            "5.7", "ModelOpt DP=EP expert-parallel PTQ (transformers MoE EP framework)"
+            _EP_MIN_TRANSFORMERS,
+            "ModelOpt DP=EP expert-parallel PTQ (transformers MoE EP framework)",
         )
         if hf_config is None:
             config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code, **hub_options}
