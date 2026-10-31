@@ -23,6 +23,7 @@ undone after each test.
 
 import copy
 import json
+import shutil
 import sys
 import types
 from concurrent.futures import Future
@@ -30,6 +31,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from _test_utils.torch import kimi_k3_tiny_modeling
 from _test_utils.torch.kimi_k3_remote import remote_module
 from torch import nn
 
@@ -768,6 +770,62 @@ def test_only_an_expert_parallel_plan_patches_kimi_k3s_code(
     if outcome == "fsdp2":
         assert vars(config.text_config) == {"num_experts": 8}
     assert len(installs) == packed
+
+
+@pytest.mark.parametrize(
+    ("dense", "fsdp2"), [("auto", False), ("fsdp", True)], ids=["whole", "fsdp2"]
+)
+def test_an_ep_degree_of_1_builds_kimi_k3s_own_code_to_decide(monkeypatch, tmp_path, dense, fsdp2):
+    """With expert parallelism ruled out, deciding the plan still builds Kimi-K3's own code on the
+    meta device, its ``tie_weights`` without the keyword arguments transformers' ``post_init``
+    passes: the build step runs all the same, and no ``prepare``. The decision reaches its outcome:
+    the 8 experts left whole on 4 ranks are refused, or the model is planned FSDP2-sharded."""
+    _restore(monkeypatch, hf_generic, "OutputRecorder")
+    monkeypatch.setattr(dmu, "get_cached_module_file", dmu.get_cached_module_file)
+    monkeypatch.setattr(
+        get_spec("kimi_k3").ep_spec, "prepare", lambda *a, **k: pytest.fail("ran prepare")
+    )
+    monkeypatch.setattr(dist, "size", lambda group=None: 4)
+    shutil.copy(kimi_k3_tiny_modeling.__file__, tmp_path / "modeling_kimi_k3.py")
+    remote = "modeling_kimi_k3.KimiK3ForConditionalGeneration"
+    auto_map = {"AutoConfig": "modeling_kimi_k3.KimiK3Config", "AutoModelForCausalLM": remote}
+    text = {
+        "model_type": "kimi_linear",
+        "hidden_size": 16,
+        "intermediate_size": 16,
+        "routed_expert_hidden_size": 8,
+        "moe_intermediate_size": 8,
+        "num_experts": 8,
+        "num_experts_per_token": 2,
+        "num_hidden_layers": 2,
+        "first_k_dense_replace": 1,
+        "num_shared_experts": 1,
+    }
+    stored = {"model_type": "kimi_k3", "auto_map": auto_map, "text_config": text}
+    (tmp_path / "config.json").write_text(json.dumps(stored))
+    below_floor = Version(transformers.__version__) < Version(moe._ep_floor("kimi_k3"))
+
+    def decide():
+        return model_load_utils.resolve_distribution_plan(
+            str(tmp_path), ep_size=1, dense=dense, trust_remote_code=True
+        )
+
+    loaded = set(sys.modules)
+    try:
+        if fsdp2:
+            plan, _ = decide()
+            assert (plan.ep_size, plan.dense) == (1, "fsdp")
+        else:
+            with pytest.raises(
+                RuntimeError if below_floor else ValueError,
+                match="can be expert-parallel, but the plan resolved",
+            ):
+                decide()
+    finally:
+        # The checkpoint's code stays imported otherwise, for later tests to find as Kimi-K3's.
+        for name in set(sys.modules) - loaded:
+            if name.startswith("transformers_modules."):
+                del sys.modules[name]
 
 
 @pytest.mark.usefixtures("private_conversion_registry", "restore_loader_hooks", "remote_checkpoint")
