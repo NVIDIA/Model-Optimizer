@@ -42,7 +42,11 @@ from torch.utils.data import (
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as mto_dist
-from modelopt.torch.quantization.model_quant import _refuse_unsupported_distributed_calibration
+from modelopt.torch.quantization.mode import CalibrateModeRegistry
+from modelopt.torch.quantization.model_quant import (
+    _RANK_LOCAL_CALIBRATION,
+    _refuse_unsupported_distributed_calibration,
+)
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
     ParallelState,
@@ -580,6 +584,15 @@ def test_forward_loop_refuses_a_batch_that_is_not_a_mapping():
 
 
 # ------------------------------------------------------------------------ rank-local calibration
+
+
+def test_the_refused_calibrations_name_registered_modes():
+    """The refusal matches calibrate modes by name: one renamed or misspelled would stop being
+    refused without any other test failing."""
+    unregistered = [
+        name for name in _RANK_LOCAL_CALIBRATION if f"{name}_calibrate" not in CalibrateModeRegistry
+    ]
+    assert not unregistered, unregistered
 
 
 @pytest.mark.parametrize(
