@@ -1256,6 +1256,7 @@ def submit_job_impl(
             proc = subprocess.Popen(  # nosec B603 - fixed launcher argv list; no shell.
                 argv,
                 env=child_env,
+                stdin=subprocess.DEVNULL,  # the server's stdin is the MCP transport
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -1297,6 +1298,7 @@ def submit_job_impl(
         proc = subprocess.run(  # nosec B603 - fixed launcher argv list; no shell.
             argv,
             env=child_env,
+            stdin=subprocess.DEVNULL,  # the server's stdin is the MCP transport
             capture_output=True,
             text=True,
             timeout=300,
@@ -1506,6 +1508,7 @@ def _submit_job_dry_run(
         proc = subprocess.run(  # nosec B603 - fixed dry-run launcher argv list; no shell.
             argv,
             env=child_env,
+            stdin=subprocess.DEVNULL,  # the server's stdin is the MCP transport
             capture_output=True,
             text=True,
             timeout=60,
