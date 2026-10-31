@@ -15,6 +15,7 @@
 
 """Execute named README snippets through the shared documentation runner."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -34,32 +35,11 @@ SCENARIOS = [
     ),
     Scenario("llm-qat-recipes", ["llm-qat-recipes"], timeout_seconds=30),
     Scenario(
-        "llm-qat-quickstart",
-        ["llm-qat-quickstart"],
-        profile="gpu",
-        timeout_seconds=900,
-        handler="_test_utils.doc_tests.fixtures.llm_qat_readme:llm_qat_quickstart",
-    ),
-    Scenario(
-        "llm-qad-quickstart",
-        ["llm-qad-quickstart"],
-        profile="gpu",
-        timeout_seconds=900,
-        handler="_test_utils.doc_tests.fixtures.llm_qat_readme:llm_qad_quickstart",
-    ),
-    Scenario(
         "llm-qat-simple",
         ["llm-qat-simple"],
         profile="gpu",
         timeout_seconds=900,
         handler="_test_utils.doc_tests.fixtures.llm_qat_readme:llm_qat_simple",
-    ),
-    Scenario(
-        "llm-qlora-quickstart",
-        ["llm-qlora-quickstart"],
-        profile="gpu",
-        timeout_seconds=900,
-        handler="_test_utils.doc_tests.fixtures.llm_qat_readme:llm_qlora_quickstart",
     ),
     Scenario(
         "llm-qlora-serve",
@@ -113,12 +93,6 @@ SCENARIOS = [
         handler="_test_utils.doc_tests.fixtures.llm_qat_readme:llm_qat_cli_override",
     ),
     Scenario(
-        "llm-qat-dataset",
-        ["llm-qat-dataset"],
-        timeout_seconds=900,
-        handler="_test_utils.doc_tests.fixtures.llm_qat_readme:llm_qat_dataset",
-    ),
-    Scenario(
         "llm-qat-evaluation",
         ["llm-qat-evaluation"],
         profile="gpu",
@@ -129,9 +103,18 @@ SCENARIOS = [
     ),
 ]
 
-EXCLUDED = {}
+EXCLUDED = {
+    "llm-qat-dataset": "Executed by test_llm_qat.py::test_dataset_utils_pretokenize.",
+    "llm-qat-quickstart": "Executed by test_llm_qat.py::test_qwen3_qat_nvfp4 through run_example_command.",
+    "llm-qad-quickstart": "Executed by test_llm_qat.py::test_qwen3_qad_nvfp4 through run_example_command.",
+    "llm-qlora-quickstart": "Executed by test_llm_qat.py::test_qwen3_qlora_nvfp4 through run_example_command.",
+}
 
 
 @pytest.mark.parametrize("scenario", scenario_parameters(README, SCENARIOS, excluded=EXCLUDED))
 def test_readme(scenario, tmp_path, monkeypatch):
+    if scenario.id in {"llm-qat-python", "llm-qat-trainer", "llm-qad-trainer"}:
+        # Keep API smokes single-GPU: Trainer's threaded DataParallel races attention patching.
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible.split(",", 1)[0])
     execute_scenario(scenario, REPO, tmp_path, monkeypatch)

@@ -2,7 +2,8 @@
 
 The QAT and Megatron Bridge READMEs use the same parser, subprocess runner and
 pytest adapter. Example-specific code only prepares inputs and verifies results.
-The visible commands execute without command rewriting or mocked model operations.
+Standalone snippets execute as written; existing end-to-end tests substitute explicit
+CI inputs in the extracted command arguments. Neither path mocks model operations.
 These are trusted repository tests with the same privileges as pytest.
 
 ## Why a snippet runner
@@ -16,8 +17,8 @@ setup, execution and verification, with process-group cleanup.
 supports streaming output and Hub retries. It does not extract README fences or
 preserve one shell/Python namespace across selected snippets, and it imports
 Torch-specific distributed utilities. Keeping this small adapter separate lets
-CPU-only documentation checks run without importing the ML stack. Existing example
-helpers remain appropriate for tests that supply their own command arguments.
+CPU-only documentation checks run without importing the ML stack. The migrated CLI workflows use that existing runner with arguments extracted
+from README fences.
 
 Stdlib doctest checks Python prompt/output examples. These READMEs also contain
 shell pipelines, distributed training, background services and artifact assertions,
@@ -26,7 +27,7 @@ which need the scenario/handler contract described below.
 ## Fixture scope
 
 The parser, runner and pytest adapter are generic. Helpers under `fixtures/`
-implement example-specific inputs and output checks: use `llm_qat` or `bridge`
+implement inputs and output checks for the remaining standalone/manual scenarios: use `llm_qat` or `bridge`
 in helper names, and prefix standalone QAT fixture modules with `llm_qat_`.
 Installation copies QAT requirements and checks its dependencies; serving expects
 the QAT README's QLoRA checkpoint layout and adapter name. These are not general
@@ -132,22 +133,38 @@ Test-only setup, assertions, metadata, and exclusion reasons belong in Python.
 
 | README | Default smoke scenarios | Opt-in integration scenarios | Exclusions |
 | --- | --- | --- | --- |
-| `llm_qat` | Recipes; QAT/QAD/QLoRA; simple Llama demo; three Python APIs; FSDP2 layer override; config copy; CLI learning-rate override; dataset cache | Installation; vLLM adapter serving; MMLU/WikiText evaluation | None |
-| `megatron_bridge` | PTQ plus export; mock-data distillation; all-iteration export; manual pruning; distillation/pruning CLI help | Login; checkpoint import; MLflow PTQ; real-data distillation/QAD; three NAS targets; VLM pruning; vLLM generation | Interactive Docker launch; LoRA PTQ integration; incomplete VLM/inline-export/single-iteration templates; illustrative output tree |
+| `llm_qat` | QAT/QAD/QLoRA in existing end-to-end tests; recipes; simple Llama demo; three Python APIs; FSDP2 layer override; config copy; CLI learning-rate override; dataset cache | Installation; vLLM adapter serving; MMLU/WikiText evaluation | Quickstart fences are externally covered by `test_llm_qat.py`, not duplicated as scenarios |
+| `megatron_bridge` | PTQ/export, mock-data distill/export, parameter-target/manual pruning in existing end-to-end tests; CLI preflight | Login; checkpoint import; MLflow PTQ; real-data distillation/QAD; active-parameter/memory NAS targets; VLM pruning; vLLM generation | Migrated fences are externally covered; Docker setup, LoRA integration, incomplete templates and illustrative output remain excluded |
 
-QAT fixtures copy real scripts/configs and generate two-layer Qwen3 or Llama
-models, with hidden/intermediate size 512 and 20 local text records. Training
-configs use two optimizer steps, 128-token sequences, and one or two ranks via
-`MODELOPT_DOC_TEST_GPUS=1|2`. QLoRA uses DDP; QAT/QAD use FSDP2. The simple demo
-keeps its visible defaults. Python fragments receive real model, Trainer and data
-objects. Dataset-cache and config-copy tests run without GPU execution.
+QAT/QAD/QLoRA quickstarts and dataset pre-tokenization run through `test_llm_qat.py` and its existing shared
+PTQ model, dataset cache, backends and export checks. Commands are read from their
+README fences, with explicit local model/output paths, test dataset inputs and
+two training steps. The remaining QAT-only fragments retain their small workspace
+and namespace setup: simple Llama, Python APIs, layer/learning-rate overrides,
+configuration copy. The three Python API scenarios expose only the first device
+in `CUDA_VISIBLE_DEVICES` (or device 0 when unset) to their worker. This prevents
+Trainer from using threaded DataParallel, which races shared attention patching;
+existing end-to-end tests retain distributed coverage. Dataset pre-tokenization
+uses the existing dataset CLI test.
+Manual installation, serving and evaluation
+checks remain separate because the existing CLI tests do not exercise them.
 
-Megatron smoke tests use a local two-layer Qwen3, four calibration records,
-32-token sequences, two training steps and **two actual torchrun ranks**. Public
-shell variables override inputs and scale while preserving full-scale defaults.
-Export prerequisites are built by executing the README's actual training fence
-inside the same timeout/process group. Pruning verifies the loaded model's reduced
-intermediate dimension; multi-iteration export loads both saved HF checkpoints.
+Bridge PTQ/export uses the `readme` case in `test_quantize_export.py`; mock-data
+distillation and all-iteration export use `test_distill_llm_hf_export`; pruning
+uses the existing `qwen3` case plus a `readme-manual` case in `test_prune_minitron.py`.
+These tests use the existing `run_example_command` runner and its fixture inputs,
+checkpoint assertions and GPU-count handling. There is no separate Bridge smoke
+workspace or second distillation prerequisite. Other architecture and recipe
+cases retain their existing commands. Full-scale manual integrations retain their
+resource metadata and artifact checks; CLI help is checked by the preflight.
+
+`_test_utils.examples.readme.readme_command` selects one Python invocation from an
+existing named fence and returns an argument list for the existing command runner.
+It substitutes explicit test overrides and literal shell defaults, preserving
+other published flags. It neither evaluates shell expressions nor runs commands;
+unresolved variables fail with the README location. Overrides are single-value
+options; general shell workflows and Python fragments still use the snippet runner.
+No new README markers are needed for these migrations.
 
 Checks cover quantization state, training progress/finite losses, changed QAT/QAD
 weights, packed NVFP4 exports, adapter artifacts, dataset contents and loadable
@@ -175,10 +192,10 @@ python -m pytest tests/examples/megatron_bridge/test_megatron_bridge_readme.py -
 
 # Bounded defaults; manual integrations are skipped.
 CUDA_VISIBLE_DEVICES=0 python -m pytest tests/examples/llm_qat/test_llm_qat_readme.py --no-cov -rs
-CUDA_VISIBLE_DEVICES=0,1 MODELOPT_DOC_TEST_GPUS=2 \
-  python -m pytest tests/examples/llm_qat/test_llm_qat_readme.py --no-cov -k quickstart -rs
-CUDA_VISIBLE_DEVICES=0,1 \
-  python -m pytest tests/examples/megatron_bridge/test_megatron_bridge_readme.py --no-cov -rs
+python -m pytest tests/examples/llm_qat/test_llm_qat.py --no-cov -k 'qat_nvfp4 or qad_nvfp4 or qlora_nvfp4' -rs
+python -m pytest tests/examples/megatron_bridge/test_quantize_export.py --no-cov -k readme -rs
+python -m pytest tests/examples/megatron_bridge/test_distill.py --no-cov -k test_distill_llm_hf_export -rs
+python -m pytest tests/examples/megatron_bridge/test_prune_minitron.py --no-cov -k 'qwen3 or readme-manual' -rs
 
 # Select ONE manual integration with its prerequisites already supplied.
 # MODELOPT_DOC_QLORA_CHECKPOINT: exported adapter directory containing base_model/.
@@ -235,9 +252,10 @@ Both README test modules are collected by the existing example jobs. The
 workflow runs nightly, on demand, and on pushes to copied PR branches
 `pull-request/<number>` after unit tests pass. README-only changes explicitly
 activate their respective Torch or Megatron lane despite the general Markdown
-exclusion. Changes to shared test utilities activate every lane. Two-GPU Bridge
-smokes skip on the single-GPU PR runner and run on the two-GPU nightly runner;
-CLI-help scenarios still execute on the single-GPU runner.
+exclusion. Changes to shared test utilities activate every lane. Migrated Bridge
+commands use the existing end-to-end tests' GPU-count fixture, including single-GPU
+PR runners and two-GPU nightly runners. Optional full-scale scenarios retain their
+own GPU requirements.
 
 ## File responsibilities
 
@@ -246,9 +264,10 @@ CLI-help scenarios still execute on the single-GPU runner.
 | `parser.py` | Extract named fences and check references, fence coverage, and executable languages. |
 | `runner.py` | Execute resolved plans with worker-side handlers, deadlines, shared state, and cleanup. |
 | `pytest_utils.py` | Common collection, manual markers and resource checks, independent of the example. |
+| `tests/_test_utils/examples/readme.py` | Extract README command arguments for existing end-to-end tests; no separate command runner. |
 | `fixtures/llm_qat_readme.py`, `fixtures/megatron_bridge_readme.py` | Worker-side scenario setup and verification moved out of Markdown. |
-| `fixtures/llm_qat.py` | Reduced QAT/QAD/QLoRA/Llama inputs, real prerequisite quantization, Python API inputs and artifact assertions. |
-| `fixtures/megatron_bridge.py` | Local Bridge inputs, real distillation prerequisites and quantization/pruning/export assertions. |
+| `fixtures/llm_qat.py` | Inputs and assertions for the remaining QAT Python/API and standalone snippets. |
+| `fixtures/megatron_bridge.py` | Working-directory and export checks for full-scale manual Bridge integrations. |
 | `fixtures/llm_qat_installation.py` | QAT requirements in a disposable venv and QAT dependency import verification. |
 | `fixtures/llm_qat_serving.py` | QAT QLoRA checkpoint layout, adapter-server readiness and a real completion request. |
 | `tests/unit/doc_tests/test_markdown.py` | Focused fence parsing, failure-location, and timeout-cleanup regressions. |

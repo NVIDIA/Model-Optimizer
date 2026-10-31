@@ -21,29 +21,17 @@ from pathlib import Path
 
 from _test_utils.doc_tests.fixtures.megatron_bridge import (
     prepare_bridge_full_scale,
-    prepare_bridge_smoke,
-    run_bridge_distill_prerequisite,
-    verify_bridge_distilled,
     verify_bridge_hf_export,
-    verify_bridge_pruned,
-    verify_bridge_quantized,
 )
 
 __all__ = [
-    "bridge_distill",
-    "bridge_distill_export",
-    "bridge_distill_help",
     "bridge_generation",
     "bridge_import",
     "bridge_login",
     "bridge_mlflow",
     "bridge_prune_active",
-    "bridge_prune_manual",
     "bridge_prune_memory",
-    "bridge_prune_minitron_help",
-    "bridge_prune_params",
     "bridge_prune_vlm",
-    "bridge_ptq_export",
     "bridge_qad",
     "bridge_real_data",
 ]
@@ -67,15 +55,6 @@ def bridge_import(ctx):
     assert (output / "Qwen3-8B-megatron").is_dir()
 
 
-def bridge_ptq_export(ctx):
-    """Run and verify the bridge-ptq-export scenario."""
-
-    prepare_bridge_smoke(ctx)
-    ctx.run()
-
-    verify_bridge_quantized(ctx)
-
-
 def bridge_mlflow(ctx):
     """Run and verify the bridge-mlflow scenario."""
 
@@ -95,31 +74,6 @@ def bridge_real_data(ctx):
     assert list(checkpoints.glob("iter_*"))
 
 
-def bridge_distill_help(ctx):
-    """Run and verify the bridge-distill-help scenario."""
-    ctx.cwd = ctx.repo / "examples/megatron_bridge"
-    ctx.run()
-
-
-def bridge_distill(ctx):
-    """Run and verify the bridge-distill scenario."""
-
-    prepare_bridge_smoke(ctx)
-    ctx.run()
-    checkpoint = Path(ctx.env["OUTPUT_ROOT"]) / "test_distill/checkpoints"
-    assert (checkpoint / "iter_0000002").is_dir()
-    assert (checkpoint / "latest_checkpointed_iteration.txt").read_text().strip() == "2"
-
-
-def bridge_distill_export(ctx):
-    """Run and verify the bridge-distill-export scenario."""
-
-    prepare_bridge_smoke(ctx)
-    run_bridge_distill_prerequisite(ctx)
-    ctx.run()
-    verify_bridge_distilled(ctx)
-
-
 def bridge_qad(ctx):
     """Run and verify the bridge-qad scenario."""
     # Import the optional Megatron dependency only in this worker.
@@ -132,15 +86,6 @@ def bridge_qad(ctx):
     assert list(checkpoints.glob("iter_*"))
 
     assert_has_modelopt_state(checkpoints)
-
-
-def bridge_prune_params(ctx):
-    """Run and verify the bridge-prune-params scenario."""
-
-    prepare_bridge_full_scale(ctx)
-    output = Path(ctx.env["OUTPUT_ROOT"])
-    ctx.run()
-    verify_bridge_hf_export(output / "Qwen3-8B-Pruned-6B")
 
 
 def bridge_prune_active(ctx):
@@ -159,21 +104,6 @@ def bridge_prune_memory(ctx):
     output = Path(ctx.env["OUTPUT_ROOT"])
     ctx.run()
     verify_bridge_hf_export(output / "Qwen3-8B-Pruned-12GB")
-
-
-def bridge_prune_manual(ctx):
-    """Run and verify the bridge-prune-manual scenario."""
-
-    prepare_bridge_smoke(ctx)
-    ctx.run()
-
-    verify_bridge_pruned(ctx)
-
-
-def bridge_prune_minitron_help(ctx):
-    """Run and verify the bridge-prune-minitron-help scenario."""
-    ctx.cwd = ctx.repo / "examples/megatron_bridge"
-    ctx.run()
 
 
 def bridge_prune_vlm(ctx):

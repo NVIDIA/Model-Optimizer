@@ -37,6 +37,7 @@ class PythonCommand:
     line: int
     script: Path
     flags: tuple[str, ...]
+    argv: tuple[str, ...] = ()
 
 
 def python_commands(path, *, cwd, cwd_overrides=None):
@@ -84,7 +85,11 @@ def python_commands(path, *, cwd, cwd_overrides=None):
                     flags.append(token.split("=", 1)[0])
             commands.append(
                 PythonCommand(
-                    snippet.id, start, (directory / tokens[index]).resolve(), tuple(flags)
+                    snippet.id,
+                    start,
+                    (directory / tokens[index]).resolve(),
+                    tuple(flags),
+                    tuple(tokens),
                 )
             )
     return commands

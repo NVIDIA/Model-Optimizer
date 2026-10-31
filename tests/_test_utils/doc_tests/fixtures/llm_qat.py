@@ -15,7 +15,6 @@
 
 """Reduced-scale inputs for the real QAT README commands."""
 
-import json
 import math
 import os
 import shutil
@@ -27,14 +26,12 @@ import torch
 import yaml
 from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_qwen3_dir
 from datasets import Dataset
-from safetensors import safe_open
 
 __all__ = [
     "prepare_llm_qat_python_api",
     "prepare_llm_qat_quantized_input",
     "prepare_llm_qat_workspace",
     "verify_llm_qat_python_api",
-    "verify_llm_qat_workspace",
 ]
 
 
@@ -103,42 +100,6 @@ def prepare_llm_qat_workspace(repo: Path, tmp: Path, *, llama: bool = False) -> 
         flush=True,
     )
     return root
-
-
-def verify_llm_qat_workspace(root: Path, variant="qat"):
-    """Require quantized state, finite training metrics, changed weights and NVFP4 export."""
-    example = root / "examples/llm_qat"
-    ptq = example / "qwen3-8b-quantized"
-    trained = example / f"qwen3-8b-{variant}-nvfp4"
-    exported = example / f"qwen3-8b-{variant}-deploy"
-    for checkpoint in (ptq, trained):
-        assert (checkpoint / "modelopt_state.pth").stat().st_size > 0
-        assert (checkpoint / "model.safetensors").stat().st_size > 0
-    state = json.loads((trained / "trainer_state.json").read_text())
-    assert state["global_step"] == 2
-    losses = [
-        entry[key]
-        for entry in state["log_history"]
-        for key in ("loss", "eval_loss", "train_loss")
-        if key in entry
-    ]
-    assert losses and all(math.isfinite(value) for value in losses), state
-    assert any("train_loss" in entry for entry in state["log_history"]), state
-    with (
-        safe_open(ptq / "model.safetensors", framework="pt", device="cpu") as before,
-        safe_open(trained / "model.safetensors", framework="pt", device="cpu") as after,
-    ):
-        before_keys, after_keys = set(before.keys()), set(after.keys())
-        keys = [key for key in before_keys & after_keys if key.endswith("weight")]
-        assert keys and any(
-            not torch.equal(before.get_tensor(key), after.get_tensor(key)) for key in keys
-        )
-    config = json.loads((exported / "config.json").read_text())
-    assert config["quantization_config"]["quant_algo"] == "NVFP4"
-    assert (exported / "model.safetensors").stat().st_size > 0
-    with safe_open(exported / "model.safetensors", framework="pt", device="cpu") as weights:
-        exported_keys = weights.keys()
-        assert any(weights.get_tensor(key).dtype == torch.uint8 for key in exported_keys)
 
 
 def prepare_llm_qat_quantized_input(ctx, *, llama=False):

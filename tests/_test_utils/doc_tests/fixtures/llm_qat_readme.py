@@ -22,19 +22,15 @@ import shutil
 from pathlib import Path
 
 __all__ = [
-    "llm_qad_quickstart",
     "llm_qad_trainer",
     "llm_qat_cli_override",
     "llm_qat_copy_config",
-    "llm_qat_dataset",
     "llm_qat_evaluation",
     "llm_qat_install",
     "llm_qat_llama_wrap",
     "llm_qat_python",
-    "llm_qat_quickstart",
     "llm_qat_simple",
     "llm_qat_trainer",
-    "llm_qlora_quickstart",
     "llm_qlora_serve",
 ]
 
@@ -52,36 +48,6 @@ def llm_qat_install(ctx):
     verify_llm_qat_installation(ctx)
 
 
-def llm_qat_quickstart(ctx):
-    """Run and verify the llm-qat-quickstart scenario."""
-    # Optional ML dependencies are imported only inside the scenario worker.
-    from _test_utils.doc_tests.fixtures.llm_qat import (
-        prepare_llm_qat_workspace,
-        verify_llm_qat_workspace,
-    )
-
-    workspace = prepare_llm_qat_workspace(ctx.repo, ctx.tmp)
-    ctx.cwd = workspace
-    ctx.env.update(HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
-    ctx.run()
-    verify_llm_qat_workspace(workspace)
-
-
-def llm_qad_quickstart(ctx):
-    """Run and verify the llm-qad-quickstart scenario."""
-    # Optional ML dependencies are imported only inside the scenario worker.
-    from _test_utils.doc_tests.fixtures.llm_qat import (
-        prepare_llm_qat_workspace,
-        verify_llm_qat_workspace,
-    )
-
-    workspace = prepare_llm_qat_workspace(ctx.repo, ctx.tmp)
-    ctx.cwd = workspace / "examples/llm_qat"
-    ctx.env.update(HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
-    ctx.run()
-    verify_llm_qat_workspace(workspace, variant="qad")
-
-
 def llm_qat_simple(ctx):
     """Run and verify the llm-qat-simple scenario."""
     # Optional ML dependencies are imported only inside the scenario worker.
@@ -93,26 +59,6 @@ def llm_qat_simple(ctx):
     ctx.run()
     assert (ctx.cwd / "qat_model/modelopt_state.pth").is_file()
     assert (ctx.cwd / "qat_model/model.safetensors").stat().st_size > 0
-
-
-def llm_qlora_quickstart(ctx):
-    """Run and verify the llm-qlora-quickstart scenario."""
-    # Optional ML dependencies are imported only inside the scenario worker.
-    from _test_utils.doc_tests.fixtures.llm_qat import prepare_llm_qat_workspace
-
-    workspace = prepare_llm_qat_workspace(ctx.repo, ctx.tmp)
-    ctx.cwd = workspace / "examples/llm_qat"
-    ctx.env.update(HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
-    ctx.run()
-    trained = ctx.cwd / "qwen3-8b-fp4-qlora"
-    exported = ctx.cwd / "qwen3-8b-fp4-qlora-hf"
-    state = json.loads((trained / "trainer_state.json").read_text())
-    assert state["global_step"] == 2
-    losses = [entry["train_loss"] for entry in state["log_history"] if "train_loss" in entry]
-    assert losses and all(math.isfinite(value) for value in losses)
-    assert (exported / "adapter_config.json").is_file()
-    assert (exported / "adapter_model.safetensors").stat().st_size > 0
-    assert (exported / "base_model/config.json").is_file()
 
 
 def llm_qlora_serve(ctx):
@@ -206,25 +152,6 @@ def llm_qat_cli_override(ctx):
     )
     base_rates = scheduler["base_lrs"]
     assert base_rates and all(math.isclose(rate, 5e-5) for rate in base_rates), base_rates
-
-
-def llm_qat_dataset(ctx):
-    """Run and verify the llm-qat-dataset scenario."""
-    # Dataset dependencies are optional for the CPU-only config-copy scenario.
-    # Optional ML dependencies are imported only inside the scenario worker.
-    from _test_utils.doc_tests.fixtures.llm_qat import prepare_llm_qat_workspace
-    from datasets import load_from_disk
-
-    workspace = prepare_llm_qat_workspace(ctx.repo, ctx.tmp)
-    ctx.cwd = workspace / "examples/llm_qat"
-    ctx.env.update(HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
-    ctx.run()
-
-    caches = list((ctx.cwd / ".dataset_cache/tokenized").glob("*/dataset_dict.json"))
-    assert len(caches) == 1
-    cached = load_from_disk(str(caches[0].parent))
-    assert len(cached["train"]) == 16 and len(cached["eval"]) == 4
-    assert {"input_ids", "attention_mask", "labels"} <= set(cached["train"].column_names)
 
 
 def llm_qat_evaluation(ctx):

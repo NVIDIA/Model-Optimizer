@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from _test_utils.examples.readme import readme_command
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model
 from _test_utils.torch.transformers_models import (
@@ -62,32 +63,31 @@ def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
     distill_output_dir = tmp_path / "distill_output"
     distilled_hf_path = tmp_path / "distilled_hf"
     all_exports = tmp_path / "all_exports"
-    distill_cmd_parts = extend_cmd_parts(
-        [
-            "torchrun",
-            f"--nproc_per_node={num_gpus}",
-            "distill.py",
-            "--use_mock_data",
-            "--document_boundaries",
-        ],
-        student_hf_path=teacher_hf_path,
-        teacher_hf_path=teacher_hf_path,
-        output_dir=distill_output_dir,
-        tp_size=num_gpus,
-        pp_size=1,
-        # Mock token ids cycle through the 128-token vocab, so the EOD id recurs every 128 tokens
-        # and each window trains as ~17 THD segments.
-        seq_length=2048,
-        mbs=1,
-        gbs=4,
-        train_iters=train_iters,
-        lr_warmup_iters=1,
-        eval_interval=1,  # save_interval defaults to it, so every iteration is checkpointed
-        eval_iters=1,
-        log_interval=1,
-        checkpoint_keep_last=-1,
-        hf_export_path=distilled_hf_path,
+    distill_cmd_parts = readme_command(
+        Path(__file__).resolve().parents[3] / "examples/megatron_bridge/README.md",
+        "bridge-distill",
+        "distill.py",
+        overrides={
+            "nproc_per_node": num_gpus,
+            "tp_size": num_gpus,
+            "pp_size": 1,
+            "teacher_hf_path": teacher_hf_path,
+            "student_hf_path": teacher_hf_path,
+            "output_dir": distill_output_dir,
+            # Preserve this test's THD/document-boundary coverage.
+            "seq_length": 2048,
+            "mbs": 1,
+            "gbs": 4,
+            "train_iters": train_iters,
+            "lr_warmup_iters": 1,
+            "eval_interval": 1,
+            "eval_iters": 1,
+            "log_interval": 1,
+            "checkpoint_keep_last": -1,
+            "hf_export_path": distilled_hf_path,
+        },
     )
+    distill_cmd_parts.append("--document_boundaries")
     run_example_command(distill_cmd_parts, example_path="megatron_bridge")
 
     checkpoint_root = distill_output_dir / "checkpoints"
@@ -97,12 +97,16 @@ def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
         assert (distilled_hf_path / fake_hub_checkpoint.marker).exists()
 
     # export_distilled_megatron_to_hf.py converts any saved iteration, not just the final one.
-    all_export_cmd_parts = extend_cmd_parts(
-        ["torchrun", "--nproc_per_node=1", "export_distilled_megatron_to_hf.py"],
-        student_hf_path=student_export_arg,
-        megatron_path=checkpoint_root,
-        hf_export_path=all_exports,
-        export_iterations="all",
+    all_export_cmd_parts = readme_command(
+        Path(__file__).resolve().parents[3] / "examples/megatron_bridge/README.md",
+        "bridge-distill-export",
+        "export_distilled_megatron_to_hf.py",
+        overrides={
+            "nproc_per_node": 1,
+            "student_hf_path": student_export_arg,
+            "megatron_path": checkpoint_root,
+            "hf_export_path": all_exports,
+        },
     )
     run_example_command(all_export_cmd_parts, example_path="megatron_bridge")
 
