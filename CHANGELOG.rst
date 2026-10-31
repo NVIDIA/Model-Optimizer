@@ -78,6 +78,7 @@ Changelog
 - Layerwise-calibration resume (``checkpoint_dir``) no longer runs code from a modified checkpoint directory; an unusable file now fails with an error instead.
 - The default PTQ recipes now leave multi-token-prediction (MTP) layers unquantized in Megatron vision-language models too (``language_model.mtp.*``), as they already did at the model root.
 - Fix GPT-OSS draft training with pre-normalization teacher hidden states by enabling the target model's final normalization.
+- ``awq_lite`` now weights every calibration token equally in its activation statistics and its alpha search, as the reference AWQ does, so the scales no longer depend on how the tokens are split into batches (a smaller last batch, MoE experts that see few tokens in some batches). AWQ scales calibrated with uneven batches can differ from earlier releases.
 - Fix vanilla DSpark exports to use the Qwen3 DSpark architecture, head names and configuration expected by vLLM. Re-export existing training checkpoints to use this format.
 - ``mtq.fold_weight`` now folds sequential weight quantizers (e.g. W4A8 INT4 + FP8 weights) into the weights; it used to leave them unfolded and enabled.
 - Fix ONNX quantization placing a per-tensor Q/DQ pair on a rank-0 (scalar) constant input, which TensorRT's ONNX parser rejects (``convertAxis`` asserts the quantization axis lies in ``[0, nbDims]`` but ``nbDims == 0``). Rank-0 constant operands are now kept unquantized in the int8, fp8, and autotune export paths; the existing single-element Mul/Div/Pad stripping stays gated under ``target_dla``.

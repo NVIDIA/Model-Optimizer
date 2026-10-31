@@ -1738,8 +1738,8 @@ def awq_lite(
         scale = scale.mean(0).to(torch.float32)
         return scale
 
-    def get_act_scale(x):
-        return x.abs().contiguous().view(-1, x.shape[-1]).mean(0).to(torch.float32)
+    def get_act_scale_sum(x):
+        return x.abs().reshape(-1, x.shape[-1]).sum(0, dtype=torch.float32)
 
     def get_scale(x_max, w_max, alpha, tensor_parallel_group=None):
         scales = x_max.pow(alpha)
@@ -1759,7 +1759,7 @@ def awq_lite(
         out = out[0] if isinstance(out, tuple) else out
         out = out.to_local() if hasattr(out, "to_local") else out
         out_actual = out_actual.to_local() if hasattr(out_actual, "to_local") else out_actual
-        loss = (out - out_actual).float().pow(2).mean()
+        loss = (out - out_actual).float().pow(2).sum()
         self.awq_lite.loss[alpha] += loss.to(self.awq_lite.loss[alpha].device)
 
     def update_best_params(self):
@@ -1796,9 +1796,9 @@ def awq_lite(
             # Get local tensor from Dtensor
             input = input.to_local() if hasattr(input, "to_local") else input
 
-            self.awq_lite.act_scale += get_act_scale(self.input_quantizer(input))
+            self.awq_lite.act_scale += get_act_scale_sum(self.input_quantizer(input))
             self.awq_lite.num_cache_steps += 1
-            self.awq_lite.num_tokens += input.numel() / input.shape[-1]
+            self.awq_lite.num_tokens += input.numel() // input.shape[-1]
             if self.awq_lite.is_input_quantized:
                 with set_quantizer_by_cfg_context(
                     self.input_quantizer, [{"quantizer_name": "*", "enable": True}]
@@ -1868,7 +1868,7 @@ def awq_lite(
         ):
             # Hack: MoEs forward all tokens through all experts if _if_calib is True
             module._if_calib = True
-            module.awq_lite.act_scale = module.awq_lite.act_scale / module.awq_lite.num_cache_steps
+            module.awq_lite.act_scale = module.awq_lite.act_scale / module.awq_lite.num_tokens
 
             has_nan_local = torch.any(torch.isnan(module.awq_lite.act_scale))
             if use_weight_scale:
