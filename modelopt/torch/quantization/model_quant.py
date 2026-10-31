@@ -72,8 +72,8 @@ __all__ = [
     "temporarily_fold_weights",
 ]
 
-# Calibration algorithms whose statistics stay on the rank that gathered them. Any other keeps its
-# own there too when its config turns distributed_sync off.
+# Calibration algorithms whose statistics stay on the rank that gathered them, listed by hand: a new
+# one must be added. Any other keeps its own there too when its config turns distributed_sync off.
 _RANK_LOCAL_CALIBRATION = (
     "awq_lite",
     "awq_full",
