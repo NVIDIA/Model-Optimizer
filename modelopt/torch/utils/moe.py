@@ -55,6 +55,11 @@ def require_transformers(min_version: str, feature: str) -> None:
         )
 
 
+# The nested configs a VLM's expert-parallel plan and expert count are read from. A spec attaching
+# its plan anywhere else would be read as having none, and the MoE planned as a dense model.
+_SUB_CONFIG_ATTRS = ("text_config", "llm_config")
+
+
 def _ep_config(hf_config):
     """Return the config that carries the EP plan / expert count.
 
