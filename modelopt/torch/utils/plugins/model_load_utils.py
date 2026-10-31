@@ -2041,13 +2041,15 @@ def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, expert_mo
     # rank numbers, which a launch showing each process one GPU does not bind.
     cuda = fsdp_mesh.device_type == "cuda"
     device = torch.device(fsdp_mesh.device_type, _own_gpu_index() if cuda else None)
-    n_dense = _fsdp2_shard_dense(model, fsdp_mesh, expert_modules)
-    # Every alias of a tied param: the checkpoint may store the one named_parameters() drops.
-    dense_names = {
-        n
-        for n, _ in model.named_parameters(remove_duplicate=False)
-        if n.endswith((".weight", ".bias")) and not is_expert(n)
-    }
+    # A rank failing to wrap (out of memory, say) fails every rank here, before DCP's collectives.
+    with _refused_together("the dense part's FSDP2 wrapping", alone=False):
+        n_dense = _fsdp2_shard_dense(model, fsdp_mesh, expert_modules)
+        # Every alias of a tied param: the checkpoint may store the one named_parameters() drops.
+        dense_names = {
+            n
+            for n, _ in model.named_parameters(remove_duplicate=False)
+            if n.endswith((".weight", ".bias")) and not is_expert(n)
+        }
     print_rank_0(
         f"[ep] dense-distributed load: FSDP2-sharded {n_dense} dense module(s); "
         f"meta+DCP-loading {len(dense_names)} dense param(s) (experts left EP-sharded)"

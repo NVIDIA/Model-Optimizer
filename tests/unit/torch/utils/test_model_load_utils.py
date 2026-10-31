@@ -3051,6 +3051,46 @@ def test_the_dense_load_materializes_on_the_gpu_the_rank_is_bound_to(fsdp_mesh, 
     assert loads == [torch.device("cuda", 0)]
 
 
+class _PastTheWrappingError(Exception):
+    """Raised in DCP's place: the rank went on past the wrapping."""
+
+
+def _one_rank_fails_the_wrapping_job(rank, size):
+    def wrap(*args):
+        if rank == 1:
+            raise MemoryError("out of memory sharding a dense layer")
+        return 0
+
+    def dcp_load(*args, **kwargs):
+        torch.distributed.barrier()  # DCP's collectives: a rank in them waits for every peer
+        raise _PastTheWrappingError
+
+    refused = None
+    with (
+        bounded_collectives(),
+        mock.patch.object(model_load_utils, "_fsdp2_shard_dense", wrap),
+        mock.patch.object(model_load_utils, "_meta_dcp_load", dcp_load),
+    ):
+        try:  # not pytest.raises: its failure would end the pooled worker instead of the job
+            _load_ep_dense_distributed(
+                nn.Linear(2, 2), SimpleNamespace(device_type="cpu"), "unused", lambda n: False, []
+            )
+        except Exception as error:
+            refused = f"{type(error).__name__}: {error}"
+    assert refused is not None and "out of memory sharding a dense layer" in refused, (
+        rank,
+        refused,
+    )
+    assert rank == 1 or "rank 1 failed" in refused, refused
+
+
+def test_a_rank_failing_to_wrap_the_dense_part_fails_every_rank(cpu_dist_workers):
+    """Wrapping allocates each rank's shards on its own, so it can fail on one rank alone; every
+    rank then raises that failure, rather than leave the others waiting for it in DCP's
+    collectives (stood in by a bounded barrier)."""
+    cpu_dist_workers.run(_one_rank_fails_the_wrapping_job)
+
+
 def test_a_tied_head_the_checkpoint_stores_alone_reaches_both_aliases(fsdp_mesh, tmp_path):
     """A tied checkpoint can store the pair as ``lm_head.weight`` alone, which ``from_pretrained``
     loads into both aliases. With a tied MoE as the expert-parallel load leaves it -- the dense part
