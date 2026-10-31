@@ -53,7 +53,7 @@ from .kv_cache_auto_quant import (
     get_kv_cache_auto_quantize_config,
 )
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
-from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
+from .mode import CalibrateModeRegistry, QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized
 from .utils.core_utils import _get_fsdp2_mesh
@@ -71,6 +71,116 @@ __all__ = [
     "quantize",
     "temporarily_fold_weights",
 ]
+
+# Calibration algorithms whose statistics stay on the rank that gathered them, listed by hand: a new
+# one must be added. Any other keeps its own there too when its config turns distributed_sync off.
+_RANK_LOCAL_CALIBRATION = (
+    "awq_lite",
+    "awq_full",
+    "svdquant",
+    "local_hessian",  # its distributed_sync syncs only the max amax it starts from
+    "imatrix",
+)
+
+
+def _rank_local_calibrations(algorithm: QuantizeAlgoCfgType) -> list[str]:
+    """The rank-local calibrations ``algorithm`` runs, with those it runs for its scales."""
+    found = []
+    for mode, options in get_modelike_from_algo_cfg(algorithm):
+        method = mode.removesuffix("_calibrate")
+        # The options as the calibration reads them, through its mode's schema: a string such as
+        # "false" is coerced, and a default counts as if spelled out.
+        config = CalibrateModeRegistry[mode].config_class.model_validate(options)
+        if method in _RANK_LOCAL_CALIBRATION:
+            found.append(method)
+        elif not getattr(config, "distributed_sync", True):  # None skips the sync too
+            found.append(f"{method} with distributed_sync={config.distributed_sync}")
+        for key in ("weight_scale_algorithm", "scale_algorithm"):
+            if getattr(config, key, None) is not None:
+                found += _rank_local_calibrations(getattr(config, key))
+    return found
+
+
+def _group_ranks(group: dist.DistributedProcessGroup) -> list[int]:
+    """The ranks ``group`` spans, in its rank order; just this rank for a group not set."""
+    if not group.is_initialized():
+        return [dist.rank()]
+    return torch.distributed.get_process_group_ranks(group.group or torch.distributed.group.WORLD)
+
+
+def _names_the_experts_groups(
+    state: "dist.ParallelState | None", plan: dist.DistributionPlan
+) -> bool:
+    """Whether ``state`` names the groups a routed expert of ``plan`` syncs its scales over.
+
+    Those of the ``(edp, ep)`` mesh the expert-parallel load lays the ranks out in: as its
+    expert-parallel group, this rank's row, whose ranks hold the experts' shards in row order, and
+    as its data-parallel group, its column, the ranks holding the same shard.
+    """
+    if state is None or not state.expert_model_parallel_group.is_initialized():
+        return False
+    row, column = divmod(dist.rank(), plan.ep_size)
+    expert_parallel = range(row * plan.ep_size, (row + 1) * plan.ep_size)
+    data_parallel = range(column, plan.world_size, plan.ep_size)
+    return _group_ranks(state.expert_model_parallel_group) == list(expert_parallel) and sorted(
+        _group_ranks(state.data_parallel_group)
+    ) == list(data_parallel)
+
+
+def _refuse_unsupported_distributed_calibration(
+    model: nn.Module, algorithm: QuantizeAlgoCfgType
+) -> None:
+    """Refuse a calibration that would come out wrong on a model distributed over several ranks.
+
+    Each rank of such a model calibrates on its own data, so an algorithm that keeps its statistics
+    on the rank would calibrate the ranks' copies, or shards, of a weight differently. Under expert
+    parallelism each rank's per-expert quantizers hold its own experts, and calibration syncs them
+    over the groups their module's ``ParallelState`` names, every rank for a module converted
+    without one: a module holding routed experts must name the experts' expert-parallel group and,
+    for data parallelism, only the ranks holding the same experts, or any calibration would merge
+    different experts' scales. Called before anything changes, so the caller seeds the routed
+    experts' ``ParallelState`` before quantizing, as the expert-parallel load does; their quantized
+    modules, whose state calibration reads, are checked again once converted, before they calibrate.
+    """
+    plan = dist.recorded_distribution_plan(model)
+    if plan is None or plan.world_size == 1:
+        return
+    refused = _rank_local_calibrations(algorithm)
+    if refused:
+        raise NotImplementedError(
+            f"Calibrating with {', '.join(refused)} is not supported on a model distributed over "
+            f"{plan.world_size} ranks. Each rank calibrates on its own data and this calibration "
+            "keeps what it gathers on the rank, so the ranks would calibrate their copies, or their "
+            "shards, of a weight differently. Calibrate with max or MSE with distributed_sync on, "
+            "GPTQ, SmoothQuant or awq_clip, or in a single process."
+        )
+    if algorithm is None or not plan.is_expert_parallel:
+        return
+    # Routed experts: the modules carrying an expert-parallel group, and the quantized modules under
+    # a container named ``experts``, as every expert-parallel plan in transformers names it.
+    holders = {}
+    for name, module in model.named_modules():
+        state = getattr(module, "_parallel_state", None)
+        if (state is not None and state.expert_model_parallel_group.is_initialized()) or (
+            isinstance(module, QuantModule) and "experts" in name.split(".")
+        ):
+            holders[name] = state
+    if not holders and not any("experts" in name.split(".") for name, _ in model.named_modules()):
+        return  # no routed experts here, as in a VLM's vision tower: no experts' scales to merge
+    wrong = [name for name, state in holders.items() if not _names_the_experts_groups(state, plan)]
+    if not holders or wrong:
+        raise NotImplementedError(
+            f"Calibrating a model whose experts are sharded over {plan.ep_size} ranks needs each "
+            "routed expert's ParallelState to name, as its expert-parallel group, this rank's row "
+            f"of the ({plan.edp}, {plan.ep_size}) expert-parallel mesh and, as its data-parallel "
+            f"group, its column, the {plan.edp} rank(s) holding the same experts, or calibration "
+            "would sync their scales over the wrong ranks. "
+            + (
+                f"These modules do not: {wrong[:3]}."
+                if wrong
+                else "None of the model's modules carries an expert-parallel group."
+            )
+        )
 
 
 def _refuse_awq_on_a_sharded_fsdp2_model(
@@ -128,6 +238,7 @@ def calibrate(
     Returns: The calibrated pytorch model.
     """
     _refuse_awq_on_a_sharded_fsdp2_model(model, algorithm)
+    _refuse_unsupported_distributed_calibration(model, algorithm)
     if forward_loop is not None:
         # get the number of arguments of forward_loop
         num_args = len(inspect.signature(forward_loop).parameters)
@@ -502,6 +613,7 @@ def quantize(
     """
     quantize_config = QuantizeConfig(**dict(config))
     _refuse_awq_on_a_sharded_fsdp2_model(model, config.get("algorithm"))
+    _refuse_unsupported_distributed_calibration(model, config.get("algorithm"))
     if not is_quantized(model):
         model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
     else:
@@ -940,6 +1052,14 @@ def auto_quantize(
         if isinstance(quantization_formats, str) or not isinstance(quantization_formats, Sequence):
             raise TypeError("`quantization_formats` must be a sequence of formats.")
         quantization_formats = list(quantization_formats)
+    plan = dist.recorded_distribution_plan(model)
+    if plan is not None and plan.is_expert_parallel:  # before anything converts the model
+        raise NotImplementedError(
+            f"auto_quantize does not support a model whose experts are sharded over {plan.ep_size} "
+            "ranks yet: its forwards would run the experts without the expert-parallel forwards "
+            "that quantization replaces and distributed_forward_loop restores. Quantize it with "
+            "mtq.quantize through distributed_forward_loop, or AutoQuantize in a single process."
+        )
 
     method_name, method_config = _parse_auto_quantize_method(method)
     is_kv_search = constraints is not None and constraints.get("cost_model") == COST_MODEL_KV_CACHE
@@ -1061,6 +1181,7 @@ def auto_quantize(
             )
         # Every candidate, before the search calibrates any: calibrate() would refuse mid-search.
         _refuse_awq_on_a_sharded_fsdp2_model(model, algo, candidate=name)
+        _refuse_unsupported_distributed_calibration(model, algo)
 
     # Select the appropriate searcher based on method
     if method_name not in AUTO_QUANTIZE_SEARCHERS:

@@ -30,6 +30,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
+from .distributed import all_reduce, recorded_distribution_plan
 from .logging import print_rank_0, warn_rank_0
 
 if TYPE_CHECKING:
@@ -1005,17 +1006,60 @@ def get_max_batch_size(
     """Get the maximum batch size that can be used for the model.
 
     ``forward_step(model, inputs)`` optionally probes a custom workload, including during
-    OOM retries. By default, probe a model forward (or generation for encoder-decoder models).
+    OOM retries (which a model distributed over several ranks skips, below). By default, probe a
+    model forward (or generation for encoder-decoder models).
+
+    For a model whose recorded plan distributes it over several ranks
+    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`) it is collective: every rank
+    calls it, and every rank gets the smallest batch size any rank's GPU allows
+    (:func:`~modelopt.torch.utils.distributed.all_reduce`), so that all run the same number of
+    calibration steps. Each rank then measures the GPU it computes on, from one forward of the
+    single-sample input, and does not probe the batch size it arrives at: retrying a smaller batch
+    after an out-of-memory error would run a different number of forwards, and of the collectives
+    inside them, on each rank. Probing in lockstep would not make it safe either: a rank that runs out
+    of memory partway through a forward has left its peers waiting in that forward's collectives. If
+    the estimate does not fit, pass an explicit batch size instead. A model with no plan recorded,
+    such as a Megatron model, is measured on every visible GPU, as in a single process.
     """
+    args = (
+        model,
+        max_sample_length,
+        sample_memory_usage_ratio,
+        sample_input_single_batch,
+        enable_grad,
+        forward_step,
+    )
+    plan = recorded_distribution_plan(model)
+    if plan is not None and plan.world_size > 1:
+        # The device this rank computes on, which LOCAL_RANK does not name under a launcher that
+        # shows each rank one GPU.
+        device = torch.device("cuda", torch.cuda.current_device())
+        return all_reduce("calib_batch_size", lambda: _max_batch_size(*args, device=device), min)
+    return _max_batch_size(*args)
+
+
+def _max_batch_size(
+    model: torch.nn.Module,
+    max_sample_length: int,
+    sample_memory_usage_ratio: float,
+    sample_input_single_batch: torch.Tensor | None,
+    enable_grad: bool,
+    forward_step: Callable[[torch.nn.Module, torch.Tensor], Any] | None,
+    device: torch.device | None = None,
+) -> int:
+    """:func:`get_max_batch_size` measured on ``device`` with one probe, or on every visible GPU."""
+    devices = range(torch.cuda.device_count()) if device is None else [device]
 
     def _get_free_gpu_mem():
-        min_gpu_free_mem = torch.cuda.get_device_properties(0).total_memory
+        min_gpu_free_mem = torch.cuda.get_device_properties(
+            0 if device is None else device
+        ).total_memory
         max_allocated_mem = 0
-        for device in range(torch.cuda.device_count()):
-            free_mem = torch.cuda.mem_get_info(device)[0]
+        for gpu in devices:
+            free_mem = torch.cuda.mem_get_info(gpu)[0]
             if free_mem < min_gpu_free_mem:
                 min_gpu_free_mem = free_mem
-                max_allocated_mem = torch.cuda.max_memory_allocated(device)
+                max_allocated_mem = torch.cuda.max_memory_allocated(gpu)
         return min_gpu_free_mem, max_allocated_mem
 
     torch.cuda.empty_cache()
@@ -1058,27 +1102,27 @@ def get_max_batch_size(
         else:
             target_data_batch = max(int(free_mem_before / mem_diff_per_data_batch), 1)
 
-        def _expand_to(batch: int) -> torch.Tensor:
-            return sample_input_single_batch.expand(
-                [
-                    batch if index == 0 else dim
-                    for index, dim in enumerate(sample_input_single_batch.shape)
-                ]
-            )
-
-        target_input = _expand_to(target_data_batch)
-
         # For some models on multi GPU, we observe the memory per batch is not a constant.
-        # So we just test the target batch size and make sure we do not go OOM.
-        while target_data_batch > 1:
-            with torch.set_grad_enabled(enable_grad):
-                try:
-                    infer_method(target_input)
-                    break
-                except torch.cuda.OutOfMemoryError:  # pragma: no cover - GPU OOM retry path
-                    target_data_batch = target_data_batch // 2  # pragma: no cover
-                    target_input = _expand_to(target_data_batch)  # pragma: no cover
-                    torch.cuda.empty_cache()  # pragma: no cover
+        # So we just test the target batch size and make sure we do not go OOM. A model distributed
+        # over several ranks is measured once, not probed (see get_max_batch_size).
+        if device is None:
+
+            def _expand_to(batch: int) -> torch.Tensor:
+                return sample_input_single_batch.expand(
+                    [
+                        batch if index == 0 else dim
+                        for index, dim in enumerate(sample_input_single_batch.shape)
+                    ]
+                )
+
+            while target_data_batch > 1:
+                with torch.set_grad_enabled(enable_grad):
+                    try:
+                        infer_method(_expand_to(target_data_batch))
+                        break
+                    except torch.cuda.OutOfMemoryError:  # pragma: no cover - GPU OOM retry path
+                        target_data_batch = target_data_batch // 2  # pragma: no cover
+                        torch.cuda.empty_cache()  # pragma: no cover
 
     # Regulate the data batch target to be 1, 2, 4, 8, 12, ..., capped at 64
     if target_data_batch < 2:
