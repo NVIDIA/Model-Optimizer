@@ -2019,9 +2019,12 @@ def test_a_placement_warning_raised_on_one_rank_fails_every_rank(cpu_dist_worker
 
 def _one_rank_cannot_apply_the_spec_job(rank, size, ckpt, step):
     apply = model_load_utils.apply_distributed_support
+    prepares = []
 
     def apply_on_rank0_only(*args, **kwargs):
-        if rank == 1:
+        prepares.append(kwargs.get("prepare", True))
+        # "prepared": rank 1 states the spec as rank 0 does, and fails only where prepare runs.
+        if rank == 1 and (step != "prepared" or prepares[-1]):
             raise OSError("this rank cannot import the checkpoint's code")
         return apply(*args, **kwargs)
 
@@ -2041,7 +2044,7 @@ def _one_rank_cannot_apply_the_spec_job(rank, size, ckpt, step):
                 mock.patch.object(model_load_utils, "load_and_prepare_ep", _loaded_in_step)
             )
         try:
-            if step == "decision":
+            if step in ("decision", "prepared"):
                 resolve_distribution_plan(ckpt)
             else:
                 load_pretrained(ckpt, distribution=DistributionPlan(2, ep_size=2))
@@ -2050,14 +2053,17 @@ def _one_rank_cannot_apply_the_spec_job(rank, size, ckpt, step):
         else:
             raised = "no error"
     assert "cannot import the checkpoint's code" in raised, raised
+    # Deciding an expert-parallel plan, every rank reached the step that prepares it.
+    assert (True in prepares) == (step != "decision"), prepares
 
 
 @needs_ep_transformers
-@pytest.mark.parametrize("step", ["decision", "load"])
+@pytest.mark.parametrize("step", ["decision", "prepared", "load"])
 def test_a_rank_that_cannot_apply_the_spec_fails_every_rank(cpu_dist_workers, tmp_path, step):
     """A spec's preparation reads the checkpoint and imports its code on each rank, which can fail
-    on one alone; the others must not wait for it, in the plan's broadcast when deciding, nor in the
-    load a handed expert-parallel plan starts."""
+    on one alone; the others must not wait for it, in the plan's broadcast when deciding, in the
+    step that prepares the expert-parallel plan decided, nor in the load a handed expert-parallel
+    plan starts."""
     _deepseek_v3(n_routed_experts=8).save_pretrained(tmp_path)
     cpu_dist_workers.run(_one_rank_cannot_apply_the_spec_job, ckpt=str(tmp_path), step=step)
 
