@@ -638,7 +638,8 @@ def load_pretrained(
       placement or ``dtype``, and refuses a quantized checkpoint.
     * otherwise ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
       ``AutoModelForCausalLM``); on a distributed run every rank loads the whole model, onto its own
-      GPU unless ``device_map`` is passed.
+      GPU unless ``device_map`` is passed. Pass ``device_map=None`` where the model is placed
+      otherwise, as under ``init_quantized_weights``, which refuses a device map.
 
     No load here shards the routed experts: a plan with ``ep_size > 1`` is refused. A refusal on any
     rank raises on every rank, before the load. The plan is recorded on the model
