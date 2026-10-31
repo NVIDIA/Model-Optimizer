@@ -609,7 +609,7 @@ def test_a_prepare_that_raises_after_patching_still_records_it(monkeypatch):
 
     with pytest.raises(RuntimeError, match="no kernels to wrap"):
         _prepare(SimpleNamespace(text_config=SimpleNamespace(), auto_map=_AUTO_MAP))
-    assert "kimi_k3" in moe._PATCHED_EVERY_LOAD
+    assert get_spec("kimi_k3").model_type in moe._PATCHED_EVERY_LOAD
 
 
 @pytest.mark.usefixtures(

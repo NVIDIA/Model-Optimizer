@@ -239,7 +239,8 @@ def check_not_patched_by_prepare(model_type: str) -> None:
     A spec whose ``prepare`` patches every later load of its model
     (:attr:`~modelopt.torch.models.EPSpec.prepare_patches_every_load`) leaves code only an
     expert-parallel load builds from: once it ran in this process, a whole-model or FSDP2-sharded
-    load of the model is refused before anything is built.
+    load of the model is refused before it builds or loads one. The plan decision's throwaway meta
+    build runs earlier, so under torchrun an EP degree of 1 meets the decision's own refusal first.
     """
     if model_type in _PATCHED_EVERY_LOAD:
         raise NotImplementedError(

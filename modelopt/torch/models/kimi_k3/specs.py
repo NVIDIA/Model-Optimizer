@@ -20,13 +20,13 @@ decompressed at load.
 """
 
 from ..specs import EPSpec, ModelSpec, register
-from .ep import BASE_MODEL_EP_PLAN, make_buildable, prepare
+from .ep import BASE_MODEL_EP_PLAN, MODEL_TYPE, make_buildable, prepare
 
 __all__: list[str] = []
 
 register(
     ModelSpec(
-        model_type="kimi_k3",
+        model_type=MODEL_TYPE,
         modeling_source="remote_code",
         ep_spec=EPSpec(
             prepare=prepare,

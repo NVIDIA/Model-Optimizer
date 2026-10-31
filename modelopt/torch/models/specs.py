@@ -234,7 +234,7 @@ class EPSpec(SpecSection):
     """Whether ``prepare`` patches the model's code for every later load of it in the process, not
     only for the expert-parallel load it ran for (Kimi-K3's swaps its remote MoE block's class).
     Once such a ``prepare`` has run, a whole-model or FSDP2-sharded load of the model in the process
-    is refused before anything is built."""
+    is refused before it builds or loads one."""
 
     decompressed_formats: tuple[str, ...] = ()
     """The checkpoint formats (a ``quantization_config``'s ``quant_method``) whose experts
