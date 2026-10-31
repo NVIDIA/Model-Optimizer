@@ -311,15 +311,22 @@ def test_the_build_step_lets_the_checkpoint_s_own_vlm_build_on_this_transformers
     text = {"model_type": "deepseek_v3", "hidden_size": 16, "num_hidden_layers": 1}
     stored = {"model_type": "kimi_vl", "auto_map": auto_map, "text_config": text}
     (tmp_path / "config.json").write_text(json.dumps(stored))
-    config = AutoConfig.from_pretrained(tmp_path, trust_remote_code=True)
+    loaded = set(sys.modules)
+    try:
+        config = AutoConfig.from_pretrained(tmp_path, trust_remote_code=True)
 
-    kimi_vl.make_buildable(config, ckpt_path=str(tmp_path), trust_remote_code=True)
-    model = model_load_utils.build_meta_causal_lm(
-        str(tmp_path), True, None, copy.deepcopy(config), auto_class=AutoModelForCausalLM
-    )
+        kimi_vl.make_buildable(config, ckpt_path=str(tmp_path), trust_remote_code=True)
+        model = model_load_utils.build_meta_causal_lm(
+            str(tmp_path), True, None, copy.deepcopy(config), auto_class=AutoModelForCausalLM
+        )
 
-    assert type(model).tie_weights._kimi_tie_weights_shim
-    assert sys.modules[type(model).__module__].DeepseekV3ForCausalLM is DeepseekV3ForCausalLM
+        assert type(model).tie_weights._kimi_tie_weights_shim
+        assert sys.modules[type(model).__module__].DeepseekV3ForCausalLM is DeepseekV3ForCausalLM
+    finally:
+        # The checkpoint's code stays imported otherwise, for later tests to find as a Kimi module.
+        for name in set(sys.modules) - loaded:
+            if name.startswith("transformers_modules."):
+                del sys.modules[name]
 
 
 @_BOTH_ADAPTERS
