@@ -909,12 +909,21 @@ def auto_class():
     return Auto
 
 
+def _pin_cuda(monkeypatch, gpus, bound=None):
+    """Pin the CUDA state a rank's GPU is read from: ``gpus`` visible, and the process bound to
+    cuda:``bound``, or to none yet, so its local rank picks one. Tests then read the case rather
+    than the host, whose process may have set CUDA up already."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: gpus > 0)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: gpus)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: bound is not None)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: bound or 0)
+
+
 @pytest.fixture
 def a_gpu(monkeypatch):
     """This rank has a GPU of its own, which the FSDP2 load shards onto; the stand-in loaders never
     use it."""
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: 8)
+    _pin_cuda(monkeypatch, 8)
 
 
 @pytest.fixture
@@ -962,8 +971,7 @@ def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
     from_pretrained."""
     run_as(4, rank=1)
     serve(LlamaConfig(**_TINY))
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: gpus)
+    _pin_cuda(monkeypatch, gpus)
 
     model = load_pretrained(str(tmp_path), auto_class, **passed)
 
@@ -980,10 +988,7 @@ def test_a_rank_bound_to_its_one_visible_gpu_loads_onto_it(
     none."""
     run_as(4, rank=1)
     serve(LlamaConfig(**_TINY))
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
-    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    _pin_cuda(monkeypatch, 1, bound=0)
 
     load_pretrained(str(tmp_path), auto_class)
 
@@ -998,8 +1003,7 @@ def test_a_rank_without_a_gpu_of_its_own_says_so(
     0 may have a GPU of its own and nothing to say."""
     run_as(4, rank=1)
     serve(LlamaConfig(**_TINY))
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    _pin_cuda(monkeypatch, 1)
 
     with pytest.warns(UserWarning, match="local rank 1"):
         load_pretrained(str(tmp_path), auto_class)
@@ -1292,11 +1296,11 @@ def _one_rank_refused_job(rank, size, ckpt, refused_on_1, gpus_on_1, match):
     gpus = size if rank == 0 else gpus_on_1  # what this rank's host shows it
     with (
         bounded_collectives(),
-        mock.patch.object(torch.cuda, "is_available", return_value=gpus > 0),
-        mock.patch.object(torch.cuda, "device_count", return_value=gpus),
+        pytest.MonkeyPatch.context() as cuda,
         mock.patch.object(model_load_utils, "ensure_local_checkpoint", _fetched_in_step),
         mock.patch.object(model_load_utils, "parallel_load_and_prepare_fsdp2", _loaded_in_step),
     ):
+        _pin_cuda(cuda, gpus)  # the pooled worker's own CUDA state is whatever an earlier job left
         try:  # not pytest.raises: its failure would end the pooled worker instead of the job
             load_pretrained(
                 ckpt,
@@ -1356,15 +1360,13 @@ def _one_visible_gpu_per_process_job(rank, size, ckpt):
 
     with (
         bounded_collectives(),
-        # Each rank sees only its own GPU, which its process bound as cuda:0, whatever its local
-        # rank.
-        mock.patch.object(torch.cuda, "is_available", return_value=True),
-        mock.patch.object(torch.cuda, "device_count", return_value=1),
-        mock.patch.object(torch.cuda, "is_initialized", return_value=True),
-        mock.patch.object(torch.cuda, "current_device", return_value=0),
+        pytest.MonkeyPatch.context() as cuda,
         mock.patch.object(model_load_utils, "ensure_local_checkpoint", _fetched_in_step),
         mock.patch.object(model_load_utils, "parallel_load_and_prepare_fsdp2", load),
     ):
+        # Each rank sees only its own GPU, which its process bound as cuda:0, whatever its local
+        # rank.
+        _pin_cuda(cuda, 1, bound=0)
         load_pretrained(ckpt, distribution=DistributionPlan(2, dense="fsdp"))
     assert devices == [torch.device("cuda", 0)], (rank, devices)
 
