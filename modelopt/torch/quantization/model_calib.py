@@ -76,6 +76,7 @@ from .utils import (
 from .utils.calib_utils import (
     _GPTQ_HELPER_REGISTRY,
     _IMATRIX_ENCODER_REGISTRY,
+    _LOCAL_HESSIAN_ENCODER_REGISTRY,
     GPTQHelper,
     bfloat16_hessian_gemm,
     run_on_each_gpu,
@@ -914,13 +915,15 @@ def _mse_calibrate_weights(
     fp8_scale_sweep: bool,
     error_func_for: Callable[[TensorQuantizer], Callable | None] | None = None,
     hessian_for: Callable[[TensorQuantizer], torch.Tensor | None] | None = None,
+    skip: Callable[[TensorQuantizer], bool] | None = None,
 ):
     """Run MSE weight calibration over all eligible quantizers (shared by mse / local-Hessian).
 
     ``error_func_for`` maps a weight quantizer to an optional per-weight error function
     (local-Hessian's Hessian metric); ``None`` means plain squared error. ``hessian_for``
     maps a weight quantizer to the same metric as a raw per-cin-block Hessian tensor,
-    enabling the Hessian-weighted Triton fast path.
+    enabling the Hessian-weighted Triton fast path. Quantizers ``skip`` returns True for are left
+    alone.
     """
     seen_modules: set[int] = set()
     pbar = tqdm(desc="MSE weight calibration")
@@ -930,6 +933,8 @@ def _mse_calibrate_weights(
         seen_modules.add(id(parent_module))
         with enable_weight_access_and_writeback(parent_module, model, names):
             for weight, weight_quantizer in parent_module.iter_weights_for_calibration():
+                if skip is not None and skip(weight_quantizer):
+                    continue
                 error_func = error_func_for(weight_quantizer) if error_func_for else None
                 hessian = hessian_for(weight_quantizer) if hessian_for else None
                 cal = _make_weight_mse_calibrator(
@@ -1034,6 +1039,12 @@ class _LocalHessianAccumulator:
             return block_loss.unsqueeze(-1).expand(-1, bs).reshape(original_shape)
 
         return local_hessian_error
+
+
+def _has_local_hessian_encoder(quantizer) -> bool:
+    """Whether ``quantizer``'s backend registered a local-Hessian encoder, so has no amax to search."""
+    backend = getattr(quantizer, "backend", None)
+    return isinstance(backend, str) and backend in _LOCAL_HESSIAN_ENCODER_REGISTRY
 
 
 def _warn_if_block_size_mismatch(weight_quantizer: TensorQuantizer, block_size: int, name: str):
@@ -1265,6 +1276,7 @@ def local_hessian_calibrate(
     debug: bool = False,
     shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
     hessian_input_dtype: str = "float32",
+    perc_damp: float = 0.3,
 ):
     """Calibrate weight quantizers by minimizing the Hessian-weighted error.
 
@@ -1276,6 +1288,13 @@ def local_hessian_calibrate(
     metric where a weight pairs with its input activations (dense linears and HF fused-MoE
     experts), plain MSE otherwise. Other quantizer types (e.g. SequentialQuantizer) are
     unsupported and left at their max-calibrated scale.
+
+    Weights whose quantizer backend registered a local-Hessian encoder (see
+    :func:`~modelopt.torch.quantization.utils.calib_utils.register_local_hessian_encoder`), such as
+    the GGML IQ formats, are instead encoded once from their Hessian over the encoder's own block
+    size, and replaced by their fake-quantized value. ``block_size`` and the amax-search options
+    do not apply to them. As with imatrix, a quantizer that already holds final codes is left
+    alone, so ``[gptq, local_hessian]`` runs GPTQ where it applies and this on any weight it leaves.
 
     We recommend using Local-Hessian with layerwise calibration enabled
     (``"layerwise": {"enable": True}``) and a calibration batch size of 1.
@@ -1295,6 +1314,8 @@ def local_hessian_calibrate(
             (``model._local_hessian_accumulators``) for inspection.
         hessian_input_dtype: ``"float32"`` or ``"bfloat16"``, the dtype the Hessian GEMM reads
             the activations in.
+        perc_damp: Fraction of the mean Hessian diagonal added to the diagonal of the Hessian an
+            encoder scores by (default: 0.3); unused by the amax search.
 
     See :class:`LocalHessianCalibConfig <modelopt.torch.quantization.config.LocalHessianCalibConfig>`
     for details on the configuration options.
@@ -1303,9 +1324,20 @@ def local_hessian_calibrate(
         warnings.warn("forward_loop must be provided for local_hessian; skipping local_hessian")
         return
 
-    # Phase 1: max-calibrate (also bootstraps dead experts + promotes/syncs NVFP4 static).
+    encoded_modules, encoders = _encoder_targets(
+        module_name_maps(model), _LOCAL_HESSIAN_ENCODER_REGISTRY, "local_hessian"
+    )
+
+    # Phase 1: max-calibrate (also bootstraps dead experts + promotes/syncs NVFP4 static). The
+    # Hessian pass below runs the forward loop; max only runs one too if activations need amax.
     print_rank_0("local_hessian: Running max calibration for all quantizers...")
-    max_calibrate(model, forward_loop, distributed_sync, shared_states=shared_states)
+    max_calibrate(
+        model,
+        forward_loop,
+        distributed_sync,
+        shared_states=shared_states,
+        skip_forward_without_activation_calib=True,
+    )
 
     names = module_name_maps(model)
 
@@ -1313,26 +1345,29 @@ def local_hessian_calibrate(
     accumulators: dict[int, _LocalHessianAccumulator] = {}
 
     def capture(weight_quantizer, weight, input_tensor):
+        encoder = encoders.get(id(weight_quantizer))
+        if encoder is None and _has_local_hessian_encoder(weight_quantizer):
+            return  # declined by its encoder, e.g. already holding GPTQ's codes
         input_local = input_tensor.to_local() if hasattr(input_tensor, "to_local") else input_tensor
         acc = accumulators.get(id(weight_quantizer))
         if acc is None:
             acc = _LocalHessianAccumulator(
-                weight.shape[0], weight.shape[1], block_size, getattr(torch, hessian_input_dtype)
+                weight.shape[0],
+                weight.shape[1],
+                block_size if encoder is None else encoder.block_size,
+                getattr(torch, hessian_input_dtype),
             )
             accumulators[id(weight_quantizer)] = acc
         acc.accumulate(input_local)
 
+    def warn_fallback(name, weight, quantizer):
+        if not _has_local_hessian_encoder(quantizer):  # validated against the encoder's own block
+            _warn_local_hessian_fallback(name, weight, quantizer, block_size, warned)
+
     # Phase 2: capture each weight's input activations during a forward with weight fake-quant
     # disabled (so H = ΣXᵀX reflects full-precision weights); input quantizers are left as-is.
     warned: set = set()
-    handles = _register_weight_input_hooks(
-        model,
-        names,
-        capture,
-        on_weight=lambda name, weight, quantizer: _warn_local_hessian_fallback(
-            name, weight, quantizer, block_size, warned
-        ),
-    )
+    handles = _register_weight_input_hooks(model, names, capture, on_weight=warn_fallback)
     print_rank_0("local_hessian: Caching activations and computing local Hessian...")
     try:
         with set_quantizer_by_cfg_context(
@@ -1351,13 +1386,24 @@ def local_hessian_calibrate(
             "diverge under tensor/data parallelism. Treat local_hessian as single-rank for now."
         )
 
-    # Phase 3: weight search. Build error_funcs first so build_error_func caches the normalized
+    # Phase 3a: encode the weights an encoder takes, freeing each Hessian once it is used.
+    def encode(weight, quantizer):
+        acc = accumulators.get(id(quantizer))
+        hessian = None if acc is None else acc.normalized_hessian()
+        weight.copy_(encoders[id(quantizer)].encode(weight, quantizer, hessian, perc_damp))
+        if acc is not None and not debug:
+            acc.hessian_per_block = acc._normalized_hessian = None
+
+    if encoders:
+        encoded = _encode_weights(model, names, encoded_modules, encoders, encode)
+        print_rank_0(f"local_hessian: encoded {encoded} weights")
+
+    # Phase 3b: weight search. Build error_funcs first so build_error_func caches the normalized
     # Hessian (freeing the raw buffer) before normalized_hessian() reuses it; the fast path
     # (tensor) and reference fallback (error_func) then share that one tensor.
-    error_funcs = {
-        qid: acc.build_error_func(keep_buffer=debug) for qid, acc in accumulators.items()
-    }
-    hessians = {qid: acc.normalized_hessian() for qid, acc in accumulators.items()}
+    searched = {qid: acc for qid, acc in accumulators.items() if qid not in encoders}
+    error_funcs = {qid: acc.build_error_func(keep_buffer=debug) for qid, acc in searched.items()}
+    hessians = {qid: acc.normalized_hessian() for qid, acc in searched.items()}
     print_rank_0("local_hessian: Running MSE calibration with local Hessian loss...")
     _mse_calibrate_weights(
         model,
@@ -1368,6 +1414,7 @@ def local_hessian_calibrate(
         fp8_scale_sweep=fp8_scale_sweep,
         error_func_for=lambda q: error_funcs.get(id(q)),
         hessian_for=lambda q: hessians.get(id(q)),
+        skip=_has_local_hessian_encoder,
     )
 
     # Release the per-block Hessians (held by the error_func closures, calibrators, and the
@@ -2773,34 +2820,9 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
         warn_rank_0("imatrix: no forward_loop given; skipping imatrix calibration")
         return
     names = module_name_maps(model)
-
-    # Pick the targets before the forward disables every weight quantizer.
-    def _accepted(quantizer):
-        backend = getattr(quantizer, "backend", None)
-        encoder = _IMATRIX_ENCODER_REGISTRY.get(backend) if isinstance(backend, str) else None
-        return encoder is not None and encoder.accepts(quantizer)
-
-    targets: dict[int, list] = {}  # id(weight quantizer) -> [sum of x^2 per column, token count]
-    target_modules = []
-    for name, module in names.name_to_module.items():
-        if not isinstance(module, QuantModule):
-            continue
-        accepted = [q for q in module.iter_weight_quantizers_for_calibration() if _accepted(q)]
-        if accepted:
-            target_modules.append((name, module))
-            targets.update((id(q), [None, 0]) for q in accepted)
-
-    # Refuse a weight the encoder cannot take before any forward or calibration state changes;
-    # otherwise it would fail only after calibration, with the earlier weights already encoded.
-    for name, module in target_modules:
-        if _is_quant_fused_experts(module):
-            _refuse_packed_fused_expert_weights(name, module, "imatrix", lambda q: id(q) in targets)
-        for weight, quantizer in module.iter_weights_for_calibration():
-            if id(quantizer) in targets:
-                try:
-                    _IMATRIX_ENCODER_REGISTRY[quantizer.backend].validate(weight, quantizer)
-                except (ValueError, TypeError) as e:
-                    raise type(e)(f"imatrix cannot encode a weight of {name}: {e}") from e
+    target_modules, encoders = _encoder_targets(names, _IMATRIX_ENCODER_REGISTRY, "imatrix")
+    # id(weight quantizer) -> [sum of x^2 per column, token count]
+    targets: dict[int, list] = {qid: [None, 0] for qid in encoders}
 
     # TODO: sum the statistics across data-parallel ranks, as max_calibrate syncs amax.
     if targets and dist_is_initialized() and dist_size() > 1:
@@ -2840,12 +2862,61 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
     def encode(weight, quantizer):
         sum_sq, count = targets[id(quantizer)]
         second_moments = None if count == 0 else sum_sq.to(weight.device) / count
-        encoder = _IMATRIX_ENCODER_REGISTRY[quantizer.backend]
-        weight.copy_(encoder.encode(weight, quantizer, second_moments))
+        weight.copy_(encoders[id(quantizer)].encode(weight, quantizer, second_moments))
 
-    # Weights readable as they stand are grouped by device and encoded by one thread per GPU: a
-    # model that device_map spreads over GPUs would otherwise keep all but one of them idle.
-    # Offloaded or sharded weights are encoded in turn, each inside its materialization window.
+    encoded = _encode_weights(model, names, target_modules, encoders, encode)
+    print_rank_0(f"imatrix: encoded {encoded} weights")
+
+
+def _encoder_targets(names, registry, algorithm: str):
+    """The modules holding weights a registered encoder accepts, and ``{id(quantizer): encoder}``.
+
+    Taken before a forward disables every weight quantizer. A weight an encoder cannot take is
+    refused here, before any forward or calibration state changes; otherwise it would fail only
+    after calibration, with the earlier weights already encoded.
+    """
+
+    def _encoder(quantizer):
+        backend = getattr(quantizer, "backend", None)
+        encoder = registry.get(backend) if isinstance(backend, str) else None
+        return encoder if encoder is not None and encoder.accepts(quantizer) else None
+
+    encoders: dict[int, Any] = {}
+    target_modules = []
+    for name, module in names.name_to_module.items():
+        if not isinstance(module, QuantModule):
+            continue
+        accepted = {
+            id(q): encoder
+            for q in module.iter_weight_quantizers_for_calibration()
+            if (encoder := _encoder(q)) is not None
+        }
+        if accepted:
+            target_modules.append((name, module))
+            encoders.update(accepted)
+
+    for name, module in target_modules:
+        if _is_quant_fused_experts(module):
+            _refuse_packed_fused_expert_weights(
+                name, module, algorithm, lambda q: id(q) in encoders
+            )
+        for weight, quantizer in module.iter_weights_for_calibration():
+            if id(quantizer) in encoders:
+                try:
+                    encoders[id(quantizer)].validate(weight, quantizer)
+                except (ValueError, TypeError) as e:
+                    raise type(e)(f"{algorithm} cannot encode a weight of {name}: {e}") from e
+    return target_modules, encoders
+
+
+def _encode_weights(model, names, target_modules, targets, encode) -> int:
+    """Call ``encode(weight, quantizer)`` on every weight of ``target_modules`` in ``targets``.
+
+    Weights readable as they stand are grouped by device and encoded by one thread per GPU: a
+    model that device_map spreads over GPUs would otherwise keep all but one of them idle.
+    Offloaded or sharded weights are encoded in turn, each inside its materialization window.
+    Returns how many weights were encoded.
+    """
     by_device: dict[torch.device, list] = defaultdict(list)
     encoded = 0
     for _, module in target_modules:
@@ -2864,7 +2935,7 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
                     by_device[weight.device].append((weight, quantizer))
                 encoded += 1
     _encode_on_each_gpu(by_device, encode)
-    print_rank_0(f"imatrix: encoded {encoded} weights")
+    return encoded
 
 
 def _encode_on_each_gpu(by_device, encode):

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""imatrix calibration for the GGML formats."""
+"""imatrix and local_hessian calibration for the GGML formats."""
 
 import copy
 import dataclasses
@@ -31,9 +31,13 @@ from modelopt.recipe import load_recipe
 from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
+from modelopt.torch.quantization.ggml.local_hessian import search_choices
 
 IQ2_XXS = GGML_FORMAT_REGISTRY["iq2_xxs"]
 IMATRIX = {"method": "imatrix"}
+LOCAL_HESSIAN = {"method": "local_hessian"}
+# Both encode each weight once from a statistic of its inputs and pin the codes.
+ENCODERS = pytest.mark.parametrize("algorithm", [IMATRIX, LOCAL_HESSIAN], ids=lambda a: a["method"])
 GPTQ = {"method": "gptq", "block_size": 256, "perc_damp": 0.3}
 
 
@@ -91,13 +95,14 @@ def test_imatrix_weights_the_search_by_the_root_of_the_inputs_second_moments(mon
     torch.testing.assert_close(calls[-1], _importance(inputs.float().square().mean(dim=0)))
 
 
-def test_imatrix_pins_the_codes_it_chose():
+@ENCODERS
+def test_pins_the_codes_it_chose(algorithm):
     torch.manual_seed(0)
     model = nn.Linear(512, 8, bias=False)
     original = model.weight.detach().clone()
     plain = copy.deepcopy(model)
     inputs = _inputs()
-    mtq.quantize(model, _config(IMATRIX), forward_loop=lambda m: m(inputs))
+    mtq.quantize(model, _config(algorithm), forward_loop=lambda m: m(inputs))
     mtq.quantize(plain, _config("max"), forward_loop=lambda m: m(inputs))
 
     decoded = _decoded(model.weight_quantizer, model.weight.shape)
@@ -110,13 +115,27 @@ def test_imatrix_pins_the_codes_it_chose():
     assert output_error(decoded) < output_error(plain.weight_quantizer(plain.weight))
 
 
-def test_imatrix_leaves_codes_gptq_chose():
+@ENCODERS
+def test_weight_only_calibration_runs_one_forward(algorithm):
+    inputs = _inputs()
+    forwards = []
+
+    def forward_loop(model):
+        forwards.append(model)
+        model(inputs)
+
+    mtq.quantize(nn.Linear(512, 8, bias=False), _config(algorithm), forward_loop=forward_loop)
+    assert len(forwards) == 1
+
+
+@ENCODERS
+def test_leaves_codes_gptq_chose(algorithm):
     torch.manual_seed(0)
     gptq_only = nn.Linear(512, 8, bias=False)
     both = copy.deepcopy(gptq_only)
     inputs = _inputs()
     mtq.quantize(gptq_only, _config(GPTQ), forward_loop=lambda m: m(inputs))
-    mtq.quantize(both, _config([GPTQ, IMATRIX]), forward_loop=lambda m: m(inputs))
+    mtq.quantize(both, _config([GPTQ, algorithm]), forward_loop=lambda m: m(inputs))
 
     assert torch.equal(
         pinned_packed_weight(both.weight_quantizer, "iq2_xxs"),
@@ -125,12 +144,13 @@ def test_imatrix_leaves_codes_gptq_chose():
     assert torch.equal(both.weight, gptq_only.weight)
 
 
+@ENCODERS
 @pytest.mark.parametrize("calibrate_inputs", [False, True])
-def test_imatrix_refuses_a_width_it_cannot_encode_before_calibrating(calibrate_inputs):
+def test_refuses_a_width_it_cannot_encode_before_calibrating(algorithm, calibrate_inputs):
     torch.manual_seed(0)
     model = nn.Sequential(nn.Linear(512, 640, bias=False), nn.Linear(640, 8, bias=False))
     original = copy.deepcopy(model)
-    config = _config(IMATRIX)
+    config = _config(algorithm)
     if calibrate_inputs:
         # max_calibrate then runs a forward of its own, which must not run either.
         config["quant_cfg"].append(
@@ -144,7 +164,7 @@ def test_imatrix_refuses_a_width_it_cannot_encode_before_calibrating(calibrate_i
         model(inputs)
 
     with pytest.raises(
-        ValueError, match=r"imatrix cannot encode a weight of 1: .*divisible by 256"
+        ValueError, match=rf"{algorithm['method']} cannot encode a weight of 1: .*divisible by 256"
     ):
         mtq.quantize(model, config, forward_loop=forward_loop)
 
@@ -162,14 +182,15 @@ def test_imatrix_warns_that_ranks_are_not_synced(monkeypatch):
         mtq.quantize(nn.Linear(512, 8, bias=False), _config(IMATRIX), lambda m: m(inputs))
 
 
-def test_a_module_calibration_never_reached_gets_the_plain_search():
+@ENCODERS
+def test_a_module_calibration_never_reached_gets_the_plain_search(algorithm):
     torch.manual_seed(0)
     model = nn.ModuleDict(
         {"used": nn.Linear(512, 8, bias=False), "unused": nn.Linear(512, 8, bias=False)}
     )
     original = model["unused"].weight.detach().clone()
     inputs = _inputs()
-    mtq.quantize(model, _config(IMATRIX), forward_loop=lambda m: m["used"](inputs))
+    mtq.quantize(model, _config(algorithm), forward_loop=lambda m: m["used"](inputs))
 
     packed, shape = IQ2_XXS.quantize(original)
     plain = IQ2_XXS.dequantize(packed, shape, dtype=torch.float32)
@@ -210,6 +231,39 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
             (experts.down_proj, experts.down_proj_weight_quantizers),
         ):
             assert torch.equal(weight[idx].detach(), _decoded(quantizers[idx], weight[idx].shape))
+
+
+def test_local_hessian_lowers_the_output_error_of_correlated_inputs():
+    torch.manual_seed(0)
+    imatrix = nn.Linear(512, 16, bias=False)
+    original = imatrix.weight.detach().clone()
+    local_hessian = copy.deepcopy(imatrix)
+    # Mixed columns: imatrix's per-column statistic cannot see how they move together.
+    inputs = _inputs() @ torch.randn(512, 512, generator=torch.Generator().manual_seed(1))
+    mtq.quantize(imatrix, _config(IMATRIX), forward_loop=lambda m: m(inputs))
+    mtq.quantize(local_hessian, _config(LOCAL_HESSIAN), forward_loop=lambda m: m(inputs))
+
+    def output_error(model):
+        quantized = model.weight_quantizer(model.weight).detach()
+        return ((quantized - original) @ inputs.T).square().sum()
+
+    assert output_error(local_hessian) < 0.95 * output_error(imatrix)
+
+
+def test_local_hessian_damping_tends_to_the_plain_search():
+    weight = torch.randn(4, 512, generator=torch.Generator().manual_seed(0))
+    inputs = _inputs()
+    gram = (inputs.T @ inputs / len(inputs)).reshape(2, 256, 2, 256)
+    hessian = gram.diagonal(dim1=0, dim2=2).permute(2, 0, 1)
+
+    def packed(**kwargs):
+        return IQ2_XXS.quantize(weight, choices=search_choices(IQ2_XXS, weight, hessian, **kwargs))[
+            0
+        ]
+
+    # A ridge far above the Hessian leaves only the squared error the encoder's own search minimizes.
+    assert torch.equal(packed(perc_damp=1e9), IQ2_XXS.quantize(weight)[0])
+    assert not torch.equal(packed(), IQ2_XXS.quantize(weight)[0])
 
 
 @pytest.mark.parametrize("layerwise", [False, True])

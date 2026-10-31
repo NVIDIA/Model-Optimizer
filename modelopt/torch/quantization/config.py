@@ -1029,6 +1029,11 @@ class LocalHessianCalibConfig(
     - ``dw = weight - quantized_weight`` (weight reconstruction error per block)
     - ``H = X @ X.T`` is the local Hessian computed from input activations X
 
+    GGML IQ weights have no amax to search. Instead, each 256-weight block's local scales (and, for
+    IQ1_S, deltas) are picked by this loss over the block's 256 x 256 Hessian, while their
+    codebook search keeps imatrix's weighting. The weight is replaced by its encoding and the codes
+    are pinned, as with imatrix, which this replaces; ``block_size`` and the amax-search options do
+    not apply to them, and ``layerwise.calib_mutates_weights`` must stay True for offloaded ones.
     """
 
     _mutates_weights: ClassVar[bool] = False
@@ -1084,6 +1089,15 @@ class LocalHessianCalibConfig(
         default=False,
         title="Debug mode.",
         description="If True, module's local Hessian metadata will be kept as a module attribute.",
+    )
+
+    perc_damp: float = ModeloptField(
+        default=0.3,
+        ge=0.0,
+        title="Hessian damping for GGML IQ weights.",
+        description="GGML IQ weights pick their local scales by ``H + perc_damp * mean(diag(H)) * I``. "
+        "Undamped, the full Hessian overfits the calibration data at these bit widths, as GPTQ's "
+        "does. Unused by the amax search of other formats.",
     )
 
 
