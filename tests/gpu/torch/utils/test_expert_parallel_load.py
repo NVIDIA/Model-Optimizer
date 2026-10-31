@@ -604,10 +604,14 @@ def _kimi_k3_expert_parallel_job(rank, size, ckpt_dir):
                 if expected_amax is None:
                     problems.append(f"{name} is calibrated here but not in the whole model")
                     continue
-                # bf16 activations, summed in another order: compare by relative norm.
-                error = (amax - expected_amax).norm() / expected_amax.norm().clamp_min(1e-12)
-                if not error < 2e-2:
-                    problems.append(f"{name}: amax off by {error.item():.3g} (relative)")
+                # An amax is a max, and both models take it over the same bf16 activations: all that
+                # precedes the experts is dense and replicated here. Allow one bf16 step (2**-7 of
+                # the value) for the experts' down_proj input, which their grouped and eager GEMMs
+                # may round apart.
+                if not torch.allclose(amax, expected_amax, rtol=2**-7, atol=0):
+                    problems.append(
+                        f"{name}: amax {amax.tolist()}, the whole model's {expected_amax.tolist()}"
+                    )
 
             # The export names each expert back to the checkpoint's w1/w3/w2.
             to_checkpoint = build_reverse_name_mapper(model, tensor_keys=True)
