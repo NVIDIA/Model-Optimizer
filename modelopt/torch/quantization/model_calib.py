@@ -21,7 +21,6 @@ import time
 import warnings
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from functools import partial
 from typing import Any, TypeAlias
@@ -79,7 +78,9 @@ from .utils.calib_utils import (
     _IMATRIX_ENCODER_REGISTRY,
     GPTQHelper,
     bfloat16_hessian_gemm,
+    run_on_each_gpu,
     track_calib_forward_memory,
+    update_expert_weights,
 )
 
 __all__ = [
@@ -2702,15 +2703,17 @@ def gptq(
             handle.update_weights(block_size, perc_damp)
         handle.free()
     for name, module in fused_experts:
-        updated = unreached = 0
         with enable_weight_access_and_writeback(module, model, names):
-            for weight, quantizer in module.iter_weights_for_calibration():
-                handle = expert_handles.pop(id(quantizer), None)
-                if handle is not None:
-                    unreached += handle.n_samples == 0
-                    handle.update_weights(block_size, perc_damp, weight)
-                    handle.free()
-                    updated += 1
+            work = [
+                (expert_handles.pop(id(quantizer)), weight)
+                for weight, quantizer in module.iter_weights_for_calibration()
+                if id(quantizer) in expert_handles
+            ]
+            updated = len(work)
+            unreached = sum(handle.n_samples == 0 for handle, _ in work)
+            update_expert_weights(work, block_size, perc_damp)
+            # Its weight slices would keep this module's onloaded weights alive past the window.
+            del work
         if updated:
             print_rank_0(
                 f"[{name}] GPTQ updated {updated} expert weights, {unreached} of them never "
@@ -2848,25 +2851,11 @@ def _encode_on_each_gpu(by_device, encode):
         if device not in gpus:
             for item in items:
                 encode(*item)
-    if not gpus:
-        return
-    # The first encode runs here, so lazy setup that is not thread-safe, such as loading a format's
-    # CUDA extension, happens once before the workers start.
-    first, *by_device[gpus[0]] = by_device[gpus[0]]
-    encode(*first)
-    inference = torch.is_inference_mode_enabled()
-
-    def worker(device):
-        # The device, grad mode and inference mode are per thread: take the caller's.
-        torch.cuda.set_device(device)
-        with torch.inference_mode() if inference else torch.no_grad():
-            for item in by_device[device]:
-                encode(*item)
-        torch.cuda.synchronize(device)
-
-    with ThreadPoolExecutor(len(gpus)) as pool:
-        for future in [pool.submit(worker, gpu) for gpu in gpus]:
-            future.result()
+    if gpus:
+        pending = {device: iter(by_device[device]) for device in gpus}
+        run_on_each_gpu(
+            gpus, lambda device: next(pending[device], None), lambda item, _: encode(*item)
+        )
 
 
 def _run_weight_scale_calibration(model, forward_loop, scale_algorithm):
