@@ -59,6 +59,7 @@ Changelog
 - ``mtq.calibrate`` now raises an error, naming the modules, when a Hugging Face fused-experts forward reaches neither quantizer hook (a hand-written ``bmm`` forward that transformers cannot redirect, say), instead of exporting weight-derived input scales with a warning.
 
 - Layerwise-calibration resume (``checkpoint_dir``) now loads checkpoint files with ``weights_only=True``. A checkpoint directory written by an earlier release whose layer inputs hold objects other than tensors, plain containers or Hugging Face dynamic caches can no longer be resumed; recalibrate in a fresh directory, or disable checkpointing.
+- Streaming speculative-decoding training's vLLM connector (``modelopt.torch.speculative.plugins.rdma_hidden_states_connector``) now requires vLLM 0.22 or later. It is tested with vLLM 0.29 and later.
 
 **Deprecations**
 
@@ -106,6 +107,9 @@ Changelog
 - AWQ calibration (``awq_lite``, ``awq_full``) of an FSDP2 model sharded over more than one rank is now rejected with ``NotImplementedError`` by ``mtq.quantize``, ``mtq.calibrate`` and ``mtq.auto_quantize`` (before its search starts, its default formats included), and by ``examples/hf_ptq --use_fsdp2`` before loading the model: each rank would fold a different smoothing scale into its weight shard. Calibrate in a single process, or use a non-AWQ algorithm.
 - ``mtq.compress`` now rejects W4A8 weights with ``NotImplementedError``: a compressed W4A8 model could neither run nor be reloaded.
 - Fix streaming speculative-decoding training copying the whole training corpus into every rank and every DataLoader worker, which ran trainer nodes out of host memory on corpora of a few million samples. The corpus now stays memory-mapped.
+- Fix streaming speculative-decoding training capturing another request's hidden states when the vLLM serve ran requests concurrently, and failing on vLLM 0.29 and later. Retrain drafters trained in streaming mode against a serve that ran requests concurrently.
+- Fix DFlash-family drafters (DFlash, DFlash2, DSpark, Domino, LiLiCorr) trained from scratch with ``examples/speculative_decoding/main.py`` having their RoPE frequencies rounded to BF16, so they trained under different rotary phases than vLLM serves them with.
+- Fix DFlash2's candidate-selector loss weighing every block position equally and dividing by its own count of positions, unlike the backbone loss and the SGLang/SpecForge DFlash2 reference. Logged DFlash2 losses change.
 
 0.48.0 (2026-10-xx)
 ^^^^^^^^^^^^^^^^^^^
