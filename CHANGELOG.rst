@@ -43,6 +43,7 @@ Changelog
 *Misc*
 
 - The ``evaluation`` agent skill can stop looping ("doom loop") reasoning early: ask it to avoid doom loops and it adds vLLM's ``repetition_detection`` request field (vLLM 0.17.0 or later) to every task, ending a request once its output repeats. Use the same setting for baseline and candidate runs.
+- ``modelopt.torch.utils.plugins.model_load_utils.load_pretrained`` now loads a model distributed under ``torchrun``, FSDP2-sharded or whole on every rank, by the plan ``resolve_distribution_plan`` decides or one passed as its new ``distribution`` argument.
 
 **Backward Breaking Changes**
 
@@ -51,6 +52,8 @@ Changelog
 - Bump minimum required PyTorch version to 2.10.
 - Bump minimum required ``diffusers`` version to 0.37, ``peft`` to 0.18.1, ``accelerate`` to 1.6 and ``nltk`` to 3.9 for the ``[hf]`` extra.
 - Drop support for Transformer Engine 1.x. Quantizing Transformer Engine modules now requires Transformer Engine 2.0 or later.
+- ``load_pretrained`` called in a process group of several ranks now decides how to distribute the model rather than load it whole on every rank: a model too big for one GPU is FSDP2-sharded, a load that refuses placement arguments, quantized checkpoints, ones carrying an MTP head and a call inside ``init_quantized_weights``; an MoE loads without expert parallelism, and is refused when ``MODELOPT_EP_DEGREE`` asks for it, until the expert-parallel load lands; a model class other than a causal LM is refused when ``MODELOPT_FSDP_SIZE`` or ``MODELOPT_EP_DEGREE`` asks to shard; and a model loaded whole goes onto each rank's own GPU unless ``device_map`` places it. Set ``MODELOPT_FSDP_SIZE=1`` and ``MODELOPT_EP_DEGREE=1``, or pass ``distribution=DistributionPlan(<ranks>, dense="replicate")``, to load it whole on every rank.
+- ``load_pretrained`` now records how it distributed the model on the model it returns, even in a single process, so ``fsdp2_wrap`` refuses that model; to shard a model yourself, wrap one loaded with ``from_pretrained``.
 - Diffusion HF exports now omit attention quantizer buffers by default, except for FLUX.1, which retains enabled Q/K/V ``_amax`` keys for runtime compatibility; other consumers of those keys can opt in with ``export_attention_quantizers=True`` (CLI: ``--extra-param export_attention_quantizers=true``). Disabled attention quantizers remain excluded, and diffusion components, including LTX-2, no longer emit KV-cache quantization metadata.
 - ``hf_quant_config.json`` of an INT4 or W4A8 AWQ checkpoint now sets ``pre_quant_scale`` per layer, only for layers that have the tensor. A model whose fused-MoE experts have none (AWQ never applies to them) is now exported as ``MIXED_PRECISION`` with per-layer entries instead of a uniform algorithm.
 - The Windows FVD example rejects I3D checkpoints requiring unrestricted pickle loading. Custom TorchScript archives now require ``--weights-sha256`` with a trusted checksum; tensor state dictionaries continue to load directly.
@@ -68,6 +71,7 @@ Changelog
 **Bug Fixes**
 
 - Megatron-Core fake quantization of Gated DeltaNet (Qwen3.5 / Qwen3.6) with a Transformer Engine ``in_proj`` now keeps its beta / alpha gates in BF16 during evaluation, QAD, ``fold_weight`` and the vLLM fake-quant export, matching deployment. Other ``in_proj`` layers stay fully quantized and warn.
+- AWQ-Clip's per-tensor clip, which ``nvfp4_awq_clip`` uses, is now searched over every data-parallel rank's data, as its block-wise clip already was, so the replicas of a weight take the same clip (exported amax values of data-parallel runs may change) and ``nvfp4_awq_clip`` works with ``examples/hf_ptq/hf_ptq.py --use_fsdp2`` on several GPUs.
 - ``hf_quant_config.json`` now declares ``pre_quant_scale`` only for INT4 / W4A8 layers that have the tensor; loading INT4 / W4A8 fused-MoE checkpoints in TensorRT-LLM also needs a release whose MoE loader treats it as optional. AWQ, SmoothQuant and SVDQuant now warn when they skip quantized fused-MoE experts.
 - Hugging Face fused MoE experts stored transposed, ``(num_experts, in_dim, out_dim)``, without a quantized wrapper of their own (for example Aria's) are now left unquantized with a warning. They were quantized with gate and up split along the wrong axis, so their exported weights were wrong; the Hugging Face export now refuses such a model's MoE block instead.
 - Calibrating a Megatron-Core MLA model now gives ``linear_q_down_proj`` and ``linear_kv_down_proj`` one per-tensor input and weight range, as vLLM and TensorRT-LLM fuse them into one GEMM with one scale per tensor. Re-calibrate existing MLA checkpoints to get the shared ranges.

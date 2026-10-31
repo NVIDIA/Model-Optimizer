@@ -13,12 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HuggingFace model loading: :func:`load_pretrained`, and the plan to distribute a model by."""
+"""HuggingFace model loading: :func:`load_pretrained`, by a plan to distribute the model."""
 
+import copy
 import logging
 import os
 import re
+import warnings
 from collections import defaultdict
+from contextlib import contextmanager
 from itertools import chain
 from typing import TYPE_CHECKING, Any
 
@@ -51,9 +54,10 @@ from modelopt.torch.utils.distributed import (
     DistributionPlan,
     barrier,
     broadcast_state_dict,
-    fsdp2_wrap,
     is_initialized,
+    set_distribution_plan,
 )
+from modelopt.torch.utils.fsdp2_utils import fsdp2_wrap
 from modelopt.torch.utils.logging import print_rank_0, warn_rank_0
 from modelopt.torch.utils.moe import (
     _choose_ep_degree,
@@ -428,74 +432,438 @@ def record_unplaced_source_keys(
     return keys
 
 
+_FSDP2 = "FSDP2"
+# What each sharded load takes besides the checkpoint. These loads build the model class and place
+# it themselves, so from_pretrained's own arguments (device_map, max_memory, ...) do not reach them.
+_FSDP2_ONLY = frozenset({"cpu_offload", "mp_policy", "broadcast_chunk_size"})
+_SHARDED_LOAD_OPTIONS = {
+    _FSDP2: _FSDP2_ONLY | {"trust_remote_code", "attn_implementation", "hf_config"}
+}
+# The FSDP2-only values that ask nothing of a whole load: the FSDP2 load's defaults, and None where
+# that leaves the option unset (a None broadcast_chunk_size asks for all of a source's layers).
+_ASKS_NOTHING = {"cpu_offload": (False, None), "mp_policy": (None,), "broadcast_chunk_size": (8,)}
+
+
+def _route(plan: DistributionPlan) -> str | None:
+    """The sharded load ``plan`` takes, or ``None`` when every rank loads the whole model."""
+    if plan.world_size != dist.size():
+        raise ValueError(
+            f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}."
+        )
+    if plan.is_expert_parallel:
+        raise NotImplementedError(
+            f"{plan!r} shards the routed experts, which load_pretrained has no load for. Plan "
+            "ep_size=1 (MODELOPT_EP_DEGREE=1) to give every rank the whole model, or shard it "
+            "with FSDP2."
+        )
+    return _FSDP2 if plan.is_fsdp_dense else None
+
+
+@contextmanager
+def _refused_together(label: str, alone: bool):
+    """Raise on every rank if the block raises on any, so no rank waits for one that refused."""
+    error = None
+    try:
+        yield
+    except BaseException as e:  # A SystemExit too: the others would wait for this rank as well.
+        error = e
+
+    def refuse() -> None:
+        if error is not None:
+            raise error
+
+    if alone:  # A process of a launch that set no group up has no peers to tell.
+        refuse()
+    else:
+        dist.all_reduce(label, refuse, combine=lambda _: None)
+
+
+def _read_config(path, auto_class, trust_remote_code: bool = False, **hub_options):
+    """``path``'s config as ``auto_class.from_pretrained`` reads it: config_class, or AutoConfig."""
+    if (reader := getattr(auto_class, "config_class", None)) is not None:
+        return reader.from_pretrained(path, **hub_options)
+    return AutoConfig.from_pretrained(path, trust_remote_code=trust_remote_code, **hub_options)
+
+
+def _init_quantized_weights() -> bool:
+    """Whether ``init_quantized_weights`` patched ``from_pretrained`` to quantize and place."""
+    return getattr(AutoModelForCausalLM.from_pretrained, "_modelopt_init_quantized_weights", False)
+
+
+def _whole_instead(decided: bool) -> str:
+    """How to have every rank load the model whole: the knob counts only for a decided plan."""
+    plan = f"distribution=DistributionPlan({dist.size()}, dense='replicate')"
+    return f"MODELOPT_FSDP_SIZE=1 or {plan}" if decided else plan
+
+
+def _refuse_sharded_load_options(
+    route, auto_class, kwargs, decided: bool, measured: bool = False
+) -> None:
+    """Refuse what the sharded load ``route`` cannot honor; ``measured``: GPU memory chose it."""
+    # An option passed as None, from_pretrained's own default (device_map=None, say), asks nothing.
+    passed = {name for name, value in kwargs.items() if value is not None}
+    unknown = sorted(passed - _SHARDED_LOAD_OPTIONS[route] - {"dtype", "torch_dtype"})
+    # torch_dtype is from_pretrained's older name for dtype, and None means "auto" to it.
+    dtypes = [name for name in ("dtype", "torch_dtype") if kwargs.get(name) not in (None, "auto")]
+    if measured and (refused := sorted({*unknown, *dtypes})):
+        # Say so, rather than refuse the options below as if the caller had asked for this load.
+        raise TypeError(
+            f"{refused} do not apply to a sharded load, but no plan or MODELOPT_FSDP_SIZE asked for "
+            f"a layout, and by rank 0's GPU memory the model does not fit one GPU, so the {route} "
+            f"load shards it. To load it whole on every rank: {_whole_instead(decided)}."
+        )
+    if _init_quantized_weights():
+        raise NotImplementedError(
+            f"The {route} load builds the model without from_pretrained, so it would skip "
+            "init_quantized_weights' quantization; load the model whole on every rank: "
+            f"{_whole_instead(decided)}."
+        )
+    if auto_class not in (None, AutoModelForCausalLM):
+        name = getattr(auto_class, "__name__", repr(auto_class))
+        raise NotImplementedError(
+            f"The {route} load builds its model class itself, a causal LM's or a text-only VLM's "
+            f"image-text class, so it takes no auto_class={name}: leave it out to have the load "
+            f"pick, or load the model whole with it: {_whole_instead(decided)}."
+        )
+    if dtypes:  # A sharded load keeps the checkpoint's dtype.
+        name = dtypes[0]
+        raise TypeError(
+            f"The {route} load reads the checkpoint's tensors as stored and keeps their dtype, so "
+            f"{name}={kwargs[name]!r} does not apply to it; FSDP2's mp_policy sets the dtype it "
+            "computes in."
+        )
+    if unknown:
+        raise TypeError(
+            f"{unknown} do not apply to the {route} load, which places the model itself; it "
+            f"takes {sorted(_SHARDED_LOAD_OPTIONS[route])}. To place the model yourself, have "
+            f"every rank load it whole: {_whole_instead(decided)}."
+        )
+
+
+def _sharded_load_kwargs(
+    route, ckpt_path, auto_class, model_type, kwargs, hub_options, decided: bool, measured: bool
+) -> dict:
+    """What the sharded load ``route`` names takes, refusing what it cannot honor."""
+    from modelopt.torch.models.hf import checkpoint_has_mtp
+
+    _refuse_sharded_load_options(route, auto_class, kwargs, decided, measured)
+    # Past the refusal, anything else is a dtype the load keeps or an option at its default, None.
+    kwargs = {k: v for k, v in kwargs.items() if k in _SHARDED_LOAD_OPTIONS[route]}
+    if checkpoint_has_mtp(model_type, ckpt_path):
+        # The head is built on a whole model only; carried over, it would export unquantized.
+        raise NotImplementedError(
+            f"The {route} load cannot build the MTP head this {model_type} checkpoint carries. To "
+            f"load it whole on every rank: {_whole_instead(decided)}."
+        )
+    trust_remote_code = kwargs.pop("trust_remote_code", False)
+    hf_config = kwargs.pop("hf_config", None)
+    if hf_config is None:
+        hf_config = AutoConfig.from_pretrained(
+            ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+        )
+    nested = (getattr(hf_config, name, None) for name in ("text_config", "llm_config"))
+    if any(getattr(c, "quantization_config", None) is not None for c in (hf_config, *nested)):
+        # Read as stored, quantized weights (a VLM's language model's too) would load as if not.
+        raise NotImplementedError(
+            f"The {route} load cannot dequantize this {model_type} checkpoint. To load it whole on "
+            f"every rank: {_whole_instead(decided)}."
+        )
+    # As build_meta_causal_lm builds: AutoModelForCausalLM refuses most VLMs' configs, and builds
+    # some as the language model alone, whose other towers the export would carry unquantized.
+    builds = (
+        AutoModelForImageTextToText if is_fsdp2_text_only_vlm(hf_config) else AutoModelForCausalLM
+    )
+    if _auto_class(hf_config, trust_remote_code=trust_remote_code) is not builds:
+        raise NotImplementedError(
+            f"The {route} load builds a causal LM, or a text-only VLM it supports, which this "
+            f"{model_type} checkpoint is not. To load it whole on every rank, pass its model class "
+            f"as auto_class, with {_whole_instead(decided)}."
+        )
+    if not dist.is_initialized() and "RANK" not in os.environ:
+        # FSDP2 shards through a process group even on one rank.
+        raise RuntimeError(
+            f"The {route} load shards through a process group, even on one rank, which a process "
+            "started without a launcher cannot set up; launch it with `torchrun --nproc_per_node=1`."
+        )
+    if not _has_own_gpu():
+        # Refused with the other ranks, not inside the load, where they would wait for this one.
+        raise RuntimeError(
+            f"The {route} load shards onto each rank's own GPU, and this rank has none: it sees "
+            f"{torch.cuda.device_count()} GPU(s) as local rank {dist.local_rank()}. To load it "
+            f"whole on every rank: {_whole_instead(decided)}."
+        )
+    return {"trust_remote_code": trust_remote_code, "hf_config": hf_config, **kwargs}
+
+
+def _own_gpu_index() -> int | None:
+    """This rank's GPU, as torch's DeviceMesh takes it, or ``None`` for a rank with none there.
+
+    The device CUDA is set to once it is set up, else the one the rank's local rank numbers.
+    """
+    if not torch.cuda.is_available():
+        return None
+    if torch.cuda.is_initialized():
+        return torch.cuda.current_device()
+    index = dist.local_rank()
+    return index if index < torch.cuda.device_count() else None
+
+
+def _has_own_gpu() -> bool:
+    """Whether this rank has a GPU of its own (:func:`_own_gpu_index`)."""
+    return _own_gpu_index() is not None
+
+
+def _load_sharded(ckpt_path, load_kwargs) -> nn.Module:
+    """The FSDP2 load, by the arguments :func:`_sharded_load_kwargs` checked."""
+    if not dist.is_initialized():
+        # A single process's group of one, which the sharded model needs while it lives.
+        dist.setup()
+    return parallel_load_and_prepare_fsdp2(
+        ckpt_path,
+        torch.device("cuda", _own_gpu_index()),
+        dist.rank(),
+        dist.size(),
+        **load_kwargs,
+    )
+
+
 def load_pretrained(
     ckpt_path: str,
     auto_class: Any = None,
     *,
     model_type: str | None = None,
+    distribution: DistributionPlan | None = None,
     **kwargs,
 ) -> nn.Module:
-    """Load a Hugging Face model for ModelOpt to optimize and export.
+    """Load a Hugging Face model for ModelOpt to optimize and export, whole or distributed.
 
-    ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
-    ``AutoModelForCausalLM``), plus what ModelOpt needs around the load:
+    ``distribution`` is the :class:`~modelopt.torch.utils.distributed.DistributionPlan` to load by:
+    every rank takes rank 0's or, when rank 0 passes none, :func:`resolve_distribution_plan`'s.
+
+    * ``dense="fsdp"``: :func:`parallel_load_and_prepare_fsdp2` shards a causal LM, or a text-only
+      VLM it supports, over the process group (one process needs ``torchrun --nproc_per_node=1``).
+      It builds and places the model itself, so it takes its own options but no ``auto_class``,
+      placement or ``dtype``, and refuses a quantized checkpoint.
+    * otherwise ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
+      ``AutoModelForCausalLM``); on a distributed run every rank loads the whole model, onto its own
+      GPU unless ``device_map`` is passed or ``init_quantized_weights`` places it.
+
+    No load here shards the routed experts: a plan with ``ep_size > 1`` is refused. A refusal on any
+    rank raises on every rank, before the load. The plan is recorded on the model
+    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`) for calibration and export, so
+    :func:`~modelopt.torch.utils.fsdp2_utils.fsdp2_wrap` refuses it: to shard a model yourself,
+    load it with ``from_pretrained``. :doc:`/guides/_distributed_loading` has the routing in full.
+    Around the load:
 
     * A Hub model ID is made local first (:func:`ensure_local_checkpoint`, which takes the
       ``revision``, ``token``, ``cache_dir`` and ``local_files_only`` ``kwargs``): the export reads
       the source checkpoint from disk. Under ``torch.distributed`` every rank must call this. The
-      config and model loads still take all but ``revision``: an ``auto_map`` entry can name
-      custom code in another Hub repo, which Transformers fetches with them. A ``subfolder`` is
-      part of where the checkpoint is: the config, the loading hook and the record below read it,
-      as the load does.
+      config read and a whole-model load still take all but ``revision``: an ``auto_map`` entry can
+      name custom code in another Hub repo, which Transformers fetches with them. A sharded load
+      builds the model with ``from_config``, which takes none. A ``subfolder`` is part of where the
+      checkpoint is: the config, the loading hook and the record below read it, as the load does.
     * The model type's loading hook runs
       (:func:`~modelopt.torch.models.hf.prepare_model_for_loading`), e.g. to keep the MTP head a
       Nemotron-H checkpoint carries. ``model_type`` selects it; when omitted, the type of the
-      ``config`` passed for the load, else of the checkpoint's config.
+      ``config`` passed for the load, else of the checkpoint's config. A sharded load cannot run
+      it, so it refuses a checkpoint the hook would build modules for.
     * The checkpoint tensors the model has no parameter for are recorded
       (:func:`record_unplaced_source_keys`), so the export carries them over unchanged. The model
       is returned alone: ``output_loading_info=True`` is refused. So is a ``variant``: the record
       and the export read the checkpoint's default weight files.
     """
-    if kwargs.pop("output_loading_info", False):
-        raise ValueError(
-            "load_pretrained returns the model alone and does not take output_loading_info=True; "
-            "the checkpoint tensors the model has no parameter for are recorded on it instead "
-            "(see record_unplaced_source_keys)."
-        )
-    if kwargs.get("variant") is not None:
-        raise ValueError(
-            f"load_pretrained does not take variant={kwargs['variant']!r}: the checkpoint tensors "
-            "the model has no parameter for are recorded from, and carried into the export from, "
-            "the checkpoint's default weight files."
-        )
     # Importing modelopt.torch.models registers every model spec; only callers of this need them.
     from modelopt.torch.models.hf import prepare_model_for_loading
 
-    auto_class = auto_class or AutoModelForCausalLM
+    # A launch whose processes set no group up (hf_ptq without --use_fsdp2): each loads alone.
+    alone = dist.is_distributed_launch() and not dist.is_initialized()
+    if alone and isinstance(distribution, DistributionPlan) and distribution.world_size > 1:
+        raise RuntimeError(
+            f"{distribution!r} is for {distribution.world_size} ranks, whose process group this "
+            f"{os.environ['WORLD_SIZE']}-rank launch has not set up; load inside distributed_run(), "
+            "which sets it up."
+        )
+    if alone and isinstance(distribution, DistributionPlan) and _route(distribution) is not None:
+        # One rank cannot set the launch's group up, and a one-rank plan is no plan for the launch.
+        launch = os.environ["WORLD_SIZE"]
+        raise RuntimeError(
+            f"The {_route(distribution)} load shards through this {launch}-rank launch's process "
+            "group, which is not set up; load inside distributed_run(), which sets it up, with a "
+            f"plan for the launch: DistributionPlan({launch}, dense='fsdp')."
+        )
+    if alone and distribution is None:
+        # Knobs asking to shard over the launch are refused, as is a value that is no EP degree.
+        ep, world = _ep_degree(None), int(os.environ["WORLD_SIZE"])
+        experts = ep != "auto" and ep > 1
+        asked = [f"MODELOPT_EP_DEGREE={env.ep_degree()}"] if experts else []
+        if _dense_from_env(world) == "fsdp":
+            asked.append(f"MODELOPT_FSDP_SIZE={env.fsdp_size()}")
+        if asked:
+            ep_way = ", with MODELOPT_EP_DEGREE=1: no load here shards the routed experts"
+            raise RuntimeError(
+                f"{' and '.join(asked)} ask to shard the model over this "
+                f"{os.environ['WORLD_SIZE']}-rank launch, whose process group is not set up; load "
+                f"inside distributed_run(), which sets it up{ep_way if experts else ''}."
+            )
+    # None is these options' own default: passed explicitly, it is no option to refuse.
+    for name in ("config", "variant", "hf_config"):
+        if name in kwargs and kwargs[name] is None:
+            del kwargs[name]
+    # The config to load with, or, as from_pretrained also takes it, a path to read it from.
+    config = kwargs.get("config")
+    config = config if isinstance(config, (PretrainedConfig, str, os.PathLike)) else None
+
+    def handed() -> DistributionPlan | None:
+        if distribution is None:
+            return None
+        if not isinstance(distribution, DistributionPlan):
+            raise TypeError(f"distribution={distribution!r}: expected a DistributionPlan or None.")
+        _route(distribution)
+        return distribution
+
+    # Every rank loads rank 0's distribution, which rank 0 checks before it sends it.
+    plan = handed() if alone else dist.broadcast_from("distribution", handed)
     hub_options = {
         k: kwargs.pop(k) for k in ("token", "cache_dir", "local_files_only") if k in kwargs
     }
     revision = {"revision": kwargs.pop("revision")} if "revision" in kwargs else {}
-    _, ckpt_path = ensure_local_checkpoint(ckpt_path, **revision, **hub_options)
+    decided = plan is None and dist.size() > 1
+    # Each rank checks its own arguments; a refusal on one fails every rank before the fetch.
+    with _refused_together("load arguments", alone):
+        # No load here shards the routed experts yet, so an EP degree left to the decision is 1.
+        # Parsed in this check, a knob one rank cannot parse fails every rank.
+        ep_size = 1 if decided and _ep_degree(None) == "auto" else None
+        if kwargs.pop("output_loading_info", False):
+            raise ValueError(
+                "load_pretrained returns the model alone and does not take "
+                "output_loading_info=True; the checkpoint tensors the model has no parameter for "
+                "are recorded on it instead (see record_unplaced_source_keys)."
+            )
+        if kwargs.get("variant") is not None:
+            raise ValueError(
+                f"load_pretrained does not take variant={kwargs['variant']!r}: the checkpoint "
+                "tensors the model has no parameter for are recorded from, and carried into the "
+                "export from, the checkpoint's default weight files."
+            )
+        if config is not None and "hf_config" in kwargs:
+            raise TypeError("config and hf_config both name the config to load with; pass one.")
+        if "hf_config" in kwargs and (plan is None or _route(plan) is None):
+            # Only a sharded load builds from hf_config, so it needs the plan it came with.
+            raise TypeError(
+                "hf_config is the config resolve_distribution_plan returned with a plan that "
+                "shards the model: pass that plan as distribution=, or pass config= to have the "
+                "plan decided from your config."
+            )
+        if plan is not None and _route(plan) is not None:
+            # A config passed becomes the load's hf_config; subfolder is where the checkpoint is.
+            _refuse_sharded_load_options(
+                _route(plan),
+                auto_class,
+                {
+                    k: v
+                    for k, v in kwargs.items()
+                    if k != "subfolder" and not (k == "config" and config is not None)
+                },
+                decided=False,
+            )
+    # Rank 0 fetches the checkpoint; a rank that cannot see it then fails every rank.
+    with _refused_together("checkpoint fetch", alone):
+        _, ckpt_path = ensure_local_checkpoint(ckpt_path, **revision, **hub_options)
+        if config is not None and not isinstance(config, PretrainedConfig):
+            # Read as the load reads it, so the plan and the loading hook follow the model's config.
+            trust = kwargs.get("trust_remote_code", False)
+            config = _read_config(config, auto_class, trust, **hub_options)
     subfolder = kwargs.pop("subfolder", None)
     if subfolder:
         ckpt_path = os.path.join(ckpt_path, subfolder)
     trust_remote_code = kwargs.get("trust_remote_code", False)
-    if model_type is None:
-        # The load uses the config passed for it, if any, so the loading hook follows that one.
-        model_type = getattr(kwargs.get("config"), "model_type", None) or (
-            AutoConfig.from_pretrained(
-                ckpt_path, trust_remote_code=trust_remote_code, **hub_options
-            ).model_type
+    hf_config = kwargs.get("hf_config")
+    if decided:
+        plan, hf_config = resolve_distribution_plan(
+            ckpt_path,
+            config=config,
+            auto_class=auto_class,
+            trust_remote_code=trust_remote_code,
+            ep_size=ep_size,
+            **hub_options,
         )
-    with prepare_model_for_loading(
-        model_type,
-        ckpt_path,
-        trust_remote_code,
-        model_class=None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class,
-    ):
-        model = auto_class.from_pretrained(ckpt_path, **hub_options, **kwargs)
-    unplaced = record_unplaced_source_keys(model, ckpt_path)
+        if _route(plan) is not None:
+            kwargs.setdefault("hf_config", hf_config)
+    elif plan is None:
+        # One rank holds the whole model, whatever the model: there is nothing to decide or read.
+        plan = DistributionPlan()
+    route = _route(plan)
+    # Each rank reads the config itself, so a refusal of it fails every rank before the load.
+    with _refused_together("load checks", alone):
+        # Options only the FSDP2 load takes would reach from_pretrained, which has no use for them.
+        if route is None:
+            for name, nothing in _ASKS_NOTHING.items():
+                if name in kwargs and kwargs[name] in nothing:
+                    del kwargs[name]
+        if route is None and (sharded := sorted(set(kwargs) & _FSDP2_ONLY)):
+            raise TypeError(
+                f"{sharded} only apply to the FSDP2 load, but {plan!r} gives every rank the whole "
+                "model; pass a plan with dense='fsdp' to shard it."
+            )
+        measured = decided and route == _FSDP2 and _dense_from_env(plan.world_size) == "auto"
+        if route is not None and config is not None:
+            # The sharded load builds from hf_config, a copy, as building writes to the config.
+            del kwargs["config"]
+            if "hf_config" not in kwargs:
+                kwargs["hf_config"] = copy.deepcopy(config)
+        if model_type is None:
+            # The load uses the config passed for it, if any, so the loading hook follows that one.
+            if route == _FSDP2 and hf_config is None and config is None:
+                # The FSDP2 load builds from the checkpoint's config too: read it once, for both.
+                hf_config = AutoConfig.from_pretrained(
+                    ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+                )
+                kwargs["hf_config"] = hf_config
+            chosen = hf_config if hf_config is not None else config
+            model_type = getattr(chosen, "model_type", None) or (
+                _read_config(ckpt_path, auto_class, trust_remote_code, **hub_options).model_type
+            )
+        load_kwargs = (
+            {}
+            if route is None
+            else _sharded_load_kwargs(
+                route, ckpt_path, auto_class, model_type, kwargs, hub_options, decided, measured
+            )
+        )
+    if route is not None:
+        model = _load_sharded(ckpt_path, load_kwargs)
+        # A sharded load finds the unplaced keys while it places the weights.
+        keys = model._modelopt_unplaced_source_keys
+    else:
+        # init_quantized_weights computes the device map itself, and refuses one it is passed.
+        spread = plan.world_size > 1 and not _init_quantized_weights()
+        if spread and (index := _own_gpu_index()) is not None:
+            # Each rank takes the whole model onto its own GPU: under "auto", every rank's
+            # accelerate could pick the same idle GPU.
+            kwargs.setdefault("device_map", {"": f"cuda:{index}"})
+        elif spread and "device_map" not in kwargs:
+            # This rank says so itself: rank 0 may have a GPU of its own, and nothing to say.
+            warnings.warn(
+                f"Rank {dist.rank()} has no GPU of its own: it sees {torch.cuda.device_count()} "
+                f"GPU(s) as local rank {dist.local_rank()}, so it loads the whole model where "
+                "from_pretrained places it without a device_map, on the CPU.",
+                stacklevel=2,
+            )
+        auto_class = auto_class or AutoModelForCausalLM
+        # It runs no collective, so a rank failing in it alone would leave the others in the next.
+        with (
+            _refused_together("whole-model load", alone),
+            prepare_model_for_loading(
+                model_type,
+                ckpt_path,
+                trust_remote_code,
+                model_class=None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class,
+            ),
+        ):
+            model = auto_class.from_pretrained(ckpt_path, **hub_options, **kwargs)
+        keys = None
+    set_distribution_plan(model, plan)
+    unplaced = record_unplaced_source_keys(model, ckpt_path, keys)
     if unplaced:
         print_rank_0(
             f"{len(unplaced)} checkpoint tensor(s) the model has no parameter for "
@@ -830,6 +1198,9 @@ def parallel_load_and_prepare_fsdp2(
     ``broadcast_chunk_size`` sets how many of a source's owned layers are broadcast per collective:
     a smaller value lowers the peak transient GPU memory at the cost of more collectives (default 8;
     pass ``None`` to broadcast all of a source's layers at once).
+
+    It records no distribution plan: a caller records its own, as :func:`load_pretrained` does
+    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`).
     """
     resolved_path = _resolve_checkpoint_dir(ckpt_path, rank)
     weight_map = indexed_weight_map(resolved_path)
@@ -1007,14 +1378,19 @@ def _ep_degree(ep_size) -> int | str:
     if str(value).lower() in ("auto", "0"):
         return "auto"
     try:
-        return int(value)
-    except ValueError:
+        degree = int(value)
+    except (ValueError, TypeError):  # TypeError: an argument that is no number at all, as [2]
+        degree = 0
+    if isinstance(value, float) and value != degree:  # int() truncates a fraction
+        degree = 0
+    if degree < 1:
         name = "MODELOPT_EP_DEGREE" if ep_size is None else "ep_size"
-        raise ValueError(f"{name}={value!r}: expected auto, 0 (auto) or an EP degree.") from None
+        raise ValueError(f"{name}={value!r}: expected auto, 0 (auto) or an EP degree.")
+    return degree
 
 
 def _decide_distribution(
-    ckpt_path: str, hf_config, world_size: int, ep_size, dense, trust_remote_code: bool
+    ckpt_path: str, hf_config, world_size: int, ep_size, dense, trust_remote_code: bool, auto_class
 ) -> DistributionPlan:
     """The plan :func:`resolve_distribution_plan` returns, decided by this rank alone."""
     # What the caller set the EP degree with, for a refusal to name it.
@@ -1030,6 +1406,25 @@ def _decide_distribution(
         )
     ep_size = _ep_degree(ep_size)
     dense = _dense_from_env(world_size) if dense is None else dense
+    if (
+        (auto_class not in (None, AutoModelForCausalLM) or _init_quantized_weights())
+        and ep_size in ("auto", 1)
+        and dense in ("auto", "replicate")
+    ):
+        # The sharded loads refuse this class and init_quantized_weights: load it whole, unbuilt.
+        return DistributionPlan(world_size)
+    if auto_class not in (None, AutoModelForCausalLM):
+        # Refused here, rather than build the decision's own pick of class, which may not build.
+        name = getattr(auto_class, "__name__", repr(auto_class))
+        raise NotImplementedError(
+            f"A sharded load builds its model class itself, a causal LM's or a text-only VLM's "
+            f"image-text class, so it takes no auto_class={name} while ep_size={ep_size!r}, "
+            f"dense={dense!r} ask to shard. To give every rank the whole model, plan ep_size=1 and "
+            "dense='replicate' (MODELOPT_EP_DEGREE=1, MODELOPT_FSDP_SIZE=1)."
+        )
+    # Building writes to the config it builds from, and only rank 0 decides: build from a copy, so
+    # the config returned with the plan, which a sharded load builds from, is alike on every rank.
+    hf_config = copy.deepcopy(hf_config)
     try:
         model = build_meta_causal_lm(
             ckpt_path,
@@ -1097,6 +1492,8 @@ def _decide_distribution(
 def resolve_distribution_plan(
     ckpt_path: str,
     *,
+    config: PretrainedConfig | None = None,
+    auto_class: Any = None,
     trust_remote_code: bool = False,
     ep_size: int | str | None = None,
     dense: str | None = None,
@@ -1113,7 +1510,7 @@ def resolve_distribution_plan(
     every later step reads it back from there
     (:func:`~modelopt.torch.utils.distributed.distribution_plan`). Returns ``(plan, hf_config)``,
     ``hf_config`` being this rank's own copy of the config (rank 0 decides the plan from its copy),
-    for a sharded load to build from.
+    for a sharded load to build from: :func:`load_pretrained` takes it only with a plan that shards.
 
     Rank 0 decides, from the model built on the meta device: from its parameters rather than
     estimates of them, and from its routed experts as an expert-parallel load finds them. Every rank
@@ -1140,6 +1537,11 @@ def resolve_distribution_plan(
     returns no path, so a caller that loads the checkpoint resolves it first, with
     :func:`ensure_local_checkpoint`, and passes the local directory: the plan is then decided for
     the snapshot the load reads.
+
+    ``config``, the caller's own config, is decided from instead of the checkpoint's. ``auto_class``
+    is the class the load builds with: with one the sharded loads refuse, or inside
+    ``init_quantized_weights``, and nothing asking to shard, the plan loads the model whole, decided
+    without a build.
     """
     # Each rank reads the checkpoint for itself. One that cannot must fail every rank here, rather
     # than leave the others waiting in a broadcast below for a rank that already raised.
@@ -1155,14 +1557,18 @@ def resolve_distribution_plan(
         )
         if subfolder:
             local_path = os.path.join(local_path, subfolder)
-        config = AutoConfig.from_pretrained(
+        if config is not None:
+            read.append((local_path, copy.deepcopy(config)))
+            return True
+        hf_config = _read_config(
             local_path,
+            auto_class,
             trust_remote_code=trust_remote_code,
             token=token,
             cache_dir=cache_dir,
             local_files_only=local_files_only,
         )
-        read.append((local_path, config))
+        read.append((local_path, hf_config))
         return True
 
     dist.all_reduce("checkpoint read", checkpoint_read, all)
@@ -1171,7 +1577,7 @@ def resolve_distribution_plan(
     plan = dist.broadcast_from(
         "plan",
         lambda: _decide_distribution(
-            ckpt_path, hf_config, world_size, ep_size, dense, trust_remote_code
+            ckpt_path, hf_config, world_size, ep_size, dense, trust_remote_code, auto_class
         ),
     )
     if plan != DistributionPlan():

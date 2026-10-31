@@ -41,6 +41,7 @@ from transformers import (
     Mxfp4Config,
 )
 
+from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.plugins import model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import (
     load_pretrained,
@@ -105,6 +106,7 @@ def test_records_the_stray_tensors_and_the_checkpoint(tmp_path, extra, subfolder
     assert model._modelopt_unplaced_source_keys == sorted(extra), "sorted, for a stable export"
     assert model._modelopt_source_checkpoint == str(checkpoint)
     assert model.dtype == torch.bfloat16, "from_pretrained kwargs must pass through"
+    assert distribution_plan(model) == DistributionPlan(), "a single process holds it whole"
 
 
 class _Recorder:
@@ -192,17 +194,65 @@ def test_an_option_it_cannot_honor_is_refused_before_anything_loads(option, refu
         load_pretrained("no/such/checkpoint", **option)
 
 
-def test_a_config_passed_for_the_load_needs_none_on_disk(tmp_path):
-    """The load uses the config it is passed, as ``from_pretrained`` does, and so does the choice of
-    its loading hook: a directory without a config.json loads."""
-    config = _tiny_llama_config()
-    _save(tmp_path, config, {**LlamaForCausalLM(config).state_dict(), STRAY: torch.ones(32)})
-    (tmp_path / "config.json").unlink()
-    (tmp_path / "generation_config.json").write_text("{}")  # from_pretrained reads it instead
+class _OwnConfig(LlamaConfig):
+    """A config class of the caller's own, which AutoConfig has no mapping for."""
 
-    model = _load(tmp_path, config=config)
+    model_type = "modelopt_test_own_llama"
+
+
+class _OwnModel(LlamaForCausalLM):
+    config_class = _OwnConfig
+
+
+@pytest.mark.parametrize(
+    ("as_path", "model_type", "model_class"),
+    [
+        (False, None, None),
+        (True, None, LlamaForCausalLM),
+        (True, "llama", LlamaForCausalLM),
+        (True, None, _OwnModel),
+    ],
+    ids=["config", "config-path", "config-path-and-model-type", "own-config-class-path"],
+)
+def test_a_config_passed_for_the_load_needs_none_on_disk(
+    tmp_path, as_path, model_type, model_class
+):
+    """The load uses the config it is passed, or reads it from the directory it is passed, as
+    ``from_pretrained`` does, through the model class's own config class, and so do its plan and the
+    choice of its loading hook: a checkpoint directory without a config.json loads, through a model
+    class of the caller's own too."""
+    config = _tiny_llama_config()
+    if model_class is _OwnModel:
+        config = _OwnConfig(**config.to_diff_dict())
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    _save(weights, config, {**LlamaForCausalLM(config).state_dict(), STRAY: torch.ones(32)})
+    if as_path:
+        (tmp_path / "config").mkdir()
+        (weights / "config.json").rename(tmp_path / "config" / "config.json")
+        passed = {"auto_class": model_class, "config": str(tmp_path / "config")}
+    else:
+        (weights / "config.json").unlink()
+        passed = {"config": config}
+    (weights / "generation_config.json").write_text("{}")  # from_pretrained reads it instead
+
+    model = _load(weights, model_type=model_type, **passed)
 
     assert model._modelopt_unplaced_source_keys == [STRAY]
+
+
+@pytest.mark.parametrize("model_type", [_OwnConfig.model_type, None], ids=["given", "read"])
+def test_a_model_class_of_the_callers_own_reads_its_config_itself(tmp_path, model_type):
+    """A single process plans nothing for a model class of the caller's own, and a model type left
+    to read is read as the class reads its config, through its own config class, which AutoConfig
+    need not know: the plan of a single process is the same whatever the model."""
+    config = _OwnConfig(**_tiny_llama_config().to_diff_dict())
+    _save(tmp_path, config, {**LlamaForCausalLM(config).state_dict(), STRAY: torch.ones(32)})
+
+    model = _load(tmp_path, _OwnModel, model_type=model_type)
+
+    assert model._modelopt_unplaced_source_keys == [STRAY]
+    assert distribution_plan(model) == DistributionPlan()
 
 
 def test_an_ignore_rule_does_not_hide_an_unplaced_tensor(tmp_path):

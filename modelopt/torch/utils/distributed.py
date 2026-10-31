@@ -16,12 +16,15 @@
 """Utility functions for using torch.distributed."""
 
 import functools
+import gc
 import io
+import itertools
 import os
 import sys
 import time
 import traceback
-from collections.abc import Callable, Iterator
+import types
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import timedelta
@@ -30,8 +33,17 @@ from warnings import warn
 
 import torch
 import torch.distributed
-from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, fully_shard
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
+from torch.utils.data import (
+    BatchSampler,
+    DataLoader,
+    IterableDataset,
+    RandomSampler,
+    SequentialSampler,
+)
+from torch.utils.data.distributed import DistributedSampler
+from tqdm import tqdm
 
 __all__ = [
     "DistributedProcessGroup",
@@ -42,6 +54,7 @@ __all__ = [
     "backend",
     "barrier",
     "broadcast_from",
+    "distributed_forward_loop",
     "distributed_run",
     "distribution_plan",
     "fsdp2_wrap",
@@ -54,7 +67,9 @@ __all__ = [
     "is_initialized",
     "is_master",
     "rank",
+    "recorded_distribution_plan",
     "set_distribution_plan",
+    "shard_dataloader",
     "size",
 ]
 
@@ -351,6 +366,16 @@ torch.serialization.add_safe_globals([DistributionPlan])
 _PLAN_ATTR = "_modelopt_distribution_plan"
 
 
+def _recorded_plan(model: torch.nn.Module) -> tuple[str, DistributionPlan] | None:
+    """Which of ``model`` and its submodules records a plan, named, and that plan; else ``None``."""
+    for name, module in model.named_modules():
+        recorded = getattr(module, _PLAN_ATTR, None)
+        if recorded is not None:
+            where = f"{type(module).__name__} {name!r}" if name else type(module).__name__
+            return where, recorded
+    return None
+
+
 def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> None:
     """Record that ``model`` is distributed as ``plan``, on it and on every submodule it has now.
 
@@ -374,14 +399,12 @@ def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> Non
             f"{plan!r} is for {plan.world_size} ranks, but the run it is recorded in has "
             f"{size()}; a plan's world_size is the ranks that hold the model."
         )
-    for name, module in model.named_modules():
-        recorded = getattr(module, _PLAN_ATTR, None)
-        if recorded is not None:
-            where = f"{type(module).__name__} {name!r}" if name else type(module).__name__
-            raise ValueError(
-                f"{where} is already recorded as distributed by {recorded!r}; a model is "
-                f"distributed and its plan recorded once, so {plan!r} cannot be recorded over it."
-            )
+    if (found := _recorded_plan(model)) is not None:
+        where, recorded = found
+        raise ValueError(
+            f"{where} is already recorded as distributed by {recorded!r}; a model is distributed "
+            f"and its plan recorded once, so {plan!r} cannot be recorded over it."
+        )
     for module in model.modules():
         setattr(module, _PLAN_ATTR, plan)
 
@@ -396,18 +419,28 @@ def distribution_plan(model: torch.nn.Module) -> DistributionPlan:
     a launch sets its group up, each of its processes runs alone with a model of its own, so a model
     with no plan reads as a single process's there.
     """
-    plan = getattr(model, _PLAN_ATTR, None)
+    plan = recorded_distribution_plan(model)
     if plan is not None:
         return plan
     sharded = is_fsdp2_model(model)
     if sharded or size() > 1:
         how = "is FSDP2-sharded" if sharded else f"is held in a run of {size()} ranks"
         raise RuntimeError(
-            f"{type(model).__name__} {how}, but has no distribution plan recorded. Record how it "
-            "is distributed with set_distribution_plan(); a module added to a model after its plan "
-            "was recorded has none, so read the plan off that model."
+            f"{type(model).__name__} {how}, but has no distribution plan recorded. Load it with "
+            "load_pretrained, or record how it is distributed with set_distribution_plan(); a "
+            "module added to a model after its plan was recorded has none, so read the plan off "
+            "that model."
         )
     return DistributionPlan()
+
+
+def recorded_distribution_plan(model: torch.nn.Module) -> DistributionPlan | None:
+    """The plan :func:`set_distribution_plan` recorded on ``model``, or ``None`` if none was.
+
+    For code that also serves models distributed without a plan, such as Megatron's, which
+    :func:`distribution_plan` refuses in a run of several ranks.
+    """
+    return getattr(model, _PLAN_ATTR, None)
 
 
 _V = TypeVar("_V")
@@ -666,6 +699,269 @@ def distributed_run(
             _destroy_group(exc)
 
 
+class _StridedIterableShard(IterableDataset):
+    """Rank-strided shard of a streaming ``IterableDataset`` (no ``len()`` required).
+
+    ``DistributedSampler`` only works with map-style datasets. Streaming calibration datasets (e.g. the
+    Nemotron image-text ``NemotronTarPlusJsonlIterable``) are iterable, so each rank instead builds its
+    own copy of the stream, the same on every rank as :func:`shard_dataloader` requires,
+    and takes slot ``rank`` from every complete group of ``world_size`` consecutive samples. Any
+    trailing incomplete group is dropped so every rank yields exactly the same count -- preserving
+    the equal-per-rank-batch invariant that keeps per-step EP collectives from hanging when one rank
+    runs short. A stream shorter than ``world_size`` has no complete group, so it is refused rather
+    than leaving every rank with nothing to calibrate on. It is iterated in the loader's own process
+    (:func:`shard_dataloader` refuses workers for a stream). Every rank still reads and decodes every
+    sample, keeping one in ``world_size``: for a stream costly to decode, a map-style dataset, or a
+    source that shards itself, saves that work.
+    ``vlm_dataset_utils._ShardedIterable`` cannot stand in: it pads every rank to a count its own loader
+    knows, while this wraps any loader's stream, which may know none.
+    """
+
+    def __init__(self, base: IterableDataset, rank: int, world_size: int):
+        self.base = base
+        self.rank = rank
+        self.world_size = world_size
+
+    def __iter__(self):
+        it = iter(self.base)
+        for index in itertools.count():
+            group = list(itertools.islice(it, self.world_size))
+            if len(group) < self.world_size:
+                if index == 0:
+                    # shard_dataloader requires the same stream on every rank and worker, so all of
+                    # them refuse it together.
+                    raise ValueError(
+                        f"The calibration stream has {len(group)} sample(s), fewer than the "
+                        f"{self.world_size} ranks: no rank would get a sample to calibrate on."
+                    )
+                return  # drop incomplete trailing group -> equal counts across ranks
+            yield group[self.rank]
+
+
+def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoader:
+    """Wrap a DataLoader so each rank sees a unique shard.
+
+    For map-style datasets a ``DistributedSampler`` is used. ``drop_last=False`` keeps per-rank batch
+    counts equal (else a rank exits calibration early and hangs the others on the per-step collectives),
+    at the cost of the sampler repeating up to ``world_size - 1`` samples to pad the even split. It
+    replaces the loader's sampler, so a shuffling one becomes the rank's unshuffled share, and one that
+    picks samples itself (a subset, a sampler over another source than the loader's dataset, a
+    random sampler drawing its own number of samples or with replacement, or a batch sampler other
+    than a plain ``BatchSampler``) is refused rather than silently widened. For streaming
+    ``IterableDataset`` datasets (which have no ``len()``
+    and so can't use a sampler) each rank strides its own copy of the stream via
+    :class:`_StridedIterableShard`. That stream must yield the same samples in the same order on
+    every rank, or the shards overlap and the ranks' step counts can differ, which hangs the
+    collectives: one that shuffles needs a fixed seed of its own, as the ranks' RNGs need not agree.
+    A stream loaded with workers is refused: a dataset that splits itself across them by
+    ``get_worker_info()``, as a Hugging Face streaming dataset does, would be split twice and
+    silently lose samples.
+
+    Forwards all non-sampler DataLoader settings from ``loader`` (batching, workers, pinning,
+    prefetch, init fn, generator, ...). With one rank there is nothing to shard: ``loader`` itself
+    comes back, its sampler and shuffling included.
+    """
+    if world_size == 1:
+        return loader
+    batching = loader.batch_sampler
+    if not isinstance(loader.dataset, IterableDataset):
+        # A plain BatchSampler, built from batch_size or passed in, batches what its sampler picks;
+        # with auto-batching off there is none, and the loader's sampler picks each item.
+        if type(batching) is BatchSampler:
+            picker = batching.sampler
+        else:
+            picker = loader.sampler if batching is None else batching
+        known = type(picker) in (SequentialSampler, RandomSampler, DistributedSampler)
+        # A sampler over another source than the loader's dataset, or a RandomSampler drawing its
+        # own number of samples or with replacement, picks which and how many it reads, as a subset
+        # does; one that orders or shuffles the whole dataset does not.
+        source = getattr(picker, "data_source", getattr(picker, "dataset", ()))
+        narrowing = known and (
+            len(source) != len(loader.dataset)
+            or (
+                isinstance(picker, RandomSampler)
+                and (picker.replacement or picker.num_samples != len(loader.dataset))
+            )
+        )
+        if not known or narrowing:
+            raise ValueError(
+                f"shard_dataloader: the loader's {type(picker).__name__} picks which samples it "
+                "reads, and the rank's DistributedSampler would replace it; pass a loader over "
+                "just the samples to calibrate on (a torch.utils.data.Subset) instead."
+            )
+    if isinstance(loader.dataset, IterableDataset):
+        if loader.num_workers:
+            raise ValueError(
+                f"shard_dataloader: a streaming loader with num_workers={loader.num_workers} is "
+                "refused: a dataset that splits itself across the workers by get_worker_info() "
+                "would be split twice, by worker and by rank, and lose samples. Load it with "
+                "num_workers=0."
+            )
+        return DataLoader(
+            _StridedIterableShard(loader.dataset, rank, world_size),
+            batch_size=loader.batch_size,
+            drop_last=loader.drop_last,
+            collate_fn=loader.collate_fn,
+            num_workers=loader.num_workers,
+            pin_memory=loader.pin_memory,
+            timeout=loader.timeout,
+            worker_init_fn=loader.worker_init_fn,
+            multiprocessing_context=loader.multiprocessing_context,
+            generator=loader.generator,
+            prefetch_factor=loader.prefetch_factor,
+            persistent_workers=loader.persistent_workers,
+            pin_memory_device=getattr(loader, "pin_memory_device", ""),
+        )
+    sampler = DistributedSampler(
+        loader.dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False,
+        drop_last=False,
+    )
+    return DataLoader(
+        loader.dataset,
+        batch_size=loader.batch_size if batching is None else batching.batch_size,
+        drop_last=loader.drop_last if batching is None else batching.drop_last,
+        sampler=sampler,
+        collate_fn=loader.collate_fn,
+        num_workers=loader.num_workers,
+        pin_memory=loader.pin_memory,
+        timeout=loader.timeout,
+        worker_init_fn=loader.worker_init_fn,
+        multiprocessing_context=loader.multiprocessing_context,
+        generator=loader.generator,
+        prefetch_factor=loader.prefetch_factor,
+        persistent_workers=loader.persistent_workers,
+        pin_memory_device=getattr(loader, "pin_memory_device", ""),
+    )
+
+
+def _reinstall_a2a_forwards(model, ep_mesh) -> int:
+    """Re-plant the torch_a2a TP forward wrappers that quantizer insertion clobbered.
+
+    transformers installs its TP input/output transforms by REPLACING ``module.forward`` with an
+    instance attribute (TensorParallelLayer.install_forward). For torch_a2a_experts that wrapper is
+    what passes the EP ``process_group`` into the experts forward. ModelOpt's quantizer insertion
+    rebinds ``module.forward`` on the same instance, dropping the wrapper -- after which
+    ``torch_a2a_experts_forward`` receives ``process_group=None`` and raises.
+
+    Called at the top of the calibration loop: after conversion (so it wraps the QUANTIZED forward)
+    and before the first forward. Only a forward quantizer insertion rebound is planted again: a
+    wrapper still in place -- transformers' from the load, on a module quantization left alone, or
+    one planted here on an earlier pass -- is kept, since wrapping it again would run its transforms
+    twice. ``ep_mesh`` is the mesh the routed experts are sharded over; without one there is nothing
+    to re-plant.
+    """
+    if ep_mesh is None:
+        return 0
+    try:
+        from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
+    except ImportError:  # older transformers
+        from transformers.integrations.tensor_parallel import ALL_PARALLEL_STYLES
+    try:
+        from transformers.distributed.tensor_parallel import _get_parameter_tp_plan
+    except ImportError:
+        from transformers.integrations.tensor_parallel import _get_parameter_tp_plan
+
+    plan = getattr(model, "tp_plan", None) or {}
+    if not plan:
+        return 0
+
+    n = 0
+    for name, mod in model.named_modules():
+        style_name = _get_parameter_tp_plan(parameter_name=name, tp_plan=plan, is_weight=False)
+        if style_name not in ("torch_a2a_experts", "torch_a2a_router"):
+            continue
+        # install_forward() -- and the clobber it causes -- only exist on transformers >=5.16. Older
+        # releases install their TP input/output transforms as forward PRE-HOOKS, which survive
+        # ModelOpt rebinding ``module.forward``: nothing to re-plant. Checked per style, the one
+        # about to be called.
+        style = ALL_PARALLEL_STYLES.get(style_name)
+        if not hasattr(style, "install_forward"):
+            continue
+        # install_forward stores a plain function as the instance's forward, and quantizer
+        # insertion (bind_forward_method) a bound method over it: only the latter lost its wrapper.
+        if not isinstance(vars(mod).get("forward"), types.MethodType):
+            continue
+        style.install_forward(mod, ep_mesh)
+        n += 1
+    if n and is_master():
+        print(
+            f"[ep] re-installed {n} torch_a2a forward wrapper(s) clobbered by quantizer insertion",
+            flush=True,
+        )
+    return n
+
+
+def _release_cached_cuda_memory():
+    """Hand the caching allocator's reserved-but-unused pool back to the driver.
+
+    Only a process that started CUDA has a pool to hand back; elsewhere the collection alone costs
+    about a second.
+    """
+    if torch.cuda.is_initialized():
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
+def distributed_forward_loop(
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    device: torch.device | str | None = None,
+    ep_mesh: "torch.distributed.device_mesh.DeviceMesh | None" = None,
+) -> Callable[[torch.nn.Module], None]:
+    """Build an ``mtq.quantize`` ``forward_loop`` for a distributed (e.g. expert-parallel) model.
+
+    Moves each batch onto ``device``, when given, and runs the captured ``model`` forward (the EP
+    all-reduce / all-to-all collectives fire inside that forward). A model whose plan
+    (:func:`distribution_plan`) is expert-parallel passes the ``ep_mesh`` its experts are sharded
+    over, for the all-to-all forwards that quantizer insertion drops to be re-installed before the
+    first forward; any other model passes none. ``mtq.quantize`` hands the
+    ``forward_loop`` callback an inner module that this closure ignores, calling the captured
+    top-level ``model`` instead so the full distributed forward (and its collectives) runs.
+
+    The forwards run without gradients and with KV/state caching disabled (``_disable_use_cache``), as
+    the single-node ``_forward_loop`` runs them: a hybrid Mamba/attention model mutates its cache in
+    place. Each batch is a mapping of the forward's keyword arguments, as ``model(**batch)`` takes;
+    only its tensor values move to ``device``, so tensors nested in a value (a list of images, say)
+    must already be there.
+    """
+    # Local import to avoid any import cycle within modelopt.torch.utils.
+    from modelopt.torch.utils.dataset_utils import _disable_use_cache
+
+    plan = distribution_plan(model)
+    if plan.is_expert_parallel != (ep_mesh is not None):
+        raise ValueError(
+            f"{plan!r}: an expert-parallel model calibrates with the ep_mesh its routed experts "
+            "are sharded over, and any other model without one."
+        )
+    if ep_mesh is not None and ep_mesh.size() != plan.ep_size:
+        raise ValueError(f"{plan!r}: the ep_mesh spans {ep_mesh.size()} ranks, not {plan.ep_size}.")
+
+    def calibrate(_inner_model):
+        _reinstall_a2a_forwards(model, ep_mesh)
+        with _disable_use_cache(model), torch.no_grad():
+            # Hand the caching allocator's unused pool back: NCCL allocates its buffers outside it.
+            _release_cached_cuda_memory()
+            for batch in tqdm(dataloader, desc="Calibrating", disable=not is_master()):
+                if not isinstance(batch, Mapping):
+                    raise TypeError(
+                        f"distributed_forward_loop: the loader yields {type(batch).__name__}, not a "
+                        "mapping of the forward's keyword arguments."
+                    )
+                if device is not None:
+                    batch = {
+                        k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+                        for k, v in batch.items()
+                    }
+                model(**batch)
+            # Again for what runs next (amax sync, export collectives), past the forwards' pool.
+            _release_cached_cuda_memory()
+
+    return calibrate
+
+
 def cleanup():
     """Cleans up the distributed environment.
 
@@ -713,112 +1009,12 @@ def is_fsdp2_model(model) -> bool:
     return any(isinstance(m, FSDPModule) for m in model.modules())
 
 
-def _off_dtype_params(model) -> set[torch.nn.Parameter]:
-    """Params whose dtype differs from the model's dominant (by element count) param dtype.
-
-    FSDP2 needs one dtype per shard group, but HF models routinely keep a few params in fp32 for
-    stability (e.g. MoE router gates). Pass these to ``fully_shard(ignored_params=...)``.
-
-    TODO: Drop this and shard the off-dtype params once a stable PyTorch release includes FSDP2
-    mixed-precision parameter dtype support (already on nightly).
-    """
-    numel_by_dtype: dict[torch.dtype, int] = {}
-    for param in model.parameters():
-        numel_by_dtype[param.dtype] = numel_by_dtype.get(param.dtype, 0) + param.numel()
-    if len(numel_by_dtype) <= 1:
-        return set()
-
-    # Lazy import: logging imports this module at top level (circular).
-    from modelopt.torch.utils.logging import warn_rank_0
-
-    dominant = max(numel_by_dtype, key=lambda d: numel_by_dtype[d])
-    off_dtype = {n: p for n, p in model.named_parameters() if p.dtype != dominant}
-    off_numel = sum(numel_by_dtype[d] for d in numel_by_dtype if d != dominant)
-    names = sorted(off_dtype)
-    warn_rank_0(
-        f"Model has mixed parameter dtypes {set(numel_by_dtype)}; FSDP2 needs one dtype per shard "
-        f"group, so {len(names)} non-{dominant} parameter(s) "
-        f"({100 * off_numel / sum(numel_by_dtype.values()):.2f}% of elements) will stay replicated "
-        f"rather than sharded: {names[:3]}{' ...' if len(names) > 3 else ''}"
-    )
-    return set(off_dtype.values())
-
-
-def _move_to_fsdp_device(model, params: set[torch.nn.Parameter]) -> None:
-    """Move ``params`` onto the device FSDP2 computes on for ``model``.
-
-    ``fully_shard`` only moves the params it manages, so ignored ones would be stranded on
-    whatever device the caller built the model on. Meta params are left alone for deferred init.
-
-    The device comes from a sharded param's mesh rather than its local shard: under
-    ``cpu_offload`` the shard rests on CPU while compute still happens on the accelerator.
-    """
-    # Lazy import: logging imports this module at top level (circular).
-    from modelopt.torch.utils.logging import warn_rank_0
-
-    mesh = next((p.device_mesh for p in model.parameters() if isinstance(p, DTensor)), None)
-    if mesh is None:
-        warn_rank_0(
-            f"FSDP2 sharded no parameter of {type(model).__name__}, so the compute device for "
-            f"{len(params)} unsharded off-dtype parameter(s) cannot be determined; leaving them "
-            "where they are. Move them to the compute device or the forward will fail."
-        )
-        return
-
-    device = (
-        torch.device("cpu")
-        if mesh.device_type == "cpu"
-        else torch.device(mesh.device_type, getattr(torch, mesh.device_type).current_device())
-    )
-    for param in params:
-        if not param.is_meta and param.device != device:
-            param.data = param.data.to(device)
-
-
 def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):
-    """Auto-detect a HF causal-LM's decoder layers and FSDP2 ``fully_shard`` each one.
+    """Forward to :func:`~modelopt.torch.utils.fsdp2_utils.fsdp2_wrap`, where it moved."""
+    # Lazy import: fsdp2_utils imports modelopt.torch.utils.logging, which imports this module.
+    from modelopt.torch.utils.fsdp2_utils import fsdp2_wrap as wrap
 
-    By default (``shard_root=True``) the root module is wrapped too, so embed/lm_head/norm are
-    sharded instead of replicated per rank; pass ``shard_root=False`` to leave the root replicated
-    (only decoder layers sharded). Returns the detected decoder layers so callers can reuse the
-    detection result.
-
-    Parameters whose dtype differs from the model's dominant one are excluded from the wrap (see
-    :func:`_off_dtype_params`), since FSDP2 rejects a shard group that mixes dtypes. They stay
-    replicated and are moved onto the shards' device, which ``fully_shard`` does not do for the
-    params it ignores.
-    """
-    # Lazy import: layerwise_calib imports this module at top level (circular).
-    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
-
-    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
-    if decoder_layers is None:
-        raise RuntimeError(
-            "Could not auto-detect decoder layers; FSDP2 wrap requires a standard HF causal-LM layout."
-        )
-
-    fsdp_kwargs: dict[str, Any] = {"reshard_after_forward": True}
-    if mp_policy is not None:
-        fsdp_kwargs["mp_policy"] = mp_policy
-    if cpu_offload:
-        fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
-    ignored_params = _off_dtype_params(model)
-    if ignored_params:
-        fsdp_kwargs["ignored_params"] = ignored_params
-
-    # Snapshot/restore config.architectures: some HF builders mutate it during fully_shard.
-    config = getattr(model, "config", None)
-    architectures = list(getattr(config, "architectures", []) or [])
-    for layer in decoder_layers:
-        fully_shard(layer, **fsdp_kwargs)
-    if shard_root:
-        fully_shard(model, **fsdp_kwargs)
-    if ignored_params:
-        _move_to_fsdp_device(model, ignored_params)
-    if config is not None and architectures:
-        config.architectures = architectures
-
-    return decoder_layers
+    return wrap(model, shard_root=shard_root, mp_policy=mp_policy, cpu_offload=cpu_offload)
 
 
 def broadcast_state_dict(

@@ -15,12 +15,14 @@
 
 """Tests for ``modelopt.torch.utils.plugins.model_load_utils``.
 
-Nothing here needs a GPU. The tests of ``resolve_distribution_plan`` answer the process group's rank
-and size as a torchrun launch would, and serve tiny real transformers configs from memory, so the
-decision builds their real models on the meta device; only the last ones use a process group, two
-gloo ranks.
+Nothing here needs a GPU. The tests of ``resolve_distribution_plan`` and of the loads
+``load_pretrained`` routes a plan to answer the process group's rank and size as a torchrun launch
+would, and serve tiny real transformers configs from memory: the decision builds their real models on
+the meta device, and stand-ins for the sharded loaders record how they were called. Only the last
+tests of each part use a process group, two gloo ranks.
 """
 
+import inspect
 import math
 import os
 from contextlib import contextmanager
@@ -49,6 +51,7 @@ from transformers import (
     AutoModelForSeq2SeqLM,
     AutoModelForSpeechSeq2Seq,
     LlamaConfig,
+    LlamaForCausalLM,
     Phi4MultimodalConfig,
     Qwen2_5_VLConfig,
     Qwen3MoeConfig,
@@ -56,9 +59,13 @@ from transformers import (
     WhisperConfig,
 )
 
+import modelopt.torch.models.hf as models_hf
+import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.quantization.plugins import accelerate as accelerate_plugin
+from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
-from modelopt.torch.utils.distributed import DistributionPlan
+from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.plugins import model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import (
     _auto_class,
@@ -66,6 +73,7 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _convert_keys,
     _resolve_target,
     build_meta_causal_lm,
+    load_pretrained,
     record_unplaced_source_keys,
     resolve_distribution_plan,
     unplaced_source_keys,
@@ -236,17 +244,27 @@ def _gathered_alike(gathered, mine, group=None):
 def run_as(monkeypatch):
     """Run as rank ``rank`` of a ``world_size``-rank launch, deciding for itself.
 
-    Every rank reads the checkpoint as this one does. How the ranks agree on one plan is tested at
-    the end of this file.
+    Every rank acts as its group's first, and reads the checkpoint as this one does. How the ranks
+    agree on one plan, and on one load, is tested on two gloo ranks at the end of each part.
     """
     monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
     monkeypatch.setattr(torch.distributed, "broadcast_object_list", lambda *a, **k: None)
     monkeypatch.setattr(torch.distributed, "all_gather_object", _gathered_alike)
+    broadcast_from = dist.broadcast_from
+
+    def broadcast_as_the_first(label, fn, src=0):
+        # broadcast_from sends from dist.rank(), which process_group sets for the FSDP2 load.
+        with monkeypatch.context() as sending:
+            sending.setattr(dist, "rank", lambda group=None: src)
+            return broadcast_from(label, fn, src)
+
+    monkeypatch.setattr(dist, "broadcast_from", broadcast_as_the_first)
 
     def enter(world_size, rank=0):
         monkeypatch.setattr(dist, "is_distributed_run", lambda: world_size > 1)
         monkeypatch.setattr(dist, "size", lambda group=None: world_size)
         monkeypatch.setattr(dist, "is_master", lambda group=None: rank == 0)
+        monkeypatch.setattr(dist, "local_rank", lambda: rank)
         monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: world_size)
 
     return enter
@@ -486,31 +504,47 @@ def test_an_ep_degree_that_does_not_divide_the_world_names_where_it_came_from(
         resolve_distribution_plan(str(tmp_path), **arguments)
 
 
+@pytest.mark.parametrize("value", [[2], 2.9], ids=["a-list", "a-fraction"])
+def test_an_ep_size_that_is_no_whole_number_is_refused(run_as, serve, tmp_path, value):
+    """An argument int() fails on with a TypeError, or would truncate, is no degree either."""
+    run_as(4)
+    serve(LlamaConfig(**_TINY))
+
+    with pytest.raises(ValueError, match=r"ep_size=.*EP degree"):
+        resolve_distribution_plan(str(tmp_path), ep_size=value)
+
+
+@pytest.mark.parametrize("value", ["world", "-2"], ids=["word", "below-1"])
 @pytest.mark.parametrize(
     ("world_size", "source"),
     [(4, "MODELOPT_EP_DEGREE"), (1, "ep_size")],
     ids=["knob", "argument-in-a-single-process"],
 )
 def test_an_ep_degree_that_is_not_a_number_names_where_it_came_from(
-    run_as, serve, monkeypatch, tmp_path, world_size, source
+    run_as, serve, monkeypatch, tmp_path, world_size, source, value
 ):
-    """A single process takes its own argument as given, but parses it as the decision does."""
+    """A single process takes its own argument as given, but parses it as the decision does, and a
+    degree below 1 is no degree either."""
     run_as(world_size)
     serve(LlamaConfig(**_TINY))
     arguments = {}
     if source == "ep_size":
-        arguments["ep_size"] = "world"
+        arguments["ep_size"] = value
     else:
-        monkeypatch.setenv(source, "world")
+        monkeypatch.setenv(source, value)
 
-    with pytest.raises(ValueError, match=f"{source}='world'"):
+    with pytest.raises(ValueError, match=f"{source}='{value}'"):
         resolve_distribution_plan(str(tmp_path), **arguments)
 
 
 @needs_qwen3_moe_ep_plan
-@pytest.mark.parametrize("value", ["0", "", "AUTO"], ids=["zero", "exported-empty", "capitals"])
+@pytest.mark.parametrize(
+    "value",
+    ["0", "", " ", "AUTO", " auto "],
+    ids=["zero", "exported-empty", "exported-blank", "capitals", "padded"],
+)
 def test_an_ep_degree_of_0_is_auto(run_as, serve, monkeypatch, tmp_path, value):
-    """And so is one exported empty, and auto in any case: the plan decides."""
+    """And so is one exported empty or blank, and auto in any case or padded: the plan decides."""
     monkeypatch.setenv("MODELOPT_EP_DEGREE", value)
     run_as(4)
     serve(_qwen3_moe(num_experts=8))
@@ -590,15 +624,17 @@ def test_arguments_override_the_env_knobs(run_as, serve, monkeypatch, tmp_path):
         ("4", "fsdp"),
         ("WORLD", "fsdp"),
         ("", "fsdp"),
+        (" ", "fsdp"),
+        (" world ", "fsdp"),
         ("2", None),
     ],
-    ids=["1", "4", "WORLD", "exported-empty", "part-of-the-world"],
+    ids=["1", "4", "WORLD", "exported-empty", "exported-blank", "padded", "part-of-the-world"],
 )
 def test_the_dense_knob_replicates_or_shards_over_the_whole_world(
     run_as, serve, gpu_memory, monkeypatch, tmp_path, value, dense
 ):
-    """Exported empty, the knob is auto, which shards a model too big for one GPU. Sharding over
-    part of the world is refused: no layout does that."""
+    """Exported empty or blank, the knob is auto, which shards a model too big for one GPU. Sharding
+    over part of the world is refused: no layout does that."""
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", value)
     run_as(4)
     serve(LlamaConfig(**_TINY))
@@ -735,6 +771,17 @@ def test_a_meta_build_leaves_the_auto_class_as_it_found_it(monkeypatch):
     assert ProbeConfig not in mapping
 
 
+def test_the_config_returned_with_the_plan_is_as_every_rank_read_it(run_as, serve, tmp_path):
+    """Rank 0 alone decides, building the model, which writes to the config it builds from; a
+    sharded load builds from the config returned, so rank 0's must be the one the others read."""
+    run_as(2)
+    serve(LlamaConfig(**_TINY))
+
+    _, hf_config = resolve_distribution_plan(str(tmp_path))
+
+    assert vars(hf_config) == vars(LlamaConfig(**_TINY))
+
+
 def test_the_hub_options_locate_the_checkpoint_the_load_reads(tmp_path):
     """``revision``, ``cache_dir``, ``local_files_only`` and ``subfolder`` find the checkpoint as
     ``load_pretrained`` takes them, so the plan and its config are those of what the load reads."""
@@ -791,23 +838,995 @@ def test_every_rank_takes_the_plan_rank0_decided(cpu_dist_workers, tmp_path):
     )
 
 
-def _one_rank_cannot_see_the_checkpoint_job(rank, size, ckpt):
+def _one_rank_cannot_see_the_checkpoint_job(rank, size, ckpt, load):
     isdir = os.path.isdir
     with (
         bounded_collectives(),
         mock.patch("os.path.isdir", lambda path: (rank == 0 or path != ckpt) and isdir(path)),
     ):
         try:
-            resolve_distribution_plan(ckpt)
+            if load:
+                load_pretrained(ckpt, distribution=DistributionPlan(size), device_map="cpu")
+            else:
+                resolve_distribution_plan(ckpt)
         except RuntimeError as error:
             raised = str(error)
         else:
             raised = "no error"
-    # Rank 1's own error, carried to rank 0, rather than rank 0 timing out in the plan's broadcast.
+    # Rank 1's own error, carried to rank 0, rather than rank 0 timing out in the next collective.
     assert "which this rank cannot see" in raised, raised
 
 
-def test_a_rank_that_cannot_see_the_checkpoint_fails_every_rank(cpu_dist_workers, tmp_path):
-    """Before the plan's broadcast, which rank 0 would otherwise wait in for a rank that raised."""
+@pytest.mark.parametrize("load", [False, True], ids=["plan", "load"])
+def test_a_rank_that_cannot_see_the_checkpoint_fails_every_rank(cpu_dist_workers, tmp_path, load):
+    """Deciding the plan, or loading by a handed one: rank 0 would otherwise wait for the rank that
+    raised in the next collective, the plan's broadcast or the load's checks. The group is the
+    caller's and the error is caught, so nothing else ends rank 0's wait."""
     LlamaConfig(**_TINY).save_pretrained(tmp_path)
-    cpu_dist_workers.run(_one_rank_cannot_see_the_checkpoint_job, ckpt=str(tmp_path))
+    cpu_dist_workers.run(_one_rank_cannot_see_the_checkpoint_job, ckpt=str(tmp_path), load=load)
+
+
+# ------------------------------------------------------------------------------ loading by the plan
+
+
+class _Loaded(torch.nn.Module):
+    """What a sharded loader returns: a model whose load recorded what it could not place."""
+
+    def __init__(self):
+        super().__init__()
+        self._modelopt_unplaced_source_keys = []
+
+
+@pytest.fixture
+def loaders(monkeypatch):
+    """Stand-ins for the sharded loaders, each recording its call by parameter name."""
+    calls = {}
+
+    def recording(name, loader):
+        def stub(*args, **kwargs):
+            calls[name] = inspect.signature(loader).bind(*args, **kwargs).arguments
+            return _Loaded()
+
+        return stub
+
+    monkeypatch.setattr(
+        model_load_utils,
+        "parallel_load_and_prepare_fsdp2",
+        recording("fsdp2", model_load_utils.parallel_load_and_prepare_fsdp2),
+    )
+    return calls
+
+
+@pytest.fixture
+def auto_class():
+    """An ``auto_class`` whose from_pretrained records its arguments."""
+
+    class Auto:
+        calls: list = []
+
+        @classmethod
+        def from_pretrained(cls, ckpt_path, **kwargs):
+            cls.calls.append(kwargs)
+            return torch.nn.Linear(1, 1)
+
+    return Auto
+
+
+def _pin_cuda(monkeypatch, gpus, bound=None):
+    """Pin the CUDA state a rank's GPU is read from: ``gpus`` visible, and the process bound to
+    cuda:``bound``, or to none yet, so its local rank picks one. Tests then read the case rather
+    than the host, whose process may have set CUDA up already."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: gpus > 0)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: gpus)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: bound is not None)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: bound or 0)
+
+
+@pytest.fixture
+def a_gpu(monkeypatch):
+    """This rank has a GPU of its own, which the FSDP2 load shards onto; the stand-in loaders never
+    use it."""
+    _pin_cuda(monkeypatch, 8)
+
+
+@pytest.fixture
+def process_group(monkeypatch, a_gpu):
+    """Rank 1 of a 2-rank process group, as the FSDP2 load reads it."""
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "rank", lambda group=None: 1)
+    monkeypatch.setattr(dist, "size", lambda group=None: 2)
+    monkeypatch.setattr(dist, "local_rank", lambda: 1)
+
+
+# ----------------------------------------------------------------------------------- the loads
+
+
+@pytest.mark.parametrize(
+    ("passed", "gpus", "placed"),
+    [
+        ({}, 4, {"device_map": {"": "cuda:1"}}),
+        ({"device_map": "cpu"}, 4, {"device_map": "cpu"}),
+        ({"device_map": None}, 4, {"device_map": None}),
+        ({}, 1, {}),
+        ({"mp_policy": None, "cpu_offload": None}, 4, {"device_map": {"": "cuda:1"}}),
+        # As hf_ptq passes --cpu_offload when it is not set: the FSDP2 load's own default.
+        ({"cpu_offload": False}, 4, {"device_map": {"": "cuda:1"}}),
+        ({"broadcast_chunk_size": 8}, 4, {"device_map": {"": "cuda:1"}}),
+    ],
+    ids=[
+        "defaults_to_the_rank_gpu",
+        "caller_placement_wins",
+        "none_loads_on_the_cpu",
+        "no_gpu_of_its_own",
+        "fsdp2_options_at_none",
+        "cpu_offload_at_its_default",
+        "broadcast_chunk_size_at_its_default",
+    ],
+)
+def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
+    run_as, serve, loaders, auto_class, monkeypatch, tmp_path, passed, gpus, placed
+):
+    """Each rank takes the whole model onto its own GPU; "auto" would let every rank's accelerate
+    pick the same idle GPU. device_map=None is from_pretrained's own: a load on the CPU, which the
+    caller places, as hf_ptq does. A rank with none of its own, on a host with fewer GPUs than
+    ranks, is left to from_pretrained's placement rather than handed a device it does not have. The
+    FSDP2 load's own options left unset or at its defaults ask nothing and do not reach
+    from_pretrained."""
+    run_as(4, rank=1)
+    serve(LlamaConfig(**_TINY))
+    _pin_cuda(monkeypatch, gpus)
+
+    model = load_pretrained(str(tmp_path), auto_class, **passed)
+
+    assert auto_class.calls == [placed]
+    assert distribution_plan(model) == DistributionPlan(4)
+    assert loaders == {}
+
+
+def test_a_rank_bound_to_its_one_visible_gpu_loads_onto_it(
+    run_as, serve, loaders, auto_class, monkeypatch, tmp_path
+):
+    """A launch that exposes one GPU to each process binds every rank to cuda:0, whatever its local
+    rank: each takes the whole model onto the GPU it is bound to, rather than read as having
+    none."""
+    run_as(4, rank=1)
+    serve(LlamaConfig(**_TINY))
+    _pin_cuda(monkeypatch, 1, bound=0)
+
+    load_pretrained(str(tmp_path), auto_class)
+
+    assert auto_class.calls == [{"device_map": {"": "cuda:0"}}]
+
+
+def test_a_rank_without_a_gpu_of_its_own_says_so(
+    run_as, serve, loaders, auto_class, monkeypatch, tmp_path
+):
+    """On a host with fewer GPUs than ranks, a rank of a replicated load left without one loads the
+    model where from_pretrained places it while its peers load onto theirs: it warns itself, as rank
+    0 may have a GPU of its own and nothing to say."""
+    run_as(4, rank=1)
+    serve(LlamaConfig(**_TINY))
+    _pin_cuda(monkeypatch, 1)
+
+    with pytest.warns(UserWarning, match="local rank 1"):
+        load_pretrained(str(tmp_path), auto_class)
+    assert auto_class.calls == [{}]
+
+
+@pytest.mark.parametrize(
+    "defaults",
+    [
+        {"dtype": "auto"},
+        {"dtype": None},
+        {"torch_dtype": "auto"},
+        # As hf_ptq passes them: placement options at from_pretrained's own default.
+        {
+            "device_map": None,
+            "max_memory": None,
+            "offload_folder": None,
+            "quantization_config": None,
+        },
+    ],
+    ids=["auto", "none", "torch_dtype", "placement-none"],
+)
+def test_an_fsdp_plan_loads_through_the_parallel_fsdp2_loader(
+    run_as, loaders, process_group, monkeypatch, tmp_path, defaults
+):
+    """FSDP2 shards over the process group it reads its rank and GPU from, by a config read once,
+    with the Hub options the load was given (custom code an ``auto_map`` names in another repo).
+    It keeps the checkpoint's dtype, as from_pretrained does for "auto" and for None, under either
+    name of the argument, and takes a placement option passed as None as not passed."""
+    run_as(2, rank=1)
+    served, reads = LlamaConfig(**_TINY), []
+    monkeypatch.setattr(
+        transformers.AutoConfig, "from_pretrained", lambda *a, **k: reads.append(k) or served
+    )
+    plan = DistributionPlan(2, dense="fsdp")
+
+    model = load_pretrained(
+        str(tmp_path), distribution=plan, cpu_offload=True, local_files_only=True, **defaults
+    )
+
+    call = loaders.pop("fsdp2")
+    assert (call["device"], call["rank"], call["world_size"]) == (torch.device("cuda:1"), 1, 2)
+    assert call["cpu_offload"] is True
+    assert call["hf_config"] is served
+    assert [read.get("local_files_only") for read in reads] == [True]
+    assert distribution_plan(model) == plan
+    assert loaders == {}
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+def test_a_text_only_vlm_the_fsdp2_load_builds_reaches_it(
+    run_as, serve, loaders, process_group, tmp_path, model_type
+):
+    """The FSDP2 load builds Qwen3.5's VLMs through their image-text class, as hf_ptq's --use_fsdp2
+    does, so a plan that shards one reaches the load rather than being refused as no causal LM."""
+    try:
+        config = serve(AutoConfig.for_model(model_type))
+    except ValueError:
+        pytest.skip("Qwen3.5 requires a recent Transformers")
+    run_as(2, rank=1)
+
+    load_pretrained(str(tmp_path), distribution=DistributionPlan(2, dense="fsdp"))
+
+    assert loaders.pop("fsdp2")["hf_config"] is config
+
+
+@pytest.mark.parametrize("handed", [True, False], ids=["handed", "decided"])
+def test_a_sharded_load_offers_the_knob_only_for_a_plan_it_decided(
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, handed
+):
+    """MODELOPT_FSDP_SIZE counts only for a plan the load decides: to keep a model whole under a
+    plan of its own, a caller passes a replicated one, which is all the refusal offers it."""
+    run_as(2, rank=1)
+    serve(LlamaConfig(**_TINY))
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    plan = {"distribution": DistributionPlan(2, dense="fsdp")} if handed else {}
+
+    with pytest.raises(TypeError, match=r"\['device_map'\] do not apply") as refused:
+        load_pretrained(str(tmp_path), device_map="auto", **plan)
+    assert ("MODELOPT_FSDP_SIZE=1" in str(refused.value)) is not handed
+    assert loaders == {}
+
+
+@pytest.mark.parametrize(
+    "unset",
+    [{}, {"config": None}, {"variant": None}, {"hf_config": None}],
+    ids=["none_passed", "config_none", "variant_none", "hf_config_none"],
+)
+def test_a_load_it_decides_reads_the_config_once(
+    run_as, loaders, process_group, monkeypatch, tmp_path, unset
+):
+    """The config the plan was decided from is the one the FSDP2 load gets, not a second read. An
+    option passed as None, its default, is as if not passed, not one the FSDP2 load refuses."""
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    run_as(2, rank=1)
+    config, reads = LlamaConfig(**_TINY), []
+    monkeypatch.setattr(
+        transformers.AutoConfig, "from_pretrained", lambda *a, **k: reads.append(a) or config
+    )
+
+    model = load_pretrained(str(tmp_path), **unset)
+
+    assert len(reads) == 1
+    assert loaders["fsdp2"]["hf_config"] is config
+    assert distribution_plan(model) == DistributionPlan(2, dense="fsdp")
+
+
+@pytest.mark.parametrize("handed", [False, True], ids=["decided", "handed"])
+def test_a_config_passed_for_the_load_is_the_one_it_decides_from(
+    run_as, loaders, process_group, monkeypatch, tmp_path, handed
+):
+    """No config is read: the plan is decided from the one passed for the load, which the FSDP2
+    load then builds from, as it does with a plan handed in. Building writes to that config, so the
+    load works on a copy of it."""
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    run_as(2, rank=1)
+    reads: list = []
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **k: reads.append(a))
+    config = LlamaConfig(**{**_TINY, "num_hidden_layers": 2})
+    as_passed = config.to_dict()
+    plan = {"distribution": DistributionPlan(2, dense="fsdp")} if handed else {}
+
+    model = load_pretrained(str(tmp_path), config=config, **plan)
+
+    assert reads == []
+    assert loaders["fsdp2"]["hf_config"].num_hidden_layers == 2
+    assert loaders["fsdp2"]["hf_config"] is not config  # building it writes to it
+    assert config.to_dict() == as_passed
+    assert distribution_plan(model) == DistributionPlan(2, dense="fsdp")
+
+
+def test_hf_config_is_refused_without_the_plan_it_came_with(
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path
+):
+    """A sharded load builds from hf_config as given, so the plan must be the one it came with: a
+    plan decided from the checkpoint's own config would load a model it was not decided for."""
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    run_as(2, rank=1)
+    serve(LlamaConfig(**_TINY))
+
+    with pytest.raises(TypeError, match=r"hf_config.*resolve_distribution_plan"):
+        load_pretrained(str(tmp_path), hf_config=LlamaConfig(**{**_TINY, "num_hidden_layers": 2}))
+    assert loaders == {}
+
+
+class _OwnConfig(LlamaConfig):
+    """A config class of the caller's own, which AutoConfig has no mapping for."""
+
+    model_type = "modelopt_test_own_llama"
+
+
+@pytest.mark.parametrize(
+    ("fsdp_size", "own_config"),
+    [(None, False), ("world", False), (None, True)],
+    ids=["no-knob", "knob-shards", "own-config-class"],
+)
+def test_a_model_class_of_the_callers_own_loads_whole(
+    run_as, serve, loaders, auto_class, monkeypatch, tmp_path, fsdp_size, own_config
+):
+    """The sharded loads build their own model class and refuse another, so with nothing asking to
+    shard, a class of the caller's own loads whole on every rank, and with a knob asking to shard
+    it is refused. Neither builds the model on the meta device, which the decision's own pick of
+    class may not build (an encoder-decoder loaded through AutoModel). The decision reads the
+    checkpoint's config as the class does, through its own config class, which AutoConfig need not
+    know."""
+    run_as(2)
+    if own_config:
+        _OwnConfig(**_TINY).save_pretrained(tmp_path)
+        auto_class.config_class = _OwnConfig
+    else:
+        serve(LlamaConfig(**_TINY))
+    monkeypatch.setattr(
+        model_load_utils, "build_meta_causal_lm", lambda *a, **k: pytest.fail("built a model")
+    )
+    if fsdp_size is None:
+        model = load_pretrained(str(tmp_path), auto_class)
+        assert distribution_plan(model) == DistributionPlan(2)
+        assert len(auto_class.calls) == 1
+    else:
+        monkeypatch.setenv("MODELOPT_FSDP_SIZE", fsdp_size)
+        with pytest.raises(NotImplementedError, match="auto_class=Auto "):
+            load_pretrained(str(tmp_path), auto_class)
+    assert loaders == {}
+
+
+@pytest.mark.parametrize("handed", [True, False], ids=["handed", "decided"])
+def test_a_model_class_given_by_name_is_refused_by_name(
+    run_as, serve, loaders, monkeypatch, tmp_path, handed
+):
+    """A sharded load refuses a model class it does not build, given by name too, rather than fail
+    on the name having no __name__ of its own."""
+    run_as(2)
+    serve(LlamaConfig(**_TINY))
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    plan = {"distribution": DistributionPlan(2, dense="fsdp")} if handed else {}
+
+    with pytest.raises(NotImplementedError, match="auto_class='AutoModelForCausalLM'"):
+        load_pretrained(str(tmp_path), "AutoModelForCausalLM", **plan)
+    assert loaders == {}
+
+
+@needs_qwen3_moe_ep_plan
+@pytest.mark.parametrize("knob", [None, "4"], ids=["left-to-decide", "asked-for"])
+def test_a_load_it_decides_keeps_the_experts_whole(
+    run_as, serve, loaders, monkeypatch, tmp_path, knob
+):
+    """No load here shards the routed experts yet, so an MoE whose EP degree is left to the decision
+    is decided without expert parallelism and loads, where an automatic degree would be one the
+    load refuses; a degree MODELOPT_EP_DEGREE asks for is still refused, not ignored."""
+    run_as(4)
+    serve(_qwen3_moe())
+    if knob is not None:
+        monkeypatch.setenv("MODELOPT_EP_DEGREE", knob)
+    monkeypatch.setattr(
+        transformers.AutoModelForCausalLM,
+        "from_pretrained",
+        classmethod(lambda cls, *a, **k: torch.nn.Linear(1, 1)),
+    )
+
+    if knob is not None:
+        with pytest.raises(NotImplementedError, match=r"ep_size=4.*MODELOPT_EP_DEGREE=1"):
+            load_pretrained(str(tmp_path))
+        return
+    assert distribution_plan(load_pretrained(str(tmp_path))) == DistributionPlan(4)
+
+
+def test_an_expert_parallel_plan_is_refused(run_as, serve, loaders, auto_class, tmp_path):
+    """No load here shards the routed experts: an EP plan fails before anything loads."""
+    run_as(2)
+    serve(Qwen3MoeConfig(num_experts=8, moe_intermediate_size=8, **_TINY))
+
+    with pytest.raises(NotImplementedError, match=r"ep_size=2.*MODELOPT_EP_DEGREE=1"):
+        load_pretrained(str(tmp_path), auto_class, distribution=DistributionPlan(2, ep_size=2))
+    assert loaders == {}
+    assert auto_class.calls == []
+
+
+def _every_rank_loads_rank0s_plan_job(rank, size, ckpt, handed, placed):
+    model, refused = None, None
+    # Ranks without GPUs, whatever the host has: the pooled workers keep no CUDA context.
+    with bounded_collectives(), mock.patch.object(torch.cuda, "is_available", return_value=False):
+        try:  # not pytest.raises: its failure would end the pooled worker instead of the job
+            model = load_pretrained(ckpt, distribution=handed[rank], **placed)
+        except Exception as error:
+            refused = str(error)
+    if isinstance(handed[0], DistributionPlan):
+        assert refused is None and distribution_plan(model) == handed[0], (rank, refused)
+    else:
+        # Rank 0's refusal, on every rank, rather than a rank left waiting in the broadcast.
+        assert "expected a DistributionPlan" in str(refused), (rank, refused)
+
+
+@pytest.mark.parametrize(
+    ("handed", "placed"),
+    [
+        ((DistributionPlan(2), DistributionPlan(2, dense="fsdp")), {"device_map": "cpu"}),
+        ((DistributionPlan(2), None), {"device_map": "cpu"}),
+        (("fsdp2", DistributionPlan(2)), {"device_map": "cpu"}),
+        ((DistributionPlan(2), DistributionPlan(2)), {}),
+    ],
+    ids=["another-plan", "none", "not-a-plan", "placed-by-default"],
+)
+def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path, handed, placed):
+    """Over a real broadcast, whatever rank 1 was handed. Ranks loading different plans would build
+    mismatched meshes, and one handed none would decide a plan through collectives the others never
+    join: both would hang. A distribution rank 0 refuses fails every rank. Placed by default, each
+    rank takes the model onto its GPU, and a run without GPUs, as these ranks are, loads it whole."""
+    LlamaForCausalLM(LlamaConfig(**_TINY)).save_pretrained(tmp_path)
+    cpu_dist_workers.run(
+        _every_rank_loads_rank0s_plan_job, ckpt=str(tmp_path), handed=handed, placed=placed
+    )
+
+
+def _fetched_in_step(ckpt_path, **hub_options):
+    """The checkpoint's fetch, as the collective it is: a rank not in it leaves the others waiting."""
+    torch.distributed.barrier()
+    return None, ckpt_path
+
+
+def _loaded_in_step(*args, **kwargs):
+    """The FSDP2 load, as the collectives it runs, which a rank without a GPU fails before."""
+    if dist.local_rank() >= torch.cuda.device_count():
+        raise RuntimeError("no GPU to shard onto")
+    torch.distributed.barrier()
+    return _Loaded()
+
+
+_FSDP2_PLAN = DistributionPlan(2, dense="fsdp")
+
+
+def _one_rank_refused_job(
+    rank, size, ckpt, refused_on_1, gpus_on_1, match, knobs_on_1=None, plan=_FSDP2_PLAN
+):
+    refused = None
+    gpus = size if rank == 0 else gpus_on_1  # what this rank's host shows it
+    with (
+        bounded_collectives(),
+        pytest.MonkeyPatch.context() as cuda,
+        mock.patch.dict(os.environ, (knobs_on_1 or {}) if rank == 1 else {}),
+        mock.patch.object(model_load_utils, "ensure_local_checkpoint", _fetched_in_step),
+        mock.patch.object(model_load_utils, "parallel_load_and_prepare_fsdp2", _loaded_in_step),
+    ):
+        _pin_cuda(cuda, gpus)  # the pooled worker's own CUDA state is whatever an earlier job left
+        try:  # not pytest.raises: its failure would end the pooled worker instead of the job
+            load_pretrained(ckpt, distribution=plan, **(refused_on_1 if rank == 1 else {}))
+        except Exception as error:
+            refused = str(error)
+    # Rank 1's refusal on both ranks, rather than rank 0 failing at the group's timeout.
+    assert refused is not None and match in refused, (rank, refused)
+    assert rank == 1 or "rank 1 failed" in refused, refused
+
+
+@pytest.mark.parametrize(
+    ("refused_on_1", "gpus_on_1", "match"),
+    [
+        (
+            {"config": LlamaConfig(**_TINY), "hf_config": LlamaConfig(**_TINY)},
+            2,
+            "config and hf_config",
+        ),
+        ({"dtype": torch.float32}, 2, "dtype=torch.float32"),
+        (
+            {"hf_config": LlamaConfig(**_TINY, quantization_config={"quant_method": "fp8"})},
+            2,
+            "dequantize",
+        ),
+        ({}, 0, "as local rank 1"),
+        ({}, 1, "as local rank 1"),
+    ],
+    ids=["two-configs", "dtype", "quantized-config", "no-gpu", "fewer-gpus-than-ranks"],
+)
+def test_a_load_refused_on_one_rank_fails_every_rank(
+    cpu_dist_workers, tmp_path, refused_on_1, gpus_on_1, match
+):
+    """Rank 1 alone is refused, by its arguments before the checkpoint is fetched, or by the config
+    it was handed or its lack of a GPU before the FSDP2 load: every rank raises the refusal, rather
+    than leave rank 0 waiting in the fetch's or the load's collectives, which stand-ins on a bounded
+    group run here."""
+    LlamaConfig(**_TINY).save_pretrained(tmp_path)
+    cpu_dist_workers.run(
+        _one_rank_refused_job,
+        ckpt=str(tmp_path),
+        refused_on_1=refused_on_1,
+        gpus_on_1=gpus_on_1,
+        match=match,
+    )
+
+
+def test_a_knob_one_rank_cannot_parse_fails_every_rank(cpu_dist_workers, tmp_path):
+    """With no plan handed, rank 1 alone reads a malformed MODELOPT_EP_DEGREE: every rank raises it,
+    rather than leave rank 0 waiting in the plan decision's collectives."""
+    LlamaConfig(**_TINY).save_pretrained(tmp_path)
+    cpu_dist_workers.run(
+        _one_rank_refused_job,
+        ckpt=str(tmp_path),
+        refused_on_1={},
+        gpus_on_1=2,
+        match="MODELOPT_EP_DEGREE='eigth'",
+        knobs_on_1={"MODELOPT_EP_DEGREE": "eigth"},
+        plan=None,
+    )
+
+
+def _one_visible_gpu_per_process_job(rank, size, ckpt):
+    devices = []
+
+    def load(ckpt_path, device, *args, **kwargs):
+        devices.append(device)
+        torch.distributed.barrier()
+        return _Loaded()
+
+    with (
+        bounded_collectives(),
+        pytest.MonkeyPatch.context() as cuda,
+        mock.patch.object(model_load_utils, "ensure_local_checkpoint", _fetched_in_step),
+        mock.patch.object(model_load_utils, "parallel_load_and_prepare_fsdp2", load),
+    ):
+        # Each rank sees only its own GPU, which its process bound as cuda:0, whatever its local
+        # rank.
+        _pin_cuda(cuda, 1, bound=0)
+        load_pretrained(ckpt, distribution=DistributionPlan(2, dense="fsdp"))
+    assert devices == [torch.device("cuda", 0)], (rank, devices)
+
+
+def test_one_visible_gpu_per_process_shards_on_every_rank(cpu_dist_workers, tmp_path):
+    """Two ranks, each shown only its own GPU and bound to it as cuda:0, both shard onto it: rank 1,
+    whose local rank numbers no GPU it sees, is not refused as having none."""
+    LlamaConfig(**_TINY).save_pretrained(tmp_path)
+    cpu_dist_workers.run(_one_visible_gpu_per_process_job, ckpt=str(tmp_path))
+
+
+class _LoadsWholeExceptOnRank1:
+    """A model class whose whole-model load fails on rank 1 alone, as an out-of-memory GPU would."""
+
+    @classmethod
+    def from_pretrained(cls, ckpt_path, **kwargs):
+        if dist.rank() == 1:
+            raise OSError("rank 1 could not load the model")
+        return torch.nn.Linear(1, 1)
+
+
+def _one_rank_fails_to_load_job(rank, size, ckpt):
+    refused = None
+    with (
+        bounded_collectives(),
+        mock.patch.object(model_load_utils, "ensure_local_checkpoint", _fetched_in_step),
+    ):
+        try:  # not pytest.raises: its failure would end the pooled worker instead of the job
+            load_pretrained(ckpt, _LoadsWholeExceptOnRank1, distribution=DistributionPlan(2))
+        except Exception as error:
+            refused = str(error)
+    # Rank 1's failure on both ranks, rather than rank 0 going on to the next collective alone.
+    assert refused is not None and "could not load the model" in refused, (rank, refused)
+
+
+def test_a_whole_load_that_fails_on_one_rank_fails_every_rank(cpu_dist_workers, tmp_path):
+    """A whole-model load runs no collective, so a rank failing in it alone would leave the others
+    to wait for it in the next one, calibration's or the export's."""
+    LlamaConfig(**_TINY).save_pretrained(tmp_path)
+    cpu_dist_workers.run(_one_rank_fails_to_load_job, ckpt=str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("change", "error", "match"),
+    [
+        ({"kwargs": {"device_map": "auto"}}, TypeError, r"\['device_map'\] do not apply"),
+        ({"kwargs": {"dtype": torch.bfloat16}}, TypeError, r"dtype=torch\.bfloat16"),
+        (
+            {"kwargs": {"torch_dtype": torch.bfloat16}},
+            TypeError,
+            r"torch_dtype=torch\.bfloat16",
+        ),
+        (
+            {"auto_class": AutoModel},
+            NotImplementedError,
+            r"auto_class=AutoModel: leave it out.*DistributionPlan\(2, dense='replicate'\)",
+        ),
+        ({"mtp": True}, NotImplementedError, "MTP head"),
+        (
+            {"kwargs": {"config": LlamaConfig(**_TINY), "hf_config": LlamaConfig(**_TINY)}},
+            TypeError,
+            "config and hf_config",
+        ),
+    ],
+    ids=["placement", "dtype", "torch_dtype", "model_class", "mtp_head", "two_configs"],
+)
+def test_a_sharded_load_refuses_what_it_cannot_honor(
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, change, error, match
+):
+    """Placement, a model class, a head only a whole model builds, two configs to load with: none
+    reaches a sharded load, which fails before it starts rather than load something other than
+    what was asked."""
+    run_as(2)
+    serve(LlamaConfig(**_TINY))
+    if change.get("mtp"):
+        monkeypatch.setattr(models_hf, "checkpoint_has_mtp", lambda *a: True)
+
+    with pytest.raises(error, match=match):
+        load_pretrained(
+            str(tmp_path),
+            change.get("auto_class"),
+            distribution=DistributionPlan(2, dense="fsdp"),
+            **change.get("kwargs", {}),
+        )
+    assert loaders == {}
+
+
+@pytest.mark.parametrize(
+    ("distribution", "checkpoint", "options", "error", "match"),
+    [
+        (
+            DistributionPlan(4, dense="fsdp"),
+            "causal-lm",
+            None,
+            ValueError,
+            "is for 4 ranks",
+        ),
+        (
+            DistributionPlan(2, dense="fsdp"),
+            "quantized",
+            None,
+            NotImplementedError,
+            "dequantize",
+        ),
+        (
+            DistributionPlan(2, dense="fsdp"),
+            "quantized-language-model",
+            {"trust_remote_code": True},
+            NotImplementedError,
+            "dequantize",
+        ),
+        (
+            DistributionPlan(2, dense="fsdp"),
+            "vlm",
+            None,
+            NotImplementedError,
+            "llava",
+        ),
+        ("fsdp2", "causal-lm", None, TypeError, "expected a DistributionPlan"),
+        (
+            DistributionPlan(2),
+            "causal-lm",
+            "hf_config",
+            TypeError,
+            r"hf_config.*resolve_distribution_plan",
+        ),
+        (
+            DistributionPlan(2),
+            "causal-lm",
+            {"cpu_offload": True},
+            TypeError,
+            r"\['cpu_offload'\] only apply",
+        ),
+    ],
+    ids=[
+        "another-world",
+        "quantized-checkpoint",
+        "quantized-language-model",
+        "vlm-checkpoint",
+        "not-a-plan",
+        "hf-config-on-a-whole-load",
+        "fsdp2-option-on-a-whole-load",
+    ],
+)
+def test_a_load_refuses_what_it_cannot_load(
+    run_as,
+    serve,
+    loaders,
+    auto_class,
+    process_group,
+    tmp_path,
+    distribution,
+    checkpoint,
+    options,
+    error,
+    match,
+):
+    """Before anything loads: a plan for another world; a quantized checkpoint, which FSDP2 would
+    read as stored, even when only a VLM's language model is quantized and its remote code builds it
+    as a causal LM; a VLM but a text-only one it supports, which FSDP2 would build through
+    AutoModelForCausalLM, refused or as its language model alone; anything but a plan; and the
+    sharded loads' config, or an option only the FSDP2 load takes, which from_pretrained would take
+    for a model argument and fail far from here, or drop."""
+    run_as(2)
+    config = serve(transformers.LlavaConfig() if checkpoint == "vlm" else LlamaConfig(**_TINY))
+    if checkpoint == "quantized":
+        config.quantization_config = {"quant_method": "fp8"}
+    if checkpoint == "quantized-language-model":  # Kimi-K2.5's layout
+        config.auto_map = _REMOTE_VLM
+        config.text_config = LlamaConfig(**_TINY, quantization_config={"quant_method": "fp8"})
+    if options == "hf_config":
+        options = {"auto_class": auto_class, "hf_config": config}
+
+    with pytest.raises(error, match=match):
+        load_pretrained(str(tmp_path), distribution=distribution, **(options or {}))
+    assert loaders == {}
+    assert auto_class.calls == []
+
+
+@pytest.mark.parametrize("device_map", ["auto", None], ids=["placed", "none"])
+def test_an_automatic_layout_says_so_when_it_refuses_a_placement(
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, device_map
+):
+    """With neither a plan nor MODELOPT_FSDP_SIZE, rank 0's GPU memory decides to shard a model too
+    big for it, and the sharded load refuses options it does not take. The refusal says the layout
+    was decided rather than asked for, and how to keep the load whole. device_map=None, as hf_ptq
+    passes it, places nothing, and the model is sharded."""
+    run_as(2, rank=1)
+    serve(LlamaConfig(**_TINY))
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: 1)
+
+    if device_map is None:
+        load_pretrained(str(tmp_path), AutoModelForCausalLM, device_map=None, dtype="auto")
+        assert "fsdp2" in loaders
+        return
+    with pytest.raises(TypeError, match=r"\['device_map'\] do not apply.*MODELOPT_FSDP_SIZE=1"):
+        load_pretrained(str(tmp_path), device_map="auto")
+    assert loaders == {}
+
+
+class _ContextLoadReachedError(Exception):
+    """Raised where init_quantized_weights' from_pretrained builds the model, past its checks."""
+
+
+@pytest.mark.parametrize("memory", [1 << 50, 1], ids=["fits", "too-big"])
+def test_a_load_it_decides_inside_init_quantized_weights_is_whole_and_unplaced(
+    run_as, loaders, process_group, monkeypatch, tmp_path, memory
+):
+    """Inside init_quantized_weights, with nothing asking to shard, every rank gets the whole model,
+    whatever rank 0's GPU memory, and the load leaves the device map to the context, which computes
+    it and refuses one passed: the context's from_pretrained gets past that refusal."""
+    run_as(2, rank=1)
+    LlamaConfig(**_TINY).save_pretrained(tmp_path)  # read from disk, as the context reads it too
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: memory)
+    monkeypatch.setattr(
+        accelerate_plugin, "init_empty_weights", mock.Mock(side_effect=_ContextLoadReachedError)
+    )
+
+    with init_quantized_weights(mtq.INT8_DEFAULT_CFG), pytest.raises(_ContextLoadReachedError):
+        load_pretrained(str(tmp_path))
+    assert loaders == {}
+
+
+@pytest.mark.parametrize("handed", [False, True], ids=["knob", "handed"])
+def test_a_sharded_load_is_refused_inside_init_quantized_weights(
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, handed
+):
+    """init_quantized_weights quantizes and compresses in the from_pretrained it patches, which the
+    FSDP2 load never calls: a knob or a plan asking to shard there is refused rather than return the
+    model unquantized."""
+    run_as(2, rank=1)
+    serve(LlamaConfig(**_TINY))
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    plan = {"distribution": DistributionPlan(2, dense="fsdp")} if handed else {}
+
+    with (
+        init_quantized_weights(mtq.INT8_DEFAULT_CFG),
+        pytest.raises(NotImplementedError, match=r"init_quantized_weights.*dense='replicate'"),
+    ):
+        load_pretrained(str(tmp_path), **plan)
+    assert loaders == {}
+
+
+@pytest.mark.parametrize(
+    ("checkpoint", "match"),
+    [("quantized", "dequantize"), ("mtp", "MTP head")],
+    ids=["quantized", "mtp"],
+)
+def test_a_measured_layout_names_the_way_back_when_it_refuses_a_checkpoint(
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, checkpoint, match
+):
+    """Nothing asked for the layout rank 0's GPU memory chose, so a checkpoint the FSDP2 load cannot
+    take is refused with the way to load it whole, as every refusal of that load says."""
+    run_as(2, rank=1)
+    config = serve(LlamaConfig(**_TINY))
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: 1)
+    if checkpoint == "quantized":
+        config.quantization_config = {"quant_method": "fp8"}
+    else:
+        monkeypatch.setattr(models_hf, "checkpoint_has_mtp", lambda *a: True)
+
+    with pytest.raises(NotImplementedError, match=match) as refused:
+        load_pretrained(str(tmp_path))
+    assert "MODELOPT_FSDP_SIZE=1" in str(refused.value)
+    assert loaders == {}
+
+
+@pytest.mark.parametrize(
+    ("distribution", "options", "error", "match"),
+    [
+        (DistributionPlan(4), {}, ValueError, "is for 4 ranks"),
+        (
+            DistributionPlan(2),
+            {"hf_config": LlamaConfig(**_TINY)},
+            TypeError,
+            r"hf_config.*resolve_distribution_plan",
+        ),
+        (
+            DistributionPlan(2, dense="fsdp"),
+            {"device_map": "auto"},
+            TypeError,
+            r"\['device_map'\] do not apply",
+        ),
+        (
+            DistributionPlan(2, dense="fsdp"),
+            {"auto_class": AutoModel},
+            NotImplementedError,
+            "auto_class=AutoModel",
+        ),
+        (
+            DistributionPlan(2, dense="fsdp"),
+            {"dtype": torch.float32},
+            TypeError,
+            r"dtype=torch\.float32",
+        ),
+    ],
+    ids=[
+        "another-world",
+        "hf-config-on-a-whole-load",
+        "whole-load-option-on-a-sharded-plan",
+        "auto-class-on-a-sharded-plan",
+        "dtype-on-a-sharded-plan",
+    ],
+)
+def test_a_handed_plan_is_checked_before_the_checkpoint_is_fetched(
+    run_as, monkeypatch, tmp_path, distribution, options, error, match
+):
+    """Making the checkpoint local can mean downloading it: a plan the load refuses fails first, as
+    do hf_config with a plan that loads the model whole and an option a sharded plan's load
+    refuses."""
+    run_as(2)
+    monkeypatch.setattr(
+        model_load_utils, "ensure_local_checkpoint", lambda *a, **k: pytest.fail("fetched it")
+    )
+
+    with pytest.raises(error, match=match):
+        load_pretrained(str(tmp_path), distribution=distribution, **options)
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+def test_a_single_process_fsdp2_load_sets_up_its_group_of_one(
+    monkeypatch, serve, loaders, a_gpu, tmp_path, quantized
+):
+    """FSDP2 on one rank still shards through a process group, of one, which the load sets up once
+    nothing can refuse it: a refused load leaves no group behind."""
+    config = serve(LlamaConfig(**_TINY))
+    if quantized:
+        config.quantization_config = {"quant_method": "fp8"}
+    monkeypatch.setenv("RANK", "0")  # torchrun --nproc_per_node=1
+    live = []
+    monkeypatch.setattr(dist, "is_initialized", lambda: bool(live))
+    monkeypatch.setattr(dist, "setup", lambda timeout=None: live.append(0))
+    # What a group of one answers once it is up.
+    monkeypatch.setattr(dist, "rank", lambda group=None: 0)
+    monkeypatch.setattr(dist, "size", lambda group=None: 1)
+    monkeypatch.setattr(dist, "local_rank", lambda: 0)
+    plan = DistributionPlan(dense="fsdp")
+
+    if quantized:
+        with pytest.raises(NotImplementedError, match="dequantize"):
+            load_pretrained(str(tmp_path), distribution=plan)
+        assert live == []
+        return
+    load_pretrained(str(tmp_path), distribution=plan)
+
+    assert live == [0]
+    call = loaders.pop("fsdp2")
+    assert (call["rank"], call["world_size"]) == (0, 1)
+
+
+def test_a_single_process_fsdp2_load_needs_a_launcher(monkeypatch, serve, loaders, tmp_path):
+    """Started without one, the process cannot set its group of one up; it is told to launch with
+    torchrun rather than fail inside init_process_group."""
+    serve(LlamaConfig(**_TINY))
+    monkeypatch.delenv("RANK", raising=False)
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(dist, "setup", lambda timeout=None: pytest.fail("set a group up"))
+
+    with pytest.raises(RuntimeError, match="torchrun --nproc_per_node=1"):
+        load_pretrained(str(tmp_path), distribution=DistributionPlan(dense="fsdp"))
+    assert loaders == {}
+
+
+@pytest.fixture
+def launch_without_its_group(monkeypatch):
+    """Rank 0 of an 8-rank launch whose processes set no process group up."""
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(dist, "setup", lambda timeout=None: pytest.fail("set a group up"))
+
+
+def test_a_launch_that_sets_no_group_up_loads_whole_on_each_process(
+    launch_without_its_group, serve, loaders, auto_class, tmp_path
+):
+    """A launcher can start several processes that never set a group up (hf_ptq without
+    --use_fsdp2): each loads the whole model as a single process does, with no collective to wait
+    in and no plan to agree on."""
+    serve(LlamaConfig(**_TINY))
+
+    model = load_pretrained(str(tmp_path), auto_class)
+
+    assert auto_class.calls == [{}]
+    assert distribution_plan(model) == DistributionPlan()
+    assert loaders == {}
+
+
+@pytest.mark.parametrize(
+    ("distribution", "knobs", "error", "match"),
+    [
+        (
+            DistributionPlan(8),
+            {},
+            RuntimeError,
+            r"is for 8 ranks.*distributed_run",
+        ),
+        (
+            DistributionPlan(dense="fsdp"),
+            {},
+            RuntimeError,
+            r"DistributionPlan\(8, dense='fsdp'\)",
+        ),
+        (
+            None,
+            {"MODELOPT_FSDP_SIZE": "world"},
+            RuntimeError,
+            "MODELOPT_FSDP_SIZE=world",
+        ),
+        (
+            None,
+            {"MODELOPT_EP_DEGREE": "4"},
+            RuntimeError,
+            r"MODELOPT_EP_DEGREE=4 .*distributed_run\(\).*MODELOPT_EP_DEGREE=1",
+        ),
+        (None, {"MODELOPT_EP_DEGREE": "eigth"}, ValueError, "MODELOPT_EP_DEGREE='eigth'"),
+    ],
+    ids=["several-ranks", "sharded", "fsdp-knob", "ep-knob", "ep-knob-not-a-degree"],
+)
+def test_what_needs_the_group_is_refused_in_a_launch_that_sets_none_up(
+    launch_without_its_group,
+    serve,
+    loaders,
+    monkeypatch,
+    tmp_path,
+    distribution,
+    knobs,
+    error,
+    match,
+):
+    """A plan for several ranks, a sharded load, and knobs asking to shard over the launch need its
+    group, which one rank cannot set up for itself: refused before anything is fetched, rather than
+    leave each process the whole model the knobs did not ask for. A knob that is not one is refused
+    as the plan decision refuses it, not dropped."""
+    serve(LlamaConfig(**_TINY))
+    for name, value in knobs.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(
+        model_load_utils, "ensure_local_checkpoint", lambda *a, **k: pytest.fail("fetched it")
+    )
+
+    with pytest.raises(error, match=match):
+        load_pretrained(str(tmp_path), distribution=distribution)
+    assert loaders == {}
