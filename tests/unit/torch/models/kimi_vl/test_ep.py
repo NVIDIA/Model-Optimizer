@@ -353,6 +353,57 @@ def test_the_build_step_lets_the_checkpoint_s_own_vlm_build_on_this_transformers
                 del sys.modules[name]
 
 
+@pytest.mark.parametrize(
+    ("dense", "fsdp2"), [("auto", False), ("fsdp", True)], ids=["whole", "fsdp2"]
+)
+def test_an_ep_degree_of_1_builds_the_checkpoint_s_own_vlm_to_decide(
+    monkeypatch, tmp_path, dense, fsdp2
+):
+    """With expert parallelism ruled out, deciding the plan still builds the checkpoint's own code
+    on the meta device, its ``tie_weights`` without the keyword arguments transformers' ``post_init``
+    passes: the build step runs all the same, and no ``prepare``. The decision reaches its outcome:
+    the 8 experts left whole on 4 ranks are refused, or the model is planned FSDP2-sharded."""
+    for module_name, name in COMPAT_SYMBOLS:
+        with contextlib.suppress(ImportError):
+            _restore(monkeypatch, importlib.import_module(module_name), name)
+    monkeypatch.setattr(dmu, "get_cached_module_file", dmu.get_cached_module_file)
+    monkeypatch.setattr(
+        get_spec("kimi_vl").ep_spec, "prepare", lambda *a, **k: pytest.fail("ran prepare")
+    )
+    monkeypatch.setattr(dist, "size", lambda group=None: 4)
+    shutil.copy(kimi_vl_tiny_modeling.__file__, tmp_path / "modeling_kimi_vl.py")
+    remote = "modeling_kimi_vl.KimiVLForConditionalGeneration"
+    auto_map = {"AutoConfig": "modeling_kimi_vl.KimiVLConfig", "AutoModelForCausalLM": remote}
+    text = {
+        "model_type": "deepseek_v3",
+        "hidden_size": 16,
+        "num_hidden_layers": 1,
+        "first_k_dense_replace": 0,
+        "n_routed_experts": 8,
+        "moe_intermediate_size": 8,
+    }
+    stored = {"model_type": "kimi_vl", "auto_map": auto_map, "text_config": text}
+    (tmp_path / "config.json").write_text(json.dumps(stored))
+
+    def decide():
+        return model_load_utils.resolve_distribution_plan(
+            str(tmp_path), ep_size=1, dense=dense, trust_remote_code=True
+        )
+
+    loaded = set(sys.modules)
+    try:
+        if fsdp2:
+            plan, _ = decide()
+            assert (plan.ep_size, plan.dense) == (1, "fsdp")
+        else:
+            with pytest.raises(ValueError, match="can be expert-parallel, but the plan resolved"):
+                decide()
+    finally:
+        for name in set(sys.modules) - loaded:
+            if name.startswith("transformers_modules."):
+                del sys.modules[name]
+
+
 @_BOTH_ADAPTERS
 @pytest.mark.parametrize(
     ("missing", "match"),
