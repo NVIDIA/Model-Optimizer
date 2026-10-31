@@ -237,6 +237,15 @@ def _spec_refuses_ep(model_type: str) -> bool:
 _PATCHED_EVERY_LOAD: set[str] = set()
 
 
+def mark_patched_every_load(model_type: str) -> None:
+    """Record that a ``prepare`` patched ``model_type`` for every later load in this process.
+
+    :func:`apply_distributed_support` records it once such a ``prepare`` returns; a ``prepare`` calls
+    this itself at its first patch that lasts, so a raise after it still leaves the record.
+    """
+    _PATCHED_EVERY_LOAD.add(model_type)
+
+
 def check_not_patched_by_prepare(model_type: str) -> None:
     """Refuse a load other than an expert-parallel one of a model whose ``prepare`` patched it for good.
 
@@ -323,7 +332,7 @@ def apply_distributed_support(
     if prepare and ep.prepare is not None:
         hf_config = ep.prepare(hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code)
         if ep.prepare_patches_every_load:
-            _PATCHED_EVERY_LOAD.add(model_type)
+            mark_patched_every_load(model_type)
         # The load builds from the config prepare returns: a bad one would fail only there, far
         # from the spec at fault.
         if hf_config is None:

@@ -597,6 +597,21 @@ def test_the_remote_modeling_is_imported_through_the_class_the_auto_map_declares
         kimi_k3._force_load_remote_modeling(config_only, "/ckpt", False)
 
 
+@pytest.mark.usefixtures("private_conversion_registry", "remote_checkpoint")
+def test_a_prepare_that_raises_after_patching_still_records_it(monkeypatch):
+    """Kimi-K3's prepare records its lasting patch where it makes it, so a step after it that raises
+    still leaves the process refusing a load other than an expert-parallel one."""
+
+    def fails(kmod):
+        raise RuntimeError("no kernels to wrap")
+
+    monkeypatch.setattr(kimi_k3, "_patch_kda_beta_sigmoid", fails)
+
+    with pytest.raises(RuntimeError, match="no kernels to wrap"):
+        _prepare(SimpleNamespace(text_config=SimpleNamespace(), auto_map=_AUTO_MAP))
+    assert "kimi_k3" in moe._PATCHED_EVERY_LOAD
+
+
 @pytest.mark.usefixtures(
     "private_conversion_registry", "restore_loader_hooks", "torch_a2a_unregistered"
 )
