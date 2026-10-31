@@ -224,11 +224,11 @@ class EPSpec(SpecSection):
     the installed transformers, so the plan decision can build the model before ``prepare`` runs.
 
     Called as ``make_buildable(hf_config, ckpt_path=..., trust_remote_code=...)``, on every rank,
-    before the plan is decided, for every plan that could still be expert-parallel, whatever plan
-    comes out. So it must be idempotent and change nothing the model computes or loads: it may shim
-    names transformers dropped, wrap the remote-code staging to reach the modules the code imports,
-    and adapt a method to the arguments transformers now passes it, but patches no MoE or expert
-    class, config, weight converter or weight-loading hook."""
+    before the plan is decided, for every decision that builds the model, an EP degree of 1
+    included, whatever plan comes out. So it must be idempotent and change nothing the model
+    computes or loads: it may shim names transformers dropped, wrap the remote-code staging to reach
+    the modules the code imports, and adapt a method to the arguments transformers now passes it,
+    but patches no MoE or expert class, config, weight converter or weight-loading hook."""
 
     decompressed_formats: tuple[str, ...] = ()
     """The checkpoint formats (a ``quantization_config``'s ``quant_method``) whose experts
