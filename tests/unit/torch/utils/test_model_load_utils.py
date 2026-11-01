@@ -1010,7 +1010,6 @@ def test_a_model_is_decided_from_its_whole_model(run_as, serve, gpu_memory, tmp_
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2, dense="fsdp")
 
 
-@needs_ep_transformers
 def test_the_expert_count_is_read_from_the_config_holding_the_plan(
     run_as, serve, monkeypatch, tmp_path
 ):
