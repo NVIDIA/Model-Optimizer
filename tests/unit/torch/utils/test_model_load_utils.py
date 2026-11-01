@@ -671,105 +671,30 @@ def test_a_run_without_expert_parallelism_needs_no_spec(
     assert resolve_distribution_plan(str(tmp_path))[0] == plan
 
 
-# The refusals of an MoE left whole on every rank, by whether its spec allows expert parallelism.
+# The refusal of an MoE left whole on every rank that could be expert-parallel.
 _CAN_BE_EP = "can be expert-parallel, but the plan resolved .* divid(?:es|ing) both its {} experts"
-_NO_EP_YET = (
-    "cannot be quantized expert-parallel yet: .* The plan replicates .* FSDP2 .* if the "
-    "FSDP2 load supports the checkpoint, which takes .*, load it in a single process, or "
-    r"replicate .*DistributionPlan\(2, 1, 'replicate'\)"
-)
-_NEEDS_LATER = (
-    "can be expert-parallel, but the plan resolved .* this transformers cannot shard its experts. "
-    r"Upgrade transformers to 5\.7 or later to shard them, or shard the whole model with FSDP2"
-)
-# The same, for an EP degree the caller set to 1, which an upgrade alone leaves at 1.
-_NEEDS_LATER_AND_A_DEGREE = (
-    "can be expert-parallel, but the plan resolved .* this transformers cannot shard its experts. "
-    r"Upgrade transformers to 5\.7 or later and set MODELOPT_EP_DEGREE above 1, dividing both its "
-    "8 experts and the world size, to shard them, or shard the whole model with FSDP2"
-)
 
 
+@needs_ep_transformers  # below the floor, no MoE can be expert-parallel
 @pytest.mark.parametrize(
-    ("config", "ep_degree", "refusal", "version"),
+    ("config", "ep_degree", "experts"),
     [
-        pytest.param(
-            _deepseek_v3(n_routed_experts=3),
-            None,
-            _CAN_BE_EP.format(3),
-            None,
-            id="auto_finds_no_degree",
-        ),
-        pytest.param(
-            _qwen3_moe(num_experts=8), "1", _CAN_BE_EP.format(8), None, id="explicit_degree_one"
-        ),
-        pytest.param(
-            _deepseek_v3(n_routed_experts=8),
-            "1",
-            _CAN_BE_EP.format(8),
-            None,
-            id="explicit_degree_one_spec_plan",
-        ),
-        pytest.param(
-            # MXFP4, as GPT-OSS's checkpoints are, which the expert-parallel load refuses too.
-            GptOssConfig(
-                num_local_experts=4, quantization_config={"quant_method": "mxfp4"}, **_TINY
-            ),
-            None,
-            _NO_EP_YET,
-            None,
-            id="spec_refuses_ep",
-        ),
-        pytest.param(
-            _deepseek_v3(n_routed_experts=8), None, _NEEDS_LATER, "5.6.2", id="below_the_ep_floor"
-        ),
-        pytest.param(
-            _qwen3_moe(num_experts=8),
-            1,
-            _CAN_BE_EP.format(8),
-            None,
-            id="explicit_degree_one_as_an_argument",
-        ),
-        pytest.param(
-            _deepseek_v3(n_routed_experts=3),
-            None,
-            _CAN_BE_EP.format(3),
-            "5.6.2",
-            id="below_the_ep_floor_no_degree",
-        ),
-        pytest.param(
-            _deepseek_v3(n_routed_experts=8),
-            "1",
-            _NEEDS_LATER_AND_A_DEGREE,
-            "5.6.2",
-            id="below_the_ep_floor_explicit_degree_one",
-        ),
+        pytest.param(_deepseek_v3(n_routed_experts=3), None, 3, id="auto_finds_no_degree"),
+        pytest.param(_qwen3_moe(num_experts=8), "1", 8, id="explicit_degree_one"),
+        pytest.param(_deepseek_v3(n_routed_experts=8), "1", 8, id="explicit_degree_one_spec_plan"),
+        pytest.param(_qwen3_moe(num_experts=8), 1, 8, id="explicit_degree_one_as_an_argument"),
     ],
 )
 def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
-    run_as, serve, monkeypatch, tmp_path, config, ep_degree, refusal, version
+    run_as, serve, monkeypatch, tmp_path, config, ep_degree, experts
 ):
     """No EP degree above 1 divides 3 experts over 2 ranks, and an explicit 1 asks for none,
     whether the plan comes with the config (Qwen3-MoE) or only from the model's spec, which an EP
     degree of 1 skips (DeepSeek-V3). With nothing sharded either, every rank would hold the whole
-    MoE: that must fail, not run, and name the expert count an EP degree has to divide. GPT-OSS
-    carries a plan too, but its spec refuses expert parallelism, so auto picks no EP degree for it
-    and this check refuses it as an MoE that cannot be expert-parallel yet, whatever else the
-    expert-parallel load refuses it for, offering every other way out (FSDP2 only for an
-    unquantized causal LM); the spec's own refusal, a
-    NotImplementedError and so a RuntimeError too, words it differently. Below the transformers
-    release expert parallelism needs, no EP degree is offered, since none would load: upgrading
-    is, where an EP degree divides the experts; where none does, upgrading would not shard them.
-    The ways out are named as the caller set the plan, so arguments, which override the knobs, are
-    named."""
-    if version is not None:
-        monkeypatch.setattr(transformers, "__version__", version)
-    experts = getattr(config, "n_routed_experts", None) or getattr(config, "num_experts", 0)
-    below = Version(transformers.__version__) < Version(_EP_MIN_TRANSFORMERS)
-    if version is None and refusal.startswith("can be") and below and experts % 2 == 0:
-        # On a transformers below the floor, upgrading is the way out where an EP degree divides
-        # the experts, with a degree set to 1 raised as well.
-        refusal = _NEEDS_LATER_AND_A_DEGREE if ep_degree is not None else _NEEDS_LATER
+    MoE: that must fail, not run, and name the expert count an EP degree has to divide. An MoE the
+    expert-parallel load cannot take loads as a dense model does instead
+    (test_an_moe_its_spec_or_transformers_rules_out_loads_as_a_dense_model). The ways out are
+    named as the caller set the plan, so arguments, which override the knobs, are named."""
     if ep_degree is not None:
         if config.model_type == "qwen3_moe" and Version(transformers.__version__) < Version("5.7"):
             pytest.skip("qwen3_moe's base_model_ep_plan ships in transformers 5.7")
@@ -779,12 +704,8 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
     run_as(2)
     serve(config)
 
-    with pytest.raises((RuntimeError, ValueError), match=refusal) as refused:
+    with pytest.raises(ValueError, match=_CAN_BE_EP.format(experts)) as refused:
         resolve_distribution_plan(str(tmp_path), **arguments)
-    if refusal is _NO_EP_YET:  # as the load refuses the same spec
-        assert refused.type is NotImplementedError
-    if refusal.startswith(_CAN_BE_EP[: _CAN_BE_EP.index("{")]):  # what its inputs resolve to
-        assert refused.type is ValueError, refused.type
     if arguments:  # a knob the arguments override would lead straight back here
         assert "ep_size=1 with dense='replicate'" in str(refused.value), refused.value
         assert "MODELOPT_" not in str(refused.value), refused.value
@@ -805,10 +726,9 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     below its floor -- is planned without expert parallelism rather than committed to a load that
     refuses it, for some reasons only after the download. Nor is it refused for being left whole,
     whether the decision or the caller made its EP degree 1: it cannot be expert-parallel here, so
-    it loads as a dense model does, with a warning saying why; a spec ruling expert parallelism out
-    has a refusal of its own (GPT-OSS's, in
-    test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error). A replication both knobs ask for
-    is the caller's choice, and gets no warning."""
+    it loads as a dense model does, with a warning saying why, as one its spec rules out does
+    (test_an_moe_its_spec_or_transformers_rules_out_loads_as_a_dense_model). A replication both
+    knobs ask for is the caller's choice, and gets no warning."""
     for knob, value in knobs.items():
         monkeypatch.setenv(knob, value)
     run_as(2)
@@ -824,9 +744,7 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     why = {
         "its-plan": "shards no weights of",
         "its-format": "'fp8' checkpoint; an unquantized copy of the model would load",
-        "its-spec": "Not yet.",
         "its-transformers": r"transformers >= 5\.7, but 5\.6\.2 is installed\. Upgrade",
-        "its-specs-transformers": r"transformers >= 5\.13, but 5\.10\.0 is installed\. Upgrade",
     }[refused_by]
 
     if "MODELOPT_FSDP_SIZE" in knobs:
@@ -869,17 +787,72 @@ def test_an_ep_capable_moe_is_replicated_when_both_knobs_ask_for_it(
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
 
 
-def test_an_ep_degree_of_1_auto_picks_does_not_ask_for_the_replication(
-    run_as, serve, monkeypatch, tmp_path
-):
-    """Auto is an EP degree of 1 for GPT-OSS, whose spec refuses expert parallelism; with the dense
-    part asked to be replicated, that is still a replication the plan reached, and is refused."""
-    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "1")
-    run_as(2)
-    serve(GptOssConfig(num_local_experts=4, **_TINY))
+_GPT_OSS_MXFP4 = GptOssConfig(  # MXFP4, as GPT-OSS's checkpoints are
+    num_local_experts=4, quantization_config={"quant_method": "mxfp4"}, **_TINY
+)
 
-    with pytest.raises(RuntimeError, match="cannot be quantized expert-parallel yet"):
-        resolve_distribution_plan(str(tmp_path))
+
+@pytest.mark.parametrize(
+    ("config", "version", "knobs", "why"),
+    [
+        pytest.param(
+            _GPT_OSS_MXFP4, None, {}, "cannot be quantized expert-parallel yet", id="spec"
+        ),
+        pytest.param(
+            _GPT_OSS_MXFP4,
+            None,
+            {"MODELOPT_EP_DEGREE": "1"},
+            "cannot be quantized expert-parallel yet",
+            id="spec-set-to-1",
+        ),
+        pytest.param(
+            _GPT_OSS_MXFP4,
+            None,
+            {"MODELOPT_FSDP_SIZE": "1"},
+            "cannot be quantized expert-parallel yet",
+            id="spec-dense-replicated",
+        ),
+        pytest.param(
+            _deepseek_v3(n_routed_experts=8),
+            "5.6.2",
+            {},
+            r"requires transformers >= 5\.7, but 5\.6\.2 is installed\. Upgrade",
+            id="below-the-floor",
+        ),
+        pytest.param(
+            _deepseek_v3(n_routed_experts=8),
+            "5.6.2",
+            {"MODELOPT_EP_DEGREE": "1"},
+            r"requires transformers >= 5\.7, but 5\.6\.2 is installed\. Upgrade",
+            id="below-the-floor-set-to-1",
+        ),
+        pytest.param(
+            _deepseek_v3(n_routed_experts=3),
+            "5.6.2",
+            {},
+            r"requires transformers >= 5\.7, but 5\.6\.2 is installed\. Upgrade",
+            id="below-the-floor-no-degree",
+        ),
+    ],
+)
+def test_an_moe_its_spec_or_transformers_rules_out_loads_as_a_dense_model(
+    run_as, serve, monkeypatch, tmp_path, config, version, knobs, why
+):
+    """GPT-OSS's spec refuses expert parallelism, and DeepSeek-V3's needs transformers 5.7: with the
+    EP degree left to auto or set to 1, either loads as a dense model does, whole on every rank
+    here, and a warning on rank 0 says why, with the spec's way around expert parallelism or the
+    upgrade that would let its experts shard. It is not refused for being left whole, whatever
+    the dense part's knob asks: it cannot be expert-parallel here."""
+    if version is not None:
+        monkeypatch.setattr(transformers, "__version__", version)
+    for knob, value in knobs.items():
+        monkeypatch.setenv(knob, value)
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+    run_as(2)
+    serve(config)
+
+    with pytest.warns(UserWarning, match=f"loads without expert parallelism.*{why}"):
+        assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
 
 
 @needs_qwen3_moe_ep_plan
