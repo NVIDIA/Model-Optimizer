@@ -2218,11 +2218,17 @@ def test_a_load_it_decides_inside_init_quantized_weights_is_whole_and_unplaced(
     run_as, loaders, process_group, monkeypatch, tmp_path, memory
 ):
     """Inside init_quantized_weights, with nothing asking to shard, every rank gets the whole model,
-    whatever rank 0's GPU memory, and the load leaves the device map to the context, which computes
-    it and refuses one passed: the context's from_pretrained gets past that refusal."""
+    whatever rank 0's GPU memory, and no model spec is applied, whose prepare could fail or patch
+    the process for a load that never shards. The load leaves the device map to the context, which
+    computes it and refuses one passed: the context's from_pretrained gets past that refusal."""
     run_as(2, rank=1)
     LlamaConfig(**_TINY).save_pretrained(tmp_path)  # read from disk, as the context reads it too
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: memory)
+    monkeypatch.setattr(
+        model_load_utils, "apply_distributed_support", lambda *a, **k: pytest.fail("applied a spec")
+    )
+    # As on a transformers new enough for expert parallelism, whose floor would rule it out here.
+    monkeypatch.setattr(model_load_utils, "_spec_refuses_ep", lambda model_type: False)
     monkeypatch.setattr(
         accelerate_plugin, "init_empty_weights", mock.Mock(side_effect=_ContextLoadReachedError)
     )
@@ -2253,14 +2259,24 @@ def test_a_sharded_load_is_refused_inside_init_quantized_weights(
 
 
 @needs_qwen3_moe_ep_plan
-@pytest.mark.parametrize("handed", [False, True], ids=["knob", "handed"])
+@pytest.mark.parametrize(
+    ("config", "handed"),
+    [
+        (_qwen3_moe(num_experts=8), False),
+        (_qwen3_moe(num_experts=8), True),
+        (_deepseek_v3(n_routed_experts=8), False),
+    ],
+    ids=["knob", "handed", "knob-spec-plan"],
+)
 def test_an_expert_parallel_load_is_refused_inside_init_quantized_weights(
-    run_as, serve, loaders, process_group, monkeypatch, tmp_path, handed
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, config, handed
 ):
     """The expert-parallel load never calls from_pretrained either, and its way to a whole model on
-    every rank sets the EP degree to 1 as well, as the decision refuses to replicate an MoE unasked."""
+    every rank sets the EP degree to 1 as well, as the decision refuses to replicate an MoE unasked.
+    An EP degree asked for still applies the model's spec, so the decision finds the experts of an
+    MoE whose plan only its spec supplies (DeepSeek-V3's), and the load is what refuses."""
     run_as(2, rank=1)
-    serve(_qwen3_moe(num_experts=8))
+    serve(config)
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
     monkeypatch.setenv("MODELOPT_EP_DEGREE", "2")
     plan = {"distribution": DistributionPlan(2, 2)} if handed else {}

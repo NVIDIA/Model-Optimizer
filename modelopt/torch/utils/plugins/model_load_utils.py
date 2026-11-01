@@ -1862,16 +1862,19 @@ def resolve_distribution_plan(
     # Whether the run rules expert parallelism out is rank 0's call, as the plan is: a rank that
     # skipped the spec while the others applied it would load without the expert-parallel plan
     # they shard by, and fail once the mesh is up, leaving them waiting in a collective. A model
-    # class the sharded loads refuse rules it out too: the decision then plans the whole model on
-    # every rank, or refuses, without the spec, whose prepare could fail, or patch the process,
-    # for a load that never shards.
+    # class the sharded loads refuse rules it out too, as does init_quantized_weights with the EP
+    # degree left to auto: the decision then plans the whole model on every rank, or a sharded
+    # load that is refused, without the spec, whose prepare could fail, or patch the process, for a
+    # load that never shards. An EP degree asked for under init_quantized_weights still takes the
+    # spec, for the decision to find the experts the load then refuses to shard.
     prepared = [hf_config]
     if dist.broadcast_from(
         "spec",
         lambda: (
             world_size > 1
             and auto_class in (None, AutoModelForCausalLM)
-            and _ep_degree(ep_size, hf_config.model_type) != 1
+            and (ep := _ep_degree(ep_size, hf_config.model_type)) != 1
+            and not (ep == "auto" and _init_quantized_weights())
         ),
     ):
         # Before deciding: deciding without the spec would read an expert-parallel MoE as dense. A
