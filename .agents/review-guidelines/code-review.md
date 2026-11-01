@@ -40,14 +40,14 @@ In particular:
 
 A long PR gets skimmed, not reviewed, so size is judged on its own — a clean 900-line PR is still a PR nobody read carefully. This section implements the repo's own "Sizing and splitting PRs" rules; where `AGENTS.md` or `CONTRIBUTING.md` spells them out, they win over anything here.
 
-**What counts toward the size budget.** Only *core logic* lines: lines **added** to source files (`.py`, `.cu`/`.cuh`, `.cpp`/`.h`, `.go`, `.rs`, `.ts`, shell, …). Deleted lines don't count — a refactor that replaces 400 lines with 200 is a 200-line PR here. Three categories are excluded, and they are excluded entirely:
+**What counts toward the size budget.** Only *core logic* lines: lines **added** to source files (`.py`, `.cu`/`.cuh`, `.cpp`/`.h`, `.go`, `.rs`, `.ts`, shell, …). Deleted lines don't count — a refactor that replaces 400 lines with 200 is a 200-line PR here. Blank lines and comment-only lines (docstrings and block comments included) don't count either, even in source files. Three categories are excluded, and they are excluded entirely:
 1. **Test code** — anything under `tests/`, plus `test_*.py`, `*_test.go`, `*.spec.ts` and friends.
 2. **Config** — `.yaml`, `.yml`, `.json`, `.toml`, `.ini`, `.xml`, lockfiles.
 3. **Docs** — `.md`, `.rst`, `.txt`, notebooks, and anything under `docs/`.
 
 A 2000-line PR that is 1700 lines of new tests and regenerated YAML is a 300-line PR for this purpose. Never ask someone to split a PR because of its test or config volume — every sub-PR is supposed to carry the unit tests for the code it introduces, and a budget that counted them would punish that.
 
-**The threshold is ~500 added lines of core logic.** Over it, ask the author to split — the presumption is always that it can be split, and "cohesive", "reads well" and "nothing else wrong" don't rebut it. Use a trusted size notice when supplied; otherwise count added core-logic lines from the diff. Do not infer that a PR is under budget solely because no size notice was supplied. Disclose truncation that prevents assessing its size.
+**The budget is ~500 added lines of core logic — a guideline, not a hard limit.** A PR a little over it needs no split ask, and "over the budget" in this baseline always means clearly over. When a PR is clearly over, ask the author to split — the presumption is that it can be split, and "cohesive", "reads well" and "nothing else wrong" don't, on their own, rebut it. Use a trusted size notice when supplied; otherwise count added core-logic lines from the diff. Do not infer that a PR is under budget solely because no size notice was supplied. Disclose truncation that prevents assessing its size.
 
 **The exceptions, and they are the only ones.** A PR may exceed the budget when the change genuinely cannot be split:
 1. **A mechanical rename** — a move or rename carried out verbatim across many files.
