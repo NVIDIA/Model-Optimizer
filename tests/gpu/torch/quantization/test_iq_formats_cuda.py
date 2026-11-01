@@ -72,7 +72,8 @@ def test_cuda_pack_matches_pytorch_encoder_and_is_decodable(monkeypatch, name):
     Exact parity is asserted on this input, not in general: the two encoders evaluate the same
     squared error with different floating-point fusion, so where two local scales fall within a
     float32 ULP they can round to different sides. That happens in roughly one block in several
-    thousand, costs under 1e-8 of relative reconstruction error, and favours neither encoder --
+    hundred to several thousand depending on the GPU, costs under 1e-8 of relative reconstruction
+    error, and favours neither encoder --
     see ``test_cuda_pack_reconstruction_matches_pytorch_at_scale``.
     """
     module, _, block_bytes, _ = FORMATS[name]
@@ -118,18 +119,26 @@ def test_cuda_pack_reconstruction_matches_pytorch_at_scale(monkeypatch, name):
     reference, shape = getattr(module, f"quantize_{name}")(weight)
 
     dequantize = getattr(module, f"dequantize_{name}")
-    target = weight.float()
-    denominator = target.square().sum()
+    target = weight.float().reshape(blocks, 256)
     cuda_error = (
-        dequantize(packed, shape, dtype=torch.float32) - target
-    ).square().sum() / denominator
+        (dequantize(packed, shape, dtype=torch.float32).reshape(blocks, 256) - target)
+        .square()
+        .sum(dim=-1)
+    )
     torch_error = (
-        dequantize(reference, shape, dtype=torch.float32) - target
-    ).square().sum() / denominator
+        (dequantize(reference, shape, dtype=torch.float32).reshape(blocks, 256) - target)
+        .square()
+        .sum(dim=-1)
+    )
 
-    differing = int((packed != reference).any(dim=-1).sum())
-    assert differing <= blocks // 1000, f"{differing} of {blocks} blocks differ"
-    assert torch.isclose(cuda_error, torch_error, rtol=1e-5)
+    # How often near-ties round differently depends on how the compiler fuses the CUDA encoder's
+    # arithmetic for the target GPU (2 of these 1024 IQ1_M blocks on Jetson Thor), so bound the
+    # count loosely and require each differing block to reconstruct as well as the reference.
+    differing = (packed != reference).any(dim=-1).flatten()
+    num_differing = int(differing.sum())
+    assert num_differing <= blocks // 100, f"{num_differing} of {blocks} blocks differ"
+    assert torch.allclose(cuda_error[differing], torch_error[differing], rtol=1e-5)
+    assert torch.isclose(cuda_error.sum(), torch_error.sum(), rtol=1e-5)
 
 
 @pytest.mark.parametrize("name", sorted(FORMATS))

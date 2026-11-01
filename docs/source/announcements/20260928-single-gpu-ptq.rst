@@ -133,12 +133,15 @@ at sequence length 512, **batch size 8**.
 
 .. note::
 
-   **Pick the batch size on purpose.** For layerwise runs, ``hf_ptq.py`` defaults to
-   ``--batch_size 1``, but only if you leave the flag at its auto-probe default. An explicit
-   value passes straight through. Going to 8 cuts wall clock roughly in half. It does move the
+   **Pick the batch size on purpose.** For layerwise runs, ``hf_ptq.py`` left at its default
+   probes one decoder layer of each kind and takes the most samples whose forward fits in half
+   the GPU's free memory, up to 32,768 tokens' worth (64 at sequence length 512). It was 1 when
+   this run was made, which is why it passed ``--batch_size 8``. An explicit value passes
+   straight through. Going from 1 to 8 cut wall clock roughly in half. It does move the
    numbers a little. Weights, ``weight_scale`` and ``weight_scale_2`` come out bit-identical,
-   but activation ``input_scale`` values shift slightly, because batching pads each sequence to
-   the longest one in the batch and those pad positions feed the activation amax.
+   but activation ``input_scale`` values shift slightly, because a different batch shape
+   rounds the activations differently. Padding does not change: ``hf_ptq.py`` pads every
+   calibration sample to the same length whatever the batch size.
 
 Then launch the run:
 

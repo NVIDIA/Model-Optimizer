@@ -176,8 +176,7 @@ def get_parser() -> argparse.ArgumentParser:
         help=(
             "TensorRT-RTX implementation used with --calibration_eps NvTensorRtRtx. "
             "The legacy backend uses TensorRT-RTX libraries on PATH; "
-            "the ABI backend uses the installed standalone EP plugin. "
-            "The ABI backend requires Python 3.11 or later."
+            "the ABI backend uses the installed standalone EP plugin."
         ),
     )
     argparser.add_argument(

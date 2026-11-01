@@ -28,11 +28,57 @@ from unittest.mock import patch
 import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
-from _test_utils.torch.transformers_models import get_tiny_nemotron_h
+from _test_utils.torch.transformers_models import create_tiny_qwen3_moe_dir, get_tiny_nemotron_h
 from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM, LlamaConfig
 
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+@pytest.mark.parametrize(
+    ("calib_with_images", "packed_location", "error"),
+    [
+        (False, None, None),
+        (True, None, "text-only inputs"),
+        (False, "root", "pack-quantized"),
+        (False, "text", "pack-quantized"),
+    ],
+)
+def test_fsdp2_qwen_vlm_requires_text_only_calibration(
+    model_type, calib_with_images, packed_location, error
+):
+    args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=calib_with_images)
+    config = SimpleNamespace(model_type=model_type, vision_config={}, text_config=SimpleNamespace())
+    if packed_location is not None:
+        target = config if packed_location == "root" else config.text_config
+        target.quantization_config = {"quant_method": "compressed-tensors"}
+    expected = pytest.raises(NotImplementedError, match=error) if error else nullcontext()
+    with expected:
+        example_utils.validate_fsdp2_supported(args, config)
+
+
+@pytest.mark.parametrize(
+    ("ranks", "qformat", "recipe", "refused"),
+    [
+        (2, "w4a8_awq_beta", None, True),
+        (2, "fp8", "general/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits", True),
+        (2, "fp8", None, False),
+        (1, "w4a8_awq_beta", None, False),
+    ],
+)
+def test_fsdp2_refuses_awq_on_several_ranks_before_loading(
+    monkeypatch, ranks, qformat, recipe, refused
+):
+    """Each rank would fold its own AWQ scale into its weight shard, which the library refuses
+    only once the model is loaded: the example refuses at argument validation."""
+    monkeypatch.setattr(example_utils.dist_utils, "size", lambda: ranks)
+    args = SimpleNamespace(local_checkpoint_path="local-model", qformat=qformat, recipe=recipe)
+    expected = (
+        pytest.raises(NotImplementedError, match="AWQ calibration") if refused else nullcontext()
+    )
+    with expected:
+        example_utils.validate_fsdp2_supported(args, SimpleNamespace(model_type="llama"))
 
 
 def _write_safetensors(path, tensors):
@@ -89,6 +135,14 @@ def test_mtp_preparation_matches_loader(tmp_path, loader, trust_remote_code):
     for name, value in source.state_dict().items():
         torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
     assert not any("MTP weights may remain unquantized" in str(w.message) for w in caught)
+
+
+def test_get_model_loads_with_the_requested_experts_implementation(tmp_path):
+    """hf_ptq's --experts_implementation reaches the fused experts: eager calibrates them as earlier
+    releases did, where transformers would pick grouped_mm for this model."""
+    path = create_tiny_qwen3_moe_dir(tmp_path)
+    model = example_utils.get_model(str(path), device="cpu", experts_implementation="eager")
+    assert model.config._experts_implementation == "eager"
 
 
 @pytest.mark.parametrize("failure_at", [1, 2])
@@ -395,20 +449,54 @@ def test_is_diffusion_gemma(hf_config, expected):
 
 
 @pytest.mark.parametrize(
-    ("trust_remote_code", "expect_bundled_code"),
-    [(True, True), (False, False)],
+    (
+        "architecture",
+        "remote_config",
+        "builtin_config_error",
+        "trust_remote_code",
+        "expect_bundled",
+    ),
+    [
+        ("DeepseekV3ForCausalLM", False, None, True, True),
+        ("DeepseekV3ForCausalLM", False, None, False, False),
+        # Dense Nemotron-H: the built-in class cannot parse the remote config -> bundled code.
+        ("NemotronHForCausalLM", True, KeyError("-"), True, True),
+        # MoE Nemotron-H (or a newer Transformers): the built-in config parses -> built-in class.
+        ("NemotronHForCausalLM", True, None, True, False),
+        # An unrelated failure (e.g. Hub retrieval) is not an incompatibility: it propagates.
+        ("NemotronHForCausalLM", True, OSError("hub down"), True, None),
+    ],
 )
-def test_get_model_deepseek_honors_trust_remote_code(
-    monkeypatch, tmp_path, trust_remote_code, expect_bundled_code
+def test_get_model_selects_bundled_or_builtin_class(
+    monkeypatch,
+    tmp_path,
+    *,
+    architecture,
+    remote_config,
+    builtin_config_error,
+    trust_remote_code,
+    expect_bundled,
 ):
-    """DeepSeek ships bundled modeling code; --trust_remote_code selects it, else built-in."""
+    """--trust_remote_code selects bundled code for DeepSeek and for a config the built-in
+    class cannot represent; otherwise the built-in class is used."""
     used = {}
-    hf_config = SimpleNamespace(
-        architectures=["DeepseekV3ForCausalLM"],
+    config_cls = type(
+        "_Config",
+        (SimpleNamespace,),
+        {"__module__": "transformers_modules.ckpt.config" if remote_config else __name__},
+    )
+    hf_config = config_cls(
+        architectures=[architecture],
         dtype=torch.bfloat16,
-        model_type="deepseek_v3",
+        model_type="nemotron_h" if "NemotronH" in architecture else "deepseek_v3",
         torch_dtype=torch.bfloat16,
     )
+
+    def _load_config(*args, **kwargs):
+        # The re-derivation of a built-in config is the call made without trust_remote_code.
+        if builtin_config_error and not kwargs.get("trust_remote_code"):
+            raise builtin_config_error
+        return hf_config
 
     class FakeModel:
         def eval(self):
@@ -431,20 +519,43 @@ def test_get_model_deepseek_honors_trust_remote_code(
 
         return Fake
 
-    monkeypatch.setattr(example_utils.AutoConfig, "from_pretrained", lambda *a, **k: hf_config)
+    monkeypatch.setattr(example_utils.AutoConfig, "from_pretrained", _load_config)
     monkeypatch.setattr(example_utils, "AutoModelForCausalLM", _record("bundled"))
-    monkeypatch.setattr(
-        example_utils.transformers, "DeepseekV3ForCausalLM", _record("builtin"), raising=False
-    )
+    monkeypatch.setattr(example_utils.transformers, architecture, _record("builtin"), raising=False)
+    monkeypatch.setattr(example_utils, "prepare_model_for_loading", lambda *a, **k: nullcontext())
     monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
     monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
 
+    if expect_bundled is None:
+        with pytest.raises(OSError):
+            example_utils.get_model(
+                str(tmp_path), device="cpu", trust_remote_code=trust_remote_code
+            )
+        return
     example_utils.get_model(str(tmp_path), device="cpu", trust_remote_code=trust_remote_code)
 
-    assert used["path"] == ("bundled" if expect_bundled_code else "builtin")
+    assert used["path"] == ("bundled" if expect_bundled else "builtin")
+
+
+def test_nemotron_h_prefers_bundled_code_for_unsupported_block_type(monkeypatch):
+    """A built-in config that parses but names a block type the built-in model lacks needs the
+    checkpoint's bundled code."""
+    modeling = pytest.importorskip("transformers.models.nemotron_h.modeling_nemotron_h")
+    remote_cls = type("_Config", (SimpleNamespace,), {"__module__": "transformers_modules.c.cfg"})
+    hf_config = remote_cls(model_type="nemotron_h")
+    monkeypatch.setattr(
+        example_utils.AutoConfig,
+        "from_pretrained",
+        lambda *a, **k: SimpleNamespace(layers_block_type=["mamba", "mlp"]),
+    )
+
+    monkeypatch.setattr(modeling, "MIXER_TYPES", {"mamba": object})
+    assert example_utils.prefers_bundled_code("nemotron_h", hf_config, "ckpt", {})
+    monkeypatch.setattr(modeling, "MIXER_TYPES", {"mamba": object, "mlp": object})
+    assert not example_utils.prefers_bundled_code("nemotron_h", hf_config, "ckpt", {})
 
 
 # ---------- get_tokenizer ----------------------------------------------------

@@ -15,6 +15,7 @@
 """Export Megatron Core Model to HuggingFace vLLM fakequant checkpoint."""
 
 import os
+import re
 import tempfile
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -32,10 +33,11 @@ from modelopt.torch.export.plugins.vllm_fakequant_hf import (
 from modelopt.torch.export.quant_format import QUANTIZATION_NONE
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.nn import GroupedQuantizer, SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.utils.core_utils import apply_without_qdq
 from modelopt.torch.utils import get_unwrapped_name
 from modelopt.torch.utils.distributed import DistributedProcessGroup, is_master
 
-__all__ = ["export_mcore_gpt_to_hf_vllm_fq"]
+__all__ = ["check_mcore_vllm_fakequant_quantizers", "export_mcore_gpt_to_hf_vllm_fq"]
 
 
 def _quantizer_configs(module: torch.nn.Module) -> tuple[dict[str, dict], str]:
@@ -95,6 +97,39 @@ def _quantizer_configs(module: torch.nn.Module) -> tuple[dict[str, dict], str]:
             recipe.update({"_" + name: getattr(quantizer, name) for name in attributes})
         configs[get_unwrapped_name(name, module)] = recipe
     return configs, ""
+
+
+def check_mcore_vllm_fakequant_quantizers(model: torch.nn.Module) -> None:
+    """Raise if vLLM fake-quant reload cannot reproduce a quantizer of a Megatron model.
+
+    Checks the settings the vLLM fake-quant export and reload support, with weight quantizers
+    folded into the weights. Collective: a failure on any rank raises on every rank.
+    """
+    failure = ""
+    tied = any(getattr(m, "share_embeddings_and_output_weights", False) for m in model.modules())
+    # MTP and lm_head quantizers are rejected outright, before their individual settings.
+    for name, quantizer in model.named_modules():
+        if not isinstance(quantizer, TensorQuantizer):
+            continue
+        active = quantizer.is_enabled and quantizer._if_quant
+        transform = quantizer.rotate_is_enabled or quantizer.pre_quant_scale is not None
+        if re.search(r"(^|\.)mtp\.", name) and (active or transform):
+            failure = f"MTP quantization is not supported by vLLM fakequant export/reload: {name}"
+        elif re.search(r"(^|\.)output_layer\.", name) and (
+            (active and (tied or "weight_quantizer" not in name)) or (tied and transform)
+        ):
+            failure = f"Unsupported lm_head quantization for vLLM fakequant: {name}"
+        if failure:
+            break
+    if not failure:
+        _, failure = _quantizer_configs(model)
+    failure = DistributedProcessGroup.get_dist_syncd_obj(
+        failure,
+        DistributedProcessGroup(None),
+        lambda failures: next((message for message in failures if message), ""),
+    )
+    if failure:
+        raise ValueError(failure)
 
 
 def _save_quantizer_state(path: Path, save: Callable[[Path], object]) -> None:
@@ -226,24 +261,8 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         self._grouped_fq_modules: set[torch.nn.Module] = set()
 
     def _gather_exclude_modules(self) -> list[str]:
-        """Validate settings before gathering excluded modules."""
-        # Tied embeddings bypass the output-layer route, so validate the live head here too.
-        head = getattr(self.model, "output_layer", None)
-        if head is not None:
-            for name, quantizer in head.named_modules():
-                if not isinstance(quantizer, TensorQuantizer):
-                    continue
-                tied = self.model.share_embeddings_and_output_weights
-                active = quantizer.is_enabled and quantizer._if_quant
-                if (active and (tied or "weight_quantizer" not in name)) or (
-                    tied and (quantizer.rotate_is_enabled or quantizer.pre_quant_scale is not None)
-                ):
-                    self._quantizer_validation_failure = (
-                        self._quantizer_validation_failure
-                        or f"Unsupported lm_head quantization for vLLM fakequant: {name}"
-                    )
-                    break
-        # All ranks reach this after MTP collection and before writing weights.
+        """Raise export-time failures (e.g. conflicting packed recipes) before gathering."""
+        # All ranks reach this after collecting the shards and before writing weights.
         failure = DistributedProcessGroup.get_dist_syncd_obj(
             self._quantizer_validation_failure,
             DistributedProcessGroup(None),
@@ -387,8 +406,12 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         self._state_dict.update({prefix + name: value for name, value in state.items()})
 
     @staticmethod
-    def _fakequant_weight(weight, weight_quantizer, dtype):
-        """Return a CPU QDQ weight while preserving the quantizer's device."""
+    def _fakequant_weight(weight, weight_quantizer, dtype, unquantized_rows=None):
+        """Return a CPU QDQ weight while preserving the quantizer's device.
+
+        ``unquantized_rows`` skip the QDQ but keep the quantizer's scaling / rotation, as in the
+        fake-quant forward (GatedDeltaNet's beta / alpha gates).
+        """
         weight = weight.to(dtype)
         # Fold the weight_quantizer into the weight by applying fake-quantization
         # (quantize then dequantize). The weight_quantizer amax is not exported;
@@ -412,7 +435,17 @@ class VllmFqGPTModelExporter(GPTModelExporter):
                 if need_move:
                     weight_quantizer.to(quant_device)
                 try:
-                    weight = weight_quantizer(weight.to(quant_device)).to(dtype)
+                    weight = weight.to(quant_device)
+                    qweight = weight_quantizer(weight)
+                    if unquantized_rows is not None:
+                        qweight = torch.cat(
+                            [
+                                qweight[: unquantized_rows.start],
+                                apply_without_qdq(weight_quantizer, weight[unquantized_rows]),
+                                qweight[unquantized_rows.stop :],
+                            ]
+                        )
+                    weight = qweight.to(dtype)
                 finally:
                     if need_move:
                         weight_quantizer.to(wq_dev)
@@ -439,23 +472,10 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         """
         name_to_value = {}
         qformat: str = self._get_quantization_format(module)
+        # MTP quantizers are rejected up front (check_mcore_vllm_fakequant_quantizers).
         if prefix.startswith("mtp."):
-            for name, quantizer in module.named_modules():
-                if isinstance(quantizer, TensorQuantizer) and (
-                    (quantizer.is_enabled and quantizer._if_quant)
-                    or quantizer.rotate_is_enabled
-                    or quantizer.pre_quant_scale is not None
-                ):
-                    self._quantizer_validation_failure = self._quantizer_validation_failure or (
-                        f"MTP quantization is not supported by vLLM fakequant export/reload: {name}"
-                    )
-                    break
             return self._get_weight_bias(module, dtype), qformat, 0
-        quantizer_configs, error = _quantizer_configs(module)
-        if error:
-            self._quantizer_validation_failure = self._quantizer_validation_failure or error
-            # Skip unsupported kernels while peers complete the export collectives.
-            return self._get_weight_bias(module, dtype), qformat, 0
+        quantizer_configs, _ = _quantizer_configs(module)
         source_prefix = prefix if not prefix or prefix.endswith(".") else prefix + "."
         for qname, qstate in quantizer_configs.items():
             marker_id = len(self._quantizer_recipe_markers)
@@ -473,7 +493,10 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         # Grouped slicing reads QDQ weights from the hooked module.state_dict().
         if "weight" in name_to_value and module not in self._grouped_fq_modules:
             name_to_value["weight"] = self._fakequant_weight(
-                name_to_value["weight"], getattr(module, "weight_quantizer", None), dtype
+                name_to_value["weight"],
+                getattr(module, "weight_quantizer", None),
+                dtype,
+                getattr(module, "_modelopt_unquantized_output_rows", None),
             )
 
         # Save activation ranges; weight quantizers are folded into the weights above.
@@ -540,6 +563,7 @@ def export_mcore_gpt_to_hf_vllm_fq(
     Raises:
         ValueError: If a quantizer uses settings that cannot be restored.
     """
+    check_mcore_vllm_fakequant_quantizers(model)
     exporter = VllmFqGPTModelExporter(
         model,
         pretrained_model_name_or_path,

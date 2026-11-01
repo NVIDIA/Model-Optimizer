@@ -32,8 +32,6 @@ The recipe upgrades its already-constructed ``self.checkpointer`` instance in pl
 patch the global ``Checkpointer`` class or any other recipe's checkpointer).
 """
 
-from __future__ import annotations
-
 import os
 from typing import Any
 

@@ -25,6 +25,7 @@ Usage:
 
 import glob
 import os
+import re
 import shutil
 import tarfile
 import tempfile
@@ -36,8 +37,6 @@ nox.options.envdir = "/tmp/.nox"
 nox.options.reuse_existing_virtualenvs = True
 
 TORCH_VERSIONS = {
-    "torch_28": "torchvision~=0.23.0",
-    "torch_29": "torchvision~=0.24.0",
     "torch_210": "torchvision~=0.25.0",
     "torch_211": "torchvision~=0.26.0",
     "torch_212": "torchvision~=0.27.0",
@@ -62,7 +61,7 @@ def _cov_args():
 _CPU_ONLY_ENV = {"CUDA_VISIBLE_DEVICES": ""}
 
 
-@nox.session(python=["3.10", "3.11", "3.12", "3.13", "3.14"])
+@nox.session(python=["3.11", "3.12", "3.13", "3.14"])
 @nox.parametrize("tf_ver", [nox.param(k, id=k) for k in TRANSFORMERS_VERSIONS])
 @nox.parametrize("torch_ver", [nox.param(k, id=k) for k in TORCH_VERSIONS])
 def unit(session, torch_ver, tf_ver):
@@ -133,6 +132,29 @@ _FORCE_BUILD = {
     "mamba_ssm": {"MAMBA_FORCE_BUILD": "TRUE"},
     "causal_conv1d": {"CAUSAL_CONV1D_FORCE_BUILD": "TRUE"},
 }
+# Their setup.py files hardcode one -gencode flag per architecture (nine with CUDA 13) and ignore TORCH_CUDA_ARCH_LIST.
+_GENCODE = re.compile(
+    r'^(?P<indent>[ \t]*)cc_flag\.append\("-gencode"\)\n[ \t]*cc_flag\.append\("arch=compute_(?P<arch>\d+),code=sm_\d+"\)',
+    re.MULTILINE,
+)
+
+
+def _only_runner_archs(setup_py):
+    """Drop the ``-gencode`` entries for the architectures not in TORCH_CUDA_ARCH_LIST, which CI sets to its GPU."""
+    archs = [
+        arch for arch in re.split(r"[;\s]+", os.environ.get("TORCH_CUDA_ARCH_LIST", "")) if arch
+    ]
+    # A named list (``Hopper``) cannot be matched to the -gencode entries: build every architecture, as without the variable
+    if not archs or not all(re.fullmatch(r"\d+\.\d+[a-z]?(\+PTX)?", arch) for arch in archs):
+        return setup_py
+    keep = {re.sub(r"\D", "", arch) for arch in archs}
+    # ``pass`` keeps an ``if`` block valid when all of its entries are dropped
+    patched = _GENCODE.sub(lambda m: m[0] if m["arch"] in keep else f"{m['indent']}pass", setup_py)
+    if not _GENCODE.search(patched):
+        raise ValueError(
+            f"No -gencode entry of setup.py matches TORCH_CUDA_ARCH_LIST={';'.join(archs)!r}"
+        )
+    return patched
 
 
 def _wheelhouse():
@@ -157,7 +179,7 @@ def _build_wheel(session, name, wheelhouse):
         source = sdist.removesuffix(".tar.gz")
         setup_py = os.path.join(source, "setup.py")
         with open(setup_py) as f:
-            patched = f.read().replace("-std=c++17", "-std=c++20")
+            patched = _only_runner_archs(f.read().replace("-std=c++17", "-std=c++20"))
         with open(setup_py, "w") as f:
             f.write(patched)
         session.run(*pip_wheel, source, env=_FORCE_BUILD[name])

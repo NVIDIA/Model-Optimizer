@@ -37,7 +37,7 @@ jobs:
         if: "!startsWith(github.ref, 'refs/heads/pull-request/')"
         run: echo "any_changed=true" >> $GITHUB_OUTPUT
       - if: startsWith(github.ref, 'refs/heads/pull-request/')
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - if: startsWith(github.ref, 'refs/heads/pull-request/')

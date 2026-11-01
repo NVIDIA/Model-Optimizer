@@ -20,6 +20,7 @@ import os
 import threading
 import warnings
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -56,25 +57,29 @@ def register_for_patching(name: str, cls: type, patch_methods: list[tuple[str, A
     methods_list.append(patch_methods)
 
 
-def _get_modelopt_state_path(model_name_or_path: str) -> str:
+def _get_modelopt_state_path(model_name_or_path: str, subfolder: str = "") -> str:
     """Get the path to the ModelOpt state file or empty string if not found.
 
     Also handles HF model card as input path. However for hf hub models, we dont have modelopt_state at the moment.
     """
     if os.path.isdir(model_name_or_path):
-        return os.path.join(model_name_or_path, _MODELOPT_STATE_SAVE_NAME)
+        return os.path.join(model_name_or_path, subfolder, _MODELOPT_STATE_SAVE_NAME)
     # Optional [hf] dependency: this module is imported even when huggingface_hub is not installed.
     from huggingface_hub import try_to_load_from_cache
     from huggingface_hub.errors import HFValidationError
 
+    filename = (
+        f"{subfolder}/{_MODELOPT_STATE_SAVE_NAME}" if subfolder else _MODELOPT_STATE_SAVE_NAME
+    )
     try:
-        return try_to_load_from_cache(model_name_or_path, _MODELOPT_STATE_SAVE_NAME) or ""
+        cache_path = try_to_load_from_cache(model_name_or_path, filename)
+        return cache_path if isinstance(cache_path, str) else ""
     except HFValidationError:
         return ""
 
 
 @contextmanager
-def _patch_model_init_for_modelopt(cls, model_path):
+def _patch_model_init_for_modelopt(cls, model_path, subfolder=""):
     """Patch for `cls.init` method to restore ModelOpt state after `init`."""
     # Note: Keeping original config in local as the package will be shared among threads
     added_original_init = False
@@ -89,7 +94,7 @@ def _patch_model_init_for_modelopt(cls, model_path):
 
     @functools.wraps(_original__init__)
     def new_init_fn(self, *args, **kwargs):
-        modelopt_state_path = _get_modelopt_state_path(model_path)
+        modelopt_state_path = _get_modelopt_state_path(model_path, subfolder=subfolder)
         _original__init__(self, *args, **kwargs)
         if os.path.isfile(modelopt_state_path):
             restore_from_modelopt_state(self, modelopt_state_path=modelopt_state_path)
@@ -113,6 +118,9 @@ def _new_save_pretrained(self, save_directory, *args, **kwargs):
         path = _get_modelopt_state_path(save_directory)
         torch.save(modelopt_state(self), path)
         print_rank_0(f"Saved ModelOpt state to {path}")
+    else:
+        # A checkpoint saved without ModelOpt state must not inherit an older sidecar.
+        Path(save_directory, _MODELOPT_STATE_SAVE_NAME).unlink(missing_ok=True)
 
     return outputs
 

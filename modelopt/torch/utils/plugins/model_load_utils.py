@@ -13,33 +13,55 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HuggingFace model loading: :func:`load_pretrained`, and parallel FSDP2 loading."""
+"""HuggingFace model loading: :func:`load_pretrained`, and the plan to distribute a model by."""
 
 import logging
 import os
 import re
+from collections import defaultdict
 from itertools import chain
 from typing import TYPE_CHECKING, Any
 
 import torch
+import torch.distributed.checkpoint as dcp
 import torch.nn as nn
 from huggingface_hub import snapshot_download
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
-from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoModelForSeq2SeqLM,
+    AutoModelForSpeechSeq2Seq,
+    PretrainedConfig,
+)
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
 
+from modelopt.torch.utils import distributed as dist
+from modelopt.torch.utils import env
 from modelopt.torch.utils.distributed import (
+    DistributionPlan,
     barrier,
     broadcast_state_dict,
     fsdp2_wrap,
     is_initialized,
 )
-from modelopt.torch.utils.logging import print_rank_0
+from modelopt.torch.utils.logging import print_rank_0, warn_rank_0
+from modelopt.torch.utils.moe import (
+    _choose_ep_degree,
+    _ep_config,
+    _num_experts_from_config,
+    _routed_expert_keys,
+    _routed_expert_modules,
+)
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     checkpoint_tensor_files,
     ensure_local_checkpoint,
@@ -48,6 +70,11 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def is_fsdp2_text_only_vlm(config) -> bool:
+    """Whether the VLM has a supported text-only FSDP2 decoder layout."""
+    return getattr(config, "model_type", None) in {"qwen3_5", "qwen3_5_moe"}
 
 
 def _resolve_checkpoint_dir(ckpt_path: str, rank: int) -> str:
@@ -185,8 +212,19 @@ def build_meta_causal_lm(
     trust_remote_code: bool,
     attn_implementation: str | None,
     hf_config=None,
+    auto_class: Any = None,
 ):
-    """Build a meta-init causal LM (no real storage allocated)."""
+    """Build a meta-init causal LM (no real storage allocated), or ``auto_class``'s model.
+
+    It leaves ``auto_class`` as it found it, and the auto classes a remote model's ``__init__``
+    builds its parts through (``AutoModel``, ``AutoModelForCausalLM``). Building a remote-code
+    model through an auto class registers its class there, as it is, and a later load through that
+    auto class builds the registered class, without the ``GenerationMixin`` a first load adds: a
+    rank that built one more meta model than its peers, as rank 0 deciding a distribution does,
+    would load its model without the ``generate`` theirs have. That assumes a remote model registers
+    its classes while it is built: one its module registered when imported is undone as well, and a
+    later load in the process, which finds the module imported, does not register it again.
+    """
     if hf_config is None:
         config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
         if attn_implementation is not None:
@@ -198,10 +236,27 @@ def build_meta_causal_lm(
     dtype = getattr(hf_config, "dtype", None) or torch.bfloat16
     from accelerate import init_empty_weights  # only real callers of this function need it
 
-    with init_empty_weights(include_buffers=False):
-        model = AutoModelForCausalLM.from_config(
-            hf_config, dtype=dtype, trust_remote_code=trust_remote_code
-        )
+    model_factory = auto_class
+    if model_factory is None:
+        model_factory = AutoModelForCausalLM
+        if is_fsdp2_text_only_vlm(hf_config):
+            model_factory = AutoModelForImageTextToText
+    # Where transformers records the class a remote-code build registers: in the auto class built
+    # through, and in those a remote VLM builds its towers through. Read without a fallback: if a
+    # release moves it, this fails here rather than leave one rank's model without generate.
+    kept = [
+        (cls._model_mapping._extra_content, dict(cls._model_mapping._extra_content))
+        for cls in (model_factory, AutoModel, AutoModelForCausalLM)
+    ]
+    try:
+        with init_empty_weights(include_buffers=False):
+            model = model_factory.from_config(
+                hf_config, dtype=dtype, trust_remote_code=trust_remote_code
+            )
+    finally:
+        for registered, saved in kept:
+            registered.clear()
+            registered.update(saved)
     model.eval()
     return model
 
@@ -449,6 +504,305 @@ def load_pretrained(
     return model
 
 
+def _map_ckpt_keys_to_model(model: "torch.nn.Module", ckpt_keys, model_keys) -> dict:
+    """Map each checkpoint key to the model ``state_dict`` key it feeds.
+
+    Map each CHECKPOINT key to the built model's ``state_dict`` key it feeds, reproducing what
+    ``from_pretrained`` resolves on load -- so a DCP by-name load fills the right tensors.
+
+    Three passes per checkpoint key (first hit wins): (1) exact match (the common case); (2) the model's
+    ``_checkpoint_conversion_mapping`` regexes if it carries any (first pattern that fires); (3) longest
+    UNIQUE trailing-component match. Pass 3 covers the transformers>=5 VLM prefix-nesting
+    (``model.layers.*`` checkpoint -> ``model.language_model.layers.*`` model, ``visual.*`` -> ``model.visual.*``)
+    WITHOUT hard-coding it: the leaf path is preserved, so the ckpt key's component suffix uniquely locates
+    the model key. Ambiguous (>1 candidate) or absent suffixes are left unmapped -> caught by the caller's
+    coverage guard rather than mis-assigned.
+
+    ``model_keys`` must be the WHOLE model's keys, even when only some of them will be loaded: a suffix is
+    unique only if no other model key shares it, and the caller drops the mappings it does not load. Each
+    model key takes at most one checkpoint key -- a later pass never maps onto a key an earlier pass
+    claimed, and two checkpoint keys claiming one key in the same pass are both left unmapped. Otherwise a
+    key the model has no place for (an MTP layer's ``model.layers.61.shared_head.norm.weight``, a layer a
+    truncated model lacks) lands on ``model.norm.weight`` by suffix alone and overwrites it, with set order
+    picking the winner.
+
+    It does not resolve keys through :func:`_target_param`: a model built on meta has no record of what
+    ``from_pretrained`` ran, and the stock mapping lacks a remote-code model's renames. The loader instead
+    refuses a mapping that fills a tensor the model's load recorded as unplaced, which the export carries.
+    """
+    key_map: dict = {}
+    remaining = set(ckpt_keys)
+
+    def claim(hits: dict) -> None:
+        claimed = set(key_map.values())
+        for mk, cks in hits.items():
+            if len(cks) == 1 and mk not in claimed:
+                key_map[cks[0]] = mk
+            remaining.difference_update(cks)
+
+    # Pass 1: exact
+    claim({ck: [ck] for ck in remaining if ck in model_keys})
+    # Pass 2: model-declared regex conversion mapping (rare; e.g. leaf renames)
+    conv = getattr(model, "_checkpoint_conversion_mapping", None) or {}
+    if conv and remaining:
+        compiled = [(re.compile(p), r) for p, r in conv.items()]
+        hits: dict = defaultdict(list)
+        for ck in remaining:
+            mk = ck
+            for rx, repl in compiled:
+                mk, n = rx.subn(repl, mk)
+                if n:
+                    break
+            if mk in model_keys:
+                hits[mk].append(ck)
+        claim(hits)
+    # Pass 3: longest unique component-suffix match. Candidates only grow as the suffix shortens, so the
+    # longest suffix with any candidate decides.
+    if remaining:
+        suffix_idx: dict = defaultdict(list)
+        for mk in model_keys:
+            comps = mk.split(".")
+            for k in range(1, len(comps) + 1):
+                cands = suffix_idx[tuple(comps[-k:])]
+                if len(cands) < 2:  # only "exactly one candidate" is read below
+                    cands.append(mk)
+        hits = defaultdict(list)
+        for ck in remaining:
+            comps = ck.split(".")
+            for k in range(len(comps), 0, -1):
+                cands = suffix_idx.get(tuple(comps[-k:]))
+                if cands:
+                    if len(cands) == 1:
+                        hits[cands[0]].append(ck)
+                    break
+        claim(hits)
+    return key_map
+
+
+def _copy_tied_values(kept: torch.Tensor, src: torch.Tensor, name: str) -> None:
+    """Copy ``name``'s checkpoint values from ``src`` into ``kept``, the tied param that replaced it.
+
+    The copy is local: plain tensors, or DTensors laid out alike (one mesh, the same placements), as
+    FSDP2 shards tied params. Any other layout would need a redistribution and is refused instead.
+    """
+    alike = kept.shape == src.shape and (
+        not (isinstance(kept, DTensor) or isinstance(src, DTensor))
+        or (
+            isinstance(kept, DTensor)
+            and isinstance(src, DTensor)
+            and kept.device_mesh == src.device_mesh
+            and kept.placements == src.placements
+        )
+    )
+    if not alike:
+        raise RuntimeError(
+            f"meta+DCP load: tie_weights replaced {name}, which the checkpoint filled, with a param "
+            "laid out differently, so its values cannot be carried over"
+        )
+    with torch.no_grad():
+        if isinstance(kept, DTensor):
+            kept, src = kept.to_local(), src.to_local()
+        kept.copy_(src)
+
+
+def _meta_dcp_load(
+    model: "torch.nn.Module",
+    local_dir: str,
+    device,
+    *,
+    load_names: set,
+) -> None:
+    """Materialize a meta-built model's ``load_names`` params and fill them through torch DCP.
+
+    Each rank materializes the params on ``device`` and fills them from the HF safetensors via DCP's
+    ``HuggingFaceStorageReader``.
+
+    PLACEMENT is decided entirely by the CALLER, not here: ``dcp.load`` reads a FULL tensor into a plain
+    (replicated) param and only the LOCAL SLICE into a ``Shard`` ``DTensor``. The EP hybrid ``fully_shard``-s
+    its dense modules first, so each rank loads only its dense shard, and no full copy is made.
+
+    ``load_names`` restricts the checkpoint load to those ``state_dict`` names -- the dense params in the EP
+    hybrid, whose experts are ALREADY materialized by ``from_pretrained`` and must not be touched.
+
+    Materialization is SELECTIVE (module-by-module, only where params are meta) so already-real params (EP
+    experts) are never re-emptied. ``to_empty`` also re-empties BUFFERS (rotary ``inv_freq`` etc., + any the
+    caller already loaded), so they are snapshotted and restored -- a params-only checkpoint load would
+    otherwise leave them garbage and the calibration forward would drift (weights load fine but activation
+    amax is wrong). Persistent buffers ``load_names`` names are (re)loaded from the checkpoint via DCP below.
+
+    Every target param ends up filled -- from the checkpoint, by ``tie_weights`` with a param the
+    checkpoint filled, or with the value it already had -- or the load fails: nothing is left as the
+    uninitialized memory ``to_empty`` hands out.
+    """
+    # Read what the checkpoint holds before changing the model, so a refusal leaves it as it was.
+    reader = HuggingFaceStorageReader(str(local_dir))
+    ckpt_md = reader.read_metadata().state_dict_metadata
+    ckpt_keys = set(ckpt_md)
+    if not ckpt_keys:
+        raise RuntimeError(
+            f"meta+DCP load: the checkpoint at {local_dir} has NO tensors -- the resolved snapshot carries no "
+            "safetensors (a config-only / incomplete HF revision; e.g. refs/main pointing at a weightless "
+            "snapshot). Re-download the checkpoint or pass a complete local snapshot dir / pinned revision."
+        )
+    if isinstance(model, FSDPModule):
+        raise RuntimeError(
+            "meta+DCP load: the root module is fully_shard-ed. The load materializes module by module, "
+            "so already-real params survive, which a root-sharded FSDP2 state does not take: shard the "
+            "decoder layers only."
+        )
+    meta_buffers = sorted(n for n, b in model.named_buffers() if b.is_meta)
+    if meta_buffers:
+        raise RuntimeError(
+            f"meta+DCP load: {len(meta_buffers)} buffer(s) are on meta, which a checkpoint of params "
+            f"cannot fill (a non-persistent buffer is not in it): {meta_buffers[:3]}. Build the model "
+            "with its buffers materialized, as accelerate's init_empty_weights does."
+        )
+
+    # ``dcp.load`` matches state_dict entries to checkpoint entries BY NAME, but a checkpoint's stored key
+    # names can differ from the built model's ``state_dict`` names, and from_pretrained bridges the gap on
+    # load. E.g. Qwen2.5-VL's checkpoint stores ``model.layers.*`` / ``visual.*`` while transformers>=5 nests
+    # them as ``model.language_model.layers.*`` / ``model.visual.*`` -- a pure prefix-insertion with the leaf
+    # path preserved, which the model carries no ``_checkpoint_conversion_mapping`` attribute for. A raw by-name
+    # match would SILENTLY skip every renamed weight (they stay ``to_empty`` garbage -> a wrecked model that
+    # only surfaces as a confusing downstream crash). Reproduce from_pretrained's result generically via
+    # :func:`_map_ckpt_keys_to_model`: exact -> conversion-mapping regexes -> longest UNIQUE suffix.
+    # (sharded or plain) params + persistent buffers; a DTensor's shape is its global one.
+    model_shapes = {k: t.shape for k, t in model.state_dict().items()}
+    target_names = set(load_names) & set(model_shapes)
+    # {ckpt_key: model_key}, mapped against the WHOLE model and then cut to what this load fills: a suffix
+    # unique among the targets alone can still belong to a key outside them (an expert's, when only the
+    # dense part loads here).
+    key_map = {
+        ck: mk
+        for ck, mk in _map_ckpt_keys_to_model(model, ckpt_keys, set(model_shapes)).items()
+        if mk in target_names
+    }
+    # The export carries the checkpoint tensors the model has no parameter for over raw, as the load
+    # that built the model recorded them (record_unplaced_source_keys): filling one here too would
+    # write it twice, once quantized.
+    carried = sorted(
+        set(key_map) & set(getattr(model, "_modelopt_unplaced_source_keys", None) or ())
+    )
+    if carried:
+        raise RuntimeError(
+            f"meta+DCP load: {len(carried)} checkpoint tensor(s) map onto this model's params by name, "
+            f"but its load recorded them as having no param, for the export to carry over raw: "
+            f"{carried[:3]}. The two would write them twice."
+        )
+    # dcp.load refuses a checkpoint tensor whose shape is not its model tensor's only once to_empty has
+    # re-emptied the model; refuse it while the model is untouched.
+    mismatched = sorted(
+        f"{ck} {tuple(ckpt_md[ck].size)} -> {mk} {tuple(model_shapes[mk])}"
+        for ck, mk in key_map.items()
+        if ckpt_md[ck].size != model_shapes[mk]
+    )
+    if mismatched:
+        raise RuntimeError(
+            f"meta+DCP load: {len(mismatched)} checkpoint tensor(s) differ in shape from the model "
+            f"tensor they map onto, as when the model's config does not match the checkpoint: "
+            f"{mismatched[:3]}"
+        )
+    # Build load_sd in the model's state_dict ORDER (identical on every rank) -- NOT key_map/set iteration
+    # order, which is hash-randomized per process. dcp.load's collective load planner deadlocks if ranks
+    # present the same keys in different orders, so a deterministic, rank-consistent order is required.
+    inv = {mk: ck for ck, mk in key_map.items()}  # model_key -> ckpt_key (1:1 on model keys)
+    mapped_names = set(key_map.values())
+    # Fail fast, BEFORE the load, if the mapping left over half of the TARGET WEIGHT unloaded -- a key scheme
+    # this path did not resolve. Weight by NUMEL, not param COUNT: a fused-expert MoE (Qwen3-MoE: per-expert
+    # checkpoint -> grouped ``experts.gate_up_proj``/``down_proj`` model params DCP can't fuse) leaves only
+    # ~2 params/layer unloaded but they are ~95% of the weight, so a count-based guard misses it. A smaller
+    # shortfall can be tied weights, which ``tie_weights`` fills after the load; whatever it does not fill
+    # fails there. Every alias of a tied param counts, as in unplaced_source_keys: the checkpoint can
+    # store the one named_parameters() drops by default. Only meta params weigh in: one already real
+    # keeps its value without a checkpoint tensor.
+    want_params: set[str] = set()
+    numel: dict[str, int] = {}
+    for n, p in model.named_parameters(remove_duplicate=False):
+        if n in target_names:
+            want_params.add(n)
+            if p.is_meta:
+                numel[n] = p.numel()
+    unloaded = numel.keys() - mapped_names
+    total_nel = max(1, sum(numel.values()))
+    unloaded_nel = sum(numel[n] for n in unloaded)
+    if 2 * unloaded_nel > total_nel:
+        raise RuntimeError(
+            f"meta+DCP load: {len(unloaded)}/{len(numel)} meta params ({100 * unloaded_nel / total_nel:.0f}% "
+            f"of their weight) matched no checkpoint key -- the checkpoint's key naming was not resolved "
+            f"to this model's state_dict (exact + conversion-mapping + suffix match all missed), or it needs a "
+            f"weight conversion DCP can't do (FUSED EXPERTS, split qkv, on-the-fly dequant). Unloaded e.g.: "
+            f"{sorted(unloaded)[:5]}. Replicating the dense part (MODELOPT_FSDP_SIZE=1) loads it through "
+            "from_pretrained instead."
+        )
+    loaded_bufs = mapped_names - {n for n, _ in model.named_parameters(remove_duplicate=False)}
+    if loaded_bufs:
+        warn_rank_0(
+            f"meta+DCP load: loaded {len(loaded_bufs)} persistent buffer(s) from checkpoint: "
+            f"{sorted(loaded_bufs)[:5]}"
+        )
+    # Snapshot real buffers (to_empty re-empties them), materialize params, restore buffers. Materialize
+    # selectively, module by module, so the real experts are not re-emptied. That is safe only because no
+    # root is fully_shard-ed: a per-module loop corrupts a ROOT-sharded FSDP state (its state_dict then
+    # returns wrong keys).
+    saved_buffers = {n: b.detach().clone() for n, b in model.named_buffers() if not b.is_meta}
+    # A module's ``to_empty`` re-empties every direct param, so a param already real beside a meta one
+    # (a router's ``e_score_correction_bias`` next to its meta ``weight``) is kept here too: nothing
+    # outside ``load_names`` would refill it. Every name counts: ``to_empty`` gives a param the module
+    # registers twice a tensor under each name.
+    saved_params: dict[str, torch.Tensor] = {}
+    emptied: set[str] = set()
+    for name, m in model.named_modules():
+        direct = dict(m.named_parameters(recurse=False, remove_duplicate=False))
+        if any(p.is_meta for p in direct.values()):
+            prefix = f"{name}." if name else ""
+            saved_params.update(
+                (prefix + n, p.detach().clone()) for n, p in direct.items() if not p.is_meta
+            )
+            emptied.update(prefix + n for n in direct)
+            m.to_empty(device=device, recurse=False)
+    with torch.no_grad():
+        for n, b in model.named_buffers():
+            src = saved_buffers.get(n)
+            if src is not None:
+                b.copy_(src.to(device=b.device, dtype=b.dtype))
+        for n, src in saved_params.items():
+            p = model.get_parameter(n)
+            p.copy_(src.to(device=p.device, dtype=p.dtype))
+    # The clones are restored; only the names of the params they kept are needed from here on.
+    kept_names = set(saved_params)
+    del saved_buffers, saved_params
+
+    full_sd = model.state_dict()  # the materialized tensors: to_empty replaced the meta params
+    load_sd = {inv[mk]: full_sd[mk] for mk in full_sd if mk in inv}
+    dcp.load(load_sd, storage_reader=reader)
+    # Taken before tying, which can swap a filled param out of its module; in state_dict order, the
+    # same on every rank, so every rank keeps the same param of a tied group.
+    filled = {n: model.get_parameter(n) for n in full_sd if n in want_params and n in mapped_names}
+    if hasattr(model, "tie_weights"):
+        model.tie_weights()  # re-establish tied weights the checkpoint omitted
+    # Tying keeps one param of each tied group, not necessarily the one the checkpoint filled: a tied
+    # checkpoint storing only ``lm_head.weight`` loses its values to the embedding's empty param. The kept
+    # param takes the filled one's values, as from_pretrained leaves it.
+    loaded = {id(p) for p in filled.values()}
+    for name, src in filled.items():
+        kept = model.get_parameter(name)
+        if id(kept) not in loaded:
+            _copy_tied_values(kept, src, name)
+            loaded.add(id(kept))
+    # A re-emptied param no checkpoint tensor filled, and that tying did not make a loaded param, still
+    # holds ``to_empty``'s memory, whether or not ``load_names`` named it. from_pretrained would
+    # initialize it; this loader can't run the model's init on shards, so it fails rather than return
+    # the model. Every rank reaches the same verdict.
+    unfilled = sorted(
+        n for n in emptied - mapped_names - kept_names if id(model.get_parameter(n)) not in loaded
+    )
+    if unfilled:
+        raise RuntimeError(
+            f"meta+DCP load: {len(unfilled)} param(s) have no checkpoint tensor and are tied to no loaded "
+            f"param, so they would stay uninitialized: {unfilled[:5]}"
+        )
+
+
 def parallel_load_and_prepare_fsdp2(
     ckpt_path: str,
     device: torch.device,
@@ -568,3 +922,258 @@ def parallel_load_and_prepare_fsdp2(
     if hasattr(model, "tie_weights"):
         model.tie_weights()
     return model
+
+
+def _auto_class(hf_config, require_lm_head: bool = True, trust_remote_code: bool = False) -> Any:
+    """The auto class that builds ``hf_config``'s whole model.
+
+    A causal LM builds through ``AutoModelForCausalLM``, head included: ``require_lm_head`` only
+    applies to a model whose architecture reads as a VLM's -- a nested text config, a vision
+    config, or a ``*ForConditionalGeneration`` architecture -- or that is an encoder-decoder model
+    (``is_encoder_decoder``), whether or not it names its architecture. Without ``require_lm_head``
+    such a model builds through ``AutoModel``, its base model, when that can build it (the config
+    is a native one, or a trusted remote one registering ``AutoModel``): most base models leave the
+    head out, since it is not required, though some keep it (Llama4's). Otherwise it builds through
+    the remote ``AutoModelForCausalLM`` when the checkpoint registers its
+    ``*ForConditionalGeneration`` there, its code is trusted and it registers no image-text class,
+    else through its seq2seq class if it is an encoder-decoder model, else through
+    ``AutoModelForImageTextToText`` if that recognizes the config or, its code trusted, the
+    checkpoint registers one, else through ``AutoModelForCausalLM`` if that recognizes it (as it
+    does Phi-4-multimodal), else still through ``AutoModel``.
+    """
+    architectures = getattr(hf_config, "architectures", None) or []
+    is_vlm = (
+        getattr(hf_config, "text_config", None) is not None
+        or getattr(hf_config, "vision_config", None) is not None
+        or any("conditionalgeneration" in str(arch).lower() for arch in architectures)
+    )
+    if not is_vlm and not getattr(hf_config, "is_encoder_decoder", False):
+        return AutoModelForCausalLM
+    auto_map = getattr(hf_config, "auto_map", None) or {}
+    if not require_lm_head and (
+        type(hf_config) in AutoModel._model_mapping
+        or (trust_remote_code and "AutoModel" in auto_map)
+    ):
+        return AutoModel
+    remote_with_head = (
+        trust_remote_code
+        and "conditionalgeneration" in str(auto_map.get("AutoModelForCausalLM", "")).lower()
+    )
+    if remote_with_head and "AutoModelForImageTextToText" not in auto_map:
+        return AutoModelForCausalLM
+    for seq2seq in (AutoModelForSeq2SeqLM, AutoModelForSpeechSeq2Seq):
+        if type(hf_config) in seq2seq._model_mapping:
+            return seq2seq
+    if type(hf_config) in AutoModelForImageTextToText._model_mapping or (
+        trust_remote_code and "AutoModelForImageTextToText" in auto_map
+    ):
+        return AutoModelForImageTextToText
+    if type(hf_config) in AutoModelForCausalLM._model_mapping:
+        return AutoModelForCausalLM
+    return AutoModel
+
+
+# The share of one GPU's memory a rank may take with the dense part replicated: that whole copy and
+# the rank's share of the routed experts. The rest is left to calibration's activations and
+# communication buffers.
+_REPLICATED_SHARE = 0.6
+
+
+def _gpu_memory() -> int | None:
+    """This rank's GPU memory in bytes, or ``None`` without a GPU."""
+    if not torch.cuda.is_available():
+        return None
+    return torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
+
+
+def _dense_from_env(world_size: int) -> str:
+    """``MODELOPT_FSDP_SIZE`` as a dense layout, or ``"auto"``."""
+    value = env.fsdp_size().lower()
+    if value == "auto":
+        return "auto"
+    if value == "1":
+        return "replicate"
+    if value in ("world", str(world_size)):
+        return "fsdp"
+    raise ValueError(
+        f"MODELOPT_FSDP_SIZE={value!r}: expected auto, 1 (replicate the dense part) or world "
+        f"(FSDP2-shard it over all {world_size} ranks)."
+    )
+
+
+def _ep_degree(ep_size) -> int | str:
+    """``ep_size`` as an EP degree or ``"auto"``; ``None`` reads ``MODELOPT_EP_DEGREE``."""
+    value = env.ep_degree() if ep_size is None else ep_size
+    if str(value).lower() in ("auto", "0"):
+        return "auto"
+    try:
+        return int(value)
+    except ValueError:
+        name = "MODELOPT_EP_DEGREE" if ep_size is None else "ep_size"
+        raise ValueError(f"{name}={value!r}: expected auto, 0 (auto) or an EP degree.") from None
+
+
+def _decide_distribution(
+    ckpt_path: str, hf_config, world_size: int, ep_size, dense, trust_remote_code: bool
+) -> DistributionPlan:
+    """The plan :func:`resolve_distribution_plan` returns, decided by this rank alone."""
+    # What the caller set the EP degree with, for a refusal to name it.
+    knob = "MODELOPT_EP_DEGREE" if ep_size is None else "ep_size"
+    if world_size == 1:
+        # Nothing to shard over, so nothing about the model matters, nor do the knobs: a shell still
+        # exporting a multi-GPU run's would otherwise reshape a single process's load. The caller's
+        # own arguments still count, as dense="fsdp" for FSDP2 on one rank.
+        single = 1 if ep_size is None else _ep_degree(ep_size)
+        return DistributionPlan(
+            ep_size=single if isinstance(single, int) else 1,
+            dense="replicate" if dense in (None, "auto") else dense,
+        )
+    ep_size = _ep_degree(ep_size)
+    dense = _dense_from_env(world_size) if dense is None else dense
+    try:
+        model = build_meta_causal_lm(
+            ckpt_path,
+            trust_remote_code,
+            None,
+            hf_config,
+            auto_class=_auto_class(hf_config, trust_remote_code=trust_remote_code),
+        )
+        # init_empty_weights re-wraps every parameter it registers, which unties what from_config
+        # tied: re-tie, so a tied embedding and LM head count once, as the loaded model holds them.
+        model.tie_weights()
+    except Exception as e:
+        raise RuntimeError(
+            f"Deciding how to distribute {hf_config.model_type} needs its model built on the meta "
+            f"device, which failed: {type(e).__name__}: {e}"
+        ) from e
+    ep_plan = getattr(_ep_config(hf_config), "base_model_ep_plan", None) or {}
+    experts = _routed_expert_modules(model, ep_plan)
+    num_experts = _num_experts_from_config(_ep_config(hf_config)) if experts else 0
+    if ep_plan and not experts and ep_size != 1 and _num_experts_from_config(_ep_config(hf_config)):
+        # The plan names routed experts the built model has none of under those names: deciding
+        # without them would replicate every expert on every rank, and the expert-parallel load
+        # finds them the same way.
+        containers = ", ".join(sorted(_routed_expert_keys(ep_plan))) or "none"
+        raise ValueError(
+            f"{hf_config.model_type} has routed experts and a base_model_ep_plan, but none of the "
+            f"plan's expert containers ({containers}) names a module of the built model, so they "
+            f"can be neither counted nor sharded. Set {knob}=1 to load it without expert "
+            "parallelism."
+        )
+    if experts and not num_experts and ep_size != 1:
+        # The mirror case: the containers are there, but no count to choose a degree by, which
+        # would leave every expert replicated on every rank.
+        raise ValueError(
+            f"{hf_config.model_type}'s base_model_ep_plan names routed experts the built model has, "
+            "but its config gives no expert count (num_experts, num_local_experts, "
+            f"n_routed_experts or num_routed_experts) to shard them by. Set {knob}=1 to load it "
+            "without expert parallelism."
+        )
+    if ep_size == "auto":
+        ep_size = _choose_ep_degree(world_size, num_experts)
+    elif ep_size > 1 and world_size % ep_size:
+        raise ValueError(f"{knob}={ep_size} must divide the world size ({world_size}).")
+    elif ep_size > 1 and (num_experts == 0 or num_experts % ep_size):
+        raise ValueError(
+            f"{knob}={ep_size} must divide the routed experts {hf_config.model_type} shards "
+            f"({num_experts})."
+        )
+    if dense == "auto":
+        # A rank holds a whole copy of what expert parallelism does not shard, and its 1/ep_size
+        # share of the routed experts it does.
+        sharded = (
+            {id(p) for m in experts.values() for p in m.parameters()} if ep_size > 1 else set()
+        )
+        held = sum(
+            p.numel() * p.element_size() // (ep_size if id(p) in sharded else 1)
+            for p in model.parameters()
+        )
+        memory = _gpu_memory()
+        too_big = memory is not None and held > _REPLICATED_SHARE * memory
+        dense = "fsdp" if too_big else "replicate"
+    return DistributionPlan(world_size, ep_size, dense)
+
+
+def resolve_distribution_plan(
+    ckpt_path: str,
+    *,
+    trust_remote_code: bool = False,
+    ep_size: int | str | None = None,
+    dense: str | None = None,
+    revision: str | None = None,
+    token: str | bool | None = None,
+    cache_dir: str | os.PathLike | None = None,
+    local_files_only: bool = False,
+    subfolder: str | None = None,
+) -> tuple[DistributionPlan, PretrainedConfig]:
+    """Decide how this run distributes ``ckpt_path``'s model over its ranks.
+
+    The one place a run decides it: a distributed load loads the model by the plan this returns and
+    records it on the model (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), and
+    every later step reads it back from there
+    (:func:`~modelopt.torch.utils.distributed.distribution_plan`). Returns ``(plan, hf_config)``,
+    ``hf_config`` being this rank's own copy of the config (rank 0 decides the plan from its copy),
+    for a sharded load to build from.
+
+    Rank 0 decides, from the model built on the meta device: from its parameters rather than
+    estimates of them, and from its routed experts as an expert-parallel load finds them. Every rank
+    takes rank 0's plan (:func:`~modelopt.torch.utils.distributed.broadcast_from`): the inputs are
+    read locally, ranks deciding for themselves could disagree, and ranks loading different plans
+    hang. Collective: every rank must call it.
+
+    * ``ep_size``: the expert-parallel degree, or ``"auto"``, the largest that divides both the
+      world and the routed-expert count of a model whose config carries a ``base_model_ep_plan``.
+    * ``dense``: ``"replicate"`` or ``"fsdp"`` for the rest of the model, or ``"auto"``, which
+      FSDP2-shards it when a whole copy of it and the rank's share of the routed experts would take
+      more than 60% of one GPU's memory. That GPU is rank 0's, by its total memory, so ``"auto"``
+      assumes the run's GPUs are alike; a rank 0 without a GPU replicates it.
+
+    ``None`` reads ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE`` (``1`` replicates; ``world``,
+    or the world size as a number, shards) from rank 0's environment, both defaulting to
+    ``"auto"``. A single process reads neither and holds the whole model, unless ``dense="fsdp"``
+    asks for FSDP2 on one rank.
+
+    ``revision``, ``token``, ``cache_dir``, ``local_files_only`` and ``subfolder`` locate the
+    checkpoint as :func:`load_pretrained` takes them, so the plan is decided for what the load reads:
+    all but ``subfolder`` resolve a Hub model ID (:func:`ensure_local_checkpoint`), and the config
+    read takes all but ``revision``, for custom code its ``auto_map`` names in another Hub repo. It
+    returns no path, so a caller that loads the checkpoint resolves it first, with
+    :func:`ensure_local_checkpoint`, and passes the local directory: the plan is then decided for
+    the snapshot the load reads.
+    """
+    # Each rank reads the checkpoint for itself. One that cannot must fail every rank here, rather
+    # than leave the others waiting in a broadcast below for a rank that already raised.
+    read: list[tuple[str, PretrainedConfig]] = []
+
+    def checkpoint_read() -> bool:
+        _, local_path = ensure_local_checkpoint(
+            ckpt_path,
+            revision=revision,
+            token=token,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+        )
+        if subfolder:
+            local_path = os.path.join(local_path, subfolder)
+        config = AutoConfig.from_pretrained(
+            local_path,
+            trust_remote_code=trust_remote_code,
+            token=token,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+        )
+        read.append((local_path, config))
+        return True
+
+    dist.all_reduce("checkpoint read", checkpoint_read, all)
+    ckpt_path, hf_config = read[0]
+    world_size = dist.size()
+    plan = dist.broadcast_from(
+        "plan",
+        lambda: _decide_distribution(
+            ckpt_path, hf_config, world_size, ep_size, dense, trust_remote_code
+        ),
+    )
+    if plan != DistributionPlan():
+        print_rank_0(f"Distribution: {plan!r}")
+    return plan, hf_config

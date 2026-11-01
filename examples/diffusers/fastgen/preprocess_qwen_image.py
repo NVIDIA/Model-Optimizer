@@ -30,8 +30,6 @@ Example::
         --caption_format meta_json
 """
 
-from __future__ import annotations
-
 import os
 import sys
 

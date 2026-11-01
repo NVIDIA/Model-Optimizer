@@ -193,7 +193,7 @@ def _to_chat(
     """
     if content_field == "messages":
         messages = row.get("messages")
-        if not messages:
+        if not messages or not isinstance(messages, list):
             return None
         messages = prepare_messages_for_chat_template(messages, reasoning_content=reasoning_content)
         chat: dict[str, Any] = {"messages": messages}
@@ -203,8 +203,8 @@ def _to_chat(
             if row.get(key):
                 chat[key] = row[key]
     else:
-        text = row.get("text") or ""
-        if not text:
+        text = row.get("text")
+        if not text or not isinstance(text, str):
             return None
         if "<extra_id_" not in text:
             return {"messages": [{"role": "assistant", "content": text}]}
@@ -279,14 +279,27 @@ def _take_chat_rows(
     from megatron.bridge.data.conversation_processing import is_text_only_chat_example
 
     name = f"{source['hf_dataset']} {source.get('split') or source.get('files')}"
+    content_field = source["content_field"]  # a config error, not a bad row: fail here
     rows: list[dict[str, Any]] = []
-    rejected = 0
+    rejected = unconvertible = 0
     max_rejected = 10 * want + 100
     try:
         for row in _iter_rows(source, output_dir, shuffle, seed):
-            chat = _to_chat(row, source["content_field"], reasoning_content, loss_mode)
-            # Judge the source row's top-level media keys too, which the conversion does not keep.
-            if chat is None or not is_text_only_chat_example({**row, **chat}):
+            try:
+                chat = _to_chat(row, content_field, reasoning_content, loss_mode)
+                # Judge the source row's top-level media keys too, which the conversion drops.
+                if chat is not None and not is_text_only_chat_example({**row, **chat}):
+                    chat = None
+            except (AttributeError, KeyError, TypeError, ValueError) as e:
+                # As in the tokenizing reader: one malformed record must not lose the source.
+                # Warn on the first few only; the summary line carries the count.
+                if unconvertible < 5:
+                    print(
+                        f"[WARN] {name}: skipping a row that cannot be converted: {e!r}", flush=True
+                    )
+                unconvertible += 1
+                chat = None
+            if chat is None:
                 rejected += 1
                 if rejected > max_rejected:
                     break
@@ -299,8 +312,11 @@ def _take_chat_rows(
     if len(rows) < want:
         gave_up = rejected > max_rejected
         reason = f"gave up after {rejected} rejected rows" if gave_up else "source exhausted"
+        if unconvertible:
+            reason += f"; {unconvertible} rows could not be converted"
         raise RuntimeError(f"{name}: only {len(rows)}/{want} usable rows ({reason})")
-    print(f"{name}: {len(rows)} rows ({rejected} rejected)", flush=True)
+    detail = f", {unconvertible} unconvertible" if unconvertible else ""
+    print(f"{name}: {len(rows)} rows ({rejected} rejected{detail})", flush=True)
     return rows
 
 

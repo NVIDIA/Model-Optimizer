@@ -28,9 +28,14 @@ editing if/elif chains inside ``unified_export_hf.py``.
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from modelopt.torch.export.hf_export_handlers import _HeldWindow
+    from modelopt.torch.quantization.utils.core_utils import ModuleNames
 
 __all__ = [
     "ExportContext",
@@ -58,6 +63,24 @@ class ExportContext:
     """The model's HF model type (``model.config.model_type``), used to resolve the
     model's spec in ``modelopt.torch.models``. ``None`` means unknown: spec lookups then
     fail loudly instead of guessing."""
+
+    keep_fused_experts: bool = False
+    """Marks the distributed no-gather export, whose handlers pack while the model is still sharded:
+    an FSDP2-owned weight is packed inside its unit's weight-update window, and fused MoE experts are
+    folded in place and kept fused and sharded rather than split into whole per-expert tensors,
+    which :func:`~modelopt.torch.export.moe_utils.split_fused_experts_state_dict` does later."""
+
+    module_names: "ModuleNames | None" = None
+    """``model``'s name maps, built once per export by the first handler that looks a module up
+    (:func:`~modelopt.torch.quantization.utils.module_name_maps`)."""
+
+    hold_fsdp2_windows: bool = False
+    """Whether the handlers hold an FSDP2 unit's weight-update window open across its modules: set
+    only inside :func:`~modelopt.torch.export.hf_export_handlers.held_fsdp2_weight_windows`, which
+    closes the last window. Elsewhere each module is packed in a window of its own."""
+
+    fsdp2_window: "_HeldWindow | None" = None
+    """The FSDP2 unit's weight-update window the handlers hold open across its modules."""
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]

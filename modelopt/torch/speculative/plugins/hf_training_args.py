@@ -27,9 +27,7 @@ The module is pure Pydantic schema with no runtime dependencies on ``transformer
 ``init_distributed_env`` in ``examples/speculative_decoding/main.py``.
 """
 
-from __future__ import annotations
-
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
@@ -92,7 +90,7 @@ class DataArguments(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _check_mode_requirements(self) -> DataArguments:
+    def _check_mode_requirements(self) -> Self:
         # Always recompute from the data-source fields, never trust an incoming ``mode``: a
         # value stored by an earlier validation can go stale across a recipe dump/reload +
         # override round-trip and silently select the wrong training path.

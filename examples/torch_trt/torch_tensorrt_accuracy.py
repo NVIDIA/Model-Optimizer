@@ -38,8 +38,6 @@ Example::
 samples a different random subset each run; use the full set for a stable score.
 """
 
-from __future__ import annotations
-
 import argparse
 import csv
 import sys

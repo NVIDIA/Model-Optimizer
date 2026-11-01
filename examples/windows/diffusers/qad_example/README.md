@@ -34,7 +34,7 @@ For the **full-stage QAD** implementation (LTX-2 DiT with ModelOpt quantization,
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - CUDA-capable GPU(s)
 - [Accelerate](https://huggingface.co/docs/accelerate) (for FSDP multi-GPU training)
 

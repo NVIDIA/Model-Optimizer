@@ -15,7 +15,6 @@
 
 
 import importlib
-import os
 from collections import defaultdict
 from pathlib import Path
 
@@ -39,9 +38,8 @@ _MODELS = {
     "resnet50": ("resnet50", None),
 }
 
-# PRs run swinv2 for fp8 and nvfp4 only (swin_tiny covers every format); scheduled runs keep all.
-_PR_CI = os.environ.get("GITHUB_REF", "").startswith("refs/heads/pull-request/")
-_SKIPPED_ON_PR = {("swinv2_tiny", "int8"), ("swinv2_tiny", "mxfp8"), ("swinv2_tiny", "auto")}
+# PRs run swinv2 for fp8 and nvfp4 only (swin_tiny covers every format); the other cases are nightly.
+_NIGHTLY_ONLY = {("swinv2_tiny", "int8"), ("swinv2_tiny", "mxfp8"), ("swinv2_tiny", "auto")}
 
 
 def _assert_residual_inputs_are_quantized(onnx_save_path):
@@ -74,13 +72,22 @@ def _assert_residual_inputs_are_quantized(onnx_save_path):
         )
 
 
-@pytest.mark.parametrize("qformat", _QFORMATS)
-@pytest.mark.parametrize("model_key", list(_MODELS))
+@pytest.mark.parametrize(
+    ("model_key", "qformat"),
+    [
+        pytest.param(
+            model_key,
+            qformat,
+            id=f"{model_key}-{qformat}",
+            marks=pytest.mark.nightly if (model_key, qformat) in _NIGHTLY_ONLY else (),
+        )
+        for model_key in _MODELS
+        for qformat in _QFORMATS
+    ],
+)
 def test_torch_onnx(tmp_path, model_key, qformat):
     if model_key == "resnet50" and qformat not in _RESNET_RECIPE_QFORMATS:
         pytest.skip("Only FP8 and INT8 quantization are supported for ResNet")
-    if _PR_CI and (model_key, qformat) in _SKIPPED_ON_PR:
-        pytest.skip("Covered by swin_tiny on PRs; runs in the scheduled CI")
 
     timm_model_name, model_kwargs = _MODELS[model_key]
     onnx_save_path = tmp_path / f"{model_key}.{qformat}.onnx"

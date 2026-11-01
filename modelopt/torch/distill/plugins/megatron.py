@@ -71,8 +71,11 @@ class DistillationConfig:
             Only the smallest prefix of the (sorted) Top-K whose cumulative teacher probability
             reaches this value contributes to the loss. Requires ``logit_kl_topk``. Must be in (0, 1].
         logit_kl_top_p_min_k: Minimum number of Top-K entries kept per token when top-P is active.
-        freeze_mtp: Keep the student's MTP head fixed: skip its loss, which otherwise also trains the
-            shared layers it reads from, and freeze its parameters. Default: ``False``.
+        freeze_mtp: Whether to freeze the student's MTP-specific parameters and disable its auxiliary
+            MTP loss, which otherwise also trains the shared layers it reads from. ``True`` freezes
+            it and ``False`` keeps it training. ``None`` (default) freezes it only when
+            ``kd_loss_alpha == 1.0`` and the student is quantized except for its MTP head, since
+            there is then no quantization error for the MTP loss to recover.
     """
 
     intermediate_layer_pairs: list[tuple[str, ...]] = field(default_factory=list)
@@ -82,7 +85,7 @@ class DistillationConfig:
     logit_kl_topk: int | None = None
     logit_kl_top_p: float | None = None
     logit_kl_top_p_min_k: int = 1
-    freeze_mtp: bool = False
+    freeze_mtp: bool | None = None
     criterion: Criterion | None = None
     loss_balancer: mtd.DistillationLossBalancer | None = None
 
@@ -403,13 +406,85 @@ class LogitsKLLoss(BaseLoss):
         return logits_max + torch.log(denom)
 
 
+# fp32 elements per row chunk in the Top-K loss's full-vocab passes (1 GiB).
+_TOP_LOGITS_CHUNK_NUMEL = 1 << 28
+
+
+def _row_chunks(rows: Tensor) -> list[slice]:
+    step = max(1, _TOP_LOGITS_CHUNK_NUMEL // rows.size(-1))
+    return [slice(i, i + step) for i in range(0, rows.size(0), step)]
+
+
+def _scaled_logsumexp(
+    logits: Tensor, temperature: float, tp_group, top_k: int = 0
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """fp32 row max ``m`` and ``logsumexp(x - m)`` of ``x = logits / temperature``, by row chunks.
+
+    Both are over the TP-sharded vocab dim. Also returns the local Top-K values of ``x - m`` and their
+    indices (empty if ``top_k=0``). Working relative to ``m`` keeps the results exact for logits with
+    a large common offset.
+    """
+    rows = logits.detach().reshape(-1, logits.size(-1))
+    # Rounding is monotonic, so this is also the max of the scaled fp32 logits.
+    row_max = rows.amax(dim=-1, keepdim=True).float() / temperature
+    if tp_group is not None:
+        torch.distributed.all_reduce(row_max, op=torch.distributed.ReduceOp.MAX, group=tp_group)
+    sum_exp = torch.empty_like(row_max)
+    top_vals = row_max.new_empty(rows.size(0), top_k)
+    top_idx = torch.empty(rows.size(0), top_k, dtype=torch.long, device=rows.device)
+    for c in _row_chunks(rows):
+        shifted = rows[c].to(torch.float32, copy=True).div_(temperature).sub_(row_max[c])
+        if top_k:
+            top_vals[c], top_idx[c] = torch.topk(shifted, top_k, dim=-1)
+        sum_exp[c] = shifted.exp_().sum(dim=-1, keepdim=True)
+    if tp_group is not None:
+        torch.distributed.all_reduce(sum_exp, group=tp_group)
+    # Explicit widths: a -1 cannot be inferred for empty batch or sequence dims.
+    return tuple(
+        t.view(*logits.shape[:-1], t.size(-1)) for t in (row_max, sum_exp.log(), top_vals, top_idx)
+    )
+
+
+class _ScaledLogSumExpAndGather(torch.autograd.Function):
+    """``logsumexp(x - m)`` and ``(x - m).gather(-1, index)`` of ``_scaled_logsumexp`` in fp32.
+
+    Saves only ``logits`` and writes their gradient chunk by chunk, instead of keeping fp32 copies
+    of the full logits alive for backward. ``m`` cancels out of the log-probs, so it gets no gradient.
+    """
+
+    @staticmethod
+    def forward(ctx, logits, index, temperature, tp_group):
+        row_max, lse, _, _ = _scaled_logsumexp(logits, temperature, tp_group)
+        ctx.save_for_backward(logits, index, row_max, lse)
+        ctx.temperature, ctx.tp_group = temperature, tp_group
+        return lse, logits.gather(-1, index).float() / temperature - row_max
+
+    @staticmethod
+    def backward(ctx, grad_lse, grad_vals):
+        logits, index, row_max, lse = ctx.saved_tensors
+        if ctx.tp_group is not None:
+            # As in the autograd all-reduce of the normalizer, every TP rank's loss reaches each shard.
+            grad_lse = grad_lse.clone()
+            torch.distributed.all_reduce(grad_lse, group=ctx.tp_group)
+        rows = logits.reshape(-1, logits.size(-1))
+        row_max, lse, grad_lse = row_max.reshape(-1, 1), lse.reshape(-1, 1), grad_lse.reshape(-1, 1)
+        index, grad_vals = index.reshape(-1, index.size(-1)), grad_vals.reshape(-1, index.size(-1))
+        grad = torch.empty_like(rows)
+        for c in _row_chunks(rows):
+            # softmax(x) * grad_lse, plus grad_vals scattered to the gathered entries, over T.
+            g = rows[c].to(torch.float32, copy=True).div_(ctx.temperature).sub_(row_max[c])
+            g.sub_(lse[c]).exp_().mul_(grad_lse[c]).scatter_add_(-1, index[c], grad_vals[c])
+            grad[c] = g.div_(ctx.temperature)
+        return grad.view(logits.shape), None, None, None
+
+
 class TopLogitsKLLoss(LogitsKLLoss):
     """Calculates KL-Divergence loss restricted to the Teacher's Top-K (and optionally Top-P) entries.
 
     Calculates using the global Top-K entries without gathering full logits.
     NOTE: Will gather Top-K logits per rank, so mind the value of K for communication. The full-vocab
-    normalizers still allocate fp32 copies of the local logit shards (the teacher's is freed right
-    away; the student's is retained for backward), and add two TP all-reduces per distribution.
+    normalizers run over fp32 row chunks of the local logit shards rather than fp32 copies of them,
+    and add two TP all-reduces per distribution.
 
     Both distributions are normalized over the *full* vocabulary (not re-normalized over the
     Top-K), matching the offline cached-logits KD loss in Megatron-LM. A "ghost" token holding the
@@ -471,21 +546,17 @@ class TopLogitsKLLoss(LogitsKLLoss):
         # We take K from each rank and then find the global Top-K of all those.
         local_top_k = min(self.top_k, targets.size(-1))
 
-        # Teacher: full-vocab normalizer and local Top-K, then free its fp32 copy before the student's.
-        output_teacher = targets.float() / self._temperature
-        teacher_lse = self._tp_logsumexp(output_teacher)
-        top_teacher_vals, top_idx = torch.topk(output_teacher, local_top_k, dim=-1)
-        del output_teacher
-
-        # Student: the full-vocab normalizer is inherent to the ghost-token formulation.
-        output_student = predictions.float() / self._temperature
-        student_lse = self._tp_logsumexp(output_student)
-        top_student_vals = torch.gather(output_student, dim=-1, index=top_idx)
-        del output_student
+        # Full-vocab normalizers (inherent to the ghost-token formulation) and the local Top-K, both
+        # relative to each distribution's row max, which cancels out of the log-probs.
+        tp_group = parallel_state.get_tensor_model_parallel_group() if tp_size > 1 else None
+        _, teacher_lse, top_teacher_vals, top_idx = _scaled_logsumexp(
+            targets, self._temperature, tp_group, local_top_k
+        )
+        student_lse, top_student_vals = _ScaledLogSumExpAndGather.apply(
+            predictions, top_idx, self._temperature, tp_group
+        )
 
         if tp_size > 1:
-            tp_group = parallel_state.get_tensor_model_parallel_group()
-
             # Gather all candidates into shape [N_rows, local_k * tp_size]
             # Use all_gather from torch.distributed.nn.functional to preserve gradients
             all_teacher_vals = dist_nn.functional.all_gather(
@@ -548,6 +619,11 @@ class TopLogitsKLLoss(LogitsKLLoss):
             p, q = q, p
         kl = q.exp() * (q - p)
         loss = torch.sum(mask * kl, dim=-1)
+
+        if tp_size > 1:
+            # Autograd collectives sum gradients from identical losses on every TP rank.
+            # Average only backward, preserving reported loss and loss-balancer weights.
+            loss = loss.detach() + (loss - loss.detach()) / tp_size
 
         # No need to reduce since all ranks compute same global Top-K
         return self.post_forward(loss, tp_reduce=False)
@@ -670,20 +746,16 @@ class ProjectionLayer(MegatronModule):
 ########################################################
 
 
-def _mtp_excluded_from_quantization(model: nn.Module) -> bool:
-    """Whether the model is quantized but its MTP submodules are not.
-
-    Only then is the MTP loss pure overhead, since distillation has no quantization error to
-    recover there. Plain distillation (e.g. pruning recovery) still trains the MTP head.
-    """
-    has_mtp = model_quantized = mtp_quantized = False
+def _has_quantized_backbone_with_unquantized_mtp(model: nn.Module) -> bool:
+    """Whether ``model`` has MTP submodules and enabled quantizers, none of them inside MTP."""
+    has_mtp = backbone_quantized = mtp_quantized = False
     for name, module in model.named_modules():
         is_mtp = "mtp" in name.split(".")
         has_mtp |= is_mtp
         if isinstance(module, TensorQuantizer) and module.is_enabled:
-            model_quantized = True
             mtp_quantized |= is_mtp
-    return has_mtp and model_quantized and not mtp_quantized
+            backbone_quantized |= not is_mtp
+    return has_mtp and backbone_quantized and not mtp_quantized
 
 
 def adjust_distillation_model_for_mcore(
@@ -702,13 +774,15 @@ def adjust_distillation_model_for_mcore(
     # Uses a per-forward call counter so that MTP head calls (which always precede the
     # main LM head call in _postprocess) still receive real CE loss even when
     # skip_lm_loss=True — only the final main-head call is zeroed.
-    # An MTP head left out of quantization is exempt from that: there is no quantization
-    # error to recover there, and its CE materialises an fp32 [seq, vocab] tensor.
-    # ``freeze_mtp`` skips the MTP loss unconditionally.
+    # ``freeze_mtp`` decides whether the MTP head trains. Unset, it is frozen only when the LM loss
+    # is skipped and the student is quantized except for its MTP head: there is then no
+    # quantization error to recover there, and its CE materialises an fp32 [seq, vocab] tensor.
     skip_lm_loss = distill_cfg.skip_lm_loss
-    skip_mtp_loss = distill_cfg.freeze_mtp or (
-        skip_lm_loss and _mtp_excluded_from_quantization(model)
-    )
+    if distill_cfg.freeze_mtp is None:
+        with model.hide_teacher_model():
+            skip_mtp_loss = skip_lm_loss and _has_quantized_backbone_with_unquantized_mtp(model)
+    else:
+        skip_mtp_loss = distill_cfg.freeze_mtp
     if skip_mtp_loss:
         # Freeze the untrained MTP head: DDP's overlapped grad reduce asserts on params with no grad.
         num_frozen = 0

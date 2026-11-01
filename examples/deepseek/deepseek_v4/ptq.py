@@ -74,8 +74,6 @@ activation amax (``input_scale``) is the only calibrated quantity that survives:
     afterwards.
 """
 
-from __future__ import annotations
-
 import argparse
 import copy
 import fnmatch

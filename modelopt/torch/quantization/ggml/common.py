@@ -93,21 +93,16 @@ def _input_cache_key(inputs: torch.Tensor) -> _CacheKey | None:
 def _input_fingerprint(inputs: torch.Tensor) -> torch.Tensor:
     """Return a position-sensitive device-resident fingerprint of every input element."""
     bits = inputs.contiguous().view(_SIGNED_INT_OF_SIZE[inputs.element_size()]).reshape(-1)
-    summary = torch.zeros(4, dtype=torch.int64, device=bits.device)
-    for start in range(0, bits.numel(), _ROW_KEY_CHUNK):
-        chunk = bits[start : start + _ROW_KEY_CHUNK].to(torch.int64)
-        positions = torch.arange(
-            start + 1, start + chunk.numel() + 1, dtype=torch.int64, device=bits.device
+    values = bits.to(torch.int64)
+    positions = torch.arange(1, values.numel() + 1, dtype=torch.int64, device=bits.device)
+    return torch.stack(
+        (
+            values.sum(),
+            (values * values).sum(),
+            (values * positions).sum(),
+            (values * values * positions).sum(),
         )
-        summary += torch.stack(
-            (
-                chunk.sum(),
-                (chunk * chunk).sum(),
-                (chunk * positions).sum(),
-                (chunk * chunk * positions).sum(),
-            )
-        )
-    return summary
+    )
 
 
 def _is_contiguous(shape: tuple[int, ...], stride: tuple[int, ...]) -> bool:
@@ -188,8 +183,7 @@ def _matching_cache(
     same_version = cache.input_key.version == input_key.version
     if not same_version:
         return None
-    trainable_weight = _cache_base(inputs).requires_grad
-    if not trainable_weight or torch.is_inference_mode_enabled():
+    if not _cache_base(inputs).requires_grad:
         return cache
     if torch.equal(cache.input_fingerprint, _input_fingerprint(inputs)):
         return cache

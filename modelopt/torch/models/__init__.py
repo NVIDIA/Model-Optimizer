@@ -33,6 +33,7 @@ here; the HF quantization plugin imports it (see ``README.md``).
 
 from .moe import is_moe
 from .specs import (
+    EPSpec,
     ExportSpec,
     ModelSpec,
     MoESpec,
@@ -52,6 +53,7 @@ from .specs import (
 # cannot drift silently: an entry that no longer exists fails at import, and one that is
 # no longer used fails lint.
 __all__ = [
+    "EPSpec",
     "ExportSpec",
     "MoESpec",
     "ModelSpec",
@@ -87,12 +89,16 @@ from . import (  # isort: skip
     phimoe,
     nemotron,
     nemotron_h,
+    minimax_m3_vl,
+    llama4_text,
+    nemotron_h_omni,
     qwen2_moe,
     qwen3,
     qwen3_5_moe,
     qwen3_moe,
     qwen3_next,
     qwen3_vl_moe,
+    qwen4_exp,
     step3p5,
     step3p7,
 )

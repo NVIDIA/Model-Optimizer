@@ -15,8 +15,6 @@
 
 """Unit tests for modelopt-mcp's bridge module — subprocess + filesystem interactions mocked."""
 
-from __future__ import annotations
-
 import json
 import shlex
 import subprocess
