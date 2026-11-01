@@ -94,9 +94,18 @@ below, tell the user and offer to address it before pushing; do not push as-is.
   split — a mechanical rename, generated files, or a self-contained drop such as
   a new example or a new model/backend that has no working intermediate state.
   A PR a little over needs no split. Deletions, tests, docs, comments, and blank
-  lines don't count; before opening, get a rough upper bound (it keeps
-  docstrings) from
-  `git diff -U0 <base>...HEAD -- . ':!tests' ':!docs' | grep -E '^\+[^+]' | grep -vE '^\+[[:space:]]*(#|//|$)' | wc -l`.
+  lines don't count; before opening, get a rough upper bound from the command
+  below (it keeps docstrings and block comments, and treats `#` lines in C and
+  CUDA files as code):
+
+  ```bash
+  git diff --no-color -U0 <base>...HEAD -- . ':!tests' ':!docs' | awk '
+    /^diff --git/ { hdr = 1; c = ($NF ~ /\.(c|cc|cpp|cu|cuh|h|hpp)$/); next }
+    /^@@/ { hdr = 0; next }
+    !hdr && /^\+/ && !/^\+[ \t]*$/ && !/^\+[ \t]*\/\// && (c || !/^\+[ \t]*#/) { n++ }
+    END { print n + 0 }'
+  ```
+
 - **Propose the split before opening an oversized PR.** When the work in flight
   is already clearly over budget, offer a series of smaller PRs and, once the
   user agrees, do the split — don't open the big one and ask afterwards.
