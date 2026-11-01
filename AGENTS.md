@@ -88,16 +88,18 @@ below, tell the user and offer to address it before pushing; do not push as-is.
 
 ## Sizing and splitting PRs
 
-- **Keep each PR that goes up for review under ~500 added lines of source.**
-  Large PRs stall in review; exceed the budget only when the change genuinely
-  cannot be split — a mechanical rename, generated files, or a self-contained
-  drop such as a new example or a new model/backend that has no working
-  intermediate state. Deletions, tests, and docs don't count; check the
-  insertions from `git diff --shortstat <base>...HEAD -- . ':!tests' ':!docs'`
-  before opening.
+- **Keep each PR that goes up for review around or under ~500 added lines of
+  source; this is a guideline, not a hard limit.** Large PRs stall in review, so
+  split a PR that is clearly over it unless the change genuinely cannot be
+  split — a mechanical rename, generated files, or a self-contained drop such as
+  a new example or a new model/backend that has no working intermediate state.
+  A PR a little over needs no split. Deletions, tests, docs, comments, and blank
+  lines don't count; before opening, get a rough upper bound (it keeps
+  docstrings) from
+  `git diff -U0 <base>...HEAD -- . ':!tests' ':!docs' | grep -E '^\+[^+]' | grep -vE '^\+[[:space:]]*(#|//|$)' | wc -l`.
 - **Propose the split before opening an oversized PR.** When the work in flight
-  is already over budget, offer a series of smaller PRs and, once the user
-  agrees, do the split — don't open the big one and ask afterwards.
+  is already clearly over budget, offer a series of smaller PRs and, once the
+  user agrees, do the split — don't open the big one and ask afterwards.
 - **Split on structure first, features second.** Look for a file, directory, or
   module boundary that carves the change into independent pieces. Only when no
   such boundary exists, split by feature: land the enabling refactor or
