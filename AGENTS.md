@@ -93,16 +93,20 @@ below, tell the user and offer to address it before pushing; do not push as-is.
   split a PR that is clearly over it unless the change genuinely cannot be
   split — a mechanical rename, generated files, or a self-contained drop such as
   a new example or a new model/backend that has no working intermediate state.
-  A PR a little over needs no split. Deletions, tests, docs, comments, and blank
-  lines don't count; before opening, get a rough upper bound from the command
-  below (it keeps docstrings and block comments, and treats `#` lines in C and
-  CUDA files as code):
+  A PR a little over needs no split. Deletions, tests, docs, config, comments,
+  and blank lines don't count; before opening, get a rough upper bound from the
+  command below (it keeps docstrings and block comments, and reads `//` as a
+  comment only in C and CUDA files, where `#` lines are preprocessor code):
 
   ```bash
-  git diff --no-color -U0 <base>...HEAD -- . ':!tests' ':!docs' | awk '
-    /^diff --git/ { hdr = 1; c = ($NF ~ /\.(c|cc|cpp|cu|cuh|h|hpp)$/); next }
+  git diff --no-color -U0 <base>...HEAD | awk '
+    /^diff --git/ {
+      hdr = 1; f = $NF
+      skip = f ~ /(^|\/)(tests|docs)\// || f ~ /\.(ya?ml|json|toml|ini|xml|lock|md|rst|txt|ipynb)$/
+      cmt = (f ~ /\.(c|cc|cpp|cu|cuh|h|hpp)$/) ? "^\\+[ \t]*//" : "^\\+[ \t]*#"
+      next }
     /^@@/ { hdr = 0; next }
-    !hdr && /^\+/ && !/^\+[ \t]*$/ && !/^\+[ \t]*\/\// && (c || !/^\+[ \t]*#/) { n++ }
+    !hdr && !skip && /^\+/ && !/^\+[ \t]*$/ && $0 !~ cmt { n++ }
     END { print n + 0 }'
   ```
 
