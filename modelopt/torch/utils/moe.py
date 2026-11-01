@@ -180,38 +180,50 @@ def _fsdp2_way_out(fsdp: str = "MODELOPT_FSDP_SIZE=world") -> str:
     )
 
 
-def check_distributed_support(model_type: str) -> None:
-    """Refuse ``model_type``'s expert parallelism if its spec does, or below its transformers floor.
+def _spec_refusal(model_type: str) -> RuntimeError | None:
+    """Why ``model_type``'s expert parallelism is refused here, or ``None``.
 
-    The floor is the expert-parallel load's own, or its spec's release when that is later; a model
-    with no spec or no EP section still needs the load's.
-    :func:`apply_distributed_support` checks this before it prepares a config; a config already
-    prepared with its plan needs only the check. An EP degree left to ``auto`` picks none for a
-    model this refuses (:func:`_spec_refuses_ep`), so only an EP degree asked for explicitly, or an
-    expert-parallel plan handed in, meets these errors; both name the way around expert parallelism.
+    A ``NotImplementedError`` where its spec rules it out, a ``RuntimeError`` below its transformers
+    floor: the expert-parallel load's own, or its spec's release when that is later; a model with
+    no spec or no EP section still needs the load's. The reason alone, which a plan loading the
+    model without expert parallelism warns with: :func:`check_distributed_support` refuses with it
+    and the way around expert parallelism.
     """
     ep = _ep_spec(model_type)
-    without_ep = (
-        f"without expert parallelism: in a single process, or FSDP2-sharded {_fsdp2_way_out()}"
-    )
     if ep is not None and ep.unsupported:
-        raise NotImplementedError(
-            f"{model_type} cannot be quantized expert-parallel yet: {ep.unsupported} Quantize it "
-            f"{without_ep}."
+        return NotImplementedError(
+            f"{model_type} cannot be quantized expert-parallel yet: {ep.unsupported}"
         )
     try:
         require_transformers(_ep_floor(model_type), f"{model_type} expert-parallel PTQ")
     except RuntimeError as e:
-        raise RuntimeError(f"{e} Or quantize it {without_ep}.") from None
+        return e
+    return None
+
+
+def check_distributed_support(model_type: str) -> None:
+    """Refuse ``model_type``'s expert parallelism if its spec does, or below its transformers floor.
+
+    With :func:`_spec_refusal`'s reason, and the way around expert parallelism.
+    :func:`apply_distributed_support` checks this before it prepares a config; a config already
+    prepared with its plan needs only the check. An EP degree left to ``auto`` picks none for a
+    model this refuses (:func:`_spec_refuses_ep`), so only an EP degree asked for explicitly, or an
+    expert-parallel plan handed in, meets these errors.
+    """
+    refusal = _spec_refusal(model_type)
+    if refusal is None:
+        return
+    without_ep = (
+        f"without expert parallelism: in a single process, or FSDP2-sharded {_fsdp2_way_out()}"
+    )
+    if isinstance(refusal, NotImplementedError):
+        raise NotImplementedError(f"{refusal} Quantize it {without_ep}.")
+    raise RuntimeError(f"{refusal} Or quantize it {without_ep}.")
 
 
 def _spec_refuses_ep(model_type: str) -> bool:
     """Whether :func:`check_distributed_support` refuses ``model_type``'s expert parallelism here."""
-    try:
-        check_distributed_support(model_type)
-    except RuntimeError:  # NotImplementedError is one too
-        return True
-    return False
+    return _spec_refusal(model_type) is not None
 
 
 def apply_distributed_support(
