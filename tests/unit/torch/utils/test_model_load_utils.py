@@ -860,17 +860,19 @@ def test_an_moe_its_spec_or_transformers_rules_out_loads_as_a_dense_model(
 
 @needs_qwen3_moe_ep_plan
 @pytest.mark.parametrize(
-    "value",
-    ["0", "", " ", "AUTO", " auto "],
-    ids=["zero", "exported-empty", "exported-blank", "capitals", "padded"],
+    ("value", "ep_size"),
+    [("0", None), ("", None), (" ", None), ("AUTO", None), (" auto ", None), (None, " auto ")],
+    ids=["zero", "exported-empty", "exported-blank", "capitals", "padded", "padded-argument"],
 )
-def test_an_ep_degree_of_0_is_auto(run_as, serve, monkeypatch, tmp_path, value):
-    """And so is one exported empty or blank, and auto in any case or padded: the plan decides."""
-    monkeypatch.setenv("MODELOPT_EP_DEGREE", value)
+def test_an_ep_degree_of_0_is_auto(run_as, serve, monkeypatch, tmp_path, value, ep_size):
+    """And so is one exported empty or blank, and auto in any case or padded, as an argument too:
+    the plan decides."""
+    if value is not None:
+        monkeypatch.setenv("MODELOPT_EP_DEGREE", value)
     run_as(4)
     serve(_qwen3_moe(num_experts=8))
 
-    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4)
+    assert resolve_distribution_plan(str(tmp_path), ep_size=ep_size)[0] == DistributionPlan(4, 4)
 
 
 @pytest.mark.parametrize("tied", [False, True], ids=["untied", "tied-embeddings"])
