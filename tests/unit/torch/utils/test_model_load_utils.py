@@ -1001,6 +1001,19 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
         assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
 
 
+def _prepares_as_its_spec_states(model_type):
+    """A stand-in for ``model_type``'s spec ``prepare`` that patches nothing: it puts the plan the spec
+    states on the text config, where the real ``prepare`` attaches it, and returns the config, as the
+    expert-parallel load requires of a ``prepare``."""
+    plan = get_spec(model_type).ep_spec.prepared_ep_plan
+
+    def prepare(hf_config, **kwargs):
+        hf_config.text_config.base_model_ep_plan = dict(plan)
+        return hf_config
+
+    return prepare
+
+
 @pytest.mark.skipif(
     Version(transformers.__version__) < Version(_ep_floor("kimi_k25")),
     reason="Kimi-K2.5's expert parallelism needs a later transformers",
@@ -1016,7 +1029,7 @@ def test_a_checkpoint_its_spec_decompresses_is_decided_expert_parallel(
     expert-parallel all the same; one whose spec does not (Kimi-VL's) is planned without it, as the
     expert-parallel load would refuse it."""
     spec = get_spec(model_type).ep_spec
-    monkeypatch.setattr(spec, "prepare", lambda hf_config, **kwargs: hf_config)
+    monkeypatch.setattr(spec, "prepare", _prepares_as_its_spec_states(model_type))
     monkeypatch.setattr(spec, "make_buildable", lambda *args, **kwargs: None)
     monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi())
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
