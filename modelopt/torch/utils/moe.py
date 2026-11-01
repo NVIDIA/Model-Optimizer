@@ -311,9 +311,9 @@ def _spec_ep_plan(model_type: str) -> dict[str, str]:
     (``unsupported``). Empty, too, where the plan ships with transformers rather than the spec
     (``qwen3_moe``, ``minimax_m3_vl``): the config carries it, and
     :func:`apply_distributed_support` keeps it as it is. A model below its spec's transformers floor
-    keeps its plan: its experts are routed all the same, so a run holding them whole on every rank
-    is refused rather than replicated. Only reads the spec: nothing is applied, checked or patched,
-    and ``prepare`` does not run.
+    keeps its plan: its experts are routed all the same, and the plan decision finds them by it to
+    warn that the model loads without expert parallelism, and why. Only reads the spec: nothing is
+    applied, checked or patched, and ``prepare`` does not run.
     """
     ep = _ep_spec(model_type)
     if ep is None or ep.unsupported:
