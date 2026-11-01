@@ -297,10 +297,9 @@ try:
                 padding[4] -= cache_x.shape[2]
             x = F.pad(x, padding)
 
-            # NVFP4 implicit GEMM path (self.padding is (0,0,0) since padding already applied)
-            if self._should_use_implicit_gemm():
-                if not (self.input_quantizer._if_calib and not self.input_quantizer._if_quant):
-                    return self._implicit_gemm_forward(x)
+            # NVFP4 paths (self.padding is (0,0,0) since padding already applied)
+            if self._is_nvfp4_conv():
+                return self._nvfp4_forward(x)
 
             # Default quantized conv path (skip WanCausalConv3d.forward to avoid double-padding)
             with self.quantize_weight():

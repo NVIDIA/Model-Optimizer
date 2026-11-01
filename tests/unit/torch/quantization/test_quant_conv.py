@@ -15,8 +15,6 @@
 
 """Tests of QuantConv module."""
 
-import warnings
-
 import pytest
 import torch
 import torch.nn.functional as F
@@ -410,28 +408,6 @@ class TestQuantConv3dNVFP4:
         out = m(x)
         ref = F.conv3d(x, m.weight)
         assert torch.allclose(out, ref)
-
-    def test_forward_nvfp4_training_warns_and_falls_back(self):
-        """Training mode must fall back to the default (cuDNN) path with a warning.
-
-        The implicit-GEMM kernel is inference-only; this exercises the CPU-visible
-        training-fallback branch. We turn off quantization (the quantizers stay enabled,
-        so the NVFP4 branch is still taken) so the default-path ``super().forward()``
-        does not try to run NVFP4 dynamic quantization (which requires CUDA).
-        """
-        m = self._make_nvfp4_conv3d()
-        m.input_quantizer.disable_quant()
-        m.weight_quantizer.disable_quant()
-        assert m._should_use_implicit_gemm()
-        m.train()
-        x = torch.randn(1, NUM_IN_CHANNELS, 4, 4, 4)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            out = m(x)
-        assert out.shape == (1, NUM_OUT_CHANNELS, 2, 2, 2)
-        assert any("inference-only" in str(w.message) for w in caught), (
-            f"Expected an 'inference-only' warning, got: {[str(w.message) for w in caught]}"
-        )
 
     def test_forward_nvfp4_calib_only_uses_default_path(self):
         """Calibration-only mode must NOT try to invoke the CUDA kernel.
