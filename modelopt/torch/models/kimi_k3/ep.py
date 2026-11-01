@@ -101,10 +101,6 @@ from ._remote_fixes import (
     _shim_tie_weights_kwargs,
 )
 
-# base-relative EP plan (bubbles to `language_model.model.<key>` in the VLM). MoE lives at
-# `layers.*.block_sparse_moe` (NOT `.mlp`; layer 0 is dense `.mlp`). Fused expert params shard dim-0 via
-# grouped_gemm; the experts container gets the EP group via moe_tp_experts (-> torch_a2a_experts for a2a).
-# No `ep_router` entry: KimiMoEGate runs inline over the replicated router weight and emits GLOBAL ids.
 # The model type the spec registers, and the early record of prepare's lasting patch keys on.
 MODEL_TYPE = "kimi_k3"
 # Its kimi_linear backbone's model type, which the fused-expert converters register under.
@@ -113,6 +109,10 @@ BACKBONE_MODEL_TYPE = "kimi_linear"
 # kimi_linear checkpoint, a text-only one too, whose own MoE block was never patched.
 PATCHED_EVERY_LOAD = (MODEL_TYPE, BACKBONE_MODEL_TYPE)
 
+# base-relative EP plan (bubbles to `language_model.model.<key>` in the VLM). MoE lives at
+# `layers.*.block_sparse_moe` (NOT `.mlp`; layer 0 is dense `.mlp`). Fused expert params shard dim-0 via
+# grouped_gemm; the experts container gets the EP group via moe_tp_experts (-> torch_a2a_experts for a2a).
+# No `ep_router` entry: KimiMoEGate runs inline over the replicated router weight and emits GLOBAL ids.
 BASE_MODEL_EP_PLAN = {
     "layers.*.block_sparse_moe.experts.gate_up_proj": "grouped_gemm",
     "layers.*.block_sparse_moe.experts.down_proj": "grouped_gemm",
