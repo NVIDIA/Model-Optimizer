@@ -81,10 +81,14 @@ def test_every_ep_plan_is_well_formed(model_type):
 
 @pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
 def test_a_spec_declares_a_plan_a_floor_a_prepare_or_a_refusal(model_type):
-    """An EP section that says nothing would claim support the model does not have."""
+    """An EP section that says nothing would claim support the model does not have. One that
+    declares both plans would load with their union, while _spec_ep_plan reports one of them."""
     ep = get_spec(model_type).ep_spec
     assert ep.base_model_ep_plan or ep.requires_transformers or ep.prepare or ep.unsupported, (
         f"{model_type} has an EP section that declares nothing"
+    )
+    assert not (ep.base_model_ep_plan and ep.prepared_ep_plan), (
+        f"{model_type} declares both plans; prepared_ep_plan is for a plan only prepare supplies"
     )
 
 
