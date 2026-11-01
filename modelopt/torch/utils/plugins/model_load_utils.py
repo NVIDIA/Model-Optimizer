@@ -1561,7 +1561,7 @@ def _ep_degree(ep_size, model_type: str | None = None) -> int | str:
     Without ``model_type``, where no config is read yet, auto stays auto.
     """
     value = env.ep_degree() if ep_size is None else ep_size
-    if str(value).lower() in _EP_AUTO:
+    if str(value).strip().lower() in _EP_AUTO:
         return 1 if model_type is not None and _spec_refuses_ep(model_type) else "auto"
     try:
         degree = int(value)
