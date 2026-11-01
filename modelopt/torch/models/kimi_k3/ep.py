@@ -1,4 +1,4 @@
-# Adapted from https://github.com/huggingface/transformers/blob/a906d3c/src/transformers/models/minimax_m3_vl/modeling_minimax_m3_vl.py
+# Adapted from https://github.com/huggingface/transformers/blob/a906d3c4b65095f2308b6a6a193e934d03b8eb5d/src/transformers/models/minimax_m3_vl/modeling_minimax_m3_vl.py
 # (``MiniMaxM3VLExperts``: the fused expert parameters and the eager ``forward`` loop of ``KimiK3Experts``),
 # modified for Kimi-K3's ``situ`` gate and latent expert width.
 # Copyright 2026 the MiniMax AI Team and HuggingFace Team. All rights reserved.
