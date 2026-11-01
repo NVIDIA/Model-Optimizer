@@ -15,6 +15,7 @@
 
 import copy
 import io
+import shutil
 import warnings
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -1634,6 +1635,32 @@ def test_auto_quantize_calibration_only_checkpoint_validates_module_search_space
         "estimate_sensitivity_scores",
         original_estimate_scores,
     )
+    # Matching search spaces resume from the calibration and score.
+    shutil.copy(checkpoint_path, tmp_path / "calibration_only_copy.pth")
+    resumed_model = TransformerBlock()
+    _, search_state = mtq.auto_quantize(
+        resumed_model,
+        constraints={"effective_bits": 6.0},
+        quantization_formats=[
+            mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+            mtq.INT8_DEFAULT_CFG,
+        ],
+        module_search_spaces=[
+            {
+                "module_name_patterns": ["*mlp*"],
+                "quantization_formats": [mtq.FP8_DEFAULT_CFG],
+                "allow_no_quant": False,
+            }
+        ],
+        data_loader=[resumed_model.get_input()],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=1,
+        num_score_steps=1,
+        checkpoint=str(tmp_path / "calibration_only_copy.pth"),
+    )
+    assert search_state["candidate_stats"]
+
     resumed_model = TransformerBlock()
     with pytest.raises(ValueError, match="module_search_spaces do not match"):
         mtq.auto_quantize(
