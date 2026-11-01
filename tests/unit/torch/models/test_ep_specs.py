@@ -53,8 +53,9 @@ def cfg(**kw):
 # --------------------------------------------------------------------------- the registered specs
 
 
-# The styles the expert-parallel load implements for a plan's entries.
-_KNOWN_STYLES = frozenset(moe._EXPERTS_STYLES) | {"grouped_gemm"}
+# The styles the expert-parallel load keeps for a plan's entries: the routed experts' containers',
+# grouped_gemm for their weights, and the router's ep_router. It drops any other.
+_KNOWN_STYLES = frozenset(moe._EXPERTS_STYLES) | {"grouped_gemm", "ep_router"}
 
 
 @pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
@@ -69,8 +70,8 @@ def test_every_ep_plan_is_well_formed(model_type):
         for glob, style in plan.items():
             assert isinstance(glob, str) and glob, f"{model_type}: bad glob {glob!r}"
             assert style in _KNOWN_STYLES, (
-                f"{model_type}: {glob!r} uses style {style!r}, which the expert-parallel load does "
-                f"not implement (known: {sorted(_KNOWN_STYLES)})"
+                f"{model_type}: {glob!r} uses style {style!r}, which the expert-parallel load drops; "
+                f"it keeps only {sorted(_KNOWN_STYLES)}"
             )
         assert moe._routed_expert_keys(plan), (
             f"{model_type}'s plan names no routed-experts container, so the load can neither count "
