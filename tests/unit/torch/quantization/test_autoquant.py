@@ -981,6 +981,10 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
         # Context scores share a base damage; the solver must still spend the 6-bit budget.
         assert expected["best"]["constraints"]["effective_bits"] > 5.0
     assert state["best"]["recipe"] == expected["best"]["recipe"]
+    # A re-solve from the saved state uses the search's method options (the context's LP).
+    assert mtq.get_auto_quantize_config(
+        safe_load(merged), {"effective_bits": 6.0}
+    ) == mtq.get_auto_quantize_config(expected)
 
 
 def test_auto_quantize_disable_layers():
