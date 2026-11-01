@@ -840,9 +840,10 @@ def test_an_moe_its_spec_or_transformers_rules_out_loads_as_a_dense_model(
 ):
     """GPT-OSS's spec refuses expert parallelism, and DeepSeek-V3's needs transformers 5.7: with the
     EP degree left to auto or set to 1, either loads as a dense model does, whole on every rank
-    here, and a warning on rank 0 says why, with the spec's way around expert parallelism or the
-    upgrade that would let its experts shard. It is not refused for being left whole, whatever
-    the dense part's knob asks: it cannot be expert-parallel here."""
+    here, and a warning on rank 0 says why, with the upgrade that would let its experts shard where
+    there is one, but not the way around expert parallelism the spec's refusal names: the load
+    already takes it. It is not refused for being left whole, whatever the dense part's knob asks:
+    it cannot be expert-parallel here."""
     if version is not None:
         monkeypatch.setattr(transformers, "__version__", version)
     for knob, value in knobs.items():
@@ -851,8 +852,10 @@ def test_an_moe_its_spec_or_transformers_rules_out_loads_as_a_dense_model(
     run_as(2)
     serve(config)
 
-    with pytest.warns(UserWarning, match=f"loads without expert parallelism.*{why}"):
+    with pytest.warns(UserWarning, match=f"loads without expert parallelism.*{why}") as caught:
         assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
+    warned = [str(w.message) for w in caught]
+    assert not [message for message in warned if "quantize it without" in message.lower()], warned
 
 
 @needs_qwen3_moe_ep_plan

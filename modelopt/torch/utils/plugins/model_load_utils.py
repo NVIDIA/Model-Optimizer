@@ -77,6 +77,7 @@ from modelopt.torch.utils.moe import (
     _routed_expert_keys,
     _routed_expert_modules,
     _spec_ep_plan,
+    _spec_refusal,
     _spec_refuses_ep,
     apply_distributed_support,
     check_distributed_support,
@@ -1965,19 +1966,6 @@ def _ep_plan_refusal(ep_plan: dict[str, str]) -> str | None:
             "drops, so those expert weights would load whole on every rank beside their sharded "
             "siblings."
         )
-    return None
-
-
-def _spec_refusal(model_type: str) -> Exception | None:
-    """The error ``model_type``'s spec refuses its expert parallelism with, or ``None``.
-
-    :func:`~modelopt.torch.utils.moe.check_distributed_support`'s: the spec rules it out, or the
-    installed transformers is below the release it needs.
-    """
-    try:
-        check_distributed_support(model_type)
-    except RuntimeError as e:  # NotImplementedError is one too
-        return e
     return None
 
 
