@@ -109,6 +109,7 @@ def _run_kv_autoquant_example(rank, size, checkpoint_dir, search_dir, composed):
         trust_remote_code=False,
         cpu_offload=False,
         attn_implementation="eager",
+        experts_implementation=None,
         calib_with_images=False,
         specdec_offline_dataset=None,
         low_memory_mode=False,

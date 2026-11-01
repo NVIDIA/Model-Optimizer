@@ -44,9 +44,14 @@ from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashBaseModelOutput,
     DFlashModule,
     HFDFlashModel,
+    _block_targets,
     _dpace_position_weights,
     build_target_layer_ids,
 )
+from modelopt.torch.speculative.plugins.hf_dflash2 import HFDFlash2Model
+from modelopt.torch.speculative.plugins.hf_domino import HFDominoModel
+from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel
+from modelopt.torch.speculative.plugins.hf_lilicorr import HFLiLiCorrModel
 from modelopt.torch.speculative.plugins.master_weight_adamw import (
     MasterWeightAdamW,
     VerifyMasterWeightsCallback,
@@ -560,6 +565,49 @@ class TestDraftMaskRule:
         kv = torch.arange(self.SEQ_LEN + q_len).view(1, -1)
         visible = mask_mod(torch.tensor(0), None, padded_q, kv)
         assert visible.shape == (padded_q.numel(), kv.numel())
+
+
+def _legacy_generate_swa_mask(model, ctx_len, bsz, dtype, device):
+    """Verbatim copy of the hand-written generation mask, kept as the semantic reference."""
+    window = model.dflash_swa_window_size
+    causal = model.dflash_draft_attention == "causal"
+    if window is None and not causal:
+        return None
+    block_size = model.dflash_block_size
+    kv_len = ctx_len + block_size
+    kv_idx = torch.arange(kv_len, device=device).view(1, 1, 1, -1)
+    q_pos_in_block = torch.arange(block_size, device=device).view(1, 1, -1, 1)
+    q_real_pos = ctx_len + q_pos_in_block
+    is_ctx = kv_idx < ctx_len
+    keep_ctx = is_ctx if window is None else (is_ctx & (kv_idx > q_real_pos - window))
+    keep_block = ~is_ctx
+    if causal:
+        keep_block = keep_block & ((kv_idx - ctx_len) <= q_pos_in_block)
+    keep = keep_ctx | keep_block
+    attn_mask = torch.zeros(bsz, 1, block_size, kv_len, device=device, dtype=dtype)
+    attn_mask.masked_fill_(~keep, torch.finfo(dtype).min)
+    return attn_mask
+
+
+class TestGenerateMaskRule:
+    """Generation evaluates the training rule for its one block, anchored at ``ctx_len``."""
+
+    @pytest.mark.parametrize("window", [None, BLOCK_SIZE, 2 * BLOCK_SIZE])
+    @pytest.mark.parametrize("attention", ["bidirectional", "causal"])
+    def test_matches_the_hand_written_mask(self, window, attention):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config(block_size=BLOCK_SIZE)
+        config["dflash_swa_window_size"] = window
+        config["dflash_draft_attention"] = attention
+        mtsp.convert(model, [("dflash", config)])
+        for ctx_len in (1, 5, 16):
+            args = (ctx_len, 2, torch.float32, torch.device("cpu"))
+            got = model._build_generate_swa_mask(*args)
+            want = _legacy_generate_swa_mask(model, *args)
+            if want is None:
+                assert got is None, f"ctx_len={ctx_len}"
+            else:
+                assert torch.equal(got, want), f"ctx_len={ctx_len}"
 
 
 class TestDFlashSwaMask:
@@ -1445,8 +1493,92 @@ class TestAnchorSamplingStaticShape:
         assert padded_acc == pytest.approx(base_acc)
 
 
+# Anchors 1 and 4 of an 8-token sequence whose loss_mask is 0 only at position 3:
+# (label positions, supervision mask) per block position.
+_LABELS_AT_ANCHOR = ([[1, 2, 3, 4], [4, 5, 6, 7]], [[0, 1, 0, 1], [0, 1, 1, 1]])
+_LABELS_AFTER_ANCHOR = ([[2, 3, 4, 5], [5, 6, 7, 7]], [[1, 0, 1, 1], [1, 1, 1, 0]])
+
+
+@pytest.mark.parametrize(
+    ("model_cls", "expected"),
+    [
+        (HFDFlashModel, _LABELS_AT_ANCHOR),
+        (HFDFlash2Model, _LABELS_AT_ANCHOR),
+        (HFLiLiCorrModel, _LABELS_AT_ANCHOR),
+        (HFDSparkModel, _LABELS_AFTER_ANCHOR),
+        (HFDominoModel, _LABELS_AFTER_ANCHOR),
+    ],
+    ids=["dflash", "dflash2", "lilicorr", "dspark", "domino"],
+)
+def test_block_targets_follow_the_label_shift(model_cls, expected):
+    """Each block position's label and supervision; a wrong shift trains silently worse."""
+    positions, mask = expected
+    input_ids = 100 + torch.arange(8).unsqueeze(0)  # token id = 100 + its position
+    loss_mask = torch.ones(1, 8)
+    loss_mask[0, 3] = 0.0
+    targets = _block_targets(
+        input_ids,
+        torch.tensor([[1, 4]]),
+        torch.tensor([[True, True]]),
+        loss_mask,
+        4,
+        model_cls._label_shift,
+    )
+    assert torch.equal(targets.positions, torch.tensor([positions]))
+    assert torch.equal(targets.token_ids, 100 + torch.tensor([positions]))
+    assert torch.equal(targets.mask, torch.tensor([mask], dtype=torch.float32))
+
+
+# DSpark's zero losses, whose confidence head adds a second output, are tested in
+# test_hf_dspark.py::TestDdpGradientCoverage.
+_ZERO_LOSS_HEADS = {
+    "dflash": {},
+    "domino": {"projector_type": "domino", "gru_hidden_dim": 32, "emb_dim": 16},
+}
+
+
+@pytest.mark.parametrize("draft_runs", [False, True], ids=["no_block", "zero_weight"])
+@pytest.mark.parametrize("head", list(_ZERO_LOSS_HEADS))
+def test_a_step_with_nothing_to_train_reaches_every_draft_parameter(head, draft_runs):
+    """DDP needs each trainable draft parameter's gradient on every rank, even at zero loss.
+
+    Once the draft has run, the loss must reach it through its output, which an FSDP2 unit
+    around the draft needs.
+    """
+    model = get_tiny_llama(num_hidden_layers=4)
+    config = get_dflash_config()
+    config["dflash_architecture_config"].update(_ZERO_LOSS_HEADS[head])
+    mtsp.convert(model, [("dflash", config)])
+    model.train()
+    outputs = []
+
+    def keep_output(module, args, output):
+        output.retain_grad()
+        outputs.append(output)
+
+    model.dflash_module.register_forward_hook(keep_output)
+    input_ids = torch.randint(1, model.config.vocab_size, (2, SEQ_LEN))
+    loss_mask = torch.zeros(2, SEQ_LEN)
+    if draft_runs:
+        # Anchors are drawn from the loss mask, so each row keeps one block, anchored at 2
+        # or 9, and none of its labels is in the mask.
+        loss_mask[:, [2, 9]] = 1.0
+    out = model(input_ids=input_ids, attention_mask=torch.ones_like(input_ids), loss_mask=loss_mask)
+    assert out.loss.item() == 0.0
+    out.loss.backward()
+    ungraded = [
+        n for n, p in model.dflash_module.named_parameters() if p.requires_grad and p.grad is None
+    ]
+    assert not ungraded, f"no gradient for {ungraded}"
+    assert len(outputs) == int(draft_runs)
+    assert all(output.grad is not None for output in outputs)
+
+
 class TestTeacherLogits:
-    """The base distribution is projected only at the rows, and vocab entries, asked for."""
+    """The base distribution is projected only at the rows, and vocab entries, asked for.
+
+    It is the next-token distribution, so label ``i`` reads row ``i - 1``.
+    """
 
     @staticmethod
     def _model():
@@ -1455,9 +1587,9 @@ class TestTeacherLogits:
         return model
 
     @staticmethod
-    def _positions(bsz=2):
+    def _labels(bsz=2):
         torch.manual_seed(0)
-        return torch.randint(0, SEQ_LEN, (bsz, 3, BLOCK_SIZE))
+        return torch.randint(1, SEQ_LEN, (bsz, 3, BLOCK_SIZE))
 
     @staticmethod
     def _rows(full, positions):
@@ -1471,45 +1603,56 @@ class TestTeacherLogits:
     def test_matches_the_full_sequence_projection(self):
         model = self._model()
         hidden = self._hidden(model)
-        positions = self._positions()
-        got = model._teacher_logits(DFlashBaseModelOutput(None, base_hidden=hidden), positions)
-        want = self._rows(model._base_model_lm_head(hidden), positions)
+        labels = self._labels()
+        got = model._teacher_logits(
+            DFlashBaseModelOutput(None, base_hidden=hidden), label_positions=labels
+        )
+        want = self._rows(model._base_model_lm_head(hidden), labels - 1)
         torch.testing.assert_close(got, want)
 
     def test_prenorm_hidden_gets_the_base_final_norm(self):
         model = self._model()
         hidden = self._hidden(model)
-        positions = self._positions()
+        labels = self._labels()
         outputs = DFlashBaseModelOutput(None, base_hidden=hidden, base_hidden_prenorm=True)
-        want = self._rows(model._base_model_lm_head(model._base_model_norm(hidden)), positions)
-        torch.testing.assert_close(model._teacher_logits(outputs, positions), want)
+        want = self._rows(model._base_model_lm_head(model._base_model_norm(hidden)), labels - 1)
+        torch.testing.assert_close(model._teacher_logits(outputs, label_positions=labels), want)
 
     def test_token_ids_pick_entries_of_the_full_rows(self):
         model = self._model()
         outputs = DFlashBaseModelOutput(None, base_hidden=self._hidden(model))
-        positions = self._positions()
-        token_ids = torch.randint(0, model.config.vocab_size, (*positions.shape, 5))
-        rows = model._teacher_logits(outputs, positions)
+        labels = self._labels()
+        token_ids = torch.randint(0, model.config.vocab_size, (*labels.shape, 5))
+        rows = model._teacher_logits(outputs, label_positions=labels)
         torch.testing.assert_close(
-            model._teacher_logits(outputs, positions, token_ids), rows.gather(-1, token_ids)
+            model._teacher_logits(outputs, label_positions=labels, token_ids=token_ids),
+            rows.gather(-1, token_ids),
         )
 
     def test_handed_over_logits_are_gathered_not_recomputed(self):
         model = self._model()
         logits = torch.randn(2, SEQ_LEN, model.config.vocab_size)
         outputs = DFlashBaseModelOutput(None, logits=logits)
-        positions = self._positions()
-        token_ids = torch.randint(0, model.config.vocab_size, (*positions.shape, 5))
-        want = self._rows(logits, positions)
-        assert torch.equal(model._teacher_logits(outputs, positions), want)
+        labels = self._labels()
+        token_ids = torch.randint(0, model.config.vocab_size, (*labels.shape, 5))
+        want = self._rows(logits, labels - 1)
+        assert torch.equal(model._teacher_logits(outputs, label_positions=labels), want)
         assert torch.equal(
-            model._teacher_logits(outputs, positions, token_ids), want.gather(-1, token_ids)
+            model._teacher_logits(outputs, label_positions=labels, token_ids=token_ids),
+            want.gather(-1, token_ids),
         )
+
+    def test_label_zero_does_not_wrap_to_the_last_row(self):
+        model = self._model()
+        logits = torch.randn(1, SEQ_LEN, model.config.vocab_size)
+        outputs = DFlashBaseModelOutput(None, logits=logits)
+        got = model._teacher_logits(outputs, label_positions=torch.tensor([[0]]))
+        assert torch.equal(got[0, 0], logits[0, 0])
 
     def test_missing_base_distribution_raises(self):
         model = self._model()
         with pytest.raises(ValueError, match="base_model_hidden_states"):
-            model._teacher_logits(DFlashBaseModelOutput(None), self._positions())
+            model._teacher_logits(DFlashBaseModelOutput(None), label_positions=self._labels())
 
     def test_offline_dict_keeps_the_hidden_unprojected(self):
         d = {

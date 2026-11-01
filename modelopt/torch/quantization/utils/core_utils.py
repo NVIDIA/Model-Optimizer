@@ -942,7 +942,17 @@ def get_prefixed_param_names(parent_model, target_module, param_index=None):
     target_ids = {id(p) for p in target_module.parameters()}
     # Lowest position == first in named_parameters() order, matching a linear scan's result.
     match = min((param_index[pid] for pid in target_ids if pid in param_index), default=None)
-    return match[1].rsplit(".", 1)[0] if match is not None else None
+    # "" for a parameter the parent owns itself.
+    return match[1].rpartition(".")[0] if match is not None else None
+
+
+def _param_key(module_name: str | None, param_name: str) -> str:
+    """The full name of ``module_name``'s parameter ``param_name``; ``""`` names the root module.
+
+    A module the name map does not know (``None``) keeps the ``None.`` key no parameter has, so it is
+    skipped rather than taken for the root.
+    """
+    return param_name if module_name == "" else f"{module_name}.{param_name}"
 
 
 def create_fsdp_param_mapping(fsdp_param_list, model):
@@ -966,8 +976,7 @@ def create_fsdp_param_mapping(fsdp_param_list, model):
         if module_name is not None:
             # Get the parameter name from _module_info and construct full param name
             param_name = param._module_info.param_name
-            full_param_name = f"{module_name}.{param_name}"
-            mapping[full_param_name] = param
+            mapping[_param_key(module_name, param_name)] = param
     return mapping
 
 
@@ -996,17 +1005,26 @@ def no_requires_grad():
 def enable_fake_quant(module):
     """Temporarily set the fake_quant attribute of a module to True.
 
-    This is used to prevent weight compression from being triggered during an unshard() call.
+    This is used to prevent weight compression from being triggered during an unshard() call. A
+    sequential weight quantizer (W4A8) holds the flag on each of its stages.
     """
-    original_fake_quant = []
-    for m in module.modules():
-        if hasattr(m, "weight_quantizer"):
-            original_fake_quant.append(m.weight_quantizer._fake_quant)
-            m.weight_quantizer._fake_quant = True
-    yield
-    for m in module.modules():
-        if hasattr(m, "weight_quantizer"):
-            m.weight_quantizer._fake_quant = original_fake_quant.pop(0)
+    from ..nn import TensorQuantizer  # local: ..nn imports this utils package at module scope
+
+    quantizers = [
+        q
+        for m in module.modules()
+        if hasattr(m, "weight_quantizer")
+        for q in m.weight_quantizer.modules()
+        if isinstance(q, TensorQuantizer)
+    ]
+    original_fake_quant = [q._fake_quant for q in quantizers]
+    for q in quantizers:
+        q._fake_quant = True
+    try:
+        yield
+    finally:
+        for q, fake_quant in zip(quantizers, original_fake_quant):
+            q._fake_quant = fake_quant
 
 
 @contextmanager
@@ -1022,6 +1040,25 @@ def enable_quant(quantizer):
         yield
     finally:
         quantizer._if_quant = original_if_quant
+
+
+def apply_without_qdq(quantizer, inputs: torch.Tensor) -> torch.Tensor:
+    """Apply ``quantizer``'s pre-quant scale and rotation to ``inputs``, without quantizing them.
+
+    For rows a quantized module computes in high precision, so they keep the transforms (e.g.
+    an AWQ / SmoothQuant scale that the stored weight compensates for) of the quantized rows.
+    """
+    from ..nn import SequentialQuantizer  # local import: ..nn imports this module
+
+    members = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
+    for member in members:
+        disabled = member._disabled
+        member._disabled = True
+        try:
+            inputs = member(inputs)
+        finally:
+            member._disabled = disabled
+    return inputs
 
 
 @contextmanager
@@ -1054,7 +1091,9 @@ def fsdp2_aware_weight_update(
     Args:
         root_model (nn.Module): The root model of the FSDPModule.
         modules_to_update (list): The list of modules to update which should be a list of modules that are
-            direct children of the FSDPModule.
+            direct children of the FSDPModule. A list is read again when the context exits, so a caller
+            may append modules of the same FSDP unit to it inside the context, and their weights are
+            re-registered with FSDP2 too (the export's held weight windows rely on this).
         reshard (bool): Whether to reshard the FSDP root module after the weight update.
 
     Returns:
@@ -1094,7 +1133,7 @@ def fsdp2_aware_weight_update(
                     module_name = _get_module_name(module, root_model, names)
                     # Check if any parameter from this module is in the mapping
                     module_params_in_mapping = any(
-                        f"{module_name}.{n}" in fsdp_param_mapping
+                        _param_key(module_name, n) in fsdp_param_mapping
                         for n, _ in module.named_parameters()
                     )
                     assert module_params_in_mapping, (
@@ -1110,8 +1149,7 @@ def fsdp2_aware_weight_update(
             # Update FSDPParam list
             for module in modules_to_update:
                 for param_name, param in module.named_parameters():
-                    name = _get_module_name(module, root_model, names)
-                    name = f"{name}.{param_name}"
+                    name = _param_key(_get_module_name(module, root_model, names), param_name)
                     if name not in fsdp_param_mapping:
                         continue
 

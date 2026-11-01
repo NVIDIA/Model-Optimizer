@@ -474,15 +474,6 @@ def test_load_request_follows_the_model_state_dict_order(tmp_path, monkeypatch):
 # ------------------------------------------------------------------- under a process group
 
 
-@pytest.fixture
-def gloo_world_of_one(skip_on_windows, tmp_path_factory):
-    """A one-rank gloo process group, so the loader takes its distributed path."""
-    store = tmp_path_factory.mktemp("pg") / "store"
-    torch.distributed.init_process_group("gloo", init_method=store.as_uri(), rank=0, world_size=1)
-    yield
-    torch.distributed.destroy_process_group()
-
-
 def test_fsdp2_sharded_params_are_filled_in_place(tmp_path, gloo_world_of_one):
     """The EP hybrid's layout: the decoder layers are ``fully_shard``-ed on meta before the load, the
     root is not. The layers' params must stay sharded ``DTensor``s holding the checkpoint values, the
