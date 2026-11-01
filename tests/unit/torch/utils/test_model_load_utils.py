@@ -603,13 +603,17 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
 
 
 @needs_qwen3_moe_ep_plan
-@pytest.mark.parametrize("ep_degree", [None, "1"], ids=["auto", "set-to-1"])
+@pytest.mark.parametrize(
+    "knobs",
+    [{}, {"MODELOPT_EP_DEGREE": "1"}, {"MODELOPT_EP_DEGREE": "1", "MODELOPT_FSDP_SIZE": "1"}],
+    ids=["auto", "set-to-1", "both-ask-to-replicate"],
+)
 @pytest.mark.parametrize(
     "refused_by",
     ["its-plan", "its-format", "its-spec", "its-transformers", "its-specs-transformers"],
 )
 def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
-    run_as, serve, monkeypatch, tmp_path, refused_by, ep_degree
+    run_as, serve, monkeypatch, tmp_path, refused_by, knobs
 ):
     """Left to the decision, an MoE the expert-parallel load would refuse -- by a plan that
     shards no expert weights through grouped_gemm, a checkpoint format it does not load, a model
@@ -617,10 +621,10 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     later one the spec states (MiniMax-M3-VL's) -- is planned without expert parallelism rather
     than committed to a load that refuses it, for some reasons only after the download. Nor is it
     refused for being left whole, whether the decision or the caller made its EP degree 1: it
-    cannot be expert-parallel here, so it loads as a dense model does, with a warning saying why
-    and what would let its experts shard."""
-    if ep_degree is not None:
-        monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
+    cannot be expert-parallel here, so it loads as a dense model does, with a warning saying why.
+    A replication both knobs ask for is the caller's choice, and gets no warning."""
+    for knob, value in knobs.items():
+        monkeypatch.setenv(knob, value)
     run_as(2)
     config = _qwen3_moe(num_experts=8)
     if refused_by == "its-plan":
@@ -647,6 +651,12 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
         "its-specs-transformers": r"transformers >= 5\.13, but 5\.10\.0 is installed\. Upgrade",
     }[refused_by]
 
+    if "MODELOPT_FSDP_SIZE" in knobs:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
+        assert not [w for w in caught if "without expert parallelism" in str(w.message)], caught
+        return
     with pytest.warns(UserWarning, match=f"loads without expert parallelism.*{why}"):
         assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
 
