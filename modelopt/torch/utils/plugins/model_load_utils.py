@@ -69,6 +69,7 @@ from modelopt.torch.utils.logging import print_rank_0, warn_rank_0
 from modelopt.torch.utils.moe import (
     _EP_MIN_TRANSFORMERS,
     _EXPERTS_STYLES,
+    _FSDP2_TAKES,
     _SUB_CONFIG_ATTRS,
     _choose_ep_degree,
     _ep_config,
@@ -1724,11 +1725,13 @@ def _decide_distribution(
             "holds the whole MoE."
         )
     elif experts and refusal is None and ep_size == 1 and dense == "replicate":
-        # The ways out besides sharding the experts.
+        # The ways out besides sharding the experts, then what the FSDP2 load takes: inside the
+        # list, that caveat would read as part of the ways after it.
         others = (
             f"shard the whole model with FSDP2 {_fsdp2_way_out(fsdp)}, load it in a single "
             f"process, or replicate it on every rank outright: {knob}=1 with {replicate}, or "
-            f"load_pretrained(..., distribution=DistributionPlan({world_size}, 1, 'replicate'))."
+            f"load_pretrained(..., distribution=DistributionPlan({world_size}, 1, 'replicate')). "
+            f"The FSDP2 load takes {_FSDP2_TAKES}."
         )
         # Name a way to shard the experts only where one exists: a count the config spells none of
         # the ways ModelOpt reads leaves no EP degree to name, as does one sharing no factor above 1

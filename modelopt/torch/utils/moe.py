@@ -168,16 +168,16 @@ def _ep_floor(model_type: str) -> str:
     return max(_EP_MIN_TRANSFORMERS, stated or _EP_MIN_TRANSFORMERS, key=parse)
 
 
+# What the FSDP2 load takes, as a refusal offering it says. It builds a causal LM and reads its
+# tensors as stored, so a quantized or multimodal checkpoint (GPT-OSS's MXFP4, Llama-4's) needs a
+# single process, as does one with an MTP head the load cannot build (--use_fsdp2 refuses
+# Nemotron-H's).
+_FSDP2_TAKES = "an unquantized causal LM with no MTP head it cannot build (such as Nemotron-H's)"
+
+
 def _fsdp2_way_out(fsdp: str = "MODELOPT_FSDP_SIZE=world") -> str:
-    """FSDP2 as a refusal names it, the way around expert parallelism ``fsdp`` asks for."""
-    # The FSDP2 load builds a causal LM and reads its tensors as stored, so a quantized or
-    # multimodal checkpoint (GPT-OSS's MXFP4, Llama-4's) needs a single process, as does one with
-    # an MTP head the load cannot build (--use_fsdp2 refuses Nemotron-H's).
-    return (
-        f"(--use_fsdp2 in examples/hf_ptq/hf_ptq.py, or {fsdp}) if the FSDP2 load supports the "
-        "checkpoint, which takes an unquantized causal LM with no MTP head it cannot build (such "
-        "as Nemotron-H's)"
-    )
+    """How a refusal asks for FSDP2, the way around expert parallelism ``fsdp`` spells."""
+    return f"(--use_fsdp2 in examples/hf_ptq/hf_ptq.py, or {fsdp})"
 
 
 def _spec_refusal(model_type: str) -> RuntimeError | None:
@@ -214,7 +214,8 @@ def check_distributed_support(model_type: str) -> None:
     if refusal is None:
         return
     without_ep = (
-        f"without expert parallelism: in a single process, or FSDP2-sharded {_fsdp2_way_out()}"
+        f"without expert parallelism: in a single process, or FSDP2-sharded {_fsdp2_way_out()} if "
+        f"the FSDP2 load supports the checkpoint, which takes {_FSDP2_TAKES}"
     )
     if isinstance(refusal, NotImplementedError):
         raise NotImplementedError(f"{refusal} Quantize it {without_ep}.")
