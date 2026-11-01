@@ -72,8 +72,6 @@ from modelopt.torch.utils.moe import (
     _SUB_CONFIG_ATTRS,
     _choose_ep_degree,
     _ep_config,
-    _ep_floor,
-    _ep_spec,
     _fsdp2_way_out,
     _num_experts_from_config,
     _routed_expert_keys,
@@ -1666,9 +1664,14 @@ def _decide_distribution(
             f"{replicate} to load it without expert parallelism, whole on every rank."
         )
     chosen = ep_size == "auto"  # an EP degree no knob or argument set
-    # Why the expert-parallel load would refuse this MoE, or None, whatever EP degree is set: an MoE
-    # it refuses cannot be expert-parallel here, so is not refused below for being left whole.
-    refusal = _ep_load_refusal(hf_config, ep_plan) if experts else None
+    # Why the expert-parallel load would refuse this MoE, or None, whatever EP degree is set: its
+    # spec, the transformers it needs, its checkpoint or its plan. An MoE it refuses cannot be
+    # expert-parallel here, so is not refused below for being left whole.
+    refusal = (
+        (_spec_refusal(hf_config.model_type) or _ep_load_refusal(hf_config, ep_plan))
+        if experts
+        else None
+    )
     if ep_size == "auto":
         # The expert-parallel load would refuse this model, for some reasons only after the
         # checkpoint's download: with nothing asking for expert parallelism, plan without it.
@@ -1719,49 +1722,13 @@ def _decide_distribution(
             f"{hf_config.model_type}: ep_size=1 and dense='replicate' as asked, so every rank "
             "holds the whole MoE."
         )
-    elif (
-        experts
-        and ep_size == 1
-        and dense == "replicate"
-        # One whose spec refuses expert parallelism is refused below saying so, whatever else the
-        # expert-parallel load would refuse it for.
-        and (refusal is None or _spec_refuses_ep(hf_config.model_type))
-    ):
-        # The ways out besides sharding the experts, which a spec refusing EP rules out.
+    elif experts and refusal is None and ep_size == 1 and dense == "replicate":
+        # The ways out besides sharding the experts.
         others = (
             f"shard the whole model with FSDP2 {_fsdp2_way_out(fsdp)}, load it in a single "
             f"process, or replicate it on every rank outright: {knob}=1 with {replicate}, or "
             f"load_pretrained(..., distribution=DistributionPlan({world_size}, 1, 'replicate'))."
         )
-        ep = _ep_spec(hf_config.model_type)
-        if ep is not None and ep.unsupported:
-            # NotImplementedError, as check_distributed_support refuses the same spec.
-            raise NotImplementedError(
-                f"{hf_config.model_type} cannot be quantized expert-parallel yet: {ep.unsupported} "
-                f"The plan replicates it at world_size={world_size}, so every rank would hold the "
-                f"whole MoE. Instead, {others}"
-            )
-        if (
-            _spec_refuses_ep(hf_config.model_type)
-            and num_experts
-            and math.gcd(num_experts, world_size) > 1
-        ):
-            # Below the release its expert parallelism needs: an EP degree above 1 is refused too.
-            # Where no EP degree could shard the experts anyway, the arms below say so instead, as
-            # upgrading would not change it. An EP degree the caller set to 1 stays 1 after an
-            # upgrade, so it has to be raised as well.
-            degree = (
-                f" and set {knob} above 1, dividing both its {num_experts} experts and the world "
-                "size,"
-                if ep_asked
-                else ""
-            )
-            raise RuntimeError(
-                f"{hf_config.model_type} can be expert-parallel, but the plan resolved to ep_size=1 "
-                f"at world_size={world_size}, so every rank would hold the whole MoE, and this "
-                "transformers cannot shard its experts. Upgrade transformers to "
-                f"{_ep_floor(hf_config.model_type)} or later{degree} to shard them, or {others}"
-            )
         # Name a way to shard the experts only where one exists: a count the config spells none of
         # the ways ModelOpt reads leaves no EP degree to name, as does one sharing no factor above 1
         # with the world size.
@@ -1998,6 +1965,19 @@ def _ep_plan_refusal(ep_plan: dict[str, str]) -> str | None:
             "drops, so those expert weights would load whole on every rank beside their sharded "
             "siblings."
         )
+    return None
+
+
+def _spec_refusal(model_type: str) -> Exception | None:
+    """The error ``model_type``'s spec refuses its expert parallelism with, or ``None``.
+
+    :func:`~modelopt.torch.utils.moe.check_distributed_support`'s: the spec rules it out, or the
+    installed transformers is below the release it needs.
+    """
+    try:
+        check_distributed_support(model_type)
+    except RuntimeError as e:  # NotImplementedError is one too
+        return e
     return None
 
 
