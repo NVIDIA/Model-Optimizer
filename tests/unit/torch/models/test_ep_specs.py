@@ -104,6 +104,18 @@ def test_a_spec_with_a_prepare_states_its_plan(model_type):
 
 
 @pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
+def test_a_spec_with_a_build_step_prepares(model_type):
+    """The build step runs only where prepare does not, for the plan decision: the expert-parallel
+    load runs prepare instead, so a spec stating a build step and no prepare would load the model
+    with nothing making the checkpoint's code build."""
+    ep = get_spec(model_type).ep_spec
+    assert not ep.make_buildable or ep.prepare, (
+        f"{model_type} states a make_buildable and no prepare, so nothing runs it on the "
+        "expert-parallel load: do its work in a prepare too"
+    )
+
+
+@pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
 def test_a_plan_goes_where_the_load_reads_one(model_type):
     """A spelling the load does not read is read as no plan at all, and the MoE planned as dense."""
     attrs = get_spec(model_type).ep_spec.plan_config_attr or ()
