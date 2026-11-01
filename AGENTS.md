@@ -95,18 +95,19 @@ below, tell the user and offer to address it before pushing; do not push as-is.
   a new example or a new model/backend that has no working intermediate state.
   A PR a little over needs no split. Deletions, tests, docs, config, comments,
   and blank lines don't count; before opening, get a rough upper bound from the
-  command below (it keeps docstrings and block comments, and reads `//` as a
-  comment only in C and CUDA files, where `#` lines are preprocessor code):
+  command below (it keeps comments and docstrings, so subtract those by eye
+  when the result is close to the line):
 
   ```bash
   git diff --no-color -U0 <base>...HEAD | awk '
     /^diff --git/ {
       hdr = 1; f = $NF
-      skip = f ~ /(^|\/)(tests|docs)\// || f ~ /\.(ya?ml|json|toml|ini|xml|lock|md|rst|txt|ipynb)$/
-      cmt = (f ~ /\.(c|cc|cpp|cu|cuh|h|hpp)$/) ? "^\\+[ \t]*//" : "^\\+[ \t]*#"
+      skip = f ~ /(^|\/)(tests|docs)\//
+      skip = skip || f ~ /(^|\/)test_[^\/]*\.py$|_test\.go$|\.spec\./
+      skip = skip || f ~ /\.(ya?ml|json|toml|ini|xml|lock|md|rst|txt|ipynb)$/
       next }
     /^@@/ { hdr = 0; next }
-    !hdr && !skip && /^\+/ && !/^\+[ \t]*$/ && $0 !~ cmt { n++ }
+    !hdr && !skip && /^\+/ && !/^\+[ \t]*$/ { n++ }
     END { print n + 0 }'
   ```
 
