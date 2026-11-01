@@ -11,13 +11,16 @@ outputs:
   head_sha:
     description: The PR's head commit.
     value: ${{ steps.pr-shas.outputs.head_sha }}
+  stacked:
+    description: Whether the PR targets another PR's branch (not main, release/* or feature/*), so GPU tests are deferred.
+    value: ${{ steps.pr-shas.outputs.stacked }}
 
 runs:
   using: composite
   steps:
     - if: startsWith(github.ref, 'refs/heads/pull-request/')
       id: get-pr-info
-      uses: nv-gha-runners/get-pr-info@main
+      uses: nv-gha-runners/get-pr-info@090577647b8ddc4e06e809e264f7881650ecdccf # main
     # Extract SHAs from pr-info JSON via shell to avoid fromJSON on potentially-empty outputs
     - if: startsWith(github.ref, 'refs/heads/pull-request/')
       id: pr-shas
@@ -27,6 +30,10 @@ runs:
       run: |
         echo "head_sha=$(echo "$PR_INFO" | jq -r '.head.sha')" >> $GITHUB_OUTPUT
         echo "base_sha=$(echo "$PR_INFO" | jq -r '.base.sha')" >> $GITHUB_OUTPUT
+        base_ref=$(echo "$PR_INFO" | jq -r '.base.ref')
+        # Same base branches the unit tests run for (unit_tests.yml)
+        [[ "$base_ref" == main || "$base_ref" == release/* || "$base_ref" == feature/* ]] && stacked=false || stacked=true
+        echo "stacked=$stacked" | tee --append $GITHUB_OUTPUT
     # Get commit from the target branch that is present in the PR to use as base for changed files
     - if: startsWith(github.ref, 'refs/heads/pull-request/')
       id: calculate-merge-base

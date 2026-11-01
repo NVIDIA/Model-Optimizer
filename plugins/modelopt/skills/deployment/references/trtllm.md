@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- TensorRT-LLM >= 0.17.0
+- TensorRT-LLM >= 1.2.0 (see `docs/source/deployment/3_unified_hf.rst`)
 - Typically installed via NVIDIA container: `nvcr.io/nvidia/tensorrt-llm/release:<version>`
 - Or: `pip install tensorrt-llm`
 
@@ -51,7 +51,7 @@ directly together with a ModelOpt-quantized checkpoint.
 ### Workflow
 
 1. Quantize the checkpoint with ModelOpt PTQ (including AutoQuant / mixed precision) via
-   `examples/llm_ptq` (`hf_ptq.py` / `scripts/huggingface_example.sh`), which produces a
+   `examples/hf_ptq` (`hf_ptq.py` / `scripts/huggingface_example.sh`), which produces a
    unified HuggingFace checkpoint with `hf_quant_config.json`.
 2. Deploy that checkpoint with TensorRT-LLM's AutoDeploy backend (see the upstream
    `examples/auto_deploy` docs for the current API and `trtllm-serve` flags).
@@ -65,7 +65,7 @@ directly together with a ModelOpt-quantized checkpoint.
 
 The legacy export path using `export_tensorrt_llm_checkpoint()` is deprecated. Use the unified HF checkpoint format with `export_hf_checkpoint()` instead.
 
-If you encounter a legacy checkpoint (no `hf_quant_config.json`, has `rank*.safetensors` pattern), it needs the TRT-LLM build API to create an engine before deployment. See `docs/source/deployment/1_tensorrt_llm.rst`.
+Current TensorRT-LLM releases no longer support the legacy TensorRT backend. Re-export the quantized source model with `export_hf_checkpoint()` and deploy using the PyTorch backend. See `docs/source/deployment/3_unified_hf.rst`.
 
 ## Evaluation with TRT-LLM
 
@@ -91,5 +91,3 @@ explicitly for few-shot tasks.
 |-------|-----|
 | `No module named tensorrt_llm` | Install via container or pip |
 | NVFP4 inference fails on Hopper | NVFP4 requires Blackwell GPUs for inference |
-| Slow first inference | Engine compilation happens on first run; subsequent runs are cached |
-| OOM during engine build | Reduce `--max_batch_size` or increase TP |

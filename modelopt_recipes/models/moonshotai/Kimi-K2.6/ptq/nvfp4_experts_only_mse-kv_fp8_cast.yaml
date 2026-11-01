@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Alias recipe for nvidia/Kimi-K2.6-NVFP4 (source moonshotai/Kimi-K2.6). The general
+# expert-only NVFP4 scheme -- MSE-swept static weight scales, dynamic NVFP4 inputs, FP8
+# KV cache in cast mode -- reproduces this release with no checkpoint-specific deviation,
+# so this entry imports that recipe wholesale instead of copying its body.
+
+imports:
+  base: general/ptq/nvfp4_experts_only_mse-kv_fp8_cast
+
+$import: base
+metadata:
+  description: >-
+    moonshotai/Kimi-K2.6 quantized with the general expert-only NVFP4 scheme (MSE static
+    weight scales, dynamic inputs) and an FP8 KV cache in cast mode, as published in
+    nvidia/Kimi-K2.6-NVFP4.

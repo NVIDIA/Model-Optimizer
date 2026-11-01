@@ -16,6 +16,7 @@
 """Utility functions for PyTorch models."""
 
 import inspect
+import sys
 import types
 import warnings
 from collections import abc, deque
@@ -74,13 +75,24 @@ SUPPORTED_WRAPPERS: dict[type[nn.Module], str] = {
     torch.distributed.fsdp.FullyShardedDataParallel: "module",
 }
 
-try:
-    from deepspeed.runtime.engine import DeepSpeedEngine
-except:  # noqa: E722
-    DeepSpeedEngine = None
 
-if DeepSpeedEngine is not None:
-    SUPPORTED_WRAPPERS[DeepSpeedEngine] = "module"
+def _deepspeed_engine_type() -> type[nn.Module] | None:
+    """Return ``DeepSpeedEngine`` if deepspeed is in use, else ``None``.
+
+    An engine can only exist once its module is imported, so look it up there rather than import
+    deepspeed, which takes several seconds, with modelopt.
+    """
+    return getattr(sys.modules.get("deepspeed.runtime.engine"), "DeepSpeedEngine", None)
+
+
+def _supported_wrappers() -> dict[type[nn.Module], str]:
+    """Return ``SUPPORTED_WRAPPERS``, with ``DeepSpeedEngine`` added once deepspeed is in use."""
+    deepspeed_engine = _deepspeed_engine_type()
+    if deepspeed_engine is not None:
+        SUPPORTED_WRAPPERS.setdefault(deepspeed_engine, "module")
+    return SUPPORTED_WRAPPERS
+
+
 ModelLike: TypeAlias = nn.Module | type[nn.Module] | tuple | Callable
 ConstructorLike: TypeAlias = Callable | tuple
 
@@ -278,7 +290,7 @@ def standardize_named_model_args(
 
     Returns: A tuple (args_normalized, args_with_default) where
         args_normalized is a dictionary of ordered model args where the key represents a unique
-            serialized string based on the the argument's name in the function signature and the
+            serialized string based on the argument's name in the function signature and the
             value contains the actual argument,
         args_with_default is a set indicating whether the argument was retrieved from the default
             value in the function signature of the model's ``forward()`` method or whether the
@@ -442,22 +454,23 @@ def unwrap_model(
     force_unwrap: bool = False,
 ) -> nn.Module:
     """Unwrap a model that is wrapped by supported wrapper module or return original model."""
+    wrappers = _supported_wrappers()
     if force_unwrap:
         try:
-            if type(model) in SUPPORTED_WRAPPERS:
-                return getattr(model, SUPPORTED_WRAPPERS[type(model)])
+            if type(model) in wrappers:
+                return getattr(model, wrappers[type(model)])
         except AttributeError:
             raise ValueError(
                 f"Model of type {type(model)} could not be forcefully unwrapped! Please manually"
                 " unwrap the model before passing it in."
             )
 
-    if type(model) in SUPPORTED_WRAPPERS:
+    if type(model) in wrappers:
         if raise_error:
             raise ValueError(msg or f"Model {model} is wrapped by {type(model)}!")
         elif warn:
             warnings.warn(msg or f"Model {model} is wrapped by {type(model)}; unwrapping...")
-        return getattr(model, SUPPORTED_WRAPPERS[type(model)])
+        return getattr(model, wrappers[type(model)])
     return model
 
 
@@ -520,7 +533,7 @@ def run_forward_loop(
     Args:
         model: The model with which we run forward.
         data_loader: An iterator with data samples.
-        max_iters: Number of batches to run; by default it is infiinite or until ``data_loader``
+        max_iters: Number of batches to run; by default it is infinite or until ``data_loader``
             is exhausted.
         collect_func: A ``Callable`` that takes a batch of data from the ``data_loader``
               as input and returns the input to ``model.forward()`` such that the return value
@@ -585,7 +598,7 @@ def create_param_grad_clear_hook(param):
     """Create a hook to clear gradients for a parameter.
 
     The hook will be fired after the gradient is accumulated for the parameter.
-    Important: For this to work, ``accum_grad`` should be kept alive as longs as this utility is needed.
+    Important: For this to work, ``accum_grad`` should be kept alive as long as this utility is needed.
     """
     # For methods such as AutoQuantize, involving backward -
     # We want to clear parameter gradients as soon as they are computed to save memory
@@ -609,8 +622,9 @@ def get_unwrapped_name(name: str, model: nn.Module | None = None) -> str:
     # So unwrapping just the parent module is not enough
     # Instead of unwrapping the child modules and changing the model, we can just clean the name
     # _convert_to_wrapped_module_name is a Pytorch utility function to do this
+    deepspeed_engine = _deepspeed_engine_type()
     if isinstance(model, (nn.parallel.DistributedDataParallel, nn.parallel.DataParallel)) or (
-        DeepSpeedEngine is not None and isinstance(model, DeepSpeedEngine)
+        deepspeed_engine is not None and isinstance(model, deepspeed_engine)
     ):
         name = name.removeprefix("module.")
 

@@ -92,7 +92,7 @@ pipeline:
       --output_hf_path <<global_vars.output_dir>>/Qwen3-8B-Pruned-6B
     slurm_config:
       _factory_: "slurm_factory"
-      container: nvcr.io/nvidia/nemo:26.06
+      container: nvcr.io/nvidia/nemo:26.08
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 1
       ntasks_per_node: 2

@@ -97,7 +97,8 @@ def test_offline_eagle_training(tiny_llama_path, tiny_daring_anteater_path, offl
         f"training.output_dir={output_dir}",
         "training.num_train_epochs=1",
         "training.learning_rate=1e-5",
-        "training.training_seq_len=64",
+        # Shorter than the dumped sequences, so the offline collator truncates them.
+        "training.training_seq_len=16",
         "training.save_steps=1",
         # torch.compile is smoke-tested once by test_llama_eagle3[1-False]; skip its warmup here.
         "eagle.eagle_use_torch_compile=false",

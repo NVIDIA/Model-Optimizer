@@ -1,6 +1,6 @@
 # Deploy quantized models from Nvidia's Hugging Face model hub with TensorRT-LLM, vLLM, and SGLang
 
-The provided bash scripts show an example to deploy and run the [quantized LLama 3.1 8B Instruct FP8 model](https://huggingface.co/nvidia/Llama-3.1-8B-Instruct-FP8) from Nvidia's Hugging Face model hub on TensorRT-LLM, vLLM and SGLang respectively.
+The provided bash scripts show an example to deploy and run the [quantized Llama 3.1 8B Instruct FP8 model](https://huggingface.co/nvidia/Llama-3.1-8B-Instruct-FP8) from Nvidia's Hugging Face model hub on TensorRT-LLM, vLLM and SGLang respectively.
 
 Before running the bash scripts, please make sure you have setup the environment properly:
 

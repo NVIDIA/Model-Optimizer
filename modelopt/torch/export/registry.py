@@ -27,12 +27,15 @@ editing if/elif chains inside ``unified_export_hf.py``.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 
-from modelopt.torch.quantization.utils.core_utils import has_non_resident_weights
+if TYPE_CHECKING:
+    from modelopt.torch.export.hf_export_handlers import _HeldWindow
+    from modelopt.torch.quantization.utils.core_utils import ModuleNames
 
 __all__ = [
     "ExportContext",
@@ -46,32 +49,38 @@ __all__ = [
 class ExportContext:
     """Shared state for a single export invocation, passed to every handler call.
 
-    The tied-weight dedup caches must be scoped to one export invocation: a
-    process-global cache would carry stale entries whose ``data_ptr`` keys can be
-    recycled by PyTorch's allocator across exports, causing silent false-positive
-    aliasing. ``tied_cache`` (int keys) holds dense Linear / per-expert wrapper
-    dedup; ``moe_tied_cache`` (tuple keys) holds MoE fused-experts module dedup.
-
-    Both are ``None`` when the model's weights are not resident for the whole export
-    (FSDP2 or accelerate offload), since ``data_ptr`` keys are meaningless once weights
-    move.
+    Tied-weight dedup is not a handler concern: the driver builds one name-based
+    :class:`TiedWeightMap` and feeds it to ``sync_tied_input_amax`` and
+    ``postprocess_state_dict`` directly. Both dense and fused-MoE tied weights are packed
+    independently and their duplicate keys are dropped by name there, so the context
+    carries no tied-weight map (handlers never consulted it).
     """
 
     model: nn.Module
     dtype: torch.dtype
     is_modelopt_qlora: bool = False
-    tied_cache: dict[int, nn.Module] | None = field(default_factory=dict)
-    moe_tied_cache: dict[tuple[int, int], nn.Module] | None = field(default_factory=dict)
+    model_type: str | None = None
+    """The model's HF model type (``model.config.model_type``), used to resolve the
+    model's spec in ``modelopt.torch.models``. ``None`` means unknown: spec lookups then
+    fail loudly instead of guessing."""
 
-    def __post_init__(self) -> None:
-        # data_ptr() only identifies a tensor while it stays resident, so dedup is unsafe
-        # once weights move. Tied weights are then written as duplicates rather than
-        # re-aliased, making tied-weight export (DiffusionGemma) resident-path only.
-        # TODO: dedup by tied-group name instead, reusing the _tied_weights_keys
-        # resolution in _collect_canonical_tied_patterns, which survives weight moves.
-        if has_non_resident_weights(self.model):
-            self.tied_cache = None
-            self.moe_tied_cache = None
+    keep_fused_experts: bool = False
+    """Marks the distributed no-gather export, whose handlers pack while the model is still sharded:
+    an FSDP2-owned weight is packed inside its unit's weight-update window, and fused MoE experts are
+    folded in place and kept fused and sharded rather than split into whole per-expert tensors,
+    which :func:`~modelopt.torch.export.moe_utils.split_fused_experts_state_dict` does later."""
+
+    module_names: "ModuleNames | None" = None
+    """``model``'s name maps, built once per export by the first handler that looks a module up
+    (:func:`~modelopt.torch.quantization.utils.module_name_maps`)."""
+
+    hold_fsdp2_windows: bool = False
+    """Whether the handlers hold an FSDP2 unit's weight-update window open across its modules: set
+    only inside :func:`~modelopt.torch.export.hf_export_handlers.held_fsdp2_weight_windows`, which
+    closes the last window. Elsewhere each module is packed in a window of its own."""
+
+    fsdp2_window: "_HeldWindow | None" = None
+    """The FSDP2 unit's weight-update window the handlers hold open across its modules."""
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]

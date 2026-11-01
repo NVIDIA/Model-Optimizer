@@ -43,12 +43,21 @@ mx_format_map = {
 DISABLE_TRITON_KERNEL = False
 
 
+def _nvfp4_triton_kernel_enabled() -> bool:
+    """Whether dynamic NVFP4 fake quant runs on the Triton kernel (compute >= 8.9, not disabled)."""
+    return (
+        triton_kernel.IS_AVAILABLE
+        and hasattr(triton_kernel, "fp4_fake_quant_block")
+        and not DISABLE_TRITON_KERNEL
+    )
+
+
 def _fp8_eager(x, amax=None):
     dtype = x.dtype
     if amax is not None:
         amax = amax.to(torch.float32)
-        epsilon = 1.0 / (1 << 24)
-        zero_amax_mask = amax <= epsilon
+        # Like the CUDA extension, only an amax whose FP8 scale overflows is treated as zero.
+        zero_amax_mask = amax <= 448.0 / torch.finfo(torch.float32).max
         safe_amax = torch.where(zero_amax_mask, torch.ones_like(amax), amax)
         scale = 448.0 / safe_amax
         scale_inv = 1 / scale
@@ -119,11 +128,16 @@ def _quantize_impl(
     exponent_bits: int = 0,
     unsigned: bool = False,
     narrow_range: bool = True,
+    trt_high_precision_dtype: str | None = None,
+    block_size: int | None = None,
+    axis: int | None = None,
 ):
     if num_bits == 8 and exponent_bits == 4:
         return scaled_e4m3_impl(inputs=inputs, amax=amax)
     elif isinstance(num_bits, int):
-        return fake_quant_impl(
+        # CPU export executes this carrier directly; use the same math as the eager CPU fallback.
+        quantize_impl = fake_quant_impl if inputs.is_cuda else _tensor_quant
+        return quantize_impl(
             inputs=inputs,
             amax=amax,
             num_bits=num_bits,
@@ -143,14 +157,15 @@ def _quantize_impl_abstract(
     exponent_bits: int = 0,
     unsigned: bool = False,
     narrow_range: bool = True,
+    trt_high_precision_dtype: str | None = None,
+    block_size: int | None = None,
+    axis: int | None = None,
 ) -> torch.Tensor:
     """Register an abstract implementation for quantizing tensor.
 
     This abstract function returns an empty tensor with the same shape and dtype.
     """
-    output = torch.empty_like(input)
-
-    return output
+    return torch.empty_like(input)
 
 
 # Argument types: Tensor, int, NoneType, int, int, int, int,
@@ -162,6 +177,8 @@ def _dynamic_block_quantize_impl(
     exponent_bits: int,
     scale_num_bits: int,
     scale_exponent_bits: int,
+    trt_high_precision_dtype: str | None = None,
+    onnx_quantizer_type: str | None = None,
 ):
     scale_bits = (scale_exponent_bits, scale_num_bits - scale_exponent_bits - 1)
     if exponent_bits != 0:
@@ -175,9 +192,7 @@ def _dynamic_block_quantize_impl(
         if (
             num_bits == (2, 1)  # type: ignore[comparison-overlap]
             and scale_bits == (4, 3)
-            and triton_kernel.IS_AVAILABLE
-            and hasattr(triton_kernel, "fp4_fake_quant_block")  # requires compute >= 8.9
-            and not DISABLE_TRITON_KERNEL
+            and _nvfp4_triton_kernel_enabled()
             and amax is not None
         ):
             return triton_kernel.fp4_fake_quant_block(inputs, amax)
@@ -203,14 +218,14 @@ def _dynamic_block_quantize_impl_abstract(
     exponent_bits: int,
     scale_num_bits: int,
     scale_exponent_bits: int,
+    trt_high_precision_dtype: str | None = None,
+    onnx_quantizer_type: str | None = None,
 ):
     """Register an abstract implementation for dynamic block quantization.
 
     This abstract function returns an empty tensor with the same shape and dtype.
     """
-    output = torch.empty_like(inputs)
-
-    return output
+    return torch.empty_like(inputs)
 
 
 quantize_op = _quantize_impl
@@ -223,17 +238,20 @@ try:
     torch.library.define(
         "tensorrt::quantize_op",
         "(Tensor input, Tensor amax, int num_bits, int exponent_bits, "
-        "bool unsigned, bool narrow_range) -> Tensor",
+        "bool unsigned, bool narrow_range, str? trt_high_precision_dtype=None, "
+        "int? block_size=None, int? axis=None) -> Tensor",
     )
     torch.library.define(
         "tensorrt::dynamic_block_quantize_op",
         "(Tensor input, int block_size, Tensor amax, int num_bits, int exponent_bits, "
-        "int scale_num_bits, int scale_exponent_bits) -> Tensor",
+        "int scale_num_bits, int scale_exponent_bits, str? trt_high_precision_dtype=None, "
+        "str? onnx_quantizer_type=None) -> Tensor",
     )
     torch.library.define(
         "tensorrt::dynamic_block_quantize_op.overload",
         "(Tensor input, int block_size, None amax, int num_bits, int exponent_bits, "
-        "int scale_num_bits, int scale_exponent_bits) -> Tensor",
+        "int scale_num_bits, int scale_exponent_bits, str? trt_high_precision_dtype=None, "
+        "str? onnx_quantizer_type=None) -> Tensor",
     )
 
     # Implement the None amax case
@@ -245,6 +263,8 @@ try:
         exponent_bits: int,
         scale_num_bits: int,
         scale_exponent_bits: int,
+        trt_high_precision_dtype: str | None = None,
+        onnx_quantizer_type: str | None = None,
     ):
         return torch.empty_like(inputs)
 
@@ -368,8 +388,7 @@ class FakeTensorQuantFunction(Function):
 
         def legacy_quant_func():
             # The LegacyFakeTensorQuantFunction support cpu and amax with any shape that can be broadcasted to inputs.
-            outputs = _tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
-            return outputs
+            return _tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
 
         if not inputs.is_cuda:
             outputs = legacy_quant_func()
@@ -382,6 +401,9 @@ class FakeTensorQuantFunction(Function):
                     exponent_bits=0,
                     unsigned=unsigned,
                     narrow_range=narrow_range,
+                    trt_high_precision_dtype=trt_high_precision_dtype,
+                    block_size=block_size,
+                    axis=axis,
                 )
             except (AttributeError, ValueError):
                 # AttributeError: cuda_ext is not imported, possibly due to CPU only installation
@@ -447,6 +469,7 @@ class ScaledE4M3Function(Function):
             exponent_bits=4,
             unsigned=False,
             narrow_range=False,
+            trt_high_precision_dtype=trt_high_precision_dtype,
         )
 
         if bias is not None:
@@ -461,7 +484,6 @@ class ScaledE4M3Function(Function):
 
 
 def _dynamic_block_quantize_forward(
-    ctx,
     inputs,
     block_size,
     amax,
@@ -469,7 +491,6 @@ def _dynamic_block_quantize_forward(
     scale_bits,
     trt_high_precision_dtype=None,
     onnx_quantizer_type="dynamic",
-    pass_through_bwd=True,
 ):
     """Forward method."""
     if isinstance(num_bits, int):
@@ -482,7 +503,7 @@ def _dynamic_block_quantize_forward(
     assert isinstance(scale_bits, tuple) and len(scale_bits) == 2
     scale_exponent_bits = scale_bits[0]
     scale_num_bits = scale_bits[0] + scale_bits[1] + 1
-    outputs = dynamic_block_quantize_op(
+    return dynamic_block_quantize_op(
         inputs,
         block_size,
         amax,
@@ -490,8 +511,9 @@ def _dynamic_block_quantize_forward(
         exponent_bits,
         scale_num_bits,
         scale_exponent_bits,
+        trt_high_precision_dtype,
+        onnx_quantizer_type,
     )
-    return outputs
 
 
 class DynamicBlockQuantizationFunction(Function):
@@ -551,7 +573,6 @@ class DynamicBlockQuantizationFunction(Function):
         """Forward method."""
         _save_for_backward_if_needed(ctx, pass_through_bwd, inputs, amax)
         return _dynamic_block_quantize_forward(
-            ctx,
             inputs,
             block_size,
             amax,
@@ -559,7 +580,6 @@ class DynamicBlockQuantizationFunction(Function):
             scale_bits,
             trt_high_precision_dtype,
             onnx_quantizer_type,
-            pass_through_bwd,
         )
 
     @staticmethod
@@ -602,6 +622,26 @@ class StaticBlockwiseFP4FakeQuantFunction(Function):
     def backward(ctx, grad_outputs):
         """Implements straight through estimation with clipping."""
         return _fake_quant_backward_function(ctx, grad_outputs, num_args=len(ctx.needs_input_grad))
+
+
+class StackedNVFP4FakeQuantFunction(Function):
+    """Dynamic NVFP4 fake quantization of stacked tensors, one global amax per slice of dim 0.
+
+    Matches a separate :func:`dynamic_block_quant` call per slice (e.g. per expert of a fused
+    ``(E, N, K)`` weight) in a single kernel launch.
+    """
+
+    @staticmethod
+    def forward(ctx, inputs, amax, pass_through_bwd=True):
+        """Forward method; ``amax`` holds one value per slice of ``inputs`` along dim 0."""
+        clip_amax = amax.reshape(-1, *([1] * (inputs.dim() - 1)))
+        _save_for_backward_if_needed(ctx, pass_through_bwd, inputs, clip_amax)
+        return triton_kernel.fp4_fake_quant_block(inputs, amax)
+
+    @staticmethod
+    def backward(ctx, grad_outputs):
+        """Implements straight through estimation with clipping."""
+        return _fake_quant_backward_function(ctx, grad_outputs, num_args=3)
 
 
 def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
@@ -703,5 +743,6 @@ fake_tensor_quant = FakeTensorQuantFunction.apply
 scaled_e4m3 = ScaledE4M3Function.apply
 dynamic_block_quant = DynamicBlockQuantizationFunction.apply
 static_blockwise_fp4_fake_quant = StaticBlockwiseFP4FakeQuantFunction.apply
+stacked_nvfp4_fake_quant = StackedNVFP4FakeQuantFunction.apply
 fp4_cast_ste = FP4CastSTEFunction.apply
 int_cast_ste = IntCastSTEFunction.apply

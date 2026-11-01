@@ -1,0 +1,8 @@
+{
+  "engine_args": {
+    "mamba_backend": "flashinfer",
+    "mamba_ssm_cache_dtype": "float16",
+    "enable_mamba_cache_stochastic_rounding": true,
+    "mamba_cache_philox_rounds": 5
+  }
+}

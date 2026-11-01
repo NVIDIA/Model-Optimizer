@@ -46,7 +46,7 @@ __all__ = [
     "register_bidirectional_sdpa",
 ]
 
-DEFAULT_RECIPE = "huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj"
+DEFAULT_RECIPE = "model_type/nemotron_llama/ptq/nvfp4_output_quant_proj"
 
 # TODO: Add an accuracy evaluation pipeline for the embedding and reranking models.
 CALIBRATION_TEXTS = [

@@ -156,7 +156,7 @@ def run_mip_only(hydra_config_path: str):
         mtpz.mip.run_mip_sweep(hydra_cfg)
     else:
         # mip_and_realize_models (distributed processing)
-        # TODO: How to make it part of mnt.search() api, similarly to run_full_puzzletron() API
+        # TODO: How to make it part of mtn.search() api, similarly to run_full_puzzletron() API
         mtpz.tools.mprint("Puzzletron Progress 7/8: running MIP and realizing models (multi-gpu)")
         mtpz.mip.launch_mip_and_realize_model(hydra_cfg)
 

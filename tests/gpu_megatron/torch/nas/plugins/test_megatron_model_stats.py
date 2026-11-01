@@ -24,11 +24,7 @@ Two test groups:
 from types import SimpleNamespace
 
 import pytest
-from _test_utils.torch.megatron.models import (
-    HAS_MAMBA,
-    get_mcore_gpt_model,
-    get_mcore_mamba_hybrid_model,
-)
+from _test_utils.torch.megatron.models import HAS_MAMBA, get_mcore_gpt_model, get_mcore_hybrid_model
 
 from modelopt.torch.nas.plugins.megatron_model_stats import (
     mcore_memory_footprint_mb,
@@ -506,13 +502,13 @@ def test_formula_total_matches_gpt_moe_model(dist_workers, parallelism, num_gpus
     dist_workers.run(_test_formula_matches_gpt_moe_model, parallelism=parallelism)
 
 
-def _test_formula_matches_mamba_model(rank, size, parallelism):
+def _test_formula_matches_hybrid_model(rank, size, parallelism):
     hidden_size = 64
     mamba_head_dim = 16
     mamba_num_heads = hidden_size // mamba_head_dim  # 4
     pattern = "ME*-"  # 4-layer hybrid
 
-    model = get_mcore_mamba_hybrid_model(
+    model = get_mcore_hybrid_model(
         tensor_model_parallel_size=1 if parallelism != "tp" else size,
         pipeline_model_parallel_size=1 if parallelism != "pp" else size,
         expert_model_parallel_size=1 if parallelism != "ep" else size,
@@ -546,10 +542,10 @@ def _test_formula_matches_mamba_model(rank, size, parallelism):
 
 
 @pytest.mark.parametrize("parallelism", ["tp", "pp", "ep"])
-def test_formula_matches_mamba_model(dist_workers, parallelism, num_gpus):
-    """Builds a non-MoE hybrid MambaModel; formula must match the live param count."""
+def test_formula_matches_hybrid_model(dist_workers, parallelism, num_gpus):
+    """Builds a Mamba/MoE/attention/MLP HybridModel; formula must match the live param count."""
     if num_gpus == 1 and parallelism != "tp":
         pytest.skip("Skipping as redundant test on 1 GPU")
     if not HAS_MAMBA:
         pytest.skip("Mamba not installed")
-    dist_workers.run(_test_formula_matches_mamba_model, parallelism=parallelism)
+    dist_workers.run(_test_formula_matches_hybrid_model, parallelism=parallelism)

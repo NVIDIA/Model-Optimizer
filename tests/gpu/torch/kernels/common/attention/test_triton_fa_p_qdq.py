@@ -20,7 +20,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from conftest import make_qkv, make_varlen_meta, sdpa_reference
+from conftest import make_qkv, make_varlen_meta
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor, e2m1_values
@@ -454,9 +454,12 @@ class TestSoftmaxQdqForward:
         with pytest.raises(ValueError, match="p_qdq_amax"):
             attention(q, k, v, locs, lens, 8, p_qdq="fp8", p_qdq_amax=0.0)
 
-    @requires_native_e4m3
-    def test_composes_with_skip_softmax(self):
-        """p_qdq composes with the skip-softmax feature in one launch."""
+    def test_rejects_skip_softmax(self):
+        """p_qdq cannot combine with active skip-softmax in one launch.
+
+        Quantized P changes the score distribution the skip thresholds were
+        calibrated on, so the kernel rejects the composition (pre-launch).
+        """
         seq_len, num_heads, num_kv_heads, head_dim = 256, 4, 2, 64
         scale = 1.0 / (head_dim**0.5)
 
@@ -464,19 +467,18 @@ class TestSoftmaxQdqForward:
         q, k, v = make_qkv(seq_len, num_heads, num_kv_heads, head_dim, dtype=torch.float16)
         locs, lens = make_varlen_meta([seq_len])
 
-        o = attention(
-            q,
-            k,
-            v,
-            locs,
-            lens,
-            seq_len,
-            softmax_scale=scale,
-            p_qdq="fp8",
-            skip_softmax_threshold=1e-3,
-        )
-        ref = sdpa_reference(q, k, v, locs, lens)
-        torch.testing.assert_close(o, ref, rtol=5e-2, atol=5e-2)
+        with pytest.raises(ValueError, match="cannot be combined with attention quantization"):
+            attention(
+                q,
+                k,
+                v,
+                locs,
+                lens,
+                seq_len,
+                softmax_scale=scale,
+                p_qdq="fp8",
+                skip_softmax_threshold=1e-3,
+            )
 
     def test_invalid_mode_raises(self):
         q, k, v = make_qkv(8, 2, 2, 32, dtype=torch.float16)

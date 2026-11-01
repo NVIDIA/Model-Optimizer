@@ -15,16 +15,56 @@
 
 """Common graph manipulation utilities for ONNX models."""
 
+import gc
+import math
 import os
 from collections import defaultdict, deque
+from collections.abc import Iterable
 
 import numpy as np
 import onnx
 import torch
-from onnx import TensorProto, helper, numpy_helper
+from onnx import TensorProto, numpy_helper
 
 from ...logging_config import logger
 from .dtype_conversion import fp16_to_bf16_array
+
+__all__ = [
+    "DEFAULT_QDQ_REMOVE_QUANT_TYPES",
+    "GraphCache",
+    "add_initializer",
+    "add_unique_initializers",
+    "add_value_info",
+    "array_to_initializer",
+    "axes_for_rank",
+    "batch_replace_nodes",
+    "calculate_clip_range",
+    "check_to_apply_transpose",
+    "cleanup_unused_ios",
+    "convert_initializers_to_dtype",
+    "convert_model_fp16_to_bf16",
+    "detect_model_dtype",
+    "find_initializer",
+    "find_node_by_name",
+    "find_node_by_output",
+    "find_nodes_by_pattern",
+    "get_all_tensors_used",
+    "get_constant_by_name",
+    "get_consumers",
+    "get_node_attr_i",
+    "get_onnx_dtype",
+    "infer_shapes",
+    "initializer_to_array",
+    "insert_nodes_at_position",
+    "is_const_dq_input",
+    "pad4d",
+    "parse_qdq_quantized_dtype_list",
+    "remove_node",
+    "resolve_reshape_shape",
+    "set_node_attr_i",
+    "topological_sort_nodes",
+    "uses_external_data",
+]
 
 
 def uses_external_data(model_path: str) -> bool:
@@ -145,21 +185,42 @@ def detect_model_dtype(model: onnx.ModelProto) -> tuple[int, np.dtype]:
     return dominant_dtype, dtype_map.get(dominant_dtype, np.float32)
 
 
-def get_onnx_dtype(io_dtype: str) -> int:
-    """Convert string dtype to ONNX TensorProto dtype.
-
-    Args:
-        io_dtype: String representation of dtype ("float32", "float16", or "bfloat16").
-
-    Returns:
-        ONNX TensorProto data type constant.
-    """
-    dtype_map = {
-        "float32": TensorProto.FLOAT,
-        "float16": TensorProto.FLOAT16,
-        "bfloat16": TensorProto.BFLOAT16,
+def get_onnx_dtype(io_dtype: int | str, *, strict: bool = False) -> int:
+    """Resolve ONNX codes, names, and NumPy aliases; default unknown names to FP16 unless strict."""
+    if isinstance(io_dtype, int):
+        return io_dtype
+    key = str(io_dtype).strip()
+    members = dict(TensorProto.DataType.items())
+    if key.isdecimal() and int(key) in members.values():
+        return int(key)
+    aliases = {
+        "float32": "FLOAT",
+        "float64": "DOUBLE",
+        "fp32": "FLOAT",
+        "fp16": "FLOAT16",
+        "str": "STRING",
+        **{
+            f"{prefix}{bits}": f"{name}{bits}"
+            for prefix, name in (("u", "UINT"), ("i", "INT"))
+            for bits in (8, 16, 32, 64)
+        },
     }
-    return dtype_map.get(io_dtype, TensorProto.FLOAT16)
+    dtype = members.get(aliases.get(key.lower(), key.upper()))
+    if dtype is not None:
+        return dtype
+    if strict:
+        raise ValueError(
+            f"Unknown dtype {io_dtype!r}. Use an ONNX type name, NumPy name, or integer code."
+        )
+    return TensorProto.FLOAT16
+
+
+def parse_qdq_quantized_dtype_list(dtypes: Iterable[int | str]) -> frozenset[int]:
+    """Normalize the storage types selected for QDQ removal."""
+    return frozenset(get_onnx_dtype(dtype, strict=True) for dtype in dtypes)
+
+
+DEFAULT_QDQ_REMOVE_QUANT_TYPES = frozenset({TensorProto.UINT16, TensorProto.INT16})
 
 
 def find_nodes_by_pattern(graph: onnx.GraphProto, pattern: str) -> list[onnx.NodeProto]:
@@ -438,28 +499,27 @@ def add_initializer(
     name: str,
     data: np.ndarray,
     dtype: int = TensorProto.FLOAT16,
-) -> None:
-    """Add an initializer (constant tensor) to the graph.
-
-    Args:
-        graph: ONNX graph to modify.
-        name: Name for the initializer.
-        data: Numpy array data.
-        dtype: ONNX data type for the tensor.
-    """
-    if dtype == TensorProto.BFLOAT16:
-        # For bfloat16, data comes as int16 view - create raw tensor
-        tensor = onnx.TensorProto()
-        tensor.name = name
-        tensor.data_type = TensorProto.BFLOAT16
-        tensor.dims.extend(data.shape)
-        tensor.raw_data = data.tobytes()
-    else:
-        tensor = numpy_helper.from_array(data, name=name)
+    *,
+    with_value_info: bool = True,
+) -> str:
+    """Add or reuse an identical initializer; reject name conflicts before changing the graph."""
+    is_bf16 = dtype == TensorProto.BFLOAT16
+    if not is_bf16:
+        data = np.asarray(data, dtype=onnx.helper.tensor_dtype_to_np_dtype(dtype))
+    tensor = array_to_initializer(data, name, is_bfloat16=is_bf16)
+    existing = find_initializer(graph, name)
+    if existing is not None:
+        if (
+            existing.data_type != dtype
+            or list(existing.dims) != list(tensor.dims)
+            or numpy_helper.to_array(existing).tobytes() != numpy_helper.to_array(tensor).tobytes()
+        ):
+            raise ValueError(f"Conflicting generated initializer {name!r}")
+        return name
     graph.initializer.append(tensor)
-    # Also add to value_info for shape inference
-    value_info = helper.make_tensor_value_info(name, dtype, list(data.shape))
-    graph.value_info.append(value_info)
+    if with_value_info:
+        add_value_info(graph, name, dtype, list(data.shape))
+    return name
 
 
 def convert_initializers_to_dtype(graph: onnx.GraphProto, target_dtype_str: str = "float16") -> int:
@@ -613,3 +673,387 @@ def convert_model_fp16_to_bf16(graph: onnx.GraphProto, verbose: bool = True) -> 
         logger.info(f"  Outputs: {stats['outputs_converted']}")
 
     return stats
+
+
+def infer_shapes(model: onnx.ModelProto) -> onnx.ModelProto:
+    """Run ORT symbolic shape inference and update ``value_info`` in-place."""
+    try:
+        # Symbolic inference is heavy; load it only when a transform requests inference.
+        from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
+
+        inferred = SymbolicShapeInference.infer_shapes(model, auto_merge=True)
+        del model.graph.value_info[:]
+        model.graph.value_info.extend(inferred.graph.value_info)
+        inferred_out = {o.name: o.type for o in inferred.graph.output}
+        for o in model.graph.output:
+            if o.name in inferred_out:
+                o.type.CopyFrom(inferred_out[o.name])
+        del inferred, inferred_out
+        gc.collect()
+        return model
+    except Exception as exc:
+        raise RuntimeError(f"ORT symbolic shape inference failed: {exc}") from exc
+
+
+def resolve_reshape_shape(reshape_shape: np.ndarray, input_shape: list[int]) -> list[int]:
+    """Resolve a Reshape target shape containing ``0`` and ``-1`` into concrete dims."""
+    shape = [int(d) for d in reshape_shape.tolist()]
+    if any(d <= 0 for d in input_shape) or any(d < -1 for d in shape):
+        raise ValueError("Reshape resolution requires positive input dimensions and targets >= -1")
+    total_elems = math.prod(input_shape)
+    minus_one_indices = [i for (i, d) in enumerate(shape) if d == -1]
+    if len(minus_one_indices) > 1:
+        raise ValueError(f"resolve_reshape_shape: more than one -1 in shape {shape}")
+    resolved = []
+    for i, d in enumerate(shape):
+        if d == 0:
+            if i >= len(input_shape):
+                raise ValueError(
+                    f"resolve_reshape_shape: 0 at index {i} but input rank is {len(input_shape)}"
+                )
+            resolved.append(input_shape[i])
+        elif d == -1:
+            resolved.append(-1)
+        else:
+            resolved.append(d)
+    if minus_one_indices:
+        known_prod = 1
+        for d in resolved:
+            if d != -1:
+                known_prod *= d
+        if total_elems % known_prod != 0:
+            raise ValueError(
+                f"resolve_reshape_shape: cannot infer -1 dim: total={total_elems}, known_prod={known_prod}"
+            )
+        resolved[minus_one_indices[0]] = total_elems // known_prod
+    if int(np.prod(resolved)) != total_elems:
+        raise ValueError(
+            f"resolve_reshape_shape: element count changes from {input_shape} to {resolved}"
+        )
+    return resolved
+
+
+def pad4d(shape: list) -> list:
+    """Pad *shape* to 4-D by prepending 1-s."""
+    return [1] * (4 - len(shape)) + list(shape)
+
+
+class GraphCache:
+    """Pre-built index of an ONNX graph for O(1) lookups."""
+
+    __slots__ = (
+        "_arr_cache",
+        "_graph",
+        "_names",
+        "consumer_map",
+        "graph_input_names",
+        "graph_output_names",
+        "init_map",
+        "init_names",
+        "op_index",
+        "producer_map",
+        "vi_map",
+    )
+
+    def __init__(self, graph: onnx.GraphProto) -> None:
+        """Index the current graph; rebuild after structural or initializer changes."""
+        self._graph = graph
+        self._arr_cache: dict[str, np.ndarray] = {}
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        """(Re)build every index from scratch.  Call after bulk graph mutations."""
+        graph = self._graph
+        self._arr_cache.clear()
+        self._names = {
+            v.name for v in [*graph.input, *graph.output, *graph.initializer, *graph.value_info]
+        }
+        for node in graph.node:
+            self._names.update([node.name, *node.input, *node.output])
+        self.init_map: dict[str, onnx.TensorProto] = {init.name: init for init in graph.initializer}
+        self.init_names: set[str] = set(self.init_map)
+        self.producer_map: dict[str, onnx.NodeProto] = {}
+        for node in graph.node:
+            for out in node.output:
+                if out:
+                    self.producer_map[out] = node
+        self.consumer_map: dict[str, list[tuple]] = {}
+        for node in graph.node:
+            for i, inp in enumerate(node.input):
+                if inp:
+                    self.consumer_map.setdefault(inp, []).append((node, i))
+        self.vi_map: dict[str, onnx.ValueInfoProto] = {}
+        for vi in list(graph.value_info) + list(graph.input) + list(graph.output):
+            self.vi_map[vi.name] = vi
+        self.op_index: dict[str, list[onnx.NodeProto]] = {}
+        for node in graph.node:
+            self.op_index.setdefault(node.op_type, []).append(node)
+        self.graph_input_names: set[str] = {inp.name for inp in graph.input}
+        self.graph_output_names: set[str] = {out.name for out in graph.output}
+
+    def get_consumers(self, tensor_name: str) -> list[tuple]:
+        """Return ``[(consumer_node, input_index), ...]`` for *tensor_name*."""
+        return self.consumer_map.get(tensor_name, [])
+
+    def get_producer(self, tensor_name: str) -> onnx.NodeProto | None:
+        """Return the node that produces *tensor_name*, or ``None``."""
+        return self.producer_map.get(tensor_name)
+
+    def get_shape(self, tensor_name: str) -> list[int] | None:
+        """Return the concrete shape of *tensor_name*, or ``None``."""
+        vi = self.vi_map.get(tensor_name)
+        if vi is not None:
+            tt = vi.type.tensor_type
+            if tt.HasField("shape"):
+                shape: list[int] = []
+                for d in tt.shape.dim:
+                    if d.HasField("dim_value"):
+                        shape.append(d.dim_value)
+                    else:
+                        return None
+                return shape
+        init = self.init_map.get(tensor_name)
+        if init is not None:
+            return list(init.dims)
+        return None
+
+    def unique_name(self, preferred: str) -> str:
+        """Reserve a generated name, retaining the reference name when available."""
+        name = preferred
+        suffix = 1
+        while name in self._names:
+            name = f"{preferred}_{suffix}"
+            suffix += 1
+        self._names.add(name)
+        return name
+
+    def get_init(self, name: str) -> onnx.TensorProto | None:
+        """Return the initializer ``TensorProto`` for *name*, or ``None``."""
+        return self.init_map.get(name)
+
+    def is_init(self, name: str) -> bool:
+        """Return whether *name* is an initializer."""
+        return name in self.init_names
+
+    def nodes_by_op(self, op_type: str) -> list[onnx.NodeProto]:
+        """Return all nodes with the given *op_type*."""
+        return self.op_index.get(op_type, [])
+
+    def get_dtype(self, tensor_name: str) -> int | None:
+        """Return the ONNX elem_type int for *tensor_name*, or ``None``."""
+        vi = self.vi_map.get(tensor_name)
+        if vi is not None:
+            return vi.type.tensor_type.elem_type
+        init = self.init_map.get(tensor_name)
+        if init is not None:
+            return init.data_type
+        return None
+
+    def update_shape(self, name: str, new_shape: list) -> bool:
+        """Update the shape of tensor *name* in-place via ``vi_map``.  O(1) lookup."""
+        vi = self.vi_map.get(name)
+        if vi is None:
+            return False
+        tt = vi.type.tensor_type
+        tt.shape.dim.clear()
+        for d in new_shape:
+            dim = tt.shape.dim.add()
+            if d is None:
+                dim.dim_param = ""
+            else:
+                dim.dim_value = int(d)
+        return True
+
+    def get_init_array(self, name: str) -> np.ndarray | None:
+        """Return deserialized numpy array for initializer *name*, cached."""
+        if name in self._arr_cache:
+            return self._arr_cache[name]
+        init = self.init_map.get(name)
+        if init is None:
+            return None
+        arr = numpy_helper.to_array(init)
+        self._arr_cache[name] = arr
+        return arr
+
+
+def insert_nodes_at_position(graph, nodes_to_add, reference_node):
+    """Insert new nodes at the position of a reference node to maintain topological order."""
+    if not nodes_to_add:
+        return
+    insert_position = next(
+        (i for (i, node) in enumerate(graph.node) if node is reference_node), len(graph.node)
+    )
+    for i, new_node in enumerate(nodes_to_add):
+        graph.node.insert(insert_position + i, new_node)
+
+
+def batch_replace_nodes(graph: onnx.GraphProto, replacements: dict[int, tuple[list, list]]) -> None:
+    """Batch node removal + insertion, processed in reverse index order."""
+    for idx in sorted(replacements.keys(), reverse=True):
+        (nodes_to_remove, nodes_to_add) = replacements[idx]
+        for node in reversed(nodes_to_remove):
+            position = next((i for (i, current) in enumerate(graph.node) if current is node), None)
+            if position is not None:
+                del graph.node[position]
+        for i, new_node in enumerate(nodes_to_add):
+            graph.node.insert(idx + i, new_node)
+
+
+def get_constant_by_name(model: onnx.ModelProto, const_name: str) -> np.ndarray | None:
+    """Read a Constant node's tensor-valued attribute by its output name."""
+    for node in model.graph.node:
+        if node.op_type == "Constant" and node.output[0] == const_name:
+            value = None
+            for attr in node.attribute:
+                if attr.name == "value":
+                    value = attr.t
+                    break
+            if value is not None:
+                return numpy_helper.to_array(value)
+    return None
+
+
+def get_node_attr_i(node: onnx.NodeProto, name: str, default: int = 0) -> int:
+    """Return integer attribute *name* from *node*, or *default* if absent."""
+    attr = _attribute(node, name)
+    return int(attr.i) if attr is not None else default
+
+
+def set_node_attr_i(node: onnx.NodeProto, name: str, value: int) -> None:
+    """Set integer attribute *name* on *node*, creating it if absent."""
+    attr = _attribute(node, name)
+    if attr is None:
+        node.attribute.append(onnx.helper.make_attribute(name, int(value)))
+    else:
+        attr.i = int(value)
+
+
+def axes_for_rank(rank: int) -> list[int]:
+    """Leading axes to prepend when unsqueezing rank-R to 4D."""
+    return {1: [0, 1, 2], 2: [0, 1], 3: [0], 4: []}.get(rank, [])
+
+
+def calculate_clip_range(node, model: onnx.ModelProto) -> tuple[np.ndarray, np.ndarray]:
+    """Compute floating-point clip bounds from quantization scale and zero point."""
+    scale = find_initializer(model.graph, node.input[1])
+    x_scale = None if scale is None else numpy_helper.to_array(scale)
+    if x_scale is None:
+        x_scale = get_constant_by_name(model, node.input[1])
+    zero = find_initializer(model.graph, node.input[2]) if len(node.input) > 2 else None
+    x_zero_point = None if zero is None else numpy_helper.to_array(zero)
+    if x_scale is None:
+        raise ValueError(f"{node.name} should have x_scale value")
+    if x_zero_point is None:
+        dtype = (
+            GraphCache(model.graph).get_dtype(node.input[0])
+            if node.op_type == "DequantizeLinear"
+            else onnx.TensorProto.UINT8
+        )
+        x_zero_point = np.array(
+            0, dtype=onnx.helper.tensor_dtype_to_np_dtype(dtype or onnx.TensorProto.UINT8)
+        )
+    bounds = np.iinfo(x_zero_point.dtype)
+    (int_min, int_max) = (np.int64(bounds.min), np.int64(bounds.max))
+    x_zero_point = x_zero_point.astype(np.int64)
+    clip_min = ((int_min - x_zero_point) * x_scale).astype(np.float32)
+    clip_max = ((int_max - x_zero_point) * x_scale).astype(np.float32)
+    return (clip_min, clip_max)
+
+
+def add_value_info(
+    graph: onnx.GraphProto,
+    name: str,
+    dtype: int = onnx.TensorProto.FLOAT,
+    shape: list | tuple | None = None,
+) -> None:
+    """Append a ``value_info`` entry for tensor *name* with *dtype* and *shape*."""
+    graph.value_info.append(onnx.helper.make_tensor_value_info(name, dtype, shape))
+
+
+def add_unique_initializers(graph, unique_set: set[str], initializers_list) -> int:
+    """Add initializers whose names are not already in unique_set; update unique_set in place."""
+    added_count = 0
+    for init in initializers_list:
+        if init.name not in unique_set:
+            graph.initializer.append(init)
+            unique_set.add(init.name)
+            added_count += 1
+    return added_count
+
+
+def _attribute(node, name):
+    """Return a node attribute by name, or None when it is absent."""
+    return next((attribute for attribute in node.attribute if attribute.name == name), None)
+
+
+def _shape_before_boundary_promotion(cache, name):
+    """Resolve the original shape behind a generated graph-input Unsqueeze."""
+    producer = cache.get_producer(name)
+    if producer is not None and producer.op_type == "Unsqueeze":
+        original = producer.input[0]
+        if original in cache.graph_input_names and name == original + "_unsqueeze_input":
+            return cache.get_shape(original)
+    return cache.get_shape(name)
+
+
+def is_const_dq_input(init_list, input_name, graph):
+    """Find the constant weight behind a DequantizeLinear output."""
+    for node in graph.node:
+        if (
+            node.op_type == "DequantizeLinear"
+            and node.output[0] == input_name
+            and (node.input[0] in init_list)
+        ):
+            return node.input[0]
+    return None
+
+
+def check_to_apply_transpose(conv_node, model, tensor_name_dim_map):
+    """Check static weight and activation layouts supported by MatMul-to-Conv."""
+    weights = {init.name: init for init in model.graph.initializer}
+    init_name = is_const_dq_input(weights, conv_node.input[1], model.graph) or conv_node.input[1]
+    weight = weights.get(init_name)
+    if weight is None:
+        return False
+    shape = list(weight.dims)
+    if not (
+        len(shape) == 2
+        or (len(shape) == 3 and shape[0] == 1)
+        or (len(shape) == 4 and shape[:2] == [1, 1])
+    ):
+        return False
+    input_ = conv_node.input[0]
+    if input_ in tensor_name_dim_map:
+        shape = tensor_name_dim_map[input_]
+        if len(shape) in (2, 3) or (len(shape) == 4 and shape[0] == 1):
+            return True
+        else:
+            raise ValueError(
+                f"[check_to_apply_transpose] Unsupported shape {shape} for input {input_} in conv node"
+            )
+    else:
+        raise RuntimeError(
+            f"[check_to_apply_transpose] Input {input_} not found in tensor_name_dim_map for conv node"
+        )
+
+
+def _captured_names(graph):
+    """Return names read by a graph but defined outside its scope."""
+    bound = {v.name for v in [*graph.input, *graph.initializer]}
+    bound.update(name for node in graph.node for name in node.output if name)
+    used = {v.name for v in graph.output}
+    for node in graph.node:
+        used.update(_node_inputs(node))
+    return used - bound
+
+
+def _node_inputs(node):
+    """Return node inputs and outer-scope names captured by its subgraphs."""
+    used = {name for name in node.input if name}
+    for attribute in node.attribute:
+        if attribute.type == onnx.AttributeProto.GRAPH:
+            used.update(_captured_names(attribute.g))
+        elif attribute.type == onnx.AttributeProto.GRAPHS:
+            for graph in attribute.graphs:
+                used.update(_captured_names(graph))
+    return used

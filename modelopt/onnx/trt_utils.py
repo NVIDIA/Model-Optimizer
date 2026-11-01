@@ -139,7 +139,7 @@ def get_custom_layers(
         for plugin in trt_plugins:
             _load_trt_plugin(plugin, registry)
 
-        logger.debug(f"Total registered plugin creators: {len(registry.plugin_creator_list)}")
+        logger.debug(f"Total registered plugin creators: {len(registry.all_creators)}")
     builder = trt.Builder(trt_logger)
     network = (
         builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))

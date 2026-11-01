@@ -20,11 +20,11 @@
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
   base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
+  base_cost_excluded_layers: configs/auto_quantize/units/base_cost_excluded_layers
   nvfp4: configs/ptq/presets/model/nvfp4
   fp8: configs/ptq/presets/model/fp8
 
 metadata:
-  recipe_type: auto_quantize
   description: Mixed NVFP4 + FP8 per-layer search at 5.4 effective bits, kl_div scoring (no backprop).
 
 auto_quantize:
@@ -39,6 +39,11 @@ auto_quantize:
   score_size: 128
 
   # Base (model-agnostic) non-quantizable layers, spliced from the shared unit. Arch-specific
-  # models use a recipe under huggingface/<model>/auto_quantize/ that appends to this set.
+  # models use a recipe under model_type/<model>/auto_quantize/ that appends to this set.
   disabled_layers:
     - $import: base_disabled_layers
+
+  # Base (model-agnostic) cost-excluded layers, spliced from the shared unit: VL vision
+  # towers / MTP are kept out of the effective-bits denominator. No-op on non-VL models.
+  cost_excluded_layers:
+    - $import: base_cost_excluded_layers

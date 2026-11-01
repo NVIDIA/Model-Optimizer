@@ -10,6 +10,9 @@ name: Claude
 # external contributors (the repo is public).
 #
 # `contents: write` lets Claude push branches and open PRs.
+#
+# No pre-commit here: the checked-out PR's .pre-commit-config.yaml runs repo-local
+# hooks, so installing it would run PR-controlled code with this job's write token.
 
 on:
   issue_comment:
@@ -47,7 +50,7 @@ jobs:
           contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association)
         )
       )
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
@@ -56,26 +59,12 @@ jobs:
       id-token: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Install and enable pre-commit hooks
-        # Installs the git hook so any `git commit` Claude runs is
-        # subject to the same lint/format/license-header checks as a
-        # local developer commit — preventing PRs that fail CI on
-        # code-quality.
-        run: |
-          pip install pre-commit
-          pre-commit install
-
       - name: Run Claude
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@e4a6faad497d33dbc7144135c75e41f82f0bf6c0 # v1.0.255
         env:
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
           # NVIDIA inference proxy (LiteLLM-based) rejects two fields
@@ -88,5 +77,6 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr create:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git diff:*),Bash(git show:*),Bash(git log:*),Bash(git status:*),Bash(git checkout:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(pre-commit:*),Read,Edit,Write,Grep,Glob"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr create:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git diff:*),Bash(git show:*),Bash(git log:*),Bash(git status:*),Bash(git checkout:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Read,Edit,Write,Grep,Glob"
+            --disallowedTools "Read(//proc/**)"
             --model "${{ vars.CLAUDE_MODEL }}"

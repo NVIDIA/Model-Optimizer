@@ -1,0 +1,6 @@
+# Training and development dependencies are intentionally omitted for these legacy projects.
+av2==0.2.1
+lyft-dataset-sdk==0.0.8
+mmdet3d==1.0.0rc6
+nuscenes-devkit==1.1.11
+refile==0.4.1

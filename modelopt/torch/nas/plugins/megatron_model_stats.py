@@ -40,14 +40,7 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 import torch
-from megatron.core.models.mamba.mamba_model import MambaModel
-
-try:  # nemo:26.08+
-    from megatron.core.models.hybrid.hybrid_model import HybridModel
-
-    _HYBRID_MODEL_TYPES: tuple[type, ...] = (MambaModel, HybridModel)
-except ImportError:  # nemo:26.06 and earlier
-    _HYBRID_MODEL_TYPES = (MambaModel,)
+from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.parallel_state import (
     get_expert_tensor_and_model_parallel_group,
     get_expert_tensor_parallel_rank,
@@ -64,7 +57,6 @@ from modelopt.torch.utils import num2hrb, print_rank_0
 
 if TYPE_CHECKING:
     from megatron.core.models.gpt.gpt_model import GPTModel
-    from megatron.core.models.hybrid.hybrid_model import HybridModel  # noqa: TC004
 
 __all__ = [
     "mcore_memory_footprint_mb",
@@ -514,7 +506,7 @@ def mcore_param_count(
             total += layer_t
             active += layer_a
     else:
-        # ---- Hybrid / MambaModel: layer type is encoded in the pattern ----
+        # ---- HybridModel: layer type is encoded in the pattern ----
         layer_chars = parse_main_layer_chars(hybrid_layer_pattern, num_layers)
 
         for i, char in enumerate(layer_chars):
@@ -568,7 +560,7 @@ def mcore_param_count(
     return total, active
 
 
-def mcore_param_count_live(model: "GPTModel | MambaModel | HybridModel") -> int:
+def mcore_param_count_live(model: "GPTModel | HybridModel") -> int:
     """Count parameters in a live MCore LLM model (reduced across TP, EP, ETP, and PP ranks)."""
     if isinstance(model, DynamicModule):
         raise RuntimeError(
@@ -728,7 +720,7 @@ def mcore_memory_footprint_mb(
 
 
 def print_mcore_model_stats(
-    model: "GPTModel | MambaModel | HybridModel",
+    model: "GPTModel | HybridModel",
     label: str = "Model",
     seq_length: int = 4096,
     batch_size: int = 1,
@@ -745,7 +737,7 @@ def print_mcore_model_stats(
     """
     hybrid_layer_pattern: str | None = None
     config_overrides: dict = {}
-    if isinstance(model, _HYBRID_MODEL_TYPES):
+    if isinstance(model, HybridModel):
         hybrid_key = (
             "hybrid_override_pattern"
             if hasattr(model, "hybrid_override_pattern")
@@ -754,8 +746,8 @@ def print_mcore_model_stats(
         hybrid_layer_pattern = getattr(model, hybrid_key)
         # mamba_num_heads may not be stored in config when derived from model architecture;
         # fall back to reading it from the actual layer.
-        if getattr(model.config, "mamba_num_heads", None) is None:  # type: ignore[attr-defined]
-            for layer in model.decoder.layers:  # type: ignore[attr-defined]
+        if getattr(model.config, "mamba_num_heads", None) is None:
+            for layer in model.decoder.layers:
                 if hasattr(layer, "mixer") and hasattr(layer.mixer, "nheads"):
                     config_overrides["mamba_num_heads"] = layer.mixer.nheads
                     break

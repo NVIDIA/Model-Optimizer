@@ -338,7 +338,7 @@ start_trtllm() {
     cat <<TRTEOF
 
 # Option 1: AutoDeploy (recommended for AutoQuant / mixed-precision)
-# Quantize with ModelOpt PTQ (examples/llm_ptq) to produce a unified HF checkpoint,
+# Quantize with ModelOpt PTQ (examples/hf_ptq) to produce a unified HF checkpoint,
 # then deploy it with TensorRT-LLM's AutoDeploy backend:
 #   https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/auto_deploy
 

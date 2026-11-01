@@ -29,7 +29,6 @@ from modelopt.torch.export.hf_export_handlers import (
     _export_quant_embedding,
     _export_quant_linear,
     _prepare_bmm_experts,
-    _prepare_dbrx_experts,
     _prepare_fused_experts,
     _prepare_iterable_experts,
 )
@@ -212,27 +211,6 @@ def test_builtin_dispatch_covers_all_handler_shapes():
     assert PrepareMoEInputsRegistry.match(moe_linear) is None
     assert ExportModuleRegistry.match(_named_module("QuantMoELinear")) is None
 
-    # DBRX experts container: the usual generated class name...
-    dbrx = _named_module("QuantDbrxExperts", base_name="DbrxExperts")
-    assert PrepareMoEInputsRegistry.match(dbrx) is _prepare_dbrx_experts
-    assert ExportModuleRegistry.match(dbrx) is None
-    # ...and the _DMRegistryCls collision-fallback name, where only the mixin
-    # class name ("_QuantDbrxExperts") remains recognizable in the MRO.
-    fallback = _named_module(
-        "transformers_modules_modeling_dbrx_QuantDbrxExperts", base_name="_QuantDbrxExperts"
-    )
-    assert PrepareMoEInputsRegistry.match(fallback) is _prepare_dbrx_experts
-
-    # DBRX preparation remains type-specific even if a future DBRX variant gains
-    # plural quantizers; the independent export registry takes the fused path.
-    fused_dbrx = _named_module(
-        "QuantDbrxExperts",
-        base_name="DbrxExperts",
-        gate_up_proj_weight_quantizers=nn.ModuleList(),
-    )
-    assert PrepareMoEInputsRegistry.match(fused_dbrx) is _prepare_dbrx_experts
-    assert ExportModuleRegistry.match(fused_dbrx) is _export_fused_experts_module
-
     # Structural fused-experts matching wins over BMM name matching independently
     # in both registries.
     fused = _named_module(
@@ -303,10 +281,10 @@ def test_process_quantized_modules_exports_via_registry():
         assert weight.dtype == torch.float8_e4m3fn
 
 
-def test_export_context_caches_are_per_instance():
-    model = nn.Linear(2, 2)
-    ctx_a = ExportContext(model=model, dtype=torch.float16)
-    ctx_b = ExportContext(model=model, dtype=torch.float16)
-    ctx_a.tied_cache[123] = model
-    assert ctx_b.tied_cache == {}
-    assert ctx_b.moe_tied_cache == {}
+def test_export_context_carries_no_resolver():
+    # Tied-weight dedup is driven by the driver's resolver (fed to sync_tied_input_amax /
+    # postprocess_state_dict), not by handlers, so ExportContext no longer builds or holds
+    # a resolver. Building one per context would be dead work (handlers never read it) and,
+    # for large models, an avoidable O(#modules x #patterns x #params) alias-map pass.
+    ctx = ExportContext(model=nn.Linear(2, 2), dtype=torch.float16)
+    assert not hasattr(ctx, "resolver")

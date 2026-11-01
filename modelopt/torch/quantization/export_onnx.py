@@ -111,10 +111,7 @@ from torch.onnx import symbolic_helper
 from torch.onnx import symbolic_helper as sym_help
 
 if TYPE_CHECKING:
-    if hasattr(torch.onnx._internal, "jit_utils"):
-        from torch.onnx._internal.jit_utils import GraphContext
-    else:  # torch >= 2.9
-        from torch.onnx._internal.torchscript_exporter.jit_utils import GraphContext
+    from torch.onnx._internal.torchscript_exporter.jit_utils import GraphContext
 
 onnx_dtype_map = {
     "BFloat16": onnx.TensorProto.BFLOAT16,
@@ -225,9 +222,12 @@ def _fp8_quantize(
         "Constant",
         value_t=torch.tensor(scale_inv).to(torch_dtype_map[inputs.type().scalarType()]),
     )
-    return g.op("trt::TRT_FP8QuantizeLinear", inputs, scale).setType(
+    quantized = g.op("trt::TRT_FP8QuantizeLinear", inputs, scale).setType(
         inputs.type().with_dtype(torch.uint8).with_sizes(output_shape)
     )
+    # PyTorch runs shape inference before setType for custom ops, so refresh its reliability state.
+    torch._C._jit_pass_onnx_node_shape_type_inference(quantized.node(), g.params_dict, g.opset)
+    return quantized
 
 
 def _fp8_dequantize(
@@ -278,18 +278,11 @@ def scaled_dot_product_attention(
     enable_gqa: bool = False,
 ):
     """Perform scaled dot product attention."""
-    if hasattr(torch.onnx, "_type_utils"):
-        from torch.onnx._type_utils import JitScalarType
-    else:  # torch >= 2.9
-        from torch.onnx._internal.torchscript_exporter._type_utils import JitScalarType
-
-    if hasattr(torch.onnx, "symbolic_opset14"):
-        from torch.onnx.symbolic_opset14 import _attention_scale, _causal_attention_mask
-    else:  # torch >= 2.9
-        from torch.onnx._internal.torchscript_exporter.symbolic_opset14 import (
-            _attention_scale,
-            _causal_attention_mask,
-        )
+    from torch.onnx._internal.torchscript_exporter._type_utils import JitScalarType
+    from torch.onnx._internal.torchscript_exporter.symbolic_opset14 import (
+        _attention_scale,
+        _causal_attention_mask,
+    )
 
     assert (not is_causal) or (is_causal and symbolic_helper._is_none(attn_mask)), (
         "is_causal and attn_mask cannot be set at the same time"
@@ -390,18 +383,11 @@ def export_fp8_mha(
                          |
                         Cast
     """
-    if hasattr(torch.onnx, "_type_utils"):
-        from torch.onnx._type_utils import JitScalarType
-    else:  # torch >= 2.9
-        from torch.onnx._internal.torchscript_exporter._type_utils import JitScalarType
-
-    if hasattr(torch.onnx, "symbolic_opset14"):
-        from torch.onnx.symbolic_opset14 import _attention_scale, _causal_attention_mask
-    else:  # torch >= 2.9
-        from torch.onnx._internal.torchscript_exporter.symbolic_opset14 import (
-            _attention_scale,
-            _causal_attention_mask,
-        )
+    from torch.onnx._internal.torchscript_exporter._type_utils import JitScalarType
+    from torch.onnx._internal.torchscript_exporter.symbolic_opset14 import (
+        _attention_scale,
+        _causal_attention_mask,
+    )
 
     # Pass all arguments, including x, to the custom ONNX operator
     assert (not is_causal) or (is_causal and sym_help._is_none(attn_mask)), (

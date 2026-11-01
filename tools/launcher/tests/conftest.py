@@ -17,7 +17,6 @@
 
 Run from the launcher directory:
     cd Model-Optimizer/tools/launcher
-    uv pip install pytest
     uv run python3 -m pytest tests/ -v
 
 Or via nox from Model-Optimizer root:

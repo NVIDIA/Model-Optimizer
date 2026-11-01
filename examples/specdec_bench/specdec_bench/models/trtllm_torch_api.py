@@ -82,6 +82,9 @@ class TRTLLMPYTModel(Model):
         output_dict["token_times"] = timing
         return output_dict
 
+    def stop(self):
+        self.model.shutdown()
+
 
 def create_executor(model_path: str, max_concurrent_requests, kwargs):
     disable_overlap_schedule = kwargs.get("disable_overlap_schedule", False)
@@ -125,6 +128,8 @@ def create_executor(model_path: str, max_concurrent_requests, kwargs):
         )
     elif kwargs.get("speculative_algorithm", None) == "NONE":
         specdec = None
+    elif kwargs.get("speculative_algorithm", None) == "DSPARK":
+        raise NotImplementedError("DSPARK is only supported by --engine VLLM.")
     else:
         specdec = None
 
