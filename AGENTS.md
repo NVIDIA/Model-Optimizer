@@ -99,14 +99,15 @@ below, tell the user and offer to address it before pushing; do not push as-is.
   when the result is close to the line):
 
   ```bash
-  git diff --no-color -U0 <base>...HEAD | awk '
-    /^diff --git/ {
-      hdr = 1; f = $NF
+  git diff --no-color --src-prefix=a/ --dst-prefix=b/ -U0 <base>...HEAD | awk '
+    /^diff --git/ { hdr = 1; skip = 0; next }
+    /^@@/ { hdr = 0; next }
+    hdr && /^\+\+\+ / {
+      f = $0; sub(/^\+\+\+ "?b\//, "", f); sub(/[\t"]+$/, "", f)
       skip = f ~ /(^|\/)(tests|docs)\//
-      skip = skip || f ~ /(^|\/)test_[^\/]*\.py$|_test\.go$|\.spec\./
+      skip = skip || f ~ /(^|\/)test_[^\/]*\.py$|_test\.go$|\.spec\.[^\/]+$/
       skip = skip || f ~ /\.(ya?ml|json|toml|ini|xml|lock|md|rst|txt|ipynb)$/
       next }
-    /^@@/ { hdr = 0; next }
     !hdr && !skip && /^\+/ && !/^\+[ \t]*$/ { n++ }
     END { print n + 0 }'
   ```
