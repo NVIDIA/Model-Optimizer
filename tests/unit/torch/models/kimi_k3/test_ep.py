@@ -31,7 +31,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from _test_utils.torch import kimi_k3_tiny_modeling
 from _test_utils.torch.kimi_k3_remote import remote_module
 from torch import nn
 
@@ -47,6 +46,7 @@ import transformers.core_model_loading as cml
 import transformers.dynamic_module_utils as dmu
 import transformers.modeling_utils as mu
 import transformers.utils.generic as hf_generic
+from _test_utils.torch import kimi_k3_tiny_modeling
 from transformers.core_model_loading import build_glob_alternation
 from transformers.integrations.moe import ALL_EXPERTS_FUNCTIONS
 
