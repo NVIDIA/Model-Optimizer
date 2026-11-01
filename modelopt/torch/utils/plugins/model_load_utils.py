@@ -2115,8 +2115,11 @@ def resolve_distribution_plan(
                     prepare=False,
                 )
             elif (ep := _ep_spec(hf_config.model_type)) and ep.make_buildable is not None:
+                # A copy, as the plan arm's: the config is returned, and the load builds from it.
                 ep.make_buildable(
-                    hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code
+                    copy.deepcopy(hf_config),
+                    ckpt_path=ckpt_path,
+                    trust_remote_code=trust_remote_code,
                 )
             return True
 
