@@ -305,6 +305,30 @@ def test_prepare_runs_after_the_plan_is_attached_and_its_config_is_returned(monk
     }
 
 
+@needs_ep_transformers
+@pytest.mark.parametrize(
+    ("returned", "refusal"),
+    [(None, "returned None"), (cfg(), "returned a config with no base_model_ep_plan")],
+    ids=["nothing", "a-config-without-a-plan"],
+)
+def test_a_prepare_returning_no_config_the_load_can_read_is_refused(monkeypatch, returned, refusal):
+    """The load builds from the config prepare returns. One that is missing, or carries no plan
+    where the load reads one, is refused here, naming the spec, rather than failing in the load."""
+    spec = ModelSpec(
+        model_type="_probe",
+        ep_spec=EPSpec(
+            base_model_ep_plan={"layers.*.experts": "grouped_gemm"},
+            prepare=lambda hf_config, **kwargs: returned,
+        ),
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.models.get_spec", lambda mt: spec if mt == "_probe" else None
+    )
+
+    with pytest.raises(ValueError, match=f"_probe's spec prepare {refusal}"):
+        apply_distributed_support("_probe", cfg())
+
+
 @needs_transformers
 def test_the_plan_a_spec_would_supply(monkeypatch):
     """What the plan decision reads at an EP degree of 1, to refuse an MoE left whole on every rank:

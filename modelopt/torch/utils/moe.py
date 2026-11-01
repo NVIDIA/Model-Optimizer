@@ -262,6 +262,18 @@ def apply_distributed_support(
 
     if ep.prepare is not None:
         hf_config = ep.prepare(hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code)
+        # The load builds from the config prepare returns: a bad one would fail only there, far
+        # from the spec at fault.
+        if hf_config is None:
+            raise ValueError(
+                f"{model_type}'s spec prepare returned None, not the config to load expert-parallel."
+            )
+        if not getattr(_ep_config(hf_config), "base_model_ep_plan", None):
+            raise ValueError(
+                f"{model_type}'s spec prepare returned a config with no base_model_ep_plan where "
+                f"the expert-parallel load reads one: on the config, or its "
+                f"{' or '.join(_SUB_CONFIG_ATTRS)}."
+            )
     return hf_config
 
 
