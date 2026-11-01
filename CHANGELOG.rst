@@ -250,6 +250,7 @@ Changelog
 - The ``evaluation`` agent skill's NeMo Gym MRCR recipe no longer passes ``HF_TOKEN`` on the command line, where other users on the node could read it, and keeps its rollout script in a private temporary directory instead of a fixed ``/tmp`` path.
 - Fix ``ModuleNotFoundError: No module named 'huggingface_hub'`` when importing ``modelopt.torch`` without the optional ``hf`` extra. Install the ``hf`` extra to use Hugging Face checkpointing. Affects 0.44 through 0.48.
 - Require Wonderwords 2.2.0 or newer in the ``hf`` extra to prevent RULER calibration failures during random-word generation with older releases.
+- A legacy dict-format ``quant_cfg`` now applies its ``"default"`` key before the other keys wherever it appears, as before 0.44 and as the quant_cfg guide describes. A ``"default": {"enable": False}`` listed after the wildcard keys, as in the guide's example, disabled every quantizer, so ``mtq.quantize`` raised for weight quantization or left the model unquantized.
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^

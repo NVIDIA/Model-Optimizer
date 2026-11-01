@@ -941,18 +941,21 @@ def test_atomicity_later_cfg_entry_does_not_inherit_earlier():
             )
 
 
-def test_legacy_dict_format_end_to_end():
+@pytest.mark.parametrize("default_last", [False, True])
+def test_legacy_dict_format_end_to_end(default_last):
     """Old dict-format quant_cfg works end-to-end through mtq.quantize via normalization."""
     model = SimpleLinear()
     # Old-style dict config with "default" key and wildcard keys
-    old_config = {
-        "quant_cfg": {
-            "default": {"enable": False},
-            "*weight_quantizer": {"num_bits": 8, "axis": 0},
-            "*input_quantizer": {"num_bits": 8, "axis": None},
-        },
-        "algorithm": "max",
+    quant_cfg = {
+        "*weight_quantizer": {"num_bits": 8, "axis": 0},
+        "*input_quantizer": {"num_bits": 8, "axis": None},
     }
+    # "default" applies first wherever it appears, as in the docs' legacy example.
+    if default_last:
+        quant_cfg["default"] = {"enable": False}
+    else:
+        quant_cfg = {"default": {"enable": False}, **quant_cfg}
+    old_config = {"quant_cfg": quant_cfg, "algorithm": "max"}
     model = mtq.quantize(model, old_config, lambda m: m(m.get_input()))
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer):
