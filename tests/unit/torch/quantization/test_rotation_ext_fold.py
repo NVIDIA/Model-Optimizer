@@ -45,6 +45,8 @@ from dataclasses import dataclass
 
 import pytest
 import torch
+
+pytest.importorskip("transformers")
 from transformers import LlamaConfig, LlamaForCausalLM, Qwen3Config, Qwen3ForCausalLM
 
 from modelopt.torch.quantization.rotation import RotationSet, fold_rotations

@@ -48,6 +48,8 @@ import pytest
 import torch
 import torch.nn as nn
 from torch.nn.utils import stateless
+
+pytest.importorskip("transformers")
 from transformers import LlamaConfig, LlamaForCausalLM, Qwen3Config, Qwen3ForCausalLM
 
 from modelopt.torch.quantization.rotation import (

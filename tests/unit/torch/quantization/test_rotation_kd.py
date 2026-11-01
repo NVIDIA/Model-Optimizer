@@ -19,7 +19,10 @@ import copy
 import sys
 import traceback
 
+import pytest
 import torch
+
+pytest.importorskip("transformers")
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from modelopt.torch.quantization.rotation import QuantObjective, learn_rotations
