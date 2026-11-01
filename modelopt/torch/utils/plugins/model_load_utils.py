@@ -1629,9 +1629,10 @@ def _decide_distribution(
             f"{knob}={ep_size} must divide the routed experts {hf_config.model_type} shards "
             f"({num_experts})."
         )
-    if refusal is not None and ep_size == 1:
+    if refusal is not None and ep_size == 1 and not asked_to_replicate:
         # It loads as a dense model does, whole on every rank or FSDP2-sharded, whether the decision
-        # or the caller set the EP degree to 1: say why its experts are not sharded, and what would.
+        # or the caller set the EP degree to 1: say why its experts are not sharded, and the fix
+        # where the load names one. A replication both knobs ask for is the caller's choice.
         warn_rank_0(
             f"{hf_config.model_type} loads without expert parallelism, as a dense model does, since "
             f"the expert-parallel load cannot take it: {refusal}"

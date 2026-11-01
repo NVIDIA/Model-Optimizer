@@ -38,8 +38,9 @@ Left to decide, the EP degree of an MoE is the largest that divides both its rou
 world size. An MoE the expert-parallel load cannot take (one its model spec rules out, as GPT-OSS's
 and Llama-4's, one below the transformers release it needs, a quantized checkpoint, or a plan that
 shards no expert weights) loads as a dense model does, whole on every rank or FSDP2-sharded, with
-an EP degree left to the decision or set to 1; a warning on rank 0 says why, and what would let its
-experts shard. The decision FSDP2-shards the whole model instead of sharding the experts when a
+an EP degree left to the decision or set to 1. A warning on rank 0 says why, and the fix where
+there is one (an unquantized checkpoint, a later transformers); none when both knobs ask for the
+replication. The decision FSDP2-shards the whole model instead of sharding the experts when a
 rank's share of them with a whole copy of the dense part would not fit one GPU. An EP degree above
 1 that a knob or argument asks for stands, and the load refuses what it cannot take. A plan that
 leaves an expert-parallel MoE whole on every rank, which no knob asked for, is refused, naming the
