@@ -1266,7 +1266,7 @@ def test_a_load_after_a_prepare_that_patched_every_load_is_refused(
     whose own unpatched block the converters would load newly initialized experts into."""
     monkeypatch.setattr(moe, "_PATCHED_EVERY_LOAD", set())
     monkeypatch.setattr(
-        get_spec("kimi_k3").ep_spec, "prepare", lambda hf_config, **kwargs: hf_config
+        get_spec("kimi_k3").ep_spec, "prepare", _prepares_as_its_spec_states("kimi_k3")
     )
     run_as(2)
     config = serve(SimpleNamespace(model_type=model_type, text_config=SimpleNamespace()))
@@ -1279,6 +1279,28 @@ def test_a_load_after_a_prepare_that_patched_every_load_is_refused(
             str(tmp_path), auto_class, distribution=distribution, trust_remote_code=True
         )
     assert loaders == {}
+
+
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version(_ep_floor("kimi_k3")),
+    reason="Kimi-K3's expert parallelism needs a later transformers",
+)
+def test_a_prepare_that_patched_every_load_is_recorded_though_it_returns_no_config(
+    monkeypatch, tmp_path
+):
+    """A ``prepare`` that patches every later load stays recorded when it returns no config to load:
+    the refusal of what it returned comes after the record, as its patches stay in the process, so a
+    whole-model or FSDP2-sharded load of the model is still refused after it."""
+    monkeypatch.setattr(moe, "_PATCHED_EVERY_LOAD", set())
+    spec = get_spec("kimi_k3").ep_spec
+    monkeypatch.setattr(spec, "prepare", lambda hf_config, **kwargs: None)
+    config = SimpleNamespace(model_type="kimi_k3", text_config=SimpleNamespace())
+
+    with pytest.raises(ValueError, match="prepare returned None"):
+        moe.apply_distributed_support(
+            "kimi_k3", config, ckpt_path=str(tmp_path), trust_remote_code=True
+        )
+    assert set(spec.prepare_patches_every_load) <= moe._PATCHED_EVERY_LOAD
 
 
 @pytest.mark.parametrize(
