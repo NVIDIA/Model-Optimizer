@@ -941,8 +941,9 @@ def test_atomicity_later_cfg_entry_does_not_inherit_earlier():
             )
 
 
+@pytest.mark.parametrize("default_enabled", [False, True])
 @pytest.mark.parametrize("default_last", [False, True])
-def test_legacy_dict_format_end_to_end(default_last):
+def test_legacy_dict_format_end_to_end(default_last, default_enabled):
     """Old dict-format quant_cfg works end-to-end through mtq.quantize via normalization."""
     model = SimpleLinear()
     # Old-style dict config with "default" key and wildcard keys
@@ -951,10 +952,11 @@ def test_legacy_dict_format_end_to_end(default_last):
         "*input_quantizer": {"num_bits": 8, "axis": None},
     }
     # "default" applies first wherever it appears, as in the docs' legacy example.
+    default_cfg = {"num_bits": 4, "enable": True} if default_enabled else {"enable": False}
     if default_last:
-        quant_cfg["default"] = {"enable": False}
+        quant_cfg["default"] = default_cfg
     else:
-        quant_cfg = {"default": {"enable": False}, **quant_cfg}
+        quant_cfg = {"default": default_cfg, **quant_cfg}
     old_config = {"quant_cfg": quant_cfg, "algorithm": "max"}
     model = mtq.quantize(model, old_config, lambda m: m(m.get_input()))
     for name, module in model.named_modules():
@@ -963,10 +965,15 @@ def test_legacy_dict_format_end_to_end(default_last):
                 assert module.is_enabled
                 assert module.num_bits == 8
             elif name.endswith("output_quantizer"):
-                # "default" key → quantizer_name="*" with enable=False disables everything,
-                # but weight/input quantizers are re-enabled by subsequent entries.
-                # output_quantizer is NOT re-enabled so it stays disabled.
-                assert not module.is_enabled
+                if default_enabled:
+                    # Only "default" matches output_quantizer, so it keeps the default's attributes.
+                    assert module.is_enabled
+                    assert module.num_bits == 4
+                else:
+                    # "default" key → quantizer_name="*" with enable=False disables everything,
+                    # but weight/input quantizers are re-enabled by subsequent entries.
+                    # output_quantizer is NOT re-enabled so it stays disabled.
+                    assert not module.is_enabled
 
 
 @pytest.mark.parametrize("config", ["INT8_DEFAULT_CFG", "W4A8_AWQ_BETA_CFG"])
