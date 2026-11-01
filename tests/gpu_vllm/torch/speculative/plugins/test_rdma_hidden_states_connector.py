@@ -15,25 +15,26 @@
 
 """How the streaming hidden-state connector finds a request's hidden states in vLLM's cache.
 
-CPU-only, but here rather than in tests/unit because the connector imports vLLM at module
-level. Every mistake these tests guard against is silent: the draft trains on another
-token's or another request's hidden states, and nothing raises.
+Every mistake these tests guard against is silent: the draft trains on another token's or
+another request's hidden states, and nothing raises.
 """
 
 from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     UniformTypeKVCacheSpecs,
 )
 
+from modelopt.torch.speculative.plugins import rdma_hidden_states_connector
 from modelopt.torch.speculative.plugins.rdma_hidden_states_connector import (
+    RdmaHiddenStatesConnector,
     _hidden_state_group_index,
-    _request_slots,
-    extract_from_kv_cache,
     planes_dim,
 )
 
@@ -45,29 +46,72 @@ CAPTURE = HiddenStateCacheSpec(
 )
 
 
+def _groups(*specs):
+    return SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=s, layer_names=["layer"]) for s in specs]
+    )
+
+
+def _worker_connector(kv):
+    """A worker-side connector over ``kv``, as ``register_kv_caches`` leaves it, minus NIXL."""
+    extra = {"pool_slots": "2", "max_tokens": "8"}
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(get_from_extra_config=lambda k, d: extra.get(k, d))
+    )
+    conn = RdmaHiddenStatesConnector(config, KVConnectorRole.WORKER, _groups(ATTENTION, CAPTURE))
+    conn.cache_layers = ["capture"]
+    conn._planes_dim = planes_dim(kv, N_PLANES)
+    conn._cache_block_size, conn._num_blocks = BLOCK_SIZE, NUM_BLOCKS
+    conn._feat_shape, conn._dtype = (N_PLANES, HIDDEN), kv.dtype
+    conn._per_token_elems = N_PLANES * HIDDEN
+    conn._slot_elems = conn._max_tokens * conn._per_token_elems
+    conn._pool = torch.zeros(conn._pool_slots, conn._slot_elems, dtype=kv.dtype).pin_memory()
+    conn._nixl = SimpleNamespace(get_xfer_descs=lambda t: None, get_serialized_descs=lambda d: b"")
+    return conn
+
+
 @pytest.mark.parametrize("layout", ["BNHC", "BHNC"])
-def test_a_request_reads_its_own_tokens_from_either_layout(layout):
-    """vLLM #51718 (0.29) moved the captured planes from dim 2 of the cache view to dim 1."""
-    tokens = torch.randn(NUM_BLOCKS * BLOCK_SIZE, N_PLANES, HIDDEN)  # row i = slot i
-    cache = tokens.view(NUM_BLOCKS, BLOCK_SIZE, N_PLANES, HIDDEN)
+def test_concurrent_requests_each_capture_their_own_hidden_states(layout, monkeypatch):
+    """Two prompts prefilled in one step, batched behind a request that is already decoding.
+
+    Their capture blocks are neither contiguous nor in batch order, and the attention group
+    holds other block ids, so reading the step's slot_mapping by position, or the wrong
+    group's blocks, hands a request another request's rows. vLLM 0.29 (#51718) moved the
+    cache view from [B, N, H, C] to [B, H, N, C].
+    """
+    tokens = torch.randn(NUM_BLOCKS * BLOCK_SIZE, N_PLANES, HIDDEN, device="cuda")  # row = slot
+    kv = tokens.view(NUM_BLOCKS, BLOCK_SIZE, N_PLANES, HIDDEN)
     if layout == "BHNC":
-        cache = cache.transpose(1, 2).contiguous()
-    # Holding blocks 3 then 1, the request's 6 tokens sit in slots 12-15 and 4-5.
-    slots = _request_slots((3, 1), 6, BLOCK_SIZE)
-    got = extract_from_kv_cache(cache, slots, 6, planes_dim(cache, N_PLANES))
-    assert torch.equal(got, tokens[[12, 13, 14, 15, 4, 5]])
+        kv = kv.transpose(1, 2).contiguous()
+    conn = _worker_connector(kv)
+
+    # block_ids holds one list per group: attention first, then the capture layer.
+    new_reqs = [
+        SimpleNamespace(req_id="A", prompt_token_ids=list(range(6)), block_ids=([7, 8], [3, 1])),
+        SimpleNamespace(req_id="B", prompt_token_ids=list(range(3)), block_ids=([9], [0])),
+    ]
+    scheduled = SimpleNamespace(scheduled_new_reqs=new_reqs, num_scheduled_tokens={"A": 6, "B": 3})
+    conn.bind_connector_metadata(conn.build_connector_meta(scheduled))
+    # The step's batch: the decoding request (slot 19) first, then B, then A.
+    slot_mapping = torch.tensor([19, 0, 1, 2, 12, 13, 14, 15, 4, 5], device="cuda")
+    monkeypatch.setattr(
+        rdma_hidden_states_connector,
+        "get_forward_context",
+        lambda: SimpleNamespace(slot_mapping={"capture": slot_mapping}),
+    )
+    conn.save_kv_layer("capture", kv, CacheOnlyAttentionMetadata(slot_mapping))
+    torch.cuda.synchronize()
+
+    # Pool slots go to requests in scheduling order: A's 6 tokens, then B's 3.
+    for pool_slot, slots in [(0, [12, 13, 14, 15, 4, 5]), (1, [0, 1, 2])]:
+        want = tokens[slots].flatten().cpu()
+        assert torch.equal(conn._pool[pool_slot, : want.numel()], want)
 
 
 @pytest.mark.parametrize("dims", [(N_PLANES, N_PLANES), (BLOCK_SIZE, BLOCK_SIZE)])
 def test_a_view_that_does_not_show_where_the_planes_are_is_refused(dims):
     with pytest.raises(RuntimeError):
         planes_dim(torch.empty(NUM_BLOCKS, *dims, HIDDEN), N_PLANES)
-
-
-def _groups(*specs):
-    return SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=s, layer_names=["layer"]) for s in specs]
-    )
 
 
 @pytest.mark.parametrize(
