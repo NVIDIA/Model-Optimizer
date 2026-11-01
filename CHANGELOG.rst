@@ -33,7 +33,7 @@ Changelog
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
 - Add support for the `SPEED-Bench v1.1 <https://huggingface.co/datasets/nvidia/SPEED-Bench>`_ dataset.
 - With ``training.dataloader_num_workers`` > 0, ``examples/speculative_decoding/main.py`` now yields each training batch as soon as a worker finishes it, so one slow sample, such as a slow hidden-state fetch in streaming training, no longer stalls every DDP rank. Sample order within the prefetch window is then no longer deterministic; set ``training.dataloader_in_order=true`` to restore it (context-parallel runs always keep it).
-- The ``general/speculative_decoding/dflash2`` recipe now enables ``dflash_use_torch_compile`` and ``dflash_use_flex_attention``, and turns ``tf32`` off, which compilation needs on PyTorch 2.9 and 2.10. To train eagerly as before, set ``dflash.dflash_use_torch_compile=false dflash.dflash_use_flex_attention=false``.
+- The ``general/speculative_decoding/dflash2`` recipe now enables ``dflash_use_torch_compile`` and ``dflash_use_flex_attention``, and turns ``tf32`` off, which compilation needs on PyTorch 2.9 and 2.10. To train eagerly as before, start the run with ``dflash.dflash_use_torch_compile=false dflash.dflash_use_flex_attention=false``; a run resumed from a checkpoint keeps the checkpoint's DFlash settings.
 
 *Megatron Framework (M-LM / M-Bridge)*
 

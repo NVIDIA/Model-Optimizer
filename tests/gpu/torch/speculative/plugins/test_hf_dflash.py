@@ -398,8 +398,23 @@ class TestDFlashFlexAttentionGPU:
 
     def test_compiled_flex_matches_eager_flex(self):
         """The DFlash2 recipe's compile + flex pair trains: eager flex's loss, finite grads."""
-        eager = self._model(dflash_use_flex_attention=True)
-        compiled = self._model(dflash_use_flex_attention=True, dflash_use_torch_compile=True)
+        # The recipe's DFlash2 draft and objective, sized for this model.
+        dflash2 = {
+            "dflash_self_logit_distillation": False,
+            "dflash_lk_loss_type": "lambda",
+            "dflash_architecture_config": {
+                "num_hidden_layers": 2,
+                "projector_type": "dflash2",
+                "conv_kernel_size": 2,
+                "conv_group_size": 16,
+                "selector_rank": 8,
+                "selector_top_k": 5,
+            },
+        }
+        eager = self._model(dflash_use_flex_attention=True, **dflash2)
+        compiled = self._model(
+            dflash_use_flex_attention=True, dflash_use_torch_compile=True, **dflash2
+        )
         compiled.dflash_module.load_state_dict(eager.dflash_module.state_dict())
         input_ids, attention_mask = self._inputs()
 
