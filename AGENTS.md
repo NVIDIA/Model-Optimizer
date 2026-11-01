@@ -99,8 +99,8 @@ below, tell the user and offer to address it before pushing; do not push as-is.
   when the result is close to the line):
 
   ```bash
-  git diff --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ \
-    -U0 <base>...HEAD | awk '
+  git diff --no-color --no-ext-diff --no-textconv \
+    --src-prefix=a/ --dst-prefix=b/ -U0 <base>...HEAD | awk '
     /^diff --git/ { hdr = 1; skip = 0; next }
     /^@@/ { hdr = 0; next }
     hdr && /^\+\+\+ / {
