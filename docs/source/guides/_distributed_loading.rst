@@ -35,14 +35,15 @@ Routes
   (``auto_class`` defaults to ``AutoModelForCausalLM``).
 
 Left to decide, the EP degree of an MoE is the largest that divides both its routed experts and the
-world size. The decision plans without expert parallelism, and says why, an MoE the expert-parallel
-load would refuse: one its model spec rules out (GPT-OSS's, Llama-4's), one below the transformers
-release it needs, a quantized checkpoint, or a plan that shards no expert weights. It FSDP2-shards
-the whole model instead when a rank's share of the experts with a whole copy of the dense part would
-not fit one GPU. An EP degree a knob or argument asks for stands, and the load refuses what it
-cannot take. A plan that leaves an expert-parallel MoE whole on every rank, which no knob asked
-for, is refused, naming the ways out; ``MODELOPT_EP_DEGREE=1`` with ``MODELOPT_FSDP_SIZE=1`` asks
-for it.
+world size. An MoE the expert-parallel load cannot take (one its model spec rules out, as GPT-OSS's
+and Llama-4's, one below the transformers release it needs, a quantized checkpoint, or a plan that
+shards no expert weights) loads as a dense model does, whole on every rank or FSDP2-sharded, with
+an EP degree left to the decision or set to 1; a warning on rank 0 says why, and what would let its
+experts shard. The decision FSDP2-shards the whole model instead of sharding the experts when a
+rank's share of them with a whole copy of the dense part would not fit one GPU. An EP degree above
+1 that a knob or argument asks for stands, and the load refuses what it cannot take. A plan that
+leaves an expert-parallel MoE whole on every rank, which no knob asked for, is refused, naming the
+ways out; ``MODELOPT_EP_DEGREE=1`` with ``MODELOPT_FSDP_SIZE=1`` asks for it.
 
 A refusal on any rank raises on every rank, before the load, and says how to load the model whole:
 ``MODELOPT_FSDP_SIZE=1`` for a plan the load decided, or
