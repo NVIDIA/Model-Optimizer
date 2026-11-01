@@ -375,12 +375,8 @@ def quantize_model(model, args, tokenizer=None, calibration_forward_loop=None):
         quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
     else:
         raise RuntimeError("Unsupported quantization format")
-    # Keep the vision tower in high precision. Pass a non-NVFP4 cfg (num_bits=8) with
-    # enable=False, not just enable=False: an NVFP4-typed QuantConv3d routes to a JIT
-    # implicit-GEMM CUDA kernel (needs CUDA_HOME) even when disabled.
-    quant_cfg["quant_cfg"].append(
-        {"quantizer_name": "*vlm.model.visual*", "enable": False, "cfg": {"num_bits": 8}}
-    )
+    # Keep the vision tower in high precision.
+    quant_cfg["quant_cfg"].append({"quantizer_name": "*vlm.model.visual*", "enable": False})
 
     if args.quant_format == "nvfp4" or getattr(args, "real_quant", False):
         # Keep Linear layers whose in/out features aren't multiples of 16 in high precision:
