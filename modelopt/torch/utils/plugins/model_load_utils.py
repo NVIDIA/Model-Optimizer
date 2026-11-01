@@ -1619,21 +1619,22 @@ def _decide_distribution(
     # it refuses cannot be expert-parallel here, so is not refused below for being left whole.
     refusal = _ep_load_refusal(hf_config, ep_plan) if experts else None
     if ep_size == "auto":
-        ep_size = _choose_ep_degree(world_size, num_experts)
-        if ep_size > 1 and refusal is not None:
-            # The expert-parallel load would refuse this model, for some reasons only after the
-            # checkpoint's download: with nothing asking for expert parallelism, plan without it.
-            print_rank_0(
-                f"{hf_config.model_type}: planned without expert parallelism, which its load "
-                f"would refuse: {refusal}"
-            )
-            ep_size = 1
+        # The expert-parallel load would refuse this model, for some reasons only after the
+        # checkpoint's download: with nothing asking for expert parallelism, plan without it.
+        ep_size = 1 if refusal is not None else _choose_ep_degree(world_size, num_experts)
     elif ep_size > 1 and world_size % ep_size:
         raise ValueError(f"{knob}={ep_size} must divide the world size ({world_size}).")
     elif ep_size > 1 and (num_experts == 0 or num_experts % ep_size):
         raise ValueError(
             f"{knob}={ep_size} must divide the routed experts {hf_config.model_type} shards "
             f"({num_experts})."
+        )
+    if refusal is not None and ep_size == 1:
+        # It loads as a dense model does, whole on every rank or FSDP2-sharded, whether the decision
+        # or the caller set the EP degree to 1: say why its experts are not sharded, and what would.
+        warn_rank_0(
+            f"{hf_config.model_type} loads without expert parallelism, as a dense model does, since "
+            f"the expert-parallel load cannot take it: {refusal}"
         )
     dense_chosen = dense == "auto"  # a dense layout no knob or argument set
     if dense == "auto":
@@ -1753,7 +1754,9 @@ def resolve_distribution_plan(
 
     A plan that leaves an expert-parallel MoE whole on every rank raises, unless both knobs ask for
     exactly that: ``ep_size=1`` with ``dense="replicate"`` (``MODELOPT_EP_DEGREE=1`` and
-    ``MODELOPT_FSDP_SIZE=1``) replicates it, noting that every rank holds the whole MoE.
+    ``MODELOPT_FSDP_SIZE=1``) replicates it, noting that every rank holds the whole MoE. An MoE the
+    expert-parallel load cannot take is planned as a dense model is, at an EP degree left to the
+    decision or set to 1, with a warning saying why.
     """
     # Each rank reads the checkpoint for itself. One that cannot must fail every rank here, rather
     # than leave the others waiting in a broadcast below for a rank that already raised.
@@ -1892,7 +1895,8 @@ def _ep_load_refusal(hf_config, ep_plan: dict[str, str]) -> Exception | None:
         return e
     if (method := _ckpt_quant_method(hf_config)) not in _EP_SOURCE_FORMATS:
         return NotImplementedError(
-            f"The expert-parallel load cannot dequantize a {method!r} checkpoint."
+            f"The expert-parallel load cannot dequantize a {method!r} checkpoint; an unquantized "
+            "copy of the model would load expert-parallel."
         )
     refusal = _ep_plan_refusal(ep_plan)
     return ValueError(refusal) if refusal is not None else None

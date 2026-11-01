@@ -617,7 +617,8 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     later one the spec states (MiniMax-M3-VL's) -- is planned without expert parallelism rather
     than committed to a load that refuses it, for some reasons only after the download. Nor is it
     refused for being left whole, whether the decision or the caller made its EP degree 1: it
-    cannot be expert-parallel here."""
+    cannot be expert-parallel here, so it loads as a dense model does, with a warning saying why
+    and what would let its experts shard."""
     if ep_degree is not None:
         monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
     run_as(2)
@@ -638,8 +639,16 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
         monkeypatch.setattr(transformers, "__version__", "5.6.2")
     serve(config)
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+    why = {
+        "its-plan": "shards no weights of",
+        "its-format": "'fp8' checkpoint; an unquantized copy of the model would load",
+        "its-spec": "Not yet.",
+        "its-transformers": r"transformers >= 5\.7, but 5\.6\.2 is installed\. Upgrade",
+        "its-specs-transformers": r"transformers >= 5\.13, but 5\.10\.0 is installed\. Upgrade",
+    }[refused_by]
 
-    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
+    with pytest.warns(UserWarning, match=f"loads without expert parallelism.*{why}"):
+        assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
 
 
 @needs_qwen3_moe_ep_plan
