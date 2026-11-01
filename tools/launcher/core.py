@@ -72,7 +72,15 @@ def get_default_env(experiment_title=None):
     }
     tracking = {
         key: os.environ[key]
-        for key in ("MLFLOW_RUN_ID", "MLFLOW_TRACKING_URI")
+        for key in (
+            "MLFLOW_RUN_ID",
+            "MLFLOW_TRACKING_URI",
+            "MLFLOW_EXPERIMENT_ID",
+            "PENSIEVE_MLFLOW_RUN_ID",
+            "PENSIEVE_MLFLOW_TRACKING_URI",
+            "PENSIEVE_MLFLOW_EXPERIMENT_ID",
+            "PENSIEVE_LAUNCH_ID",
+        )
         if os.environ.get(key)
     }
     slurm_env.update(tracking)
@@ -957,7 +965,7 @@ def run_jobs(
                         modelopt_src_path,
                         experiment_title,
                     )
-                    task_env.update(default_local_env)
+                    task_env = {**default_local_env, **task_env}
                 else:
                     executor = build_slurm_executor(
                         user,
@@ -970,7 +978,7 @@ def run_jobs(
                         modelopt_src_path,
                         experiment_title,
                     )
-                    task_env.update(default_slurm_env)
+                    task_env = {**default_slurm_env, **task_env}
 
                 if assets:
                     if hf_local is not None:

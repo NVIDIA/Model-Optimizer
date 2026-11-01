@@ -250,7 +250,9 @@ Successful JSON stdout has this shape:
 ```
 
 Return assets in declaration order. Paths must lie under the declared source root;
-use immutable snapshots when versions are supported. Diagnostics belong on stderr;
+use immutable snapshots when versions are supported. Resolved paths must not contain
+`:`, `,`, a newline, or a carriage return. Pinned references require a string
+`version`, and asset declarations must be unique. Diagnostics belong on stderr;
 never include credentials in the command, response or manifest. A nonzero exit,
 non-ready response, invalid manifest or timeout prevents the pipeline from creating
 an experiment. Transfers can continue independently after a timeout; providers must
@@ -264,3 +266,13 @@ for each distinct host/cache root. Missing providers or mismatched mounts fail
 before job submission. Additional mounts must not overlap declared asset destinations,
 and Slurm arguments cannot override the container mounts. Dry-run configuration
 inspection does not transfer assets.
+
+## MLflow environment context
+
+The launcher forwards nonempty `MLFLOW_RUN_ID`, `MLFLOW_TRACKING_URI`, and
+`MLFLOW_EXPERIMENT_ID` values to both local and Slurm task environments. It also
+forwards `PENSIEVE_MLFLOW_RUN_ID`, `PENSIEVE_MLFLOW_TRACKING_URI`,
+`PENSIEVE_MLFLOW_EXPERIMENT_ID`, and `PENSIEVE_LAUNCH_ID` as independent lifecycle
+references. Task-level environment values override defaults. A lifecycle run
+is never implicitly selected as the workload's standard MLflow run. The owner
+of each run creates and finalizes it; propagation alone does not enable logging.

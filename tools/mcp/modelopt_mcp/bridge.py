@@ -705,6 +705,16 @@ def _create_mlflow_run(
                 "mlflow.runName": run_name,
                 "lifecycle": "submitted",
                 "managed_by": "modelopt-mcp",
+                **{
+                    tag: os.environ[key]
+                    for key, tag in (
+                        ("PENSIEVE_LAUNCH_ID", "pensieve.launch_id"),
+                        ("PENSIEVE_MLFLOW_RUN_ID", "pensieve.mlflow_run_id"),
+                        ("PENSIEVE_MLFLOW_TRACKING_URI", "pensieve.mlflow_tracking_uri"),
+                        ("PENSIEVE_MLFLOW_EXPERIMENT_ID", "pensieve.mlflow_experiment_id"),
+                    )
+                    if os.environ.get(key)
+                },
             },
         )
         run_id = run.info.run_id
@@ -1732,6 +1742,8 @@ def submit_job_impl(
     if mlflow_info.get("enabled"):
         child_env["MLFLOW_RUN_ID"] = mlflow_info["mlflow_run_id"]
         child_env["MLFLOW_TRACKING_URI"] = mlflow_info["mlflow_tracking_uri"]
+        if mlflow_info.get("mlflow_experiment_id"):
+            child_env["MLFLOW_EXPERIMENT_ID"] = mlflow_info["mlflow_experiment_id"]
 
     if executor == "docker":
         # Docker mode: spawn detached. Redirect stdout/stderr to a side-channel

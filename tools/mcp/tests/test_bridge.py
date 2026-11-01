@@ -778,6 +778,14 @@ def test_submit_job_slurm_creates_mlflow_run_and_injects_env(monkeypatch, tmp_pa
     mlflow = pytest.importorskip("mlflow")
     tracking_uri = f"sqlite:///{tmp_path / 'tracking.db'}"
     client = mlflow.tracking.MlflowClient(tracking_uri=tracking_uri)
+    context = {
+        "PENSIEVE_LAUNCH_ID": "pl_existing",
+        "PENSIEVE_MLFLOW_RUN_ID": "existing-lifecycle-run",
+        "PENSIEVE_MLFLOW_TRACKING_URI": "https://lifecycle.example",
+        "PENSIEVE_MLFLOW_EXPERIMENT_ID": "22",
+    }
+    for key, value in context.items():
+        monkeypatch.setenv(key, value)
     captured = {}
 
     def fake_run(argv, **kwargs):
@@ -810,6 +818,13 @@ def test_submit_job_slurm_creates_mlflow_run_and_injects_env(monkeypatch, tmp_pa
     assert captured["env"]["MLFLOW_RUN_ID"] == run_id
     assert captured["env"]["MLFLOW_TRACKING_URI"] == tracking_uri
     run = client.get_run(run_id)
+    assert captured["env"]["MLFLOW_EXPERIMENT_ID"] == run.info.experiment_id
+    assert run_id != context["PENSIEVE_MLFLOW_RUN_ID"]
+    assert {key: captured["env"][key] for key in context} == context
+    assert run.data.tags["pensieve.launch_id"] == "pl_existing"
+    assert run.data.tags["pensieve.mlflow_run_id"] == "existing-lifecycle-run"
+    assert run.data.tags["pensieve.mlflow_tracking_uri"] == "https://lifecycle.example"
+    assert run.data.tags["pensieve.mlflow_experiment_id"] == "22"
     assert run.info.status == "RUNNING"
     assert run.info.end_time is None
     assert run.data.tags["mlflow.runName"] == "alice/cluster.example.com/examples/config"

@@ -37,6 +37,7 @@ from core import (
     SandboxPipeline,
     SandboxTask,
     SandboxTask0,
+    SandboxTask1,
     _git_info,
     create_task_from_yaml,
     get_default_env,
@@ -215,8 +216,12 @@ class TestRunJobsExtended:
     """Extended run_jobs tests for env merging, test_level, and detach."""
 
     @patch("core.run.Experiment")
+    @pytest.mark.parametrize("remote", [False, True])
+    @patch("core.build_slurm_executor")
     @patch("core.build_docker_executor")
-    def test_environment_list_merged_to_env(self, mock_docker, mock_exp, tmp_path):
+    def test_environment_list_merged_to_env(
+        self, mock_docker, mock_slurm, mock_exp, tmp_path, monkeypatch, remote
+    ):
         """List-of-dicts environment is merged into task_env."""
         mock_exp_inst = MagicMock()
         mock_exp_inst._id = "exp_env"
@@ -225,19 +230,23 @@ class TestRunJobsExtended:
         mock_exp.return_value = mock_exp_inst
         mock_docker.return_value = MagicMock()
 
+        monkeypatch.setenv("MLFLOW_RUN_ID", "ambient-metric-run")
+        monkeypatch.setenv("PENSIEVE_MLFLOW_RUN_ID", "lifecycle-run")
         slurm_env, local_env = get_default_env()
 
         t0 = SandboxTask0(
             script="test.sh",
             slurm_config=MagicMock(),
-            environment=[{"A": "1"}, {"B": "2"}],
+            environment=[{"A": "1"}, {"B": "2"}, {"MLFLOW_RUN_ID": "task-metric-run"}],
         )
-        pipeline = SandboxPipeline(task_0=t0)
+        pipeline = SandboxPipeline(
+            task_0=t0, task_1=SandboxTask1(script="next.sh", slurm_config=MagicMock())
+        )
 
         with patch("core.run.Script") as mock_script:
             run_jobs(
                 job_table={"job": pipeline},
-                hf_local="/tmp/hf",
+                hf_local=None if remote else "/tmp/hf",
                 user="u",
                 identity=None,
                 job_dir=str(tmp_path),
@@ -246,11 +255,15 @@ class TestRunJobsExtended:
                 default_local_env=local_env,
                 base_dir=str(tmp_path),
             )
-            # Script called with merged env
-            call_kwargs = mock_script.call_args[1]
-            assert "A" in call_kwargs["env"]
-            assert "B" in call_kwargs["env"]
-            assert call_kwargs["env"]["A"] == "1"
+            first, second = [call.kwargs["env"] for call in mock_script.call_args_list]
+            assert first["A"] == "1" and first["B"] == "2"
+            assert first["MLFLOW_RUN_ID"] == "task-metric-run"
+            assert second["MLFLOW_RUN_ID"] == "ambient-metric-run"
+            assert (
+                first["PENSIEVE_MLFLOW_RUN_ID"]
+                == second["PENSIEVE_MLFLOW_RUN_ID"]
+                == "lifecycle-run"
+            )
 
     @patch("core.run.Experiment")
     @patch("core.build_docker_executor")

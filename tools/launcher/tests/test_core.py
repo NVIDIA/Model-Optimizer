@@ -208,12 +208,22 @@ class TestGetDefaultEnv:
         # get_default_env honors HF_HOME / TRITON_CACHE_DIR overrides, so isolate the ambient env.
         monkeypatch.delenv("HF_HOME", raising=False)
         monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
-        monkeypatch.setenv("MLFLOW_RUN_ID", "run-123")
-        monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://tracking.example")
+        tracking = {
+            "MLFLOW_RUN_ID": "metric-run",
+            "MLFLOW_TRACKING_URI": "https://metrics.example",
+            "MLFLOW_EXPERIMENT_ID": "11",
+            "PENSIEVE_MLFLOW_RUN_ID": "lifecycle-run",
+            "PENSIEVE_MLFLOW_TRACKING_URI": "https://lifecycle.example",
+            "PENSIEVE_MLFLOW_EXPERIMENT_ID": "22",
+            "PENSIEVE_LAUNCH_ID": "pl_attempt",
+        }
+        for key, value in tracking.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("PENSIEVE_OTHER_SECRET", "not-a-tracking-variable")
         slurm_env, local_env = get_default_env()
         for env in (slurm_env, local_env):
-            assert env["MLFLOW_RUN_ID"] == "run-123"
-            assert env["MLFLOW_TRACKING_URI"] == "https://tracking.example"
+            assert {key: env[key] for key in tracking} == tracking
+            assert "PENSIEVE_OTHER_SECRET" not in env
         assert slurm_env["TRITON_CACHE_DIR"] == "/cicd/triton-cache"
         assert slurm_env["HF_HOME"] == "/cicd/hf-cache"
         assert slurm_env["MLM_SKIP_INSTALL"] == "1"

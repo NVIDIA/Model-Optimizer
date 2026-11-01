@@ -24,7 +24,7 @@ Mode is determined by which args you pass, not by which tool you call. One tool,
 | `submit_job(yaml_path, hf_local? \| cluster_host?, ..., dry_run?, source_ref?, source_repo?, enable_mlflow?)` | Submit a launcher YAML. Mode resolved from mutually-exclusive args. Before launching, materializes a managed Model-Optimizer checkout at `source_ref` (branch, tag, or SHA; default `main`) and initializes recursive submodules, then runs that checkout's launcher. Returns `experiment_id` (Slurm) or PID plus captured `experiment_id` when available (Docker) immediately; if Docker's short tail times out, it still returns PID with `experiment_id=None` and a persistent `stdout_log` under `$NEMORUN_HOME/.modelopt-mcp/docker-submit-logs/` for diagnostics. The actual job runs detached. Auto-runs `verify_setup` first by default (skippable). When `enable_mlflow=True`, creates an MLflow run before launch and passes standard `MLFLOW_RUN_ID` / `MLFLOW_TRACKING_URI` into the job. **Pass `dry_run=True`** to validate the YAML via `launch.py --dryrun --yes` without contacting the cluster / spawning a container / running sbatch — returns `{ok, dry_run: True, validated: bool, diagnostic?, exit_code, stdout_tail, stderr_tail, argv, source_sha, source_root}` instead of `experiment_id`. |
 | `job_status(experiment_id)` | Filesystem-based status from nemo_run's experiment dir (`_DONE`, `status_*.out`). Returns `done` / `failed` / `running` plus per-task statuses. No in-memory registry; survives MCP server restarts. |
 | `job_logs(experiment_id, task?, tail?)` | Read `log_<task>.out` from the experiment dir. Per-task filtering + optional tail to truncate. |
-| `wait_for_experiment(experiment_id, timeout_sec?, poll_interval_sec?, finalize_mlflow?, mlflow_run_id?)` | Block until `job_status` returns `done` / `failed`, or until `timeout_sec` elapses. Single tool call replaces the agent's `while True: status; sleep` loop — saves tool-call turns and avoids overshooting the poll interval. When `finalize_mlflow=True`, fetches terminal Nemo/Slurm logs with `nemo experiment logs`, then attaches final pass/fail status and launcher logs to the MLflow run created by `submit_job(enable_mlflow=True)`. |
+| `wait_for_experiment(experiment_id, timeout_sec?, poll_interval_sec?, finalize_mlflow?, mlflow_run_id?, mlflow_tracking_uri?)` | Block until `job_status` returns `done` / `failed`, or until `timeout_sec` elapses. Single tool call replaces the agent's `while True: status; sleep` loop — saves tool-call turns and avoids overshooting the poll interval. When `finalize_mlflow=True`, fetches terminal Nemo/Slurm logs with `nemo experiment logs`, then attaches final pass/fail status and launcher logs to the MLflow run created by `submit_job(enable_mlflow=True)`. |
 | `finalize_mlflow_run(experiment_id, mlflow_run_id, mlflow_tracking_uri?)` | Fetch terminal Nemo/Slurm logs and attach final status plus launcher logs to an already-created MLflow run. Usually use `wait_for_experiment(..., finalize_mlflow=True)` instead. |
 | `provision_passwordless_ssh_dry_run(cluster_host, cluster_user, identity?)` | Operator UX helper. Inspects `~/.ssh/` and emits the exact `ssh-keygen` / `ssh-copy-id` commands the user should run to make `verify_setup(executor='slurm')` pass. No side effects — pure inspection + shell-command formatting. |
 | `read_cluster_artifact(experiment_id, path?, job_idx?)` | Pull artifact content from the remote cluster via nemo_run's tunnel primitives. With `path=None`, wraps `nemo experiment logs <id> <job_idx>` (built-in log fetch). With a `path`, uses the experiment's `Tunnel` to `cat` the file. No reinvented SSH. |
@@ -59,6 +59,28 @@ modelopt-mcp                         # stdio server entry on PATH
 ```
 
 Both packages share the launcher's `core.py` orchestrator. The dev path relies on `[tool.uv.sources]` to point `modelopt-launcher` at `../launcher`.
+
+MLflow is optional. For tracking-enabled development installs, use
+`uv pip install -e 'tools/mcp[mlflow]'`. For the Git install above, use
+`modelopt-mcp[mlflow] @ git+https://github.com/NVIDIA/Model-Optimizer.git#subdirectory=tools/mcp`
+as the `--from` value. Requesting tracking without the extra fails before submission.
+
+## Tracking ownership
+
+`enable_mlflow=True` creates an MCP-owned metric run. If CI already creates and
+finalizes its own run, leave this option disabled and supply its standard
+`MLFLOW_RUN_ID`, `MLFLOW_TRACKING_URI`, and optional `MLFLOW_EXPERIMENT_ID` to
+the launcher instead. The submitter remains responsible for finalizing that run.
+Forwarding variables alone does not create a run or publish workload metrics.
+
+The launcher also forwards the separate `PENSIEVE_MLFLOW_RUN_ID`,
+`PENSIEVE_MLFLOW_TRACKING_URI`, `PENSIEVE_MLFLOW_EXPERIMENT_ID`, and
+`PENSIEVE_LAUNCH_ID` context. These never replace standard MLflow variables or
+cause implicit run creation. If present in the MCP server environment,
+MCP-created metric runs record these references as `pensieve.*` tags. Context
+supplied only in task YAML is visible to that workload; its metric logger must
+explicitly link to the lifecycle run. Finalizing an MCP metric run does not
+finalize the externally owned lifecycle run.
 
 ## Managed source checkouts
 
@@ -125,6 +147,7 @@ status = mcp__modelopt__wait_for_experiment(
     experiment_id=result["experiment_id"],
     finalize_mlflow=True,
     mlflow_run_id=result["mlflow"]["mlflow_run_id"],
+    mlflow_tracking_uri=result["mlflow"]["mlflow_tracking_uri"],
 )
 
 # 5. Fetch logs
