@@ -116,6 +116,18 @@ def test_a_spec_with_a_build_step_prepares(model_type):
 
 
 @pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
+def test_a_spec_decompresses_only_in_a_prepare(model_type):
+    """The decision counts a format in decompressed_formats as one the expert-parallel load takes,
+    on the strength of prepare installing the decompressor: a spec stating formats and no prepare
+    would have it plan a checkpoint expert-parallel that nothing decompresses."""
+    ep = get_spec(model_type).ep_spec
+    assert not ep.decompressed_formats or ep.prepare, (
+        f"{model_type} states decompressed_formats and no prepare, so nothing decompresses its "
+        "experts: install the decompressor in a prepare"
+    )
+
+
+@pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
 def test_a_plan_goes_where_the_load_reads_one(model_type):
     """A spelling the load does not read is read as no plan at all, and the MoE planned as dense."""
     attrs = get_spec(model_type).ep_spec.plan_config_attr or ()
