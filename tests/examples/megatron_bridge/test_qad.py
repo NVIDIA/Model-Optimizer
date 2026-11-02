@@ -47,6 +47,19 @@ except ImportError:  # Megatron-Bridge that still CP-shards mrope position ids
     HAS_MROPE_CP_FIX = False
 
 
+def _load_checkpoint_tensors(checkpoint_path: Path) -> dict[str, torch.Tensor]:
+    """Model tensors of a Megatron distributed checkpoint (optimizer state excluded)."""
+    reader = FileSystemReader(str(checkpoint_path))
+    metadata = reader.read_metadata().state_dict_metadata
+    tensors = {
+        name: torch.empty(meta.size, dtype=meta.properties.dtype)
+        for name, meta in metadata.items()
+        if not name.startswith("optimizer") and hasattr(meta, "size")
+    }
+    dcp.load(tensors, storage_reader=reader)
+    return tensors
+
+
 @pytest.mark.timeout(720)  # Multiple steps in one test hence takes longer than the default timeout
 @pytest.mark.parametrize(
     ("create_student", "lora_rank"),
@@ -137,8 +150,10 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
     # Step 2: QAD -- load the quantized student from the Megatron checkpoint (restoring the ModelOpt
     # quantizers) and distill from the (unquantized) HF teacher. The distilled checkpoint must keep the
     # ModelOpt state so the quantizers survive distillation.
+    # The LoRA case trains only adapters, so its base weights would not exercise the cache's gradient.
     distill_cmd = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"]
+        + ([] if lora_rank else ["--fake_quant_weight_cache"]),
         student_hf_path=hf_model_path,
         student_megatron_path=quantized_megatron_path,
         teacher_hf_path=hf_model_path,
@@ -168,6 +183,20 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
     assert tracker.read_text(encoding="utf-8").strip() == str(early_exit_iter)
     assert (distilled_megatron_path / "iter_0000001").is_dir()
     assert_has_modelopt_state(distilled_megatron_path)
+
+    if not lora_rank and not is_vlm:
+        # The weight cache reuses fake-quantized weights within a step; training must not change.
+        uncached_dir = tmp_path / "qad_uncached"
+        uncached_cmd = [arg for arg in distill_cmd if arg != "--fake_quant_weight_cache"]
+        uncached_cmd[uncached_cmd.index("--output_dir") + 1] = str(uncached_dir)
+        run_example_command(uncached_cmd, example_path="megatron_bridge", setup_free_port=True)
+        cached, uncached = (
+            _load_checkpoint_tensors(path / f"iter_{early_exit_iter:07d}")
+            for path in (distilled_megatron_path, uncached_dir / "checkpoints")
+        )
+        assert cached and cached.keys() == uncached.keys()
+        for name, value in cached.items():
+            torch.testing.assert_close(value, uncached[name], rtol=0, atol=0, msg=name)
 
     if lora_rank:
         # Reuse the output directory to exercise optimizer and trained-adapter restoration.

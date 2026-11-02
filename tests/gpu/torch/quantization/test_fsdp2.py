@@ -23,8 +23,7 @@ import pytest
 import torch
 import torch.nn as nn
 from _test_utils.torch.distributed.utils import synchronize_state_dict
-from torch.distributed._composable.fsdp.fully_shard import fully_shard
-from torch.distributed.fsdp import CPUOffloadPolicy
+from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 from torch.distributed.tensor import DTensor
 
 import modelopt.torch.quantization as mtq
@@ -103,16 +102,20 @@ def _test_nested_fsdp2_backward(rank, size, quant_cfg):
     out_test = fsdp_model(inputs)
     out_test.sum().backward()
 
-    fully_shard(fsdp_model_quant_after[0])
-    fully_shard(fsdp_model_quant_after[1])
-    fsdp_model_quant_after = fully_shard(fsdp_model_quant_after)
-    fsdp_model_quant_after = mtq.quantize(fsdp_model_quant_after, quant_cfg, forward_loop)
-    optimizer_quant_after = torch.optim.SGD(fsdp_model_quant_after.parameters(), lr=0.1)
-    out_quant_after = fsdp_model_quant_after(inputs)
-    out_quant_after.sum().backward()
+    # AWQ calibration of a model sharded over several ranks is refused: there, quantize first only.
+    quant_after = size == 1 or "awq" not in str(quant_cfg.get("algorithm"))
+    if quant_after:
+        fully_shard(fsdp_model_quant_after[0])
+        fully_shard(fsdp_model_quant_after[1])
+        fsdp_model_quant_after = fully_shard(fsdp_model_quant_after)
+        fsdp_model_quant_after = mtq.quantize(fsdp_model_quant_after, quant_cfg, forward_loop)
+        optimizer_quant_after = torch.optim.SGD(fsdp_model_quant_after.parameters(), lr=0.1)
+        out_quant_after = fsdp_model_quant_after(inputs)
+        out_quant_after.sum().backward()
 
     assert torch.allclose(out_ref, out_test)
-    assert torch.allclose(out_ref, out_quant_after)
+    if quant_after:
+        assert torch.allclose(out_ref, out_quant_after)
 
     optimizer_ref.step()
     optimizer_ref.zero_grad()
@@ -120,14 +123,15 @@ def _test_nested_fsdp2_backward(rank, size, quant_cfg):
     optimizer_test.step()
     optimizer_test.zero_grad()
 
-    optimizer_quant_after.step()
-    optimizer_quant_after.zero_grad()
+    if quant_after:
+        optimizer_quant_after.step()
+        optimizer_quant_after.zero_grad()
 
     out_ref_1 = model(inputss)
     out_test_1 = fsdp_model(inputss)
-    out_quant_after_1 = fsdp_model_quant_after(inputss)
     assert torch.allclose(out_ref_1, out_test_1, rtol=1e-4)
-    assert torch.allclose(out_ref_1, out_quant_after_1, rtol=1e-4)
+    if quant_after:
+        assert torch.allclose(out_ref_1, fsdp_model_quant_after(inputss), rtol=1e-4)
 
 
 def test_fsdp_simple_linear(dist_workers):
