@@ -48,14 +48,12 @@ from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
     ("calib_with_images", "packed_location", "error"),
     [
         (False, None, None),
-        (True, None, "text-only inputs"),
+        (True, None, None),
         (False, "root", "pack-quantized"),
         (False, "text", "pack-quantized"),
     ],
 )
-def test_fsdp2_vlm_requires_text_only_calibration(
-    model_type, architectures, calib_with_images, packed_location, error
-):
+def test_fsdp2_vlm_validation(model_type, architectures, calib_with_images, packed_location, error):
     args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=calib_with_images)
     config = SimpleNamespace(
         model_type=model_type,
@@ -99,12 +97,15 @@ def test_forward_requires_images(model, requires_images):
 
 
 @pytest.mark.parametrize(
-    ("model_class", "refused"), [(_ImageOnlyVLM, True), (_TextCapableVLM, False)]
+    ("model_class", "calib_with_images", "refused"),
+    [(_ImageOnlyVLM, False, True), (_ImageOnlyVLM, True, False), (_TextCapableVLM, False, False)],
 )
-def test_fsdp2_refuses_image_only_forward_before_loading(monkeypatch, model_class, refused):
-    """Refused from the config alone, before any rank reads the checkpoint."""
+def test_fsdp2_refuses_image_only_forward_before_loading(
+    monkeypatch, model_class, calib_with_images, refused
+):
+    """Refused from the config alone, before any rank reads the checkpoint, unless images are given."""
     monkeypatch.setattr(example_utils, "resolve_model_class", lambda *_: model_class)
-    args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=False)
+    args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=calib_with_images)
     config = SimpleNamespace(model_type="vlm", architectures=["VLM"], vision_config={})
     expected = (
         pytest.raises(NotImplementedError, match="requires image inputs")
