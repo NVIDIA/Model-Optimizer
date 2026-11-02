@@ -53,7 +53,7 @@ from .kv_cache_auto_quant import (
     get_kv_cache_auto_quantize_config,
 )
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
-from .mode import CalibrateModeRegistry, QuantizeModeRegistry, get_modelike_from_algo_cfg
+from .mode import QuantizeModeRegistry, _rank_local_calibrations, get_modelike_from_algo_cfg
 from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized
 from .utils.core_utils import _get_fsdp2_mesh
@@ -71,35 +71,6 @@ __all__ = [
     "quantize",
     "temporarily_fold_weights",
 ]
-
-# Calibration algorithms whose statistics stay on the rank that gathered them, listed by hand: a new
-# one must be added. Any other keeps its own there too when its config turns distributed_sync off.
-_RANK_LOCAL_CALIBRATION = (
-    "awq_lite",
-    "awq_full",
-    "svdquant",
-    "local_hessian",  # its distributed_sync syncs only the max amax it starts from
-    "imatrix",
-)
-
-
-def _rank_local_calibrations(algorithm: QuantizeAlgoCfgType) -> list[str]:
-    """The rank-local calibrations ``algorithm`` runs, with those it runs for its scales."""
-    found = []
-    for mode, options in get_modelike_from_algo_cfg(algorithm):
-        method = mode.removesuffix("_calibrate")
-        # The options as the calibration reads them, through its mode's schema: a string such as
-        # "false" is coerced, and a default counts as if spelled out.
-        config = CalibrateModeRegistry[mode].config_class.model_validate(options)
-        if method in _RANK_LOCAL_CALIBRATION:
-            found.append(method)
-        elif not getattr(config, "distributed_sync", True):  # None skips the sync too
-            found.append(f"{method} with distributed_sync={config.distributed_sync}")
-        for key in ("weight_scale_algorithm", "scale_algorithm"):
-            if getattr(config, key, None) is not None:
-                found += _rank_local_calibrations(getattr(config, key))
-    return found
-
 
 def _group_ranks(group: dist.DistributedProcessGroup) -> list[int]:
     """The ranks ``group`` spans, in its rank order; just this rank for a group not set."""
@@ -147,9 +118,10 @@ def _refuse_unsupported_distributed_calibration(
         raise NotImplementedError(
             f"Calibrating with {', '.join(refused)} is not supported on a model distributed over "
             f"{plan.world_size} ranks. Each rank calibrates on its own data and this calibration "
-            "keeps what it gathers on the rank, so the ranks would calibrate their copies, or their "
-            "shards, of a weight differently. Calibrate with max or MSE with distributed_sync on, "
-            "GPTQ, SmoothQuant or awq_clip, or in a single process."
+            "keeps what it gathers on the rank, or does not declare that it syncs it, so the "
+            "ranks could calibrate their copies, or their shards, of a weight differently. "
+            "Calibrate with max or MSE with distributed_sync on, GPTQ, SmoothQuant or awq_clip, "
+            "or in a single process."
         )
     if algorithm is None or not plan.is_expert_parallel:
         return

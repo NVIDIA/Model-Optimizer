@@ -25,6 +25,7 @@ import re
 import sys
 import types
 from collections import Counter, OrderedDict
+from typing import Literal
 
 import pytest
 import torch
@@ -41,12 +42,12 @@ from torch.utils.data import (
 )
 
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.mode as quant_mode
 import modelopt.torch.utils.distributed as mto_dist
-from modelopt.torch.quantization.mode import CalibrateModeRegistry
-from modelopt.torch.quantization.model_quant import (
-    _RANK_LOCAL_CALIBRATION,
-    _refuse_unsupported_distributed_calibration,
-)
+from modelopt.torch.opt.config import ModeloptField
+from modelopt.torch.quantization.config import QuantizeAlgorithmConfig
+from modelopt.torch.quantization.mode import BaseCalibrateModeDescriptor, CalibrateModeRegistry
+from modelopt.torch.quantization.model_quant import _refuse_unsupported_distributed_calibration
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
     ParallelState,
@@ -586,13 +587,41 @@ def test_forward_loop_refuses_a_batch_that_is_not_a_mapping():
 # ------------------------------------------------------------------------ rank-local calibration
 
 
-def test_the_refused_calibrations_name_registered_modes():
-    """The refusal matches calibrate modes by name: one renamed or misspelled would stop being
-    refused without any other test failing."""
-    unregistered = [
-        name for name in _RANK_LOCAL_CALIBRATION if f"{name}_calibrate" not in CalibrateModeRegistry
+def test_every_calibrate_mode_declares_whether_it_calibrates_distributed():
+    """A mode that declares nothing is refused on a model distributed over several ranks, so each
+    one modelopt registers says whether it calibrates correctly there."""
+    undeclared = [
+        name
+        for name, descriptor in vars(quant_mode).items()
+        if isinstance(descriptor, type)
+        and issubclass(descriptor, BaseCalibrateModeDescriptor)
+        and descriptor is not BaseCalibrateModeDescriptor
+        and descriptor._distributed_calibration is None
     ]
-    assert not unregistered, unregistered
+    assert not undeclared, undeclared
+
+
+def test_an_undeclared_calibration_is_refused_on_several_ranks():
+    """A calibration registered without declaring distributed support cannot slip past the guard."""
+
+    class _UndeclaredConfig(QuantizeAlgorithmConfig):
+        method: Literal["undeclared"] = ModeloptField("undeclared")
+
+    @CalibrateModeRegistry.register_mode
+    class _UndeclaredMode(BaseCalibrateModeDescriptor):
+        @property
+        def config_class(self) -> type[QuantizeAlgorithmConfig]:
+            return _UndeclaredConfig
+
+        _calib_func = None
+
+    model = nn.Sequential(nn.Linear(16, 16))
+    set_distribution_plan(model, DistributionPlan(world_size=2))
+    try:
+        with pytest.raises(NotImplementedError, match=r"undeclared \(no declared distributed"):
+            mtq.calibrate(model, {"method": "undeclared"}, lambda m: m(torch.randn(2, 16)))
+    finally:
+        CalibrateModeRegistry.remove_mode("undeclared_calibrate")
 
 
 @pytest.mark.parametrize(
