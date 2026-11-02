@@ -109,6 +109,7 @@ def test_image_calibration_uses_full_vlm_forward(hf_ptq, monkeypatch):
     args = SimpleNamespace(
         qformat="fp8",
         calib_with_images=True,
+        use_fsdp2=False,
         specdec_offline_dataset=None,
         layerwise_export=False,
     )

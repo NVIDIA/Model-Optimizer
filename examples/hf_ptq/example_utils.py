@@ -99,8 +99,8 @@ def validate_fsdp2_supported(args, config):
     issues = []
     if "vila" in args.local_checkpoint_path.lower():
         issues.append("VILA (custom builder + non-standard layer layout)")
-    # A VLM is calibrated on text through its language model; a layout whose decoder layers cannot
-    # be found fails in fsdp2_wrap. Encoder-decoder models have no single decoder stack to shard.
+    # A VLM is calibrated on text (see forward_requires_images); a layout whose decoder layers
+    # cannot be found fails in fsdp2_wrap. Encoder-decoder models have no single decoder stack.
     if getattr(config, "is_encoder_decoder", False):
         issues.append("encoder-decoder models")
     elif _is_multimodal_config(config) and getattr(args, "calib_with_images", False):
@@ -210,6 +210,12 @@ def is_nemotron_vl(model_or_config):
 
     architectures = getattr(config, "architectures", [])
     return any("nemotron" in arch.lower() for arch in architectures)
+
+
+def forward_requires_images(model: torch.nn.Module) -> bool:
+    """Whether ``model.forward`` cannot run without images (``pixel_values`` has no default)."""
+    param = inspect.signature(model.forward).parameters.get("pixel_values")
+    return param is not None and param.default is inspect.Parameter.empty
 
 
 def create_vlm_calibration_loop(full_model, calib_dataloader):

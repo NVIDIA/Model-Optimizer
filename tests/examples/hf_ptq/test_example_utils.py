@@ -79,6 +79,24 @@ def test_fsdp2_refuses_encoder_decoder():
         example_utils.validate_fsdp2_supported(args, config)
 
 
+class _ImageOnlyVLM(torch.nn.Module):
+    def forward(self, pixel_values, input_ids=None):  # e.g. Nemotron Nano VL
+        pass
+
+
+class _TextCapableVLM(torch.nn.Module):
+    def forward(self, input_ids=None, pixel_values=None):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("model", "requires_images"),
+    [(_ImageOnlyVLM(), True), (_TextCapableVLM(), False), (torch.nn.Linear(2, 2), False)],
+)
+def test_forward_requires_images(model, requires_images):
+    assert example_utils.forward_requires_images(model) is requires_images
+
+
 def _write_safetensors(path, tensors):
     save_file(tensors, str(path), metadata={"format": "pt"})
 

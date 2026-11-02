@@ -812,18 +812,14 @@ def _auxiliary_modules(model, decoder_layers) -> list[torch.nn.Module]:
             parts = name.split(".")
             for i in range(1, len(parts)):
                 ancestor_ids.add(id(model.get_submodule(".".join(parts[:i]))))
-    # Asked of every ancestor: a VLM wrapper may not expose its language model's lm_head.
     embedding_ids = set()
-    for module in model.modules():
-        if id(module) not in ancestor_ids:
-            continue
-        for getter in ("get_input_embeddings", "get_output_embeddings"):
-            try:
-                embedding = getattr(module, getter)()
-            except (AttributeError, NotImplementedError):
-                embedding = None
-            if embedding is not None:
-                embedding_ids.add(id(embedding))
+    for getter in ("get_input_embeddings", "get_output_embeddings"):
+        try:
+            embedding = getattr(model, getter)()
+        except (AttributeError, NotImplementedError):
+            embedding = None
+        if embedding is not None:
+            embedding_ids.add(id(embedding))
 
     aux = []
     for module in model.modules():

@@ -15,6 +15,8 @@
 
 """Pure-function tests for ``modelopt.torch.utils.plugins.model_load_utils``."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from safetensors.torch import save_file
@@ -26,17 +28,40 @@ from _test_utils.torch.transformers_models import (
     get_tiny_qwen3_5_moe_vl,
     get_tiny_qwen3_5_vl,
 )
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText
 
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils.plugins.model_load_utils import (
     _conversion_plan,
     _convert_keys,
+    _meta_model_factory,
     _resolve_target,
     build_meta_causal_lm,
     record_unplaced_source_keys,
     unplaced_source_keys,
 )
+
+_CAUSAL = {"AutoModelForCausalLM": "modeling.Model"}
+_IMAGE_TEXT = {"AutoModelForImageTextToText": "modeling.Model"}
+
+
+@pytest.mark.parametrize(
+    ("model_type", "auto_map", "multimodal", "factory"),
+    [
+        ("remote", {**_CAUSAL, **_IMAGE_TEXT}, True, AutoModelForImageTextToText),
+        ("remote", {**_CAUSAL, **_IMAGE_TEXT}, False, AutoModelForCausalLM),
+        ("remote", _CAUSAL, True, AutoModelForCausalLM),  # e.g. Nemotron VL: full model there
+        ("remote", _IMAGE_TEXT, False, AutoModelForImageTextToText),
+        ("llava", None, True, AutoModelForImageTextToText),
+        ("qwen3_5", None, False, AutoModelForCausalLM),  # text-only checkpoint of a VLM type
+        ("phi4_multimodal", None, True, AutoModelForCausalLM),  # no image-text-to-text class
+    ],
+)
+def test_meta_model_factory(model_type, auto_map, multimodal, factory):
+    config = SimpleNamespace(model_type=model_type, auto_map=auto_map)
+    if multimodal:
+        config.vision_config = {}
+    assert _meta_model_factory(config) is factory
 
 
 def _build_tiny_qwen3_moe():

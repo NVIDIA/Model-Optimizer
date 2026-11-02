@@ -58,18 +58,22 @@ logger = logging.getLogger(__name__)
 def _meta_model_factory(config):
     """Auto class that builds ``config``'s whole model, vision tower included for a VLM.
 
-    A remote-code checkpoint is built with the head its ``auto_map`` registers, preferring the
-    causal-LM one. A Transformers VLM is built as image-text-to-text: ``AutoModelForCausalLM``
-    rejects most VLM configs, and for the rest may build a text-only class whose parameter names
-    no longer match the checkpoint.
+    A remote-code checkpoint is built with the head its ``auto_map`` registers: image-text-to-text
+    for a multimodal config that registers it, else causal-LM (Nemotron VL registers its full model
+    there). A Transformers VLM is built as image-text-to-text: ``AutoModelForCausalLM`` rejects most
+    VLM configs, and for the rest may build a text-only class whose parameter names no longer match
+    the checkpoint.
     """
     auto_map = getattr(config, "auto_map", None) or {}
+    multimodal = hasattr(config, "vision_config")
+    if "AutoModelForImageTextToText" in auto_map and (
+        multimodal or "AutoModelForCausalLM" not in auto_map
+    ):
+        return AutoModelForImageTextToText
     if "AutoModelForCausalLM" in auto_map:
         return AutoModelForCausalLM
-    if "AutoModelForImageTextToText" in auto_map:
-        return AutoModelForImageTextToText
     if (
-        hasattr(config, "vision_config")
+        multimodal
         and getattr(config, "model_type", None) in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
     ):
         return AutoModelForImageTextToText
@@ -310,48 +314,47 @@ def _group_sources_by_layer(
     plans: list[dict],
     model_param_names: set[str],
     layer_prefixes: list[str],
-) -> tuple[dict[int, list[str]], list[str], list[str]]:
+) -> tuple[dict[int, list[str]], list[str], list[str], set[str]]:
     """Bucket checkpoint keys by the decoder layer their converted target lives in.
 
-    Returns ``(layer_sources, non_layer_sources, unplaced)``: ``layer_sources[i]`` holds the keys
-    targeting decoder layer ``i``, ``non_layer_sources`` holds root (embed/lm_head/norm) keys, and
-    ``unplaced`` NAMES the keys whose target isn't in the model -- weights the built model has no
-    home for (an MTP head, an auxiliary tower). The names are kept, not just counted, so the export
-    can copy them through: PTQ never touches them, but the exported checkpoint is still expected to
-    contain them.
+    Returns ``(layer_sources, non_layer_sources, unplaced, targets)``: ``layer_sources[i]`` holds
+    the keys targeting decoder layer ``i``, ``non_layer_sources`` holds root (embed/lm_head/norm)
+    keys, and ``unplaced`` NAMES the keys whose target isn't in the model -- weights the built model
+    has no home for (an MTP head, an auxiliary tower). The names are kept, not just counted, so the
+    export can copy them through: PTQ never touches them, but the exported checkpoint is still
+    expected to contain them. ``targets`` holds the parameter names some key loads into.
     """
     layer_sources: dict[int, list[str]] = {i: [] for i in range(len(layer_prefixes))}
     non_layer_sources: list[str] = []
     unplaced: list[str] = []
+    targets: set[str] = set()
     for ckpt_key in ckpt_keys:
         target = _target_param(plans, ckpt_key, model_param_names)
         if target is None:
             unplaced.append(ckpt_key)
             continue
+        targets.add(target)
         for i, prefix in enumerate(layer_prefixes):
             if target.startswith(prefix):
                 layer_sources[i].append(ckpt_key)
                 break
         else:
             non_layer_sources.append(ckpt_key)
-    return layer_sources, non_layer_sources, unplaced
+    return layer_sources, non_layer_sources, unplaced, targets
 
 
-def _check_every_param_sourced(
-    model: nn.Module,
-    plans: list[dict],
-    model_param_names: set[str],
-    placed_keys: "Iterable[str]",
-) -> None:
+def _check_every_param_sourced(model: nn.Module, sourced_targets: set[str]) -> None:
     """Raise if a parameter (or meta buffer) of ``model`` gets no tensor from the checkpoint.
 
     The FSDP2 loader materializes the model with uninitialized storage, so a parameter no checkpoint
     key converts into would silently calibrate on garbage, e.g. when a VLM checkpoint names its
     weights in a layout the conversion plan does not cover. A tied pair (``lm_head`` and the
-    embedding) counts as sourced if either name is: ``tie_weights`` fills the other after the load.
+    embedding) counts as sourced if either name is: ``tie_weights`` fills the other after the load,
+    from the mapping it recomputes here.
     """
-    sourced = {_target_param(plans, key, model_param_names) for key in placed_keys}
-    for target, source in (getattr(model, "all_tied_weights_keys", None) or {}).items():
+    sourced = set(sourced_targets)
+    tied = getattr(model, "get_expanded_tied_weights_keys", None)
+    for target, source in (tied(all_submodels=True) if tied else {}).items():
         if target in sourced or source in sourced:
             sourced.update((target, source))
     required = chain(
@@ -862,7 +865,7 @@ def parallel_load_and_prepare_fsdp2(
     # non_layer_sources). Every tensor in the files the index names, not only the ones it lists, so
     # the unplaced ones fall out of this same pass. A model built from its config ran no
     # conversions of its own, so the stock plan is the only one.
-    layer_sources, non_layer_sources, unplaced = _group_sources_by_layer(
+    layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
         checkpoint_tensor_files(resolved_path),
         [plan] if plan else [],
         model_param_names,
@@ -881,12 +884,7 @@ def parallel_load_and_prepare_fsdp2(
     # What from_pretrained records: the conversions some checkpoint key used. The export reverts
     # these and would otherwise query the wrapped class, which has lost them.
     model._weight_conversions = [c for c in plan["conversions"] if c.was_used()] if plan else []
-    _check_every_param_sourced(
-        model,
-        [plan] if plan else [],
-        model_param_names,
-        chain(non_layer_sources, *layer_sources.values()),
-    )
+    _check_every_param_sourced(model, sourced_targets)
 
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
 
