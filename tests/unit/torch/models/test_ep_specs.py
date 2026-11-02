@@ -128,6 +128,18 @@ def test_a_spec_decompresses_only_in_a_prepare(model_type):
 
 
 @pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
+def test_a_spec_states_a_prepared_plan_only_with_a_prepare(model_type):
+    """The decision reads prepared_ep_plan and may plan the model expert-parallel on it, but only
+    prepare attaches it for the load: with no prepare, the load gets a config with no plan and
+    refuses the model after the decision."""
+    ep = get_spec(model_type).ep_spec
+    assert not ep.prepared_ep_plan or ep.prepare, (
+        f"{model_type} states prepared_ep_plan and no prepare, so nothing attaches it for the "
+        "expert-parallel load: state it as base_model_ep_plan, or attach it in a prepare"
+    )
+
+
+@pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
 def test_a_plan_goes_where_the_load_reads_one(model_type):
     """A spelling the load does not read is read as no plan at all, and the MoE planned as dense."""
     attrs = get_spec(model_type).ep_spec.plan_config_attr or ()
