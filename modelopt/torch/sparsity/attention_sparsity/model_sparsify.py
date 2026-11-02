@@ -20,14 +20,11 @@ from typing import Any
 
 import torch
 
-from modelopt.torch.opt.conversion import apply_mode
 from modelopt.torch.opt.searcher import ForwardLoop
 
 from .calibration import calibrate_sparse_attention
 from .config import SparseAttentionConfig
 from .conversion import get_sparse_attention_mode_state, update_sparse_attention_metadata
-from .mode import SparseAttentionModeRegistry
-from .searcher import SparseAttentionSearcher
 
 __all__ = [
     "calibrate",
@@ -162,11 +159,9 @@ def sparsify(
         DeprecationWarning,
         stacklevel=2,
     )
-    model = apply_mode(
-        model, mode=[("sparse_attention", config)], registry=SparseAttentionModeRegistry
-    )
-    SparseAttentionSearcher().search(model, {}, (), {"forward_loop": forward_loop})
-    return model
+    from ..sparsification import sparsify as _sparsify  # circular: ..sparsification imports this
+
+    return _sparsify(model, config, forward_loop=forward_loop)
 
 
 def calibrate(
@@ -186,9 +181,10 @@ def calibrate(
     Returns:
         The calibrated model with optimized sparse attention thresholds.
     """
-    mode_state = get_sparse_attention_mode_state(model)
+    # Saving refreshes only the last mode's metadata, which may not be sparse_attention, so refresh it
+    # for each converted model in ``model``, which may also be a wrapper or a container of several.
+    mode_states = [(m, s) for m in model.modules() if (s := get_sparse_attention_mode_state(m))]
     calibrate_sparse_attention(model, config, forward_loop=forward_loop)
-    # Saving refreshes only the last mode's metadata, which may not be sparse_attention.
-    if mode_state is not None:
-        update_sparse_attention_metadata(model, *mode_state)
+    for m, (mode_config, metadata) in mode_states:
+        update_sparse_attention_metadata(m, mode_config, metadata)
     return model

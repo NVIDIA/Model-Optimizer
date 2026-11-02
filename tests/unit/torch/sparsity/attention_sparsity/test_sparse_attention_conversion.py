@@ -215,7 +215,8 @@ class TestConversionEdgeCases:
             assert method.target_sparse_ratio == target_sparse_ratio
             assert module.get_threshold_info()["type"] == "dynamic_calibrated"
 
-    def test_calibrate_after_later_mode_survives_restore(self):
+    @pytest.mark.parametrize("in_container", [False, True])
+    def test_calibrate_after_later_mode_survives_restore(self, in_container):
         """calibrate() persists its results even when sparse_attention is not the last mode."""
         calibration_params = {"prefill": {"a": 3.14, "b": 7.5}}
 
@@ -224,30 +225,33 @@ class TestConversionEdgeCases:
                 if isinstance(module, SparseAttentionModule):
                     module._sparse_method_instance.calibration_params = calibration_params
 
-        model = mts.sparsify(SimpleAttentionModel(), FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
-        model = mts.sparsify(model, "sparse_magnitude")
+        models = [
+            mts.sparsify(
+                mts.sparsify(SimpleAttentionModel(), FLASH_SKIP_SOFTMAX_DEFAULT_CFG),
+                "sparse_magnitude",
+            )
+            for _ in range(2 if in_container else 1)
+        ]
         with patch(
             "modelopt.torch.sparsity.attention_sparsity.model_sparsify.calibrate_sparse_attention",
             side_effect=fake_calibration,
         ):
-            sparse_attn.calibrate(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+            # A container holds several separately converted models.
+            sparse_attn.calibrate(
+                nn.ModuleList(models) if in_container else models[0],
+                FLASH_SKIP_SOFTMAX_DEFAULT_CFG,
+            )
 
-        model_restored = mto.restore_from_modelopt_state(
-            SimpleAttentionModel(), mto.modelopt_state(model)
-        )
-        sparse_modules = [
-            m for m in model_restored.modules() if isinstance(m, SparseAttentionModule)
-        ]
-        assert sparse_modules
-        for module in sparse_modules:
-            assert module._sparse_method_instance.calibration_params == calibration_params
-
-    def test_calibrate_container_of_converted_models(self):
-        """calibrate() works on a module holding several separately converted models."""
-        models = nn.ModuleList(
-            mts.sparsify(SimpleAttentionModel(), FLASH_SKIP_SOFTMAX_DEFAULT_CFG) for _ in range(2)
-        )
-        sparse_attn.calibrate(models, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+        for model in models:
+            model_restored = mto.restore_from_modelopt_state(
+                SimpleAttentionModel(), mto.modelopt_state(model)
+            )
+            sparse_modules = [
+                m for m in model_restored.modules() if isinstance(m, SparseAttentionModule)
+            ]
+            assert sparse_modules
+            for module in sparse_modules:
+                assert module._sparse_method_instance.calibration_params == calibration_params
 
     @pytest.mark.parametrize("weight_first", [True, False])
     def test_chain_with_weight_sparsity(self, weight_first):
@@ -285,13 +289,40 @@ class TestConversionEdgeCases:
             (FLASH_SKIP_SOFTMAX_DEFAULT_CFG, {"forward_loop": print}, print),
             (FLASH_SKIP_SOFTMAX_DEFAULT_CFG, {"data_loader": [None]}, print),
             ("quantize", None, None),
+            (["sparse_magnitude", "sparsegpt"], None, print),  # incompatible modes
+            ({"sparse_cfg": {"*attention*": {"thresholds": {"prefill": [2.0]}}}}, None, None),
+            (  # the failing mode comes after one that prunes weights
+                [
+                    ("sparse_magnitude", {}),
+                    ("sparse_attention", {"sparse_cfg": {"calibration": {"samples": 0}}}),
+                ],
+                None,
+                None,
+            ),
+            (mts.SKIP_SOFTMAX_CALIB, None, print),  # decode calibration needs RULER data
+            (
+                [("sparsegpt", {}), ("sparse_attention", FLASH_SKIP_SOFTMAX_DEFAULT_CFG)],
+                {"data_loader": iter([None])},  # a second mode would find it consumed
+                None,
+            ),
         ],
     )
     def test_sparsify_rejects_invalid_input_before_converting(self, mode, config, forward_loop):
         model = SimpleAttentionModel()
-        with pytest.raises(ValueError):
+        state_dict = copy.deepcopy(model.state_dict())
+        with pytest.raises((AssertionError, ValueError)):
             mts.sparsify(model, mode, config, forward_loop=forward_loop)
         assert not mto.ModeloptStateManager.is_converted(model)
+        assert all(torch.equal(v, state_dict[k]) for k, v in model.state_dict().items())
+
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
+    @pytest.mark.parametrize("sparsify", [mts.sparsify, sparse_attn.sparsify])
+    def test_sparsify_keeps_training_modes(self, sparsify):
+        model = SimpleAttentionModel()
+        model.attention.eval()
+        sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+        assert model.training
+        assert not any(m.training for m in model.attention.modules())
 
     def test_deprecated_sparsify(self):
         """The deprecated mtsa.sparsify warns and matches mts.sparsify."""

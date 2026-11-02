@@ -36,7 +36,7 @@ Changelog
 
 *Sparsity*
 
-- ``mts.sparsify`` now also applies sparse attention: pass a sparse attention config such as ``mts.SKIP_SOFTMAX_CALIB`` in place of the mode, or combine it with weight sparsity as ``[("sparsegpt", {}), ("sparse_attention", cfg)]``. ``mts.export`` now also handles models with sparse attention, which it keeps.
+- ``mts.sparsify`` now also applies sparse attention: pass a sparse attention config such as ``mts.SKIP_SOFTMAX_CALIB`` in place of the mode, or combine it with weight sparsity in one call, e.g. ``mts.sparsify(model, [("sparsegpt", {}), ("sparse_attention", mts.SKIP_SOFTMAX_DEFAULT)], forward_loop=forward_loop)``. ``mts.export`` now also handles models with sparse attention, which it keeps.
 
 *Misc*
 

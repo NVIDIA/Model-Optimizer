@@ -38,7 +38,7 @@ from modelopt.torch.quantization.conversion import (
     set_quantizer_attributes_partial,
     set_quantizer_by_cfg,
 )
-from modelopt.torch.utils import atomic_print
+from modelopt.torch.utils import atomic_print, restore_training_modes
 
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
 from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe
@@ -139,7 +139,7 @@ def calibrate(
     # TODO: Re-enable when the CUDA error: unspecified launch failure is fixed.
     # clear_cuda_cache()
 
-    _restore_training_modes(model, training_modes)
+    restore_training_modes(model, training_modes)
 
     return model
 
@@ -154,22 +154,6 @@ def _holds_only_quantizers(module: nn.Module) -> bool:
         and bool(children)
         and all(_holds_only_quantizers(child) for child in children)
     )
-
-
-def _restore_training_modes(model: nn.Module, training_modes: dict[nn.Module, bool]) -> None:
-    """Give each module back its mode from ``training_modes``; one not in it takes its parent's mode.
-
-    ``model.train()`` runs first, as it always did, so every module's ``train()`` is called; then the modules
-    whose own mode differs get it back, parents first, because ``train()`` also sets every module below.
-    """
-    model.train(training_modes[model])
-    stack = [(child, model.training) for child in model.children()]
-    while stack:
-        module, parent_mode = stack.pop()
-        mode = training_modes.get(module, parent_mode)
-        if module.training != mode:
-            module.train(mode)
-        stack.extend((child, mode) for child in module.children())
 
 
 def postprocess_amax(model: nn.Module, key: str, post_process_fn) -> nn.Module:
