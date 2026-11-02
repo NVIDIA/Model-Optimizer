@@ -23,19 +23,32 @@ on one process.
 
 The routing-weight gradient check guards that the routing weights keep their gradient: they never
 travel, and weight their tokens' expert results on the rank that holds them.
+
+The tests at the end cover the module's helpers that count a model's routed experts, choose the EP
+degree they are sharded over, and find them by the model's ``base_model_ep_plan``.
 """
 
 import copy
 import warnings
+from contextlib import nullcontext
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.distributed as dist
+from _test_utils.torch.moe_models import MoeLayer, model_with_decoder_at
 from packaging.version import Version
+from torch import nn
 
+import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.moe as moe
-from modelopt.torch.utils.moe import a2a_moe
+from modelopt.torch.utils.moe import (
+    _choose_ep_degree,
+    _num_experts_from_config,
+    _routed_expert_modules,
+    a2a_moe,
+)
 
 # Small, fully-deterministic problem. E must be divisible by every world size under test.
 E, TOP_K, H, T = 4, 2, 8, 6
@@ -87,10 +100,10 @@ def test_a2a_moe_keeps_the_dtype_it_is_given(cpu_dist_workers, dtype, tol):
     cpu_dist_workers.run(_keeps_dtype_job, dtype=dtype, tol=tol)
 
 
-def _chunked_hops_job(rank, size):
+def _chunked_hops_job(rank, size, grad):
     """Shrinking the per-hop element limit splits every 2-D hop along the hidden dim into slices
     within it -- the guard against int32 offset overflow, at a size a unit test can afford --
-    without changing the result."""
+    without changing the result or, with a graph, the gradients."""
     gen = torch.Generator().manual_seed(rank)
     x = torch.randn(T, H, generator=gen)
     # Every rank sends and receives T * TOP_K = 12 rows. A limit of 34 holds 2 of their H = 8
@@ -98,7 +111,7 @@ def _chunked_hops_job(rank, size):
     ti = (torch.arange(T * TOP_K) % E).reshape(T, TOP_K)
     tw = torch.rand(T, TOP_K, generator=gen)
     limit = 34
-    hops = []  # the elements each 2-D hop moves
+    hops = []  # the elements each 2-D hop moves, the backward's included
     real = dist.all_to_all_single
 
     def recording(output, input_, *args, **kwargs):
@@ -106,19 +119,27 @@ def _chunked_hops_job(rank, size):
             hops.append(max(output.numel(), input_.numel()))
         return real(output, input_, *args, **kwargs)
 
+    def run():
+        x_ = x.clone().requires_grad_(grad)
+        with torch.set_grad_enabled(grad):
+            out = a2a_moe(dist.group.WORLD, x_, ti, tw, E // size, _identity_experts)
+            if grad:
+                out.square().sum().backward()
+        return out.detach(), x_.grad
+
     dist.all_to_all_single = recording
     try:
-        with torch.no_grad():
-            whole = a2a_moe(dist.group.WORLD, x, ti, tw, E // size, _identity_experts)
-            whole_hops = hops.copy()
-            hops.clear()
-            moe._A2A_MAX_HOP_ELEMENTS = limit
-            chunked = a2a_moe(dist.group.WORLD, x, ti, tw, E // size, _identity_experts)
+        whole, whole_grad = run()
+        whole_hops = hops.copy()
+        hops.clear()
+        moe._A2A_MAX_HOP_ELEMENTS = limit
+        chunked, chunked_grad = run()
     finally:
         dist.all_to_all_single = real
         moe._A2A_MAX_HOP_ELEMENTS = 2**31 - 1
     assert max(hops) <= limit < max(whole_hops)
     torch.testing.assert_close(chunked, whole, atol=0, rtol=0)
+    torch.testing.assert_close(chunked_grad, whole_grad, atol=0, rtol=0)
 
 
 def _bounded_combine_job(rank, size):
@@ -163,8 +184,9 @@ def test_the_combine_works_a_slice_of_tokens_at_a_time(cpu_dist_workers):
     cpu_dist_workers.run(_bounded_combine_job)
 
 
-def test_a2a_moe_chunks_hops_past_the_element_limit(cpu_dist_workers):
-    cpu_dist_workers.run(_chunked_hops_job)
+@pytest.mark.parametrize("grad", [False, True], ids=["forward", "backward"])
+def test_a2a_moe_chunks_hops_past_the_element_limit(cpu_dist_workers, grad):
+    cpu_dist_workers.run(_chunked_hops_job, grad=grad)
 
 
 def _routing_skew_job(rank, size, routing):
@@ -362,20 +384,56 @@ def _assert_experts_backward_matches(rank, whole, local, owned, size, to_rank0=F
         )
 
 
-def _real_experts_backward_job(rank, size):
+def _fake_quantized_like_the_whole_module(rank, size, whole, local, owned):
+    """Both with ModelOpt's fake quantizers, the local ones set to the whole module's calibrated
+    scales so the two compute the same quantized function; returns them converted. Calibrating
+    through the torch_a2a forward sees only the tokens dispatched to this rank's experts."""
+    cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*proj_input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            {"quantizer_name": "*proj_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+    x, weights, index = _routed_tokens(size)
+    tok = slice(rank * T, (rank + 1) * T)
+    whole_holder, local_holder = torch.nn.ModuleList([whole]), torch.nn.ModuleList([local])
+    whole.config._experts_implementation = "grouped_mm"
+    mtq.quantize(whole_holder, cfg, lambda m: m[0](x, index, weights))
+    local.config._experts_implementation = "torch_a2a"
+    mtq.quantize(
+        local_holder, cfg, lambda m: m[0](x[tok], index[tok], weights[tok], dist.group.WORLD)
+    )
+    whole, local = whole_holder[0], local_holder[0]
+    for name in ("gate_up_proj_input_quantizer", "down_proj_input_quantizer"):
+        getattr(local, name).amax = getattr(whole, name).amax
+    for name in ("gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"):
+        for i, quantizer in enumerate(getattr(local, name)):
+            quantizer.amax = getattr(whole, name)[owned.start + i].amax
+    return whole, local
+
+
+def _real_experts_backward_job(rank, size, quantized):
     moe.register_torch_a2a()
     whole, local, owned = _split_qwen3_moe_experts(rank, size)
+    if quantized:
+        whole, local = _fake_quantized_like_the_whole_module(rank, size, whole, local, owned)
     _assert_experts_backward_matches(rank, whole, local, owned, size)
 
 
-def test_fused_experts_backward_through_torch_a2a_matches_the_whole_module(cpu_dist_workers):
+@pytest.mark.parametrize("quantized", [False, True], ids=["unquantized", "fake-quantized"])
+def test_fused_experts_backward_through_torch_a2a_matches_the_whole_module(
+    cpu_dist_workers, quantized
+):
     """transformers' fused experts, split over two ranks, train through the torch_a2a forward exactly
     as the whole module does on one process: same output, and same gradients for the hidden states,
-    the routing weights and each rank's experts."""
+    the routing weights and each rank's experts. With ModelOpt's fake quantizers inserted, that is
+    QAT under expert parallelism."""
     transformers = pytest.importorskip("transformers")
     if Version(transformers.__version__) < Version("5.6"):
         pytest.skip("expert parallelism needs transformers >= 5.6")
-    cpu_dist_workers.run(_real_experts_backward_job)
+    cpu_dist_workers.run(_real_experts_backward_job, quantized=quantized)
 
 
 def _fp32_routing_weights_job(rank, size):
@@ -401,3 +459,107 @@ def test_fp32_routing_weights_give_grouped_mms_result_at_ep1(cpu_dist_workers):
     if Version(transformers.__version__) < Version("5.6"):
         pytest.skip("expert parallelism needs transformers >= 5.6")
     cpu_dist_workers.run(_fp32_routing_weights_job)
+
+
+# ------------------------------------------------------------------------------- expert counting
+
+
+@pytest.mark.parametrize(
+    ("config", "experts"),
+    [
+        (SimpleNamespace(hidden_size=128), 0),
+        (SimpleNamespace(num_experts=16), 16),
+        (SimpleNamespace(num_local_experts=16), 16),
+        (SimpleNamespace(n_routed_experts=16), 16),
+        (SimpleNamespace(num_routed_experts=16), 16),
+        (SimpleNamespace(text_config=SimpleNamespace(n_routed_experts=32)), 32),
+        (SimpleNamespace(llm_config=SimpleNamespace(n_routed_experts=32)), 32),
+    ],
+    ids=[
+        "dense",
+        "num_experts",
+        "num_local_experts",
+        "n_routed_experts",
+        "num_routed_experts",
+        "vlm-text_config",
+        "vlm-llm_config",
+    ],
+)
+def test_the_expert_count_is_read_under_every_spelling(config, experts):
+    """Architectures disagree on the field name, and a VLM's MoE is its nested LM, whose root
+    config has no expert count of its own: missing either would silently disable EP."""
+    assert _num_experts_from_config(config) == experts
+
+
+# ------------------------------------------------------------------------------- degree selection
+
+
+@pytest.mark.parametrize(
+    ("world", "experts", "degree"),
+    [(8, 64, 8), (8, 6, 2), (8, 5, 1), (8, 0, 1), (1, 64, 1)],
+    ids=["largest-valid", "divides-the-experts", "nothing-divides", "dense", "single-rank"],
+)
+def test_the_largest_ep_degree_dividing_the_world_and_the_experts_is_chosen(world, experts, degree):
+    """EP must divide the expert count, so every rank holds whole experts; with nothing dividing, a
+    dense model, or a single rank, there is no expert parallelism."""
+    assert _choose_ep_degree(world, experts) == degree
+
+
+# ---------------------------------------------------------------------------- routed experts
+
+
+_STOCK_PLAN = {
+    "layers.*.mlp.gate": "ep_router",
+    "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+    "layers.*.mlp.experts.down_proj": "grouped_gemm",
+    "layers.*.mlp.experts": "moe_tp_experts",
+}
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        _STOCK_PLAN,
+        {"layers.*.mlp.experts": "moe_tp_experts"},
+        {"layers.*.mlp.experts": "nemotron_experts_ep"},
+        {k: v for k, v in _STOCK_PLAN.items() if v == "grouped_gemm"},
+        {
+            "layers.*.block_sparse_moe.experts": "moe_tp_experts",
+            "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+        },
+    ],
+    ids=["stock", "experts-style-only", "nemotron-style-only", "grouped-gemm-only", "hybrid"],
+)
+@pytest.mark.parametrize(
+    "prefix",
+    ["", "model.", "model.language_model.", "language_model.model."],
+    ids=["base-model", "causal-lm", "vlm", "legacy-vlm"],
+)
+def test_routed_experts_are_the_plans_containers_under_any_prefix(plan, prefix):
+    """The base-relative plan keys match the decoder wherever the model nests it, at every layer
+    index, the container named by its style or as its grouped-GEMM parameters' parent, also in a
+    plan that names some containers one way and some the other. The router, the shared experts, and
+    a module whose name merely ends in a key's text are not routed experts."""
+    pytest.importorskip("transformers.integrations.tensor_parallel")
+    model = model_with_decoder_at(prefix)
+    model.add_module("sublayers", nn.ModuleList([MoeLayer()]))  # "sublayers.0.mlp.experts"
+
+    found = _routed_expert_modules(model, plan)
+
+    modules = dict(model.named_modules())
+    assert found == {
+        name: modules[name] for name in [f"{prefix}layers.{i}.mlp.experts" for i in (0, 1)]
+    }
+
+
+@pytest.mark.parametrize(("installed", "refused"), [("5.6.2", True), ("5.7.0", False)])
+def test_a_transformers_below_a_features_floor_is_refused(monkeypatch, installed, refused):
+    transformers = pytest.importorskip("transformers")
+    monkeypatch.setattr(transformers, "__version__", installed)
+
+    with (
+        pytest.raises(RuntimeError, match=r"EP load requires transformers >= 5\.7, but 5\.6\.2 is")
+        if refused
+        else nullcontext()
+    ):
+        moe.require_transformers("5.7", "EP load")

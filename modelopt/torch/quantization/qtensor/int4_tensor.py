@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from ..extensions import get_cuda_ext
-from ..qtensor.base_qtensor import BaseQuantizedTensor
+from ..qtensor.base_qtensor import BaseQuantizedTensor, _refuse_dtensor
 from ..utils import reduce_amax, reduce_block_padding
 
 __all__ = ["INT4QTensor"]
@@ -47,6 +47,7 @@ class INT4QTensor(BaseQuantizedTensor):
         Returns:
             tuple: Contains quantized data, input quantization config, and scale quantization config.
         """
+        _refuse_dtensor(input, cls.__name__)
         cuda_ext = get_cuda_ext()
 
         scale_quant_maxbound = cls._get_quant_maxbound(num_bits=4)
@@ -81,7 +82,7 @@ class INT4QTensor(BaseQuantizedTensor):
             # pack the int4 weights into a uint8 tensor
             # packing format: w0, w1, w2, w3, w4, w5, ...
             #               | byte  | byte  | byte  |
-            packed_output_uint8 = flattened[::2] << 4 | flattened[1::2]
+            packed_output_uint8 = torch.bitwise_left_shift(flattened[::2], 4) | flattened[1::2]
 
         # reshape the packed_output_uint8 to the original dimensions for sharding
         packed_output_uint8 = packed_output_uint8.reshape(*original_input.shape[:-1], -1)

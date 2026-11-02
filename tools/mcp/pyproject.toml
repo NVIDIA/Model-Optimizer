@@ -10,6 +10,9 @@ dependencies = [
     "pydantic>=2.0",
 ]
 
+[project.optional-dependencies]
+mlflow = ["mlflow"]
+
 [project.scripts]
 # Console entry. Codex / Claude Code launch this as a stdio subprocess.
 # See OMNIML-5123 for the design + acceptance criteria.

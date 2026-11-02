@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GPU/distributed tests for the FSDP2 load path and its helpers."""
+"""GPU/distributed tests for the loads: ``load_pretrained`` by its plan, the FSDP2 load, and their
+helpers."""
 
 import json
 import os
@@ -24,10 +25,19 @@ import torch
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor
+from transformers import AutoModelForCausalLM, LlamaConfig
 
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
-from modelopt.torch.utils.distributed import broadcast_state_dict
-from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
+from modelopt.torch.utils.distributed import (
+    DistributionPlan,
+    broadcast_state_dict,
+    distribution_plan,
+    set_distribution_plan,
+)
+from modelopt.torch.utils.plugins.model_load_utils import (
+    load_pretrained,
+    parallel_load_and_prepare_fsdp2,
+)
 
 VOCAB_SIZE = 64
 
@@ -61,6 +71,7 @@ def _test_parallel_load_and_export(rank, size, ckpt_dir, export_dir, cpu_offload
         size,
         cpu_offload=cpu_offload,
     )
+    set_distribution_plan(model, DistributionPlan(size, dense="fsdp"))
 
     # Decoder layers AND root params (embed/lm_head) are sharded DTensors under shard_root=True.
     decoder_params = list(model.model.layers[0].parameters())
@@ -106,6 +117,7 @@ def _test_carry_over_unplaced_weights(rank, size, ckpt_dir, export_dir, orphan_p
     """Load, export, and require the weights the model could not place to survive."""
     device = torch.device(f"cuda:{rank}")
     model = parallel_load_and_prepare_fsdp2(ckpt_dir, device, rank, size)
+    set_distribution_plan(model, DistributionPlan(size, dense="fsdp"))
 
     unplaced = getattr(model, "_modelopt_unplaced_source_keys", None)
     assert unplaced, (
@@ -171,3 +183,68 @@ def test_carry_over_unplaced_weights(dist_workers, tmp_path):
             orphan_prefix=f"model.layers.{orphan_idx}.",
         )
     )
+
+
+# ------------------------------------------------------------------ load_pretrained, left to decide
+
+_TINY = {
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "vocab_size": 128,
+    "max_position_embeddings": 64,
+}
+
+
+def _save(config, ckpt_dir):
+    torch.manual_seed(0)
+    AutoModelForCausalLM.from_config(config).to(torch.bfloat16).save_pretrained(ckpt_dir)
+
+
+def _full(tensor):
+    return tensor.full_tensor() if isinstance(tensor, DTensor) else tensor
+
+
+def _load_and_check(rank, size, ckpt_dir, knobs, expected):
+    """Load on every rank of the run with the plan left to decide, and check what each rank holds.
+
+    Left to decide, ``load_pretrained`` FSDP2-shards a dense model when asked to, and otherwise gives
+    every rank the whole model on its own GPU. Whichever load runs, every rank ends up with the
+    checkpoint's weights and the load's record of what it could not place.
+    """
+    device = torch.device(f"cuda:{rank}")
+    os.environ.update(knobs)
+    try:
+        model = load_pretrained(ckpt_dir)
+        whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16)
+
+        params = dict(model.named_parameters())
+        whole_params = dict(whole.named_parameters())
+        assert params.keys() == whole_params.keys()
+        sharded = {name for name, param in params.items() if isinstance(param, DTensor)}
+        if expected == "replicated":
+            assert not sharded
+            assert all(param.device == device for param in params.values())
+        else:
+            assert {name for name in params if ".layers." in name} <= sharded
+        for name, param in params.items():  # the same order on every rank: full_tensor gathers
+            torch.testing.assert_close(_full(param).cpu(), whole_params[name])
+        assert model._modelopt_unplaced_source_keys == []
+        assert model._modelopt_source_checkpoint == ckpt_dir
+        dense = "replicate" if expected == "replicated" else "fsdp"
+        assert distribution_plan(model) == DistributionPlan(size, dense=dense)
+    finally:
+        for knob in knobs:
+            del os.environ[knob]
+
+
+def test_a_dense_model_loads_whole_on_every_rank(need_2_gpus, dist_workers, tmp_path):
+    _save(LlamaConfig(**_TINY), tmp_path)
+    dist_workers.run(_load_and_check, str(tmp_path), {}, "replicated")
+
+
+def test_a_dense_model_asked_to_shard_loads_fsdp2_sharded(need_2_gpus, dist_workers, tmp_path):
+    _save(LlamaConfig(**_TINY), tmp_path)
+    dist_workers.run(_load_and_check, str(tmp_path), {"MODELOPT_FSDP_SIZE": "world"}, "fsdp2")

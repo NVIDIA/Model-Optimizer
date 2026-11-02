@@ -1061,6 +1061,8 @@ class TestDdpGradientCoverage:
         final_logits, confidence_logits = model._apply_markov_head(
             hidden, backbone_logits, input_ids, anchors, n_blocks
         )
+        final_logits.retain_grad()
+        confidence_logits.retain_grad()
         loss, _, _ = model._compute_dspark_loss(
             backbone_logits,
             final_logits,
@@ -1073,3 +1075,5 @@ class TestDdpGradientCoverage:
         )
         loss.backward()
         assert not self._ungraded(model), f"no gradient for {self._ungraded(model)}"
+        # Through the draft's outputs, which an FSDP2 unit around the draft needs.
+        assert final_logits.grad is not None and confidence_logits.grad is not None

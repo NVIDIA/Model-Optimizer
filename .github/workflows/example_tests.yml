@@ -200,7 +200,7 @@ jobs:
       contents: read
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/nemo:26.08"
+      docker_image: "nvcr.io/nvidia/nemo:26.10.00"
       example: megatron_bridge
       # PR runs single-GPU (~11 min); the nightly runs every test multi-GPU (~58 min).
       timeout_minutes: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 30 || 75 }}

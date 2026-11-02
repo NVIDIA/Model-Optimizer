@@ -15,33 +15,299 @@
 
 """HuggingFace-coupled MoE expert-parallel (EP) helpers.
 
-The DP=EP all-to-all expert transport (``torch_a2a``).
+Finding a model's routed experts, choosing the EP degree they are sharded over, and the DP=EP
+all-to-all expert transport (``torch_a2a``).
 
 The all-to-all transport is plain ``torch.distributed.all_to_all_single`` (NCCL) wrapped around
-transformers' ``_grouped_linear``. ``register_torch_a2a()`` registers it into
+transformers' quantizable ``_grouped_linear``. ``register_torch_a2a()`` registers it into
 transformers' ``ExpertsInterface`` lazily -- never at import time, so importing this module has no
 transformers-``ExpertsInterface`` side effect.
 """
 
 import warnings
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+from packaging.version import parse
 from torch.distributed.nn.functional import all_to_all_single as autograd_all_to_all_single
+
+if TYPE_CHECKING:
+    from torch import nn
+
+# The transformers release the expert-parallel load needs, for every model: 5.6 builds a model only
+# with the experts implementations it ships, never torch_a2a.
+_EP_MIN_TRANSFORMERS = "5.7"
+
+
+def require_transformers(min_version: str, feature: str) -> None:
+    """Fail loudly if the installed transformers is older than ``min_version`` (the floor for ``feature``).
+
+    Callers enforce the version where the needed APIs first exist, so a too-old transformers errors
+    clearly instead of silently mis-behaving (e.g. transformers 5.5 silently shards nothing for EP).
+    A pre-release of the floor release (``5.7.0.dev0`` for ``5.7``) is refused too: it can predate
+    the feature the floor stands for.
+    """
+    # Imported here: this module imports without transformers.
+    import transformers
+
+    have = transformers.__version__
+    if parse(have) < parse(min_version):
+        raise RuntimeError(
+            f"{feature} requires transformers >= {min_version}, but {have} is installed. "
+            f"Upgrade with: pip install -U 'transformers>={min_version}'."
+        )
+
+
+# The nested configs a VLM's expert-parallel plan and expert count are read from. A spec attaching
+# its plan anywhere else would be read as having none, and the MoE planned as a dense model.
+_SUB_CONFIG_ATTRS = ("text_config", "llm_config")
+
+
+def _ep_config(hf_config):
+    """Return the config that carries the EP plan / expert count.
+
+    For a plain MoE causal LM this is the root config. For a VLM whose nested text submodel
+    is the MoE (e.g. ``KimiK25.text_config`` -> deepseek_v3, or ``NemotronH_Omni.llm_config``
+    -> nemotron_h), this is that nested config.
+    """
+    if getattr(hf_config, "base_model_ep_plan", None):
+        return hf_config
+    for _attr in _SUB_CONFIG_ATTRS:
+        sub = getattr(hf_config, _attr, None)
+        if sub is not None and getattr(sub, "base_model_ep_plan", None):
+            return sub
+    # Fall through: no plan anywhere; let callers decide.
+    return hf_config
+
+
+def _num_experts_from_config(hf_config) -> int:
+    """Return the MoE expert count from an HF config (0 if the model is not MoE).
+
+    Recurses into ``.text_config`` / ``.llm_config`` so VLMs whose nested text submodel is the MoE
+    (Kimi-K2.7, Llama-4 multimodal, NemotronH-Omni, ...) report the LM's expert count.
+    """
+    for cfg in (hf_config, *(getattr(hf_config, attr, None) for attr in _SUB_CONFIG_ATTRS)):
+        if cfg is None:
+            continue
+        for attr in ("num_experts", "num_local_experts", "n_routed_experts", "num_routed_experts"):
+            value = getattr(cfg, attr, None)
+            if value:
+                return int(value)
+    return 0
+
+
+def _choose_ep_degree(world_size: int, num_experts: int) -> int:
+    """The largest EP degree dividing both ``world_size`` and ``num_experts``; ``1`` if none does.
+
+    EP must divide ``num_experts`` (whole experts per rank) and ``world_size`` (a valid mesh
+    factorization). Each expert shard is then replicated over the remaining ranks
+    (``DistributionPlan.edp``). The largest degree holds the fewest experts per rank, which leaves
+    the most memory for activations, i.e. for calibration batches; any degree above 1 pays the same
+    two all-to-alls per MoE layer. Heuristic -- callers may override.
+    """
+    if num_experts <= 0:
+        return 1
+    return next(
+        (ep for ep in range(world_size, 0, -1) if world_size % ep == 0 and num_experts % ep == 0),
+        1,
+    )
+
+
+# The styles a base_model_ep_plan gives a layer's routed-experts container. A plan that styles the
+# experts' grouped-GEMM parameters names the containers through their parents too, so a plan that
+# styles some containers one way and others the other names them all.
+_EXPERTS_STYLES = ("moe_tp_experts", "nemotron_experts_ep")
+
+
+def _routed_expert_keys(ep_plan: dict[str, str]) -> set[str]:
+    """The keys of ``ep_plan``, a ``base_model_ep_plan``, that name a routed-experts container."""
+    return {key for key, style in ep_plan.items() if style in _EXPERTS_STYLES} | {
+        key.rsplit(".", 1)[0] for key, style in ep_plan.items() if style == "grouped_gemm"
+    }
+
+
+def _routed_expert_modules(model: "nn.Module", ep_plan: dict[str, str]) -> "dict[str, nn.Module]":
+    """``model``'s routed-expert containers, ``{name: module}``, as its ``base_model_ep_plan`` names them.
+
+    A module is one when its name, with layer indices wildcarded as transformers does, is a container
+    key or ends with one: the keys are relative to the base model, so they omit the ``model.`` or
+    ``language_model.model.`` a causal LM or a VLM puts in front. Deciding a model's distribution and
+    loading it expert-parallel both find the experts this way, so the two cannot disagree.
+    """
+    # Local: transformers is the optional [hf] extra, and this module must import without it.
+    from transformers.integrations.tensor_parallel import replace_layer_number_by_wildcard
+
+    keys = _routed_expert_keys(ep_plan)
+    found = {}
+    for name, module in model.named_modules():
+        generic = replace_layer_number_by_wildcard(name)
+        if any(generic == key or generic.endswith("." + key) for key in keys):
+            found[name] = module
+    return found
+
+
+def _ep_spec(model_type: str):
+    """``model_type``'s :class:`~modelopt.torch.models.EPSpec`, or ``None``."""
+    # Imported here: importing modelopt.torch.models registers every model spec, which importing
+    # this module should not do.
+    from modelopt.torch.models import get_spec
+
+    return getattr(get_spec(model_type), "ep_spec", None)
+
+
+def check_distributed_support(model_type: str) -> None:
+    """Refuse ``model_type``'s expert parallelism if its spec does, or below its transformers floor.
+
+    The floor is the expert-parallel load's own, or its spec's release when that is later; a model
+    with no spec or no EP section still needs the load's.
+    :func:`apply_distributed_support` checks this before it prepares a config; a config already
+    prepared with its plan needs only the check. An EP degree left to ``auto`` picks none for a
+    model this refuses (:func:`_spec_refuses_ep`), so only an EP degree asked for explicitly, or an
+    expert-parallel plan handed in, meets these errors; both name the way around expert parallelism.
+    """
+    ep = _ep_spec(model_type)
+    # The FSDP2 load builds a causal LM and reads its tensors as stored, so a quantized or
+    # multimodal checkpoint (GPT-OSS's MXFP4, Llama-4's) needs a single process, as does one with
+    # an MTP head the load cannot build (--use_fsdp2 refuses Nemotron-H's).
+    without_ep = (
+        "without expert parallelism: in a single process, or FSDP2-sharded (--use_fsdp2 in "
+        "examples/hf_ptq/hf_ptq.py, or MODELOPT_FSDP_SIZE=world) if the FSDP2 load supports the "
+        "checkpoint, which takes an unquantized causal LM with no MTP head it cannot build (such "
+        "as Nemotron-H's)"
+    )
+    if ep is not None and ep.unsupported:
+        raise NotImplementedError(
+            f"{model_type} cannot be quantized expert-parallel yet: {ep.unsupported} Quantize it "
+            f"{without_ep}."
+        )
+    # A model whose spec states no release, or that has no spec, still needs the load's floor: auto
+    # must pick no EP degree below it, rather than reach the load and fail there.
+    stated = ep.requires_transformers if ep is not None else None
+    floor = max(_EP_MIN_TRANSFORMERS, stated or _EP_MIN_TRANSFORMERS, key=parse)
+    try:
+        require_transformers(floor, f"{model_type} expert-parallel PTQ")
+    except RuntimeError as e:
+        raise RuntimeError(f"{e} Or quantize it {without_ep}.") from None
+
+
+def _spec_refuses_ep(model_type: str) -> bool:
+    """Whether :func:`check_distributed_support` refuses ``model_type``'s expert parallelism here."""
+    try:
+        check_distributed_support(model_type)
+    except RuntimeError:  # NotImplementedError is one too
+        return True
+    return False
+
+
+def apply_distributed_support(
+    model_type: str,
+    hf_config,
+    *,
+    ckpt_path: "str | None" = None,
+    trust_remote_code: bool = False,
+):
+    """Prepare ``hf_config`` so ``model_type`` can be loaded expert-parallel, from its model spec.
+
+    Reads the model's :class:`~modelopt.torch.models.EPSpec` and applies it: enforce the
+    transformers floor this model's expert parallelism needs, then attach the
+    ``base_model_ep_plan`` it requires to whichever config carries its MoE -- the root for a plain
+    MoE, the nested text/LLM config for a VLM whose experts live in its language sub-model, since
+    the plan's globs are written against that module tree and a plan on the wrong config matches
+    nothing at all rather than failing.
+
+    An existing plan always wins: stock transformers ships one for some models, and overwriting it
+    would substitute our idea of the layout for the model's own. It wins wherever the load reads
+    one (:func:`_ep_config`), not only on the config the spec would take: on the root, or on
+    another nested config.
+
+    Returns the config to load, unchanged for a model type with no spec or no EP section. The plan
+    is written into the config it is given, so a caller that keeps its own config passes a copy, as
+    every caller here does. The generic all-to-all transport is not wired here -- it self-registers
+    in :func:`~modelopt.torch.utils.plugins.model_load_utils.load_and_prepare_ep`, so nothing about
+    it is per-model.
+    """
+    check_distributed_support(model_type)
+    ep = _ep_spec(model_type)
+    if ep is None:
+        return hf_config
+
+    # The spellings of the config the plan goes on; the first this config has takes it. Checked for
+    # every spec, before anything is attached or prepared, whatever supplies the plan, but for a
+    # config carrying a plan of its own, which wins wherever it sits and needs no nested config.
+    attrs = ep.plan_config_attr or ()
+    if isinstance(attrs, str):
+        attrs = (attrs,)
+    unread = [attr for attr in attrs if attr not in _SUB_CONFIG_ATTRS]
+    if unread:
+        raise ValueError(
+            f"{model_type}'s spec attaches its expert-parallel plan to "
+            f"config.{' or config.'.join(unread)}, where the expert-parallel load does not read "
+            f"one; it reads config.{' and config.'.join(_SUB_CONFIG_ATTRS)}."
+        )
+    existing = getattr(_ep_config(hf_config), "base_model_ep_plan", None)
+    target = hf_config
+    if attrs and not existing:
+        target = next(
+            (sub for attr in attrs if (sub := getattr(hf_config, attr, None)) is not None), None
+        )
+        if target is None:
+            raise ValueError(
+                f"{model_type} expects its expert-parallel plan on "
+                f"config.{' or config.'.join(attrs)}, which this config does not have, nor a plan "
+                "of its own."
+            )
+    if ep.base_model_ep_plan and not existing:
+        target.base_model_ep_plan = dict(ep.base_model_ep_plan)
+
+    if ep.prepare is not None:
+        hf_config = ep.prepare(hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code)
+        # The load builds from the config prepare returns: a bad one would fail only there, far
+        # from the spec at fault.
+        if hf_config is None:
+            raise ValueError(
+                f"{model_type}'s spec prepare returned None, not the config to load expert-parallel."
+            )
+        if not getattr(_ep_config(hf_config), "base_model_ep_plan", None):
+            raise ValueError(
+                f"{model_type}'s spec prepare returned a config with no base_model_ep_plan where "
+                f"the expert-parallel load reads one: on the config, or its "
+                f"{' or '.join(_SUB_CONFIG_ATTRS)}."
+            )
+    return hf_config
+
+
+def _spec_ep_plan(model_type: str) -> dict[str, str]:
+    """The ``base_model_ep_plan`` :func:`apply_distributed_support` would attach for ``model_type``.
+
+    Itself, or through the spec's ``prepare``. Empty for a model type with no spec, no
+    expert-parallel section, or one whose spec refuses expert parallelism outright
+    (``unsupported``). Empty, too, where the plan ships with transformers rather than the spec
+    (``qwen3_moe``, ``minimax_m3_vl``): the config carries it, and
+    :func:`apply_distributed_support` keeps it as it is. A model below its spec's transformers floor
+    keeps its plan: its experts are routed all the same, so a run holding them whole on every rank
+    is refused rather than replicated. Only reads the spec: nothing is applied, checked or patched,
+    and ``prepare`` does not run.
+    """
+    ep = _ep_spec(model_type)
+    if ep is None or ep.unsupported:
+        return {}
+    return dict(ep.base_model_ep_plan or ep.prepared_ep_plan or {})
+
 
 # ---------------------------------------------------------------------------------------------------
 # DP=EP all-to-all expert transport (`torch_a2a`)
 #
 # The throughput-correct MoE parallelism for calibration: dense+router run data-parallel (each rank its
 # own batch), experts are EP-sharded, and tokens are routed to the expert-owning rank by an all-to-all
-# (dispatch) / reduce (combine). The expert matmul stays on transformers' `_grouped_linear`, so each
-# expert sees the tokens routed to it from every rank.
+# (dispatch) / reduce (combine). The expert matmul stays on transformers' `_grouped_linear`, so
+# ModelOpt's per-expert quantizers attach and collect amax over the *global* (dispatched) token pool.
 # Transport is plain `torch.distributed.all_to_all_single` (NCCL) -- works cross-node at any rank count.
 # ---------------------------------------------------------------------------------------------------
 
 
-# all_to_all_single addresses its flattened buffers with int32 element offsets, so a hop larger than
-# this overflows them; a2a_moe chunks such transfers along the hidden dim.
+# all_to_all_single addresses its flattened buffers with int32 element offsets; a2a_moe sends a larger
+# hop as hidden-column slices, so every hop stays within them.
 _A2A_MAX_HOP_ELEMENTS = 2**31 - 1
 # The combine weights and sums each token's top_k results a slice of tokens at a time, so its
 # temporaries stay within this many elements however many tokens the layer routes.
@@ -57,7 +323,7 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     Works cross-node at any rank count, with explicit token permute/unpermute.
 
     Flow: expand (token, expert) pairs -> route each to dest_rank = global_expert // num_local ->
-    all_to_all the tokens (+ local-expert id) -> local grouped_mm -> all_to_all back ->
+    all_to_all the tokens (+ local-expert id) -> local grouped_mm (quantizable) -> all_to_all back ->
     weight by the routing weights and sum each token's top_k results.
 
     Tokens travel and the result returns in ``hidden_states``' dtype -- the model's, so its residual
@@ -91,9 +357,9 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     def _all_to_all(output, input_, out_split, in_split, step=None):
         """All-to-all in hidden-column slices ``step`` wide; in one hop if ``step`` is None or covers H.
 
-        all_to_all_single addresses the flattened ``[rows, H]`` buffers with int32 element offsets, so a
-        hop past 2**31 elements overflows them and hangs. Every slice has the same row splits, and
-        concatenating the slices is autograd-safe.
+        all_to_all_single addresses the flattened ``[rows, H]`` buffers with int32 element offsets;
+        slicing keeps every hop within them. Every slice has the same row splits, and concatenating the
+        slices is autograd-safe.
         """
         hdim = input_.shape[-1]
         if step is None or step >= hdim:
@@ -173,7 +439,7 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     recv_eid = torch.empty(Q, device=dev, dtype=torch.int64)
     dist.all_to_all_single(recv_eid, local_eid_s.contiguous(), out_list, in_list, group=group)
 
-    # group received tokens by local expert -> grouped_mm; weighted back home
+    # group received tokens by local expert -> grouped_mm (quantizable); weighted back home
     rorder = torch.argsort(recv_eid, stable=True)
     counts = torch.bincount(recv_eid[rorder], minlength=num_local_experts)
     offsets = torch.cumsum(counts, dim=0).to(torch.int32)
@@ -214,10 +480,10 @@ def torch_a2a_experts_forward(self, hidden_states, top_k_index, top_k_weights, p
     Registered as the `"torch_a2a"` experts implementation on transformers' `ExpertsInterface`.
 
     Dense+router run data-parallel; experts are EP-sharded; tokens are routed to the expert-owning
-    rank by the NCCL all-to-all above. Local experts run through transformers' `_grouped_linear` on
-    the tokens dispatched to them from every rank. `process_group` (the EP group) is injected by the
-    `torch_a2a_experts` TP style's `_prepare_input_fn`; the router must emit GLOBAL ids unmasked
-    (`torch_a2a_router`).
+    rank by the NCCL all-to-all above. Local experts run through the ModelOpt-quantizable
+    `_grouped_linear` so per-expert weight + shared input quantizers attach over the dispatched
+    (global) token pool. `process_group` (the EP group) is injected by the `torch_a2a_experts` TP style's
+    `_prepare_input_fn`; the router must emit GLOBAL ids unmasked (`torch_a2a_router`).
 
     ``self.num_experts`` is this rank's share of the experts: the expert-parallel loader loads them
     through transformers' expert-parallel sharding (the ``grouped_gemm`` / packed styles), which slices
@@ -234,7 +500,8 @@ def torch_a2a_experts_forward(self, hidden_states, top_k_index, top_k_weights, p
     # Per-expert biases (e.g. GPT-OSS ``gate_up_proj_bias`` / ``down_proj_bias``) are indexed by local
     # expert id below, so the plan must shard them over dim 0 like the weights (grouped_gemm): left
     # whole, every rank but the first would add other experts' biases. transformers'
-    # ``_grouped_linear`` adds them after each expert's grouped GEMM.
+    # ``_grouped_linear`` (and ModelOpt's quantized override) add them after each expert's grouped GEMM,
+    # unquantized.
     has_bias = getattr(self, "has_bias", False)
     if has_bias:
         for name in ("gate_up_proj_bias" if self.has_gate else "up_proj_bias", "down_proj_bias"):
@@ -292,8 +559,7 @@ def register_torch_a2a():
     These two styles are functionally transformers' ``megamoe_router`` / ``megamoe_experts`` (added
     in 5.10.4 for DeepGEMM Mega-MoE), reimplemented here so the transport works below 5.10.4 too.
     The base classes (``RouterParallel``, ``TensorParallelLayer``) are stock wherever the EP infra
-    exists (transformers >= 5.6, the framework floor enforced in ``load_and_prepare_ep``), so this
-    works on any such version; ``grouped_gemm`` (expert weight sharding) is stock too.
+    exists (transformers >= 5.6); ``grouped_gemm`` (expert weight sharding) is stock too.
     """
     global _TORCH_A2A_REGISTERED
     if _TORCH_A2A_REGISTERED:

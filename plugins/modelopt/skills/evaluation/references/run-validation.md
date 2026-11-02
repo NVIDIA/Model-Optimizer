@@ -49,6 +49,9 @@ before rounding. Warn for nonzero rates; do not abort, invalidate, or retry sole
 for bounded failures. At or above 2%, return findings to the parent/user without
 automatic retry or a success verdict.
 
+Skip the 2% cutoff in both gates for a canary
+that will be followed by a full evaluation.
+
 | Gate | Failures | Denominator |
 |---|---|---|
 | Response | Truncated, empty-final, or malformed/unusable model outputs | Verified unique successful raw model responses selected for evaluation |
