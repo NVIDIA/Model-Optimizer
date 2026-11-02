@@ -2707,6 +2707,9 @@ def gptq(
         if not requires_weight_materialization(handle.module, model, names)
         and not is_quantized_parallel_linear(handle.module)
     }
+    # A weight several linears share, as tied ones do, updates in turn: each update reads the last.
+    shared = Counter(handle.module.weight.data_ptr() for handle in readable.values())
+    readable = {n: h for n, h in readable.items() if shared[h.module.weight.data_ptr()] == 1}
     update_expert_weights(
         [(handle, handle.module.weight) for handle in readable.values()], block_size, perc_damp
     )

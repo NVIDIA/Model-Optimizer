@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import copy
+import threading
 import time
 
 import pytest
@@ -124,7 +125,8 @@ def test_expert_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, i
 @pytest.mark.parametrize("inference_mode", [False, True])
 def test_linear_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, inference_mode):
     """GGML updates of plain linears, a sequential MoE's experts among them, spread over two GPUs
-    as fused experts' do, and give the one-GPU weights and codes, pinned at home."""
+    as fused experts' do, and give the one-GPU weights and codes, pinned at home; tied linears
+    keep their order, the second updating the first's result."""
     get_cuda_ext_ggml(raise_if_failed=True)  # updates move only with the CUDA encoders
     width = 512  # two GGML groups per input, so the Hessian carries the first group's error
     shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
@@ -140,12 +142,24 @@ def test_linear_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, i
     }
     devices = []
     update_weights = GGMLGPTQHelper.update_weights
+    prepare_hessian_inverse = GGMLGPTQHelper._prepare_hessian_inverse
+    # The GPUs' first moved updates both read their weights before either writes one back, so
+    # updates that could race do, also when first-use setup would delay one of them.
+    both_read = threading.Barrier(2, timeout=60)
+    moved = threading.local()
 
     def recording_update_weights(self, *args, device=None, **kwargs):
         devices.append(device)
+        moved.first = device is not None and sum(d is not None for d in devices) <= 2
         return update_weights(self, *args, device=device, **kwargs)
 
+    def prepare_once_both_read(self, *args):
+        if moved.first:
+            both_read.wait()
+        return prepare_hessian_inverse(self, *args)
+
     monkeypatch.setattr(GGMLGPTQHelper, "update_weights", recording_update_weights)
+    monkeypatch.setattr(GGMLGPTQHelper, "_prepare_hessian_inverse", prepare_once_both_read)
     models = []
     with torch.inference_mode(inference_mode):
         inputs = torch.randn(96, width, device="cuda")
@@ -153,8 +167,10 @@ def test_linear_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, i
             monkeypatch.setattr(calib_utils, "get_process_gpus", lambda gpus=gpus: gpus)
             torch.manual_seed(RAND_SEED)
             model = torch.nn.Sequential(
-                *(torch.nn.Linear(width, width, bias=False) for _ in range(4))
+                *(torch.nn.Linear(width, width, bias=False) for _ in range(6))
             ).cuda()
+            # After the first, which updates alone, so the two would otherwise be the GPUs' first.
+            model[2].weight = model[1].weight
             mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
             models.append(model)
 
