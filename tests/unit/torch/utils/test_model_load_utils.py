@@ -71,6 +71,7 @@ from transformers import (
     GptOssConfig,
     LlamaConfig,
     LlamaForCausalLM,
+    LlamaPreTrainedModel,
     LlavaConfig,
     LlavaForConditionalGeneration,
     Phi4MultimodalConfig,
@@ -394,6 +395,37 @@ def test_tied_lm_head_without_stored_tie_map_loads(tmp_path, gloo_group, monkeyp
     model = _fsdp2_load(tmp_path)
     assert model.lm_head.weight is model.model.embed_tokens.weight
     assert torch.equal(model.lm_head.weight.full_tensor(), ref.model.embed_tokens.weight)
+
+
+def test_keep_in_fp32_tensors_load_in_fp32(tmp_path, gloo_group, monkeypatch):
+    """A tensor the model keeps in fp32 loads as from_pretrained loads it, not rounded to bf16."""
+    monkeypatch.setattr(LlamaPreTrainedModel, "_keep_in_fp32_modules_strict", ["input_layernorm"])
+    config = LlamaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        dtype="bfloat16",
+    )
+    config.architectures = ["LlamaForCausalLM"]
+    ref = LlamaForCausalLM(config)
+    # The kept tensors get fp32 values bf16 cannot hold; the rest are stored in bf16.
+    state = {
+        k: v.normal_() if "input_layernorm" in k else v.to(torch.bfloat16)
+        for k, v in ref.state_dict().items()
+    }
+    save_file(state, str(tmp_path / "model.safetensors"), metadata={"format": "pt"})
+    (tmp_path / "config.json").write_text(json.dumps(config.to_dict()))
+
+    model = _fsdp2_load(tmp_path)
+
+    for i, layer in enumerate(model.model.layers):
+        weight = layer.input_layernorm.weight  # replicated: fsdp2_wrap shards one dtype per unit
+        assert weight.dtype == torch.float32
+        assert torch.equal(weight, state[f"model.layers.{i}.input_layernorm.weight"])
+    assert model.model.layers[0].mlp.up_proj.weight.dtype == torch.bfloat16
 
 
 @pytest.mark.skipif(

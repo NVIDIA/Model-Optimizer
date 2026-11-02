@@ -57,7 +57,12 @@ from transformers import (
     PretrainedConfig,
 )
 from transformers.conversion_mapping import get_model_conversion_mapping
-from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
+from transformers.core_model_loading import (
+    WeightConverter,
+    build_glob_alternation,
+    dot_natural_key,
+    rename_source_key,
+)
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
@@ -338,6 +343,14 @@ def build_meta_causal_lm(
         for registered, saved in kept:
             registered.clear()
             registered.update(saved)
+    # from_pretrained keeps a model's ``_keep_in_fp32_modules(_strict)`` tensors in fp32 as it loads
+    # them; a build from the config gives them ``dtype``, and the load would then round them to it.
+    dtype_plan = model._get_dtype_plan(dtype)
+    if dtype_plan:
+        pattern, group_to_glob, _ = build_glob_alternation(list(dtype_plan))
+        for name, tensor in chain(model.named_parameters(), model.named_buffers()):
+            if match := pattern.search(name):
+                tensor.data = tensor.data.to(dtype_plan[group_to_glob[match.lastgroup]])
     model.eval()
     return model
 
