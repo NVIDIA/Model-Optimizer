@@ -894,7 +894,7 @@ def distributed_forward_loop(
     dataloader: DataLoader,
     device: torch.device | str | None = None,
     ep_mesh: "torch.distributed.device_mesh.DeviceMesh | None" = None,
-    forward: Callable[[dict], object] | None = None,
+    forward: Callable[[Mapping], object] | None = None,
 ) -> Callable[[torch.nn.Module], None]:
     """Build an ``mtq.quantize`` ``forward_loop`` for a distributed (e.g. expert-parallel) model.
 
@@ -911,7 +911,8 @@ def distributed_forward_loop(
     the single-node ``_forward_loop`` runs them: a hybrid Mamba/attention model mutates its cache in
     place. Each batch is a mapping of the forward's keyword arguments, as ``model(**batch)`` takes;
     only its tensor values move to ``device``, so tensors nested in a value (a list of images, say)
-    must already be there.
+    must already be there. ``forward`` gets a new dict when ``device`` is given, and the loader's own
+    mapping otherwise: copy that before changing it.
     """
     # Local import to avoid any import cycle within modelopt.torch.utils.
     from modelopt.torch.utils.dataset_utils import _disable_use_cache
