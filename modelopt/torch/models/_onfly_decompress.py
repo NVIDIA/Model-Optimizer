@@ -40,6 +40,7 @@ def to_native_backbone_config(
     type and class (hf_ptq's VLM detection reads ``architectures``). The decompression mark carries
     over. Defaults target the Kimi DeepSeek-V3 backbone.
     """
+    # transformers is optional: this module imports without it.
     from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
     text_config = getattr(vlm_config, "text_config", None)
@@ -95,15 +96,17 @@ def _read_compression(hf_config):
     quantization_config = _find_quantization_config(hf_config)
     if quantization_config is None:
         return None
+    # Optional: no pip extra of ModelOpt installs compressed-tensors, as only a compressed
+    # checkpoint needs it.
     try:
         from compressed_tensors.compressors.base import BaseCompressor
         from compressed_tensors.quantization import QuantizationConfig
     except ImportError as e:
-        # No pip extra of ModelOpt installs it: only a compressed checkpoint needs it.
         raise ImportError(
             "On-the-fly decompression of a compressed-tensors checkpoint needs the "
             "compressed-tensors package. Install it with: pip install compressed-tensors"
         ) from e
+    # transformers is optional: this module imports without it.
     from transformers.utils.versions import require_version
 
     # From 0.16, a compressor's parameter names and decompress are classmethods taking the scheme.
@@ -151,6 +154,7 @@ def _make_op_class(compressor, scheme, param_names):
     It subclasses ``MergeModulelist`` only so the loader shards experts at load, handing it ``None``
     for each expert another rank owns; the merge later in the chain still does the stacking.
     """
+    # transformers is optional, and core_model_loading is new in transformers 5.
     from transformers.core_model_loading import MergeModulelist
 
     anchor = "." + param_names[0]
@@ -206,6 +210,7 @@ def _make_op_class(compressor, scheme, param_names):
 @functools.cache
 def _decompressing_converter_class():
     """The ``WeightConverter`` subclass a rewritten converter is, reversing as the one it rewrote."""
+    # transformers is optional, and core_model_loading is new in transformers 5.
     from transformers.core_model_loading import WeightConverter
 
     class DecompressingConverter(WeightConverter):
@@ -268,6 +273,7 @@ def _install_keep_int_native():
     Without a quantizer the loader casts each source to its parameter's dtype in the copy, or from
     transformers 5.14 in ``DtensorShardOperation.shard_tensor``: both start here. Other loads cast.
     """
+    # transformers is optional, and core_model_loading is new in transformers 5.
     import transformers.core_model_loading as cml
 
     if getattr(cml.spawn_materialize, "_onfly_patched", False):

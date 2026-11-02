@@ -892,6 +892,7 @@ def test_a_compressed_tensors_before_per_scheme_compressors_is_refused_by_its_re
     pytest.importorskip(
         "compressed_tensors", reason="needs compressed-tensors (CI's unit session installs it)"
     )
+    # Optional dependency: imported after importorskip so the test skips without it.
     from compressed_tensors.compressors.base import BaseCompressor
 
     class _PropertyForm:
