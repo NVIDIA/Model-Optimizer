@@ -426,3 +426,53 @@ Weight folding avoids repeated quantization of weights during each inference for
 .. note::
 
     After weight folding, the model can no longer be exported to ONNX or fine-tuned with QAT.
+
+
+Local-shift GSQ for NVFP4 weights
+-------------------------------
+
+GSQ refines quantized assignments and scales using Gumbel-Softmax reconstruction
+(`paper <https://arxiv.org/abs/2604.18556>`_). The local-shift variant keeps five
+candidate grid indices around each initializer code, with clipped boundaries.
+ModelOpt adapts this method to NVFP4 E2M1 weights with native FP8 block scales.
+
+Load a weight-only recipe, then provide a replayable calibration loop:
+
+.. code-block:: python
+
+    from modelopt.recipe import load_recipe
+    import modelopt.torch.quantization as mtq
+
+    recipe = load_recipe("general/ptq/nvfp4_gsq-gptq")
+    config = recipe.quantize.model_dump(exclude_unset=True)
+    mtq.quantize(model, config, forward_loop=forward_loop)
+
+Use ``nvfp4_gsq-awq_lite`` or ``nvfp4_gsq-awq_full`` for AWQ initialization.
+The nested ``algorithm.initializer`` accepts an existing calibration method or
+its complete configuration, so GPTQ damping and AWQ search options are preserved.
+Other compatible NVFP4 initializers, such as ``max``, ``mse``, and
+``local_hessian``, can be selected through this field. Set layerwise options on
+GSQ itself, rather than its initializer.
+
+GSQ uses Lion, a centered noisy shift prior, linear temperature and logit-scale
+schedules, and optional gradient accumulation. ``steps``, ``batch_size``,
+``max_tokens`` (cached tokens per linear), and the learning rates control the
+calibration budget. Targets and rollback weights are cached on the CPU;
+five logits per weight and optimizer state reside on the calibration device
+for one group of linears sharing a global scale. The default recipes process
+one decoder layer at a time. This is linear reconstruction, rather than the
+paper's full staged reconstruction and end-to-end scale-training recipe.
+The paper's results on other grids do not establish NVFP4 quality gains.
+
+The implementation supports single-process dense ``nn.Linear`` modules with
+static NVFP4 block size 16. Activations and KV cache remain unquantized. Fused
+MoE experts, tied quantized weights, distributed/sharded calibration, structural
+initializers such as SVDQuant/LSQ, and AutoQuant candidate switching are unsupported.
+Resident weights must be on one device; layerwise calibration can limit residency.
+
+Hard candidates are checked against the initializer's reconstruction loss, and
+the best state is retained. GSQ discards its logits after calibration, storing
+hard weights and native scales in the ordinary ModelOpt checkpoint. Save/restore
+and Hugging Face export use the existing APIs. AWQ input scaling is preserved;
+AWQ-initialized checkpoints follow the existing NVFP4 AWQ export path and its
+runtime requirements, including the existing Megatron-export restriction.

@@ -1469,6 +1469,39 @@ class LSQConfig(QuantizeAlgorithmConfig):
         return self
 
 
+class GSQCalibConfig(QuantizeAlgorithmConfig):
+    """Local-shift Gumbel-Softmax refinement of dense NVFP4 weight-only quantization.
+
+    ``initializer`` accepts an existing calibration method or its full config. GPTQ
+    is the default; AWQ smoothing is retained. Structural initializers (SVDQuant
+    and LSQ), distributed calibration, and fused experts are not supported.
+    """
+
+    method: Literal["gsq"] = ModeloptField("gsq")
+    initializer: str | dict[str, Any] = ModeloptField(default={"method": "gptq"})
+    steps: int = ModeloptField(default=100, ge=1)
+    assignment_lr: float = ModeloptField(default=1e-4, gt=0, allow_inf_nan=False)
+    scale_lr: float = ModeloptField(default=5e-5, gt=0, allow_inf_nan=False)
+    temperature: float = ModeloptField(default=2.0, gt=0, allow_inf_nan=False)
+    final_temperature: float = ModeloptField(default=0.05, gt=0, allow_inf_nan=False)
+    kappa: float = ModeloptField(default=100.0, gt=0, allow_inf_nan=False)
+    final_kappa: float = ModeloptField(default=500.0, gt=0, allow_inf_nan=False)
+    prior_strength: float = ModeloptField(default=6.0, ge=0, allow_inf_nan=False)
+    init_std: float = ModeloptField(default=0.01, gt=0, allow_inf_nan=False)
+    weight_decay: float = ModeloptField(default=1.0, ge=0, allow_inf_nan=False)
+    gradient_accumulation_steps: int = ModeloptField(default=1, ge=1)
+    max_tokens: int = ModeloptField(default=1024, ge=1)
+    batch_size: int = ModeloptField(default=64, ge=1)
+    eval_every: int = ModeloptField(default=10, ge=1)
+    seed: int = ModeloptField(default=0, ge=0)
+
+    @field_validator("initializer", mode="before")
+    @classmethod
+    def _normalize_initializer(cls, value):
+        """Accept validated initializer configs without losing their options."""
+        return value.model_dump() if isinstance(value, QuantizeAlgorithmConfig) else value
+
+
 QuantizeQuantCfgType = list[QuantizerCfgEntry]
 QuantizerCfgListConfig = QuantizeQuantCfgType
 
