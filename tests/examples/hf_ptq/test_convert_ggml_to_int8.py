@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from _test_utils.examples.ggml_export import IQ1_S, quantize_tiny_llama
+from _test_utils.examples.ggml_export import FP8_ATTENTION, IQ1_S, quantize_tiny_llama
 from _test_utils.examples.hf_ptq_example_utils import convert_ggml_to_int8
 from _test_utils.examples.run_command import run_example_command
 from safetensors.torch import load_file, save_file
@@ -30,6 +30,9 @@ from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 
 # quantize_tiny_llama's layer 0 is IQ1_S (group 32) and layer 1 IQ2_XS (group 16).
 LAYER_FORMATS = {0: "iq1_s", 1: "iq2_xs"}
+FP8_LAYERS = [
+    f"model.layers.0.self_attn.{proj}" for proj in ("k_proj", "o_proj", "q_proj", "v_proj")
+]
 
 
 def _convert(ggml_dir, int8_dir, *args):
@@ -45,7 +48,7 @@ def _files(directory):
 @pytest.fixture(scope="module")
 def ggml_export(tmp_path_factory):
     tmp_path = tmp_path_factory.mktemp("ggml")
-    model, _ = quantize_tiny_llama(tmp_path)
+    model, _ = quantize_tiny_llama(tmp_path, extra_quant_cfg=FP8_ATTENTION)
     export_dir = tmp_path / "export"
     export_hf_checkpoint(model, export_dir=export_dir)
     # Files a checkpoint can ship beside its indexed weights: a nested sidecar and an off-index
@@ -74,10 +77,17 @@ def test_ggml_export_converts_to_int8_levels_and_steps(ggml_export, tmp_path):
         i: [f"model.layers.{i}.mlp.{proj}" for proj in ("down_proj", "gate_proj", "up_proj")]
         for i in LAYER_FORMATS
     }
-    assert {
-        group["weights"]["group_size"]: group["targets"]
+    groups = {
+        group["weights"].get("group_size", group["weights"]["type"]): group
         for group in config["config_groups"].values()
-    } == {32: layers[0], 16: layers[1]}
+    }
+    assert {key: group["targets"] for key, group in groups.items()} == {
+        32: layers[0],
+        16: layers[1],
+        "float": FP8_LAYERS,
+    }
+    # The FP8 layers are copied, so their static input scales describe them as W8A8.
+    assert groups["float"]["input_activations"]["strategy"] == "tensor"
 
     weight_map = json.loads((int8_dir / "model.safetensors.index.json").read_text())["weight_map"]
     assert len(set(weight_map.values())) > 1
@@ -132,8 +142,10 @@ def test_a_failed_conversion_leaves_the_output_directory_empty(ggml_export, tmp_
     assert not any((tmp_path / "int8").iterdir())
 
 
-def test_export_with_a_non_ggml_layer_is_refused_before_writing(tmp_path):
-    model, _ = quantize_tiny_llama(tmp_path, (IQ1_S, {"num_bits": (4, 3), "axis": None}))
+def test_export_with_a_layer_it_cannot_carry_over_is_refused_before_writing(tmp_path):
+    # compressed-tensors names NVFP4 tensors differently, so they cannot be copied as they are.
+    nvfp4 = {"num_bits": (2, 1), "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)}}
+    model, _ = quantize_tiny_llama(tmp_path, (IQ1_S, nvfp4))
     export_hf_checkpoint(model, export_dir=tmp_path / "ggml")
 
     with pytest.raises(subprocess.CalledProcessError):
