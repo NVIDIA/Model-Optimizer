@@ -24,8 +24,10 @@ from _test_utils.torch.quantization.tensor_quantizer_common import (
     TensorQuantizerTester,
 )
 
+import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import GroupedQuantizer, SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.utils.numeric_utils import E4M3_MAX, E4M3_MAX_46
 
 
 class TestTensorQuantizerCPU(TensorQuantizerTester):
@@ -119,3 +121,54 @@ def test_grouped_quantizer_preserves_nested_sequential_state_dict_layout():
     )
 
     assert list(grouped.state_dict()) == ["0.0._amax", "0.1._amax", "1._amax"]
+
+
+@pytest.mark.parametrize(
+    ("four_over_six", "expected_fp8_max"), [(False, E4M3_MAX), (True, E4M3_MAX_46)]
+)
+def test_unpromoted_nvfp4_static_quantizer_fake_quantizes(
+    monkeypatch, four_over_six, expected_fp8_max
+):
+    """A plain TensorQuantizer with static NVFP4 attrs must fake-quantize via the
+    static blockwise FP4 path, not the per-tensor FP8 (E4M3-only) path.
+
+    Regression test for the training-forward crash hit when an NVFP4 weight
+    quantizer was never promoted to StaticBlockScaleQuantizer (promotion happens
+    in calibration finalize, which some training flows skip). The real
+    implementation launches a triton kernel and cannot run on CPU, so it is
+    replaced with a passthrough that records how it was called.
+    """
+    block_sizes = {-1: 16, "type": "static", "scale_bits": (4, 3)}
+    if four_over_six:
+        block_sizes["four_over_six"] = True
+    quantizer = TensorQuantizer(
+        quant_attribute_cfg=QuantizerAttributeConfig(num_bits=(2, 1), block_sizes=block_sizes)
+    )
+    assert type(quantizer) is TensorQuantizer
+    assert quantizer.is_nvfp4_static
+
+    weight = torch.randn(4, 64)
+    per_block_amax = weight.view(4, 4, 16).abs().amax(dim=-1)
+    quantizer.amax = per_block_amax.clone()
+
+    captured = {}
+
+    def spy(*args, **kwargs):
+        # Call site: (inputs, amax, global_amax, quantize_block_scales,
+        #             fp8_max_for_normalization, dtype, pass_through_bwd).
+        captured["args"] = args
+        return args[0]
+
+    monkeypatch.setattr(tensor_quantizer_module, "static_blockwise_fp4_fake_quant", spy)
+
+    output = quantizer(weight)
+
+    assert output.shape == weight.shape
+    args = captured["args"]
+    assert torch.equal(args[1], per_block_amax)
+    # global_amax=None lets the implementation derive the global scale from the
+    # per-block amax, matching the fallback used when promoting the quantizer.
+    assert args[2] is None
+    assert args[3] is True
+    assert args[4] == expected_fp8_max
+    assert args[5] == weight.dtype
