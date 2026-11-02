@@ -60,6 +60,7 @@ from megatron.core.parallel_state import (
 )
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.transformer import MegatronModule, TransformerConfig
+from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.moe.router import TopKRouter
@@ -306,6 +307,7 @@ def _gpt_model_provider(
     is_hybrid=False,
     hybrid_layer_pattern=None,
     mamba_head_dim=16,
+    **config_kwargs,
 ):
     device_ctx = torch.device("meta") if meta_device else nullcontext()
 
@@ -346,6 +348,7 @@ def _gpt_model_provider(
                 moe_grouped_gemm=moe_grouped_gemm,
                 # MoE with TP requires sequence parallelism
                 sequence_parallel=tp_size > 1 and num_moe_experts is not None,
+                **config_kwargs,
             )
 
     if not meta_device:
@@ -377,15 +380,30 @@ def deterministic_algorithms():
     [("modelopt", None, False), ("transformer_engine", 4, True)],
 )
 def test_lsq_scale_grad_with_frozen_weights(
-    megatron_size_1, deterministic_algorithms, transformer_impl, num_moe_experts, moe_grouped_gemm
+    megatron_size_1,
+    deterministic_algorithms,
+    monkeypatch,
+    transformer_impl,
+    num_moe_experts,
+    moe_grouped_gemm,
 ):
     """LSQ weight scales get the same gradient whether the weights are trainable or frozen."""
+    # TE's fused attention backward failed under deterministic algorithms on RTX PRO 6000; its
+    # unfused attention is plain PyTorch. Megatron-Core checks these process-wide variables against
+    # the config's attention backend.
+    for name, value in (
+        ("NVTE_FLASH_ATTN", "0"),
+        ("NVTE_FUSED_ATTN", "0"),
+        ("NVTE_UNFUSED_ATTN", "1"),
+    ):
+        monkeypatch.setenv(name, value)
     set_seed(SEED)
     model = _gpt_model_provider(
         tp_size=1,
         transformer_impl=transformer_impl,
         num_moe_experts=num_moe_experts,
         moe_grouped_gemm=moe_grouped_gemm,
+        attention_backend=AttnBackend.unfused,
     )
     for module in model.modules():
         if isinstance(module, TopKRouter):

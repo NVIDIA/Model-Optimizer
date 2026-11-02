@@ -229,6 +229,11 @@ def test_lsq_scale_grad(module_cls, scale_only):
     out = model(x)
     # LayerNormLinear also returns its GEMM input, the normalized x.
     out, gemm_input = out if isinstance(out, tuple) else (out, x)
+    # Without grad, TE calls the autograd Function's forward directly.
+    with torch.no_grad():
+        no_grad_out = model(x)
+    no_grad_out = no_grad_out[0] if isinstance(no_grad_out, tuple) else no_grad_out
+    torch.testing.assert_close(no_grad_out, out.detach())
     grad_out = torch.randn_like(out)
     out.backward(grad_out)
 

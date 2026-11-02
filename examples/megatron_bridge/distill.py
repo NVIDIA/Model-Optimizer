@@ -60,6 +60,15 @@ try:
     HAS_DIRECT_HF_SFT = True
 except ImportError:
     HAS_DIRECT_HF_SFT = False
+try:
+    from megatron.bridge.training.post_training.lsq import (
+        LSQOptimizerConfigOverrideProvider,
+        freeze_all_but_lsq_scales,
+    )
+
+    HAS_LSQ = True
+except ImportError:
+    HAS_LSQ = False
 from megatron.core import parallel_state
 from megatron.core.datasets.gpt_dataset import GPTDataset
 from megatron.core.datasets.indexed_dataset import IndexedDataset
@@ -537,6 +546,11 @@ def get_args():
         )
     if args.sft_dataset_root and not args.sft:
         raise ValueError("--sft_dataset_root requires --sft; without it the SFT path is not used.")
+    if (args.lsq_scale_lr is not None or args.lsq_scale_only) and not HAS_LSQ:
+        raise ValueError(
+            "--lsq_scale_lr / --lsq_scale_only need a newer Megatron-Bridge "
+            "(megatron.bridge.training.post_training.lsq, NVIDIA-NeMo/Megatron-Bridge#6699)."
+        )
     if args.lsq_scale_only and args.student_megatron_path is None:
         raise ValueError("--lsq_scale_only requires an LSQ-quantized --student_megatron_path.")
     if args.sft and args.sft_dataset_root:
@@ -647,9 +661,6 @@ def _optimizer_config_override_provider(args) -> OptimizerConfigOverrideProvider
     """Optimizer parameter-group overrides; adds the LSQ scale group when --lsq_scale_lr is set."""
     if args.lsq_scale_lr is None:
         return OptimizerConfigOverrideProvider()
-    # Deferred: only recent Megatron-Bridge versions have it.
-    from megatron.bridge.training.post_training.lsq import LSQOptimizerConfigOverrideProvider
-
     return LSQOptimizerConfigOverrideProvider(
         scale_lr=args.lsq_scale_lr, scale_min_lr=None, scale_wd_mult=0.0
     )
@@ -824,8 +835,6 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         distill_provider.register_pre_wrap_hook(_per_stage_recompute_hook)
 
     if args.lsq_scale_only:
-        from megatron.bridge.training.post_training.lsq import freeze_all_but_lsq_scales
-
         # Appended, so it runs after the KD conversion; the teacher is already frozen.
         distill_provider.register_pre_wrap_hook(freeze_all_but_lsq_scales)
 

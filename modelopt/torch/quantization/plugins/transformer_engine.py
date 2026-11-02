@@ -59,19 +59,16 @@ def _is_calibrating(quantizer):
 def _sync_te_linear_wgrad_flags(weight, args):
     """Ask TE ``_Linear`` for the weight gradient when only the quantized weight needs it.
 
-    ``LinearFwdArgs.weight_requires_grad`` comes from the module's weight, before a learnable weight
-    quantizer (e.g. LSQ scales) makes the quantized weight require grad.
+    ``LinearFwdArgs.weight_requires_grad`` (TE 2.16+) comes from the module's weight, before a
+    learnable weight quantizer (e.g. LSQ scales) makes the quantized weight require grad. Earlier TE
+    versions read it from the quantized weight itself.
     """
     fwd_args_cls = getattr(te_linear, "LinearFwdArgs", None)
     if fwd_args_cls is None or not weight.requires_grad:
         return
     for fwd_args in args:
-        if isinstance(fwd_args, fwd_args_cls) and not fwd_args.weight_requires_grad:
+        if isinstance(fwd_args, fwd_args_cls):
             fwd_args.weight_requires_grad = True
-            # As TE's Linear.forward sets it for a weight that requires grad.
-            fwd_args.backward_input_needs_gather = (
-                fwd_args.parallel_mode == "column" and fwd_args.sequence_parallel
-            )
 
 
 @QuantModuleRegistry.register({te.pytorch.Linear: "te_Linear"})
