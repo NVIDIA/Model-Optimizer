@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import fnmatch
 import json
 import os
 import re
@@ -1213,11 +1214,12 @@ def test_glm5_next_export_matches_source(dist_workers, tmp_path):
     source = create_tiny_glm5_next_dir(tmp_path, with_tokenizer=True)
     dist_workers.run(partial(_test_glm5_next_export, source, tmp_path / "export"))
     assert_exported_checkpoint_matches(tmp_path / "export", source)
+    exported = load_safetensors_dir(tmp_path / "export")
 
     # NVFP4 on the dense MLP (HF layer 0) and routed experts; shared experts and MTP stay BF16.
     quantized = {
         re.sub(r"\.experts\.\d+\.", ".experts.N.", name.removesuffix(".weight_scale"))
-        for name in load_safetensors_dir(tmp_path / "export")
+        for name in exported
         if name.endswith(".weight_scale")
     }
     assert quantized == {
@@ -1225,6 +1227,23 @@ def test_glm5_next_export_matches_source(dist_workers, tmp_path):
         for mlp in ("0.mlp.", "1.mlp.experts.N.")
         for proj in ("gate_proj", "up_proj", "down_proj")
     }
+    # The quantization config must exclude every BF16 linear of the MTP layer, eh_proj included.
+    # Like vLLM, an entry also covers the modules under it (a fused MLP's gate_proj / up_proj).
+    ignore = json.loads((tmp_path / "export" / "config.json").read_text())["quantization_config"]
+    ignore = ignore["ignore"]
+    mtp_linears = {
+        name.removesuffix(".weight")
+        for name, tensor in exported.items()
+        if name.startswith("model.language_model.layers.2.")
+        and name.endswith(".weight")
+        and tensor.dim() == 2
+    }
+    assert "model.language_model.layers.2.eh_proj" in mtp_linears
+    assert {
+        n
+        for n in mtp_linears
+        if not any(n.startswith(p + ".") or fnmatch.fnmatch(n, p) for p in ignore)
+    } == set()
 
 
 def test_mtp_state_dict_copies_decoder_mtp_layers(tmp_path):

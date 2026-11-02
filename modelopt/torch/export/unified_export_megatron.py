@@ -895,8 +895,22 @@ class GPTModelExporter:
                     if getattr(mtp_layer, "eh_proj", None) is not None:
                         self.rules["mtp.eh_proj"](mtp_layer.eh_proj, first_id)
                     else:  # split projections (GLM-5.3-Flash): HF eh_proj is [e_proj | h_proj]
-                        eh_proj = torch.cat([mtp_layer.e_proj.weight, mtp_layer.h_proj.weight], 1)
+                        projs = (mtp_layer.e_proj, mtp_layer.h_proj)
+                        if any(
+                            self._get_quantization_format(p) not in (None, QUANTIZATION_NONE)
+                            for p in projs
+                        ):
+                            raise NotImplementedError(
+                                "Exporting quantized MTP e_proj / h_proj is not supported; "
+                                "disable quantization of the MTP layer (e.g. '*mtp*')."
+                            )
+                        eh_proj = torch.cat([p.weight for p in projs], 1)
                         self.rules["mtp.eh_proj"](eh_proj.detach().to(self.dtype), first_id)
+                        # A plain tensor skips the module path, so name the BF16 eh_proj here.
+                        eh_proj_name = self.all_mcore_mappings["mtp.eh_proj"].target_name_or_prefix
+                        self._record_excluded_module(
+                            eh_proj_name.format(first_id).removesuffix("weight")
+                        )
 
                 # Inner layers reuse the base decoder walker. The MTP mHC weights have no HF
                 # counterpart (Megatron-Bridge initializes them on import), so they are dropped.
