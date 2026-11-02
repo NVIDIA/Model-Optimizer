@@ -410,6 +410,13 @@ python ../vllm_serve/vllm_serve_fakequant.py /tmp/Qwen3-8B-NVFP4-QAD-vllm-fq -tp
 
 Weight-only formats leave no quantizer enabled after folding, so no sidecars are written and stock `vllm serve` loads the export as a plain BF16 checkpoint. This mode needs a Megatron-Bridge that writes the quantizer sidecars; see [Pre-Requisites](#pre-requisites).
 
+### Linear-attention state QAD
+
+`distill.py --linear_attention_recipe general/ptq/linear_attention_state_nvfp4_dynamic`
+trains with per-token GDN/KDA state quantization through the standard QAD flow.
+See the [linear-attention QAD guide](../llm_qat/linear_attention/README.md#qad-through-the-standard-modelopt-entrypoint)
+for teacher arithmetic, phase boundaries, checkpoint resume, and the separate ReplaySSM policy.
+
 ### LoRA QAD
 
 Add `--lora_rank` to PTQ to train low-rank weight updates with the usual QAD flow:

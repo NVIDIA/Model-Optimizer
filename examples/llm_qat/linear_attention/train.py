@@ -16,11 +16,10 @@
 """Run Megatron Bridge QAT or QAD with GDN/KDA recurrent-state fake quantization."""
 
 import argparse
-from contextlib import ExitStack
+import sys
 from pathlib import Path
 
 import torch
-from batch import mask_prefix_labels, phase_lengths
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
 from megatron.bridge.training.config import (
@@ -37,98 +36,51 @@ from megatron.bridge.training.config import (
     TrainingConfig,
     ValidationConfig,
 )
-from megatron.bridge.training.gpt_step import forward_step_modelopt
-from megatron.bridge.training.post_training.checkpointing import (
-    has_modelopt_state,
-    load_modelopt_state,
-)
+from megatron.bridge.training.distill import distill
+from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.training.pretrain import pretrain
-from megatron.bridge.training.state import GlobalState
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
-from megatron.core.ssm import gated_delta_net
-from megatron.core.utils import unwrap_model
 from transformers import AutoTokenizer
 
-import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
-from modelopt.torch.quantization.linear_attention import linear_attention_training_phase
-from modelopt.torch.quantization.utils import is_quantized
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "megatron_bridge"))
+from linear_attention import linear_attention_training
+
+sys.path.pop(0)
 
 
-def run_training(config, quant_config, prefill_tokens=None, teacher_provider=None):
-    """Run Bridge with fixed smoke-test splits or collator-provided prompt boundaries."""
-    operand_qat = any(entry.cfg.backend == "gdn_prefill" for entry in quant_config.linear_attention)
-    data_lengths = prefill_tokens is None or isinstance(config.dataset, FinetuningDatasetConfig)
-    if data_lengths and config.model.pipeline_model_parallel_size > 1:
-        raise ValueError(
-            "Data-derived state-QAT phases currently require PP=1; fixed splits support PP"
-        )
-    if prefill_tokens is not None and not 0 <= prefill_tokens < config.dataset.seq_length:
-        raise ValueError("prefill-tokens must leave at least one suffix label")
-    resume = config.checkpoint.load and has_modelopt_state(config.checkpoint.load)
-    with ExitStack() as phases:
-
-        def prepare_student(models):
-            # Restore the saved policy before quantization and before the QAD conversion hook.
-            if resume:
-                load_modelopt_state(models, config.checkpoint.load)
-            layer_types = (gated_delta_net.GatedDeltaNet,)
-            if hasattr(gated_delta_net, "KimiDeltaAttention"):
-                layer_types += (gated_delta_net.KimiDeltaAttention,)
-            for student in unwrap_model(models):
-                layers = [m for m in student.modules() if isinstance(m, layer_types)]
-                if not layers:
-                    raise ValueError(
-                        "Each local model chunk must contain Megatron GatedDeltaNet or "
-                        "KimiDeltaAttention; choose a pipeline layout with linear attention on every stage"
-                    )
-                student.requires_grad_(False)
-                for layer in layers:
-                    layer.requires_grad_(True)
-                if not is_quantized(student):
-                    mtq.quantize(student, quant_config)
-                if not data_lengths:
-                    phase = config.dataset.seq_length if operand_qat else prefill_tokens
-                    phases.enter_context(
-                        linear_attention_training_phase(
-                            student, [phase] * config.train.micro_batch_size
-                        )
-                    )
-            return models
-
-        def masked_batch(data_iterator):
-            batch = dict(next(data_iterator))
-            mask_prefix_labels(batch, [prefill_tokens] * batch["loss_mask"].shape[0])
-            yield batch
-
-        def forward_step(state: GlobalState, data_iterator, model, return_schedule_plan=False):
-            if data_lengths:
-                # Bridge consumes and inspects the data iterator on every TP rank before
-                # broadcasting tensor fields. Supplying None on non-source ranks crashes.
-                batch = dict(next(data_iterator))
-                prefix, valid, boundaries = phase_lengths(batch, prefill_tokens)
-                if prefill_tokens is not None:
-                    mask_prefix_labels(batch, prefix, boundaries)
-                with linear_attention_training_phase(
-                    unwrap_model(model),
-                    valid if operand_qat else prefix,
-                    sequence_lengths=valid,
-                    cu_seqlens=boundaries,
-                ):
-                    return forward_step_modelopt(state, iter([batch]), model, return_schedule_plan)
-            # Consume lazily: middle pipeline stages may not need any batch tensors.
-            return forward_step_modelopt(
-                state, masked_batch(data_iterator), model, return_schedule_plan
-            )
-
-        config.model.register_pre_wrap_hook(prepare_student)
-        if teacher_provider is not None:
+def run_training(
+    config,
+    quant_config,
+    prefill_tokens=None,
+    teacher_provider=None,
+    *,
+    train_all_weights=False,
+    teacher_serving_arithmetic=False,
+    recompute_gdn=False,
+    logit_kl_topk=None,
+):
+    """Compatibility API; QAT and QAD share the standard Bridge training hooks."""
+    with linear_attention_training(
+        config,
+        quant_config,
+        prefill_tokens,
+        teacher_provider,
+        train_all_weights=train_all_weights,
+        teacher_serving_arithmetic=teacher_serving_arithmetic,
+        recompute_gdn=recompute_gdn,
+    ) as forward_step:
+        if teacher_provider is None:
+            pretrain(config, forward_step)
+        else:
             config.model = convert_to_distillation_provider(
-                config.model, teacher_provider, ModelOptDistillConfig(kd_loss_alpha=1.0)
+                config.model,
+                teacher_provider,
+                ModelOptDistillConfig(kd_loss_alpha=1.0, logit_kl_topk=logit_kl_topk),
             )
-        # DistillationProvider supplies the QAD loss; both modes use Bridge's training loop.
-        pretrain(config, forward_step)
+            distill(config, forward_step)
 
 
 def model_provider(path, options, *, load_weights=True):
@@ -180,7 +132,23 @@ def main():
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
+    parser.add_argument("--train-all-weights", action="store_true")
+    parser.add_argument("--teacher-serving-arithmetic", action="store_true")
+    parser.add_argument(
+        "--recompute-gdn", action="store_true", help="Recompute GDN activations during backward"
+    )
+    parser.add_argument(
+        "--logit-kl-topk",
+        type=int,
+        help="Distill the teacher's top-k logits; default: full vocabulary",
+    )
     options = parser.parse_args()
+    if options.teacher_serving_arithmetic and options.teacher_model is None:
+        parser.error("--teacher-serving-arithmetic requires --teacher-model")
+    if options.logit_kl_topk is not None and (
+        options.teacher_model is None or options.logit_kl_topk < 1
+    ):
+        parser.error("--logit-kl-topk requires --teacher-model and a positive value")
     if options.train_steps < 1 or options.length < 2:
         parser.error("train-steps must be positive and length must be at least two")
     if options.train_data and options.prefill_tokens is None:
@@ -302,7 +270,16 @@ def main():
         rng=RNGConfig(seed=options.seed),
         mixed_precision="bf16_mixed",
     )
-    run_training(config, recipe.quantize, options.prefill_tokens, teacher)
+    run_training(
+        config,
+        recipe.quantize,
+        options.prefill_tokens,
+        teacher,
+        train_all_weights=options.train_all_weights,
+        teacher_serving_arithmetic=options.teacher_serving_arithmetic,
+        recompute_gdn=options.recompute_gdn,
+        logit_kl_topk=options.logit_kl_topk,
+    )
 
 
 if __name__ == "__main__":

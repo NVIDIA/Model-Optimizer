@@ -45,6 +45,7 @@ from megatron.bridge.training.config import (
     ValidationConfig,
 )
 from megatron.bridge.training.distill import distill
+from megatron.bridge.training.gpt_step import forward_step_modelopt
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
@@ -77,6 +78,7 @@ from transformers import AutoTokenizer
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.utils.distributed as dist
+from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 from modelopt.torch.export import ensure_local_checkpoint
 from modelopt.torch.opt.conversion import ModeloptStateManager
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
@@ -177,6 +179,27 @@ def get_args():
             "restored automatically, turning distillation into Quantization Aware Distillation (QAD)."
         ),
     )
+    parser.add_argument(
+        "--linear_attention_recipe",
+        type=str,
+        help="ModelOpt recipe for GDN/KDA state or GDN prefill QAD; required again on resume.",
+    )
+    parser.add_argument(
+        "--prefill_tokens",
+        type=_nonnegative_int,
+        help="Fixed linear-attention prefix; omit with prompt-completion SFT to use context lengths.",
+    )
+    parser.add_argument(
+        "--train_linear_attention_only",
+        action="store_true",
+        help="Train only GDN/KDA parameters instead of all student weights.",
+    )
+    parser.add_argument(
+        "--teacher_serving_arithmetic",
+        action="store_true",
+        help="Use the student's recurrence backend for the teacher, with all quantizers disabled.",
+    )
+    parser.add_argument("--recompute_gdn", action="store_true", help="Recompute GDN activations.")
     # Parallelism arguments
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
@@ -519,6 +542,29 @@ def get_args():
         # Decided once here so it reaches print_args and costs a single tokenizer load.
         args.sft_add_bos = _tokenizer_prepends_bos(args)
 
+    if args.linear_attention_recipe:
+        recipe = load_recipe(args.linear_attention_recipe)
+        if not isinstance(recipe, ModelOptPTQRecipe) or not recipe.quantize.linear_attention:
+            raise ValueError("--linear_attention_recipe must contain a linear-attention policy.")
+        if args.cp_size != 1 or (args.sft and args.pp_size != 1):
+            raise ValueError("Linear-attention QAD needs CP=1; data-derived phases also need PP=1.")
+        if args.sft_hf_dataset or args.document_boundaries:
+            raise ValueError(
+                "Linear-attention QAD needs prompt-completion SFT or a fixed token split; "
+                "chat/document packing lacks per-segment phase lengths."
+            )
+        if args.prefill_tokens is None and not args.sft:
+            raise ValueError("Token-only linear-attention QAD requires --prefill_tokens.")
+        if args.prefill_tokens is not None and args.prefill_tokens >= args.seq_length:
+            raise ValueError("--prefill_tokens must leave at least one suffix label.")
+    elif (
+        args.prefill_tokens is not None
+        or args.train_linear_attention_only
+        or args.teacher_serving_arithmetic
+        or args.recompute_gdn
+    ):
+        raise ValueError("Linear-attention options require --linear_attention_recipe.")
+
     _check_shared_vocabulary(args)
 
     print_args(masked_args(args))
@@ -622,7 +668,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     # Build student and teacher model providers
     # A response-only loss mask and context parallel both need per-token loss reduction,
     # which must not then be pre-averaged in the DDP collective below.
-    per_token_loss = args.sft or args.cp_size > 1
+    per_token_loss = args.sft or args.cp_size > 1 or bool(args.linear_attention_recipe)
 
     def _build_model_provider(hf_path, load_weights=True, moe_grouped_gemm=True):
         bridge = AutoBridge.from_hf_pretrained(hf_path, trust_remote_code=args.trust_remote_code)
@@ -663,7 +709,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         load_weights=args.student_megatron_path is None,
         moe_grouped_gemm=moe_grouped_gemm,
     )
-    if student_has_modelopt_state:
+    if student_has_modelopt_state or args.linear_attention_recipe:
         # Gradient accumulation fusion is not supported with ModelOpt quantized models. Disable it
         # before the model is built so the student's linear layers are constructed accordingly.
         student_provider.gradient_accumulation_fusion = False
@@ -672,6 +718,10 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     teacher_provider = _build_model_provider(
         args.teacher_hf_path, moe_grouped_gemm=not args.no_moe_grouped_gemm
     )
+    if args.linear_attention_recipe:
+        # The frozen teacher has no gradients to fuse. Match the linear-attention runtime,
+        # which does not require the optional fused-weight-gradient extension.
+        teacher_provider.gradient_accumulation_fusion = False
 
     # The KD losses compare logits elementwise over the vocab dim, so both output layers must have
     # the same padded width. A shared tokenizer does not imply it: the HF configs can disagree.
@@ -736,7 +786,6 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
                 ModeloptStateManager.transfer_state_dict(student, student.language_model)
             return model_chunks
 
-        distill_provider.register_pre_wrap_hook(_restore_student_hook, prepend=True)
     if args.document_boundaries:
         _add_document_boundaries()
 
@@ -910,7 +959,34 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     # only a move in this marker shows that this run saved one of its own.
     saved_before = checkpoint_marker(args, DISTILL)
     try:
-        distill(config)
+        with contextlib.ExitStack() as training:
+            forward_step = forward_step_modelopt
+            if args.linear_attention_recipe:
+                # Older Core builds used for ordinary QAD may not provide GDN/KDA.
+                from linear_attention import linear_attention_training
+
+                if is_vlm:
+                    raise ValueError(
+                        "Linear-attention QAD currently requires a text-only checkpoint."
+                    )
+                forward_step = training.enter_context(
+                    linear_attention_training(
+                        config,
+                        load_recipe(args.linear_attention_recipe).quantize,
+                        args.prefill_tokens,
+                        teacher_provider,
+                        train_all_weights=not args.train_linear_attention_only,
+                        teacher_serving_arithmetic=args.teacher_serving_arithmetic,
+                        recompute_gdn=args.recompute_gdn,
+                    )
+                )
+            # Restore before linear-attention setup, and before the KD conversion hook.
+            # A resumed run restores its own policy and weights through Bridge instead.
+            if args.student_megatron_path and not (
+                args.linear_attention_recipe and has_modelopt_state(checkpoint_dir)
+            ):
+                distill_provider.register_pre_wrap_hook(_restore_student_hook, prepend=True)
+            distill(config, forward_step)
     finally:
         # In a finally: when --exit_interval or --exit_duration_in_mins fires -- which is how
         # a Slurm run usually ends -- Megatron-Bridge calls sys.exit() from inside train(),

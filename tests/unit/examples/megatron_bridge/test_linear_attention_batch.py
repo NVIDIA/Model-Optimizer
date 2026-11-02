@@ -20,7 +20,7 @@ import pytest
 import torch
 
 batch_helpers = runpy.run_path(
-    str(Path(__file__).parents[4] / "examples/llm_qat/linear_attention/batch.py")
+    str(Path(__file__).parents[4] / "examples/megatron_bridge/linear_attention_batch.py")
 )
 phase_lengths = batch_helpers["phase_lengths"]
 mask_prefix_labels = batch_helpers["mask_prefix_labels"]

@@ -19,8 +19,9 @@ import sys
 
 import pytest
 import torch
+import yaml
 from _test_utils.examples.megatron_example_runner import reset_megatron_global_state
-from _test_utils.examples.run_command import MODELOPT_ROOT
+from _test_utils.examples.run_command import MODELOPT_ROOT, extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from megatron.bridge import AutoBridge
 from megatron.bridge.training.config import (
@@ -44,6 +45,7 @@ from transformers import AutoModelForCausalLM, Qwen3_5ForCausalLM, Qwen3_5TextCo
 import modelopt.torch.opt as mto
 from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.linear_attention import linear_attention_training_phase
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils.plugins.mbridge import (
@@ -58,7 +60,15 @@ run_training = runpy.run_path(str(MODELOPT_ROOT / "examples/llm_qat/linear_atten
 sys.path.pop(0)
 
 
-def _train(qad, recipe, hf_model, checkpoint=None, train_iters=1, prompt_data=None):
+def _train(
+    qad,
+    recipe,
+    hf_model,
+    checkpoint=None,
+    train_iters=1,
+    prompt_data=None,
+    teacher_serving_arithmetic=False,
+):
     captured = {}
 
     def provider(name):
@@ -88,6 +98,20 @@ def _train(qad, recipe, hf_model, checkpoint=None, train_iters=1, prompt_data=No
                         captured["loaded"] = attention.out_proj.weight.detach().clone()
 
                 module.decoder.layers[0].self_attention.register_forward_pre_hook(capture_loaded)
+            elif teacher_serving_arithmetic:
+
+                def capture_teacher_phase(attention, args):
+                    captured.setdefault(
+                        "teacher_phase",
+                        (
+                            attention._linear_attention_prefill_lengths,
+                            attention._linear_attention_sequence_lengths,
+                        ),
+                    )
+
+                module.decoder.layers[0].self_attention.register_forward_pre_hook(
+                    capture_teacher_phase
+                )
             return models
 
         model.register_post_wrap_hook(capture)
@@ -150,7 +174,13 @@ def _train(qad, recipe, hf_model, checkpoint=None, train_iters=1, prompt_data=No
         config.tokenizer = TokenizerConfig(
             tokenizer_type="HuggingFaceTokenizer", tokenizer_model=str(hf_model)
         )
-    run_training(config, recipe, None if prompt_data else 8, provider("teacher") if qad else None)
+    run_training(
+        config,
+        recipe,
+        None if prompt_data else 8,
+        provider("teacher") if qad else None,
+        teacher_serving_arithmetic=teacher_serving_arithmetic,
+    )
     return captured
 
 
@@ -165,11 +195,10 @@ def _state_logits_and_gradients(model):
 
 
 @pytest.fixture(scope="module")
-def compiled_state_training(tmp_path_factory):
-    """Compile one tiny GDN shape before timing the single-GPU training checks."""
+def linear_attention_hf_model(tmp_path_factory):
+    """Build a local model shared by state and prefill training checks."""
     if not torch.cuda.is_available():
         pytest.skip("Requires CUDA")
-    pytest.importorskip("vllm", exc_type=ModuleNotFoundError)
     hf_model = tmp_path_factory.mktemp("gdn_hf")
     tokenizer = get_tiny_tokenizer()
     tokenizer.save_pretrained(hf_model)
@@ -191,12 +220,39 @@ def compiled_state_training(tmp_path_factory):
         pad_token_id=tokenizer.pad_token_id,
     )
     Qwen3_5ForCausalLM(config).to(torch.bfloat16).save_pretrained(hf_model)
+    return hf_model
+
+
+@pytest.fixture(scope="module")
+def compiled_state_training(linear_attention_hf_model):
+    """Compile one tiny GDN shape before timing the single-GPU training checks."""
+    pytest.importorskip("vllm", exc_type=ModuleNotFoundError)
+    hf_model = linear_attention_hf_model
     recipe = load_recipe("general/ptq/linear_attention_state_int8_block32_dynamic").quantize
     try:
         _train(True, recipe, hf_model)
     finally:
         reset_megatron_global_state()
     return recipe, hf_model
+
+
+def test_operand_qad_teacher_uses_full_prefill(linear_attention_hf_model):
+    recipe = load_recipe("general/ptq/gdn_prefill_fp8_dynamic").quantize
+    try:
+        captured = _train(True, recipe, linear_attention_hf_model, teacher_serving_arithmetic=True)
+        assert captured["phase"] == captured["teacher_phase"] == ((16,), None)
+        teacher = captured["teacher"]
+        assert not any(parameter.requires_grad for parameter in teacher.parameters())
+        assert not any(
+            quantizer.is_enabled
+            for quantizer in teacher.modules()
+            if isinstance(quantizer, TensorQuantizer)
+        )
+        weight = captured["student"].decoder.layers[0].self_attention.out_proj.weight
+        assert torch.isfinite(weight).all()
+        assert not torch.equal(weight, captured["before"])
+    finally:
+        reset_megatron_global_state()
 
 
 @pytest.mark.parametrize("qad", [False, True], ids=["qat", "qad"])
@@ -302,5 +358,114 @@ def test_prompt_metadata_drives_qad_phase(compiled_state_training, tmp_path):
         attention = captured["student"].decoder.layers[0].self_attention
         assert attention.gdn_state_quantizer.is_enabled
         assert not torch.equal(attention.out_proj.weight, captured["before"])
+    finally:
+        reset_megatron_global_state()
+
+
+@pytest.fixture(scope="module")
+def replay_hf_model(linear_attention_hf_model, tmp_path_factory):
+    """Replay kernels require K=128, unlike the ordinary state-QDQ fixture."""
+    pytest.importorskip("vllm", exc_type=ModuleNotFoundError)
+    config = Qwen3_5TextConfig.from_pretrained(linear_attention_hf_model)
+    config.linear_key_head_dim = 128
+    config.linear_value_head_dim = 128
+    hf_model = tmp_path_factory.mktemp("gdn_replay_hf")
+    get_tiny_tokenizer().save_pretrained(hf_model)
+    Qwen3_5ForCausalLM(config).to(torch.bfloat16).save_pretrained(hf_model)
+    return hf_model
+
+
+@pytest.mark.parametrize(
+    ("prompt_data", "state_quantization"),
+    [(False, False), (True, False), (True, True)],
+    ids=["replay-fixed", "replay-sft", "nvfp4-state-sft"],
+)
+def test_standard_distill_linear_attention_resume(
+    replay_hf_model, tmp_path, prompt_data, state_quantization
+):
+    """The public QAD CLI trains and restores full-state and replay-read policies."""
+    hf_model = replay_hf_model
+    recipe_name = (
+        "linear_attention_state_nvfp4_dynamic" if state_quantization else "gdn_replayssm_nvfp4_read"
+    )
+    recipe = load_recipe(f"general/ptq/{recipe_name}").model_dump(
+        exclude={"metadata": {"recipe_type"}}
+    )
+    recipe_path = tmp_path / "recipe.yaml"
+    recipe_path.write_text(
+        "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n" + yaml.safe_dump(recipe)
+    )
+    output = tmp_path / "qad"
+    data_args = ["--use_mock_data", "--prefill_tokens", "8"]
+    if prompt_data:
+        (tmp_path / "training.jsonl").write_text(
+            json.dumps({"input": "a b c d ", "output": "e f g h"}) + "\n"
+        )
+        data_args = ["--sft", "--sft_dataset_root", str(tmp_path)]
+    command = extend_cmd_parts(
+        [
+            "torchrun",
+            "--nproc_per_node=1",
+            "distill.py",
+            "--no_async_save",
+            "--teacher_serving_arithmetic",
+            "--recompute_gdn",
+            *data_args,
+        ],
+        student_hf_path=hf_model,
+        teacher_hf_path=hf_model,
+        linear_attention_recipe=recipe_path,
+        output_dir=output,
+        seq_length=64,
+        mbs=1,
+        gbs=1,
+        train_iters=1,
+        lr=1e-3,
+        min_lr=1e-3,
+        lr_warmup_iters=0,
+        logit_kl_top_k=8,
+        eval_iters=0,
+        eval_interval=1,
+        save_interval=1,
+        log_interval=1,
+    )
+    run_example_command(command, example_path="megatron_bridge")
+    checkpoint = output / "checkpoints"
+    assert has_modelopt_state(str(checkpoint))
+    assert (checkpoint / "latest_checkpointed_iteration.txt").read_text().strip() == "1"
+    command[command.index("--train_iters") + 1] = "2"
+    run_example_command(command, example_path="megatron_bridge")
+    assert (checkpoint / "latest_checkpointed_iteration.txt").read_text().strip() == "2"
+    if not prompt_data:
+        # The usual PTQ -> QAD entry initializes a new run from a ModelOpt checkpoint.
+        initialized = command.copy()
+        initialized[initialized.index("--output_dir") + 1] = str(tmp_path / "initialized")
+        initialized[initialized.index("--train_iters") + 1] = "1"
+        initialized.extend(["--student_megatron_path", str(checkpoint / "iter_0000002")])
+        run_example_command(initialized, example_path="megatron_bridge")
+        assert has_modelopt_state(str(tmp_path / "initialized/checkpoints"))
+    reset_megatron_global_state()
+    try:
+        _, _, models, student, _ = load_mbridge_model_from_hf(
+            hf_model_name_or_path=str(hf_model),
+            provider_overrides={"gradient_accumulation_fusion": False},
+            init_model_parallel=True,
+            load_weights=True,
+        )
+        before_mlp = student.decoder.layers[0].mlp.linear_fc2.weight.detach().clone()
+        load_modelopt_megatron_checkpoint(models, str(checkpoint / "iter_0000002"))
+        attention = student.decoder.layers[0].self_attention
+        if state_quantization:
+            assert attention.linear_attention_config.precision == "vllm"
+            assert attention.gdn_state_quantizer.is_enabled
+            assert attention.gdn_state_quantizer.is_nvfp4_dynamic
+            assert not attention.gdn_read_quantizer.is_enabled
+        else:
+            assert attention.linear_attention_config.replay_window == 16
+            assert attention.gdn_read_quantizer.is_enabled
+            assert not attention.gdn_state_quantizer.is_enabled
+        assert torch.isfinite(attention.out_proj.weight).all()
+        # The standard QAD default trains the whole student, including its MLP.
+        assert not torch.equal(student.decoder.layers[0].mlp.linear_fc2.weight, before_mlp)
     finally:
         reset_megatron_global_state()

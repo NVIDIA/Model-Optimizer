@@ -67,6 +67,55 @@ without dependency resolution in the already-provisioned Bridge environment;
 otherwise its application dependency pins can replace Bridge's tested PyTorch
 stack. vLLM supplies forward kernels; no running server is needed for training.
 
+## QAD through the standard ModelOpt entrypoint
+
+Use `examples/megatron_bridge/distill.py` for new QAD runs. It owns model loading,
+optimizer/scheduler configuration, checkpoint resume, validation, logging, and the
+Bridge distillation loss. Linear attention supplies quantization hooks and a
+phase-aware forward step shared with the QAT example.
+
+For per-token NVFP4 state QAD, use the built-in state recipe. Its `ptq` namespace
+defines the quantizers; `distill.py` applies them to the trainable student. This
+quantizes the full state at the prefill/decode handoff and every recurrent step,
+with native working-state readout and no ReplaySSM. Fresh prefill has no internal
+state QDQ. The simulated state remains stored in FP32.
+
+```bash
+bash examples/llm_qat/linear_attention/with_vllm_defaults.sh \
+  python -m torch.distributed.run --standalone --nproc-per-node=8 examples/megatron_bridge/distill.py \
+  --student_hf_path /path/to/local-model --teacher_hf_path /path/to/local-model \
+  --linear_attention_recipe general/ptq/linear_attention_state_nvfp4_dynamic \
+  --sft --sft_dataset_root /path/to/prompt-completion-data \
+  --output_dir /path/to/qad-checkpoint --tp_size 8 --seq_length 8192 \
+  --mbs 1 --gbs 256 --train_iters 500 \
+  --lr 1e-5 --min_lr 5e-6 --lr_warmup_iters 50 \
+  --logit_kl_top_k 256 \
+  --teacher_serving_arithmetic --recompute_gdn --no_async_save \
+  --eval_iters 8 --eval_interval 10 --save_interval 10
+```
+
+ModelOpt's standard distributed Adam and cosine schedule apply. Prompt and
+completion lengths come from the data; this command does not impose a fixed
+256-token suffix. For a small smoke run, reduce `--train_iters`, `--gbs`, and
+`--lr_warmup_iters` explicitly. ReplaySSM read quantization remains available via
+the separate `general/ptq/gdn_replayssm_nvfp4_read` recipe; changing the state
+policy requires a new run and output directory.
+
+All student weights train by default; `--train_linear_attention_only` restricts
+updates to GDN/KDA parameters. `--teacher_serving_arithmetic` uses the selected
+recurrence backend for the frozen teacher with all quantizers disabled. Full-vocabulary
+KL remains the default; `--logit_kl_top_k` uses the teacher's top-k entries plus a
+residual probability bucket, with full-vocabulary normalization.
+Token-only data requires `--prefill_tokens`; prompt-completion SFT derives lengths
+from the collator. CP must be 1, and SFT also requires PP=1. Chat/document packing
+is rejected because it does not supply the required per-segment phase metadata.
+
+Resume with the same output directory, recipe, and phase options and a larger
+`--train_iters`. Checkpoints preserve the quantization policy; phase selection and
+trainable-parameter scope remain run configuration. The old `train.py` Python API
+and CLI remain compatible for QAT and existing study launchers; they now use the
+same linear-attention hooks and Bridge training loop.
+
 ## Use prompt boundaries from data
 
 For prompt-completion data, pass a directory containing `training.jsonl` records
@@ -86,7 +135,7 @@ bash examples/llm_qat/linear_attention/with_vllm_defaults.sh \
   --output /path/to/qat-checkpoint --length 1024 --train-steps 10
 ```
 
-Add `--teacher-model` for QAD. Omit `--prefill-tokens` to use each record's
+For QAD, use the standard entrypoint above; the compatibility CLI also accepts `--teacher-model`. Omit `--prefill-tokens` to use each record's
 prompt boundary. With an override, records shorter than the requested split are
 clamped to retain one recurrent input token. This data-driven CLI currently supports TP/DP with PP=CP=1;
 fixed token splits below retain the existing PP support. Multi-turn conversations
@@ -116,28 +165,31 @@ bash examples/llm_qat/linear_attention/with_vllm_defaults.sh \
   --train-steps 1 --length 128 --prefill-tokens 64
 ```
 
-For QAD, use a separate output directory and add an unquantized teacher:
+For QAD, use the standard entrypoint with a separate output directory and an
+unquantized teacher:
 
 ```bash
 bash examples/llm_qat/linear_attention/with_vllm_defaults.sh \
-  torchrun --standalone --nproc-per-node=1 examples/llm_qat/linear_attention/train.py \
-  --model /path/to/local-model \
-  --teacher-model /path/to/unquantized-model \
-  --train-data /path/to/tokenized/train_text_document \
-  --output /path/to/megatron-qad-checkpoint \
-  --recipe general/ptq/linear_attention_state_int8_block32_dynamic \
-  --train-steps 1 --length 128 --prefill-tokens 64
+  python -m torch.distributed.run --standalone --nproc-per-node=1 examples/megatron_bridge/distill.py \
+  --student_hf_path /path/to/local-model \
+  --teacher_hf_path /path/to/unquantized-model \
+  --data_paths 1.0 /path/to/tokenized/train_text_document \
+  --output_dir /path/to/megatron-qad-checkpoint \
+  --linear_attention_recipe general/ptq/linear_attention_state_nvfp4_dynamic \
+  --train_iters 1 --seq_length 128 --prefill_tokens 64 --gbs 1 --mbs 1 \
+  --lr 1e-5 --min_lr 1e-5 --lr_warmup_iters 0 --eval_iters 0 --no_async_save
 ```
 
 Student and teacher must have matching tokenizer vocabularies and output
 vocabulary dimensions. QAD uses
-`kd_loss_alpha=1.0`, disabling the language-model loss. Both modes use Bridge
-`pretrain()`; QAD wraps the student in Bridge's `DistillationProvider`. Both fixed-split modes
+`kd_loss_alpha=1.0`, disabling the language-model loss. QAT uses Bridge's
+`pretrain()` and QAD uses its standard `distill()` lifecycle. Both fixed-split modes
 mask labels predicted entirely inside the prefix. Because labels are shifted by
 one, position `prefill_tokens - 1` predicts the first suffix token and remains trainable.
 
-Only the student's linear-attention parameters are trainable; the remaining
-parameters are frozen. Training uses BF16 mixed precision. Each dense sequence
+The QAT example trains only linear-attention parameters by default. Standard QAD
+trains all student weights; add `--train_linear_attention_only` to restrict it.
+Training uses BF16 mixed precision. Each dense sequence
 has the same fixed prefix length in this CLI; packed data or variable boundaries
 require a custom batch integration.
 
@@ -313,14 +365,12 @@ imply multi-GPU qualification.
 
 ## Validation and limitations
 
-The two example tests exercise GDN QAT and QAD with shared compilation setup. Each
-saves a checkpoint, checks exact weight and policy restoration, resumes for one
-step, and exports/reloads HF weights with the separate Megatron ModelOpt metadata.
-The HF round trip checks all effective parameters, logits, and attention gradients.
-The QAD test also checks that the teacher stays frozen and unquantized.
-Both tests passed on an RTX A6000 with the dependency versions above. They use a
-tiny random Qwen3.5 GDN model and mock data: one optimizer step, then one resumed
-step. This validates the workflow, not pretrained-model quality recovery. Run:
+The example suite covers the compatibility QAT API and the standard QAD CLI,
+including per-token NVFP4 state and ReplaySSM read policies. It checks checkpoint
+save/resume, trainable student weights, frozen unquantized teachers, and phase
+boundaries from prompt metadata. The QAT/QAD HF round trip additionally checks
+effective parameters, logits, and attention gradients. These tests use tiny
+random models and validate the workflow, not pretrained-model quality recovery. Run:
 
 ```bash
 bash examples/llm_qat/linear_attention/with_vllm_defaults.sh \
