@@ -369,6 +369,12 @@ class GPTModelExporter:
                 "Export at expert parallel size > 1 does not support packed local experts; "
                 "export at EP=1."
             )
+        # Only the last stage's main ranks export the MTP, so agree before any of them could raise.
+        if self._any_rank(self._has_quantized_split_mtp_projection()):
+            raise NotImplementedError(
+                "Exporting quantized MTP e_proj / h_proj is not supported; "
+                "disable quantization of the MTP layer (e.g. '*mtp*')."
+            )
         # One layer-shard writer per pipeline stage: other TP / DP / EP ranks hold the same layers
         # (EP>1 ranks hold no gathered experts at all), and writing them too would race on the same
         # files. Unlike is_writer_rank (one global writer of save_directory metadata), this has no
@@ -895,16 +901,8 @@ class GPTModelExporter:
                     if getattr(mtp_layer, "eh_proj", None) is not None:
                         self.rules["mtp.eh_proj"](mtp_layer.eh_proj, first_id)
                     else:  # split projections (GLM-5.3-Flash): HF eh_proj is [e_proj | h_proj]
-                        projs = (mtp_layer.e_proj, mtp_layer.h_proj)
-                        if any(
-                            self._get_quantization_format(p) not in (None, QUANTIZATION_NONE)
-                            for p in projs
-                        ):
-                            raise NotImplementedError(
-                                "Exporting quantized MTP e_proj / h_proj is not supported; "
-                                "disable quantization of the MTP layer (e.g. '*mtp*')."
-                            )
-                        eh_proj = torch.cat([p.weight for p in projs], 1)
+                        # save_pretrained already refused quantized e_proj / h_proj on all ranks.
+                        eh_proj = torch.cat([mtp_layer.e_proj.weight, mtp_layer.h_proj.weight], 1)
                         self.rules["mtp.eh_proj"](eh_proj.detach().to(self.dtype), first_id)
                         # A plain tensor skips the module path, so name the BF16 eh_proj here.
                         eh_proj_name = self.all_mcore_mappings["mtp.eh_proj"].target_name_or_prefix
@@ -1352,6 +1350,17 @@ class GPTModelExporter:
         peers exit. Agree across ranks first, mirroring ``_gather_exclude_modules``.
         """
         return self._any_rank(uses_iq_quantization(self.model))
+
+    def _has_quantized_split_mtp_projection(self) -> bool:
+        """Whether this rank's MTP has a quantized split e_proj / h_proj (GLM-5.3-Flash)."""
+        mtp_layers = getattr(getattr(self.model, "mtp", None), "layers", None) or []
+        return any(
+            self._get_quantization_format(proj) not in (None, QUANTIZATION_NONE)
+            for layer in mtp_layers
+            if getattr(layer, "eh_proj", None) is None
+            for proj in (getattr(layer, "e_proj", None), getattr(layer, "h_proj", None))
+            if proj is not None
+        )
 
     @staticmethod
     def _any_rank(local: bool) -> bool:
