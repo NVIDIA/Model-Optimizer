@@ -602,8 +602,8 @@ def quantize(
     Returns: A pytorch model which has been quantized and calibrated.
     """
     quantize_config = QuantizeConfig(**dict(config))
-    _refuse_awq_on_a_sharded_fsdp2_model(model, config.get("algorithm"))
-    _refuse_unsupported_distributed_calibration(model, config.get("algorithm"))
+    _refuse_awq_on_a_sharded_fsdp2_model(model, quantize_config.algorithm)
+    _refuse_unsupported_distributed_calibration(model, quantize_config.algorithm)
     _refuse_a_malformed_variable()
     if not is_quantized(model):
         model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
@@ -614,7 +614,7 @@ def quantize(
     # Fail before calibration rather than after exporting an unquantized checkpoint.
     _check_weight_quantization_took_effect(model, quantize_config)
     _check_plugin_quantization_took_effect(model, quantize_config)
-    return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
+    return calibrate(model, quantize_config.algorithm, forward_loop=forward_loop)
 
 
 # TODO: create a config interface for auto_quantize and expose setting
