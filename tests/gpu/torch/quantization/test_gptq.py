@@ -188,18 +188,20 @@ def test_linear_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, i
 
 
 @pytest.mark.parametrize(
-    ("num_bits", "shape", "cuda_extension"),
+    ("num_bits", "shape", "dtype", "cuda_extension"),
     [
-        ("iq2_xxs", (16384, 2048), True),  # a projection 8x wider than its input
-        ("iq2_xxs", (65536, 256), True),  # one GPTQ block spans the input
-        ("iq1_s", (1024, 512), True),
+        ("iq2_xxs", (16384, 2048), torch.bfloat16, True),  # a projection 8x wider than its input
+        ("iq2_xxs", (65536, 256), torch.bfloat16, True),  # one GPTQ block spans the input
+        # Logging holds the original weight, here twice the size of a float32 copy.
+        ("iq2_xxs", (65536, 512), torch.float64, True),
+        ("iq1_s", (1024, 512), torch.bfloat16, True),
         # The PyTorch encoder's scratch grows with block_chunk_size, past the room check.
-        ("iq1_s", (1024, 512), False),
+        ("iq1_s", (1024, 512), torch.bfloat16, False),
     ],
 )
 @pytest.mark.parametrize("log_mse", [False, True])
 def test_an_update_that_may_move_fits_its_room(
-    need_2_gpus, monkeypatch, num_bits, shape, cuda_extension, log_mse
+    need_2_gpus, monkeypatch, num_bits, shape, dtype, cuda_extension, log_mse
 ):
     """An update that may run on another GPU, logging its error or not, peaks there within the
     room it is admitted with."""
@@ -209,10 +211,8 @@ def test_an_update_that_may_move_fits_its_room(
         monkeypatch.setattr(get_cuda_ext_ggml, "extension", None, raising=False)
     out_features, in_features = shape
     torch.manual_seed(RAND_SEED)
-    linear = torch.nn.Linear(
-        in_features, out_features, bias=False, dtype=torch.bfloat16, device="cuda:0"
-    )
-    inputs = torch.randn(512, in_features, dtype=torch.bfloat16, device="cuda:0")
+    linear = torch.nn.Linear(in_features, out_features, bias=False, dtype=dtype, device="cuda:0")
+    inputs = torch.randn(512, in_features, dtype=dtype, device="cuda:0")
     config = {
         "quant_cfg": [
             {"quantizer_name": "*", "enable": False},
