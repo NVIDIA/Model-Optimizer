@@ -38,6 +38,7 @@ from .config import (
     AWQLiteCalibConfig,
     CompressConfig,
     GPTQCalibConfig,
+    GSQCalibConfig,
     ImatrixCalibConfig,
     LocalHessianCalibConfig,
     LSQConfig,
@@ -60,6 +61,7 @@ from .conversion import (
     restore_svdquant_model,
     update_quantize_metadata,
 )
+from .gsq import gsq
 from .model_calib import (
     awq,
     gptq,
@@ -584,3 +586,15 @@ class LSQModeDescriptor(BaseCalibrateModeDescriptor):
         return LSQConfig
 
     _calib_func = lsq
+
+
+@CalibrateModeRegistry.register_mode
+class GSQCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for local-shift NVFP4 GSQ calibration."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Return the GSQ calibration schema."""
+        return GSQCalibConfig
+
+    _calib_func = gsq
