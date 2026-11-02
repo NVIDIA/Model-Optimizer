@@ -38,7 +38,6 @@ from example_utils import (
     build_quant_cfg,
     cleanup_distributed,
     create_vlm_calibration_loop,
-    forward_requires_images,
     generate_excludes_prompt,
     get_model,
     get_processor,
@@ -413,12 +412,6 @@ def load_model(args: argparse.Namespace):
     language_model = full_model
 
     is_nemotron_vl_model = is_nemotron_vl(full_model)
-
-    if args.use_fsdp2 and forward_requires_images(full_model):
-        raise NotImplementedError(
-            f"{type(full_model).__name__}.forward requires image inputs; "
-            "--use_fsdp2 calibrates on text only."
-        )
 
     # Default to image-text calibration for VLM models. Skip for the AutoQuantize recipe path, whose
     # text-only path does not support image-text calibration yet (auto_quantize() would raise);
