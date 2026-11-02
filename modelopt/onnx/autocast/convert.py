@@ -168,9 +168,10 @@ def convert_to_mixed_precision(
     )
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
 
-    # Automatically add 'trt' to list of providers if custom ops are detected
+    # Automatically add 'trt' to list of providers if custom ops are detected.
+    # Rebind: inserting would mutate the signature's default list (and a caller's list) for later calls.
     if "trt" not in providers and graph_sanitizer.custom_ops:
-        providers.insert(0, "trt")
+        providers = ["trt", *providers]
 
     # Initialize classifiers and converters
     node_classifier = NodeClassifier(
