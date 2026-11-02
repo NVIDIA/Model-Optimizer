@@ -145,7 +145,8 @@ For Megatron Bridge, before constructing commands, read:
 - Export each checkpoint to evaluate and pass the ptq skill's
   `references/checkpoint-validation.md` gate on it before evaluation. Run the
   serving canary on the run's first export only; later exports change only
-  weights.
+  weights, so on those the gate passes without the canary: record its
+  serving-canary row as `skipped; first export <path> passed`.
 - At each evaluated checkpoint, decide:
   - **Pass:** every benchmark of the full original PTQ suite is within 1% of
     BF16, each at its compare-results run floor (such as SciCode's 8 runs per
