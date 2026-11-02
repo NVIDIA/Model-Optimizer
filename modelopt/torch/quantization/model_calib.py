@@ -2707,6 +2707,10 @@ def gptq(
         if not requires_weight_materialization(handle.module, model, names)
         and not is_quantized_parallel_linear(handle.module)
     }
+    # A weight left to its window may also be a later linear's, which the batch would update
+    # first, and before the window opens its storage cannot be compared: all then update in turn.
+    if len(readable) < len(gptq_handles):
+        readable = {}
     # Weights in one storage, tied ones or views that may overlap, update in turn, each reading the
     # last one's result; a sequential MoE's experts each have their own storage and stay spread.
     storage = {
