@@ -46,6 +46,9 @@ docker run \
   ${DOCKER_IMAGE} bash
 ```
 
+> [!NOTE]
+> The `nemo:26.10.00` container's Transformer Engine has no sm_120 kernels (RTX PRO 6000 fails with `no kernel image is available for execution on the device`). CI works around it by copying the same-version PyPI `libtransformer_engine.so` over the container's, see [`te-all-gpu-archs`](../../.github/actions/te-all-gpu-archs/action.yml). The `nemo:26.10.01` patch release is expected to fix it.
+
 Some features (e.g. [`--vllm_fakequant_export`](#evaluating-a-qad-checkpoint-in-vllm-with-fake-quantization) and `--fake_quant_weight_cache`) need a newer Megatron-Bridge than the one in `nvcr.io/nvidia/nemo:26.10`. Until `nemo:26.12` ships it, check out Megatron-Bridge at the commit ModelOpt's CI tests against, together with its Megatron-LM submodule:
 
 ```bash

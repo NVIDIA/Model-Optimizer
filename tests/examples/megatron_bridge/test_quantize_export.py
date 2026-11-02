@@ -80,7 +80,8 @@ _DENSE_KWARGS = {
         # across ranks (EP), resharded from the TP-quantized checkpoint.
         (
             create_tiny_nemotron_h_dir,
-            {},
+            # head_dim=64: FlashAttention-4 (used by TE on sm_120) cannot compile the default head_dim=8
+            {"head_dim": 64},
             "general/ptq/nvfp4_default-kv_fp8",
             "tp_size",
             "ep_size",

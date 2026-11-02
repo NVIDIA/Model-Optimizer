@@ -548,8 +548,7 @@ def get_tiny_nemotron_h(**config_kwargs) -> PreTrainedModel:
         "hybrid_override_pattern": "ME*E",
         "num_attention_heads": 8,
         "num_key_value_heads": 4,
-        # FlashAttention-4 (used by TE on sm_120) cannot compile head_dim=8
-        "head_dim": 64,
+        "head_dim": 8,
         "mamba_num_heads": 8,
         "mamba_head_dim": 16,
         "ssm_state_size": 32,
