@@ -25,6 +25,7 @@ import json
 
 import pytest
 import torch
+from _test_utils.examples.hf_ptq_example_utils import example_utils
 from safetensors.torch import save_file
 
 pytest.importorskip("accelerate")
@@ -192,3 +193,21 @@ def test_nemotron_vl_dummy_forward_gathers_the_root(tmp_path, gloo_group):
     model.config.architectures = ["NemotronTestVL"]  # takes the Nemotron-VL branch
     _llm_dummy_forward(model)
     assert all(isinstance(p, DTensor) for p in model.model.language_model.embed_tokens.parameters())
+
+
+@pytest.mark.skipif(
+    torch.cuda.is_available(), reason="with a GPU, FSDP2 gathers the CPU-loaded root onto it"
+)
+def test_image_calibration_loop_reaches_the_vision_tower(tmp_path, gloo_group):
+    """Image-text calibration drives the whole FSDP2 VLM, so the vision tower (its own unit) runs."""
+    _tiny_llava_checkpoint(tmp_path)
+    model = _fsdp2_load(tmp_path)
+    calls = []
+    model.model.vision_tower.register_forward_hook(lambda *_: calls.append(1))
+    batch = {
+        "input_ids": torch.tensor([[1, 63, 63, 63, 63, 2]]),  # 4 image tokens: 28px / 14px patches
+        "attention_mask": torch.ones(1, 6, dtype=torch.long),
+        "pixel_values": torch.randn(1, 3, 28, 28),
+    }
+    example_utils.create_vlm_calibration_loop(model, [batch, batch])(model)
+    assert len(calls) == 2

@@ -48,14 +48,12 @@ from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
     ("calib_with_images", "packed_location", "error"),
     [
         (False, None, None),
-        (True, None, "text-only inputs"),
+        (True, None, None),
         (False, "root", "pack-quantized"),
         (False, "text", "pack-quantized"),
     ],
 )
-def test_fsdp2_vlm_requires_text_only_calibration(
-    model_type, architectures, calib_with_images, packed_location, error
-):
+def test_fsdp2_vlm_validation(model_type, architectures, calib_with_images, packed_location, error):
     args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=calib_with_images)
     config = SimpleNamespace(
         model_type=model_type,

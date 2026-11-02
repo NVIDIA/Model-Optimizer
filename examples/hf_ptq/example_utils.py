@@ -99,12 +99,10 @@ def validate_fsdp2_supported(args, config):
     issues = []
     if "vila" in args.local_checkpoint_path.lower():
         issues.append("VILA (custom builder + non-standard layer layout)")
-    # A VLM is calibrated on text (see forward_requires_images); a layout whose decoder layers
-    # cannot be found fails in fsdp2_wrap. Encoder-decoder models have no single decoder stack.
+    # A layout whose decoder layers cannot be found fails in fsdp2_wrap. Encoder-decoder models
+    # have no single decoder stack.
     if getattr(config, "is_encoder_decoder", False):
         issues.append("encoder-decoder models")
-    elif _is_multimodal_config(config) and getattr(args, "calib_with_images", False):
-        issues.append("image-text calibration (FSDP2 currently supports text-only inputs)")
     if any(
         getattr(cfg, "quantization_config", None) is not None
         for cfg in (config, getattr(config, "text_config", None))
@@ -262,7 +260,8 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
         allowed_keys = set(forward_params.keys())
 
         full_model.eval()
-        with torch.no_grad():
+        # The safe-forward branch calls submodules directly, skipping the FSDP2 root's pre-forward.
+        with torch.no_grad(), dist_utils.fsdp2_root_unsharded(full_model):
             for batch in calib_dataloader:
                 # For encoder-decoder models, rename input_ids → decoder_input_ids
                 # and disable KV caching to avoid tuple index errors in decoder layers

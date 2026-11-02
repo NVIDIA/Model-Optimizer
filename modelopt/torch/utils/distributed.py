@@ -835,6 +835,22 @@ def _auxiliary_modules(model, decoder_layers) -> list[torch.nn.Module]:
     return aux
 
 
+def _register_output_capture(model) -> None:
+    """Re-key Transformers' output-capture registry for the classes ``fully_shard`` swapped in.
+
+    Transformers looks up which outputs a module can record by its class, and ``fully_shard``
+    replaces that class with ``FSDP<cls>``. Without this, a wrapped vision tower returns
+    ``hidden_states=None`` and a VLM that reads its features from them fails on the first image.
+    """
+    try:
+        from transformers.utils.output_capturing import _CAN_RECORD_REGISTRY
+    except ImportError:  # older Transformers record outputs by other means
+        return
+    for module in model.modules():
+        if isinstance(module, FSDPModule) and getattr(module, "_can_record_outputs", None):
+            _CAN_RECORD_REGISTRY[str(type(module))] = module._can_record_outputs
+
+
 def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):
     """Auto-detect a HF causal-LM's decoder layers and FSDP2 ``fully_shard`` each one.
 
@@ -880,6 +896,7 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
         _move_to_fsdp_device(model, ignored_params)
     if config is not None and architectures:
         config.architectures = architectures
+    _register_output_capture(model)
 
     return decoder_layers
 
