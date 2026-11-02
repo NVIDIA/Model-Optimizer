@@ -18,6 +18,7 @@
 from collections import defaultdict
 from contextlib import contextmanager
 from copy import deepcopy
+from math import cos, pi
 from typing import TYPE_CHECKING
 
 import torch
@@ -265,10 +266,15 @@ class _LocalShift(nn.Module):
         )
         self.register_buffer("center", center.to(torch.uint8))
         shifts = torch.arange(-2, 3, device=block.device, dtype=torch.float32)
-        prior = -shifts.square() / 2
-        prior = prior - prior.mean()
+        indices = torch.arange(len(self.grid), device=block.device).unsqueeze(-1) + shifts
+        valid = (indices >= 0) & (indices < len(self.grid))
+        prior = (-shifts.square() / 2).expand_as(indices)
+        prior = prior - (prior * valid).sum(-1, keepdim=True) / valid.sum(-1, keepdim=True)
         logits = torch.randn((*center.shape, 5), device=block.device)
-        logits.add_(config.prior_strength * prior).mul_(config.init_std)
+        for chunk, centers in zip(
+            logits.reshape(-1, 5).split(262144), center.flatten().split(262144)
+        ):
+            chunk.add_(config.prior_strength * prior[centers.long()]).mul_(config.init_std)
         self.logits = nn.Parameter(logits)
 
     def scales(self):
@@ -276,25 +282,26 @@ class _LocalShift(nn.Module):
         projected = block.to(torch.float8_e4m3fn).float()
         return block + (projected - block).detach(), self.log_global.exp()
 
-    def _soft_codes(self, logits, center, temperature, kappa):
+    def _codes(self, logits, center, temperature, kappa, hard):
         shifts = torch.arange(-2, 3, device=center.device, dtype=torch.int32)
-        indices = (center.to(torch.int32).unsqueeze(-1) + shifts).clamp(0, 14)
-        values = self.grid[indices]
+        indices = center.to(torch.int32).unsqueeze(-1) + shifts
+        valid = (indices >= 0) & (indices < len(self.grid))
+        logits = logits.masked_fill(~valid, -1e9)
+        if hard:
+            return self.grid[indices.gather(-1, logits.argmax(-1, keepdim=True)).squeeze(-1)]
+        values = self.grid[indices.clamp(0, len(self.grid) - 1)]
         probabilities = F.gumbel_softmax(kappa * logits, tau=temperature, dim=-1)
         return (values * probabilities).sum(-1)
 
     def forward(self, temperature=1.0, kappa=1.0, hard=False, initial=False):
         if initial:
             codes = self.grid[self.center.long()]
-        elif hard:
-            indices = (self.center.long() + self.logits.argmax(-1) - 2).clamp(0, 14)
-            codes = self.grid[indices]
         else:
             # Bound candidate/gumbel temporaries independently of the linear's width.
             codes = torch.cat(
                 [
                     checkpoint(
-                        self._soft_codes, logits, center, temperature, kappa, use_reentrant=False
+                        self._codes, logits, center, temperature, kappa, hard, use_reentrant=False
                     )
                     for logits, center in zip(
                         self.logits.reshape(-1, 5).split(262144),
@@ -320,9 +327,10 @@ class _LocalShift(nn.Module):
 
 
 @torch.no_grad()
-def _lion_step(groups, momentum, weight_decay):
+def _lion_step(groups, momentum, lr_multiplier):
     # Lion's sign update avoids Adam's second-moment normalization of saturated logits.
-    for parameters, lr in groups:
+    for parameters, base_lr, weight_decay in groups:
+        lr = base_lr * lr_multiplier
         for p in parameters:
             if p.grad is None:
                 continue
@@ -343,10 +351,11 @@ def _refine(members, samples, config):
         [_LocalShift(module, global_scale, config) for _, module in members]
     )
     groups = [
-        ([a.logits for a in assignments], config.assignment_lr),
+        ([a.logits for a in assignments], config.assignment_lr, config.weight_decay),
         (
             [p for n, p in assignments.named_parameters() if not n.endswith("logits")],
             config.scale_lr,
+            0.0,
         ),
     ]
     momentum = {}
@@ -408,7 +417,8 @@ def _refine(members, samples, config):
                 if p.grad is not None
             ):
                 raise FloatingPointError("Nonfinite GSQ gradients")
-            _lion_step(groups, momentum, config.weight_decay)
+            lr_progress = progress if config.steps > 1 else 1.0
+            _lion_step(groups, momentum, 0.1 + 0.45 * (1 + cos(pi * lr_progress)))
             if (step + 1) % config.eval_every == 0 or step + 1 == config.steps:
                 loss = evaluate()
                 if loss < best_loss:

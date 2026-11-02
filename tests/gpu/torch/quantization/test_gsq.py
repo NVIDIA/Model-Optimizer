@@ -17,6 +17,7 @@
 """Real calibration, AWQ smoothing, and native GSQ checkpoint/export contracts."""
 
 from copy import deepcopy
+from importlib import import_module
 
 import pytest
 import torch
@@ -115,29 +116,72 @@ def test_gsq_quality_restore_and_native_export(method, tmp_path):
         torch.testing.assert_close(dequant, hard, rtol=0, atol=0)
 
 
-def test_local_shift_uses_fixed_indices_and_clipped_boundaries():
+def test_local_shift_uses_fixed_indices_and_masks_invalid_shifts():
     model = nn.Linear(64, 16, bias=False, device="cuda", dtype=torch.float32)
     config = _config("max")
     mtq.quantize(model, {**config, "algorithm": "max"})
     scale = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(model.weight_quantizer)
     assignment = _LocalShift(model, nn.Parameter(scale.log()), GSQCalibConfig())
+    assignment.center.copy_(
+        (torch.arange(model.weight.numel(), device="cuda") % 15).reshape_as(assignment.center)
+    )
     center = assignment.center.clone()
+    indices = center.long().unsqueeze(-1) + torch.arange(-2, 3, device="cuda")
+    valid = (indices >= 0) & (indices < 15)
     F.mse_loss(assignment().float(), model.weight.float()).backward()
     for parameter in (assignment.logits, assignment.log_block, assignment.log_global):
         assert torch.isfinite(parameter.grad).all()
         assert torch.count_nonzero(parameter.grad) > 0
+    assert torch.count_nonzero(assignment.logits.grad[~valid]) == 0
     with torch.no_grad():
-        assignment.logits.fill_(-100)
-        assignment.logits[..., 4] = 100
+        assignment.logits.zero_()
+        assignment.logits[..., 2] = 10
+        assignment.logits.masked_fill_(~valid, 1000)
     hard = assignment(hard=True)
     block, global_scale = assignment.scales()
-    expected = assignment.grid[(center.long() + 2).clamp_max(14)].reshape(*block.shape, 16) * (
+    expected = assignment.grid[center.long()].reshape(*block.shape, 16) * (
         block * global_scale
     ).unsqueeze(-1)
     torch.testing.assert_close(hard, expected.reshape_as(hard), rtol=0, atol=0)
     assert torch.equal(assignment.center, center)
-    # A clipped +2 shift and a +1 shift must remain distinct logits even at the boundary.
     assert assignment.logits.shape[-1] == 5
+
+
+@pytest.mark.parametrize("steps", [1, 5])
+def test_gsq_uses_cosine_rates_and_no_scale_decay(monkeypatch, steps):
+    gsq_module = import_module("modelopt.torch.quantization.gsq")
+    config = _config("max")
+    config["algorithm"].update(steps=steps)
+    algorithm = GSQCalibConfig(**config["algorithm"])
+    reference = torch.optim.SGD(
+        [
+            {"params": [nn.Parameter(torch.zeros(()))], "lr": algorithm.assignment_lr},
+            {"params": [nn.Parameter(torch.zeros(()))], "lr": algorithm.scale_lr},
+        ]
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(reference, T_max=max(steps - 1, 1))
+    # Both groups share a relative 10% floor, unlike PyTorch's absolute eta_min.
+    calls = []
+    step_fn = gsq_module._lion_step
+
+    def observe_step(groups, momentum, lr_multiplier):
+        cosine = scheduler.get_last_lr()
+        expected = [0.1 * base + 0.9 * rate for base, rate in zip(scheduler.base_lrs, cosine)]
+        assert [lr * lr_multiplier for _, lr, _ in groups] == pytest.approx(expected)
+        assert [decay for _, _, decay in groups] == [algorithm.weight_decay, 0.0]
+        step_fn(groups, momentum, lr_multiplier)
+        calls.append(lr_multiplier)
+        reference.step()
+        scheduler.step()
+
+    if steps == 1:
+        reference.step()
+        scheduler.step()
+    monkeypatch.setattr(gsq_module, "_lion_step", observe_step)
+    model = nn.Linear(64, 16, bias=False, device="cuda").eval()
+    x = torch.randn(64, 64, device="cuda")
+    mtq.quantize(model, config, lambda m: m(x))
+    assert len(calls) == steps
 
 
 @pytest.mark.parametrize("method", ["gptq", "awq_full"])

@@ -433,7 +433,8 @@ Local-shift GSQ for NVFP4 weights
 
 GSQ refines quantized assignments and scales using Gumbel-Softmax reconstruction
 (`paper <https://arxiv.org/abs/2604.18556>`_). The local-shift variant keeps five
-candidate grid indices around each initializer code, with clipped boundaries.
+candidate grid indices around each initializer code, masking out-of-range shifts
+as in the `reference implementation <https://github.com/IST-DASLab/GSQ>`_.
 ModelOpt adapts this method to NVFP4 E2M1 weights with native FP8 block scales.
 
 Load a weight-only recipe, then provide a replayable calibration loop:
@@ -454,8 +455,9 @@ Other compatible NVFP4 initializers, such as ``max``, ``mse``, and
 ``local_hessian``, can be selected through this field. Set layerwise options on
 GSQ itself, rather than its initializer.
 
-GSQ uses Lion, a centered noisy shift prior, linear temperature and logit-scale
-schedules, and optional gradient accumulation. ``steps``, ``batch_size``,
+GSQ uses Lion with cosine learning-rate decay to 10% of the initial rates,
+weight decay on logits only, a centered noisy shift prior, linear temperature
+and logit-scale schedules, and optional gradient accumulation. ``steps``, ``batch_size``,
 ``max_tokens`` (cached tokens per linear), and the learning rates control the
 calibration budget. Targets and rollback weights are cached on the CPU;
 five logits per weight and optimizer state reside on the calibration device
