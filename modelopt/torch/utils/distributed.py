@@ -351,6 +351,16 @@ torch.serialization.add_safe_globals([DistributionPlan])
 _PLAN_ATTR = "_modelopt_distribution_plan"
 
 
+def _recorded_plan(model: torch.nn.Module) -> tuple[str, DistributionPlan] | None:
+    """Which of ``model`` and its submodules records a plan, named, and that plan; else ``None``."""
+    for name, module in model.named_modules():
+        recorded = getattr(module, _PLAN_ATTR, None)
+        if recorded is not None:
+            where = f"{type(module).__name__} {name!r}" if name else type(module).__name__
+            return where, recorded
+    return None
+
+
 def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> None:
     """Record that ``model`` is distributed as ``plan``, on it and on every submodule it has now.
 
@@ -374,14 +384,12 @@ def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> Non
             f"{plan!r} is for {plan.world_size} ranks, but the run it is recorded in has "
             f"{size()}; a plan's world_size is the ranks that hold the model."
         )
-    for name, module in model.named_modules():
-        recorded = getattr(module, _PLAN_ATTR, None)
-        if recorded is not None:
-            where = f"{type(module).__name__} {name!r}" if name else type(module).__name__
-            raise ValueError(
-                f"{where} is already recorded as distributed by {recorded!r}; a model is "
-                f"distributed and its plan recorded once, so {plan!r} cannot be recorded over it."
-            )
+    if (found := _recorded_plan(model)) is not None:
+        where, recorded = found
+        raise ValueError(
+            f"{where} is already recorded as distributed by {recorded!r}; a model is distributed "
+            f"and its plan recorded once, so {plan!r} cannot be recorded over it."
+        )
     for module in model.modules():
         setattr(module, _PLAN_ATTR, plan)
 
@@ -403,9 +411,10 @@ def distribution_plan(model: torch.nn.Module) -> DistributionPlan:
     if sharded or size() > 1:
         how = "is FSDP2-sharded" if sharded else f"is held in a run of {size()} ranks"
         raise RuntimeError(
-            f"{type(model).__name__} {how}, but has no distribution plan recorded. Record how it "
-            "is distributed with set_distribution_plan(); a module added to a model after its plan "
-            "was recorded has none, so read the plan off that model."
+            f"{type(model).__name__} {how}, but has no distribution plan recorded. Load it with "
+            "load_pretrained, or record how it is distributed with set_distribution_plan(); a "
+            "module added to a model after its plan was recorded has none, so read the plan off "
+            "that model."
         )
     return DistributionPlan()
 

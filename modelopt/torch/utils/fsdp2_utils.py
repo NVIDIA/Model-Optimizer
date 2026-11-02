@@ -26,6 +26,7 @@ import torch
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 from torch.distributed.tensor import DTensor
 
+from modelopt.torch.utils.distributed import _recorded_plan
 from modelopt.torch.utils.logging import warn_rank_0
 
 __all__ = ["fsdp2_wrap"]
@@ -99,7 +100,20 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     :func:`_off_dtype_params`), since FSDP2 rejects a shard group that mixes dtypes. They stay
     replicated and are moved onto the shards' device, which ``fully_shard`` does not do for the
     params it ignores.
+
+    It records no distribution plan, and refuses a model that, or any of whose submodules, records
+    one, as a model ``load_pretrained`` returned does: wrap one loaded with ``from_pretrained``.
     """
+    if (found := _recorded_plan(model)) is not None:
+        # A model recorded as replicated would read so while sharded, misleading the export, and one
+        # recorded as sharded is wrapped already. A ValueError, as set_distribution_plan raises.
+        where, recorded = found
+        raise ValueError(
+            f"{where} is already recorded as distributed by {recorded!r}, and a plan is recorded "
+            "once. To shard a model yourself, load it with from_pretrained rather than "
+            "load_pretrained, which records the plan it loaded by, then record yours with "
+            "set_distribution_plan() once it is wrapped."
+        )
     # Importing the quantization package registers every mode and plugin; only a wrap needs it.
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
