@@ -733,27 +733,19 @@ class _StridedIterableShard(IterableDataset):
 
 
 def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoader:
-    """Wrap a DataLoader so each rank sees a unique shard.
+    """Wrap a DataLoader so each rank sees a unique shard, every rank the same number of batches.
 
-    For map-style datasets a ``DistributedSampler`` is used. ``drop_last=False`` keeps per-rank batch
-    counts equal (else a rank exits calibration early and hangs the others on the per-step collectives),
-    at the cost of the sampler repeating up to ``world_size - 1`` samples to pad the even split. It
-    replaces the loader's sampler, so a shuffling one becomes the rank's unshuffled share, and one that
-    picks samples itself (a subset, a sampler over another source than the loader's dataset, a
-    random sampler drawing its own number of samples or with replacement, or a batch sampler other
-    than a plain ``BatchSampler``) is refused rather than silently widened. For streaming
-    ``IterableDataset`` datasets (which have no ``len()``
-    and so can't use a sampler) each rank strides its own copy of the stream via
-    :class:`_StridedIterableShard`. That stream must yield the same samples in the same order on
-    every rank, or the shards overlap and the ranks' step counts can differ, which hangs the
-    collectives: one that shuffles needs a fixed seed of its own, as the ranks' RNGs need not agree.
-    A stream loaded with workers is refused: a dataset that splits itself across them by
-    ``get_worker_info()``, as a Hugging Face streaming dataset does, would be split twice and
-    silently lose samples.
+    A map-style dataset is split by a ``DistributedSampler`` that replaces the loader's sampler: a
+    shuffling loader gives each rank an unshuffled share, and up to ``world_size - 1`` samples repeat
+    to even the split. A streaming ``IterableDataset`` is strided across the ranks and must yield the
+    same samples in the same order on every rank (one that shuffles needs its own fixed seed); a
+    trailing incomplete group of samples is dropped. Refused: a loader that picks its own samples (a
+    subset, a sampler over another source than its dataset, a random sampler drawing its own number
+    of samples or with replacement, a batch sampler other than a plain ``BatchSampler``), and a
+    stream loaded with workers.
 
-    Forwards all non-sampler DataLoader settings from ``loader`` (batching, workers, pinning,
-    prefetch, init fn, generator, ...). With one rank there is nothing to shard: ``loader`` itself
-    comes back, its sampler and shuffling included.
+    Keeps the loader's other settings (batching, workers, pinning, prefetch, init fn, generator, ...).
+    With one rank, ``loader`` itself comes back, its sampler and shuffling included.
     """
     if world_size == 1:
         return loader
@@ -784,7 +776,11 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
                 "just the samples to calibrate on (a torch.utils.data.Subset) instead."
             )
     if isinstance(loader.dataset, IterableDataset):
+        # Each rank strides its own copy of the stream: one that differs by rank would overlap the
+        # shards and could give the ranks different step counts, which hangs the collectives.
         if loader.num_workers:
+            # A dataset that splits itself across workers by get_worker_info(), as a Hugging Face
+            # streaming dataset does, would be split twice and silently lose samples.
             raise ValueError(
                 f"shard_dataloader: a streaming loader with num_workers={loader.num_workers} is "
                 "refused: a dataset that splits itself across the workers by get_worker_info() "
@@ -806,6 +802,8 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
             persistent_workers=loader.persistent_workers,
             pin_memory_device=getattr(loader, "pin_memory_device", ""),
         )
+    # drop_last=False pads the split so every rank runs the same number of steps: a rank that ran
+    # short would leave the others waiting in the per-step collectives.
     sampler = DistributedSampler(
         loader.dataset,
         num_replicas=world_size,

@@ -1006,20 +1006,13 @@ def get_max_batch_size(
     """Get the maximum batch size that can be used for the model.
 
     ``forward_step(model, inputs)`` optionally probes a custom workload, including during
-    OOM retries (which a model distributed over several ranks skips, below). By default, probe a
-    model forward (or generation for encoder-decoder models).
+    OOM retries. By default, probe a model forward (or generation for encoder-decoder models).
 
-    For a model whose recorded plan distributes it over several ranks
-    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`) it is collective: every rank
-    calls it, and every rank gets the smallest batch size any rank's GPU allows
-    (:func:`~modelopt.torch.utils.distributed.all_reduce`), so that all run the same number of
-    calibration steps. Each rank then measures the GPU it computes on, from one forward of the
-    single-sample input, and does not probe the batch size it arrives at: retrying a smaller batch
-    after an out-of-memory error would run a different number of forwards, and of the collectives
-    inside them, on each rank. Probing in lockstep would not make it safe either: a rank that runs out
-    of memory partway through a forward has left its peers waiting in that forward's collectives. If
-    the estimate does not fit, pass an explicit batch size instead. A model with no plan recorded,
-    such as a Megatron model, is measured on every visible GPU, as in a single process.
+    For a model whose recorded plan spans several ranks
+    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), every rank must call it, and
+    every rank gets the same size: the smallest that each rank estimates from one forward on the GPU
+    it computes on. That estimate is not retried on out-of-memory; if it does not fit, pass an
+    explicit batch size. A model with no plan recorded is measured on every visible GPU.
     """
     args = (
         model,
@@ -1031,6 +1024,10 @@ def get_max_batch_size(
     )
     plan = recorded_distribution_plan(model)
     if plan is not None and plan.world_size > 1:
+        # The smallest estimate gives every rank the same number of calibration steps. It is not
+        # probed: a rank retrying a smaller batch after an out-of-memory error would run more
+        # forwards, and their collectives, than its peers, and one that runs out of memory partway
+        # through a forward leaves them waiting in its collectives.
         # The device this rank computes on, which LOCAL_RANK does not name under a launcher that
         # shows each rank one GPU.
         device = torch.device("cuda", torch.cuda.current_device())
