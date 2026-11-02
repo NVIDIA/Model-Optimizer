@@ -782,8 +782,10 @@ def test_a_remote_moe_whose_prepare_attaches_its_plan_left_whole_is_an_error(
 ):
     """Remote-code Kimi checkpoints get their plan from their spec's ``prepare``, which an EP degree
     of 1 skips: it patches their code. The plan their spec states still finds the experts their own
-    code builds, so whole on every rank they are refused like Qwen3-MoE: a ValueError, or the
-    RuntimeError naming the release when this transformers is below what their spec needs."""
+    code builds, so whole on every rank they are refused like Qwen3-MoE. Below the release their
+    spec needs none could be expert-parallel, and they load as a dense model does, with a warning."""
+    if Version(transformers.__version__) < Version(_ep_floor(model_type)):
+        pytest.skip(f"{model_type} cannot be expert-parallel on this transformers")
     monkeypatch.setenv("MODELOPT_EP_DEGREE", "1")
     monkeypatch.setattr(
         get_spec(model_type).ep_spec, "prepare", lambda *a, **k: pytest.fail("ran prepare")
@@ -791,12 +793,8 @@ def test_a_remote_moe_whose_prepare_attaches_its_plan_left_whole_is_an_error(
     monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi())
     run_as(4)
     serve(SimpleNamespace(model_type=model_type, text_config=SimpleNamespace(n_routed_experts=8)))
-    below_floor = Version(transformers.__version__) < Version(_ep_floor(model_type))
 
-    with pytest.raises(
-        RuntimeError if below_floor else ValueError,
-        match="can be expert-parallel, but the plan resolved",
-    ):
+    with pytest.raises(ValueError, match="can be expert-parallel, but the plan resolved"):
         resolve_distribution_plan(str(tmp_path))
 
 
