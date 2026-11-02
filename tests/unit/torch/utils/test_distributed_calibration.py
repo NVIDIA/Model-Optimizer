@@ -601,6 +601,17 @@ def test_every_calibrate_mode_declares_whether_it_calibrates_distributed():
     assert not undeclared, undeclared
 
 
+@pytest.mark.parametrize(
+    "algorithm",
+    [None, "max", "mse", "smoothquant", "awq_clip", "gptq", "nvfp4_act_headroom", "lsq"],
+)
+def test_a_calibration_that_syncs_across_ranks_is_accepted_on_several_ranks(algorithm):
+    """The modes that declare they calibrate correctly on several ranks pass the guard."""
+    model = nn.Sequential(nn.Linear(16, 16))
+    set_distribution_plan(model, DistributionPlan(world_size=2))
+    _refuse_unsupported_distributed_calibration(model, algorithm)
+
+
 def test_an_undeclared_calibration_is_refused_on_several_ranks():
     """A calibration registered without declaring distributed support cannot slip past the guard."""
 
