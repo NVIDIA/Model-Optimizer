@@ -635,7 +635,8 @@ def get_tiny_glm5_next(**text_config_kwargs) -> PreTrainedModel:
         "intermediate_size": 128,
         "moe_intermediate_size": 32,
         "num_hidden_layers": 2,
-        "layer_types": ["linear_attention", "indexed_attention"],
+        # "full_attention" maps to the sparse-MLA name of the installed transformers version.
+        "layer_types": ["linear_attention", "full_attention"],
         "mlp_layer_types": ["dense", "sparse"],
         "indexer_types": ["full", "full"],
         "num_attention_heads": 4,
@@ -644,8 +645,9 @@ def get_tiny_glm5_next(**text_config_kwargs) -> PreTrainedModel:
         "kv_lora_rank": 16,
         "qk_nope_head_dim": 16,
         "v_head_dim": 16,
-        "linear_num_heads": 4,
-        "linear_head_dim": 16,
+        # Megatron-Bridge reads these released-checkpoint fields, which transformers doesn't define.
+        "linear_attn_config": {"num_heads": 4, "head_dim": 16, "short_conv_kernel_size": 4},
+        "scoring_func": "sigmoid",
         "index_n_heads": 2,
         "index_head_dim": 16,
         "index_topk": 8,
@@ -668,7 +670,54 @@ def get_tiny_glm5_next(**text_config_kwargs) -> PreTrainedModel:
         "projection_intermediate_size": 64,
     }
     cfg = Glm5NextConfig(text_config=text_kwargs, vision_config=vision_kwargs)
-    return AutoModelForImageTextToText.from_config(cfg, dtype=torch.bfloat16)
+    model = AutoModelForImageTextToText.from_config(cfg, dtype=torch.bfloat16)
+    with torch.no_grad():
+        for name, tensor in [*model.named_parameters(), *model.named_buffers()]:
+            # Perturb the constant-initialized norms, gates and mHC scales, so export tests catch swaps.
+            if (tensor == tensor.flatten()[0]).all():
+                tensor.add_(torch.rand_like(tensor) * 0.1)
+            # FP32 in the released checkpoint, so export tests check them bit-exact.
+            if name.endswith(
+                ("_hc.base", "_hc.scale", "A_log", "dt_bias", "e_score_correction_bias")
+            ):
+                tensor.data = tensor.data.float()
+    return model
+
+
+def create_tiny_glm5_next_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, return_model: bool = False, **config_kwargs
+) -> Path | tuple[Path, PreTrainedModel]:
+    """Save :func:`get_tiny_glm5_next` with the MTP layer released checkpoints have.
+
+    transformers doesn't build the MTP layer, so it is added to the checkpoint here: a copy of the
+    last (sparse) decoder layer without mHC, plus random MTP norms and ``eh_proj``.
+    """
+    dir_path, model = _create_tiny_llm_dir(
+        Path(tmp_path) / "tiny_glm5_next_vl",
+        get_tiny_glm5_next,
+        with_tokenizer=with_tokenizer,
+        return_model=True,
+        num_nextn_predict_layers=1,
+        **config_kwargs,
+    )
+    text_config = model.config.text_config
+    last = f"model.language_model.layers.{text_config.num_hidden_layers - 1}."
+    mtp = f"model.language_model.layers.{text_config.num_hidden_layers}."
+    path = dir_path / "model.safetensors"
+    state_dict = load_file(str(path))
+    for key in list(state_dict):
+        if key.startswith(last) and ".hc_" not in key:
+            state_dict[mtp + key.removeprefix(last)] = state_dict[key].clone()
+    hidden = text_config.hidden_size
+    for name, shape in [
+        ("enorm.weight", (hidden,)),
+        ("hnorm.weight", (hidden,)),
+        ("eh_proj.weight", (hidden, 2 * hidden)),
+        ("shared_head.norm.weight", (hidden,)),
+    ]:
+        state_dict[mtp + name] = torch.randn(shape, dtype=torch.bfloat16)
+    save_file(state_dict, str(path), metadata={"format": "pt"})
+    return (dir_path, model) if return_model else dir_path
 
 
 ##### GLM-5.3-FLASH / DEEPSEEK-V4 (config-only, for vLLM ``load_format="dummy"``) #####
