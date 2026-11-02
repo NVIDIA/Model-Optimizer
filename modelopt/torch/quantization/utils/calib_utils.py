@@ -128,12 +128,17 @@ def _update_room(helper, weight, block_size) -> int:
     dtype-conversion temporary (a projection much wider than its input makes the weight the larger
     part); the block's errors and up to four temporaries of a group no wider than the block, each
     as large as the weight when the input is no wider than a block; and the codec's tables and
-    scratch, about 35 MiB on a GPU's first update.
+    scratch, about 35 MiB on a GPU's first update. Logging the error afterwards holds up to six
+    float32 weight-sized tensors: the result, the original in its dtype and in float32, the error
+    and two products.
     """
     columns = weight.shape[-1]
     rows = weight.numel() // columns
     block = min(block_size, columns)
-    return 2**26 + 4 * (8 * helper.hessian.numel() + rows * (2 * columns + 5 * block))
+    per_row = 2 * columns + 5 * block
+    if helper.log_mse:
+        per_row = max(per_row, 6 * columns)
+    return 2**26 + 4 * (8 * helper.hessian.numel() + rows * per_row)
 
 
 def update_expert_weights(work, block_size, perc_damp):
