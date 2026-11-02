@@ -95,7 +95,8 @@ from modelopt.torch.quantization.utils import (
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
-from modelopt.torch.utils.distributed import fsdp2_root_unsharded, is_fsdp2_model
+from modelopt.torch.utils.distributed import is_fsdp2_model
+from modelopt.torch.utils.fsdp2_utils import fsdp2_root_unsharded
 from modelopt.torch.utils.perf import maybe_clear_cuda_cache
 
 try:
