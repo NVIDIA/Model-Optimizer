@@ -15,10 +15,12 @@
 
 """Unittests for AWQ and SVDQuant"""
 
+from datetime import timedelta
 from functools import partial
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from _test_utils.torch.quantization.quantize_common import get_awq_config
 
@@ -33,6 +35,7 @@ from modelopt.torch.quantization.model_calib import (
 )
 from modelopt.torch.quantization.nn import QuantLinear, TensorQuantizer
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.utils.distributed import DistributionPlan, ParallelState, set_distribution_plan
 
 
 class _SimpleMLP(nn.Module):
@@ -264,6 +267,70 @@ def test_awq_clip():
     config = get_awq_config("awq_clip")
     model, model_ref, dataloader, ref_data = get_test_args(config)
     _awq_clip_tester(model, model_ref, ref_data, config)
+
+
+class _Experts(nn.Module):
+    """Two experts, each run only on the inputs routed to it, as an MoE runs them."""
+
+    def __init__(self, data_parallel_group):
+        super().__init__()
+        self.experts = nn.ModuleList(nn.Linear(16, 4, bias=False) for _ in range(2))
+        for expert in self.experts:
+            with torch.no_grad():
+                # Every rank's copy: small weights, and a large one per row on input channel 0.
+                expert.weight.copy_(torch.linspace(-0.1, 0.1, 64).view(4, 16))
+                expert.weight[:, 0] = 1.0
+            expert._parallel_state = ParallelState(data_parallel_group=data_parallel_group)
+
+    def forward(self, calls):
+        for index, x in calls:
+            self.experts[index](x)
+
+
+def _rank_input(rank):
+    x = torch.randn(8, 16, generator=torch.Generator().manual_seed(rank))
+    if rank % 2 == 0:
+        x[:, 0] = 0  # never reaches the large weights: a tighter clip only sharpens the rest
+    else:
+        x[:, 1:] = 0  # reaches only them: clipping them costs the most
+    return x
+
+
+def _awq_clip_on_every_rank_job(rank, size):
+    x = _rank_input(rank)
+    # The same number of steps on every rank, but expert 1 runs on both of rank 0's and on one of
+    # rank 1's, there on no tokens: an expert's forwards, unlike the steps, are each rank's own.
+    steps = [[(0, x), (1, x)]] * 2 if rank == 0 else [[(0, x), (1, x[:0])], [(0, x)]]
+    # A rank left waiting in the clip search's sync gives up in seconds on this group.
+    group = dist.new_group(timeout=timedelta(seconds=10))
+    dist.barrier(group=group)
+    model = _Experts(group)
+    set_distribution_plan(model, DistributionPlan(size))
+    try:
+        mtq.quantize(model, get_awq_config("awq_clip"), lambda m: [m(calls) for calls in steps])
+        clips = [expert.weight_quantizer.amax for expert in model.experts]
+        gathered = [None] * size
+        dist.all_gather_object(gathered, clips, group=group)
+    finally:
+        dist.destroy_process_group(group)
+    assert all(
+        torch.equal(mine, theirs) for other in gathered for mine, theirs in zip(clips, other)
+    ), gathered
+    # Expert 1's clips are those rank 0's tokens pick alone, which rank 1's empty call leaves be.
+    alone = _Experts(data_parallel_group=-1)
+    x0 = _rank_input(0)
+    mtq.quantize(alone, get_awq_config("awq_clip"), lambda m: [m([(1, x0)]) for _ in range(2)])
+    assert (clips[1] > 0).all(), clips[1]
+    assert torch.equal(clips[1], alone.experts[1].weight_quantizer.amax)
+
+
+def test_awq_clip_picks_the_same_clips_on_every_rank(cpu_dist_workers):
+    """Each rank of a model distributed over several ranks calibrates on its own data. awq_clip
+    averages each candidate clip's loss over the data-parallel ranks, once all the forwards have
+    run, so the ranks' copies of a weight take the same clips, though each rank's own data would
+    pick others, and though an MoE's expert runs a different number of forwards on each rank, on
+    one of them on no tokens, which leaves the clips the other ranks' tokens pick."""
+    cpu_dist_workers.run(_awq_clip_on_every_rank_job)
 
 
 @pytest.mark.parametrize("use_weight_scale", [None, False])

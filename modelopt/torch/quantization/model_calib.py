@@ -2029,16 +2029,10 @@ def awq_clip(
             clip_ratios = [
                 round(float(k), 2) for k in torch.arange(min_clip_ratio, 1.0, shrink_step)
             ] + [1.0]
-            if self.is_per_tensor_clip(module):
-                self.loss = {k: torch.tensor(0.0, device=module.weight.device) for k in clip_ratios}
-            else:
-                self.loss = {
-                    k: torch.zeros(
-                        (co, math.ceil(ci / self.block_size)),
-                        device=module.weight.device,
-                    )
-                    for k in clip_ratios
-                }
+            shape = () if self.is_per_tensor_clip(module) else (co, math.ceil(ci / self.block_size))
+            # One buffer for every candidate's loss, which the data-parallel sync reduces in place.
+            self.loss_buffer = torch.zeros(len(clip_ratios), *shape, device=module.weight.device)
+            self.loss = dict(zip(clip_ratios, self.loss_buffer))
             self.best_clip_val = None
             self.best_loss = None
 
@@ -2067,7 +2061,24 @@ def awq_clip(
                 indices, self.awq_clip.w_amax * shrink, self.awq_clip.best_clip_val
             )
 
+    def sync_across_dp(module):
+        """Average the clip search over the data-parallel ranks, so every replica picks one clip.
+
+        Once, after the forwards: a module's forward count, as an MoE expert's, can differ by rank.
+        """
+        group = module.parallel_state.data_parallel_group
+        if not group.is_initialized():
+            return
+        losses = module.awq_clip.loss_buffer
+        dist.all_reduce(losses, op=dist.ReduceOp.SUM, group=group.group)
+        losses /= group.world_size()
+        tokens = torch.tensor(module.awq_clip.num_tokens, device=losses.device)
+        dist.all_reduce(tokens, op=dist.ReduceOp.SUM, group=group.group)
+        module.awq_clip.num_tokens = int(tokens.item())
+
     def _clip_search(self, inputs, co_bsz=256, max_tokens=16):
+        if inputs.numel() == 0:  # no tokens to search with; their loss, a mean over none, is NaN
+            return
         weight = self.weight
         self.weight_quantizer.enable()
 
@@ -2125,11 +2136,6 @@ def awq_clip(
 
                     # co_bsz, n_block
                     loss = (cur_out - org_out).float().pow(2).mean(dim=1)
-
-                    parallel_group = self.parallel_state.data_parallel_group
-                    if parallel_group.is_initialized():
-                        dist.all_reduce(loss, op=dist.ReduceOp.SUM, group=parallel_group.group)
-                        loss /= parallel_group.world_size()
 
                     del cur_out, cur_w
                     self.awq_clip.loss[shrink][
@@ -2197,6 +2203,11 @@ def awq_clip(
         module.weight_quantizer.enable()
         if module.awq_clip.is_input_quantized:
             module.input_quantizer.enable()
+
+    # Every module's reduction before any weight gather, which an FSDP2 model's postprocess runs.
+    for module in model.modules():
+        if is_quantized_linear(module) and hasattr(module, "awq_clip"):
+            sync_across_dp(module)
 
     for name, module in model.named_modules():
         if is_quantized_linear(module) and hasattr(module, "awq_clip"):
