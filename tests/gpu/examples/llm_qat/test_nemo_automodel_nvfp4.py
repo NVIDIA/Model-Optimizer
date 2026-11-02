@@ -94,7 +94,10 @@ def test_published_parity_and_gradients(dtype):
     native, state = _make_model("cuda")
     adapter = NVFP4GroupedExperts(native.bfloat16(), state).to(dtype)
     assert adapter.gate_and_up_projs is native.gate_and_up_projs
-    exported = export_hf_experts(adapter.state_dict(), dtype=dtype)
+    full_state = adapter.state_dict()
+    full_state["unrelated._extra_state"] = None
+    full_state["unrelated.weight"] = torch.empty(1, device="meta")
+    exported = export_hf_experts(full_state, dtype=dtype)
     for key, value in state.items():
         assert torch.equal(
             exported[key].reshape(-1).view(torch.uint8), value.reshape(-1).view(torch.uint8)

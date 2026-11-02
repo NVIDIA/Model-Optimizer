@@ -244,7 +244,7 @@ def export_hf_experts(
     up, down = state[stem + "gate_and_up_projs"], state[stem + "down_projs"]
     if dtype not in _COMPUTE_DTYPES:
         raise ValueError("Export dtype must be float32, float16, or bfloat16")
-    for tensor in state.values():
+    for tensor in (up, down):
         if isinstance(tensor, DTensor) or tensor.is_meta:
             raise ValueError(
                 "Export requires a materialized full state; gather outside the exporter"

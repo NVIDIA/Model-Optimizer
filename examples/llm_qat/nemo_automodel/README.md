@@ -89,6 +89,8 @@ if dist.get_rank() == 0:
 The prefix must identify the adapter in the native state. Remap output keys if
 the target HF module path differs. The exporter returns packed uint8 weights
 and the original scales; it performs no collectives or device transfers.
+Unrelated entries in the full-model state are ignored, including non-tensor
+extra state and meta tensors outside the selected expert module.
 Merge these tensors with the other model components and the appropriate
 quantization configuration using a separately validated full-model exporter.
 
@@ -103,3 +105,24 @@ pytest tests/gpu/examples/llm_qat/test_nemo_automodel_nvfp4.py -v --durations=10
 Tests cover packed parity, dtype preservation, routed and empty gradients,
 rejection without modifying the source, and distributed FSDP2 Adam resume/export.
 The FSDP2 test uses all visible GPUs.
+
+## Full-model experiment
+
+A separate Qwen3.8-Flash-Next workspace experiment extended this adapter with a
+streaming loader, mixed-format exporter, and serving-matched forward kernels with
+recomputed backward passes. Those model-specific extensions are not included in
+this example and are necessary to reproduce the following results.
+
+On 16 GB300 GPUs, BF16 and NVFP4 language-model parity passed against vLLM 0.30
+for five prompts of 256, 256, 500, 299, and 2048 tokens. All 97 captured boundaries
+matched exactly for each prompt. The serving comparison used TP1/EP1, isolated
+uncached requests, chunked prefill, and pinned FlashInfer tactics. Zero-update
+export/reload was exact; trained exports had maximum log-probability error below
+6e-6 and top-1 agreement above 99.4%.
+
+Three QAD updates completed with FP32 expert masters, frozen published scales,
+and exact optimizer-state restoration. Peak allocated memory was 166.3 GiB per
+GPU, with about 11.5 minutes per update at global batch 64 and a 2048-token cap.
+The best checkpoint reduced held-out teacher-to-student KL by 11.63% on 32
+examples. This small pilot does not establish task-benchmark accuracy recovery
+or long-run convergence; vision forward was not exercised.

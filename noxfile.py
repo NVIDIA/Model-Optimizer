@@ -37,8 +37,6 @@ nox.options.envdir = "/tmp/.nox"
 nox.options.reuse_existing_virtualenvs = True
 
 TORCH_VERSIONS = {
-    "torch_28": "torchvision~=0.23.0",
-    "torch_29": "torchvision~=0.24.0",
     "torch_210": "torchvision~=0.25.0",
     "torch_211": "torchvision~=0.26.0",
     "torch_212": "torchvision~=0.27.0",

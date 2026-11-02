@@ -43,8 +43,8 @@ class GraphSanitizer:
         model: onnx.ModelProto,
         min_opset: int = 13,
         max_ir_version: int | None = None,
-        trt_plugins: list[str] | None = [],
-        trt_plugins_precision: list[str] | None = [],
+        trt_plugins: list[str] | None = None,
+        trt_plugins_precision: list[str] | None = None,
         onnx_path: str | None = None,
     ) -> None:
         """Initialize GraphSanitizer.
@@ -62,7 +62,7 @@ class GraphSanitizer:
         self.standard_ops = {schema.name for schema in onnx.defs.get_all_schemas()}
         self.custom_ops = None
         self.custom_ops_low_precision_nodes = []
-        self.trt_plugins = trt_plugins
+        self.trt_plugins = [] if trt_plugins is None else trt_plugins
         self.trt_plugins_precision = trt_plugins_precision or []
         self.onnx_path = os.path.abspath(onnx_path) if onnx_path is not None else None
         self.external_data_dir = os.path.dirname(self.onnx_path) if self.onnx_path else ""
