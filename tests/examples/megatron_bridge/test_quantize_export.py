@@ -56,7 +56,7 @@ _DENSE_KWARGS = {
     ),
     [
         # MoE: routed experts used to be dropped silently from the export. Calibrates with context
-        # parallelism (not on the VLM: M-RoPE CP needs nemo:26.10).
+        # parallelism.
         (
             create_tiny_qwen3_moe_dir,
             _DENSE_KWARGS,

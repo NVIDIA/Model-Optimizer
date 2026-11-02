@@ -1,0 +1,21 @@
+name: Transformer Engine for all GPU architectures
+description: >-
+  Replace the NeMo container's libtransformer_engine.so with the PyPI build of the same TE version. The nemo:26.10
+  build only has kernels for sm_90/100/103/107, so it fails with "no kernel image is available" on RTX PRO 6000
+  (sm_120). Remove once a NeMo container ships TE with all GPU architectures again.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euxo pipefail
+        te_dir=$(python -c "import importlib.util, os; print(os.path.dirname(importlib.util.find_spec('transformer_engine').origin))")
+        te_ver=$(python -c "import importlib.metadata as m; print(m.version('transformer_engine').split('+')[0])")
+        cuda=$(python -c "import torch; print(torch.version.cuda.split('.')[0])")
+        tmp=$(mktemp -d)
+        python -m pip download -q --no-deps "transformer_engine_cu${cuda}==${te_ver}" -d "$tmp"
+        python -m zipfile -e "$tmp"/*.whl "$tmp/whl"
+        # Only the core library: the container's PyTorch extension has no device code and stays.
+        cp "$tmp/whl/transformer_engine/wheel_lib/libtransformer_engine.so" "$te_dir/"
+        rm -rf "$tmp"
