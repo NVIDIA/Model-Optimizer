@@ -99,7 +99,8 @@ def bridge_workers(request):
 @pytest.mark.parametrize(
     ("create_source", "quant_cfg_name"),
     [
-        (partial(create_tiny_llama_dir, with_tokenizer=True), "nvfp4"),
+        # head_dim=64: FlashAttention-4 (used by TE on sm_120) cannot compile the default head_dim=2
+        (partial(create_tiny_llama_dir, with_tokenizer=True, head_dim=64), "nvfp4"),
         (partial(create_tiny_qwen3_dir, with_tokenizer=True), "fp8"),
         # The bridge can't export quantized Mamba or GatedDeltaNet projections yet.
         (partial(create_tiny_nemotron_h_dir, with_tokenizer=True), "nvfp4_mlp_only"),
