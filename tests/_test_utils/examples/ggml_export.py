@@ -24,11 +24,20 @@ IQ1_S = {"num_bits": "iq1_s", "block_sizes": {-1: 256}, "backend": "ggml"}
 IQ2_XS = {"num_bits": "iq2_xs", "block_sizes": {-1: 256}, "backend": "ggml"}
 
 
-def quantize_tiny_llama(tmp_path, layer_cfgs=(IQ1_S, IQ2_XS)):
+FP8 = {"num_bits": (4, 3), "axis": None}
+# FP8 W8A8 attention in layer 0, beside the GGML MLPs, as in recipes that keep attention in FP8.
+FP8_ATTENTION = (
+    {"quantizer_name": "*layers.0.self_attn.*weight_quantizer", "cfg": FP8},
+    {"quantizer_name": "*layers.0.self_attn.*input_quantizer", "cfg": FP8},
+)
+
+
+def quantize_tiny_llama(tmp_path, layer_cfgs=(IQ1_S, IQ2_XS), extra_quant_cfg=()):
     """Return a two-layer tiny LLaMA whose layer ``i`` MLP takes ``layer_cfgs[i]``, and its tokens.
 
     The default formats have 32- and 16-weight sub-blocks, so the INT8 checkpoint needs a config
-    group for each. The shapes suit vLLM's kernels, and fake quant runs on CPU.
+    group for each. ``extra_quant_cfg`` quantizes other layers. The shapes suit vLLM's kernels,
+    and fake quant runs on CPU.
     """
     source = create_tiny_llama_dir(
         tmp_path,
@@ -49,6 +58,7 @@ def quantize_tiny_llama(tmp_path, layer_cfgs=(IQ1_S, IQ2_XS)):
                 {"quantizer_name": f"*layers.{i}.mlp*weight_quantizer", "cfg": cfg}
                 for i, cfg in enumerate(layer_cfgs)
             ),
+            *extra_quant_cfg,
         ],
         "algorithm": "max",
     }

@@ -775,7 +775,7 @@ python convert_ggml_to_int8.py <ggml_ckpt_path> <int8_ckpt_path>
 vllm serve <int8_ckpt_path>
 ```
 
-Each weight keeps its GGML integer level, and the step of its 16- or 32-weight sub-block becomes the INT8 group scale. The INT8 checkpoint therefore holds the same weights up to rounding the scales to the model dtype, at about half the BF16 weight memory. Its config names each converted layer explicitly, so every other layer loads unquantized. The GGML checkpoint is left unchanged.
+Each weight keeps its GGML integer level, and the step of its 16- or 32-weight sub-block becomes the INT8 group scale. The INT8 checkpoint therefore holds the same weights up to rounding the scales to the model dtype, at about half the BF16 weight memory. Its config names each converted layer explicitly. Only the GGML layers are rewritten: FP8 layers, such as FP8 attention beside GGML MLPs, are copied as they are and described in the same config, every other unquantized layer loads unquantized, and an export with layers of another format, such as NVFP4, is refused. The GGML checkpoint is left unchanged.
 
 vLLM serves group-32 layers (IQ1_S, IQ2_XXS, Q8_0) with Marlin and group-16 layers (IQ1_M, IQ2_XS, IQ2_S) with Humming. On Blackwell GPUs, Marlin is much slower at large batch sizes, so set `VLLM_DISABLED_KERNELS=MarlinLinearKernel` to use Humming for group 32 as well.
 

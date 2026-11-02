@@ -49,12 +49,14 @@ def convert_ggml_export_to_int8(
 
     Every GGML weight is an integer level of at most 8 bits times the step of its 16- or
     32-weight sub-block, so storing those levels with the steps as group scales reproduces the
-    GGML weights up to rounding the steps to the model dtype. Unquantized tensors and the other
-    files are copied as they are; the GGML export is left unchanged.
+    GGML weights up to rounding the steps to the model dtype. Only the GGML layers are rewritten:
+    every other tensor and file is copied as it is, including the layers of other quantization
+    formats, which the config describes in compressed-tensors terms. The GGML export is left
+    unchanged.
 
     Args:
-        ggml_dir: A Hugging Face export whose quantized layers are all GGML formats, as written
-            by hf_ptq.py with a GGML recipe.
+        ggml_dir: A Hugging Face export holding GGML layers, as written by hf_ptq.py with a GGML
+            recipe. Its other quantized layers must use a format in ``_CARRIED_OVER_SCHEMES``.
         output_dir: Where to write the INT8 checkpoint. Must be empty or not exist yet.
         max_shard_size: Target bytes per output safetensors shard; a larger tensor gets a shard
             of its own. Conversion holds one output shard in memory at a time.
@@ -73,6 +75,7 @@ def convert_ggml_export_to_int8(
     scale_dtype = getattr(torch, dtype)
     weight_map = indexed_weight_map(ggml_dir)
     layer_formats = _ggml_layer_formats(ggml_dir, weight_map, quantization)
+    carried_over = _carried_over_schemes(weight_map, quantization)
     if output_dir.exists() and any(output_dir.iterdir()):
         raise ValueError(f"{output_dir} is not empty.")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -85,7 +88,7 @@ def convert_ggml_export_to_int8(
         total_size = sum((output_dir / s).stat().st_size for s in set(new_weight_map.values()))
         index = {"metadata": {"total_size": total_size}, "weight_map": new_weight_map}
         (output_dir / _INDEX).write_text(json.dumps(index, indent=2))
-        config["quantization_config"] = _compressed_tensors_config(layer_formats)
+        config["quantization_config"] = _compressed_tensors_config(layer_formats, carried_over)
         (output_dir / "config.json").write_text(json.dumps(config, indent=4))
         # Both skip files already written, and copy_non_model_files skips hf_quant_config.json,
         # which describes the GGML payloads this replaced.
@@ -104,7 +107,7 @@ def convert_ggml_export_to_int8(
 def _ggml_layer_formats(
     ggml_dir: Path, weight_map: dict[str, str], quantization: dict
 ) -> dict[str, GGMLFormat]:
-    """The GGML format of every layer holding a packed payload, refusing anything else."""
+    """The GGML format of every layer holding a packed payload, refusing formats it cannot carry."""
     if quantization.get("kv_cache_quant_algo") is not None:
         raise ValueError("INT8 conversion of a GGML export does not carry KV cache quantization.")
     mixed = quantization.get("quant_algo") == "MIXED_PRECISION"
@@ -114,9 +117,18 @@ def _ggml_layer_formats(
         if mixed
         else {quantization.get("quant_algo")}
     )
-    unsupported = sorted(str(a) for a in algos if str(a).lower() not in GGML_FORMAT_REGISTRY)
+    unsupported = sorted(
+        str(a)
+        for a in algos
+        if str(a).lower() not in GGML_FORMAT_REGISTRY
+        and str(a).upper() not in _CARRIED_OVER_SCHEMES
+    )
     if unsupported:
-        raise ValueError(f"Only GGML layers convert to INT8, but the export has {unsupported}.")
+        raise ValueError(
+            f"The export has {unsupported} layers, which the INT8 checkpoint cannot carry over: "
+            f"only GGML layers convert, and only {sorted(_CARRIED_OVER_SCHEMES)} layers are "
+            "copied as they are."
+        )
 
     layer_formats = {}
     for shard in sorted(set(weight_map.values())):
@@ -136,10 +148,45 @@ def _ggml_layer_formats(
             if mixed and layer not in layer_configs:
                 raise ValueError(f"{layer} holds a uint8 weight but is not in quantized_layers.")
             algo = layer_configs[layer]["quant_algo"] if mixed else quantization["quant_algo"]
-            layer_formats[layer] = GGML_FORMAT_REGISTRY[algo.lower()]
+            if algo.lower() in GGML_FORMAT_REGISTRY:
+                layer_formats[layer] = GGML_FORMAT_REGISTRY[algo.lower()]
     if not layer_formats:
         raise ValueError(f"{ggml_dir} holds no GGML weights to convert.")
     return layer_formats
+
+
+def _fp8_scheme(has_input_scale: bool) -> dict:
+    """ModelOpt FP8: per-tensor ``weight_scale`` and, with a static input scale, ``input_scale``."""
+    fp8 = {
+        "num_bits": 8,
+        "type": "float",
+        "symmetric": True,
+        "strategy": "tensor",
+        "dynamic": False,
+    }
+    return {
+        "weights": fp8,
+        "input_activations": fp8 if has_input_scale else None,
+        "output_activations": None,
+        "format": "float-quantized",
+    }
+
+
+# The non-GGML formats an INT8 checkpoint carries over unchanged, by ModelOpt quant_algo: each maps
+# to the compressed-tensors scheme that reads the layer's exported tensors as they are. A format
+# whose tensors compressed-tensors names or scales differently, such as NVFP4, is refused.
+_CARRIED_OVER_SCHEMES = {"FP8": _fp8_scheme}
+
+
+def _carried_over_schemes(weight_map: dict[str, str], quantization: dict) -> dict[str, dict]:
+    """The compressed-tensors scheme of every quantized layer that is copied rather than converted."""
+    if quantization.get("quant_algo") != "MIXED_PRECISION":
+        return {}
+    return {
+        layer: _CARRIED_OVER_SCHEMES[algo](f"{layer}.input_scale" in weight_map)
+        for layer, cfg in quantization.get("quantized_layers", {}).items()
+        if (algo := str(cfg.get("quant_algo")).upper()) in _CARRIED_OVER_SCHEMES
+    }
 
 
 def _write_int8_shards(
@@ -206,34 +253,41 @@ def _nbytes(tensors: dict[str, torch.Tensor]) -> int:
     return sum(t.numel() * t.element_size() for t in tensors.values())
 
 
-def _compressed_tensors_config(layer_formats: dict[str, GGMLFormat]) -> dict:
-    """One config group per INT8 group size, targeting its layers by name.
+def _int8_scheme(group_size: int) -> dict:
+    return {
+        "weights": {
+            "num_bits": 8,
+            "type": "int",
+            "symmetric": True,
+            "strategy": "group",
+            "group_size": group_size,
+            "dynamic": False,
+        },
+        "input_activations": None,
+        "output_activations": None,
+        "format": "pack-quantized",
+    }
+
+
+def _compressed_tensors_config(
+    layer_formats: dict[str, GGMLFormat], carried_over: dict[str, dict]
+) -> dict:
+    """One config group per scheme, targeting its layers by name.
 
     vLLM maps explicit layer names onto its own modules, but not ``re:`` patterns.
     """
-    layers_by_group_size: dict[int, list[str]] = {}
-    for layer, ggml_format in sorted(layer_formats.items()):
-        layers_by_group_size.setdefault(ggml_format.int8_group_size, []).append(layer)
+    schemes = {layer: _int8_scheme(f.int8_group_size) for layer, f in layer_formats.items()}
+    layers_by_scheme: dict[str, list[str]] = {}
+    for layer, scheme in sorted({**schemes, **carried_over}.items()):
+        layers_by_scheme.setdefault(json.dumps(scheme, sort_keys=True), []).append(layer)
     config_groups = {
-        f"group_{i}": {
-            "targets": layers,
-            "weights": {
-                "num_bits": 8,
-                "type": "int",
-                "symmetric": True,
-                "strategy": "group",
-                "group_size": group_size,
-                "dynamic": False,
-            },
-            "input_activations": None,
-            "output_activations": None,
-            "format": "pack-quantized",
-        }
-        for i, (group_size, layers) in enumerate(sorted(layers_by_group_size.items()))
+        f"group_{i}": {"targets": layers, **json.loads(scheme)}
+        for i, (scheme, layers) in enumerate(sorted(layers_by_scheme.items()))
     }
+    formats = {group["format"] for group in config_groups.values()}
     return {
         "quant_method": "compressed-tensors",
-        "format": "pack-quantized",
+        "format": formats.pop() if len(formats) == 1 else "mixed-precision",
         "quantization_status": "compressed",
         "config_groups": config_groups,
         "ignore": [],
