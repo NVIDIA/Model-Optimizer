@@ -72,6 +72,7 @@ __all__ = [
     "temporarily_fold_weights",
 ]
 
+
 def _group_ranks(group: dist.DistributedProcessGroup) -> list[int]:
     """The ranks ``group`` spans, in its rank order; just this rank for a group not set."""
     if not group.is_initialized():
