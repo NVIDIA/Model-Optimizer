@@ -1706,16 +1706,12 @@ def _revert_quant_config_names_best_effort(
     try:
         name_mapper = build_reverse_name_mapper(model)
         if name_mapper is not None and hf_quant_config:
-            # Weight owners only, as the resident export passes: a container or quantizer whose
+            # Parameter owners only, as the resident export passes: a container or quantizer whose
             # name a rename moves into a wildcard would expand that wildcard into every module.
             return _revert_hf_quant_config_names(
                 hf_quant_config,
                 name_mapper,
-                module_names=(
-                    name.removesuffix(".weight")
-                    for name, _ in model.named_parameters()
-                    if name.endswith(".weight")
-                ),
+                module_names={name.rpartition(".")[0] for name, _ in model.named_parameters()},
             )
     except Exception as exc:
         warnings.warn(
