@@ -23,6 +23,7 @@ from _test_utils.import_helper import skip_if_no_libcudnn, skip_if_no_tensorrt
 from _test_utils.onnx.autocast.utils import _assert_tensors_are_fp16
 from _test_utils.onnx.quantization.utils import assert_nodes_are_quantized
 
+import modelopt.onnx.autocast.convert as autocast_convert
 import modelopt.onnx.trt_utils as trt_utils
 from modelopt.onnx.autocast import convert_to_mixed_precision
 from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
@@ -186,7 +187,7 @@ def test_get_custom_layers_file_backed_matches_in_memory(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("node_name", ["custom_skip_ln_0", ""])
-def test_trt_plugin_autocast(tmp_path, node_name):
+def test_trt_plugin_autocast(tmp_path, monkeypatch, node_name):
     model = _create_test_model_trt()
     model.graph.node[1].name = node_name
     with open(os.path.join(tmp_path, "model_with_trt_plugin_autocast.onnx"), "w") as f:
@@ -240,9 +241,18 @@ def test_trt_plugin_autocast(tmp_path, node_name):
         )
 
         # Convert model to FP16
+        reference_runner = autocast_convert.ReferenceRunner
+        runner_providers = []
+
+        def capture_reference_runner(model, providers, trt_plugins):
+            runner_providers.append(list(providers))
+            return reference_runner(model, providers, trt_plugins)
+
+        monkeypatch.setattr(autocast_convert, "ReferenceRunner", capture_reference_runner)
         providers = ["cpu"]
         model_fp16 = convert_to_mixed_precision(f.name, providers=providers)
-        assert providers == ["trt", "cpu"]
+        assert providers == ["cpu"]
+        assert runner_providers == [["trt", "cpu"]]
 
         # Check that the default conversion happened successfully: all tensors are FP16
         assert _assert_tensors_are_fp16(model_fp16)
