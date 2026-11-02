@@ -65,7 +65,7 @@ Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-
 
 ## Steps to Reproduce
 
-**Environment:** Results below were produced with container `nvcr.io/nvidia/nemo:26.04` and ModelOpt 0.45.0, where pruning Nemotron models additionally required `python -m pip install "transformers<5"` for the pruned-HF save. Current ModelOpt requires `nvcr.io/nvidia/nemo:26.08` (no `transformers<5` needed). See the [Megatron-Bridge README](../../README.md) for environment setup (including ModelOpt mount path) and container usage.
+**Environment:** Results below were produced with container `nvcr.io/nvidia/nemo:26.04` and ModelOpt 0.45.0, where pruning Nemotron models additionally required `python -m pip install "transformers<5"` for the pruned-HF save. Current ModelOpt requires `nvcr.io/nvidia/nemo:26.10` (no `transformers<5` needed). See the [Megatron-Bridge README](../../README.md) for environment setup (including ModelOpt mount path) and container usage.
 
 ### 1. Data Preparation
 

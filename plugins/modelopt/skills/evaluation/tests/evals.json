@@ -50,6 +50,30 @@
     ]
   },
   {
+    "name": "bounded-failures-pre-full-run-canaries",
+    "skills": ["evaluation"],
+    "query": "Review canaries that will each be followed by a full evaluation: 10 trials with one isolated output fault, 20 trials with one isolated terminal timeout, and 100 trials with three of each. Both gates have verified denominators equal to the trial count, complete protocol-valid scored coverage, and passing independent checks. Contrast standalone evaluations with the same counts, a 20-trial run called a canary without a planned full evaluation, and the subsequent full run with 3% failures. Do not launch jobs.",
+    "files": [],
+    "expected_behavior": [
+      "Skips the 2% cutoff in both gates for all three pre-full-run canaries, including the 100-trial canary; reports counts and rates",
+      "Diagnoses failures, preserves scored failures and denominators, and allows canary progression if independent checks pass without automatic retry",
+      "Applies the normal cutoff to standalone evaluations of any size, the canary without a planned full evaluation, and the subsequent full run: each requires parent review without success or automatic retry",
+      "Does not infer full-run accuracy or comparability from a canary pass"
+    ]
+  },
+  {
+    "name": "bounded-failures-canary-blockers",
+    "skills": ["evaluation"],
+    "query": "Classify these 20-trial canaries, each planned to precede a full evaluation: A has only 19 scored trials; B has complete coverage but fabricated fallback zeros; C has systemic judge authentication failures recorded as zeros; D has complete protocol-valid coverage, one isolated trial timeout, and 20 isolated malformed outputs among 1000 verified raw model responses, with other checks passing. For E both gate denominators are unknown. Can the canary exception clear these? Do not launch jobs.",
+    "files": [],
+    "expected_behavior": [
+      "Blocks A for missing coverage, B for fabricated scores, and C for systemic judge failures despite the planned full evaluations",
+      "Skips the percentage cutoff for both D gates regardless of denominator size, reports 1/20 and 20/1000, and allows progression with warnings after diagnosis",
+      "Leaves E incomplete: the canary exception does not waive denominator accounting",
+      "Retains evidence and failure counts; never drops failed samples, pools gates, or silently regrades"
+    ]
+  },
+  {
     "name": "bounded-failures-overlap-and-resume",
     "skills": ["evaluation"],
     "query": "A complete run has 1000 expected scored trials and 10000 verified unique successful model responses. Solver timeouts affect trials 1-12, harness errors 9-16, and terminal action failures 15-19. Resumed logs duplicate these records. Model response faults affect IDs 1-120 (truncated), 81-170 (empty-final), and 151-190 (malformed). All failures are preserved protocol-valid incorrect/zero outcomes; other checks pass. A second run has the same response faults but 20 runtime-failed trials. Do not launch jobs.",

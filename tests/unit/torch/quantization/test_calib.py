@@ -74,7 +74,7 @@ def get_act_scale(x):
 
 # copied with modifications from https://github.com/mit-han-lab/llm-awq/blob/main/awq/quantize/auto_scale.py
 @torch.no_grad()
-def awq_lite_manual(module, x, quantizer):
+def awq_lite_manual(module, x, quantizer, use_weight_scale=True):
     # w: co, ci
     # x: n, ci
     weight = module.weight
@@ -96,7 +96,10 @@ def awq_lite_manual(module, x, quantizer):
 
     for ratio in range(n_grid):
         ratio = ratio * 1 / n_grid
-        scales = (x_max.pow(ratio) / w_max.pow(1 - ratio)).clamp(min=1e-4).view(-1)
+        scales = x_max.pow(ratio)
+        if use_weight_scale:
+            scales = scales / w_max.pow(1 - ratio)
+        scales = scales.clamp(min=1e-4).view(-1)
         scales = scales / (scales.max() * scales.min()).sqrt()
         module.weight.mul_(scales.view(1, -1))
         module.weight.data.copy_(quantizer(module.weight.data) / (scales.view(1, -1)))
@@ -198,13 +201,14 @@ def get_test_args(config):
     return model, model_ref, dataloader, ref_data
 
 
-def _awq_lite_tester(model, model_ref, data):
+def _awq_lite_tester(model, model_ref, data, use_weight_scale=True):
     scale_dict = {}
     for i in [0, 2, 4]:
         scale_ref = awq_lite_manual(
             model_ref.net[i],
             data[i],
             TensorQuantizer(QuantizerAttributeConfig(num_bits=4, block_sizes={-1: 8})),
+            use_weight_scale=use_weight_scale,
         )
         assert torch.allclose(model.net[i].awq_lite.best_scale, scale_ref)
         scale_dict[i] = scale_ref
@@ -245,10 +249,14 @@ def _awq_clip_tester(model, model_ref, data, config):
         model(data[0])
 
 
-def test_awq_lite():
+@pytest.mark.parametrize("use_weight_scale", [None, True, False])
+def test_awq_lite(use_weight_scale):
     """Test awq_lite."""
-    model, model_ref, dataloader, ref_data = get_test_args(get_awq_config("awq_lite"))
-    _awq_lite_tester(model, model_ref, ref_data)
+    config = get_awq_config("awq_lite")
+    if use_weight_scale is not None:
+        config["algorithm"]["use_weight_scale"] = use_weight_scale
+    model, model_ref, dataloader, ref_data = get_test_args(config)
+    _awq_lite_tester(model, model_ref, ref_data, use_weight_scale is not False)
 
 
 def test_awq_clip():
@@ -258,12 +266,15 @@ def test_awq_clip():
     _awq_clip_tester(model, model_ref, ref_data, config)
 
 
-def test_awq_full():
+@pytest.mark.parametrize("use_weight_scale", [None, False])
+def test_awq_full(use_weight_scale):
     """Test awq."""
     config = get_awq_config("awq_full")
+    if use_weight_scale is not None:
+        config["algorithm"]["use_weight_scale"] = use_weight_scale
     model, model_ref, dataloader, ref_data = get_test_args(config)
 
-    scale_dict = _awq_lite_tester(model, model_ref, ref_data)
+    scale_dict = _awq_lite_tester(model, model_ref, ref_data, use_weight_scale is not False)
 
     x = dataloader[0].clone()
     for i, mod in enumerate(model_ref.net):

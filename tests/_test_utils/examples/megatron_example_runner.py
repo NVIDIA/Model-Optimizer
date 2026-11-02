@@ -242,35 +242,34 @@ def run_example_in_process(cmd_parts: list[str], example_path: str) -> str:
     script = next(p for p in cmd_parts if str(p).endswith(".py"))
     argv = [str(p) for p in cmd_parts[cmd_parts.index(script) :]]
     example_dir = str(MODELOPT_ROOT / "examples" / example_path)
-    cwd = os.getcwd()
-    os.chdir(example_dir)  # match the subprocess path, which runs with the example dir as cwd
-    native = [""]  # bound up front: readable even if the capture fails to start
-    try:
-        module = _load_example_module(str(script), example_path)
-        reset_megatron_global_state()  # a previous step left its own parallel state behind
+    # match the subprocess path, which runs with the example dir as cwd
+    with contextlib.chdir(example_dir):
+        native = [""]  # bound up front: readable even if the capture fails to start
         try:
-            # get_args() inside the guard: argparse calls parser.error() -> SystemExit on a flag
-            # that has drifted from the example's parser, which is the failure this suite most
-            # wants to report clearly rather than raise bare out of the runner. argv stays patched
-            # across main() as well, which the subprocess path had.
-            with (
-                _preserved_signal_handlers(),
-                _capture_output() as native,
-                patch.object(sys, "argv", argv),
-            ):
-                args = module.get_args()
-                module.main(args)
-        except SystemExit as e:
-            if e.code not in (0, None):
-                raise RuntimeError(f"{script} exited with code {e.code}") from e
-        return native[0]
-    except BaseException as e:
-        # The caller matches transient-HuggingFace markers on this alongside the traceback.
-        e.captured_output = native[0]
-        raise
-    finally:
-        os.chdir(cwd)
-        print(native[0])  # keep the step's output in the test log
+            module = _load_example_module(str(script), example_path)
+            reset_megatron_global_state()  # a previous step left its own parallel state behind
+            try:
+                # get_args() inside the guard: argparse calls parser.error() -> SystemExit on a flag
+                # that has drifted from the example's parser, which is the failure this suite most
+                # wants to report clearly rather than raise bare out of the runner. argv stays patched
+                # across main() as well, which the subprocess path had.
+                with (
+                    _preserved_signal_handlers(),
+                    _capture_output() as native,
+                    patch.object(sys, "argv", argv),
+                ):
+                    args = module.get_args()
+                    module.main(args)
+            except SystemExit as e:
+                if e.code not in (0, None):
+                    raise RuntimeError(f"{script} exited with code {e.code}") from e
+            return native[0]
+        except BaseException as e:
+            # The caller matches transient-HuggingFace markers on this alongside the traceback.
+            e.captured_output = native[0]
+            raise
+        finally:
+            print(native[0])  # keep the step's output in the test log
 
 
 def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
@@ -291,11 +290,10 @@ def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
         # The rendezvous store now lives in a long-lived process, so do not rely on torchrun's
         # fixed default port being free by the time the next step starts.
         argv.insert(1, f"--master_port={get_free_port()}")
-    cwd = os.getcwd()
-    os.chdir(example_dir)
     cap = [""]
     try:
         with (
+            contextlib.chdir(example_dir),
             _preserved_signal_handlers(),
             _capture_output() as cap,
             patch.object(sys, "argv", argv),
@@ -308,7 +306,6 @@ def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
         e.captured_output = cap[0]
         raise
     finally:
-        os.chdir(cwd)
         print(cap[0])  # keep the step's output in the test log
 
 

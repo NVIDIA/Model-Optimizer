@@ -15,8 +15,6 @@
 
 """Checkpoint loading and calibration support for the Nemotron-H MTP tail."""
 
-from __future__ import annotations
-
 import copy
 import inspect
 import json
@@ -29,8 +27,10 @@ from pathlib import Path
 import torch
 from huggingface_hub import snapshot_download
 from safetensors import SafetensorError
+from transformers import AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.masking_utils import create_causal_mask
+from transformers.models.nemotron_h import modeling_nemotron_h
 
 from modelopt.torch.quantization.model_calib import (
     _needs_activation_forward_for_max_calib,
@@ -42,6 +42,7 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import indexed_weight_map
 
 __all__ = [
     "has_mtp_weights",
+    "prefers_bundled_code",
     "prepare_for_calibration",
     "prepare_for_loading",
 ]
@@ -65,6 +66,29 @@ def _resolve_checkpoint_path(checkpoint_path: str) -> Path:
 def has_mtp_weights(checkpoint_path: str) -> bool:
     """Inspect local or Hub checkpoint tensors without constructing or executing model code."""
     return _get_mtp_layout(_resolve_checkpoint_path(checkpoint_path)) is not None
+
+
+def prefers_bundled_code(hf_config, checkpoint_path: str, config_kwargs: dict) -> bool:
+    """True for a remote-code config the built-in Nemotron-H class cannot represent.
+
+    Built-in Nemotron-H implements only the MoE variant on some Transformers releases, so a
+    dense checkpoint's config fails to parse as a built-in one and needs its bundled code.
+    """
+    if getattr(hf_config, "model_type", None) != "nemotron_h":
+        return False
+    if not type(hf_config).__module__.startswith("transformers_modules"):
+        return False
+    builtin_kwargs = {k: v for k, v in config_kwargs.items() if k != "trust_remote_code"}
+    try:
+        builtin_config = AutoConfig.from_pretrained(checkpoint_path, **builtin_kwargs)
+    except (KeyError, ValueError, TypeError, AttributeError):
+        # Config-parsing incompatibilities only; e.g. an OSError from the Hub must propagate.
+        return True
+    # Parsing can succeed while model construction fails on a block type the built-in lacks.
+    return any(
+        t not in modeling_nemotron_h.MIXER_TYPES
+        for t in getattr(builtin_config, "layers_block_type", ())
+    )
 
 
 def _normalize_mtp_block_types(block_types, mixer_types):
@@ -118,28 +142,30 @@ class _NemotronHMTP(torch.nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        # Native Nemotron-H is optional: older Transformers can still load unrelated models.
-        from transformers.models.nemotron_h.modeling_nemotron_h import (
-            MIXER_TYPES,
-            NemotronHBlock,
-            NemotronHRMSNorm,
-        )
-
         block_config = copy.deepcopy(config)
         # Some remote-code revisions drop this field while materializing ``llm_config``.
         # The detected tensor layout is the canonical attention + MoE MTP tail.
         block_types = list(getattr(config, "mtp_layers_block_type", None) or ("attention", "moe"))
-        block_config.layers_block_type = _normalize_mtp_block_types(block_types, MIXER_TYPES)
+        block_config.layers_block_type = _normalize_mtp_block_types(
+            block_types, modeling_nemotron_h.MIXER_TYPES
+        )
         self.layers = torch.nn.ModuleList(
-            [NemotronHBlock(block_config, layer_idx) for layer_idx in range(len(block_types))]
+            [
+                modeling_nemotron_h.NemotronHBlock(block_config, layer_idx)
+                for layer_idx in range(len(block_types))
+            ]
         )
         first_layer, last_layer = self.layers[0], self.layers[-1]
-        first_layer.enorm = NemotronHRMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-        first_layer.hnorm = NemotronHRMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        first_layer.enorm = modeling_nemotron_h.NemotronHRMSNorm(
+            config.hidden_size, eps=config.layer_norm_epsilon
+        )
+        first_layer.hnorm = modeling_nemotron_h.NemotronHRMSNorm(
+            config.hidden_size, eps=config.layer_norm_epsilon
+        )
         first_layer.eh_proj = torch.nn.Linear(
             config.hidden_size * 2, config.hidden_size, bias=False
         )
-        last_layer.final_layernorm = NemotronHRMSNorm(
+        last_layer.final_layernorm = modeling_nemotron_h.NemotronHRMSNorm(
             config.hidden_size, eps=config.layer_norm_epsilon
         )
 

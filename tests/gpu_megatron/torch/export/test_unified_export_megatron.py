@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import re
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
@@ -26,6 +27,7 @@ import transformers
 from _test_utils.torch.export.unified_checkpoint import (
     assert_exported_checkpoint_matches,
     assert_per_expert_experts_complete,
+    load_safetensors_dir,
 )
 from _test_utils.torch.megatron.models import get_mcore_gpt_model, get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import get_forward
@@ -49,6 +51,11 @@ import modelopt.torch.speculative as mtsp
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
 from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
 from modelopt.torch.export.quant_format import GGML_FORMATS
+from modelopt.torch.export.quantized_weight_export import (
+    build_hf_quantization_config,
+    capture_kv_cache_export_state,
+    get_kv_cache_export_spec,
+)
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -501,6 +508,27 @@ def _verify_exported_metadata(export_dir: Path, model_type, quant_config, extra_
         assert generation_config["top_p"] == 0.5
 
 
+def _verify_functional_kv_cache_export(model, export_dir: Path):
+    """The functional KV-cache export writes the same scales and config as this exporter."""
+    attentions = [m for m in model.modules() if hasattr(m, "k_bmm_quantizer")]
+    states = [capture_kv_cache_export_state(attention) for attention in attentions]
+    assert states and None not in states
+    exported = load_safetensors_dir(export_dir)
+    for kind in ("k_scale", "v_scale"):
+        names = sorted(
+            (name for name in exported if name.endswith(kind)),
+            key=lambda name: int(re.search(r"layers\.(\d+)\.", name).group(1)),
+        )
+        assert len(names) == len(states)
+        for name, state in zip(names, states):
+            torch.testing.assert_close(exported[name], getattr(state, kind).to(exported[name]))
+    config = build_hf_quantization_config({}, [get_kv_cache_export_spec(a) for a in attentions])
+    quantization_config = json.loads((export_dir / "config.json").read_text())[
+        "quantization_config"
+    ]
+    assert config["kv_cache_scheme"] == quantization_config["kv_cache_scheme"]
+
+
 def _test_unified_export_megatron(
     tmp_path,
     model_type,
@@ -661,6 +689,8 @@ def _test_unified_export_megatron(
 
     if quant_config:
         _verify_model_quant_config(tmp_export_dir, quant_config, kv_cache_quant_cfg)
+    if kv_cache_quant_cfg and rank == 0:
+        _verify_functional_kv_cache_export(model, tmp_export_dir)
 
     if rank == 0:
         _verify_exported_metadata(tmp_export_dir, model_type, quant_config, extra_module)

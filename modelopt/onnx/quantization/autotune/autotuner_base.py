@@ -29,7 +29,7 @@ import functools
 import os
 import random
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import onnx
 import onnx_graphsurgeon as gs
@@ -675,7 +675,7 @@ class QDQAutotunerBase:
 
         scheme.latency_ms = latency_ms
         scheme.error = not success
-        scheme.profile_timestamp = datetime.now(timezone.utc).isoformat()
+        scheme.profile_timestamp = datetime.now(UTC).isoformat()
         display_index = scheme_index + 1
 
         if not success:
@@ -807,7 +807,7 @@ class QDQAutotunerBase:
                             f"Skipped empty pattern {pattern_schemes.pattern_signature[:16]}..."
                         )
 
-                except (KeyError, TypeError, ValueError) as exc:  # noqa: PERF203
+                except (KeyError, TypeError, ValueError) as exc:
                     logger.warning("Failed to load pattern: %s", exc)
                     continue
 

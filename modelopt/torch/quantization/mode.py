@@ -73,6 +73,7 @@ from .model_calib import (
     smoothquant,
     svdquant,
 )
+from .utils.calib_utils import reset_calib_forward_memory
 
 __all__ = ["BaseCalibrateModeDescriptor"]
 
@@ -250,6 +251,7 @@ def wrapped_calib_func(
                 module._moe_calib_experts_ratio = moe_calib_experts_ratio
 
     if func is not None:
+        reset_calib_forward_memory()
         if layerwise:
             # All currently implemented PTQ algorithms support layerwise calibration;
             # future algorithms that need full-model context must add a guard here.

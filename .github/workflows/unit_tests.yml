@@ -133,13 +133,10 @@ jobs:
       matrix:
         include:
           # Default torch (2.14) across the other supported Python versions
-          - {nox_session: "unit-3.10(torch_214, tf_latest)", python_version: "3.10"}
           - {nox_session: "unit-3.11(torch_214, tf_latest)", python_version: "3.11"}
           - {nox_session: "unit-3.13(torch_214, tf_latest)", python_version: "3.13"}
           - {nox_session: "unit-3.14(torch_214, tf_latest)", python_version: "3.14"}
           # Older torch versions on the default Python (3.12) for back-compat.
-          - {nox_session: "unit-3.12(torch_28, tf_latest)", python_version: "3.12"}
-          - {nox_session: "unit-3.12(torch_29, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_210, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_211, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_212, tf_latest)", python_version: "3.12"}
@@ -224,7 +221,7 @@ jobs:
         # so they run in their own lightweight job rather than the main unit lane.
         # Override addopts to drop the repo's coverage/instafail plugins (not installed here).
         run: |
-          pip install pytest "tomli; python_version < '3.11'"
+          pip install pytest
           python -m pytest plugins/modelopt/skills/ -o addopts="" -p no:cacheprovider -v
   unit-pr-required-check:
     # Run even if some jobs are skipped

@@ -441,6 +441,15 @@ class TestExportSparseAttentionConfig:
         assert group_0["target_sparsity"] == {"prefill": 0.4, "decode": 0.6}
         assert out["producer"]["name"] == "modelopt"
 
+        # Diffusion (VisualGen) schema: one coefficient block, scalar target_sparsity.
+        group_0 = export_sparse_attention_config(model, for_diffusion=True)["config_groups"][
+            "group_0"
+        ]
+        tsf = group_0["threshold_scale_factor"]
+        assert tsf["coefficients"] == {"a": 3.14, "b": 7.5}
+        assert "prefill" not in tsf and "decode" not in tsf
+        assert group_0["target_sparsity"] == 0.4
+
     def test_exports_sparse_softmax_metadata(self):
         """N:M sparse-softmax params are exported without calibration metadata."""
         model = SimpleAttentionModel()

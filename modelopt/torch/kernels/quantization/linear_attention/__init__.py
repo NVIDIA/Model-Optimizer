@@ -19,6 +19,6 @@
 GatedDeltaNet kernels of `flash-linear-attention <https://github.com/fla-org/flash-linear-attention>`_
 (``fla.ops.common.chunk_delta_h`` and ``fla.ops.gated_delta_rule.chunk``) that can fake-quantize the
 recurrent state carried between chunks to FP8 (``state_qdq``). They still import the surrounding
-fla operators, so ``fla-core==0.5.1`` and Triton must be installed to use
+fla operators, so ``fla-core`` 0.5.x and Triton must be installed to use
 them. This package initializer does not import the kernels, so importing it needs neither.
 """

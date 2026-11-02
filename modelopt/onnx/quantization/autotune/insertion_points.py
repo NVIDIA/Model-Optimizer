@@ -22,7 +22,7 @@ Q/DQ insertion that can be reused across multiple matching regions in a model.
 
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 import numpy as np
 import onnx_graphsurgeon as gs
@@ -91,7 +91,7 @@ class ResolvedInsertionPoint:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ResolvedInsertionPoint":
+    def from_dict(cls, data: dict[str, Any]) -> Self:
         """Create from dictionary."""
         return cls(**data)
 
@@ -115,7 +115,7 @@ class NodeInputInsertionPoint(InsertionPoint):
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "NodeInputInsertionPoint":
+    def from_dict(cls, data: dict[str, Any]) -> Self:
         """Create from dictionary."""
         return cls(node_index=data["node_index"], input_index=data["input_index"])
 
@@ -190,7 +190,7 @@ class ChildRegionInputInsertionPoint(InsertionPoint):
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ChildRegionInputInsertionPoint":
+    def from_dict(cls, data: dict[str, Any]) -> Self:
         """Create from dictionary."""
         return cls(**data)
 
@@ -249,7 +249,7 @@ class ChildRegionOutputInsertionPoint(InsertionPoint):
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ChildRegionOutputInsertionPoint":
+    def from_dict(cls, data: dict[str, Any]) -> Self:
         """Create from dictionary."""
         return cls(**data)
 

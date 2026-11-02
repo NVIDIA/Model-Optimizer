@@ -26,6 +26,7 @@ class PercentileCalibrator(MaxCalibrator):
         self.total_step = kwargs["total_step"]
         self.collect_method = kwargs["collect_method"]
         self.data = {}
+        self._counts = {}
         self.i = 0
 
     def collect(self, x):
@@ -49,6 +50,7 @@ class PercentileCalibrator(MaxCalibrator):
             self.data[_cur_step] = torch.max(self.data[_cur_step], local_amax)
         else:
             self.data[_cur_step] += local_amax
+        self._counts[_cur_step] = self._counts.get(_cur_step, 0) + 1
         if self._track_amax:
             raise NotImplementedError
         self.i += 1
@@ -57,7 +59,7 @@ class PercentileCalibrator(MaxCalibrator):
         """Return the absolute max of all tensors collected."""
         up_lim = int(self.total_step * self.percentile)
         if self.collect_method == "min-mean":
-            amaxs_values = [self.data[i] / self.total_step for i in range(up_lim)]
+            amaxs_values = [self.data[i] / self._counts[i] for i in range(up_lim)]
         else:
             amaxs_values = [self.data[i] for i in range(up_lim)]
         if self.collect_method == "mean-max":

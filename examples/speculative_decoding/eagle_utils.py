@@ -24,7 +24,6 @@ import numpy as np
 import torch
 import transformers
 from datasets import load_dataset
-from packaging.version import Version
 from scripts.ar_validate import validate_ar
 from transformers import Trainer, TrainerCallback
 
@@ -654,13 +653,6 @@ def get_patched_templated_ring_attn(orig_templated_attn: Callable):
 def patch_ring_attention_for_ttt():
     """Patch torch ring attention to support context parallelism for TTT."""
     # Torch Ring Attention only supports no mask or causal mask. We apply the following patches to enable TTT mask.
-
-    if Version(torch.__version__) < Version("2.10.0"):
-        raise RuntimeError(
-            f"Context parallel TTT only supported for PyTorch >= 2.10.0. "
-            f"Got {torch.__version__}. "
-            f"Please use torch 2.10.0 or cp_size=1."
-        )
 
     from torch.distributed.tensor.experimental._context_parallel import _attention
 
