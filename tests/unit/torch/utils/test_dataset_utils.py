@@ -1128,30 +1128,29 @@ class TestVLMShardedIterable:
         counts = self._counts(total=64, world=4, delivered=57)
         assert counts == [16, 16, 16, 16], counts
 
-    def test_accept_skips_rejected_items_without_changing_counts(self):
-        """A rank replaces an item the filter rejects with its own next one, so counts hold."""
+    def test_accept_drops_rejected_items_and_pads_like_a_short_stream(self):
+        """With the stream capped at ``per_rank * world`` (as the loaders do), a rejected item is
+        never yielded and its rank pads instead, so every rank still yields ``per_rank`` items."""
         from modelopt.torch.utils.vlm_dataset_utils import (
             _HFDatasetsIterableWrapper,
             _ShardedIterable,
         )
 
-        base = _HFDatasetsIterableWrapper(list(range(40)), num_samples=40)
-        shards = [
-            list(
-                _ShardedIterable(
-                    base,
-                    rank=r,
-                    world=4,
-                    per_rank=5,
-                    accept=lambda x: None if x % 3 == 0 else x * 10,
-                )
+        base = _HFDatasetsIterableWrapper(list(range(20)), num_samples=20)
+        rejected = {5, 9}  # both on rank 1's stride (1, 5, 9, 13, 17)
+        shards = []
+        for r in range(4):
+            shard = _ShardedIterable(
+                base, rank=r, world=4, per_rank=5, accept=lambda x: None if x in rejected else x
             )
-            for r in range(4)
-        ]
+            if r == 1:
+                with pytest.warns(UserWarning, match="3 of 5 usable samples for rank 1"):
+                    shards.append(list(shard))
+            else:
+                shards.append(list(shard))
         assert [len(s) for s in shards] == [5, 5, 5, 5]
-        assert all(x % 3 != 0 for s in shards for x in (v // 10 for v in s))
-        flat = [x for s in shards for x in s]
-        assert len(flat) == len(set(flat)), "shards overlap"
+        assert not rejected & {x for s in shards for x in s}
+        assert shards[1] == [1, 13, 17, 17, 17]
 
     def test_stream_shorter_than_world_is_rejected(self):
         """Fewer samples than ranks would leave some ranks with nothing to forward."""

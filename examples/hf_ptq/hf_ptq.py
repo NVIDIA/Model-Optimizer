@@ -1336,9 +1336,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Run calibration under PyTorch FSDP2 (requires torchrun); takes precedence over "
             "--use_seq_device_map. Includes experimental weight and KV-cache AutoQuantize. "
-            "Supports causal LMs and VLMs with text-only calibration (no VILA / encoder-decoder / "
-            "image-text calibration / models whose forward requires images / pack-quantized / "
-            "speculative / sparsity / MTP)."
+            "Supports causal LMs and VLMs, calibrated on text or, with --calib_with_images, on "
+            "image-text samples (required for a VLM whose forward needs images). Not supported: "
+            "VILA / encoder-decoder / pack-quantized / speculative / sparsity / MTP."
         ),
     )
     parser.add_argument(

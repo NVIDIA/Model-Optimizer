@@ -23,6 +23,7 @@ This module supports both:
 import contextlib
 import copy
 import itertools
+import warnings
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -93,8 +94,9 @@ class _ShardedIterable(torch.utils.data.IterableDataset):
         for item in itertools.islice(iter(self._base), self._rank, None, self._world):
             if count >= self._per_rank:
                 return
-            # Runs on this rank's own stride only, so a sample that fails is replaced by this
-            # rank's next one instead of leaving an unusable batch to raise on one rank.
+            # Runs on this rank's own stride, so a rejected sample is dropped here (and made up for
+            # by the padding below) rather than reaching the collate, where an all-rejected batch
+            # would raise on this rank only.
             if self._accept is not None:
                 item = self._accept(item)
                 if item is None:
@@ -108,8 +110,9 @@ class _ShardedIterable(torch.utils.data.IterableDataset):
                     f"Rank {self._rank} received no calibration samples "
                     f"(need {self._per_rank}); the dataset stream is empty."
                 )
-            warn_rank_0(
-                f"Calibration stream delivered {count} of {self._per_rank} samples for rank "
+            # Any rank can be short, so warn from this one rather than from rank 0 only.
+            warnings.warn(
+                f"Calibration stream delivered {count} of {self._per_rank} usable samples for rank "
                 f"{self._rank}; repeating the last sample to keep ranks in step."
             )
             for _ in range(self._per_rank - count):
@@ -564,6 +567,12 @@ def get_vlm_dataset_dataloader(
         else:
             from torch.utils.data.distributed import DistributedSampler
 
+            if require_image:
+                warn_rank_0(
+                    "Map-style datasets are sharded without the per-rank image filter: a batch "
+                    "whose images all fail to load raises on that rank only, and the other ranks "
+                    "wait in their next collective."
+                )
             sampler = DistributedSampler(dataset, num_replicas=dp_size, rank=dp_rank, shuffle=False)
 
     return DataLoader(

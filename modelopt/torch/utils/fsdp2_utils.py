@@ -156,13 +156,25 @@ def _register_output_capture(model) -> None:
     replaces that class with ``FSDP<cls>``. Without this, a wrapped vision tower returns
     ``hidden_states=None`` and a VLM that reads its features from them fails on the first image.
     """
+    recorders = [
+        m
+        for m in model.modules()
+        if isinstance(m, FSDPModule) and getattr(m, "_can_record_outputs", None)
+    ]
     try:
         from transformers.utils.output_capturing import _CAN_RECORD_REGISTRY
-    except ImportError:  # older Transformers record outputs by other means
+    except ImportError:
+        # Every supported Transformers (5.5+) defines the registry here, so recorders without it
+        # mean the private API moved and re-keying would silently stop working.
+        if recorders:
+            warn_rank_0(
+                "transformers.utils.output_capturing._CAN_RECORD_REGISTRY not found, so FSDP2 "
+                f"cannot re-key it for {type(recorders[0]).__name__}; modules that record outputs "
+                "(e.g. a vision tower's hidden_states) may return None."
+            )
         return
-    for module in model.modules():
-        if isinstance(module, FSDPModule) and getattr(module, "_can_record_outputs", None):
-            _CAN_RECORD_REGISTRY[str(type(module))] = module._can_record_outputs
+    for module in recorders:
+        _CAN_RECORD_REGISTRY[str(type(module))] = module._can_record_outputs
 
 
 def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):
