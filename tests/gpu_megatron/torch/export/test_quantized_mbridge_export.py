@@ -42,7 +42,6 @@ from modelopt.torch.utils.plugins.megatron_generate import megatron_prefill
 QUANT_CFGS = {
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
     "fp8": mtq.FP8_DEFAULT_CFG,
-    "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
 }
 
 
@@ -102,11 +101,10 @@ def bridge_workers(request):
         # head_dim=64: FlashAttention-4 (used by TE on sm_120) cannot compile the default head_dim=2
         (partial(create_tiny_llama_dir, with_tokenizer=True, head_dim=64), "nvfp4"),
         (partial(create_tiny_qwen3_dir, with_tokenizer=True), "fp8"),
-        # The bridge can't export quantized Mamba projections yet.
-        (partial(create_tiny_nemotron_h_dir, with_tokenizer=True, head_dim=64), "nvfp4_mlp_only"),
+        (partial(create_tiny_nemotron_h_dir, with_tokenizer=True, head_dim=64), "nvfp4"),
         (partial(create_tiny_qwen3_5_moe_vl_dir, with_processor=True), "nvfp4"),
     ],
-    ids=["llama-nvfp4", "qwen3-fp8", "nemotron_h-nvfp4_mlp_only", "qwen3_5_moe_vl-nvfp4"],
+    ids=["llama-nvfp4", "qwen3-fp8", "nemotron_h-nvfp4", "qwen3_5_moe_vl-nvfp4"],
 )
 def test_matches_megatron_exporter(
     dist_workers_size_1, bridge_workers, tmp_path, create_source, quant_cfg_name
