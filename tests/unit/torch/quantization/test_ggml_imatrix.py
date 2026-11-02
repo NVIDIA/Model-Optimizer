@@ -66,7 +66,9 @@ def _record_importance(monkeypatch):
     calls = []
 
     def recording_quantize(weight, **kwargs):
-        calls.append(kwargs.get("importance"))
+        # Forwards re-encode under the pinned scales; only calibration's own encodes count.
+        if "scales" not in kwargs:
+            calls.append(kwargs.get("importance"))
         return IQ2_XXS.quantize(weight, **kwargs)
 
     monkeypatch.setitem(
@@ -101,7 +103,8 @@ def test_imatrix_pins_the_codes_it_chose():
     mtq.quantize(plain, _config("max"), forward_loop=lambda m: m(inputs))
 
     decoded = _decoded(model.weight_quantizer, model.weight.shape)
-    assert torch.equal(model.weight.detach(), decoded)
+    # IQ2_XXS keeps the pinned scales, so the weight stays as it was and encodes to the pin again.
+    assert torch.equal(model.weight.detach(), original)
     torch.testing.assert_close(model(inputs), inputs @ decoded.T)
 
     def output_error(weight):
@@ -173,7 +176,7 @@ def test_a_module_calibration_never_reached_gets_the_plain_search():
 
     packed, shape = IQ2_XXS.quantize(original)
     plain = IQ2_XXS.dequantize(packed, shape, dtype=torch.float32)
-    assert torch.equal(model["unused"].weight.detach(), plain)
+    assert torch.equal(model["unused"].weight, original)
     assert torch.equal(_decoded(model["unused"].weight_quantizer, original.shape), plain)
 
 
@@ -205,11 +208,16 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
             torch.testing.assert_close(
                 down_calls[idx], _importance((F.silu(gate) * up).square().mean(dim=0))
             )
-        for weight, quantizers in (
-            (experts.gate_up_proj, experts.gate_up_proj_weight_quantizers),
-            (experts.down_proj, experts.down_proj_weight_quantizers),
+        for weight, original_weight, quantizers in (
+            (
+                experts.gate_up_proj,
+                original.experts.gate_up_proj,
+                experts.gate_up_proj_weight_quantizers,
+            ),
+            (experts.down_proj, original.experts.down_proj, experts.down_proj_weight_quantizers),
         ):
-            assert torch.equal(weight[idx].detach(), _decoded(quantizers[idx], weight[idx].shape))
+            assert pinned_packed_weight(quantizers[idx], "iq2_xxs") is not None
+            assert torch.equal(weight[idx], original_weight[idx])
 
 
 @pytest.mark.parametrize("layerwise", [False, True])

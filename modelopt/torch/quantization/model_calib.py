@@ -2931,7 +2931,9 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
         sum_sq, count = targets[id(quantizer)]
         second_moments = None if count == 0 else sum_sq.to(weight.device) / count
         encoder = _IMATRIX_ENCODER_REGISTRY[quantizer.backend]
-        weight.copy_(encoder.encode(weight, quantizer, second_moments))
+        kept = encoder.encode(weight, quantizer, second_moments)
+        if kept is not weight:
+            weight.copy_(kept)
 
     # Weights readable as they stand are grouped by device and encoded by one thread per GPU: a
     # model that device_map spreads over GPUs would otherwise keep all but one of them idle.

@@ -637,9 +637,11 @@ class ImatrixEncoder:
     def encode(
         self, weight: torch.Tensor, quantizer, second_moments: torch.Tensor | None
     ) -> torch.Tensor:
-        """Return ``weight`` fake-quantized by ``quantizer``, weighted by ``second_moments``.
+        """Encode ``weight`` weighted by ``second_moments`` and return the weight to keep.
 
-        ``second_moments`` is ``None`` when no calibration input reached the weight.
+        That is ``weight`` fake-quantized by ``quantizer``, or ``weight`` itself when ``quantizer``
+        re-derives the encoding from it. ``second_moments`` is ``None`` when no calibration input
+        reached the weight.
         """
         raise NotImplementedError
 

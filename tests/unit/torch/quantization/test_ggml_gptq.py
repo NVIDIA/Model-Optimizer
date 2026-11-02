@@ -31,7 +31,11 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.ggml.common import _row_keys, pinned_packed_weight
+from modelopt.torch.quantization.ggml.common import (
+    _row_keys,
+    pinned_importance,
+    pinned_packed_weight,
+)
 from modelopt.torch.quantization.ggml.gptq import gptq_group_update
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.quantization.utils.calib_utils import (
@@ -120,11 +124,11 @@ def _inputs():
     return torch.randn(128, 512, generator=generator) @ torch.randn(512, 512, generator=generator)
 
 
-def _gptq_model(rows=8):
+def _gptq_model(rows=8, num_bits="iq1_s", algorithm=GPTQ):
     torch.manual_seed(0)
     model = torch.nn.Linear(512, rows, bias=False)
     inputs = _inputs()
-    mtq.quantize(model, _iq_config(GPTQ), forward_loop=lambda m: m(inputs))
+    mtq.quantize(model, _iq_config(algorithm, num_bits), forward_loop=lambda m: m(inputs))
     return model, inputs
 
 
@@ -208,7 +212,9 @@ def test_a_module_calibration_never_reached_gets_the_plain_search():
 
     packed, shape = IQ2_XXS.quantize(original)
     plain = IQ2_XXS.dequantize(packed, shape, dtype=original.dtype)
-    torch.testing.assert_close(model["unused"].weight.detach(), plain, rtol=0, atol=0)
+    pinned = pinned_packed_weight(model["unused"].weight_quantizer, "iq2_xxs")
+    decoded = IQ2_XXS.dequantize(pinned, shape, dtype=original.dtype)
+    torch.testing.assert_close(decoded, plain, rtol=0, atol=0)
 
 
 def _int4_config(algorithm):
@@ -320,6 +326,36 @@ def test_gptq_drops_each_fused_experts_weights_before_the_next_window(monkeypatc
     assert updated
 
 
+@pytest.mark.parametrize("num_bits", ["iq2_xxs", "iq2_xs", "iq2_s", "iq1_m"])
+def test_a_format_that_keeps_its_scales_encodes_gptqs_weight_to_the_pin(num_bits):
+    ggml_format = GGML_FORMAT_REGISTRY[num_bits]
+    model, inputs = _gptq_model(num_bits=num_bits, algorithm={**GPTQ, "importance_weighted": True})
+    quantizer = model.weight_quantizer
+    pinned = pinned_packed_weight(quantizer, num_bits)
+    decoded = ggml_format.dequantize(pinned, torch.tensor(model.weight.shape), dtype=torch.float32)
+
+    # The weight is left before GPTQ's rounding, yet encodes to GPTQ's codes, as its decoding does.
+    assert not torch.equal(model.weight.detach(), decoded)
+    assert torch.equal(ggml_format.pack(model.weight, quantizer), pinned)
+    assert torch.equal(ggml_format.pack(decoded, quantizer), pinned)
+    torch.testing.assert_close(model(inputs), inputs @ decoded.T)
+
+    # A QAD update re-encodes under the pinned scales and importance.
+    with torch.no_grad():
+        model.weight.add_(torch.randn_like(model.weight) * 0.01)
+    scales = ggml_format.payload_scales(pinned.reshape(-1, ggml_format.block_bytes))
+    expected, _ = ggml_format.quantize(
+        model.weight.detach(),
+        scales=scales,
+        importance=pinned_importance(quantizer, num_bits),
+    )
+    packed = ggml_format.pack(model.weight, quantizer)
+    assert torch.equal(packed, expected)
+    assert torch.equal(
+        ggml_format.payload_scales(packed.reshape(-1, ggml_format.block_bytes)), scales
+    )
+
+
 def test_pin_outlives_the_weight_tensor():
     model, _ = _gptq_model()
     # Same values in a new tensor, as an offload round trip or a layerwise resume leaves them.
@@ -352,15 +388,19 @@ def test_folding_a_bf16_weight_decodes_the_pinned_payload():
     assert _pin(model) is None
 
 
-def test_pin_survives_save_and_restore():
-    model, inputs = _gptq_model()
+# IQ2_XS keeps its pinned scales: it re-encodes the unrounded weight, so needs the importance too.
+@pytest.mark.parametrize("num_bits", ["iq1_s", "iq2_xs"])
+def test_pin_survives_save_and_restore(num_bits):
+    model, inputs = _gptq_model(num_bits=num_bits, algorithm={**GPTQ, "importance_weighted": True})
     buffer = io.BytesIO()
     mto.save(model, buffer)
     buffer.seek(0)
 
     restored = mto.restore(torch.nn.Linear(512, 8, bias=False), buffer)
 
-    assert torch.equal(IQ1_S.pack(restored.weight, restored.weight_quantizer), _pin(model))
+    ggml_format = GGML_FORMAT_REGISTRY[num_bits]
+    pinned = pinned_packed_weight(model.weight_quantizer, num_bits)
+    assert torch.equal(ggml_format.pack(restored.weight, restored.weight_quantizer), pinned)
     torch.testing.assert_close(restored(inputs), model(inputs))
 
 
@@ -393,31 +433,38 @@ def test_pin_is_ignored_once_the_quantizer_changes_format(restore):
     )
 
 
-def _megatron_exporter(weight):
-    """A GPTModelExporter whose quantized-state lookup hands back ``weight`` as an IQ1_S tensor."""
+def _megatron_exporter(dtype, num_bits):
+    """A GPTModelExporter to ``dtype`` whose modules are quantized to ``num_bits``."""
     exporter = object.__new__(GPTModelExporter)
-    exporter.dtype = torch.bfloat16
+    exporter.dtype = dtype
     exporter._state_dict = {}
     exporter.exclude_modules = []
     exporter.layer_config_dict = {}
-    exporter._get_quantized_state = lambda *args, **kwargs: ({"weight": weight}, "iq1_s", 256)
+    exporter._get_quantization_format = lambda module: num_bits
     return exporter
 
 
-def _pinned_export(rows, dtype):
-    """A GPTQ'd weight in the export dtype, its quantizer, and its pinned payload."""
-    model, _ = _gptq_model(rows)
-    return model.weight.detach().to(dtype), model.weight_quantizer, _pin(model)
+def _pinned_export(rows, num_bits):
+    """A GPTQ'd float32 weight, its quantizer, and its pinned payload."""
+    model, _ = _gptq_model(rows, num_bits)
+    pinned = pinned_packed_weight(model.weight_quantizer, num_bits)
+    return model.weight.detach(), model.weight_quantizer, pinned
 
 
+# Export dtypes of the float32 model. IQ2_XS keeps its pinned scales, so its weight is not the
+# pinned decoding and rounding it to BF16 before encoding could change its codes.
 EXPORT_DTYPES = pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+EXPORT_FORMATS = pytest.mark.parametrize("num_bits", ["iq1_s", "iq2_xs"])
 
 
 @EXPORT_DTYPES
-def test_megatron_gated_mlp_export_writes_the_pinned_rows(dtype):
-    weight, quantizer, pinned = _pinned_export(8, dtype)
-    module = SimpleNamespace(config=SimpleNamespace(ffn_hidden_size=4), weight_quantizer=quantizer)
-    exporter = _megatron_exporter(weight)
+@EXPORT_FORMATS
+def test_megatron_gated_mlp_export_writes_the_pinned_rows(dtype, num_bits):
+    weight, quantizer, pinned = _pinned_export(8, num_bits)
+    module = SimpleNamespace(
+        config=SimpleNamespace(ffn_hidden_size=4), weight=weight, weight_quantizer=quantizer
+    )
+    exporter = _megatron_exporter(dtype, num_bits)
 
     exporter._gated_mlp_slicing(module, "mlp.")
 
@@ -426,8 +473,9 @@ def test_megatron_gated_mlp_export_writes_the_pinned_rows(dtype):
 
 
 @EXPORT_DTYPES
-def test_megatron_grouped_mlp_export_writes_the_pinned_rows(dtype):
-    weight, quantizer, pinned = _pinned_export(8, dtype)
+@EXPORT_FORMATS
+def test_megatron_grouped_mlp_export_writes_the_pinned_rows(dtype, num_bits):
+    weight, quantizer, pinned = _pinned_export(8, num_bits)
     module = SimpleNamespace(
         num_gemms=1,
         weight0=weight,
@@ -435,7 +483,7 @@ def test_megatron_grouped_mlp_export_writes_the_pinned_rows(dtype):
         state_dict=lambda: {"weight0": weight},
         weight_quantizer=GroupedQuantizer(quantizer),
     )
-    exporter = _megatron_exporter(weight)
+    exporter = _megatron_exporter(dtype, num_bits)
 
     exporter._grouped_mlp_slicing(
         module, "mlp.experts.{}", gate_proj_name="gate_proj", up_proj_name="up_proj"
@@ -446,10 +494,11 @@ def test_megatron_grouped_mlp_export_writes_the_pinned_rows(dtype):
 
 
 @EXPORT_DTYPES
-def test_megatron_qkv_export_writes_the_pinned_rows(dtype):
+@EXPORT_FORMATS
+def test_megatron_qkv_export_writes_the_pinned_rows(dtype, num_bits):
     # 4 query groups of [2 q heads, k, v], 4 rows per head: K and V are gathered from scattered
     # rows, which is where a lookup keyed on rounded projections went wrong.
-    weight, quantizer, pinned = _pinned_export(64, dtype)
+    weight, quantizer, pinned = _pinned_export(64, num_bits)
     config = SimpleNamespace(
         hidden_size=512,
         num_query_groups=4,
@@ -457,25 +506,27 @@ def test_megatron_qkv_export_writes_the_pinned_rows(dtype):
         kv_channels=4,
         attention_output_gate=False,
     )
-    exporter = _megatron_exporter(weight)
+    exporter = _megatron_exporter(dtype, num_bits)
 
-    exporter._qkv_slicing(SimpleNamespace(config=config, weight_quantizer=quantizer), "attn.")
+    module = SimpleNamespace(config=config, weight=weight, weight_quantizer=quantizer)
+    exporter._qkv_slicing(module, "attn.")
 
-    heads = pinned.view(4, 4, 4, 2, IQ1_S.block_bytes)  # [group, q q k v, row, block, byte]
+    heads = pinned.view(4, 4, 4, 2, -1)  # [group, q q k v, row, block, byte]
     assert torch.equal(exporter._state_dict["attn.q_proj.weight"], heads[:, :2].flatten(0, 2))
     assert torch.equal(exporter._state_dict["attn.k_proj.weight"], heads[:, 2].flatten(0, 1))
     assert torch.equal(exporter._state_dict["attn.v_proj.weight"], heads[:, 3].flatten(0, 1))
 
 
 @EXPORT_DTYPES
-def test_megatron_gated_delta_net_export_writes_the_pinned_rows(dtype):
-    weight, quantizer, pinned = _pinned_export(12, dtype)
+@EXPORT_FORMATS
+def test_megatron_gated_delta_net_export_writes_the_pinned_rows(dtype, num_bits):
+    weight, quantizer, pinned = _pinned_export(12, num_bits)
     module = SimpleNamespace(
-        in_proj=SimpleNamespace(weight_quantizer=quantizer),
+        in_proj=SimpleNamespace(weight=weight, weight_quantizer=quantizer),
         in_proj_split_names=("query", "key", "value", "z", "beta", "alpha"),
         in_proj_split_sections=(2, 2, 2, 2, 2, 2),
     )
-    exporter = _megatron_exporter(weight)
+    exporter = _megatron_exporter(dtype, num_bits)
 
     exporter._gated_delta_net_slicing(module, "mixer.")
 
