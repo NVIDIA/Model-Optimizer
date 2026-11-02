@@ -2707,9 +2707,14 @@ def gptq(
         if not requires_weight_materialization(handle.module, model, names)
         and not is_quantized_parallel_linear(handle.module)
     }
-    # A weight several linears share, as tied ones do, updates in turn: each update reads the last.
-    shared = Counter(handle.module.weight.data_ptr() for handle in readable.values())
-    readable = {n: h for n, h in readable.items() if shared[h.module.weight.data_ptr()] == 1}
+    # Weights in one storage, tied ones or views that may overlap, update in turn, each reading the
+    # last one's result; a sequential MoE's experts each have their own storage and stay spread.
+    storage = {
+        name: (handle.module.weight.device, handle.module.weight.untyped_storage().data_ptr())
+        for name, handle in readable.items()
+    }
+    shared = Counter(storage.values())
+    readable = {n: h for n, h in readable.items() if shared[storage[n]] == 1}
     update_expert_weights(
         [(handle, handle.module.weight) for handle in readable.values()], block_size, perc_damp
     )

@@ -125,8 +125,9 @@ def test_expert_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, i
 @pytest.mark.parametrize("inference_mode", [False, True])
 def test_linear_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, inference_mode):
     """GGML updates of plain linears, a sequential MoE's experts among them, spread over two GPUs
-    as fused experts' do, and give the one-GPU weights and codes, pinned at home; tied linears
-    keep their order, the second updating the first's result."""
+    as fused experts' do, and give the one-GPU weights and codes, pinned at home; linears whose
+    weights share a storage, tied or overlapping views, keep their order, the later updating the
+    earlier's result."""
     get_cuda_ext_ggml(raise_if_failed=True)  # updates move only with the CUDA encoders
     width = 512  # two GGML groups per input, so the Hessian carries the first group's error
     shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
@@ -167,10 +168,14 @@ def test_linear_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, i
             monkeypatch.setattr(calib_utils, "get_process_gpus", lambda gpus=gpus: gpus)
             torch.manual_seed(RAND_SEED)
             model = torch.nn.Sequential(
-                *(torch.nn.Linear(width, width, bias=False) for _ in range(6))
+                *(torch.nn.Linear(width, width, bias=False) for _ in range(8))
             ).cuda()
-            # After the first, which updates alone, so the two would otherwise be the GPUs' first.
+            # After the first, which updates alone: tied linears, then views overlapping in all but
+            # a row; the first of these pairs to be spread holds the GPUs' first updates.
             model[2].weight = model[1].weight
+            rows = torch.randn(width + 1, width, device="cuda")
+            model[3].weight = torch.nn.Parameter(rows[:-1])
+            model[4].weight = torch.nn.Parameter(rows[1:])
             mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
             models.append(model)
 
