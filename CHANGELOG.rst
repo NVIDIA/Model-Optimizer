@@ -24,7 +24,7 @@ Changelog
 - Speed up NVFP4 QAT and QAD of Hugging Face fused MoE experts: all experts of a projection are now fake-quantized in one kernel launch instead of one per expert, about 2x faster per MoE layer on Qwen3-30B-A3B with FSDP2.
 - ``hf_ptq.py`` calibrates Qwen3.8 (``qwen4_exp``) without running its QSA indexer's per-query Python loop when every visible key fits the indexer's token budget, with bit-identical results. On Qwen3.8-Flash-Next this saves about two hours of layerwise calibration.
 - Speed up Hugging Face QAT and QAD with ``QATTrainer``, ``QADTrainer`` or ``--manual_gc``: the ``gc.collect()`` run before each training step now skips the model and optimizer state, saving about 1 s per step (30%) on Qwen3-30B-A3B.
-- Add an opt-in no-gather HuggingFace export for FSDP2-sharded models: with ``MODELOPT_FSDP2_EXPORT=nogather``, ``export_hf_checkpoint`` sends each tensor to a single owner rank and every rank writes its own shards in parallel, instead of gathering the full state dict on one host. MoE experts stay sharded through the export, so each rank only materializes its own experts.
+- Add an opt-in no-gather HuggingFace export for FSDP2-sharded models: with ``MODELOPT_FSDP2_EXPORT=nogather``, ``export_hf_checkpoint`` moves each tensor once, to the one rank that writes it, instead of all-gathering each FSDP2 unit on every rank as the default export does. Fused MoE experts stay sharded, each rank writing its own, and a conversion mapping that splits or merges tensors, which the default export refuses, is reversed as a single-process export reverses it.
 
 *Speculative Decoding*
 
