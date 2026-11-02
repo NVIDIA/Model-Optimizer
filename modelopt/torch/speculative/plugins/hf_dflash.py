@@ -394,6 +394,7 @@ class HFDFlashModel(DFlashModel):
         super().modify(config)
 
         self.dflash_fp32_master_weights = config.dflash_fp32_master_weights
+        self.dflash_detach_target_hidden = config.dflash_detach_target_hidden
 
         base_config = self._base_llm_config
         # Use Qwen3Config (not generic PretrainedConfig) so rope_parameters is
@@ -832,6 +833,12 @@ class HFDFlashModel(DFlashModel):
         selected = [hidden_states[lid + 1] for lid in self.target_layer_ids]
         if device is not None:
             selected = [h.to(device) for h in selected]
+        if getattr(self, "dflash_detach_target_hidden", False):
+            # Cut the graph here rather than weighting the loss. Every route from the draft
+            # objective back into the base runs through these tensors, so detaching them is
+            # what makes "the drafter may not perturb the base" structural instead of a
+            # number someone has to keep tuned.
+            selected = [h.detach() for h in selected]
         return torch.cat(selected, dim=-1)
 
     def _generation_base(self, input_ids):

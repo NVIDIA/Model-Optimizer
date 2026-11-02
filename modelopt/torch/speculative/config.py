@@ -98,6 +98,21 @@ class DFlashConfig(ModeloptBaseConfig):
         default=True, description="Whether to freeze base model during DFlash module training."
     )
 
+    dflash_detach_target_hidden: bool = ModeloptField(
+        default=False,
+        description=(
+            "Detach the base hidden states the draft module reads, severing the gradient "
+            "path from the draft objective back into the base model. Default False leaves "
+            "training unchanged.\n\n"
+            "This is weaker than dflash_freeze_base_model=True, and deliberately so: the "
+            "base still trains, just not on anything the drafter wants. That is the "
+            "arrangement reinforcement-learning setups need, where the policy keeps "
+            "updating on its own objective while a drafter co-trains alongside it and must "
+            "not perturb it. Cutting the graph rather than weighting the loss makes the "
+            "guarantee structural -- no setting of a loss weight can reintroduce the path."
+        ),
+    )
+
     dflash_self_logit_distillation: bool = ModeloptField(
         default=True, description="Whether to use logit distillation from base model."
     )
