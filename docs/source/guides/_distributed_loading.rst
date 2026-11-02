@@ -25,9 +25,8 @@ Routes
 ======
 
 * A plan with ``ep_size > 1`` takes the expert-parallel load (``load_and_prepare_ep``): each rank
-  holds ``num_experts / ep_size`` of an MoE's routed experts and a replica of the dense part, and
-  tokens reach their experts' ranks by all-to-all. It replicates the dense part, so a plan that
-  FSDP2-shards it as well is refused.
+  holds ``num_experts / ep_size`` of an MoE's routed experts and the dense part, replicated or
+  FSDP2-sharded as the plan says, and tokens reach their experts' ranks by all-to-all.
 * A plan with ``dense="fsdp"`` takes the FSDP2 load (``parallel_load_and_prepare_fsdp2``): a causal
   LM, or a text-only VLM it supports (Qwen3.5), is FSDP2-sharded over the process group, each rank
   reading its own layers.
@@ -40,11 +39,10 @@ and Llama-4's, one below the transformers release it needs, a quantized checkpoi
 shards no expert weights) loads as a dense model does, whole on every rank or FSDP2-sharded, with
 an EP degree left to the decision or set to 1. A warning on rank 0 says why, and the fix where
 there is one (an unquantized checkpoint, a later transformers); none when both knobs ask for the
-replication. The decision FSDP2-shards the whole model instead of sharding the experts when a
-rank's share of them with a whole copy of the dense part would not fit one GPU. An EP degree above
-1 that a knob or argument asks for stands, and the load refuses what it cannot take. A plan that
-leaves an expert-parallel MoE whole on every rank, which no knob asked for, is refused, naming the
-ways out; ``MODELOPT_EP_DEGREE=1`` with ``MODELOPT_FSDP_SIZE=1`` asks for it.
+replication. An EP degree above 1 that a knob or argument asks for stands, and the load refuses
+what it cannot take. A plan that leaves an expert-parallel MoE whole on every rank, which no knob
+asked for, is refused, naming the ways out; ``MODELOPT_EP_DEGREE=1`` with ``MODELOPT_FSDP_SIZE=1``
+asks for it.
 
 A refusal on any rank raises on every rank, before the load, and says how to load the model whole:
 ``MODELOPT_FSDP_SIZE=1`` for a plan the load decided, or
