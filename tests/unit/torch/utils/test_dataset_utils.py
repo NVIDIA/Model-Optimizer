@@ -14,10 +14,12 @@
 # limitations under the License.
 
 import json
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from torch.utils.data import DataLoader
 
@@ -34,6 +36,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     prepare_messages_for_chat_template,
 )
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
 def test_prepare_messages_for_chat_template():
@@ -434,6 +437,68 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
     assert seen_batch_sizes == [1, 10, 5]
     # Final batch is 5 -> regulated to 4 (5 // 4 * 4 = 4).
     assert result == 4
+
+
+class _BatchSizeProbe(torch.nn.Module):
+    """Records the batch size of every forward."""
+
+    def __init__(self):
+        super().__init__()
+        self.batch_sizes = []
+
+    def forward(self, x):
+        self.batch_sizes.append(x.shape[0])
+
+
+def _batch_size_job(rank, world_size, planned):
+    model = _BatchSizeProbe()
+    if planned:
+        set_distribution_plan(model, DistributionPlan(world_size))
+    # A sample takes 100 bytes: rank 0's GPU has room for 4 of them, rank 1's for 10 (regulated to 8).
+    free = [400, 1000][rank]
+    # What one measurement reads: the rank's own GPU, or every visible one.
+    gpus = 1 if planned else 4
+    measured = []
+
+    def mem_get_info(device):
+        measured.append(device)
+        return (free if len(measured) <= gpus else free - 100, 0)
+
+    with (
+        # A rank left waiting in the reduction gives up in seconds.
+        bounded_collectives(),
+        patch("torch.cuda.empty_cache"),
+        patch(
+            "torch.cuda.get_device_properties",
+            return_value=SimpleNamespace(total_memory=10**12),
+        ),
+        patch("torch.cuda.device_count", return_value=4),
+        # A launcher that shows each rank one GPU: every rank computes on cuda:0.
+        patch("torch.cuda.current_device", return_value=0),
+        patch("torch.cuda.mem_get_info", side_effect=mem_get_info),
+        patch("torch.cuda.max_memory_allocated", return_value=0),
+    ):
+        batch_size = get_max_batch_size(
+            model, max_sample_length=8, sample_input_single_batch=torch.ones((1, 8))
+        )
+
+    if planned:
+        assert measured == [torch.device("cuda", 0)] * 2  # the GPU it computes on, not LOCAL_RANK
+        # One probe: an OOM retry would run more forwards on some ranks.
+        assert model.batch_sizes == [1]
+        assert batch_size == 4  # rank 0's
+    else:
+        assert measured == list(range(4)) * 2  # every visible GPU, as in a single process
+        assert batch_size == [4, 8][rank]  # its own
+
+
+@pytest.mark.parametrize("planned", [True, False], ids=["planned", "no-plan"])
+def test_get_max_batch_size_in_a_distributed_run(cpu_dist_workers, planned):
+    """Every rank must run the same number of calibration steps, so ranks agree on one batch size
+    for a model whose plan distributes it over them: the smallest any rank's GPU allows. A model
+    with no plan recorded, such as a Megatron model, is measured by each rank as a single process
+    measures it, and is not refused."""
+    cpu_dist_workers.run(_batch_size_job, planned=planned)
 
 
 def test_get_dataset_samples_with_unsupported_dataset(make_toy_hf_dataset):
