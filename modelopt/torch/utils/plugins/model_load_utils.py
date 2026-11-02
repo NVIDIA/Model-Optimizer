@@ -1584,9 +1584,12 @@ def parallel_load_and_prepare_fsdp2(
     # it came from. Not a state dict: holding these tensors from load to export would waste the
     # memory this loader exists to save.
     record_unplaced_source_keys(model, resolved_path, unplaced)
-    # What from_pretrained records: the conversions some checkpoint key used. The export reverts
-    # these and would otherwise query the wrapped class, which has lost them.
-    model._weight_conversions = [c for c in plan["conversions"] if c.was_used()] if plan else []
+    # What from_pretrained records: the conversions some checkpoint key used, or all of them on a
+    # Transformers without ``was_used``. The export reverts these and would otherwise query the
+    # wrapped class, which has lost them.
+    model._weight_conversions = [
+        c for c in (plan["conversions"] if plan else []) if getattr(c, "was_used", lambda: True)()
+    ]
     _check_every_param_sourced(model, sourced_targets)
 
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
