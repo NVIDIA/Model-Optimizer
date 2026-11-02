@@ -2,7 +2,8 @@ name: Transformer Engine for all GPU architectures
 description: >-
   Replace the NeMo container's libtransformer_engine.so with the PyPI build of the same TE version. The nemo:26.10
   build only has kernels for sm_90/100/103/107, so it fails with "no kernel image is available" on RTX PRO 6000
-  (sm_120). Remove once a NeMo container ships TE with all GPU architectures again.
+  (sm_120). TODO: CI pins nemo:26.10.00; when 26.10.01 ships TE with all GPU architectures, bump the pin and delete
+  this action.
 
 runs:
   using: composite
