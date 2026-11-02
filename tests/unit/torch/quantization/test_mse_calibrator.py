@@ -333,6 +333,42 @@ class TestMseCalibrator:
         a_after_reset = cal.compute_amax()
         assert a_after_reset is None
 
+        # reset() must leave the instance reusable: `_initial_amax` is only ever set in
+        # __init__, so dropping it would make a second search impossible. A later
+        # calibration stage that re-enters this calibrator depends on this.
+        assert cal._initial_amax is not None
+        cal.collect(x)
+        assert cal.compute_amax() is not None
+
+    def test_mse_does_not_leave_its_search_calibrator_installed(self):
+        # `mse` installs a *search* calibrator for the amax search. If it stays installed, the
+        # next stage to collect stats runs against it: on a spent one that crashes, and on a
+        # reusable one it silently returns an MSE search result where a plain max was asked
+        # for. Restoring is what makes `algorithm=['max','mse','max']` correct, not just
+        # non-crashing.
+        torch.manual_seed(0)
+        model = torch.nn.Sequential(torch.nn.Linear(32, 16, bias=False))
+        mtq.quantize(
+            model,
+            {
+                "quant_cfg": {
+                    "default": {"enable": False},
+                    "*weight_quantizer": {"num_bits": 8, "axis": 0, "enable": True},
+                },
+                "algorithm": None,
+            },
+            forward_loop=None,
+        )
+        before = type(model[0].weight_quantizer._calibrator)
+
+        mtq.calibrate(model, algorithm="mse", forward_loop=None)
+
+        for _, module in model.named_modules():
+            if isinstance(module, TensorQuantizer) and hasattr(module, "_calibrator"):
+                assert type(module._calibrator) is before, (
+                    f"mse left {type(module._calibrator).__name__} installed"
+                )
+
     def test_per_channel_basic(self):
         """Test per-channel MSE calibration with axis=0."""
         torch.manual_seed(0)
