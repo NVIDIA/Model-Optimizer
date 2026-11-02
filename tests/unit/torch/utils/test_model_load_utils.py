@@ -65,11 +65,14 @@ from transformers import (
     AutoModelForImageTextToText,
     AutoModelForSeq2SeqLM,
     AutoModelForSpeechSeq2Seq,
+    CLIPVisionConfig,
     DeepseekV3Config,
     FineGrainedFP8Config,
     GptOssConfig,
     LlamaConfig,
     LlamaForCausalLM,
+    LlavaConfig,
+    LlavaForConditionalGeneration,
     Phi4MultimodalConfig,
     PreTrainedModel,
     Qwen2_5_VLConfig,
@@ -84,12 +87,14 @@ import modelopt.torch.models.hf as models_hf
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 import modelopt.torch.utils.moe as moe
+from modelopt.torch.export.unified_export_hf import _llm_dummy_forward
 from modelopt.torch.models import _onfly_decompress, get_spec
 from modelopt.torch.quantization.plugins import accelerate as accelerate_plugin
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import plugins
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
+from modelopt.torch.utils.fsdp2_utils import fsdp2_root_unsharded
 from modelopt.torch.utils.moe import _EP_MIN_TRANSFORMERS
 from modelopt.torch.utils.plugins import hf_checkpoint_utils, model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import (
@@ -103,6 +108,7 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _fsdp2_shard_dense,
     _load_ep_dense_distributed,
     _make_expert_param_matcher,
+    _meta_model_factory,
     _refuse_unquantizable_experts,
     _resolve_target,
     _seed_parallel_states,
@@ -110,10 +116,42 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     build_meta_causal_lm,
     load_and_prepare_ep,
     load_pretrained,
+    parallel_load_and_prepare_fsdp2,
     record_unplaced_source_keys,
     resolve_distribution_plan,
+    resolve_model_class,
     unplaced_source_keys,
 )
+
+_CAUSAL = {"AutoModelForCausalLM": "modeling.Model"}
+_IMAGE_TEXT = {"AutoModelForImageTextToText": "modeling.Model"}
+
+
+@pytest.mark.parametrize(
+    ("model_type", "auto_map", "multimodal", "factory"),
+    [
+        ("remote", {**_CAUSAL, **_IMAGE_TEXT}, True, AutoModelForImageTextToText),
+        ("remote", {**_CAUSAL, **_IMAGE_TEXT}, False, AutoModelForCausalLM),
+        ("remote", _CAUSAL, True, AutoModelForCausalLM),  # e.g. Nemotron VL: full model there
+        ("remote", _IMAGE_TEXT, False, AutoModelForImageTextToText),
+        ("llava", None, True, AutoModelForImageTextToText),
+        ("qwen3_5", None, False, AutoModelForCausalLM),  # text-only checkpoint of a VLM type
+        ("phi4_multimodal", None, True, AutoModelForCausalLM),  # no image-text-to-text class
+    ],
+)
+def test_meta_model_factory(model_type, auto_map, multimodal, factory):
+    config = SimpleNamespace(model_type=model_type, auto_map=auto_map)
+    if multimodal:
+        config.vision_config = {}
+    assert _meta_model_factory(config) is factory
+
+
+def test_resolve_model_class():
+    assert resolve_model_class(AutoConfig.for_model("llava")) is LlavaForConditionalGeneration
+    assert resolve_model_class(AutoConfig.for_model("llama")) is LlamaForCausalLM
+    remote = AutoConfig.for_model("llama")
+    remote.auto_map = {"AutoModelForCausalLM": "modeling.Model"}
+    assert resolve_model_class(remote) is None  # remote code needs trust_remote_code
 
 
 def _build_tiny_qwen3_moe():
@@ -230,6 +268,159 @@ def test_meta_qwen_vlm_preserves_architecture_and_vision(model_type):
         == config.text_config.num_hidden_layers
     )
     assert all(parameter.is_meta for parameter in model.parameters())
+
+
+# ``parallel_load_and_prepare_fsdp2`` on a VLM checkpoint in the published (pre-v5) key layout:
+# Transformers registers its renamings on the top-level class, so they must be looked up before
+# ``fully_shard`` swaps the root's class. A 1-rank gloo group on CPU is enough.
+
+# Current Llava parameter prefix -> the prefix the published llava-hf checkpoints store.
+_PUBLISHED_LAYOUT = {
+    "model.language_model.": "language_model.model.",
+    "model.vision_tower.": "vision_tower.",
+    "model.multi_modal_projector.": "multi_modal_projector.",
+    "lm_head.": "language_model.lm_head.",
+}
+
+
+def _tiny_llava_checkpoint(path, drop=()):
+    text = LlamaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        tie_word_embeddings=False,
+    )
+    vision = CLIPVisionConfig(
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        image_size=28,
+        patch_size=14,
+    )
+    config = LlavaConfig(text_config=text, vision_config=vision, image_token_index=63)
+    config.architectures = ["LlavaForConditionalGeneration"]
+    config.dtype = torch.float32  # the meta build defaults to bfloat16 otherwise
+    torch.manual_seed(0)
+    model = LlavaForConditionalGeneration(config).eval()
+
+    def published(name):
+        for new, old in _PUBLISHED_LAYOUT.items():
+            if name.startswith(new):
+                return old + name[len(new) :]
+        return name
+
+    state = {
+        published(n): t.clone().contiguous()
+        for n, t in model.state_dict().items()
+        if not any(n.startswith(d) for d in drop)
+    }
+    save_file(state, str(path / "model.safetensors"), metadata={"format": "pt"})
+    (path / "config.json").write_text(json.dumps(config.to_dict()))
+    return model
+
+
+@pytest.fixture
+def gloo_group(tmp_path):
+    """1-rank group, kept for the whole test: gathering a loaded DTensor needs it."""
+    owns_group = not torch.distributed.is_initialized()
+    if owns_group:
+        torch.distributed.init_process_group(
+            "gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'group'}"
+        )
+    yield
+    if owns_group:
+        torch.distributed.destroy_process_group()
+
+
+def _fsdp2_load(path):
+    return parallel_load_and_prepare_fsdp2(
+        str(path), torch.device("cpu"), 0, 1, attn_implementation="eager"
+    )
+
+
+def test_published_layout_vlm_loads_every_weight(tmp_path, gloo_group):
+    ref = _tiny_llava_checkpoint(tmp_path)
+    model = _fsdp2_load(tmp_path)
+
+    ref_params = dict(ref.named_parameters())
+    for name, param in model.named_parameters():
+        loaded = param.full_tensor() if isinstance(param, DTensor) else param
+        assert torch.equal(loaded.detach(), ref_params[name].detach()), name
+
+    # Vision tower and projector are their own FSDP2 units, not part of the root's.
+    assert isinstance(model.model.vision_tower, FSDPModule)
+    assert isinstance(model.model.multi_modal_projector, FSDPModule)
+    # The export reverses exactly the renamings the load ran, as after from_pretrained.
+    assert model._weight_conversions, "renamings the published layout needs were not recorded"
+
+
+def test_unsourced_parameter_raises(tmp_path, gloo_group):
+    _tiny_llava_checkpoint(tmp_path, drop=("model.multi_modal_projector.",))
+    with pytest.raises(RuntimeError, match="get no tensor from the checkpoint"):
+        _fsdp2_load(tmp_path)
+
+
+def test_tied_lm_head_without_stored_tie_map_loads(tmp_path, gloo_group, monkeypatch):
+    """A tied checkpoint omits lm_head.weight; tie_weights fills it from the map it recomputes,
+    even for a model that does not store ``all_tied_weights_keys``."""
+    config = LlamaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        tie_word_embeddings=True,
+    )
+    config.architectures = ["LlamaForCausalLM"]
+    config.dtype = torch.float32
+    ref = LlamaForCausalLM(config)
+    state = {k: v.clone() for k, v in ref.state_dict().items() if k != "lm_head.weight"}
+    save_file(state, str(tmp_path / "model.safetensors"), metadata={"format": "pt"})
+    (tmp_path / "config.json").write_text(json.dumps(config.to_dict()))
+
+    build = model_load_utils.build_meta_causal_lm
+
+    def build_without_tie_map(*args, **kwargs):
+        model = build(*args, **kwargs)
+        del model.all_tied_weights_keys
+        return model
+
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", build_without_tie_map)
+    model = _fsdp2_load(tmp_path)
+    assert model.lm_head.weight is model.model.embed_tokens.weight
+    assert torch.equal(model.lm_head.weight.full_tensor(), ref.model.embed_tokens.weight)
+
+
+@pytest.mark.skipif(
+    torch.cuda.is_available(), reason="with a GPU, FSDP2 gathers the CPU-loaded root onto it"
+)
+def test_language_model_call_gathers_the_root(tmp_path, gloo_group):
+    """Plain PTQ calibrates the extracted language model directly, which skips the FSDP2 root's
+    pre-forward unshard; the root's own parameters (embed_tokens) must be gathered for it."""
+    _tiny_llava_checkpoint(tmp_path)
+    model = _fsdp2_load(tmp_path)
+    language_model = model.model.language_model
+    with fsdp2_root_unsharded(model):
+        language_model(input_ids=torch.tensor([[1, 2, 3]]))
+    assert all(isinstance(p, DTensor) for p in language_model.embed_tokens.parameters())
+
+
+@pytest.mark.skipif(
+    torch.cuda.is_available(), reason="with a GPU, FSDP2 gathers the CPU-loaded root onto it"
+)
+def test_nemotron_vl_dummy_forward_gathers_the_root(tmp_path, gloo_group):
+    """The Nemotron-VL export forward calls the language model submodule, which skips the FSDP2
+    root's pre-forward unshard; the root's own parameters (embed_tokens) must be gathered for it."""
+    _tiny_llava_checkpoint(tmp_path)
+    model = _fsdp2_load(tmp_path)
+    model.config.architectures = ["NemotronTestVL"]  # takes the Nemotron-VL branch
+    _llm_dummy_forward(model)
+    assert all(isinstance(p, DTensor) for p in model.model.language_model.embed_tokens.parameters())
 
 
 # -------------------------------------------------------------- deciding how a model is distributed
@@ -1477,16 +1668,16 @@ def test_an_fsdp_plan_loads_through_the_parallel_fsdp2_loader(
     assert loaders == {}
 
 
-@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
-def test_a_text_only_vlm_the_fsdp2_load_builds_reaches_it(
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe", "llava"])
+def test_a_vlm_the_fsdp2_load_builds_reaches_it(
     run_as, serve, loaders, process_group, tmp_path, model_type
 ):
-    """The FSDP2 load builds Qwen3.5's VLMs through their image-text class, as hf_ptq's --use_fsdp2
-    does, so a plan that shards one reaches the load rather than being refused as no causal LM."""
+    """The FSDP2 load builds a VLM through its image-text class, as hf_ptq's --use_fsdp2 does, so a
+    plan that shards one reaches the load rather than being refused as no causal LM."""
     try:
         config = serve(AutoConfig.for_model(model_type))
     except ValueError:
-        pytest.skip("Qwen3.5 requires a recent Transformers")
+        pytest.skip(f"{model_type} requires a more recent Transformers")
     run_as(2, rank=1)
 
     load_pretrained(str(tmp_path), distribution=DistributionPlan(2, dense="fsdp"))
@@ -2129,13 +2320,6 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
             NotImplementedError,
             "dequantize",
         ),
-        (
-            DistributionPlan(2, dense="fsdp"),
-            "vlm",
-            None,
-            NotImplementedError,
-            "llava",
-        ),
         ("fsdp2", "causal-lm", None, TypeError, "expected a DistributionPlan"),
         (
             DistributionPlan(2),
@@ -2183,7 +2367,6 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
         "another-world",
         "quantized-checkpoint",
         "quantized-language-model",
-        "vlm-checkpoint",
         "not-a-plan",
         "hf-config-on-a-whole-load",
         "fsdp2-option-on-a-whole-load",
@@ -2207,12 +2390,11 @@ def test_a_load_refuses_what_it_cannot_load(
 ):
     """Before anything loads: a plan for another world; a quantized checkpoint, which FSDP2 would
     read as stored, even when only a VLM's language model is quantized and its remote code builds it
-    as a causal LM; a VLM but a text-only one it supports, which FSDP2 would build through
-    AutoModelForCausalLM, refused or as its language model alone; anything but a plan; and the
-    sharded loads' config, or an option only one sharded load takes, which from_pretrained would
-    take for a model argument and fail far from here, or drop."""
+    as a causal LM; anything but a plan; and the sharded loads' config, or an option only one
+    sharded load takes, which from_pretrained would take for a model argument and fail far from
+    here, or drop."""
     run_as(2)
-    config = serve(transformers.LlavaConfig() if checkpoint == "vlm" else LlamaConfig(**_TINY))
+    config = serve(LlamaConfig(**_TINY))
     if checkpoint == "quantized":
         config.quantization_config = {"quant_method": "fp8"}
     if checkpoint == "quantized-language-model":  # Kimi-K2.5's layout

@@ -38,6 +38,7 @@ from example_utils import (
     build_quant_cfg,
     cleanup_distributed,
     create_vlm_calibration_loop,
+    forward_requires_images,
     generate_excludes_prompt,
     get_model,
     get_processor,
@@ -161,37 +162,13 @@ def extract_and_prepare_language_model_from_vl(
     return None
 
 
-def non_language_model_quant_rules(full_model: torch.nn.Module) -> list[dict[str, Any]]:
-    """Rules disabling the quantizers of every VLM module outside its language model.
+def fsdp2_call_context(full_model: torch.nn.Module, model: torch.nn.Module):
+    """Context for calling ``model``, the quantization target, of a possibly FSDP2 ``full_model``.
 
-    The FSDP2 path quantizes the whole VLM, so that the root stays the FSDP2 root, and runs text
-    through its language model (see ``fsdp2_text_forward``). These rules leave the rest of the VLM
-    unquantized, as ``extract_and_prepare_language_model_from_vl`` does on the other paths.
+    Plain PTQ calibrates the extracted language model directly, which skips the FSDP2 root's
+    pre-forward; the root's own parameters (e.g. the embeddings) are gathered around the call.
     """
-    lineage = get_language_model_from_vl(full_model, strict=True)
-    if lineage is None:
-        return []
-    names = {module: name for name, module in full_model.named_modules()}
-    memo = set(lineage)
-    rules = []
-    for ancestor in lineage[:-1]:
-        for child in ancestor.children():
-            if child not in memo:
-                memo.add(child)
-                rules.append({"quantizer_name": f"{names[child]}.*", "enable": False})
-    return rules
-
-
-def fsdp2_text_forward(full_model: torch.nn.Module) -> tuple[torch.nn.Module, Any]:
-    """Module a text-only forward of an FSDP2 model runs through, and the context to run it in.
-
-    A VLM wrapper's forward may require images (Nemotron VL), so text goes to its language model,
-    called with the FSDP2 root's own parameters gathered.
-    """
-    lineage = get_language_model_from_vl(full_model, strict=True)
-    if lineage is None:
-        return full_model, contextlib.nullcontext()
-    return lineage[-1], fsdp2_root_unsharded(full_model)
+    return contextlib.nullcontext() if model is full_model else fsdp2_root_unsharded(full_model)
 
 
 class _DeviceDataLoader:
@@ -437,10 +414,16 @@ def load_model(args: argparse.Namespace):
 
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
+    if args.use_fsdp2 and forward_requires_images(full_model):
+        raise NotImplementedError(
+            f"{type(full_model).__name__}.forward requires image inputs; "
+            "--use_fsdp2 calibrates on text only."
+        )
+
     # Default to image-text calibration for VLM models. Skip for the AutoQuantize recipe path, whose
     # text-only path does not support image-text calibration yet (auto_quantize() would raise);
     # auto-enabling it here would make Nemotron-VL AutoQuantize fail unconditionally. Nor for FSDP2,
-    # which calibrates a VLM on text only.
+    # which calibrates on text only.
     if (
         is_nemotron_vl_model
         and not args.calib_with_images
@@ -482,7 +465,7 @@ def load_model(args: argparse.Namespace):
 
         # Plain PTQ quantizes only the language model. Recipes keep the complete VLM so their
         # quantizer rules can target vision and language components in one state.
-        if args.recipe is None and not args.use_fsdp2:
+        if args.recipe is None:
             extracted_lm = extract_and_prepare_language_model_from_vl(full_model)
             if extracted_lm is not None:
                 language_model = extracted_lm
@@ -504,9 +487,8 @@ def load_model(args: argparse.Namespace):
             # Plain PTQ quantizes only the extracted language model. The recipe path keeps the outer
             # CausalLM so recipes / search can see the Qwen3.5/3.6-MoE VLM lm_head; extracting here
             # would leave modelopt state on the ancestors and make auto_quantize() fail with
-            # "multiple modelopt states". FSDP2 quantizes the whole VLM instead, so the root stays the
-            # FSDP2 root (see non_language_model_quant_rules).
-            if args.recipe is None and not args.use_fsdp2:
+            # "multiple modelopt states".
+            if args.recipe is None:
                 extracted_lm = extract_and_prepare_language_model_from_vl(full_model)
                 if extracted_lm is not None:
                     language_model = extracted_lm
@@ -585,11 +567,6 @@ def mono_quantize(
 
     if not model_is_already_quantized or calibration_only:
         # quantize the model
-        if args.use_fsdp2 and args.recipe is None:
-            quant_cfg = {
-                **quant_cfg,
-                "quant_cfg": [*quant_cfg["quant_cfg"], *non_language_model_quant_rules(full_model)],
-            }
 
         use_calibration = need_calibration(quant_cfg)
 
@@ -612,10 +589,9 @@ def mono_quantize(
                 if args.use_fsdp2:
                     text_loop = calibrate_loop
 
-                    def calibrate_loop(_model):
-                        target, context = fsdp2_text_forward(full_model)
-                        with context:
-                            text_loop(target)
+                    def calibrate_loop(model):
+                        with fsdp2_call_context(full_model, model):
+                            text_loop(model)
 
         if args.layerwise_export:
             LayerwiseExporter(full_model, args.export_path)
@@ -1095,12 +1071,9 @@ def quantize_main(
 
             run_auto_quant = aq_config is not None
 
-            probe_model, probe_context = language_model, contextlib.nullcontext()
-            if args.use_fsdp2:
-                probe_model, probe_context = fsdp2_text_forward(full_model)
-            with probe_context:
+            with fsdp2_call_context(full_model, language_model):
                 args.batch_size = get_max_batch_size(
-                    probe_model,
+                    language_model,
                     max_sample_length=args.calib_seq,
                     sample_memory_usage_ratio=sample_memory_usage_ratio
                     if not run_auto_quant
@@ -1369,7 +1342,8 @@ def parse_args() -> argparse.Namespace:
             "Run calibration under PyTorch FSDP2 (requires torchrun); takes precedence over "
             "--use_seq_device_map. Includes experimental weight and KV-cache AutoQuantize. "
             "Supports causal LMs and VLMs with text-only calibration (no VILA / encoder-decoder / "
-            "image-text calibration / pack-quantized / speculative / sparsity / MTP)."
+            "image-text calibration / models whose forward requires images / pack-quantized / "
+            "speculative / sparsity / MTP)."
         ),
     )
     parser.add_argument(

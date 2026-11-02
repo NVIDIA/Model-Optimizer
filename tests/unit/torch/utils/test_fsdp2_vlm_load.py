@@ -32,8 +32,17 @@ pytest.importorskip("transformers")
 
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
-from transformers import CLIPVisionConfig, LlamaConfig, LlavaConfig, LlavaForConditionalGeneration
+from transformers import (
+    CLIPVisionConfig,
+    LlamaConfig,
+    LlamaForCausalLM,
+    LlavaConfig,
+    LlavaForConditionalGeneration,
+)
 
+from modelopt.torch.export.unified_export_hf import _llm_dummy_forward
+from modelopt.torch.utils import plugins
+from modelopt.torch.utils.distributed import fsdp2_root_unsharded
 from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
 
 # Current Llava parameter prefix -> the prefix the published llava-hf checkpoints store.
@@ -126,14 +135,58 @@ def test_unsourced_parameter_raises(tmp_path, gloo_group):
         _fsdp2_load(tmp_path)
 
 
+def test_tied_lm_head_without_stored_tie_map_loads(tmp_path, gloo_group, monkeypatch):
+    """A tied checkpoint omits lm_head.weight; tie_weights fills it from the map it recomputes,
+    even for a model that does not store ``all_tied_weights_keys``."""
+    config = LlamaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        tie_word_embeddings=True,
+    )
+    config.architectures = ["LlamaForCausalLM"]
+    config.dtype = torch.float32
+    ref = LlamaForCausalLM(config)
+    state = {k: v.clone() for k, v in ref.state_dict().items() if k != "lm_head.weight"}
+    save_file(state, str(tmp_path / "model.safetensors"), metadata={"format": "pt"})
+    (tmp_path / "config.json").write_text(json.dumps(config.to_dict()))
+
+    build = plugins.model_load_utils.build_meta_causal_lm
+
+    def build_without_tie_map(*args, **kwargs):
+        model = build(*args, **kwargs)
+        del model.all_tied_weights_keys
+        return model
+
+    monkeypatch.setattr(plugins.model_load_utils, "build_meta_causal_lm", build_without_tie_map)
+    model = _fsdp2_load(tmp_path)
+    assert model.lm_head.weight is model.model.embed_tokens.weight
+    assert torch.equal(model.lm_head.weight.full_tensor(), ref.model.embed_tokens.weight)
+
+
+@pytest.mark.skipif(
+    torch.cuda.is_available(), reason="with a GPU, FSDP2 gathers the CPU-loaded root onto it"
+)
+def test_language_model_call_gathers_the_root(tmp_path, gloo_group):
+    """Plain PTQ calibrates the extracted language model directly, which skips the FSDP2 root's
+    pre-forward unshard; the root's own parameters (embed_tokens) must be gathered for it."""
+    _tiny_llava_checkpoint(tmp_path)
+    model = _fsdp2_load(tmp_path)
+    language_model = model.model.language_model
+    with fsdp2_root_unsharded(model):
+        language_model(input_ids=torch.tensor([[1, 2, 3]]))
+    assert all(isinstance(p, DTensor) for p in language_model.embed_tokens.parameters())
+
+
 @pytest.mark.skipif(
     torch.cuda.is_available(), reason="with a GPU, FSDP2 gathers the CPU-loaded root onto it"
 )
 def test_nemotron_vl_dummy_forward_gathers_the_root(tmp_path, gloo_group):
     """The Nemotron-VL export forward calls the language model submodule, which skips the FSDP2
     root's pre-forward unshard; the root's own parameters (embed_tokens) must be gathered for it."""
-    from modelopt.torch.export.unified_export_hf import _llm_dummy_forward
-
     _tiny_llava_checkpoint(tmp_path)
     model = _fsdp2_load(tmp_path)
     model.config.architectures = ["NemotronTestVL"]  # takes the Nemotron-VL branch
