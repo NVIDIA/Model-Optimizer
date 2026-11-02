@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 import torch
 import yaml
+from _test_utils.examples.readme import readme_command
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.export.unified_checkpoint import (
     assert_exported_checkpoint_matches,
@@ -27,6 +28,7 @@ from _test_utils.torch.export.unified_checkpoint import (
 from _test_utils.torch.megatron.modelopt_state import assert_has_modelopt_state
 from _test_utils.torch.transformers_models import (
     create_tiny_nemotron_h_dir,
+    create_tiny_qwen3_dir,
     create_tiny_qwen3_moe_dir,
     create_tiny_qwen3vl_dir,
 )
@@ -45,22 +47,46 @@ _DENSE_KWARGS = {
 }
 
 
+def _command(script, num_gpus, options, *, snippet=None):
+    if snippet is not None:
+        return readme_command(
+            Path(__file__).resolve().parents[3] / "examples/megatron_bridge/README.md",
+            snippet,
+            script,
+            overrides={"nproc_per_node": num_gpus, **options},
+        )
+    return extend_cmd_parts(["torchrun", f"--nproc_per_node={num_gpus}", script], **options)
+
+
 @pytest.mark.parametrize(
     (
         "create_model",
         "model_kwargs",
-        "recipe",
+        "quantization_args",
+        "use_readme",
         "quantize_parallelism",
         "export_parallelism",
         "fakequant_export_parallelism",
     ),
     [
+        # The former README smoke reuses this test's checkpoint/export assertions.
+        pytest.param(
+            create_tiny_qwen3_dir,
+            dict(_DENSE_KWARGS, head_dim=64),
+            {},
+            True,
+            "tp_size",
+            "pp_size",
+            None,
+            id="readme",
+        ),
         # MoE: routed experts used to be dropped silently from the export. Calibrates with context
         # parallelism (not on the VLM: M-RoPE CP needs nemo:26.10).
         (
             create_tiny_qwen3_moe_dir,
             _DENSE_KWARGS,
-            "general/ptq/nvfp4_default-kv_fp8",
+            {"recipe": "general/ptq/nvfp4_default-kv_fp8"},
+            False,
             "cp_size",
             "pp_size",
             # Per-expert HF names, each EP rank owning some of them.
@@ -71,7 +97,8 @@ _DENSE_KWARGS = {
         (
             create_tiny_qwen3vl_dir,
             {},
-            "general/ptq/fp8_default-kv_fp8",
+            {"recipe": "general/ptq/fp8_default-kv_fp8"},
+            False,
             "tp_size",
             "pp_size",
             "tp_size",
@@ -81,13 +108,14 @@ _DENSE_KWARGS = {
         (
             create_tiny_nemotron_h_dir,
             {},
-            "general/ptq/nvfp4_default-kv_fp8",
+            {"recipe": "general/ptq/nvfp4_default-kv_fp8"},
+            False,
             "tp_size",
             "ep_size",
             "pp_size",
         ),
     ],
-    ids=["qwen3_moe", "qwen3vl", "nemotron_h"],
+    ids=["readme", "qwen3_moe", "qwen3vl", "nemotron_h"],
 )
 @pytest.mark.timeout(420)  # quantize + 2 exports in one test; 1-gpu CI exceeds the default 300s
 def test_quantize_and_export(
@@ -95,13 +123,14 @@ def test_quantize_and_export(
     num_gpus,
     create_model,
     model_kwargs,
-    recipe,
+    quantization_args,
+    use_readme,
     quantize_parallelism,
     export_parallelism,
     fakequant_export_parallelism,
     fake_hub_checkpoint,
 ):
-    """Quantize a tiny model via a YAML recipe and export it to a unified HF checkpoint.
+    """Quantize a tiny model and export it to a unified HF checkpoint.
 
     The model is passed as a Hub ID (see ``fake_hub_checkpoint``): both steps load and export from
     its local copy, and the Megatron checkpoint records the Hub ID as its tokenizer.
@@ -114,10 +143,9 @@ def test_quantize_and_export(
     hf_export_path = tmp_path / "quantized_hf"
 
     # Step 1: quantize and save a Megatron checkpoint
-    quantize_cmd = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "quantize.py", "--skip_generate"],
+    quantize_args = dict(
         hf_model_name_or_path=model_arg,
-        recipe=recipe,
+        **quantization_args,
         **{quantize_parallelism: num_gpus},
         calib_dataset_name="cnn_dailymail",
         calib_num_samples=4,
@@ -125,6 +153,13 @@ def test_quantize_and_export(
         seq_length=16,
         export_megatron_path=megatron_path,
     )
+    quantize_cmd = _command(
+        "quantize.py",
+        num_gpus,
+        quantize_args,
+        snippet="bridge-quantize" if use_readme else None,
+    )
+    quantize_cmd.append("--skip_generate")
     run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)
     assert (megatron_path / "latest_checkpointed_iteration.txt").exists()
     assert_has_modelopt_state(megatron_path)
@@ -135,12 +170,17 @@ def test_quantize_and_export(
         )
 
     # Step 2: export to HF
-    export_cmd = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "export_quantized_megatron_to_hf.py"],
+    export_args = dict(
         hf_model_name_or_path=model_arg,
         megatron_path=megatron_path,
         export_unified_hf_path=hf_export_path,
         **{export_parallelism: num_gpus},
+    )
+    export_cmd = _command(
+        "export_quantized_megatron_to_hf.py",
+        num_gpus,
+        export_args,
+        snippet="bridge-export" if use_readme else None,
     )
     run_example_command(export_cmd, example_path="megatron_bridge", setup_free_port=True)
     assert (hf_export_path / "config.json").exists()
@@ -163,6 +203,10 @@ def test_quantize_and_export(
     # )
     # outputs = llm.generate(["Hello!"], vllm.SamplingParams(max_tokens=4))
     # assert outputs and outputs[0].outputs and outputs[0].outputs[0].text
+
+    if fakequant_export_parallelism is None:
+        # This case ends at the unified export; the other cases also check fake-quant sidecars.
+        return
 
     # Step 3: export folded weights + quantizer sidecars through Megatron-Bridge for vLLM fake quant
     fakequant_path = tmp_path / "vllm_fakequant"

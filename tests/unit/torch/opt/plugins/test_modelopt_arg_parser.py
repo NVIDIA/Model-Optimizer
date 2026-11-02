@@ -70,6 +70,15 @@ def test_yaml_warmup_spelling_follows_transformers(tmp_path, arg_type, yaml, exp
 class TestModelOptArgParser:
     """Tests for ModelOptArgParser --config and --generate_docs features."""
 
+    def test_help_includes_wrapper_options(self, capsys):
+        parser = ModelOptArgParser((_ModelArgs, _TrainArgs))
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args_into_dataclasses(args=["--help"])
+        assert exc_info.value.code == 0
+        help_text = capsys.readouterr().out
+        assert "--config PATH" in help_text
+        assert "--generate_docs [PATH]" in help_text
+
     def test_cli_args_only(self):
         parser = ModelOptArgParser((_ModelArgs, _TrainArgs))
         model_args, train_args = parser.parse_args_into_dataclasses(

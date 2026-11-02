@@ -81,7 +81,17 @@ runs:
             # The scheduled and on-demand runs also run the tests marked nightly (tests/conftest.py).
             pytest_args+=(--run-nightly)
           fi
-          python3 -m pytest tests/examples/${{ inputs.example }} --cov "${pytest_args[@]}" || status=$?
+          readme_cli_tests="tests/examples/${{ inputs.example }}/test_${{ inputs.example }}_readme_cli.py"
+          if [[ -f "$readme_cli_tests" ]]; then
+            echo "Checking README CLI options before example execution"
+            python3 -m pytest "$readme_cli_tests" --no-cov -x "${pytest_args[@]}" || status=$?
+            pytest_args+=(--ignore="$readme_cli_tests")
+          fi
+          if (( status == 0 )); then
+            python3 -m pytest tests/examples/${{ inputs.example }} --cov "${pytest_args[@]}" || status=$?
+          else
+            echo "Skipping example execution because README CLI checks failed"
+          fi
         fi
         echo "status=$status" >> "$GITHUB_OUTPUT"
     - name: Verdict
