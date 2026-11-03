@@ -50,6 +50,7 @@ class _Projections(nn.Module):
 def _config(initializer):
     config = load_recipe("general/ptq/nvfp4_gsq-gptq").quantize.model_dump(exclude_unset=True)
     config["algorithm"].update(
+        reconstruction="linear",
         initializer=initializer,
         steps=4,
         eval_every=2,
@@ -76,14 +77,13 @@ def test_gsq_quality_restore_and_native_export(method, tmp_path):
     config = _config(initializer)
     mtq.quantize(baseline, {**config, "algorithm": ["max", initializer]}, lambda m: m(x))
     preprocess_linear_fusion([baseline.q_proj, baseline.k_proj, baseline.v_proj])
-    baseline_loss = F.mse_loss(baseline(x).float(), reference.float())
     cpu_rng, cuda_rng = torch.get_rng_state(), torch.cuda.get_rng_state()
     mtq.quantize(model, config, lambda m: m(x))
     assert torch.equal(cpu_rng, torch.get_rng_state())
     assert torch.equal(cuda_rng, torch.cuda.get_rng_state())
     actual = model(x).detach()
     actual_loss = F.mse_loss(actual.float(), reference.float())
-    assert actual_loss <= baseline_loss + 1e-6
+    assert torch.isfinite(actual_loss)
     assert all(not m.input_quantizer.is_enabled for m in (model.q_proj, model.k_proj, model.v_proj))
     if "awq" in method:
         for name in ("q_proj", "k_proj", "v_proj"):
@@ -114,6 +114,232 @@ def test_gsq_quality_restore_and_native_export(method, tmp_path):
             dtype=hard.dtype,
         )
         torch.testing.assert_close(dequant, hard, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("reconstruction", ["linear", "staged"])
+def test_gsq_retains_final_state_even_when_initializer_has_lower_loss(reconstruction):
+    torch.manual_seed(17)
+    if reconstruction == "staged":
+        model = (
+            get_tiny_llama(
+                hidden_size=64,
+                intermediate_size=64,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+                num_hidden_layers=1,
+            )
+            .cuda()
+            .eval()
+        )
+        original = model.model.layers[0].self_attn.q_proj.weight.detach().clone()
+        config = _config("max")
+        config["algorithm"].update(
+            reconstruction="staged",
+            qk_steps=1,
+            epochs=1,
+            initializer_samples=1,
+            train_samples=1,
+            batch_size=1,
+            scale_lr=20.0,
+            layerwise={"enable": True},
+        )
+        baseline = deepcopy(model)
+        mtq.quantize(baseline, {**config, "algorithm": "max"})
+        projection = baseline.model.layers[0].self_attn.q_proj
+        baseline_weight = projection.weight_quantizer(projection.weight).detach()
+        ids = torch.arange(16, device="cuda").reshape(1, -1)
+        mtq.quantize(model, config, lambda m: [m(ids, use_cache=False) for _ in range(2)])
+        actual = model.model.layers[0].self_attn.q_proj.weight
+        assert F.mse_loss(actual.float(), original.float()) > 10 * F.mse_loss(
+            baseline_weight.float(), original.float()
+        )
+        return
+    model = nn.Linear(64, 16, bias=False, device="cuda").eval()
+    baseline = deepcopy(model)
+    x = torch.randn(64, 64, device="cuda")
+    target = model(x).detach()
+    config = _config("max")
+    mtq.quantize(baseline, {**config, "algorithm": "max"})
+    config["algorithm"].update(steps=1, scale_lr=20.0)
+    mtq.quantize(model, config, lambda m: m(x))
+    assert F.mse_loss(model(x), target) > 100 * F.mse_loss(baseline(x), target)
+
+
+def test_staged_gsq_rejects_preexisting_awq_scaling_without_mutation():
+    model = (
+        get_tiny_llama(
+            hidden_size=64,
+            intermediate_size=64,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_hidden_layers=1,
+        )
+        .cuda()
+        .eval()
+    )
+    config = _config("max")
+    config["algorithm"].update(
+        reconstruction="staged",
+        qk_steps=1,
+        epochs=1,
+        initializer_samples=1,
+        train_samples=1,
+        batch_size=1,
+        layerwise={"enable": True},
+    )
+    mtq.quantize(model, {**config, "algorithm": None})
+    for module in model.model.layers[0].modules():
+        if hasattr(module, "input_quantizer") and isinstance(module, nn.Linear):
+            module.input_quantizer.pre_quant_scale = torch.linspace(
+                0.5, 2, 64, device="cuda", dtype=torch.bfloat16
+            )
+    before = deepcopy(model.state_dict())
+    ids = torch.arange(16, device="cuda").reshape(1, -1)
+    with pytest.raises(ValueError):
+        mtq.calibrate(
+            model, config["algorithm"], lambda m: [m(ids, use_cache=False) for _ in range(2)]
+        )
+    for name, value in before.items():
+        torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("method", ["gptq", "awq_lite", "awq_full"])
+@pytest.mark.parametrize("change", ["tokens", "mask", "positions"])
+def test_staged_gsq_isolates_initializer_data_and_trains_both_joint_regions(method, change):
+    model = (
+        get_tiny_llama(
+            hidden_size=64,
+            intermediate_size=64,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_hidden_layers=1,
+        )
+        .cuda()
+        .eval()
+    )
+    other = deepcopy(model)
+    config = _config({"method": method})
+    config["algorithm"].update(
+        reconstruction="staged",
+        qk_steps=8,
+        epochs=2,
+        initializer_samples=1,
+        train_samples=3,
+        batch_size=2,
+        microbatch_size=2,
+        assignment_lr=0.01,
+        scale_lr=0.003,
+        layerwise={"enable": True},
+    )
+    initializer = torch.arange(16, device="cuda").reshape(1, -1)
+
+    def loop(m, offset):
+        m(initializer, use_cache=False)
+        for i in range(3):
+            mask = torch.ones_like(initializer)
+            positions = torch.arange(16, device="cuda").reshape(1, -1)
+            if offset and change == "mask":
+                mask[:, 4::2] = 0
+            if offset and change == "positions":
+                positions = positions * 2
+            tokens = (initializer * (i + 1) + (offset if change == "tokens" else 0)) % 32
+            m(tokens, use_cache=False, attention_mask=mask, position_ids=positions)
+
+    mtq.quantize(model, config, lambda m: loop(m, 0))
+    mtq.quantize(other, config, lambda m: loop(m, 13))
+    first, second = model.model.layers[0], other.model.layers[0]
+    for name in ("q_proj", "k_proj"):
+        torch.testing.assert_close(
+            getattr(first.self_attn, name).weight,
+            getattr(second.self_attn, name).weight,
+            rtol=0,
+            atol=0,
+        )
+    for region, names in [
+        ("self_attn", ("v_proj", "o_proj")),
+        ("mlp", ("gate_proj", "up_proj", "down_proj")),
+    ]:
+        assert any(
+            not torch.equal(
+                getattr(getattr(first, region), name).weight,
+                getattr(getattr(second, region), name).weight,
+            )
+            for name in names
+        )
+
+
+@pytest.mark.parametrize("method", ["max", "awq_lite"])
+def test_staged_gsq_qk_responds_to_correlations_between_hessian_blocks(method):
+    base = (
+        get_tiny_llama(
+            hidden_size=256,
+            intermediate_size=256,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_hidden_layers=1,
+            dtype=torch.float32,
+        )
+        .cuda()
+        .eval()
+    )
+    layer = base.model.layers[0]
+    x = torch.randn(1, 16, 1, device="cuda").expand(-1, -1, 256).clone()
+    x += 0.02 * torch.randn_like(x)
+    flipped = x.clone()
+    flipped[..., :128].neg_()
+    positions = torch.arange(16, device="cuda").reshape(1, -1)
+    with torch.no_grad():
+        rotary = base.model.rotary_emb(x, positions)
+    initializer = {"method": method}
+    if method == "awq_lite":
+        # A single alpha candidate makes initialization independent of input signs.
+        initializer["alpha_step"] = 1.0
+    config = _config(initializer)
+    config["algorithm"].update(
+        reconstruction="staged",
+        qk_steps=32,
+        epochs=1,
+        initializer_samples=1,
+        train_samples=1,
+        batch_size=1,
+        assignment_lr=0.01,
+        scale_lr=0.003,
+    )
+    initialized, trained = [], []
+    for inputs in (x, flipped):
+        baseline = deepcopy(layer)
+        mtq.quantize(
+            baseline,
+            {**config, "algorithm": ["max", initializer]},
+            lambda m: m(inputs, position_embeddings=rotary),
+        )
+        preprocess_linear_fusion(
+            [baseline.self_attn.q_proj, baseline.self_attn.k_proj, baseline.self_attn.v_proj]
+        )
+        initialized.append(baseline)
+        candidate = deepcopy(layer)
+        mtq.quantize(
+            candidate, config, lambda m: [m(inputs, position_embeddings=rotary) for _ in range(2)]
+        )
+        trained.append(candidate)
+    # Flipping an entire 128-feature block preserves all within-block Grams.
+    # Only the full Hessian can distinguish the Q/K objectives for these inputs.
+    for name in ("q_proj", "k_proj"):
+        first, second = [getattr(model.self_attn, name) for model in initialized]
+        torch.testing.assert_close(first.weight, second.weight, rtol=0, atol=0)
+        torch.testing.assert_close(
+            first.weight_quantizer.amax, second.weight_quantizer.amax, rtol=0, atol=0
+        )
+        if method == "awq_lite":
+            torch.testing.assert_close(
+                first.input_quantizer.pre_quant_scale,
+                second.input_quantizer.pre_quant_scale,
+                rtol=0,
+                atol=0,
+            )
+        assert not torch.equal(
+            getattr(trained[0].self_attn, name).weight, getattr(trained[1].self_attn, name).weight
+        )
 
 
 def test_local_shift_uses_fixed_indices_and_masks_invalid_shifts():
@@ -220,7 +446,8 @@ def test_gsq_rolls_back_mutating_initializer_failure(method):
 
 
 @pytest.mark.parametrize("method", ["gptq", "awq_lite"])
-def test_layerwise_gsq_hf_export_preserves_hard_codes(method, tmp_path):
+@pytest.mark.parametrize("reconstruction", ["linear", "staged"])
+def test_layerwise_gsq_hf_export_preserves_hard_codes(method, reconstruction, tmp_path):
     model = (
         get_tiny_llama(
             hidden_size=64, intermediate_size=64, num_attention_heads=4, num_key_value_heads=4
@@ -231,7 +458,32 @@ def test_layerwise_gsq_hf_export_preserves_hard_codes(method, tmp_path):
     x = torch.randint(0, 32, (2, 16), device="cuda")
     config = _config({"method": method})
     config["algorithm"].update(steps=2, layerwise={"enable": True})
-    mtq.quantize(model, config, lambda m: m(x, use_cache=False))
+    if reconstruction == "staged":
+        config["algorithm"].update(
+            reconstruction="staged",
+            qk_steps=2,
+            epochs=1,
+            initializer_samples=1,
+            train_samples=1,
+            batch_size=1,
+        )
+
+    def forward(m):
+        for row in x.split(1):
+            m(row, use_cache=False, attention_mask=torch.ones_like(row))
+
+    mtq.quantize(model, config, forward)
+    actual = model(x, use_cache=False).logits.detach()
+    assert torch.isfinite(actual).all()
+    state = tmp_path / "staged.pth"
+    mto.save(model, state)
+    restored = mto.restore(
+        get_tiny_llama(
+            hidden_size=64, intermediate_size=64, num_attention_heads=4, num_key_value_heads=4
+        ).cuda(),
+        state,
+    ).eval()
+    torch.testing.assert_close(restored(x, use_cache=False).logits, actual, rtol=0, atol=0)
     expected = {}
     for name, module in model.named_modules():
         if hasattr(module, "weight_quantizer") and module.weight_quantizer.is_enabled:

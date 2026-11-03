@@ -454,17 +454,40 @@ its complete configuration, so GPTQ damping and AWQ search options are preserved
 Other compatible NVFP4 initializers, such as ``max``, ``mse``, and
 ``local_hessian``, can be selected through this field. Set layerwise options on
 GSQ itself, rather than its initializer.
+Staged calibration requires original unscaled inputs; apply AWQ through
+``initializer`` rather than passing a previously AWQ-calibrated model.
 
-GSQ uses Lion with cosine learning-rate decay to 10% of the initial rates,
-weight decay on logits only, a centered noisy shift prior, linear temperature
-and logit-scale schedules, and optional gradient accumulation. ``steps``, ``batch_size``,
-``max_tokens`` (cached tokens per linear), and the learning rates control the
-calibration budget. Targets and rollback weights are cached on the CPU;
-five logits per weight and optimizer state reside on the calibration device
-for one group of linears sharing a global scale. The default recipes process
-one decoder layer at a time. This is linear reconstruction, rather than the
-paper's full staged reconstruction and end-to-end scale-training recipe.
-The paper's results on other grids do not establish NVFP4 quality gains.
+The default recipes use dense Llama staged reconstruction. Supply exactly
+``initializer_samples`` sequences (default 512), followed by ``train_samples``
+training sequences (default 4096) in the replayable loop. Keep validation data
+outside this loop. Sequences retain their attention masks, positions, and rotary
+embeddings; use ``use_cache=False``. Microbatches must contain compatible metadata
+and sequence lengths. FineWeb-Edu with 4096-token sequences is the reference
+training recipe; dataset selection remains the caller's responsibility.
+
+Each decoder layer first refines Q and K independently for ``qk_steps`` (default
+2000), using full damped Hessian reconstruction and constant learning rates.
+It then jointly trains V/O against the original attention region output and
+gate/up/down against the original full decoder block output. The latter student
+uses quantized attention, while its teacher uses original weights. Both joint
+stages use ``epochs`` (default 10), logical ``batch_size`` 64, and
+``microbatch_size`` 16 with gradient accumulation. The next layer receives the
+already quantized prefix's outputs.
+
+GSQ uses Lion with weight decay on logits only, a centered noisy shift prior,
+and linear temperature and logit-scale schedules. Joint stages use cosine
+learning-rate decay to 10%. Native global scales shared with fixed projections
+remain fixed during that stage; other global scales and all block scales are
+learned. Distinct native scale groups remain distinct within joint regions.
+CPU memory holds replay sequences and original weights; device memory holds
+five logits per trained weight, gradients, and Lion momentum for one region.
+
+For independent linear reconstruction, set ``reconstruction="linear"``.
+``steps``, ``max_tokens`` (cached tokens per linear), and
+``gradient_accumulation_steps`` control that mode. It supports arbitrary dense
+linear layouts, while staged mode requires all seven Llama decoder projections.
+There is no separate end-to-end scale-training phase. The paper's results on
+other grids do not establish NVFP4 quality gains.
 
 The implementation supports single-process dense ``nn.Linear`` modules with
 static NVFP4 block size 16. Activations and KV cache remain unquantized. Fused
@@ -472,8 +495,9 @@ MoE experts, tied quantized weights, distributed/sharded calibration, structural
 initializers such as SVDQuant/LSQ, and AutoQuant candidate switching are unsupported.
 Resident weights must be on one device; layerwise calibration can limit residency.
 
-Hard candidates are checked against the initializer's reconstruction loss, and
-the best state is retained. GSQ discards its logits after calibration, storing
+Every stage retains its final hard state, including when it has higher loss
+than the initializer; validation does not select earlier epochs. GSQ discards
+its logits after calibration, storing
 hard weights and native scales in the ordinary ModelOpt checkpoint. Save/restore
 and Hugging Face export use the existing APIs. AWQ input scaling is preserved;
 AWQ-initialized checkpoints follow the existing NVFP4 AWQ export path and its

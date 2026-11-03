@@ -22,6 +22,7 @@ imports:
 
 algorithm:
   method: gsq
+  reconstruction: staged
   initializer:
     method: gptq
   layerwise:

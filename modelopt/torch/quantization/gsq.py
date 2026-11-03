@@ -43,7 +43,7 @@ __all__ = ["gsq"]
 
 
 def gsq(model, forward_loop, **kwargs):
-    """Refine initialized codes and native scales using linear reconstruction.
+    """Refine initialized codes and native scales using linear or staged reconstruction.
 
     Original targets are collected before the initializer changes weights. AWQ
     input scaling remains part of each reconstructed forward. Final hard weights
@@ -52,6 +52,7 @@ def gsq(model, forward_loop, **kwargs):
     # The calibration registry imports this module to register the GSQ entrypoint.
     from modelopt.torch.export.quant_utils import preprocess_linear_fusion
 
+    from .gsq_staged import StagedReplay, refine_staged
     from .mode import CalibrateModeRegistry, get_modelike_from_algo_cfg
     from .model_calib import max_calibrate
 
@@ -59,6 +60,8 @@ def gsq(model, forward_loop, **kwargs):
     if forward_loop is None:
         raise ValueError("GSQ requires a replayable forward_loop")
     modules = _validate_model(model)
+    if config.reconstruction == "staged":
+        StagedReplay.validate(model, modules)
     mode, options = get_modelike_from_algo_cfg(config.initializer)[0]
     descriptor = CalibrateModeRegistry[mode]
     initializer = descriptor.config_class(**options)
@@ -77,11 +80,16 @@ def gsq(model, forward_loop, **kwargs):
         torch.random.default_generator.manual_seed(config.seed)
         if cuda_devices:
             torch.cuda.default_generators[device.index].manual_seed(config.seed)
-        samples = _collect_targets(model, modules, forward_loop, config.max_tokens)
+        if config.reconstruction == "staged":
+            replay = StagedReplay(model, forward_loop, config)
+            initializer_loop = replay.initialize
+        else:
+            samples = _collect_targets(model, modules, forward_loop, config.max_tokens)
+            initializer_loop = forward_loop
         if any(not isinstance(m.weight_quantizer, StaticBlockScaleQuantizer) for _, m in modules):
             max_calibrate(model, forward_loop=None)
         initialize: Callable[..., ConvertReturnType] = descriptor.convert
-        initialized_model, _ = initialize(model, initializer, forward_loop=forward_loop)
+        initialized_model, _ = initialize(model, initializer, forward_loop=initializer_loop)
         if initialized_model is not model:
             raise ValueError("GSQ initializer must calibrate the original model in place")
         for _, siblings in find_shared_input_groups(model, SHARED_PATTERNS):
@@ -101,7 +109,10 @@ def gsq(model, forward_loop, **kwargs):
         # Fusible siblings share a global scale; optimize them together so installing
         # one sibling cannot change the native representation of another.
         for members in groups.values():
-            _refine(members, samples, config)
+            if config.reconstruction == "linear":
+                _refine(members, samples, config)
+        if config.reconstruction == "staged":
+            refine_staged(model, modules, replay, config)
 
 
 def _validate_model(model):
@@ -389,8 +400,6 @@ def _refine(members, samples, config):
     with torch.enable_grad():
         for _, module in members:
             module.weight_quantizer.disable_quant()
-        best_loss = evaluate(initial=True)
-        best = [a.snapshot(initial=True) for a in assignments]
         for step in range(config.steps):
             progress = step / max(config.steps - 1, 1)
             tau = config.temperature + progress * (config.final_temperature - config.temperature)
@@ -420,12 +429,10 @@ def _refine(members, samples, config):
             lr_progress = progress if config.steps > 1 else 1.0
             _lion_step(groups, momentum, 0.1 + 0.45 * (1 + cos(pi * lr_progress)))
             if (step + 1) % config.eval_every == 0 or step + 1 == config.steps:
-                loss = evaluate()
-                if loss < best_loss:
-                    best_loss = loss
-                    best = [a.snapshot() for a in assignments]
+                evaluate()
         with torch.no_grad():
-            for (_, module), (weight, amax, global_amax) in zip(members, best):
+            for (_, module), assignment in zip(members, assignments):
+                weight, amax, global_amax = assignment.snapshot()
                 module.weight.copy_(weight)
                 q = module.weight_quantizer
                 q.amax = amax.to(device).reshape_as(q.amax)

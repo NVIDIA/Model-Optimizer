@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 37 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 40 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -55,6 +55,9 @@ supported combinations.
 | `nvfp4_omlp_only-kv_fp8_cast` | NVFP4 W4A4, o_proj + MLP/MoE | FP8 (constant amax) | max |
 | `nvfp4_weight_only-kv_fp16` | NVFP4 W4A16, weights only | none (BF16/FP16) | max |
 | `nvfp4_weight_only-kv_fp8_cast` | NVFP4 W4A16, weights only | FP8 (constant amax) | max |
+| `nvfp4_gsq-gptq` | NVFP4 W4A16, dense Llama | none | staged GSQ after GPTQ |
+| `nvfp4_gsq-awq_lite` | NVFP4 W4A16, dense Llama | none | staged GSQ after AWQ Lite |
+| `nvfp4_gsq-awq_full` | NVFP4 W4A16, dense Llama | none | staged GSQ after AWQ Full |
 | `int4_blockwise_weight_only` | INT4 W4A16, block 128, weights only | none | max |
 | `nvfp4_mlp_weight_only` | NVFP4 W4A16 (block 32), MLP + MoE weights only | none | max |
 | `mxfp4_mlp_weight_only` | MXFP4 W4A16, MLP + MoE weights only | none | none (no calibration) |
@@ -140,6 +143,11 @@ activations and tensor-core math are what deliver the throughput.
 
 - **`nvfp4_weight_only`** — NVFP4 weights, BF16 activations. Memory savings of
   4-bit weights without the activation-quantization risk.
+- **`nvfp4_gsq`** — native NVFP4 weights with GPTQ or AWQ initialization and
+  local-shift Gumbel-Softmax refinement. Dense Llama recipes use Q/K Hessian,
+  joint V/O attention, and joint MLP block reconstruction. Supply 512 initializer
+  sequences followed by 4096 training sequences, with the final epoch retained.
+  Quality improvements require model-specific validation.
 - **`int4_blockwise_weight_only`** — INT4 weights, block size 128, BF16
   activations. Classic W4A16 weight compression; works without NVFP4-class
   hardware.

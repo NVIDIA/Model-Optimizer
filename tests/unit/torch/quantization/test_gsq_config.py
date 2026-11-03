@@ -56,7 +56,14 @@ def test_gsq_rejects_incompatible_quantizers_without_mutation(config):
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("steps", 0), ("temperature", 0), ("scale_lr", float("nan")), ("max_tokens", 0)],
+    [
+        ("steps", 0),
+        ("temperature", 0),
+        ("scale_lr", float("nan")),
+        ("max_tokens", 0),
+        ("qk_steps", 0),
+        ("epochs", 0),
+    ],
 )
 def test_gsq_invalid_optimization_options(field, value):
     with pytest.raises(ValueError):
@@ -71,3 +78,16 @@ def test_gsq_rejects_weight_shared_with_unquantized_linear():
     mtq.quantize(model, {**config, "algorithm": None})
     with pytest.raises(ValueError, match="tied"):
         gsq(model, lambda m: m(torch.ones(4, 64)))
+
+
+def test_staged_gsq_rejects_unsupported_layout_without_mutation():
+    model = torch.nn.Linear(64, 16)
+    config = load_recipe("general/ptq/nvfp4_gsq-gptq").quantize.model_dump()
+    mtq.quantize(model, {**config, "algorithm": None})
+    before = deepcopy(model.state_dict())
+    with pytest.raises(ValueError):
+        mtq.calibrate(
+            model, {"method": "gsq", "reconstruction": "staged"}, lambda m: m(torch.ones(1, 4, 64))
+        )
+    for name, value in before.items():
+        torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
