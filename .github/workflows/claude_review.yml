@@ -81,8 +81,10 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           trigger_phrase: "/claude review"
           show_full_output: true
+          # A Bash rule ending in ":*" is a literal prefix, where an inner "*" matches only itself,
+          # so the reviews rule spells out this PR's endpoint, as the prompt's command does.
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/*/pulls/*/reviews:*),Bash(git diff:*),Bash(git show:*),Bash(git log:*),Read,Grep,Glob"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ env.REPO }}/pulls/${{ env.PR_NUMBER }}/reviews:*),Bash(git diff:*),Bash(git show:*),Bash(git log:*),Read,Grep,Glob"
             --disallowedTools "Task,Read(//proc/**)"
             --model "${{ vars.CLAUDE_MODEL }}"
           prompt: |
@@ -315,6 +317,8 @@ jobs:
             If it differs from HEAD SHA, stop without publishing a stale review.
             Submit one review with the summary as its body (do not duplicate it as a PR comment):
             - Eligible `approve`:
-              `gh api repos/$REPO/pulls/$PR_NUMBER/reviews --method POST -f commit_id=<HEAD SHA> -f event=APPROVE -f body="<summary>"`
+              `gh api repos/${{ env.REPO }}/pulls/${{ env.PR_NUMBER }}/reviews --method POST -f commit_id=<HEAD SHA> -f event=APPROVE -f body="<summary>"`
             - All other cases:
-              `gh api repos/$REPO/pulls/$PR_NUMBER/reviews --method POST -f commit_id=<HEAD SHA> -f event=COMMENT -f body="<summary>"`
+              `gh api repos/${{ env.REPO }}/pulls/${{ env.PR_NUMBER }}/reviews --method POST -f commit_id=<HEAD SHA> -f event=COMMENT -f body="<summary>"`
+            Run it exactly as written, with the endpoint right after `gh api`: the tool allow-list
+            refuses any other form, such as `gh api -X POST <endpoint>` or `gh pr review`.

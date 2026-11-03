@@ -42,7 +42,7 @@ from _test_utils.torch.megatron.utils import (
     save_distributed_checkpoint,
     sharded_state_dict_test_helper,
 )
-from _test_utils.torch.misc import is_blackwell, set_seed
+from _test_utils.torch.misc import set_seed
 from _test_utils.torch.quantization.models import RegularQuantModelForTP
 from _test_utils.torch.quantization.quant_utils import get_model_size
 from _test_utils.torch.quantization.quantize_common import (
@@ -344,6 +344,8 @@ def _gpt_model_provider(
                 use_cpu_initialization=meta_device,
                 num_moe_experts=num_moe_experts,
                 moe_grouped_gemm=moe_grouped_gemm,
+                # MoE with TP requires sequence parallelism
+                sequence_parallel=tp_size > 1 and num_moe_experts is not None,
             )
 
     if not meta_device:
@@ -600,19 +602,7 @@ def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     )
 
 
-@pytest.mark.parametrize(
-    "hidden_size",
-    [
-        256,
-        # Runs in the pytest process, so a Blackwell CUDA crash here would break every later test
-        pytest.param(
-            320,
-            marks=pytest.mark.skipif(
-                is_blackwell(), reason="Flaky CUDA illegal memory access on Blackwell"
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("hidden_size", [256, 320])
 def test_regular_state_dict(distributed_setup_size_1, hidden_size):
     initialize_for_megatron(tensor_model_parallel_size=1, pipeline_model_parallel_size=1, seed=SEED)
 

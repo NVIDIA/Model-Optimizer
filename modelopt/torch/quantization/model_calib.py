@@ -21,7 +21,6 @@ import time
 import warnings
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from functools import partial
 from typing import Any, TypeAlias
@@ -79,7 +78,9 @@ from .utils.calib_utils import (
     _IMATRIX_ENCODER_REGISTRY,
     GPTQHelper,
     bfloat16_hessian_gemm,
+    run_on_each_gpu,
     track_calib_forward_memory,
+    update_expert_weights,
 )
 
 __all__ = [
@@ -2028,16 +2029,10 @@ def awq_clip(
             clip_ratios = [
                 round(float(k), 2) for k in torch.arange(min_clip_ratio, 1.0, shrink_step)
             ] + [1.0]
-            if self.is_per_tensor_clip(module):
-                self.loss = {k: torch.tensor(0.0, device=module.weight.device) for k in clip_ratios}
-            else:
-                self.loss = {
-                    k: torch.zeros(
-                        (co, math.ceil(ci / self.block_size)),
-                        device=module.weight.device,
-                    )
-                    for k in clip_ratios
-                }
+            shape = () if self.is_per_tensor_clip(module) else (co, math.ceil(ci / self.block_size))
+            # One buffer for every candidate's loss, which the data-parallel sync reduces in place.
+            self.loss_buffer = torch.zeros(len(clip_ratios), *shape, device=module.weight.device)
+            self.loss = dict(zip(clip_ratios, self.loss_buffer))
             self.best_clip_val = None
             self.best_loss = None
 
@@ -2066,7 +2061,24 @@ def awq_clip(
                 indices, self.awq_clip.w_amax * shrink, self.awq_clip.best_clip_val
             )
 
+    def sync_across_dp(module):
+        """Average the clip search over the data-parallel ranks, so every replica picks one clip.
+
+        Once, after the forwards: a module's forward count, as an MoE expert's, can differ by rank.
+        """
+        group = module.parallel_state.data_parallel_group
+        if not group.is_initialized():
+            return
+        losses = module.awq_clip.loss_buffer
+        dist.all_reduce(losses, op=dist.ReduceOp.SUM, group=group.group)
+        losses /= group.world_size()
+        tokens = torch.tensor(module.awq_clip.num_tokens, device=losses.device)
+        dist.all_reduce(tokens, op=dist.ReduceOp.SUM, group=group.group)
+        module.awq_clip.num_tokens = int(tokens.item())
+
     def _clip_search(self, inputs, co_bsz=256, max_tokens=16):
+        if inputs.numel() == 0:  # no tokens to search with; their loss, a mean over none, is NaN
+            return
         weight = self.weight
         self.weight_quantizer.enable()
 
@@ -2124,11 +2136,6 @@ def awq_clip(
 
                     # co_bsz, n_block
                     loss = (cur_out - org_out).float().pow(2).mean(dim=1)
-
-                    parallel_group = self.parallel_state.data_parallel_group
-                    if parallel_group.is_initialized():
-                        dist.all_reduce(loss, op=dist.ReduceOp.SUM, group=parallel_group.group)
-                        loss /= parallel_group.world_size()
 
                     del cur_out, cur_w
                     self.awq_clip.loss[shrink][
@@ -2196,6 +2203,11 @@ def awq_clip(
         module.weight_quantizer.enable()
         if module.awq_clip.is_input_quantized:
             module.input_quantizer.enable()
+
+    # Every module's reduction before any weight gather, which an FSDP2 model's postprocess runs.
+    for module in model.modules():
+        if is_quantized_linear(module) and hasattr(module, "awq_clip"):
+            sync_across_dp(module)
 
     for name, module in model.named_modules():
         if is_quantized_linear(module) and hasattr(module, "awq_clip"):
@@ -2702,15 +2714,17 @@ def gptq(
             handle.update_weights(block_size, perc_damp)
         handle.free()
     for name, module in fused_experts:
-        updated = unreached = 0
         with enable_weight_access_and_writeback(module, model, names):
-            for weight, quantizer in module.iter_weights_for_calibration():
-                handle = expert_handles.pop(id(quantizer), None)
-                if handle is not None:
-                    unreached += handle.n_samples == 0
-                    handle.update_weights(block_size, perc_damp, weight)
-                    handle.free()
-                    updated += 1
+            work = [
+                (expert_handles.pop(id(quantizer)), weight)
+                for weight, quantizer in module.iter_weights_for_calibration()
+                if id(quantizer) in expert_handles
+            ]
+            updated = len(work)
+            unreached = sum(handle.n_samples == 0 for handle, _ in work)
+            update_expert_weights(work, block_size, perc_damp)
+            # Its weight slices would keep this module's onloaded weights alive past the window.
+            del work
         if updated:
             print_rank_0(
                 f"[{name}] GPTQ updated {updated} expert weights, {unreached} of them never "
@@ -2726,6 +2740,31 @@ def gptq(
 # Calibration rows squared at a time, bounding imatrix's float32 temporaries to this slice of an
 # input rather than twice the whole of it.
 _IMATRIX_ROW_CHUNK = 1024
+# CUDA reductions over about 1,024 rows or more stage partial sums in a global buffer that grows
+# with the input, so longer GPU inputs are reduced in groups of this many rows.
+_IMATRIX_GPU_GROUP = 512
+
+
+def _imatrix_sum_of_squares(x: torch.Tensor) -> torch.Tensor:
+    """Per-column sum of squares of the rows of ``x``, in float32."""
+    if not (x.is_cuda and x.dtype in (torch.bfloat16, torch.float16, torch.float32)):
+        # On a CPU vector_norm copies the whole input to float32 first, and it rejects float64,
+        # so square float32 slices of the input instead.
+        return sum(rows.float().square().sum(dim=0) for rows in x.split(_IMATRIX_ROW_CHUNK))
+    if x.shape[0] > _IMATRIX_GPU_GROUP**2:
+        # Bound the group sums, and the reduction over them, to _IMATRIX_GPU_GROUP rows too.
+        return sum(_imatrix_sum_of_squares(rows) for rows in x.split(_IMATRIX_GPU_GROUP**2))
+    # On a GPU vector_norm squares and sums in float32 inside the kernel, without a float32 copy.
+    if x.shape[0] <= 3 * _IMATRIX_GPU_GROUP:
+        # Launches dominate at this size, so one reduction is fastest, and up to here it stages no
+        # more than squaring float32 slices would.
+        return torch.linalg.vector_norm(x, 2, dim=0, dtype=torch.float32).square_()
+    full = x.shape[0] // _IMATRIX_GPU_GROUP * _IMATRIX_GPU_GROUP
+    groups = x[:full].reshape(-1, _IMATRIX_GPU_GROUP, x.shape[1])
+    sum_sq = torch.linalg.vector_norm(groups, 2, dim=1, dtype=torch.float32).square_().sum(dim=0)
+    if full < x.shape[0]:
+        sum_sq += torch.linalg.vector_norm(x[full:], 2, dim=0, dtype=torch.float32).square_()
+    return sum_sq
 
 
 @torch.no_grad()
@@ -2795,7 +2834,7 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
         x = inputs.detach().reshape(-1, inputs.shape[-1])
         if x.shape[0] == 0:
             return
-        sum_sq = sum(rows.float().square().sum(dim=0) for rows in x.split(_IMATRIX_ROW_CHUNK))
+        sum_sq = _imatrix_sum_of_squares(x)
         entry[0] = sum_sq if entry[0] is None else entry[0] + sum_sq
         entry[1] += x.shape[0]
 
@@ -2848,25 +2887,11 @@ def _encode_on_each_gpu(by_device, encode):
         if device not in gpus:
             for item in items:
                 encode(*item)
-    if not gpus:
-        return
-    # The first encode runs here, so lazy setup that is not thread-safe, such as loading a format's
-    # CUDA extension, happens once before the workers start.
-    first, *by_device[gpus[0]] = by_device[gpus[0]]
-    encode(*first)
-    inference = torch.is_inference_mode_enabled()
-
-    def worker(device):
-        # The device, grad mode and inference mode are per thread: take the caller's.
-        torch.cuda.set_device(device)
-        with torch.inference_mode() if inference else torch.no_grad():
-            for item in by_device[device]:
-                encode(*item)
-        torch.cuda.synchronize(device)
-
-    with ThreadPoolExecutor(len(gpus)) as pool:
-        for future in [pool.submit(worker, gpu) for gpu in gpus]:
-            future.result()
+    if gpus:
+        pending = {device: iter(by_device[device]) for device in gpus}
+        run_on_each_gpu(
+            gpus, lambda device: next(pending[device], None), lambda item, _: encode(*item)
+        )
 
 
 def _run_weight_scale_calibration(model, forward_loop, scale_algorithm):
