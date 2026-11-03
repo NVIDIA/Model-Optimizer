@@ -2869,6 +2869,7 @@ def test_routed_experts_without_experts_in_their_names_are_refused(ep_world_of_t
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
     monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
     config = SimpleNamespace(
+        model_type=_NO_SPEC,
         base_model_ep_plan={
             "layers.*.mlp.routed": "moe_tp_experts",
             "layers.*.mlp.routed.gate_up_proj": "grouped_gemm",
@@ -2951,7 +2952,9 @@ def test_an_expert_count_the_config_does_not_name_is_read_off_the_loaded_experts
     monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
     monkeypatch.setattr(model_load_utils, "_refuse_unquantizable_experts", next_check)
     config = SimpleNamespace(
-        base_model_ep_plan=_EP_PLAN, **({"num_experts": named} if named else {})
+        model_type=_NO_SPEC,
+        base_model_ep_plan=_EP_PLAN,
+        **({"num_experts": named} if named else {}),
     )
     if (loaded, held) == (4, 2):
         outcome = pytest.raises(_PastError)
