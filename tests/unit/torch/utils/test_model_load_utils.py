@@ -4911,6 +4911,28 @@ def test_a_reimported_module_does_not_wrap_a_patch_twice(
 
 
 @needs_float8
+def test_a_reimported_module_replaces_the_dequant_it_installed(pre_5_10_transformers, monkeypatch):
+    """Below 5.10.1 the dequant override reads the dtype of the module that installed it, so the
+    install of a re-imported ``model_load_utils`` replaces the earlier override rather than wrap it.
+    A weight that is not fp8 then reaches transformers' own dequant directly, not first through the
+    earlier override's cast to its dtype (bfloat16, unset there), which would round it at float32."""
+    stock = vars(Fp8Dequantize).get("_dequantize_one")
+    if stock is None:
+        pytest.skip("this transformers has no dequant of its own to hand such a weight to (5.9 on)")
+    gen = torch.Generator().manual_seed(0)
+    packed = torch.randint(0, 256, (256, 256), dtype=torch.uint8, generator=gen).view(torch.int8)
+    scales = torch.rand(256, 16, generator=gen) + 0.5  # one per 32 unpacked values
+    expected = stock(_dequant_op((128, 128)), packed, scales).to(torch.float32)
+    model_load_utils._patch_finegrained_fp8_dequant()
+    monkeypatch.setattr(model_load_utils, "_FINEGRAINED_FP8_PATCHED", False)
+
+    model_load_utils._patch_finegrained_fp8_dequant()
+    out = _dequant_op((128, 128))._dequantize_one(packed, scales, output_dtype=torch.float32)
+
+    assert torch.equal(out, expected)
+
+
+@needs_float8
 def test_undoing_the_patch_restores_stock_transformers(pre_5_10_transformers, monkeypatch):
     """The patch rebinds only the dequant method and, where the quantizer has one, its converter
     hook and guard flag. Putting those back restores the stock classes exactly, after which the
