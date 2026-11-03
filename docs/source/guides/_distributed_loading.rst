@@ -102,9 +102,12 @@ one the load asks for: hand a load that widens it, ``dtype=torch.float32`` say, 
 A call that places the model (``device_map``, ``quantization_config``, a ``dtype``) loads only where
 the model fits one GPU; where it does not, the refusal says the layout was decided rather than asked
 for. So does the expert-parallel load's, for an MoE whose experts the decision shards with neither a
-plan nor ``MODELOPT_EP_DEGREE``. Pass ``distribution=`` or set ``MODELOPT_FSDP_SIZE=1`` to keep the
-load whole. An option at ``from_pretrained``'s own default, ``device_map=None`` included, places
-nothing and does not keep the load whole.
+plan nor ``MODELOPT_EP_DEGREE``. To keep the load whole, set ``MODELOPT_FSDP_SIZE=1`` or pass
+``distribution=DistributionPlan(<ranks>, dense="replicate")``; for that MoE, set
+``MODELOPT_EP_DEGREE=1`` with ``MODELOPT_FSDP_SIZE=1``, or pass
+``distribution=DistributionPlan(<ranks>, 1, "replicate")``, as ``MODELOPT_FSDP_SIZE=1`` alone leaves
+the EP degree to the decision, which still shards its experts. An option at ``from_pretrained``'s
+own default, ``device_map=None`` included, places nothing and does not keep the load whole.
 
 Configs
 =======
