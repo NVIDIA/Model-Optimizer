@@ -28,8 +28,8 @@ from vllm.model_executor.layers.quantization import modelopt as vllm_modelopt
 from modelopt.torch.export import export_hf_checkpoint
 
 pytestmark = pytest.mark.skipif(
-    "W8A16" not in getattr(vllm_modelopt, "QUANT_ALGOS", ()),
-    reason="vLLM's ModelOpt loader serves W8A16 layers from vllm-project/vllm#65272 on",
+    "INT8_PB_WO" not in getattr(vllm_modelopt, "QUANT_ALGOS", ()),
+    reason="vLLM's ModelOpt loader serves INT8_PB_WO layers from vllm-project/vllm#65272 on",
 )
 
 
