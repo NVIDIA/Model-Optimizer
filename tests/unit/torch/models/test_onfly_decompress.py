@@ -889,11 +889,13 @@ _FORMATS = {
 }
 
 
-def _compressed_mixtral(path, fmt):
+def _compressed_mixtral(path, fmt, sharded=False):
     """Save a tiny Mixtral whose experts ``fmt`` compresses; return its config and dense experts.
 
     Mixtral's checkpoint names its experts ``w1``/``w3``/``w2``, which the model fuses and the export
-    names back: names a save gets wrong would show.
+    names back: names a save gets wrong would show. Each expert has a scale of its own, so experts
+    paired with another's scales would show too. ``sharded`` stores the experts' packed weights and
+    their scales in two shards in opposite expert order.
     """
     weights, values, scale = _FORMATS[fmt]
     config = MixtralConfig(
@@ -921,14 +923,29 @@ def _compressed_mixtral(path, fmt):
     dense = {}
     for key in sorted(k for k in list(state) if ".experts." in k):  # ...experts.<e>.w1.weight
         rows, cols = state.pop(key).shape
-        dense[key] = values[torch.randint(0, len(values), (rows, cols), generator=gen)]
-        scales = torch.full((rows, cols // 32), scale)
+        factor = 2 ** int(key.split(".experts.")[1].split(".")[0])  # per expert, exact in both
+        dense[key] = values[torch.randint(0, len(values), (rows, cols), generator=gen)] * factor
+        scales = torch.full((rows, cols // 32), scale * factor)
         stored = compressor.compress({"weight": dense[key], "weight_scale": scales}, scheme)
         for name, tensor in stored.items():  # floats as bf16, as the Kimi checkpoints store them
             state[key.removesuffix("weight") + name] = (
                 tensor.bfloat16() if tensor.is_floating_point() else tensor
             )
-    save_file(state, str(path / "model.safetensors"), metadata={"format": "pt"})
+    if sharded:
+        # Expert 0's packed weights with expert 1's scales, and the other way around.
+        shards = {"model-00001-of-00002.safetensors": {}, "model-00002-of-00002.safetensors": {}}
+        for key, tensor in state.items():
+            expert = key.split(".experts.")[1][0] if ".experts." in key else "0"
+            first = (expert == "0") == ("weight_scale" not in key)
+            shards[list(shards)[0 if first else 1]][key] = tensor
+        (path / "model.safetensors").unlink()
+        for name, shard in shards.items():
+            save_file(shard, str(path / name), metadata={"format": "pt"})
+        weight_map = {key: name for name, shard in shards.items() for key in shard}
+        index = {"metadata": {}, "weight_map": weight_map}
+        (path / "model.safetensors.index.json").write_text(json.dumps(index))
+    else:
+        save_file(state, str(path / "model.safetensors"), metadata={"format": "pt"})
     config_json = json.loads((path / "config.json").read_text())
     config_json["quantization_config"] = quantization_config
     (path / "config.json").write_text(json.dumps(config_json))
@@ -936,18 +953,23 @@ def _compressed_mixtral(path, fmt):
 
 
 @pytest.mark.usefixtures("restore_loader_hooks")
+@pytest.mark.parametrize("sharded", [False, True], ids=["one-file", "sharded"])
 @pytest.mark.parametrize("fmt", sorted(_FORMATS))
-def test_a_compressed_checkpoint_loads_exactly_and_saves_under_its_own_names(tmp_path, fmt):
+def test_a_compressed_checkpoint_loads_exactly_and_saves_under_its_own_names(
+    tmp_path, fmt, sharded
+):
     """A real ``from_pretrained`` through the installed decompressor: the fused experts hold the
-    checkpoint's weights exactly. The converters the load kept reverse as the original fusion, so a
-    save writes the experts back as the checkpoint's own ``w1``/``w3``/``w2`` weights, decompressed,
-    and the export names its expanded experts after them."""
+    checkpoint's weights exactly, each expert's scaled by its own scales, also when the packed
+    weights and the scales sit in different shards in opposite expert order. The converters the load
+    kept reverse as the original fusion, so a save writes the experts back as the checkpoint's own
+    ``w1``/``w3``/``w2`` weights, decompressed, and the export names its expanded experts after
+    them."""
     pytest.importorskip(
         "compressed_tensors",
         minversion="0.16",
         reason="needs compressed-tensors (CI's unit session installs it)",
     )
-    config, dense = _compressed_mixtral(tmp_path, fmt)
+    config, dense = _compressed_mixtral(tmp_path, fmt, sharded)
     onfly.install_onfly_decompress(config)
     del config.quantization_config  # as the expert-parallel load does: no quantizer competes
 
