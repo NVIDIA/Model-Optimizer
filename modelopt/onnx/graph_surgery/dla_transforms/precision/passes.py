@@ -105,7 +105,8 @@ class PrepareFp16(ir.passes.InPlacePass):
             graph.outputs[index] = result
         for value in graph.initializers.values():
             if value.dtype == ir.DataType.FLOAT and value not in preserved_initializers:
-                value.const_value = ir.tensor(value.const_value.numpy().astype(np.float16))
+                # Avoid infinities from overflow turning zero masks into NaNs.
+                value.const_value = ir.tensor(_fp16_array(value.const_value.numpy()))
                 value.type = ir.TensorType(ir.DataType.FLOAT16)
                 self.count += 1
         metadata_changed = False
@@ -173,6 +174,24 @@ class CastFp16Boundaries(ir.passes.InPlacePass):
 
         self.count = preparation.count - before
         return ir.passes.PassResult(model, modified=modified)
+
+
+def _fp16_array(array: np.ndarray) -> np.ndarray:
+    """Clamp finite overflow without copying the full FP32 tensor."""
+    result = np.empty_like(array, dtype=np.float16, order="K", subok=False)
+    limit = np.finfo(np.float16).max
+    with np.nditer(
+        [array, result],
+        flags=["external_loop", "buffered", "zerosize_ok"],
+        op_flags=[["readonly"], ["writeonly"]],
+        order="K",
+        buffersize=65536,
+    ) as chunks:
+        for source, target in chunks:
+            bounded = source.copy()
+            np.clip(bounded, -limit, limit, out=bounded, where=np.isfinite(bounded))
+            target[...] = bounded
+    return result
 
 
 def fp32_regions(model: ir.Model) -> tuple[set[ir.Value], set[ir.Node], set[tuple[ir.Node, int]]]:

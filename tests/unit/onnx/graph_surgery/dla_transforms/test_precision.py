@@ -74,6 +74,77 @@ def test_fp16_boundaries_keep_public_io_and_share_input_cast():
     np.testing.assert_array_equal(_run(model, feeds)[0], _run(result, feeds)[0])
 
 
+@pytest.mark.parametrize("kind", ["mixed", "scalar", "empty", "noncontiguous"])
+def test_fp16_initializer_range_preserves_special_values_and_zero_masking(kind):
+    values = np.asarray(
+        [
+            -1e9,
+            1e9,
+            -65504,
+            65504,
+            -0.0,
+            0.0,
+            -0.5,
+            0.5,
+            2**-24,
+            2**-25,
+            -(2**-25),
+            np.nan,
+            -np.inf,
+            np.inf,
+        ],
+        np.float32,
+    ).reshape(1, 1, 2, 7)
+    expected = np.asarray(
+        [
+            -65504,
+            65504,
+            -65504,
+            65504,
+            -0.0,
+            0.0,
+            -0.5,
+            0.5,
+            2**-24,
+            0.0,
+            -0.0,
+            np.nan,
+            -np.inf,
+            np.inf,
+        ],
+        np.float16,
+    ).reshape(values.shape)
+    mask = np.ones_like(values)
+    mask.reshape(-1)[:2] = 0
+    if kind == "scalar":
+        values, expected, mask = values[0, 0, 0, 0], expected[0, 0, 0, 0], np.float32(0)
+    elif kind == "empty":
+        values, expected, mask = values[..., :0], expected[..., :0], mask[..., :0]
+    elif kind == "noncontiguous":
+        values, expected, mask = (array.swapaxes(-1, -2) for array in (values, expected, mask))
+        assert not values.flags.c_contiguous
+    model = _model(
+        [helper.make_node("Mul", ["mask", "fill"], ["y"])],
+        [helper.make_tensor_value_info("mask", TensorProto.FLOAT, list(values.shape))],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, list(values.shape))],
+        [numpy_helper.from_array(np.asarray(values), "fill")],
+    )
+    working = ir.serde.deserialize_model(model)
+    working.graph.initializers["fill"].const_value = ir.tensor(np.asarray(values))
+    original = values.copy()
+    assert precision(DlaGraph(working)) == 3
+    result = _finish(working)
+    converted = numpy_helper.to_array(result.graph.initializer[0])
+    assert converted.dtype == np.float16
+    np.testing.assert_array_equal(converted, expected)
+    zeros = expected == 0
+    np.testing.assert_array_equal(np.signbit(converted[zeros]), np.signbit(expected[zeros]))
+    np.testing.assert_array_equal(values, original)
+    actual = _run(result, {"mask": np.asarray(mask)})[0]
+    expected_output = expected.astype(np.float32) * mask
+    np.testing.assert_array_equal(actual, expected_output)
+
+
 def test_fp16_preserves_schema_fp32_region_and_casts_its_shared_reader():
     model = _model(
         [
