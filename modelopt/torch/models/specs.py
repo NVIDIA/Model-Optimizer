@@ -225,7 +225,9 @@ class EPSpec(SpecSection):
 
     Called as ``make_buildable(hf_config, ckpt_path=..., trust_remote_code=...)``, on every rank,
     before the plan is decided, for every decision that builds the model, an EP degree of 1
-    included, whatever plan comes out. So it must be idempotent and change nothing the model
+    included, whatever plan comes out. Only a multi-rank decision runs it: a single process, or a
+    plan handed in, decides nothing, and its load builds the checkpoint's code as
+    ``from_pretrained`` does, without it. It must be idempotent and change nothing the model
     computes or loads: it may shim names transformers dropped, wrap the remote-code staging to reach
     the modules the code imports, and adapt a method to the arguments transformers now passes it,
     but patches no MoE or expert class, config, weight converter or weight-loading hook."""
