@@ -83,7 +83,7 @@ def get_cuda_ext_ggml(raise_if_failed: bool = False):
     """Return the GGML-compatible packing extension, exposing one packer per format.
 
     The formats share their packing helpers, CUDA version requirement, and build flags, so they
-    build as a single extension: ``iq1_s_pack(input, grid, importance=None)``,
+    build as a single extension: ``iq1_s_pack(input, grid, scales, importance=None)``,
     ``iq1_m_pack(input, grid, scales, importance=None)``,
     ``iq2_xs_pack(input, grid, scales, importance=None)``,
     ``iq2_xxs_pack(input, grid, scales, importance=None)``,

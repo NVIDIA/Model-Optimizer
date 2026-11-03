@@ -74,6 +74,7 @@ _DEFAULT_BLOCK_CHUNK_SIZE = 1024
 # forward. Measured decoding a 2048x5632 weight: 66.5 ms at 256 blocks, 4.2 ms at 4096,
 # where the transient peak is +42 MiB.
 _DEFAULT_DECODE_CHUNK_SIZE = 4096
+_SCALE_BLOCK_CHUNK_SIZE = 4096
 
 
 _GRID_CACHE: dict[torch.device, torch.Tensor] = {}
@@ -96,12 +97,15 @@ def _predict_iq1_s_scales(blocks: torch.Tensor) -> torch.Tensor:
     """Predict one FP16 super-block scale for each flattened block.
 
     The fixed-scale search favors a compressed super-block scale, so this empirical anchor
-    puts d below the full-range value. The CUDA encoder computes the same quantity in its
-    own scale kernel; this is the reference the torch path uses.
+    puts d below the full-range value. Both encoders take d from here, so they cannot disagree
+    on it.
     """
     x = narrow_to_float32(blocks)
     amax = x.abs().amax(dim=1)
-    return ((amax / _IQ1_S_NATIVE_MAX) * _IQ1_S_SCALE_ANCHOR).clamp(max=65504.0).to(torch.float16)
+    # CUDA turns division by a Python scalar into a reciprocal multiply, which rounds differently
+    # from the CPU; a tensor divisor keeps IEEE division, so d is the same on every device.
+    native_max = torch.full_like(amax, _IQ1_S_NATIVE_MAX)
+    return ((amax / native_max) * _IQ1_S_SCALE_ANCHOR).clamp(max=65504.0).to(torch.float16)
 
 
 def _search_shifted_grid(
@@ -229,7 +233,11 @@ def quantize_iq1_s(
     if weight.is_cuda:
         extension = get_cuda_ext_ggml()
         if extension is not None:
-            packed = extension.iq1_s_pack(blocks, grid, block_importance)
+            scale_chunks = [
+                _predict_iq1_s_scales(blocks[start : start + _SCALE_BLOCK_CHUNK_SIZE])
+                for start in range(0, blocks.shape[0], _SCALE_BLOCK_CHUNK_SIZE)
+            ]
+            packed = extension.iq1_s_pack(blocks, grid, torch.cat(scale_chunks), block_importance)
             packed_shape = (
                 *weight.shape[:-1],
                 weight.shape[-1] // IQ1_S_BLOCK_SIZE,

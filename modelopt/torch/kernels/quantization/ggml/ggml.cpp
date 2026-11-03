@@ -22,7 +22,8 @@
 
 #include "common.cuh"
 
-at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid, std::optional<at::Tensor> importance);
+at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales,
+                           std::optional<at::Tensor> importance);
 at::Tensor iq2_xs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales,
                             std::optional<at::Tensor> importance);
 at::Tensor iq2_xxs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales,
@@ -51,12 +52,13 @@ at::Tensor q8_0_pack(at::Tensor input) {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("iq1_s_pack", &iq1_s_pack_cuda,
              "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
-             "dimension is a multiple of 256. The grid must be float32 [2048, 8]. Returns uint8 "
-             "[numel / 256, 50] on the input device. Non-finite input elements are treated as "
-             "zero during packing, and finite elements outside the float32 range saturate. "
-             "An optional float32 importance [blocks per row, 256] weights each value's "
-             "squared error in the search; flattened block i uses row i % rows.",
-             pybind11::arg("input"), pybind11::arg("grid"),
+             "dimension is a multiple of 256. The grid must be float32 [2048, 8], and scales must "
+             "be finite non-negative float16 [numel / 256]. Returns uint8 [numel / 256, 50] on "
+             "the input device. Non-finite input elements are treated as zero during packing, "
+             "and finite elements outside the float32 range saturate. An optional float32 "
+             "importance [blocks per row, 256] weights each value's squared error in the search; "
+             "flattened block i uses row i % rows.",
+             pybind11::arg("input"), pybind11::arg("grid"), pybind11::arg("scales"),
              pybind11::arg("importance") = pybind11::none());
   module.def("iq2_xs_pack", &iq2_xs_pack_cuda,
              "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
