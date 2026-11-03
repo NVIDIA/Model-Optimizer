@@ -453,7 +453,7 @@ def prepare(
     """
     # Not at module scope: the model registry imports this module, and modelopt.torch.utils.moe
     # imports the registry.
-    from modelopt.torch.utils.moe import mark_patched_every_load, register_torch_a2a
+    from modelopt.torch.utils.moe import config_levels, mark_patched_every_load, register_torch_a2a
 
     if ckpt_path is None:
         raise ValueError(_NO_CHECKPOINT)
@@ -505,10 +505,10 @@ def prepare(
 
     # The per-expert w1/w3/w2 -> gate_up_proj/down_proj fusion converters (tf 5.13 skips these for
     # custom-code models). The decompressor rewrites them into compressed-aware (weight_packed -> bf16)
-    # ones at the load, so both need only come before it. Drop quantization_config afterwards so
-    # transformers builds no competing HF quantizer.
+    # ones at the load, so both need only come before it. Drop quantization_config afterwards, at
+    # every level the decompressor reads one, so transformers builds no competing HF quantizer.
     _register_kimi_k3_conversions()
-    for cfg in (hf_config, text_cfg):
+    for cfg in config_levels(hf_config):
         if getattr(cfg, "quantization_config", None) is not None:
             cfg.quantization_config = None
     return hf_config
