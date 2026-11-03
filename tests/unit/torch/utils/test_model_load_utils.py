@@ -1099,6 +1099,8 @@ def test_transformers_own_kimi_k25_port_of_an_unquantized_checkpoint_is_planned_
     it is. On a GPU the whole model overfills but a rank's share of it with the experts sharded
     fits, the decision shards the experts rather than FSDP2-shard the whole model, whose load takes
     no image-text config."""
+    # Local: this module exists only from transformers 5.13, so a module-level import would break
+    # collection on older releases.
     from transformers.models.kimi_k25.configuration_kimi_k25 import Kimi_K25Config
 
     monkeypatch.setattr(
