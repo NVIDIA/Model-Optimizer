@@ -45,6 +45,8 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # CONFIG — edit these for your cluster and model. They are exported so `srun`
 # propagates them into the container task below.
+# EXPORT_PATH and HF_HOME must be on storage every node can see: every rank writes its share of
+# the checkpoint to EXPORT_PATH, and rank 0 downloads a repo id into HF_HOME for the others to read.
 # ---------------------------------------------------------------------------
 export CONTAINER_IMAGE={container_image}                # e.g. nvcr.io#nvidia/pytorch:25.10-py3
 export MODELOPT_PATH={path_to_modelopt_repo}            # host clone of TensorRT-Model-Optimizer
@@ -75,14 +77,19 @@ srun --container-image="${CONTAINER_IMAGE}" \
     set -euo pipefail
     export PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     # ModelOpt + its HF deps (transformers/accelerate/datasets/...) from the mounted source, then example extras.
-    # Expert parallelism needs transformers 5.7 or newer, which the image may not ship.
-    pip install -q -e "/modelopt[hf]" "transformers>=5.7" --no-build-isolation
+    # Expert parallelism needs transformers 5.7 or newer, which the image may not ship. The editable
+    # install writes into the one clone every node mounts, so the nodes take turns where the
+    # filesystem offers flock.
+    mkdir -p /modelopt/build
+    (
+      flock 9 || true
+      pip install -q -e "/modelopt[hf]" "transformers>=5.7" --no-build-isolation
+    ) 9>/modelopt/build/.pip-install.lock
     pip install -q -r requirements.txt
     python -c "import transformers as t; print(t.__name__, t.__version__)"
 
     torchrun \
       --nnodes="${SLURM_NNODES}" \
-      --node_rank="${SLURM_NODEID}" \
       --nproc_per_node="$(nvidia-smi -L | wc -l)" \
       --rdzv_backend=c10d \
       --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
