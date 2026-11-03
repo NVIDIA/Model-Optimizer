@@ -113,6 +113,7 @@ Changelog
 - Fix ``export_hf_checkpoint`` of an FSDP2 model quantized with W4A8 AWQ (``W4A8_AWQ_BETA_CFG``), which failed with an ``AttributeError`` on every rank.
 - AWQ calibration (``awq_lite``, ``awq_full``) of an FSDP2 model sharded over more than one rank is now rejected with ``NotImplementedError`` by ``mtq.quantize``, ``mtq.calibrate`` and ``mtq.auto_quantize`` (before its search starts, its default formats included), and by ``examples/hf_ptq --use_fsdp2`` before loading the model: each rank would fold a different smoothing scale into its weight shard. Calibrate in a single process, or use a non-AWQ algorithm.
 - ``mtq.compress`` now rejects W4A8 weights with ``NotImplementedError``: a compressed W4A8 model could neither run nor be reloaded.
+- Fake quantization of an NVFP4 affine KV cache (``nvfp4_affine``) now applies its calibrated bias; it ignored the bias and saturated the simulated KV cache. Checkpoints exported after ``max`` calibration are unchanged; re-run fake-quantized evaluations of models quantized with it.
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^
