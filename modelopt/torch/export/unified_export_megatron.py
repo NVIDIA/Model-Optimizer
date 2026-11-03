@@ -35,7 +35,10 @@ from safetensors.torch import save_file
 
 from modelopt import __version__
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
+    GroupedQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.utils import import_plugin, warn_rank_0
 from modelopt.torch.utils.distributed import gather_state_dicts
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
@@ -1352,14 +1355,18 @@ class GPTModelExporter:
         return self._any_rank(uses_iq_quantization(self.model))
 
     def _has_quantized_split_mtp_projection(self) -> bool:
-        """Whether this rank's MTP has a quantized split e_proj / h_proj (GLM-5.3-Flash)."""
+        """Whether this rank's MTP has a quantized split e_proj / h_proj (GLM-5.3-Flash).
+
+        Any enabled quantizer counts: an input-only one has no export format but would be dropped.
+        """
         mtp_layers = getattr(getattr(self.model, "mtp", None), "layers", None) or []
         return any(
-            self._get_quantization_format(proj) not in (None, QUANTIZATION_NONE)
+            isinstance(m, TensorQuantizer) and m.is_enabled
             for layer in mtp_layers
             if getattr(layer, "eh_proj", None) is None
             for proj in (getattr(layer, "e_proj", None), getattr(layer, "h_proj", None))
             if proj is not None
+            for m in proj.modules()
         )
 
     @staticmethod
