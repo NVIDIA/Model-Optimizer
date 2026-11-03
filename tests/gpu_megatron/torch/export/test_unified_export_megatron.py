@@ -1207,6 +1207,15 @@ def _test_glm5_next_export(source, export_dir, rank, size):
             unwrapped, str(source), dtype=torch.bfloat16, export_dir=str(export_dir)
         )
 
+        # A quantized split e_proj / h_proj can't be folded into a BF16 eh_proj, even input-only.
+        language_model.mtp.layers[0].e_proj.input_quantizer.enable()
+        refused_dir = export_dir.with_name("refused")
+        with pytest.raises(NotImplementedError, match="quantized MTP e_proj / h_proj"):
+            export_mcore_gpt_to_hf(
+                unwrapped, str(source), dtype=torch.bfloat16, export_dir=str(refused_dir)
+            )
+        assert not list(refused_dir.glob("*.safetensors"))
+
 
 def test_glm5_next_export_matches_source(dist_workers, tmp_path):
     """GLM-5.3-Flash (mHC, KDA, KPool DSA indexer, MTP, VLM) exports to its source's names and values."""
