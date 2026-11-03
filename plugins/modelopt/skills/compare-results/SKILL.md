@@ -38,8 +38,9 @@ change is being measured, typically a further quantized version of the baseline.
    credible comparable reference exists, label the baseline externally
    unverified rather than claiming the check passed, then continue using the
    validated measured baseline.
-7. Compute exact deltas outside the chat context when there are multiple tasks
-   or repeated runs.
+7. Compute degradation as `Baseline - Candidate` (positive means worse), in
+   percentage points for percentage scores. Apply **Statistical Assessment**;
+   compute deltas and uncertainty outside chat when combining tasks or runs.
 8. Report comparability, external baseline sanity, and quantized-feasibility
    verdicts before interpreting the delta as model quality. If the user did not
    provide an acceptance threshold, report feasibility as inconclusive instead
@@ -88,13 +89,40 @@ baseline check in the evaluation skill's `references/run-validation.md`
 separately tests whether the baseline's absolute score is credible; both guards
 must be reported.
 
+## Statistical Assessment
+
+- Report each score and its standard error (SE); use percent for percentage
+  scores and SE, percentage points for degradation. Fetch missing SEs or estimate
+  them from scored observations using a method appropriate to the metric.
+  Never substitute standard deviation for SE or treat missing SE as zero.
+- Use approximate 95% confidence intervals (±2 SE) when justified; use a
+  metric-appropriate interval for small samples or boundary scores. Prefer a
+  CI on the degradation from paired observations on the same examples. Preserve
+  task/run clustering; repeated answers to one example are not independent
+  examples. Use independent-run SEs only when independence is justified.
+- If only per-score SEs are available, report their intervals and the limitation;
+  interval overlap is not a significance test on the difference. Missing or
+  inadequate uncertainty makes statistical conclusions inconclusive, not proof
+  of equivalence. Separate uncertainty over examples from run-to-run variation.
+- Distinguish a significant drop from an unacceptable drop. Compare degradation
+  and its uncertainty with the user's acceptance target, not just zero. Failure
+  to detect a drop does not establish that the target is met. Use judgment for
+  borderline results and explain it; if uncertainty prevents a decision, report
+  feasibility as inconclusive and propose more samples or matched runs.
+- Choose sample/repeat counts before running; retain all valid runs rather than
+  rerunning until a favorable score appears. Treat results selected from many
+  candidates/tasks as exploratory unless confirmed on held-out data or with an
+  appropriate multiple-comparison correction.
+
 ## Report Format
 
 Include:
 
 - Baseline and candidate identifiers.
-- Per-task metric path, baseline score, candidate score, delta, and stderr if
-  available.
+- Per-task metric path, baseline and candidate scores with SEs, degradation,
+  confidence intervals and method, sample/run counts, and an Assessment column.
+  Mark unavailable uncertainty explicitly; keep the assessment concise, not a
+  statistics tutorial.
 - Per-task external reference score, source URL, known protocol differences,
   percentage-point difference, and sanity status (`verified`, `failed`, or
   `externally unverified`).
