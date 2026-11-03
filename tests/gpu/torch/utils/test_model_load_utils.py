@@ -22,10 +22,12 @@ from functools import partial
 
 import pytest
 import torch
+import transformers
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
+from packaging.version import Version
 from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor
-from transformers import AutoModelForCausalLM, LlamaConfig
+from transformers import AutoModelForCausalLM, DeepseekV3Config, LlamaConfig, Qwen3MoeConfig
 
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 from modelopt.torch.utils.distributed import (
@@ -34,6 +36,7 @@ from modelopt.torch.utils.distributed import (
     distribution_plan,
     set_distribution_plan,
 )
+from modelopt.torch.utils.moe import _EP_MIN_TRANSFORMERS
 from modelopt.torch.utils.plugins.model_load_utils import (
     load_pretrained,
     parallel_load_and_prepare_fsdp2,
@@ -187,6 +190,7 @@ def test_carry_over_unplaced_weights(dist_workers, tmp_path):
 
 # ------------------------------------------------------------------ load_pretrained, left to decide
 
+NUM_EXPERTS = 8
 _TINY = {
     "hidden_size": 64,
     "intermediate_size": 128,
@@ -210,9 +214,11 @@ def _full(tensor):
 def _load_and_check(rank, size, ckpt_dir, knobs, expected):
     """Load on every rank of the run with the plan left to decide, and check what each rank holds.
 
-    Left to decide, ``load_pretrained`` FSDP2-shards a dense model when asked to, and otherwise gives
-    every rank the whole model on its own GPU. Whichever load runs, every rank ends up with the
-    checkpoint's weights and the load's record of what it could not place.
+    Left to decide, ``load_pretrained`` shards an expert-parallel MoE's experts, FSDP2-shards a dense
+    model when asked to, and otherwise gives every rank the whole model on its own GPU. Whichever
+    load runs, every rank ends up with the checkpoint's weights and the load's record of what it
+    could not place. An expert-parallel model also computes what the whole model does: each rank's
+    tokens reach the ranks holding their experts and come back.
     """
     device = torch.device(f"cuda:{rank}")
     os.environ.update(knobs)
@@ -227,14 +233,40 @@ def _load_and_check(rank, size, ckpt_dir, knobs, expected):
         if expected == "replicated":
             assert not sharded
             assert all(param.device == device for param in params.values())
-        else:
+        elif expected == "fsdp2":
             assert {name for name in params if ".layers." in name} <= sharded
+        else:
+            # Each rank holds its contiguous share of the routed experts, and the rest whole.
+            experts = {name for name in params if ".mlp.experts." in name}
+            assert experts and not sharded - experts
+            per_rank = NUM_EXPERTS // size
+            for name in experts:
+                local = params.pop(name)
+                local = local.to_local() if isinstance(local, DTensor) else local
+                assert local.shape[0] == per_rank
+                owned = whole_params[name][rank * per_rank : (rank + 1) * per_rank]
+                torch.testing.assert_close(local.cpu(), owned)
         for name, param in params.items():  # the same order on every rank: full_tensor gathers
             torch.testing.assert_close(_full(param).cpu(), whole_params[name])
         assert model._modelopt_unplaced_source_keys == []
         assert model._modelopt_source_checkpoint == ckpt_dir
-        dense = "replicate" if expected == "replicated" else "fsdp"
-        assert distribution_plan(model) == DistributionPlan(size, dense=dense)
+        assert (
+            distribution_plan(model)
+            == {
+                "replicated": DistributionPlan(size),
+                "fsdp2": DistributionPlan(size, dense="fsdp"),
+                "expert-parallel": DistributionPlan(size, ep_size=size),
+            }[expected]
+        )
+        if expected == "expert-parallel":
+            # Every rank sends its own batch through the experts, as calibration does.
+            whole.to(device)
+            generator = torch.Generator().manual_seed(rank)
+            input_ids = torch.randint(0, _TINY["vocab_size"], (2, 16), generator=generator)
+            with torch.no_grad():
+                sharded = model(input_ids.to(device)).logits
+                reference = whole(input_ids.to(device)).logits
+            torch.testing.assert_close(sharded.float(), reference.float(), atol=2e-2, rtol=2e-2)
     finally:
         for knob in knobs:
             del os.environ[knob]
@@ -248,3 +280,48 @@ def test_a_dense_model_loads_whole_on_every_rank(need_2_gpus, dist_workers, tmp_
 def test_a_dense_model_asked_to_shard_loads_fsdp2_sharded(need_2_gpus, dist_workers, tmp_path):
     _save(LlamaConfig(**_TINY), tmp_path)
     dist_workers.run(_load_and_check, str(tmp_path), {"MODELOPT_FSDP_SIZE": "world"}, "fsdp2")
+
+
+def _qwen3_moe():
+    """Qwen3-MoE, whose config ships its own expert-parallel plan from transformers 5.7."""
+    config = Qwen3MoeConfig(moe_intermediate_size=32, num_experts=NUM_EXPERTS, **_TINY)
+    config.num_experts_per_tok = 2
+    return config
+
+
+def _deepseek_v3():
+    """DeepSeek-V3 with no plan of its own, as before transformers 5.13, so only its model spec
+    makes it expert-parallel. Every layer is an MoE layer, its attention shrunk to the tiny width."""
+    config = DeepseekV3Config(
+        n_routed_experts=NUM_EXPERTS,
+        num_experts_per_tok=2,
+        moe_intermediate_size=32,
+        first_k_dense_replace=0,
+        n_group=1,
+        topk_group=1,
+        q_lora_rank=32,
+        kv_lora_rank=16,
+        qk_rope_head_dim=8,
+        qk_nope_head_dim=8,
+        v_head_dim=16,
+        **_TINY,
+    )
+    config.base_model_ep_plan = None  # saved in config.json: no plan of its own on any transformers
+    return config
+
+
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version(_EP_MIN_TRANSFORMERS),
+    reason=f"expert parallelism needs transformers >= {_EP_MIN_TRANSFORMERS}",
+)
+@pytest.mark.parametrize(
+    "config", [_qwen3_moe, _deepseek_v3], ids=["its-own-plan", "its-spec-plan"]
+)
+def test_an_expert_parallel_moe_loads_with_its_experts_sharded(
+    need_2_gpus, dist_workers, tmp_path, config
+):
+    """Whether the plan comes with the model's config or only from its model spec."""
+    if NUM_EXPERTS % dist_workers.world_size:
+        pytest.skip(f"{NUM_EXPERTS} experts do not shard over {dist_workers.world_size} GPUs")
+    _save(config(), tmp_path)
+    dist_workers.run(_load_and_check, str(tmp_path), {}, "expert-parallel")
