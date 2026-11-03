@@ -2256,9 +2256,12 @@ def export_hf_checkpoint(
             # outputs; the win grows with world size, where the replicated gather costs ~world x the
             # bytes. Left opt-in so the default path is unchanged.
             # Imported here: the writer imports unified_export_hf_streaming, which imports this module.
-            from .distributed_writer import distributed_save_hf_checkpoint
+            from .distributed_writer import check_export_destination, distributed_save_hf_checkpoint
 
             _qlora = kwargs.get("is_modelopt_qlora", False)
+            # Before the fold below changes the model in place: refused only by the writer, after
+            # it, the model could not be exported again, even to an empty directory.
+            check_export_destination(export_dir)
             # Folds in place; the model is sharded here, so the MoE experts stay fused and each rank
             # folds only its local experts. The writer then splits each rank's experts into
             # per-expert tensors.

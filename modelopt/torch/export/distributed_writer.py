@@ -535,6 +535,32 @@ def _in_rank_order(values: list[list]) -> list:
     return [value for (value,) in values]
 
 
+def _refuse_an_existing_checkpoint(export_dir: Path) -> None:
+    """Raise if ``export_dir`` holds a checkpoint, which the distributed export never overwrites."""
+    existing = sorted(p.name for p in export_dir.iterdir() if _CHECKPOINT_FILES.fullmatch(p.name))
+    if existing:
+        raise FileExistsError(
+            f"{export_dir} already holds a checkpoint ({', '.join(existing[:3])}), which the "
+            "distributed export does not overwrite; remove those files (an export that failed "
+            "during its final renames can leave some behind) or export to another directory."
+        )
+
+
+def check_export_destination(export_dir: "str | Path") -> None:
+    """Refuse, on every rank alike, an export directory that already holds a checkpoint. Collective.
+
+    The export calls it before it folds the model in place, so a refusal leaves the model as it was
+    and free to export elsewhere; the writer checks again, for a checkpoint written in between.
+    """
+    export_dir = Path(export_dir)
+
+    def check() -> None:
+        export_dir.mkdir(parents=True, exist_ok=True)
+        _refuse_an_existing_checkpoint(export_dir)
+
+    all_reduce("export destination", check, lambda _: None)
+
+
 def _write_even_shards(
     local_sd: dict, export_dir: "str | Path", max_shard_size: "str | int", rank: int, world: int
 ) -> None:
@@ -565,16 +591,9 @@ def _write_even_shards(
     def plan_mine() -> list:
         # In the first collective, which carries one rank's failure to every rank: its filesystem can
         # fail to create the directory, or show a checkpoint there, which the export never overwrites.
+        # The export checks the directory before it folds the model too; this catches one written since.
         export_dir.mkdir(parents=True, exist_ok=True)
-        existing = sorted(
-            p.name for p in export_dir.iterdir() if _CHECKPOINT_FILES.fullmatch(p.name)
-        )
-        if existing:
-            raise FileExistsError(
-                f"{export_dir} already holds a checkpoint ({', '.join(existing[:3])}), which the "
-                "distributed export does not overwrite; remove those files (an export that failed "
-                "during its final renames can leave some behind) or export to another directory."
-            )
+        _refuse_an_existing_checkpoint(export_dir)
         return [(len(my_files), write_keys)]
 
     planned = all_reduce("shard plan", plan_mine, _in_rank_order)

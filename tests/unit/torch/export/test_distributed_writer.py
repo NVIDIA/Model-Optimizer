@@ -981,6 +981,32 @@ def test_nogather_export_writes_what_the_single_process_export_writes(
     assert (tmp_path / "export" / sidecar.name).read_text() == sidecar.read_text()
 
 
+def test_nogather_export_refuses_an_existing_checkpoint_before_folding(gloo_world_of_one, tmp_path):
+    """Refused only by the writer, after the in-place fold, the model would be left packed and could
+    not be exported again. Checked first, the refusal leaves it as it was, free to export elsewhere."""
+    model = _load(_save(_llama_config(), tmp_path / "src"))
+    want = _quantize_with_reference(model, mtq.FP8_DEFAULT_CFG)
+    model = _fsdp2_shard(model, gloo_world_of_one)
+    taken = tmp_path / "taken"
+    taken.mkdir()
+    save_file({"x": torch.zeros(1)}, str(taken / "model.safetensors"))
+
+    def local(value):
+        return value.to_local() if isinstance(value, DTensor) else value
+
+    before = {k: local(v).clone() for k, v in model.state_dict().items()}
+
+    with pytest.raises(FileExistsError, match="already holds a checkpoint"):
+        _nogather_export(model, taken)
+
+    after = model.state_dict()
+    assert after.keys() == before.keys()
+    changed = [k for k, v in before.items() if not torch.equal(local(after[k]), v)]
+    assert not changed, changed
+    _nogather_export(model, tmp_path / "export")
+    _assert_byte_identical(_load_checkpoint(tmp_path / "export"), want)
+
+
 def test_nogather_export_saves_modelopt_state(gloo_world_of_one, tmp_path):
     """As the default FSDP2 export does, it writes the ModelOpt state next to the weights."""
     model = _load(_save(_llama_config(), tmp_path / "src"))
