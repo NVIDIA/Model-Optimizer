@@ -268,7 +268,12 @@ def _resolved_shape(value, source, *, allowzero=0):
     if target is None or target.ndim != 1 or source is None:
         raise ValueError("TODO: support dynamic Reshape controls and dimensions")
     result = [int(dim) for dim in target]
-    if allowzero or any(dim < -1 for dim in result) or result.count(-1) > 1:
+    # Positive, nonempty targets have identical semantics for either allowzero setting.
+    if (
+        (allowzero and (allowzero != 1 or not result or any(dim <= 0 for dim in result)))
+        or any(dim < -1 for dim in result)
+        or result.count(-1) > 1
+    ):
         raise ValueError("TODO: support literal-zero Reshape dimensions")
     result = [source[index] if dim == 0 else dim for index, dim in enumerate(result)]
     if -1 in result:

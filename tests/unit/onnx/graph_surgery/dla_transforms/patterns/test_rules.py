@@ -61,13 +61,20 @@ def _check(original, rules):
     return result
 
 
-@pytest.mark.parametrize("shape1", [[2, 2, 2, 2, 4], [0, 2, 2, 2, -1]])
-def test_reshape_transpose_reshape(shape1):
+@pytest.mark.parametrize(
+    ("shape1", "allowzero"),
+    [
+        ([2, 2, 2, 2, 4], 0),
+        ([0, 2, 2, 2, -1], 0),
+        pytest.param([2, 2, 2, 2, 4], 1, id="positive_allowzero"),
+    ],
+)
+def test_reshape_transpose_reshape(shape1, allowzero):
     model = _model(
         [
-            helper.make_node("Reshape", ["x", "s1"], ["r"]),
+            helper.make_node("Reshape", ["x", "s1"], ["r"], allowzero=allowzero),
             helper.make_node("Transpose", ["r"], ["t"], perm=[0, 1, 3, 2, 4]),
-            helper.make_node("Reshape", ["t", "s2"], ["y"]),
+            helper.make_node("Reshape", ["t", "s2"], ["y"], allowzero=allowzero),
         ],
         {"s1": np.array(shape1, np.int64), "s2": np.array([2, 4, 8], np.int64)},
         [2, 4, 8],
@@ -77,9 +84,17 @@ def test_reshape_transpose_reshape(shape1):
     assert all(len(value.type.tensor_type.shape.dim) <= 4 for value in result.graph.value_info)
 
 
-@pytest.mark.parametrize(("quantized", "keepdims"), [(False, 0), (True, 0), (False, 1)])
-def test_reshape_reduce_sum(quantized, keepdims):
-    nodes = [helper.make_node("Reshape", ["x", "s1"], ["r"])]
+@pytest.mark.parametrize(
+    ("quantized", "keepdims", "allowzero"),
+    [
+        (False, 0, 0),
+        (True, 0, 0),
+        (False, 1, 0),
+        pytest.param(False, 0, 1, id="positive_allowzero"),
+    ],
+)
+def test_reshape_reduce_sum(quantized, keepdims, allowzero):
+    nodes = [helper.make_node("Reshape", ["x", "s1"], ["r"], allowzero=allowzero)]
     tensors = {"s1": np.array([2, 2, 2, 2, 4], np.int64), "axes": np.array([-1], np.int64)}
     if quantized:
         nodes.extend(
@@ -112,6 +127,8 @@ def test_reshape_reduce_sum(quantized, keepdims):
     [
         (2, "supported"),
         (4, "supported"),
+        (2, "allowzero"),
+        (4, "allowzero"),
         (4, "public_indices"),
         (4, "narrow_tail"),
         (4, "values_indices"),
@@ -136,7 +153,9 @@ def test_topk_vector_gather(rank, case):
     nodes = [
         helper.make_node("TopK", ["scores", "k"], ["values", "indices"], axis=-1),
         helper.make_node("Cast", ["indices"], ["cast"], to=TensorProto.INT64),
-        helper.make_node("Reshape", ["cast", "shape"], ["reshaped"]),
+        helper.make_node(
+            "Reshape", ["cast", "shape"], ["reshaped"], allowzero=int(case == "allowzero")
+        ),
         helper.make_node("Tile", ["reshaped", "repeats"], ["tiled"]),
     ]
     if rank == 4:
@@ -213,7 +232,7 @@ def test_topk_vector_gather(rank, case):
     )
     model = ir.serde.deserialize_model(source)
     graph = DlaGraph(model)
-    supported = case == "supported"
+    supported = case in ("supported", "allowzero")
     assert graph.apply_pattern(TopKVectorGather.rule(graph)) == int(supported)
     ir.passes.common.RemoveUnusedNodesPass()(model)
     assert all(
