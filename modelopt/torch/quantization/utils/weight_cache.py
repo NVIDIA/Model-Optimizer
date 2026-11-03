@@ -40,6 +40,7 @@ __all__ = [
 _ENROLLED: WeakKeyDictionary = WeakKeyDictionary()  # quantizer -> weakref to its model (chunk)
 _ACTIVE: WeakKeyDictionary = WeakKeyDictionary()  # quantizer -> _Session of its open scope
 _num_open_scopes = 0  # a plain int so the uncached path stays a cheap, compile-friendly check
+_PREFILLED: dict = {}  # quantizer -> (input key, value) a grouped call made for its next call
 
 
 @dataclass
@@ -142,12 +143,9 @@ def enable_weight_cache(
                     )
                 if not quantizer.is_enabled:
                     continue
-                if not quantizer._pass_through_bwd:
-                    raise ValueError(f"{name}: the weight cache requires pass_through_bwd=True.")
-                if getattr(quantizer, "_lsq", False):  # LSQ's backward is not straight-through
-                    raise ValueError(f"{name}: the weight cache does not support LSQ quantizers.")
-                if any(p.requires_grad for p in quantizer.parameters()):
-                    raise ValueError(f"{name}: the weight cache does not support learned scales.")
+                error = _straight_through_error(quantizer)
+                if error is not None:
+                    raise ValueError(f"{name}: {error}.")
                 owner = _ENROLLED.get(quantizer)
                 if owner is not None and owner() is not None and owner() is not m:
                     raise ValueError(
@@ -230,30 +228,105 @@ def cached_fake_quantize(quantizer, inputs: torch.Tensor, source: torch.Tensor) 
 
     ``source`` is the tensor the quantizer received, from which ``inputs`` was derived (e.g. by
     padding). It keys the entry, so that a derived tensor made afresh on each call still hits.
+    A value :func:`prefill_fake_quantize` computed for this source is taken instead of computing it.
     """
+    prefilled = _PREFILLED.pop(quantizer, None) if _PREFILLED else None
     session = _ACTIVE.get(quantizer) if _num_open_scopes else None
-    if session is None:
+    if session is None and prefilled is None:
         return quantizer._fake_quantize(inputs)
 
     key = _input_key(source)
+    value = prefilled[1] if prefilled is not None and prefilled[0] == key else None
+    if session is None:
+        return (
+            quantizer._fake_quantize(inputs)
+            if value is None
+            else _CachedIdentity.apply(inputs, value)
+        )
+    entry = _lookup(session, quantizer, key)
+    if entry is None:
+        if value is None:
+            with torch.no_grad():
+                value = quantizer._fake_quantize(inputs)
+            _check_payload(value, inputs)
+        entry = session.add(quantizer, key, source, value)
+    return _CachedIdentity.apply(inputs, entry.value)
+
+
+@contextmanager
+def prefill_fake_quantize(
+    quantizers, inputs: list[torch.Tensor], sources: list[torch.Tensor], compute: Callable
+) -> Iterator[None]:
+    """Fake-quantize with one ``compute`` call what the quantizers' next calls would compute one by one.
+
+    Inside this context, ``quantizers[i]`` called on ``sources[i]`` takes the value ``compute`` made
+    from ``inputs[i]``, unless it is a cache hit. ``compute`` is a backend's grouped entrypoint (see
+    ``register_quant_backend``). It runs without autograd and each value passes its gradient straight
+    through, so it only gets the quantizers whose own gradient is straight-through. It may return
+    None, and the quantizers then compute their values themselves.
+    """
+    todo = []
+    for i, (q, source) in enumerate(zip(quantizers, sources, strict=True)):
+        session = _ACTIVE.get(q) if _num_open_scopes else None
+        entry = None if session is None else session.entries.get(q)
+        hit = entry is not None and entry.key == _input_key(source)
+        if not hit and _straight_through_error(q) is None:
+            todo.append(i)
+    try:
+        if todo:
+            with torch.no_grad():
+                values = compute([inputs[i] for i in todo], [quantizers[i] for i in todo])
+            if values is not None:
+                if len(values) != len(todo):
+                    raise ValueError(
+                        f"A grouped fake quant returned {len(values)} tensors for {len(todo)} inputs."
+                    )
+                for i, value in zip(todo, values):  # all of them valid before any is used
+                    _check_payload(value, inputs[i])
+                if len({v.untyped_storage().data_ptr() for v in values}) != len(values):
+                    raise ValueError(
+                        "A grouped fake quant must return each tensor in its own storage."
+                    )
+                for i, value in zip(todo, values):
+                    _PREFILLED[quantizers[i]] = (_input_key(sources[i]), value)
+        yield
+    finally:
+        for q in quantizers:
+            _PREFILLED.pop(q, None)
+
+
+def _straight_through_error(quantizer) -> str | None:
+    """Why a straight-through gradient would not be ``quantizer``'s own, or None."""
+    if not quantizer._pass_through_bwd:
+        return "the weight cache requires pass_through_bwd=True"
+    if getattr(quantizer, "_lsq", False):  # LSQ's backward is not straight-through
+        return "the weight cache does not support LSQ quantizers"
+    if any(p.requires_grad for p in quantizer.parameters()):
+        return "the weight cache does not support learned scales"
+    return None
+
+
+def _lookup(session: _Session, quantizer, key: tuple) -> _Entry | None:
+    """``quantizer``'s entry for ``key``, counted as a hit, or None after dropping a stale one."""
     entry = session.entries.get(quantizer)
     if entry is not None and entry.key != key:
         session.drop(quantizer)
         entry = None
-    if entry is None:
-        with torch.no_grad():
-            value = quantizer._fake_quantize(inputs)
-        if (value.shape, value.dtype, value.device) != (inputs.shape, inputs.dtype, inputs.device):
-            raise ValueError("A cached fake quant must keep the weight's shape, dtype and device.")
-        if value.untyped_storage().data_ptr() == inputs.untyped_storage().data_ptr():
-            raise ValueError("A cached fake quant must not return a view of the weight.")
-        entry = session.add(quantizer, key, source, value)
-    elif entry.value._version != entry.value_version:
-        session.drop(quantizer)
-        raise RuntimeError("A cached fake-quantized weight was modified in place.")
-    else:
+    if entry is not None:
+        if entry.value._version != entry.value_version:
+            session.drop(quantizer)
+            raise RuntimeError("A cached fake-quantized weight was modified in place.")
         session.stats.hits += 1
-    return _CachedIdentity.apply(inputs, entry.value)
+    return entry
+
+
+def _check_payload(value, inputs: torch.Tensor) -> None:
+    if not isinstance(value, torch.Tensor):
+        raise TypeError("A cached fake quant must return a tensor.")
+    if (value.shape, value.dtype, value.device) != (inputs.shape, inputs.dtype, inputs.device):
+        raise ValueError("A cached fake quant must keep the weight's shape, dtype and device.")
+    if value.untyped_storage().data_ptr() == inputs.untyped_storage().data_ptr():
+        raise ValueError("A cached fake quant must not return a view of the weight.")
 
 
 def _as_list(model) -> list[nn.Module]:

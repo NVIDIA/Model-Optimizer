@@ -29,6 +29,7 @@ from modelopt.torch.quantization.utils import replace_function
 from modelopt.torch.quantization.utils.core_utils import apply_without_qdq
 
 from ..nn import GroupedQuantizer, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
+from ..nn.modules.tensor_quantizer import _try_grouped_fake_quant
 from .custom import _ParallelLinear
 
 _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV = "MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP"
@@ -294,10 +295,16 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         if use_compiled_loop:
             quantized_weights = self._compiled_weight_quantizer_loop(*weights)
         else:
-            quantized_weights = tuple(
-                (self.weight_quantizer[gemm_idx] if grouped else self.weight_quantizer)(weight)
-                for gemm_idx, weight in enumerate(weights)
+            # A custom backend with a grouped entrypoint fake-quantizes every expert it has to compute
+            # in one call.
+            quantized_weights = (
+                _try_grouped_fake_quant(self.weight_quantizer, weights) if grouped else None
             )
+            if quantized_weights is None:
+                quantized_weights = tuple(
+                    (self.weight_quantizer[gemm_idx] if grouped else self.weight_quantizer)(weight)
+                    for gemm_idx, weight in enumerate(weights)
+                )
         for gemm_idx, quantized_weight in enumerate(quantized_weights):
             new_args[weights_start + gemm_idx] = quantized_weight
         output = getattr(package, func_name)(*new_args)
