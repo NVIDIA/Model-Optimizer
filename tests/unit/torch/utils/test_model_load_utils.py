@@ -4076,7 +4076,8 @@ def test_a_tied_head_the_checkpoint_stores_alone_reaches_both_aliases(fsdp_mesh,
     src = get_tiny_qwen3_moe(tie_word_embeddings=True)
     src.save_pretrained(tmp_path)
     weights = tmp_path / "model.safetensors"
-    stored = load_file(weights)
+    # Copies: the loaded tensors may map the file, which save_file then overwrites.
+    stored = {k: v.clone() for k, v in load_file(weights).items()}
     stored["lm_head.weight"] = stored.pop("model.embed_tokens.weight")
     save_file(stored, weights, metadata={"format": "pt"})
     with _ep_dense_meta_load(_is_expert):
