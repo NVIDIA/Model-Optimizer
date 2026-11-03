@@ -311,50 +311,14 @@ def stored_names(hf_config) -> tuple[str, ...]:
     raise ValueError("The config is not marked for on-the-fly decompression: install it first.")
 
 
-def decompression_refusal(hf_config) -> str | None:
-    """Why :func:`install_onfly_decompress` would refuse ``hf_config``, or ``None``, installing nothing.
+def _checked_compression(hf_config):
+    """What :func:`install_onfly_decompress` checks before it installs anything, changing nothing.
 
-    What it checks before it installs anything, for a model spec's ``prepare_refusal`` to ask before
-    the plan is decided: the dtype the experts decompress to, at every config level, the
-    transformers release, the checkpoint's compressed-tensors scheme, a config with nothing to
-    decompress, and a process already decompressing a checkpoint compressed differently.
-    """
-    for level in config_levels(hf_config):
-        dtype = getattr(level, "dtype", None)
-        if dtype is not None and str(dtype).removeprefix("torch.") != "bfloat16":
-            return (
-                f"the experts decompress to bfloat16, but this config loads in {dtype}. Load the "
-                "checkpoint in bfloat16."
-            )
-    try:
-        require_transformers("5.8", "on-the-fly compressed-tensors decompression")
-        compression = _read_compression(hf_config)
-    except (ImportError, NotImplementedError, RuntimeError, ValueError) as e:
-        return str(e)
-    # transformers is optional: this module imports without it.
-    import transformers.modeling_utils as mu
-
-    installed = getattr(mu.get_model_conversion_mapping, "_onfly_compression", None)
-    if compression is None:
-        if installed is not None and is_marked(hf_config):
-            return None
-        return (
-            "the config has no compressed-tensors quantization_config to decompress the experts by"
-        )
-    if installed is not None and compression != installed:
-        return (
-            f"this process already decompresses a '{installed[3]}' checkpoint; one compressed "
-            f"differently ('{compression[3]}') needs a process of its own"
-        )
-    return None
-
-
-def install_onfly_decompress(hf_config):
-    """Make ``from_pretrained`` decompress the experts of the checkpoint ``hf_config`` describes.
-
-    Call before ``from_pretrained``. The hooks are process-wide but rewrite only the converters of a
-    model built from a config they marked: one compressed checkpoint per process, installing again
-    for it marks that config too, and one compressed differently is refused.
+    Returns the checkpoint's compression (:func:`_read_compression`) and the one this process already
+    decompresses, or ``None``. Raises what the install refuses: a raw dict, a dtype other than the
+    experts' bfloat16 at any config level, transformers before 5.8, the checkpoint's
+    compressed-tensors scheme, a config with nothing to decompress, and a process already
+    decompressing a checkpoint compressed differently.
     """
     if isinstance(hf_config, dict):
         # The load finds the hooks by a mark on the config object, which a dict cannot carry.
@@ -368,38 +332,61 @@ def install_onfly_decompress(hf_config):
                 f"install_onfly_decompress: the experts decompress to bfloat16, but this config "
                 f"loads in {dtype}. Load the checkpoint in bfloat16."
             )
-    # Before compressed-tensors is needed: a release below the floor is what to fix first.
+    # Before compressed-tensors is needed, and before the loader is read: a release below the floor
+    # is what to fix first.
     require_transformers("5.8", "on-the-fly compressed-tensors decompression")
     compression = _read_compression(hf_config)
+    # transformers is optional: this module imports without it.
+    import transformers.modeling_utils as mu
+
+    installed = getattr(mu.get_model_conversion_mapping, "_onfly_compression", None)
+    if compression is None and not (installed is not None and is_marked(hf_config)):
+        # A marked config its prepare dropped quantization_config from (Kimi-K3's) may be prepared
+        # again; an unmarked one would load its experts newly initialized.
+        raise ValueError(
+            "install_onfly_decompress: config has no compressed-tensors quantization_config"
+            + ("" if installed is None else " and is not marked: nothing would decompress it")
+        )
+    if compression is not None and installed is not None and compression != installed:
+        raise RuntimeError(
+            f"install_onfly_decompress: this process already decompresses a '{installed[3]}' "
+            f"checkpoint (stored params {installed[2]}); one compressed differently ('{compression[3]}', "
+            f"stored params {compression[2]}) needs a process of its own"
+        )
+    return compression, installed
+
+
+def decompression_refusal(hf_config) -> str | None:
+    """Why :func:`install_onfly_decompress` would refuse ``hf_config``, or ``None``, installing nothing.
+
+    The install's own checks (:func:`_checked_compression`), for a model spec's ``prepare_refusal``
+    to ask before the plan is decided.
+    """
+    try:
+        _checked_compression(hf_config)
+    except (ImportError, NotImplementedError, RuntimeError, TypeError, ValueError) as e:
+        return str(e)
+    return None
+
+
+def install_onfly_decompress(hf_config):
+    """Make ``from_pretrained`` decompress the experts of the checkpoint ``hf_config`` describes.
+
+    Call before ``from_pretrained``. The hooks are process-wide but rewrite only the converters of a
+    model built from a config they marked: one compressed checkpoint per process, installing again
+    for it marks that config too, and one compressed differently is refused.
+    """
+    compression, installed = _checked_compression(hf_config)
     # Imported once the release is known to have them: transformers 4 has no core_model_loading.
     import transformers.modeling_utils as mu
     from transformers.core_model_loading import WeightConverter
 
-    installed = getattr(mu.get_model_conversion_mapping, "_onfly_compression", None)
     if installed is not None:
-        if compression is None:
-            # A marked config its prepare dropped quantization_config from (Kimi-K3's) may be prepared
-            # again; an unmarked one would load its experts newly initialized.
-            if not is_marked(hf_config):
-                raise ValueError(
-                    "install_onfly_decompress: config has no compressed-tensors "
-                    "quantization_config and is not marked: nothing would decompress it"
-                )
-            return
-        if compression != installed:
-            raise RuntimeError(
-                f"install_onfly_decompress: this process already decompresses a '{installed[3]}' "
-                f"checkpoint (stored params {installed[2]}); one compressed differently ('{compression[3]}', "
-                f"stored params {compression[2]}) needs a process of its own"
-            )
-        # The same checkpoint through a config of its own, which its load must find marked too.
-        _mark(hf_config, installed[2])
+        # The same checkpoint through a config of its own, which its load must find marked too, or a
+        # marked config prepared again.
+        if compression is not None:
+            _mark(hf_config, installed[2])
         return
-    if compression is None:
-        # Nothing to decompress: refused before anything is patched.
-        raise ValueError(
-            "install_onfly_decompress: config has no compressed-tensors quantization_config"
-        )
     compressor, scheme, param_names, fmt = compression
     _install_keep_int_native()
     orig = mu.get_model_conversion_mapping

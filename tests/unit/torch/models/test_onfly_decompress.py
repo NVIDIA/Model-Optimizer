@@ -424,6 +424,7 @@ def test_installing_twice_wraps_the_loader_once(monkeypatch):
 @pytest.mark.parametrize(
     "refused",
     [
+        "raw-dict",
         "not-bf16",
         "transformers-before-5.8",
         "unreadable-scheme",
@@ -434,9 +435,9 @@ def test_installing_twice_wraps_the_loader_once(monkeypatch):
 )
 def test_decompression_refusal_finds_what_the_install_refuses(monkeypatch, refused):
     """A model spec asks before the plan is decided what the install would refuse, installing
-    nothing: the dtype at every config level, the scheme, a config with nothing to decompress, and a
-    process already decompressing a checkpoint compressed differently. It finds a refusal exactly
-    where the install raises one."""
+    nothing: a raw dict, the dtype at every config level, the transformers release, the scheme, a
+    config with nothing to decompress, and a process already decompressing a checkpoint compressed
+    differently. It finds a refusal exactly where the install raises one."""
     first = (_ScaledCompressor, None, PACKED, "stub-format")
     other = (_ScaledCompressor, None, ("weight", "weight_scale"), "other-format")
 
@@ -458,18 +459,19 @@ def test_decompression_refusal_finds_what_the_install_refuses(monkeypatch, refus
         monkeypatch.setattr(transformers, "__version__", "5.7.0")
     if refused == "compressed-differently":
         config.compression = other
+    asked = {"text_config": {}} if refused == "raw-dict" else config
     hooks = (mu.get_model_conversion_mapping, cml.spawn_materialize)
 
-    why = onfly.decompression_refusal(config)
+    why = onfly.decompression_refusal(asked)
 
     assert (mu.get_model_conversion_mapping, cml.spawn_materialize) == hooks
     if refused is None:
         assert why is None
-        onfly.install_onfly_decompress(config)
+        onfly.install_onfly_decompress(asked)
     else:
         assert why
-        with pytest.raises((NotImplementedError, ValueError, RuntimeError)):
-            onfly.install_onfly_decompress(config)
+        with pytest.raises((NotImplementedError, ValueError, RuntimeError, TypeError)):
+            onfly.install_onfly_decompress(asked)
 
 
 @pytest.mark.usefixtures("restore_loader_hooks")
