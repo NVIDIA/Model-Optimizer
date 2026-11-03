@@ -2222,7 +2222,6 @@ def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_st
 
 
 _FINEGRAINED_FP8_PATCHED = False
-_FP8_DEQUANT_DTYPE = None  # model compute dtype the dequant must emit (set by the call site)
 
 
 def _patch_finegrained_fp8_dequant(target_dtype=None):
@@ -2255,17 +2254,20 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
     112 instead of 128. So there a block-FP8 weight whose grid is the configured block's ceil grid and
     that has a partial last block is padded to whole blocks for it and the result cropped back.
     """
-    global _FINEGRAINED_FP8_PATCHED, _FP8_DEQUANT_DTYPE
+    global _FINEGRAINED_FP8_PATCHED
+    from transformers.integrations import finegrained_fp8 as _fp8
+
     if isinstance(target_dtype, str):
         # A config can name its dtype, or carry "auto" for the checkpoint's own, and Tensor.to reads a
         # string as a device: take the torch.dtype it names, and for "auto" the bfloat16 default.
         name = target_dtype.rsplit(".", 1)[-1]
         target_dtype = torch.bfloat16 if name == "auto" else getattr(torch, name)
     if target_dtype is not None:
-        _FP8_DEQUANT_DTYPE = target_dtype  # keep current even if already patched
+        # The model dtype the override emits, kept current even if already patched, and on the class
+        # with the override: a re-imported copy of this module sets the dtype the installed one reads.
+        _fp8.Fp8Dequantize._modelopt_dequant_dtype = target_dtype
     if _FINEGRAINED_FP8_PATCHED:
         return
-    from transformers.integrations import finegrained_fp8 as _fp8
 
     fp8_dtypes = {
         getattr(torch, name)
@@ -2308,8 +2310,7 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
 
     # The release's own dequant, for the weights the override leaves to it. Releases without one
     # (5.5) dequantize inline and never call the override. On a re-imported module it is the method
-    # the earlier copy's override replaced: wrapping that override would cast through its module's
-    # dtype first.
+    # the earlier copy's override replaced: wrapping that override would run its cast first.
     stock = vars(_fp8.Fp8Dequantize).get("_dequantize_one")
     stock = getattr(stock, "_modelopt_replaced", stock)
 
@@ -2318,7 +2319,9 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
         # transformers' original out_dtype logic would return F32 weights, which then run against bf16
         # activations -> "mat1 and mat2 have the same dtype" RuntimeError in the calibration matmuls.
         # A loader that passes the destination dtype, as transformers' does from 5.10.1, knows it best.
-        out_dtype = output_dtype or _FP8_DEQUANT_DTYPE or torch.bfloat16
+        out_dtype = (
+            output_dtype or getattr(type(self), "_modelopt_dequant_dtype", None) or torch.bfloat16
+        )
         if quantized.dtype not in fp8_dtypes:
             # Block FP8 only: read as fp8, packed FP4 (two values a byte) would come out at half its
             # width and wrong. transformers' own dequant unpacks it.

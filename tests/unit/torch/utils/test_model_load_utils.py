@@ -25,6 +25,7 @@ tests of each part use a process group, two gloo ranks.
 import copy
 import dataclasses
 import importlib
+import importlib.util
 import inspect
 import json
 import math
@@ -4634,7 +4635,12 @@ _PATCH_TARGETS = (
     (FineGrainedFP8HfQuantizer, "update_weight_conversions"),
     (FineGrainedFP8HfQuantizer, "_modelopt_uwc_patched"),
 )
-_RESTORED = (*_PATCH_TARGETS, (Fp8Dequantize, "_modelopt_dequant_patched"))
+# Beside them, the class keeps the 5.10.1 wrapper's flag and the model dtype the dequant emits.
+_RESTORED = (
+    *_PATCH_TARGETS,
+    (Fp8Dequantize, "_modelopt_dequant_patched"),
+    (Fp8Dequantize, "_modelopt_dequant_dtype"),
+)
 
 
 @pytest.fixture
@@ -4643,7 +4649,8 @@ def pre_5_10_transformers(monkeypatch):
     saved = [(cls, name, vars(cls).get(name, _MISSING)) for cls, name in _RESTORED]
     monkeypatch.setattr(transformers, "__version__", "5.9.0")
     monkeypatch.setattr(model_load_utils, "_FINEGRAINED_FP8_PATCHED", False)
-    monkeypatch.setattr(model_load_utils, "_FP8_DEQUANT_DTYPE", None)
+    if "_modelopt_dequant_dtype" in vars(Fp8Dequantize):
+        delattr(Fp8Dequantize, "_modelopt_dequant_dtype")
     yield
     for cls, name, value in saved:
         if value is not _MISSING:
@@ -4912,10 +4919,10 @@ def test_a_reimported_module_does_not_wrap_a_patch_twice(
 
 @needs_float8
 def test_a_reimported_module_replaces_the_dequant_it_installed(pre_5_10_transformers, monkeypatch):
-    """Below 5.10.1 the dequant override reads the dtype of the module that installed it, so the
-    install of a re-imported ``model_load_utils`` replaces the earlier override rather than wrap it.
-    A weight that is not fp8 then reaches transformers' own dequant directly, not first through the
-    earlier override's cast to its dtype (bfloat16, unset there), which would round it at float32."""
+    """Below 5.10.1 the install of a re-imported ``model_load_utils`` replaces the dequant override
+    its earlier copy installed rather than wrap it. A weight that is not fp8 then reaches
+    transformers' own dequant directly, not first through the earlier override's cast to the model
+    dtype (bfloat16, unset here), which would round it when the caller asks for float32."""
     stock = vars(Fp8Dequantize).get("_dequantize_one")
     if stock is None:
         pytest.skip("this transformers has no dequant of its own to hand such a weight to (5.9 on)")
@@ -4930,6 +4937,27 @@ def test_a_reimported_module_replaces_the_dequant_it_installed(pre_5_10_transfor
     out = _dequant_op((128, 128))._dequantize_one(packed, scales, output_dtype=torch.float32)
 
     assert torch.equal(out, expected)
+
+
+@needs_float8
+def test_every_copy_of_the_module_sets_the_dtype_the_installed_dequant_emits(
+    pre_5_10_transformers,
+):
+    """A module re-imported while its earlier copy is still called: the load goes through the copy
+    that did not install the override, yet the override emits the dtype that load sets, which is kept
+    on the class with the override rather than in either copy."""
+    spec = importlib.util.spec_from_file_location(
+        "_model_load_utils_copy", model_load_utils.__file__
+    )
+    other = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(other)
+    model_load_utils._patch_finegrained_fp8_dequant()
+    other._patch_finegrained_fp8_dequant()
+
+    model_load_utils._patch_finegrained_fp8_dequant(torch.float32)
+
+    weight, scale_inv = _block_fp8((10, 13), (3, 4))
+    assert _dequant_op((4, 4))._dequantize_one(weight, scale_inv).dtype == torch.float32
 
 
 @needs_float8
