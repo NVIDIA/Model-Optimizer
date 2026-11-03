@@ -63,6 +63,7 @@ from modelopt.torch.export.distributed_writer import (
 from modelopt.torch.export.quant_aware_conversion import revert_weight_conversion_quant_aware
 from modelopt.torch.export.unified_export_hf import (
     _export_transformers_checkpoint,
+    _process_quantized_modules,
     export_hf_checkpoint,
 )
 from modelopt.torch.utils.distributed import DistributionPlan, ParallelState, set_distribution_plan
@@ -1056,6 +1057,17 @@ def test_nogather_export_refuses_an_existing_checkpoint_before_folding(gloo_worl
     assert not changed, changed
     _nogather_export(model, tmp_path / "export")
     _assert_byte_identical(_load_checkpoint(tmp_path / "export"), want)
+
+
+def test_packing_an_fsdp2_model_outside_the_no_gather_writer_is_refused(
+    gloo_world_of_one, tmp_path
+):
+    """Only the no-gather writer packs an FSDP2 model in place, one shard at a time with its experts
+    kept fused; anywhere else packing would need whole tensors. Refused, also under ``python -O``."""
+    model = _fsdp2_shard(_load(_save(_llama_config(), tmp_path / "src")), gloo_world_of_one)
+
+    with pytest.raises(RuntimeError, match="cannot pack an FSDP2-sharded model"):
+        _process_quantized_modules(model, torch.bfloat16)
 
 
 def test_nogather_export_saves_modelopt_state(gloo_world_of_one, tmp_path):

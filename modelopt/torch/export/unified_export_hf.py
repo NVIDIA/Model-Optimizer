@@ -1006,10 +1006,13 @@ def _process_quantized_modules(
     # The handlers pack whatever weight they are handed, and nothing here materializes a shard --
     # FSDP2 models go through collect_export_tensors instead, which packs inside a gather window.
     # The no-gather writer is the deliberate exception: it packs each rank's LOCAL shard and never
-    # materializes a full tensor, which is signalled by keep_fused_experts.
-    assert not is_fsdp2_model(model) or keep_fused_experts, (
-        "_process_quantized_modules cannot pack a sharded model; use collect_export_tensors"
-    )
+    # materializes a full tensor, and the experts stay fused for that, so keep_fused_experts, which
+    # only the no-gather writer passes, is what allows a sharded model here.
+    if is_fsdp2_model(model) and not keep_fused_experts:
+        raise RuntimeError(
+            "_process_quantized_modules cannot pack an FSDP2-sharded model: pack it in "
+            "collect_export_tensors' gather windows, or export it with the no-gather writer."
+        )
     ctx = ExportContext(
         model=model,
         dtype=dtype,
@@ -1019,7 +1022,7 @@ def _process_quantized_modules(
     )
 
     # The no-gather export sets keep_fused_experts on this context, which lets a sharded model past
-    # the assert above: each FSDP2 unit's modules are then packed in one weight window, held across
+    # the check above: each FSDP2 unit's modules are then packed in one weight window, held across
     # them.
     with _hf_export_handlers.held_fsdp2_weight_windows(ctx):
         for name, sub_module in model.named_modules():
