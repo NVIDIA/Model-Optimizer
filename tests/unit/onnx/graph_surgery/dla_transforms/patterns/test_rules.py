@@ -29,6 +29,7 @@ from modelopt.onnx.graph_surgery.dla_transforms.patterns import (
     ReshapeTransposeReshape,
     TopKVectorGather,
 )
+from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
 
 
 def _model(nodes, tensors, output_shape):
@@ -56,6 +57,11 @@ def _check(original, rules):
     np.testing.assert_array_equal(
         ReferenceEvaluator(original).run(None, {"x": x})[0],
         ReferenceEvaluator(result).run(None, {"x": x})[0],
+    )
+    complete = _transform_make_dla_compatible(original, verbose=False)
+    np.testing.assert_array_equal(
+        ReferenceEvaluator(original).run(None, {"x": x})[0],
+        ReferenceEvaluator(complete).run(None, {"x": x})[0],
     )
     assert graph.apply_pattern(rules.rule(graph)) == 0
     return result
@@ -148,7 +154,7 @@ def test_topk_vector_gather(rank, case):
     if case == "different_extent":
         data_shape[2] = 6
     if case == "different_tiling":
-        target_shape, repeats = ([1, 2, 1, 1], [1, 1, 2, 3])
+        target_shape, repeats = [1, 2, 1, 1], [1, 1, 2, 3]
     axis = 1 if rank == 2 else 2
     nodes = [
         helper.make_node("TopK", ["scores", "k"], ["values", "indices"], axis=-1),
@@ -188,7 +194,11 @@ def test_topk_vector_gather(rank, case):
         outputs,
         [
             numpy_helper.from_array(np.array(array, np.int64), name)
-            for name, array in {"k": [2], "shape": target_shape, "repeats": repeats}.items()
+            for name, array in {
+                "k": [2],
+                "shape": target_shape,
+                "repeats": repeats,
+            }.items()
         ],
     )
     runtime_controls = {}
@@ -260,7 +270,26 @@ def test_topk_vector_gather(rank, case):
         np.testing.assert_array_equal(expected, actual)
     if not supported:
         return
+    complete = _transform_make_dla_compatible(source, verbose=False)
+    for expected, actual in zip(
+        ReferenceEvaluator(source).run(None, feeds),
+        ReferenceEvaluator(complete).run(None, feeds),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(expected, actual)
+    if rank == 2:
+        reduced = next(node for node in complete.graph.node if node.op_type == "ReduceMax")
+        assert {attr.name: helper.get_attribute_value(attr) for attr in reduced.attribute} == {
+            "axes": [3],
+            "keepdims": 1,
+        }
     if supported:
         assert [node.op_type for node in result.graph.node] == (
             ["MatMul", "Add", "ReduceMax"] if rank == 2 else []
-        ) + ["Reshape", "TopK", "Cast", "Squeeze", "Gather"]
+        ) + [
+            "Reshape",
+            "TopK",
+            "Cast",
+            "Squeeze",
+            "Gather",
+        ]

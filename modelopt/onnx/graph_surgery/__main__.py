@@ -235,6 +235,24 @@ Examples:
         "-q", "--quiet", action="store_true", help="Suppress progress messages"
     )
 
+    dla_parser = subparsers.add_parser(
+        "make-dla-compatible",
+        help="Apply the documented DLA transformation pipeline",
+        description=(
+            "Apply supported graph rewrites for DLA. Where assumes finite FP32 values "
+            "and may change signed zero; optional FP16 L2 intermediates can overflow or underflow."
+        ),
+    )
+    dla_parser.add_argument("-i", "--input", required=True, help="Input ONNX model path")
+    dla_parser.add_argument("-o", "--output", required=True, help="Output ONNX model path")
+    dla_parser.add_argument("--no-external-data", action="store_true")
+    dla_parser.add_argument("--external-data-name", default=None)
+    dla_parser.add_argument("-q", "--quiet", action="store_true")
+    dla_parser.add_argument("--force-fp16-activations", action="store_true")
+    qdq = dla_parser.add_mutually_exclusive_group()
+    qdq.add_argument("--remove-all-qdq", action="store_true")
+    qdq.add_argument("--qdq-quantized-dtypes", nargs="+", default=None)
+
     # Analyze subcommand
     analyze_parser = subparsers.add_parser(
         "analyze",
@@ -302,6 +320,20 @@ Examples:
             output_path=args.output,
             use_external_data=not args.no_external_data,
             external_data_name=args.external_data_name,
+            verbose=not args.quiet,
+        )
+
+    elif args.command == "make-dla-compatible":
+        from .make_dla_compatible import dla_make_dla_compatible
+
+        dla_make_dla_compatible(
+            model_path=args.input,
+            output_path=args.output,
+            use_external_data=not args.no_external_data,
+            external_data_name=args.external_data_name,
+            qdq_quantized_dtypes=args.qdq_quantized_dtypes,
+            remove_all_qdq=args.remove_all_qdq,
+            force_fp16_activations=args.force_fp16_activations,
             verbose=not args.quiet,
         )
 
