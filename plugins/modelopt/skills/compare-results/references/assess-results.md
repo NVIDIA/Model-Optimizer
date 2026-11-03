@@ -1,6 +1,7 @@
 # Assess and report
 
-Apply only after the parent skill's run-validation and comparability checks.
+Apply only after validating both evaluation runs and confirming comparability
+using the [compare-results checklist](../SKILL.md#comparability-checklist).
 Use the task recipe's canonical metric and minimum run count.
 
 ## Retry mean, standard deviation, and SE
