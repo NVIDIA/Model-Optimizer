@@ -510,13 +510,9 @@ def test_only_the_compressed_checkpoint_loads_through_the_rewritten_converters(m
 
 @pytest.mark.usefixtures("restore_loader_hooks")
 @pytest.mark.parametrize("marked", ["vlm", "text-config"])
-@pytest.mark.parametrize("loaded", ["vlm", "backbone"])
-def test_a_vlm_marked_at_either_level_loads_through_the_rewritten_converters(
-    monkeypatch, marked, loaded
-):
+def test_a_vlm_marked_at_either_level_loads_through_the_rewritten_converters(monkeypatch, marked):
     """A VLM carries its compressed-tensors config at the top level or on its text config, and the
-    install marks the config it is handed. Whether the load builds the VLM, its text config replaced
-    by the native backbone's, or that backbone on its own, its expert converters are rewritten, and
+    install marks the config it is handed. Either way the VLM's expert converters are rewritten, and
     neither level keeps the mark for a later save."""
     monkeypatch.setattr(
         mu, "get_model_conversion_mapping", lambda model, **kw: list(_stock_expert_converters())
@@ -526,8 +522,7 @@ def test_a_vlm_marked_at_either_level_loads_through_the_rewritten_converters(
     text = _RemoteTextConfig(hidden_size=64, quantization_config={"format": "stub-format"})
     vlm = SimpleNamespace(text_config=text)
     onfly.install_onfly_decompress(vlm if marked == "vlm" else text)
-    vlm.text_config = onfly.to_native_backbone_config(vlm)
-    model = SimpleNamespace(config=copy.deepcopy(vlm if loaded == "vlm" else vlm.text_config))
+    model = SimpleNamespace(config=copy.deepcopy(vlm))
 
     out = mu.get_model_conversion_mapping(model)
 
@@ -764,43 +759,6 @@ class _RemoteTextConfig(PretrainedConfig):
     """Stands in for the remote-code DeepSeek-V3 config a VLM bundles as its ``text_config``."""
 
     model_type = "remote_deepseek_v3"
-
-
-@pytest.mark.parametrize("as_dict", [False, True], ids=["config-object", "raw-dict"])
-def test_the_native_backbone_config_is_a_clean_stock_deepseek_v3(as_dict):
-    """The bundled text config becomes transformers' own ``DeepseekV3Config`` with the same
-    architecture, minus ``auto_map`` (which routes back to the remote code) and the stale
-    ``quantization_config`` (which would build a competing quantizer). ``architectures`` names the
-    native class: hf_ptq's VLM detection iterates it."""
-    fields = {
-        "hidden_size": 64,
-        "num_hidden_layers": 3,
-        "n_routed_experts": 8,
-        "moe_intermediate_size": 16,
-        "auto_map": {"AutoConfig": "configuration_deepseek.DeepseekV3Config"},
-        "quantization_config": {"quant_method": "compressed-tensors"},
-    }
-    if as_dict:
-        text = {**fields, "model_type": "remote_deepseek_v3"}
-    else:
-        text = _RemoteTextConfig(**fields)
-
-    native = onfly.to_native_backbone_config(SimpleNamespace(text_config=text))
-
-    assert type(native) is DeepseekV3Config
-    assert native.model_type == "deepseek_v3"
-    assert native.architectures == ["DeepseekV3ForCausalLM"]
-    assert (native.hidden_size, native.num_hidden_layers) == (64, 3)
-    assert (native.n_routed_experts, native.moe_intermediate_size) == (8, 16)
-    assert getattr(native, "auto_map", None) is None
-    assert getattr(native, "quantization_config", None) is None
-
-
-def test_the_native_backbone_config_needs_a_text_config_and_a_known_model_type():
-    with pytest.raises(ValueError, match="text_config"):
-        onfly.to_native_backbone_config(SimpleNamespace())
-    with pytest.raises(ValueError, match="unknown native model_type"):
-        onfly.to_native_backbone_config(SimpleNamespace(text_config={}), model_type="not_a_model")
 
 
 # -------------------------------------------------------- with the real compressed_tensors library

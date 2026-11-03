@@ -29,38 +29,6 @@ from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.moe import config_levels, require_transformers
 
 
-def to_native_backbone_config(
-    vlm_config,
-    model_type: str = "deepseek_v3",
-    architectures: "tuple[str, ...]" = ("DeepseekV3ForCausalLM",),
-):
-    """The transformers-native backbone config for a VLM config's bundled ``text_config``.
-
-    Drops the remote ``auto_map`` and the stale ``quantization_config``, and names the native model
-    type and class (hf_ptq's VLM detection reads ``architectures``). The decompression mark carries
-    over. Defaults target the Kimi DeepSeek-V3 backbone.
-    """
-    # transformers is optional: this module imports without it.
-    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
-
-    text_config = getattr(vlm_config, "text_config", None)
-    if text_config is None:
-        raise ValueError("to_native_backbone_config: config has no .text_config (not a VLM?)")
-    if model_type not in CONFIG_MAPPING:
-        raise ValueError(f"to_native_backbone_config: unknown native model_type {model_type!r}")
-    d = text_config.to_dict() if hasattr(text_config, "to_dict") else dict(text_config)
-    for key in ("auto_map", "quantization_config", "_name_or_path"):
-        d.pop(key, None)
-    d["model_type"] = model_type
-    d["architectures"] = list(architectures)
-    native = CONFIG_MAPPING[model_type].from_dict(d)
-    stored_as = getattr(vlm_config, _MARK, None) or getattr(text_config, _MARK, None)
-    if stored_as is not None:
-        # A backbone loaded from this config on its own decompresses as the VLM would.
-        _mark(native, stored_as)
-    return native
-
-
 def _find_quantization_config(hf_config):
     """Locate the compressed-tensors ``quantization_config`` (top-level, else on the nested
     language-model config) and return it as a plain dict, or ``None`` for a config without one."""
@@ -322,7 +290,7 @@ def install_onfly_decompress(hf_config):
         # The load finds the hooks by a mark on the config object, which a dict cannot carry.
         raise TypeError("install_onfly_decompress: pass the model's config object, not a dict")
     # The loader sets each parameter from what the conversion hands it, uncast. Every level counts:
-    # a backbone config derived from the text config (to_native_backbone_config) keeps its dtype.
+    # a backbone config derived from the text config keeps its dtype.
     for level in config_levels(hf_config):
         dtype = getattr(level, "dtype", None)
         if dtype is not None and str(dtype).removeprefix("torch.") != "bfloat16":
