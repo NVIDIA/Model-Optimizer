@@ -62,23 +62,25 @@ def _lower_shapes(model, planned):
 
 
 @pytest.mark.parametrize(
-    ("kind", "shape", "controls", "attrs"),
+    ("kind", "shape", "controls", "attrs", "control_dtype"),
     [
-        ("Reshape", [2, 3], [[3, 2]], {}),
-        ("Tile", [2, 3], [[1, 2]], {}),
-        ("Expand", [1, 3], [[2, 3]], {}),
-        ("Transpose", [2, 3], [], {"perm": [1, 0]}),
-        ("Transpose", [2, 3], [], {}),
-        ("Flatten", [2, 3, 4], [], {"axis": 2}),
-        ("ArgMax", [2, 3, 4], [], {"axis": 1, "keepdims": 0}),
-        ("Slice", [2, 3, 4], [[0], [1]], {}),
-        ("Slice", [2, 3, 4], [[0], [4], [2], [2]], {}),
+        ("Reshape", [2, 3], [[3, 2]], {}, np.int64),
+        ("Tile", [2, 3], [[1, 2]], {}, np.int64),
+        ("Expand", [1, 3], [[2, 3]], {}, np.int64),
+        ("Transpose", [2, 3], [], {"perm": [1, 0]}, np.int64),
+        ("Transpose", [2, 3], [], {}, np.int64),
+        ("Flatten", [2, 3, 4], [], {"axis": 2}, np.int64),
+        ("ArgMax", [2, 3, 4], [], {"axis": 1, "keepdims": 0}, np.int64),
+        ("Slice", [2, 3, 4], [[0], [1]], {}, np.int64),
+        ("Slice", [2, 3, 4], [[0], [4], [2], [2]], {}, np.int64),
+        ("Slice", [2, 3, 4], [[0], [1]], {}, np.int32),
+        ("Slice", [2, 3, 4], [[0], [4], [2], [2]], {}, np.int32),
     ],
 )
-def test_shape_controls_and_native_shapes(kind, shape, controls, attrs):
+def test_shape_controls_and_native_shapes(kind, shape, controls, attrs, control_dtype):
     """Every shape family fires and retains native values under leading-one promotion."""
     inits = [
-        numpy_helper.from_array(np.asarray(a, np.int64), f"control{i}")
+        numpy_helper.from_array(np.asarray(a, control_dtype), f"control{i}")
         for i, a in enumerate(controls)
     ]
     model = helper.make_model(
@@ -104,6 +106,49 @@ def test_shape_controls_and_native_shapes(kind, shape, controls, attrs):
         None, {"x": values.reshape((1,) * (4 - values.ndim) + values.shape)}
     )[0]
     np.testing.assert_array_equal(actual, expected.reshape(target))
+    if kind == "Slice":
+        initializers = {tensor.name: tensor for tensor in transformed.graph.initializer}
+        node = transformed.graph.node[0]
+        assert initializers[node.input[3]].data_type == initializers[node.input[1]].data_type
+
+
+def test_slice_controls_with_distinct_dtypes_are_not_shared():
+    """Equal generated axes retain each Slice's control dtype when axes were omitted."""
+    nodes = []
+    inits = []
+    for suffix, dtype in (("32", np.int32), ("64", np.int64)):
+        names = [f"{name}{suffix}" for name in ("starts", "ends", "steps")]
+        inits.extend(
+            numpy_helper.from_array(np.asarray([value], dtype), name)
+            for name, value in zip(names, (0, 1, 1))
+        )
+        nodes.append(
+            helper.make_node("Slice", ["x", names[0], names[1], "", names[2]], [f"y{suffix}"])
+        )
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "mixed_slice_controls",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3, 4])],
+            [
+                helper.make_tensor_value_info(f"y{suffix}", TensorProto.FLOAT, None)
+                for suffix in ("32", "64")
+            ],
+            inits,
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+    )
+    values = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    expected = ReferenceEvaluator(model).run(None, {"x": values})
+    target = (1, 1, 3, 4)
+    transformed, count = _lower_shapes(model, {"y32": target, "y64": target})
+    assert count == 2
+    initializers = {tensor.name: tensor for tensor in transformed.graph.initializer}
+    for node in transformed.graph.node:
+        assert initializers[node.input[3]].data_type == initializers[node.input[1]].data_type
+    actual = ReferenceEvaluator(transformed).run(None, {"x": values.reshape(1, 2, 3, 4)})
+    for result, reference in zip(actual, expected):
+        np.testing.assert_array_equal(result, reference.reshape(target))
 
 
 def test_five_dimensional_reshape_transpose_uses_original_snapshot():
