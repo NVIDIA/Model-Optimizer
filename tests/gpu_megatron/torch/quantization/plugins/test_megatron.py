@@ -344,6 +344,8 @@ def _gpt_model_provider(
                 use_cpu_initialization=meta_device,
                 num_moe_experts=num_moe_experts,
                 moe_grouped_gemm=moe_grouped_gemm,
+                # MoE with TP requires sequence parallelism
+                sequence_parallel=tp_size > 1 and num_moe_experts is not None,
             )
 
     if not meta_device:
