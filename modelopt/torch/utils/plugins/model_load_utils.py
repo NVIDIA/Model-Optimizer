@@ -594,9 +594,15 @@ def _refuse_sharded_load_options(
             f"rank: {_whole_instead(decided, route)}."
         )
     if _init_quantized_weights():
+        how = (
+            "builds the model through from_pretrained with its own config and device mesh, so "
+            "init_quantized_weights' placement and compression do not apply"
+            if route == _EXPERT_PARALLEL
+            else "builds the model without from_pretrained, so it would skip "
+            "init_quantized_weights' quantization"
+        )
         raise NotImplementedError(
-            f"The {route} load builds the model without from_pretrained, so it would skip "
-            "init_quantized_weights' quantization; load the model whole on every rank: "
+            f"The {route} load {how}; load the model whole on every rank: "
             f"{_whole_instead(decided, route)}."
         )
     if auto_class not in (None, AutoModelForCausalLM):

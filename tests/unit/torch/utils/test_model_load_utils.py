@@ -2270,10 +2270,12 @@ def test_a_sharded_load_is_refused_inside_init_quantized_weights(
 def test_an_expert_parallel_load_is_refused_inside_init_quantized_weights(
     run_as, serve, loaders, process_group, monkeypatch, tmp_path, config, handed
 ):
-    """The expert-parallel load never calls from_pretrained either, and its way to a whole model on
-    every rank sets the EP degree to 1 as well, as the decision refuses to replicate an MoE unasked.
-    An EP degree asked for still applies the model's spec, so the decision finds the experts of an
-    MoE whose plan only its spec supplies (DeepSeek-V3's), and the load is what refuses."""
+    """The expert-parallel load calls from_pretrained with its own config and device mesh, so
+    init_quantized_weights' placement and compression do not apply to it either, and its way to a
+    whole model on every rank sets the EP degree to 1 as well, as the decision refuses to replicate
+    an MoE unasked. An EP degree asked for still applies the model's spec, so the decision finds the
+    experts of an MoE whose plan only its spec supplies (DeepSeek-V3's), and the load is what
+    refuses."""
     run_as(2, rank=1)
     serve(config)
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)

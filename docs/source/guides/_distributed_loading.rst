@@ -138,7 +138,8 @@ Inside ``init_quantized_weights``
 =================================
 
 ``init_quantized_weights`` (see :doc:`_compress_quantized_models`) quantizes and compresses the
-model in the ``from_pretrained`` it patches, which the sharded loads never call. Inside it, a plan
-the load decides gives every rank the whole model, with nothing to measure, and the load leaves
-the device map to ``init_quantized_weights``, which computes it and refuses one it is passed. A
-knob or a plan that asks to shard is refused there.
+model in the ``from_pretrained`` it patches, which the FSDP2 load never calls; the expert-parallel
+load calls it with its own config and device mesh, so the patch's placement and compression do not
+apply there. Inside it, a plan the load decides gives every rank the whole model, with nothing to
+measure, and the load leaves the device map to ``init_quantized_weights``, which computes it and
+refuses one it is passed. A knob or a plan that asks to shard is refused there.
