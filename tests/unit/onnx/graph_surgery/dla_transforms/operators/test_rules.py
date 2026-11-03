@@ -27,6 +27,7 @@ from modelopt.onnx.graph_surgery.dla_transforms import stages
 from modelopt.onnx.graph_surgery.dla_transforms.context import DlaGraph
 from modelopt.onnx.graph_surgery.dla_transforms.operators import (
     INDEXING_RULES,
+    LOGICAL_RULES,
     MATRIX_RULES,
     RECURRENT_RULES,
     weight_eligible,
@@ -280,6 +281,175 @@ def _model(nodes, inputs, outputs, initializers=()):
         helper.make_graph(nodes, "logical", inputs, outputs, initializers),
         opset_imports=[helper.make_opsetid("", 21)],
     )
+
+
+def _run_logical(model, *, infer=True):
+    working = ir.serde.deserialize_model(
+        onnx.shape_inference.infer_shapes(model, strict_mode=True) if infer else model
+    )
+    count = _apply_rules(working, LOGICAL_RULES)
+    ir.passes.common.RemoveUnusedNodesPass()(working)
+    ir.passes.common.TopologicalSortPass()(working)
+    result = onnx.shape_inference.infer_shapes(ir.serde.serialize_model(working), strict_mode=True)
+    onnx.checker.check_model(result, full_check=True)
+    return result, count
+
+
+@pytest.mark.parametrize("zero_index", [0, 1])
+@pytest.mark.parametrize("static_mask", [False, True])
+def test_zero_branch_where(zero_index, static_mask):
+    """Both zero-branch orientations lower with fixed or runtime BOOL masks."""
+    condition = np.array([[True, False, True], [False, True, False]])
+    inputs = [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3])]
+    inits = [numpy_helper.from_array(np.array(0, np.float32), "zero")]
+    condition_info = helper.make_tensor_value_info("condition", TensorProto.BOOL, [2, 3])
+    if static_mask:
+        inits.append(numpy_helper.from_array(condition, "condition"))
+    else:
+        inputs.append(condition_info)
+    branches = ["zero", "x"] if zero_index == 0 else ["x", "zero"]
+    model = _model(
+        [helper.make_node("Where", ["condition", *branches], ["y"])],
+        inputs,
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 3])],
+        inits,
+    )
+    transformed, count = _run_logical(model)
+    assert count == 1 and not any(n.op_type == "Where" for n in transformed.graph.node)
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3) - 2}
+    if not static_mask:
+        feeds["condition"] = condition
+    np.testing.assert_array_equal(
+        ReferenceEvaluator(transformed).run(None, feeds)[0],
+        ReferenceEvaluator(model).run(None, feeds)[0],
+    )
+
+
+def test_binary_not_arithmetic():
+    """A private Cast/Not region becomes float arithmetic before its numeric consumer."""
+    model = _model(
+        [
+            helper.make_node("Cast", ["x"], ["boolean"], to=TensorProto.BOOL),
+            helper.make_node("Not", ["boolean"], ["negated"]),
+            helper.make_node("Cast", ["negated"], ["y"], to=TensorProto.FLOAT),
+        ],
+        [helper.make_tensor_value_info("x", TensorProto.BOOL, [2, 2])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 2])],
+    )
+    transformed, count = _run_logical(model)
+    assert count == 1 and not any(n.op_type == "Not" for n in transformed.graph.node)
+    feeds = {"x": np.array([[True, False], [False, True]])}
+    np.testing.assert_array_equal(
+        ReferenceEvaluator(transformed).run(None, feeds)[0],
+        ReferenceEvaluator(model).run(None, feeds)[0],
+    )
+
+
+@pytest.mark.parametrize(
+    ("dtype", "zero_shape", "zero"),
+    [
+        (np.float32, [], 1),
+        (np.float16, [], 0),
+        (np.float32, [2, 3], 0),
+    ],
+)
+def test_where_preserves_nonzero_precision_and_broadcast_forms(dtype, zero_shape, zero):
+    """Only the documented finite FP32 nonexpanding zero branch is lowered."""
+    model = _model(
+        [helper.make_node("Where", ["condition", "x", "branch"], ["y"])],
+        [
+            helper.make_tensor_value_info(
+                "x", helper.np_dtype_to_tensor_dtype(np.dtype(dtype)), [1, 3]
+            ),
+            helper.make_tensor_value_info("condition", TensorProto.BOOL, [1, 3]),
+        ],
+        [
+            helper.make_tensor_value_info(
+                "y",
+                helper.np_dtype_to_tensor_dtype(np.dtype(dtype)),
+                [2, 3] if zero_shape else [1, 3],
+            )
+        ],
+        [numpy_helper.from_array(np.full(zero_shape, zero, dtype), "branch")],
+    )
+    result, count = _run_logical(model)
+    assert count == 0
+    feeds = {"x": np.array([[1, 2, 3]], dtype), "condition": np.array([[True, False, True]])}
+    np.testing.assert_array_equal(
+        ReferenceEvaluator(result).run(None, feeds)[0],
+        ReferenceEvaluator(model).run(None, feeds)[0],
+    )
+
+
+@pytest.mark.parametrize("public", [False, True])
+def test_not_retains_boolean_consumers(public):
+    """Public BOOL results and boolean arithmetic must retain Not semantics."""
+    nodes = [
+        helper.make_node("Cast", ["x"], ["boolean"], to=TensorProto.BOOL),
+        helper.make_node("Not", ["boolean"], ["negated"]),
+    ]
+    if not public:
+        nodes.append(helper.make_node("And", ["negated", "x"], ["y"]))
+    source = _model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.BOOL, [2])],
+        [helper.make_tensor_value_info("negated" if public else "y", TensorProto.BOOL, [2])],
+    )
+    result, count = _run_logical(source)
+    assert count == 0
+    feeds = {"x": np.array([False, True])}
+    np.testing.assert_array_equal(
+        ReferenceEvaluator(result).run(None, feeds)[0],
+        ReferenceEvaluator(source).run(None, feeds)[0],
+    )
+
+
+@pytest.mark.parametrize(
+    ("threshold", "dtype"), [(0, np.int64), (2**24, np.int64), (0, np.float64)]
+)
+def test_greater_threshold_ordering(threshold, dtype):
+    """Safe integer thresholds lower; rounding-sensitive thresholds stay integer."""
+    model = _model(
+        [helper.make_node("Greater", ["x", "threshold"], ["y"])],
+        [helper.make_tensor_value_info("x", helper.np_dtype_to_tensor_dtype(np.dtype(dtype)), [3])],
+        [helper.make_tensor_value_info("y", TensorProto.BOOL, [3])],
+        [numpy_helper.from_array(np.array(threshold, dtype), "threshold")],
+    )
+    transformed, count = _run_logical(model)
+    assert count == (1 if threshold == 0 and dtype != np.float64 else 0)
+    feeds = {"x": np.array([threshold - 1, threshold, threshold + 1], dtype)}
+    np.testing.assert_array_equal(
+        ReferenceEvaluator(transformed).run(None, feeds)[0],
+        ReferenceEvaluator(model).run(None, feeds)[0],
+    )
+
+
+def test_greater_normalizes_mixed_intermediate_operands():
+    """A partially converted IR comparison keeps its FLOAT owner and converts only INT16."""
+    source = _model(
+        [helper.make_node("Greater", ["floating", "integer"], ["y"])],
+        [
+            helper.make_tensor_value_info("floating", TensorProto.FLOAT, [3]),
+            helper.make_tensor_value_info("integer", TensorProto.INT16, [3]),
+        ],
+        [
+            helper.make_tensor_value_info("y", TensorProto.BOOL, [3]),
+            helper.make_tensor_value_info("floating", TensorProto.FLOAT, [3]),
+        ],
+    )
+    result, count = _run_logical(source, infer=False)
+    assert count == 1
+    casts = [node for node in result.graph.node if node.op_type == "Cast"]
+    assert len(casts) == 1 and list(casts[0].input) == ["integer"]
+    comparison = next(node for node in result.graph.node if node.op_type == "Greater")
+    assert comparison.input[0] == "floating"
+    feeds = {
+        "floating": np.array([-32768.5, 1.5, 32767], np.float32),
+        "integer": np.array([-32768, 1, 32767], np.int16),
+    }
+    actual = ReferenceEvaluator(result).run(None, feeds)
+    np.testing.assert_array_equal(actual[0], feeds["floating"] > feeds["integer"])
+    np.testing.assert_array_equal(actual[1], feeds["floating"])
 
 
 @pytest.mark.parametrize(
