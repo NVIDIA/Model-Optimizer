@@ -40,6 +40,7 @@ from onnx import TensorProto, helper
 
 import modelopt.onnx.quantization.autotune.benchmark as bm
 from modelopt.onnx.quantization.autotune import TensorRTPyBenchmark, TrtExecBenchmark
+from modelopt.onnx.quantization.autotune.autotuner_base import QDQAutotunerBase
 from modelopt.onnx.quantization.autotune.benchmark import _validate_shape_range
 
 # --- fixtures ---
@@ -625,8 +626,28 @@ class TestTensorRTPyBenchmark:
         assert latency_ms > 0
         assert latency_ms != float("inf")
 
-    def test_run_with_path(self, simple_conv_model_path):
+    @pytest.mark.parametrize("storage", ["inline", "external_absolute", "external_relative"])
+    def test_run_with_path(self, simple_conv_model_path, tmp_path, monkeypatch, storage):
         """TensorRTPyBenchmark accepts model path and returns finite latency."""
+        if storage != "inline":
+            output_dir = tmp_path / "exports"
+            output_dir.mkdir()
+            working_dir = tmp_path / "working"
+            working_dir.mkdir()
+            model = onnx.load(simple_conv_model_path)
+            for weight in model.graph.initializer:
+                weight.CopyFrom(
+                    onnx.numpy_helper.from_array(onnx.numpy_helper.to_array(weight), weight.name)
+                )
+            autotuner = QDQAutotunerBase(model)
+            autotuner.initialize()
+            path = output_dir / "baseline.onnx"
+            autotuner.export_onnx(str(path), insert_qdq=False)
+            assert (output_dir / "baseline.onnx_data").is_file()
+            monkeypatch.chdir(working_dir)
+            simple_conv_model_path = (
+                os.path.relpath(path) if storage == "external_relative" else str(path)
+            )
         benchmark = TensorRTPyBenchmark(warmup_runs=1, timing_runs=2)
         latency_ms = benchmark.run(simple_conv_model_path)
         assert isinstance(latency_ms, float)
