@@ -499,16 +499,6 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
 CUSTOM_MODEL_PLUGINS.add(megatron_replace_quant_module_hook)
 
 
-def _megatron_parallel_state() -> ParallelState:
-    """Megatron's data- (with context-) and tensor-parallel groups, over which quantizer states sync."""
-    try:
-        data_parallel_group = get_data_parallel_group(with_context_parallel=True)
-    except AssertionError:
-        warn_rank_0("Context parallel group is not initialized, using data parallel group")
-        data_parallel_group = get_data_parallel_group()
-    return ParallelState(data_parallel_group, mcore_parallel.get_tensor_model_parallel_group())
-
-
 class _MegatronParallelLinear(_ParallelLinear):
     _functionals_to_replace = [
         (megatron_parallel, "linear_with_grad_accumulation_and_async_allreduce"),
@@ -517,7 +507,16 @@ class _MegatronParallelLinear(_ParallelLinear):
 
     def _setup(self):
         if not hasattr(self, "parallel_state") or self.parallel_state is None:
-            self.parallel_state = _megatron_parallel_state()
+            data_parallel_group = None
+            try:
+                data_parallel_group = get_data_parallel_group(with_context_parallel=True)
+            except AssertionError:
+                warn_rank_0("Context parallel group is not initialized, using data parallel group")
+                data_parallel_group = get_data_parallel_group()
+            self.parallel_state = ParallelState(
+                data_parallel_group,
+                mcore_parallel.get_tensor_model_parallel_group(),
+            )
 
         if getattr(self, "gradient_accumulation_fusion", False):
             warn_rank_0(
@@ -855,9 +854,13 @@ class _QuantTEMCoreColumnParallelLinear(_QuantTELinear, _MegatronColumnParallelL
 @QuantModuleRegistry.register({TELinear: "te_mcore_Linear"})
 class _QuantTEMCoreLinear(_QuantTELinear):
     def _setup(self):
-        # The default parallel state syncs over all ranks, which hangs or mixes layers under PP.
-        if self.parallel_state is None:
-            self.parallel_state = _megatron_parallel_state()
+        # Sync ranges over the replicas of this layer: its pipeline stage's tensor-, data- and
+        # context-parallel ranks (which may see different sequence shards). The default group
+        # spans all ranks, which hangs or mixes layers across pipeline stages.
+        if self.parallel_state is None and mcore_parallel.model_parallel_is_initialized():
+            self.parallel_state = ParallelState(
+                mcore_parallel.get_tensor_and_data_parallel_group(with_context_parallel=True)
+            )
         super()._setup()
 
 

@@ -2665,35 +2665,55 @@ def test_mla_fused_down_projections_share_ranges(distributed_setup_size_1, quant
         destroy_model_parallel()  # not a spawned process
 
 
-def _test_te_linear_ranges_stay_in_pipeline_stage_helper(rank, size):
-    initialize_for_megatron(pipeline_model_parallel_size=size, seed=SEED)
-    model = get_mcore_gpt_model(
-        pipeline_model_parallel_size=size,
-        num_layers=size,
-        hidden_size=128,
-        num_attention_heads=2,
-        vocab_size=128,
-        max_sequence_length=32,
-        transformer_impl="transformer_engine",
-        multi_latent_attention=True,
-    ).cuda()
-    (attention,) = [layer.self_attention for layer in model.decoder.layers]
-    with torch.no_grad():  # give each stage's MLA down-projections their own range
-        for linear in (attention.linear_q_down_proj, attention.linear_kv_down_proj):
-            linear.weight.mul_(rank + 1)
-    expected = max(
-        linear.weight.abs().amax().float()
-        for linear in (attention.linear_q_down_proj, attention.linear_kv_down_proj)
+def _test_te_linear_range_sync_helper(tensor_model_parallel_size, rank, size):
+    from megatron.core.extensions.transformer_engine import TELinear
+
+    pipeline_model_parallel_size = size // tensor_model_parallel_size
+    initialize_for_megatron(
+        tensor_model_parallel_size=tensor_model_parallel_size,
+        pipeline_model_parallel_size=pipeline_model_parallel_size,
+        seed=SEED,
     )
+    config = TransformerConfig(
+        num_layers=pipeline_model_parallel_size,
+        hidden_size=64,
+        num_attention_heads=4,
+        use_cpu_initialization=True,
+    )
+    # A duplicated TELinear, like MLA's down-projections, on every rank; each rank's weight and
+    # input (e.g. a sequence-parallel shard) has its own range.
+    model = torch.nn.ModuleDict(
+        {
+            "linear": TELinear(
+                64,
+                64,
+                parallel_mode="duplicated",
+                config=config,
+                init_method=torch.nn.init.normal_,
+                bias=False,
+                skip_bias_add=False,
+                skip_weight_param_allocation=False,
+            )
+        }
+    ).cuda()
+    with torch.no_grad():
+        model["linear"].weight.mul_(rank + 1)
+    x = torch.randn(8, 2, 64, device="cuda") * (rank + 1)
+    expected = torch.stack([x.abs().amax(), model["linear"].weight.abs().amax()]).float()
 
-    # Weights only: each stage calibrates the TELinear down-projections of its own layer.
-    mtq.quantize(model, copy.deepcopy(mtq.FP8_DEFAULT_CFG))
+    mtq.quantize(model, copy.deepcopy(mtq.FP8_DEFAULT_CFG), lambda m: m["linear"](x))
 
-    for linear in (attention.linear_q_down_proj, attention.linear_kv_down_proj):
-        assert linear.parallel_state.data_parallel_group.world_size() == 1
-        assert torch.equal(linear.weight_quantizer.amax.float(), expected)
+    # Replicas share their ranges over tensor parallelism; pipeline stages keep their own.
+    if tensor_model_parallel_size > 1:
+        torch.distributed.all_reduce(expected, op=torch.distributed.ReduceOp.MAX)
+    linear = model["linear"]
+    assert torch.equal(linear.input_quantizer.amax.float(), expected[0])
+    assert torch.equal(linear.weight_quantizer.amax.float(), expected[1])
 
 
-def test_te_linear_ranges_stay_in_pipeline_stage(dist_workers_size_2):
-    """Megatron-Core TELinear syncs ranges over Megatron's DP group, not over all ranks, which spans PP stages."""
-    dist_workers_size_2.run(_test_te_linear_ranges_stay_in_pipeline_stage_helper)
+@pytest.mark.parametrize("tensor_model_parallel_size", [1, 2])
+def test_te_linear_ranges_sync_within_pipeline_stage(
+    dist_workers_size_2, tensor_model_parallel_size
+):
+    """Megatron-Core TELinear syncs ranges over its TP / DP replicas, not across pipeline stages."""
+    dist_workers_size_2.run(partial(_test_te_linear_range_sync_helper, tensor_model_parallel_size))
