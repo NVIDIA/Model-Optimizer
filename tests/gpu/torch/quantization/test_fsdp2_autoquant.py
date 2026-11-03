@@ -25,7 +25,12 @@ import pytest
 import torch
 import torch.distributed as dist
 from _test_utils.torch.distributed.utils import DistributedWorkerPool
-from _test_utils.torch.transformers_models import create_tiny_llama_dir
+from _test_utils.torch.transformers_models import (
+    _TinyQwen35Tokenizer,
+    create_tiny_llama_dir,
+    create_tiny_qwen3_5_moe_vl_dir,
+)
+from transformers import AutoConfig
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
@@ -40,11 +45,18 @@ pytestmark = [
 ]
 
 
-def _run_gradient_autoquant(rank, size, checkpoint_dir, search_dir):
+def _run_gradient_autoquant(rank, size, checkpoint_dir, search_dir, expect_qwen_vlm=False):
     device = torch.device(f"cuda:{rank}")
     model = parallel_load_and_prepare_fsdp2(checkpoint_dir, device, rank, size)
-    torch.manual_seed(rank)
-    batches = [torch.randint(0, 128, (1, 16), device=device) for _ in range(2)]
+    if expect_qwen_vlm:
+        assert type(model).__name__.endswith("ForConditionalGeneration")
+        assert hasattr(model.model, "visual")
+        assert not model._modelopt_unplaced_source_keys
+    generator = torch.Generator(device=device).manual_seed(rank)
+    batches = [
+        torch.randint(5 if expect_qwen_vlm else 0, 128, (1, 16), device=device, generator=generator)
+        for _ in range(2)
+    ]
     _, state = mtq.auto_quantize(
         model,
         constraints={"effective_bits": 8.0},
@@ -97,6 +109,7 @@ def _run_kv_autoquant_example(rank, size, checkpoint_dir, search_dir, composed):
         trust_remote_code=False,
         cpu_offload=False,
         attn_implementation="eager",
+        experts_implementation=None,
         calib_with_images=False,
         specdec_offline_dataset=None,
         low_memory_mode=False,
@@ -178,5 +191,43 @@ def test_fsdp2_kv_autoquant_example(kv_dist_workers, tmp_path, composed):
             checkpoint_dir=checkpoint,
             search_dir=tmp_path / "search",
             composed=composed,
+        )
+    )
+
+
+def test_fsdp2_gradient_qwen_moe_autoquant(dist_workers, tmp_path):
+    try:
+        AutoConfig.for_model("qwen3_5_moe")
+    except ValueError:
+        pytest.skip("Qwen3.5 requires a recent Transformers")
+    checkpoint = create_tiny_qwen3_5_moe_vl_dir(
+        tmp_path,
+        tokenizer=_TinyQwen35Tokenizer(),
+        hidden_size=128,
+        intermediate_size=256,
+        moe_intermediate_size=64,
+        shared_expert_intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=32,
+        linear_key_head_dim=32,
+        linear_value_head_dim=32,
+        linear_num_key_heads=4,
+        linear_num_value_heads=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        layer_types=["linear_attention", "full_attention"],
+        vocab_size=128,
+        max_position_embeddings=128,
+    )
+    search_dir = tmp_path / "search"
+    search_dir.mkdir()
+    dist_workers.run(
+        partial(
+            _run_gradient_autoquant,
+            checkpoint_dir=str(checkpoint),
+            search_dir=str(search_dir),
+            expect_qwen_vlm=True,
         )
     )

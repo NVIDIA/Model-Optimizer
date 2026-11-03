@@ -35,7 +35,7 @@ def _looks_fsdp_wrapped(module: nn.Module) -> bool:
 
     - **FSDP1** (``torch.distributed.fsdp.FullyShardedDataParallel``): child modules
       carry an ``_fsdp_wrapped_module`` attribute.
-    - **FSDP2** (``torch.distributed._composable.fsdp.fully_shard``): parameters are
+    - **FSDP2** (``torch.distributed.fsdp.fully_shard``): parameters are
       ``DTensor`` instances exposing a ``full_tensor`` method.
 
     Probes only the first parameter to avoid iterating a large model. Intended for

@@ -185,9 +185,9 @@ class Passage(nn.Module):
         *,
         inputs_to_capture: Iterable[str] = [],
         outputs_to_capture: Iterable[str] = [],
-        input_overrides: Mapping[str, PassageInputAdapter | InputArgs] = {},
-        output_overrides: Mapping[str, PassageOutputAdapter | Any] = {},
-        outputs_cache: dict[str, Any] = {},
+        input_overrides: Optional[Mapping[str, PassageInputAdapter | InputArgs]] = None,
+        output_overrides: Optional[Mapping[str, PassageOutputAdapter | Any]] = None,
+        outputs_cache: Optional[dict[str, Any]] = None,
         capture_fake_outputs_predicate: Predicate = always_false_predicate,
         capture_cache_outputs_predicate: Predicate = always_false_predicate,
         early_exit: bool = False,
@@ -207,7 +207,8 @@ class Passage(nn.Module):
         self.outputs_to_capture = set(outputs_to_capture)
         self.input_overrides = input_overrides
         self.output_overrides = output_overrides
-        self.outputs_cache = outputs_cache
+        # Not a shared default: capture writes fake outputs into this dict.
+        self.outputs_cache = {} if outputs_cache is None else outputs_cache
         self.capture_fake_outputs_predicate = capture_fake_outputs_predicate
         self.capture_cache_outputs_predicate = capture_cache_outputs_predicate
         self.early_exit = early_exit
@@ -254,9 +255,9 @@ class Passage(nn.Module):
         *,
         inputs_to_capture: Iterable[str] = [],
         outputs_to_capture: Iterable[str] = [],
-        input_overrides: Mapping[str, PassageInputAdapter | InputArgs] = {},
-        output_overrides: Mapping[str, PassageOutputAdapter | Any] = {},
-        outputs_cache: dict[str, Any] = {},
+        input_overrides: Optional[Mapping[str, PassageInputAdapter | InputArgs]] = None,
+        output_overrides: Optional[Mapping[str, PassageOutputAdapter | Any]] = None,
+        outputs_cache: Optional[dict[str, Any]] = None,
         capture_fake_outputs_predicate: Predicate = always_false_predicate,
         capture_cache_outputs_predicate: Predicate = always_false_predicate,
         early_exit: bool = False,

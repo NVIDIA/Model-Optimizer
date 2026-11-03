@@ -614,6 +614,10 @@ ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for 
 
 > *Nemotron-H checkpoints containing MTP weights are not supported with `--use_fsdp2` and are rejected before distributed model loading. Remove `--use_fsdp2` to load and calibrate the MTP modules; the distributed loader does not construct them.*
 
+> *AWQ calibration (`awq_lite`, `awq_full`), as the AWQ formats and recipes use, AutoQuantize candidates included, is not supported with `--use_fsdp2` on more than one rank and is rejected before distributed model loading: each rank would fold its own smoothing scale into its weight shard. Drop `--use_fsdp2` (the single-process `device_map` still spreads the model over all the GPUs), run on one rank, or use a non-AWQ format.*
+
+> *`nvfp4_awq_clip` still works with `--use_fsdp2` on more than one GPU: it calibrates with AWQ-Clip alone, which folds no smoothing scale into the weights, and its clip search averages each candidate clip's loss over the ranks, so every rank takes the same clip.*
+
 ### Usage
 
 #### Slurm (recommended)
@@ -645,6 +649,8 @@ torchrun \
 See [Recipe-based Quantization](#recipe-based-quantization) for the recipe format and built-in recipe names. The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For more details refer to the [deployment section](#deployment) of this document.
 
 [AutoQuantize recipes](#autoquantize) use the same `torchrun` launch. With FSDP2, `--batch_size` is per rank and defaults to 1; recipe `score_size` is global. Use shared checkpoint directories and restore all `rank<N>.pth` files together, with the same world size, model, recipe, and data.
+
+Qwen checkpoints with `model_type` `qwen3_5` or `qwen3_5_moe` support this path for **text-only calibration**. The loader retains the conditional-generation architecture and vision tower, but `--calib_with_images` remains unsupported with FSDP2. During mixed-format export, linear-attention QKV/Z and B/A projections retain their separate runtime-fusion groups. Weight AutoQuantize with FSDP2 remains experimental.
 
 > *Performance Note: FSDP2 is designed for training workloads and may result in longer calibration and export times. For faster calibration, maximize the batch size based on available GPU memory and choose the right number of GPUs to avoid unnecessary communication.*
 

@@ -20,7 +20,6 @@ import copy
 import warnings
 from contextlib import contextmanager
 
-import megatron.core
 import torch
 import torch.nn.functional as F
 from megatron.core import InferenceParams, tensor_parallel
@@ -54,7 +53,6 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.transformer.utils import sharded_state_dict_default
 from megatron.core.utils import make_tp_sharded_tensor_for_checkpoint
-from packaging.version import Version
 
 from ..eagle.conversion import EagleDMRegistry
 from ..eagle.eagle_model import EagleModel
@@ -128,11 +126,6 @@ def dict_to_config(
     config.has_lm_head = architecture_config.get("has_lm_head")
 
     return config
-
-
-def mcore_version_higher_than(target_version: str):
-    """Check if megatron-core is greater than this version."""
-    return Version(megatron.core.__version__) > Version(target_version)
 
 
 def logits_kld_loss(logits, gt_logits, mapping=None):
@@ -937,8 +930,6 @@ class _DynamicEagleGPTModel(EagleModel):
             # decoder will get hidden_states from decoder.input_tensor
             decoder_input = None
 
-        extra_kwargs = {"packed_seq_params": None} if mcore_version_higher_than("0.9.0") else {}
-
         rotary_pos_emb = None
         yarn_mscale = 1.0
         if self.config.multi_latent_attention:
@@ -950,7 +941,7 @@ class _DynamicEagleGPTModel(EagleModel):
                 self.decoder,
                 decoder_input,
                 self.config,
-                **extra_kwargs,
+                packed_seq_params=None,
             )
             rotary_pos_emb = self.rotary_pos_emb(rotary_seq_len)
         elif self.position_embedding_type == "yarn":
@@ -959,7 +950,7 @@ class _DynamicEagleGPTModel(EagleModel):
                 None,
                 decoder_input,
                 self.config,
-                **extra_kwargs,
+                packed_seq_params=None,
             )
             rotary_pos_emb, yarn_mscale = self.rotary_pos_emb(rotary_seq_len)
         else:

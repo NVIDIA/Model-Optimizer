@@ -29,7 +29,6 @@ from _test_utils.torch.transformers_models import (
     get_tiny_qwen3_moe,
     tf_modelopt_state_and_output_tester,
 )
-from packaging.version import Version
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe.loader import load_recipe
@@ -37,10 +36,12 @@ from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, Ten
 from modelopt.torch.quantization.plugins.huggingface import (
     _QuantHFParallelLinear,
     _TransposedExpertsCalibMixin,
+    convert_hf_parallel_linears_on_the_fly,
     get_homogeneous_hf_decoder_layers,
     is_homogeneous_hf_model,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 pytest.importorskip("transformers")
 
@@ -100,6 +101,25 @@ def test_hf_parallel_weight_access_restores_dtensor_after_exception(monkeypatch)
         raise RuntimeError("test error")
 
     assert linear.weight is original_weight
+
+
+@pytest.mark.parametrize("expert_parallel", [False, True], ids=["no-plan", "expert-parallel"])
+def test_a_mesh_without_tp_sharded_linears_warns_unless_the_model_is_expert_parallel(
+    expert_parallel,
+):
+    """A transformers mesh with no TP-sharded Linear under it is worth a warning, except on a model
+    loaded expert-parallel: its mesh is the experts', and no Linear is meant to be sharded."""
+    model = nn.Sequential(nn.Linear(4, 4))
+    model._device_mesh = object()
+    if expert_parallel:
+        set_distribution_plan(model, DistributionPlan(2, ep_size=2))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        convert_hf_parallel_linears_on_the_fly(model)
+
+    warned = any("no TP-sharded linear layer" in str(w.message) for w in caught)
+    assert warned is not expert_parallel
 
 
 def test_convert_conv1d():
@@ -194,9 +214,6 @@ def test_nemotron_h_experts_only_recipes_target_routed_experts(recipe_path):
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
 @pytest.mark.parametrize("model_provider", [get_tiny_llama, get_tiny_qwen3_moe])
 def test_autoquantize_huggingface(model_provider, method):
-    if model_provider == get_tiny_qwen3_moe and Version(torch.__version__) < Version("2.9"):
-        pytest.skip("torch 2.8 grouped_mm is CUDA-only")
-
     model = model_provider()
     input_ids = model.dummy_inputs["input_ids"]
 

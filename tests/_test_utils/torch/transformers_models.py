@@ -41,15 +41,21 @@ from transformers import (
     LlamaForSequenceClassification,
     MixtralConfig,
     NemotronConfig,
+    NemotronHConfig,
     PreTrainedModel,
+    Qwen3_5Config,
+    Qwen3_5MoeConfig,
     Qwen3Config,
     Qwen3MoeConfig,
     Qwen3VLConfig,
-    Qwen3VLTextConfig,
     T5Config,
     T5ForConditionalGeneration,
     ViTConfig,
     ViTImageProcessor,
+)
+from transformers.conversion_mapping import (
+    get_checkpoint_conversion_mapping,
+    register_checkpoint_conversion_mapping,
 )
 
 import modelopt.torch.opt as mto
@@ -227,14 +233,7 @@ def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
         "vocab_size": 32,
         "rope_scaling": {"rope_type": "default", "mrope_section": [1, 1, 2]},
     }
-    # Transformers 4.x names this field rope_scaling; 5.x renamed it to rope_parameters.
-    # Supplying it avoids the 4.57 Qwen3-VL constructor dereferencing a None rope config.
-    rope_field = (
-        "rope_parameters"
-        if "rope_parameters" in getattr(Qwen3VLTextConfig, "__annotations__", {})
-        else "rope_scaling"
-    )
-    text_kwargs[rope_field] = {"rope_type": "default", "mrope_section": [1, 1, 2]}
+    text_kwargs["rope_parameters"] = {"rope_type": "default", "mrope_section": [1, 1, 2]}
     text_kwargs.update(config_kwargs)
     # Pass as dicts — transformers 5.3.0 Qwen3VLConfig.__init__ only handles
     # vision_config/text_config when they are dicts or None, not instances.
@@ -351,9 +350,6 @@ class _TinyQwen35Tokenizer:
 
 
 def _get_tiny_qwen3_5_vl(moe: bool = False, *, tokenizer=None, **config_kwargs) -> PreTrainedModel:
-    # Lazy imports — Qwen3.5-VL requires a recent transformers version.
-    from transformers import Qwen3_5Config, Qwen3_5MoeConfig
-
     set_seed(SEED)
 
     # Vocab + vision token ids normally derive from the reference tokenizer. Tests that do not
@@ -529,16 +525,6 @@ def _match_released_nemotron_h_embedding_name() -> None:
     with every real checkpoint on one tensor. Dropped upstream in 5.16, where this is a no-op
     since there is no such rule left to remove.
     """
-    # Optional dependency: conversion_mapping is transformers 5.x only, while NemotronH also
-    # exists on the 4.57 floor of the support matrix.
-    try:
-        from transformers.conversion_mapping import (
-            get_checkpoint_conversion_mapping,
-            register_checkpoint_conversion_mapping,
-        )
-    except ImportError:
-        return
-
     mapping = get_checkpoint_conversion_mapping("nemotron_h")
     if mapping is None:
         return
@@ -549,10 +535,6 @@ def _match_released_nemotron_h_embedding_name() -> None:
 
 def get_tiny_nemotron_h(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
-
-    # Lazy import — NemotronHConfig only exists in newer transformers builds, and this
-    # module is imported broadly (including by the min-transformers CI job).
-    from transformers import NemotronHConfig
 
     _match_released_nemotron_h_embedding_name()
 

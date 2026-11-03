@@ -119,15 +119,6 @@ except ImportError:
 
 SEED = 1234
 
-# TODO: re-enable the marked tests once fixed. Blackwell (sm_120, e.g. RTX PRO 6000) with the
-# nemo:26.06 / TE 2.16 / CUDA 13 stack hits a flaky, intermittent CUDA "illegal memory access" in
-# several tests: When fails, it poisons the process CUDA context and cascades hang across subsequent tests.
-# Passes locally on different GPUs. Likely an upstream TE/CUDA-13 kernel bug, not modelopt logic.
-skip_flaky_on_blackwell = pytest.mark.skipif(
-    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12,
-    reason="Flaky CUDA illegal memory access on Blackwell (nemo:26.06 / TE 2.16 / CUDA 13)",
-)
-
 
 def test_convert_megatron_parallel_linear(distributed_setup_size_1):
     initialize_for_megatron(seed=SEED)
@@ -353,6 +344,8 @@ def _gpt_model_provider(
                 use_cpu_initialization=meta_device,
                 num_moe_experts=num_moe_experts,
                 moe_grouped_gemm=moe_grouped_gemm,
+                # MoE with TP requires sequence parallelism
+                sequence_parallel=tp_size > 1 and num_moe_experts is not None,
             )
 
     if not meta_device:
@@ -497,7 +490,6 @@ FP8_GEMM_KV_CFG["quant_cfg"].extend(mtq.FP8_KV_CFG["quant_cfg"])
 )
 @pytest.mark.parametrize("meta_device", [False, True])
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
-@skip_flaky_on_blackwell
 def test_homogeneous_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -523,9 +515,6 @@ def test_homogeneous_sharded_state_dict(
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
 @pytest.mark.timeout(240)
 # Compressed state dict takes longer due to real quant conversion & saving/loading
-# Its real mtq.compress() path exercises the same TE/CUDA-13 kernels that trip the flaky
-# Blackwell (sm_120) illegal-memory-access; #1901 skipped the fake-quant sibling but missed this one.
-@skip_flaky_on_blackwell
 def test_homogeneous_compressed_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -607,20 +596,13 @@ def test_homogeneous_sharded_state_dict_hybrid(dist_workers, tmp_path, config):
         mixed_block_size_config,
     ],
 )
-@skip_flaky_on_blackwell
 def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     dist_workers.run(
         partial(_test_sharded_state_dict, tmp_path, config, 256, None, False, False, {}),
     )
 
 
-@pytest.mark.parametrize(
-    "hidden_size",
-    [
-        256,
-        pytest.param(320, marks=skip_flaky_on_blackwell),
-    ],
-)
+@pytest.mark.parametrize("hidden_size", [256, 320])
 def test_regular_state_dict(distributed_setup_size_1, hidden_size):
     initialize_for_megatron(tensor_model_parallel_size=1, pipeline_model_parallel_size=1, seed=SEED)
 
@@ -691,7 +673,6 @@ def _test_fp8_real_quantize_helper(rank, size):
     assert real_quant_mem < cur_mem
 
 
-@skip_flaky_on_blackwell
 def test_fp8_real_quantize(dist_workers):
     dist_workers.run(_test_fp8_real_quantize_helper)
 
@@ -1726,7 +1707,6 @@ def _test_layerwise_calibrate_vlm_text_forward_loop(drive_wrapper, rank, size):
     assert all(m.input_quantizer.amax is not None for m in calibrated)
 
 
-@skip_flaky_on_blackwell
 @pytest.mark.parametrize("drive_wrapper", [False, True])
 def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wrapper):
     dist_workers_size_1.run(partial(_test_layerwise_calibrate_vlm_text_forward_loop, drive_wrapper))

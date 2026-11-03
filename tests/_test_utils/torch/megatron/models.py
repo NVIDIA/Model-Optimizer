@@ -146,6 +146,7 @@ def get_mcore_gpt_model(
     transformer_impl: str = "modelopt" if HAS_TE else "local",
     use_cpu_initialization: bool = False,
     bf16: bool = True,
+    sequence_parallel: bool = False,
     use_te: bool = False,
     # MoE-specific parameters
     moe_grouped_gemm: bool = False,
@@ -215,7 +216,7 @@ def get_mcore_gpt_model(
         pipeline_model_parallel_size=pipeline_model_parallel_size,
         expert_model_parallel_size=expert_model_parallel_size,
         expert_tensor_parallel_size=expert_tensor_parallel_size,
-        sequence_parallel=config_kwargs.pop("sequence_parallel", False),
+        sequence_parallel=sequence_parallel,
         num_layers=num_layers,
         num_layers_in_first_pipeline_stage=num_layers_in_first_pipeline_stage,
         num_layers_in_last_pipeline_stage=num_layers_in_last_pipeline_stage,

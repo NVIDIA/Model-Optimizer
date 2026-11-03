@@ -21,6 +21,7 @@ from unittest import mock
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from _test_utils.torch.quantization.quantize_common import (
     INT4_AWQ_CLIP_CFG,
@@ -30,6 +31,8 @@ from _test_utils.torch.quantization.quantize_common import (
     save_restore_test,
 )
 from pydantic import ValidationError
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -42,6 +45,7 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     register_quant_backend,
     unregister_quant_backend,
 )
+from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.utils.distributed import ParallelState
 
 # A test config with double-quant (using `SequentialQuantizers`)
@@ -727,6 +731,36 @@ def _test_indexer_check_covers_all_ranks(rank, size):
 
 def test_indexer_k_check_covers_all_ranks(cpu_dist_workers):
     cpu_dist_workers.run(_test_indexer_check_covers_all_ranks)
+
+
+def _awq_on_a_sharded_fsdp2_model_job(rank, size):
+    model = SimpleLinear()
+    fully_shard(model, mesh=init_device_mesh("cpu", (size,)))
+    forward_loop = lambda m: m(m.get_input())  # noqa: E731
+    with bounded_collectives():
+        for config in (mtq.W4A8_AWQ_BETA_CFG, INT4_AWQ_FULL_CFG):  # awq_lite, awq_full
+            with pytest.raises(NotImplementedError, match=f"FSDP2 model sharded over {size} ranks"):
+                mtq.quantize(model, config, forward_loop)
+        # AutoQuantize checks every candidate before it calibrates the first one.
+        with pytest.raises(NotImplementedError, match="AutoQuantize candidate 'W4A8_AWQ_BETA_CFG'"):
+            mtq.auto_quantize(
+                model,
+                constraints={"effective_bits": 6.0},
+                quantization_formats=[mtq.FP8_DEFAULT_CFG, mtq.W4A8_AWQ_BETA_CFG],
+                data_loader=[SimpleLinear.get_input()],
+                forward_step=lambda m, batch: m(batch),
+                loss_func=lambda output, batch: output.sum(),
+            )
+        assert not is_quantized(model)
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
+        with pytest.raises(NotImplementedError, match="awq_lite"):
+            mtq.calibrate(model, "awq_lite", forward_loop)
+
+
+def test_awq_on_a_sharded_fsdp2_model_is_refused(cpu_dist_workers):
+    """Each rank would fold its own AWQ scale into its shard: every rank refuses alike, before the
+    model changes, through ``mtq.quantize``, ``mtq.auto_quantize`` and ``mtq.calibrate``."""
+    cpu_dist_workers.run(_awq_on_a_sharded_fsdp2_model_job)
 
 
 @pytest.mark.parametrize(

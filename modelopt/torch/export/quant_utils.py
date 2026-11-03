@@ -19,6 +19,7 @@ import fnmatch
 import logging
 from collections import defaultdict
 from collections.abc import Generator
+from itertools import chain
 from typing import Any
 from warnings import warn
 
@@ -41,6 +42,7 @@ from modelopt.torch.quantization.qtensor import (
     NVFP4QTensor,
     QTensorWrapper,
 )
+from modelopt.torch.quantization.qtensor.base_qtensor import _refuse_dtensor
 from modelopt.torch.quantization.utils import (
     quantizer_attr_names,
     representative_weight_quantizer,
@@ -299,13 +301,18 @@ def get_kv_cache_bias(kv_module: nn.Module) -> list[torch.Tensor]:
 
 
 def get_kv_cache_scaling_factor(
-    self_attention_module: nn.Module, clamp_fp8_scales: bool = True
+    self_attention_module: nn.Module,
+    clamp_fp8_scales: bool = True,
+    *,
+    resolve_constant_amax: bool = False,
 ) -> list[torch.Tensor | None]:
     """Get the K and V BMM scaling factors for the self attention module.
 
     Args:
         self_attention_module: The self attention module to get the K and V BMM scaling factors from.
         clamp_fp8_scales: Whether to clamp FP8 KV cache scaling factors to at least 1.0.
+        resolve_constant_amax: Resolve fixed forward ranges for functional capture. Defaults to
+            False to preserve legacy exporters' omission of stateless scales.
 
     Returns:
         The K and V BMM scaling factors.
@@ -318,9 +325,31 @@ def get_kv_cache_scaling_factor(
     # Both FP8 and NVFP4 cache scales are amax / 448, as the HF exporter writes them and
     # vLLM / TensorRT-LLM read them.
     scaling_factors = []
-    for quantizer_name in ("k_bmm_quantizer", "v_bmm_quantizer"):
-        quantizer = getattr(self_attention_module, quantizer_name)
-        amax = quantizer.export_amax() if quantizer.is_enabled else None
+    quantizers = [self_attention_module.k_bmm_quantizer, self_attention_module.v_bmm_quantizer]
+    reference = None
+    if resolve_constant_amax:
+        reference = next(
+            (
+                quantizer.amax
+                for quantizer in quantizers
+                if quantizer.is_enabled
+                and not quantizer._use_constant_amax
+                and quantizer.amax is not None
+            ),
+            None,
+        )
+        if reference is None:
+            reference = next(
+                chain(self_attention_module.parameters(), self_attention_module.buffers()),
+                torch.empty(0),
+            )
+    for quantizer in quantizers:
+        if not quantizer.is_enabled:
+            amax = None
+        elif resolve_constant_amax and quantizer._use_constant_amax and not quantizer.is_mx_format:
+            amax = quantizer._get_amax(reference).reshape(1)
+        else:
+            amax = quantizer.export_amax()
         scaling_factors.append(None if amax is None else amax.float() / 448.0)
 
     # For FP8, we recommend default KV-cache scaling factor to be 1. The
@@ -338,7 +367,9 @@ def get_kv_cache_scaling_factor(
         factor = scaling_factors[i]
         if factor is None:
             continue
-        if _has_large_fp8_scale(factor):
+        if not (
+            resolve_constant_amax and quantizers[i]._use_constant_amax
+        ) and _has_large_fp8_scale(factor):
             warn(
                 "Warning: Large KV activation detected. "
                 "Quantized KV cache may lead to higher accuracy drop."
@@ -828,6 +859,7 @@ def _validate_int4_block_size(in_dim, block_size):
 
 def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
     """Packs the INT4 weights into uint8 tensor."""
+    _refuse_dtensor(weight, "INT4 packing")
     out_dim = weight.shape[-2]
     assert out_dim % 2 == 0, f"Cannot pack weight. Out dimension {out_dim} is not an even number."
     in_dim = weight.shape[-1]
@@ -851,7 +883,7 @@ def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
         # Pack two 4-bit values (val0,val1) into a single byte:
         val0 = transpose[..., 0] & 0x0F
         val1 = transpose[..., 1] & 0x0F
-        packed_byte = val0 | (val1 << 4)
+        packed_byte = val0 | torch.bitwise_left_shift(val1, 4)
 
         # Transpose back to the shape (experts, out_dim // 2, in_dim)
         return packed_byte.permute(0, 2, 1).contiguous().view(torch.uint8)
@@ -864,7 +896,7 @@ def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
         # Pack two 4-bit values into one byte
         val0 = reshaped[..., 0] & 0x0F
         val1 = reshaped[..., 1] & 0x0F
-        packed_byte = val0 | (val1 << 4)
+        packed_byte = val0 | torch.bitwise_left_shift(val1, 4)
 
         # Return shape (out_dim // 2, in_dim)
         return packed_byte.T.contiguous().view(torch.uint8)
