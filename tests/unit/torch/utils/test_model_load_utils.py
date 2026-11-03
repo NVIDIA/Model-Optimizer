@@ -3088,7 +3088,9 @@ def test_a_decompressed_load_refuses_compressed_tensors_its_model_does_not_place
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
     monkeypatch.setattr(
-        model_load_utils, "unplaced_source_keys", lambda *args: [f"{mtp}.{n}" for n in names]
+        model_load_utils,
+        "unplaced_source_keys",
+        lambda *args, **kwargs: [f"{mtp}.{n}" for n in names],
     )
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
     config = SimpleNamespace(
@@ -3154,7 +3156,7 @@ def test_a_decompressed_load_refuses_compressed_tensors_in_a_file_it_never_opens
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "unplaced_source_keys", lambda *args: [])
+    monkeypatch.setattr(model_load_utils, "unplaced_source_keys", lambda *args, **kwargs: [])
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
     config = SimpleNamespace(
         model_type=_NO_SPEC,
