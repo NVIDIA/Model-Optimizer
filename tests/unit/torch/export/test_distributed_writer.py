@@ -983,7 +983,8 @@ def test_nogather_export_writes_what_the_single_process_export_writes(
 
 def test_nogather_export_refuses_an_existing_checkpoint_before_folding(gloo_world_of_one, tmp_path):
     """Refused only by the writer, after the in-place fold, the model would be left packed and could
-    not be exported again. Checked first, the refusal leaves it as it was, free to export elsewhere."""
+    not be exported again. Checked first, the refusal leaves it as it was, free to export
+    elsewhere."""
     model = _load(_save(_llama_config(), tmp_path / "src"))
     want = _quantize_with_reference(model, mtq.FP8_DEFAULT_CFG)
     model = _fsdp2_shard(model, gloo_world_of_one)

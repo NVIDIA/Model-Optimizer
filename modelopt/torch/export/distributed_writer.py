@@ -591,7 +591,8 @@ def _write_even_shards(
     def plan_mine() -> list:
         # In the first collective, which carries one rank's failure to every rank: its filesystem can
         # fail to create the directory, or show a checkpoint there, which the export never overwrites.
-        # The export checks the directory before it folds the model too; this catches one written since.
+        # The export checks the directory before it folds the model too; this catches a checkpoint
+        # written since.
         export_dir.mkdir(parents=True, exist_ok=True)
         _refuse_an_existing_checkpoint(export_dir)
         return [(len(my_files), write_keys)]
