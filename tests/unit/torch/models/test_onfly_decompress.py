@@ -918,7 +918,8 @@ def _compressed_mixtral(path, fmt, sharded=False):
     compressor, scheme, _, _ = onfly._read_compression(
         SimpleNamespace(quantization_config=quantization_config)
     )
-    state = load_file(str(path / "model.safetensors"))
+    # Copied out of the file, which is written over below.
+    state = {k: v.clone() for k, v in load_file(str(path / "model.safetensors")).items()}
     gen = torch.Generator().manual_seed(0)
     dense = {}
     for key in sorted(k for k in list(state) if ".experts." in k):  # ...experts.<e>.w1.weight
@@ -1012,7 +1013,8 @@ def test_a_load_the_decompressor_did_not_mark_casts_as_before(tmp_path):
         tie_word_embeddings=False,
     )
     AutoModelForCausalLM.from_config(config).save_pretrained(tmp_path)
-    state = load_file(str(tmp_path / "model.safetensors"))
+    # Copied out of the file, which is written over below.
+    state = {k: v.clone() for k, v in load_file(str(tmp_path / "model.safetensors")).items()}
     state["model.norm.weight"] = torch.full_like(state["model.norm.weight"], 3, dtype=torch.int8)
     save_file(state, str(tmp_path / "model.safetensors"), metadata={"format": "pt"})
 

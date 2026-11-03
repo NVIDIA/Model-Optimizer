@@ -132,7 +132,8 @@ def _save_compressed_tiny_qwen3_moe(dense_dir, packed_dir, compression):
     """The tiny Qwen3-MoE twice: whole in bf16, and with its experts compressed by ``compression``."""
     fmt, weights, values, scale = _COMPRESSIONS[compression]
     _save_tiny_qwen3_moe(dense_dir)
-    state = load_file(str(dense_dir / "model.safetensors"))
+    # Copied out of the file, which is written over below.
+    state = {k: v.clone() for k, v in load_file(str(dense_dir / "model.safetensors")).items()}
     gen = torch.Generator().manual_seed(0)
     for key in [k for k in state if ".experts." in k]:  # ...mlp.experts.<e>.gate_proj.weight
         draw = torch.randint(0, len(values), state[key].shape, generator=gen)

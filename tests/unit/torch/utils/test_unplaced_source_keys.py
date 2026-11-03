@@ -51,6 +51,32 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     parallel_load_and_prepare_fsdp2,
 )
 
+
+def test_a_two_argument_unplaced_source_keys_still_records_the_keys(monkeypatch, tmp_path):
+    """The map a load already read reaches ``unplaced_source_keys`` by keyword, and only when there is
+    one, so a caller that replaced the function with its two-argument form still records keys."""
+    seen = []
+
+    def two_arguments(model, ckpt_path):
+        seen.append(ckpt_path)
+        return ["mtp.fc.weight"]
+
+    monkeypatch.setattr(model_load_utils, "unplaced_source_keys", two_arguments)
+    model = LlamaForCausalLM(_tiny_llama_config())
+
+    assert model_load_utils.record_unplaced_source_keys(model, str(tmp_path)) == ["mtp.fc.weight"]
+    assert seen == [str(tmp_path)]
+    read = {"mtp.fc.weight": "model.safetensors"}
+    monkeypatch.setattr(
+        model_load_utils,
+        "unplaced_source_keys",
+        lambda model, ckpt_path, tensor_files=None: sorted(tensor_files),
+    )
+    assert model_load_utils.record_unplaced_source_keys(
+        model, str(tmp_path), tensor_files=read
+    ) == ["mtp.fc.weight"]
+
+
 # A layer past ``num_hidden_layers``: genuinely stray, so it must always be recorded.
 STRAY = "model.layers.1.input_layernorm.weight"
 

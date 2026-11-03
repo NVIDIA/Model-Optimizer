@@ -467,7 +467,15 @@ def record_unplaced_source_keys(
     loader of a model that may be exported calls this: :func:`load_pretrained` and
     :func:`parallel_load_and_prepare_fsdp2` do.
     """
-    keys = sorted(unplaced_source_keys(model, ckpt_path, tensor_files) if keys is None else keys)
+    if keys is None:
+        # The map by keyword, and only when the load read it: a caller that replaced
+        # unplaced_source_keys with its two-argument form gets its keys as before.
+        keys = (
+            unplaced_source_keys(model, ckpt_path)
+            if tensor_files is None
+            else unplaced_source_keys(model, ckpt_path, tensor_files=tensor_files)
+        )
+    keys = sorted(keys)
     model._modelopt_unplaced_source_keys = keys
     model._modelopt_source_checkpoint = str(ckpt_path)
     return keys
