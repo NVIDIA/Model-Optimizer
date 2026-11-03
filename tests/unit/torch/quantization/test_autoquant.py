@@ -797,6 +797,11 @@ _AWQ_SMOOTHQUANT = [mtq.INT4_AWQ_CFG, mtq.INT8_SMOOTHQUANT_CFG]
 _AWQ_CUSTOM = [mtq.INT4_AWQ_CFG, INT8_CUSTOM_QUANT_TEST_CFG]
 _SMOOTHQUANT_ONLY = [mtq.INT8_SMOOTHQUANT_CFG]
 _NONE_SMOOTHQUANT = [None, mtq.INT8_SMOOTHQUANT_CFG]
+# `algorithm: []` calibrates nothing and so adds no mode for the search to drop.
+_BLOCKWISE_UNCALIBRATED_INT8 = [
+    mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+    {**mtq.INT8_DEFAULT_CFG, "algorithm": []},
+]
 
 
 # A covering set rather than the full model x formats x method product: every model, format
@@ -813,6 +818,7 @@ _NONE_SMOOTHQUANT = [None, mtq.INT8_SMOOTHQUANT_CFG]
         (SimpleConv, _AWQ_SMOOTHQUANT, 4.0, 6.0, "aumann_shapley"),
         (SimpleLinear, _NONE_SMOOTHQUANT, 8.0, 11.0, "aumann_shapley"),
         (TransformerBlock, _AWQ_CUSTOM, 4.0, 6.0, "aumann_shapley"),
+        (SimpleLinear, _BLOCKWISE_UNCALIBRATED_INT8, 4.0, 6.0, "gradient"),
     ],
 )
 def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method):

@@ -43,7 +43,12 @@ from modelopt.torch.quantization.conversion import (
 from modelopt.torch.utils import atomic_print
 
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
-from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe, _algorithm_methods
+from .algorithms import (
+    AUTO_QUANTIZE_SEARCHERS,
+    QuantRecipe,
+    _algorithm_methods,
+    _refuse_unpinnable_weight_rewrite,
+)
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
 from .kv_cache_auto_quant import (
@@ -1144,7 +1149,8 @@ def auto_quantize(
         ),
     ]
     for quant_cfg, name in all_processed_formats:
-        algo = QuantRecipe(quant_cfg, name=name).config.algorithm
+        recipe = QuantRecipe(quant_cfg, name=name)
+        algo = recipe.config.algorithm
         if unsupported := _algorithm_methods(algo) - _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
             algo_method = ", ".join(sorted(map(str, unsupported)))
             raise ValueError(
@@ -1155,6 +1161,7 @@ def auto_quantize(
         # Every candidate, before the search calibrates any: calibrate() would refuse mid-search.
         _refuse_awq_on_a_sharded_fsdp2_model(model, algo, candidate=name)
         _refuse_unsupported_distributed_calibration(model, algo)
+        _refuse_unpinnable_weight_rewrite(recipe)
 
     # Select the appropriate searcher based on method
     if method_name not in AUTO_QUANTIZE_SEARCHERS:

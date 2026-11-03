@@ -54,6 +54,8 @@ from ._auto_quantize_cost import (
 )
 from .config import QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
 from .conversion import set_quantizer_by_cfg
+from .ggml import GGML_FORMAT_REGISTRY
+from .ggml.common import PIN_OVERRIDES_WEIGHT, pinned_packed_weight
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized_linear
 
@@ -147,6 +149,30 @@ def _algorithm_methods(algorithm) -> set:
 
 def _rewrites_weights(recipe: "QuantRecipe") -> bool:
     return bool(_algorithm_methods(recipe.config.algorithm) & _WEIGHT_REWRITING_METHODS)
+
+
+def _unpinnable_rewrite_error(recipe: "QuantRecipe", target: str) -> ValueError:
+    return ValueError(
+        f"AutoQuantize candidate {recipe} calibrates with "
+        f"{sorted(_algorithm_methods(recipe.config.algorithm))}, which rewrites weights, but "
+        f"{target} is not a single GGML quantizer that keeps the rewritten codes. Search this "
+        "format with a calibration that leaves weights unchanged."
+    )
+
+
+def _refuse_unpinnable_weight_rewrite(recipe: "QuantRecipe") -> None:
+    """Refuse, before the model is converted, a weight rewrite whose quantizer cannot pin codes.
+
+    Checks the entries that name weight quantizers. Patterns that only reach them by wildcard
+    are left to the check on the converted quantizers in the search.
+    """
+    if not _rewrites_weights(recipe):
+        return
+    for entry in recipe.config.quant_cfg:
+        if not entry.enable or entry.cfg is None or "weight_quantizer" not in entry.quantizer_name:
+            continue
+        if isinstance(entry.cfg, list) or entry.cfg.backend != "ggml":
+            raise _unpinnable_rewrite_error(recipe, f"its {entry.quantizer_name!r} entry")
 
 
 def _iter_tensor_quantizers(module: nn.Module):
@@ -1165,7 +1191,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         a single GGML quantizer pins the codes GPTQ chose) and a weight shared with another module,
         which the rewrite would change under that module too.
         """
-        modules = {}
+        params = {}
         for recipe in search_recipes:
             if not _rewrites_weights(recipe):
                 continue
@@ -1178,22 +1204,24 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                         if any(
                             isinstance(m, SequentialQuantizer) for m in quantizer.modules()
                         ) or any(q.backend != "ggml" for q in enabled):
-                            raise ValueError(
-                                f"AutoQuantize candidate {recipe} calibrates with "
-                                f"{sorted(_algorithm_methods(recipe.config.algorithm))}, "
-                                f"which rewrites {hparam.name}'s weights, but its {attr} "
-                                "is not a single GGML quantizer that keeps the rewritten codes. "
-                                "Search this format with a calibration that leaves weights unchanged."
+                            raise _unpinnable_rewrite_error(recipe, f"{hparam.name}'s {attr}")
+                        # Only the weight this quantizer covers: "weight_quantizer" -> "weight",
+                        # a fused module's "gate_up_proj_weight_quantizers" -> "gate_up_proj".
+                        weight_name = (
+                            _get_replay_quantizer_attr(attr)
+                            .removesuffix("weight_quantizer")
+                            .rstrip("_")
+                            or "weight"
+                        )
+                        param = getattr(module, weight_name, None)
+                        if not isinstance(param, nn.Parameter):
+                            raise NotImplementedError(
+                                f"{hparam.name}'s {attr} does not quantize a single weight "
+                                f"parameter, which candidate {recipe} would rewrite."
                             )
-                        modules[module] = hparam.name
-        if not modules:
+                        params[param] = hparam.name
+        if not params:
             return None
-        params = {
-            param: name
-            for module, name in modules.items()
-            for param_name, param in module.named_parameters(recurse=False)
-            if not param_name.endswith("bias")
-        }
         uses = defaultdict(int)
         for _, param in self.model.named_parameters(remove_duplicate=False):
             uses[param] += 1
@@ -1225,9 +1253,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         unweighted format like Q8_0; it keeps quantizing the source weight, as the selected model
         will.
         """
-        from .ggml import GGML_FORMAT_REGISTRY
-        from .ggml.common import PIN_OVERRIDES_WEIGHT, pinned_packed_weight
-
         for hparam in quant_recipe_hparams:
             for module in hparam.quant_modules:
                 for weight, quantizer in module.iter_weights_for_calibration():
@@ -1243,8 +1268,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     def _write_selected_codes_to_weights(self):
         """Leave each selected weight-rewriting candidate's weights as its codes decode, as GPTQ does."""
-        from .ggml import GGML_FORMAT_REGISTRY
-        from .ggml.common import PIN_OVERRIDES_WEIGHT
 
         def replays(quantizer):
             return getattr(quantizer, PIN_OVERRIDES_WEIGHT, False)
@@ -1468,15 +1491,17 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                         desc=f"Calibrating for {recipe}",
                     )
 
+                num_modes = len(ModeloptStateManager(self.model).state_dict())
                 calibrate(
                     self.model,
                     algorithm=recipe.config.algorithm,
                     forward_loop=forward_loop,
                 )
-                # Calibrate adds a new mode to the model. Since auto_quantize mixes the quantization recipes
-                # across layers, lets not save this new mode in the modelopt state.
+                # Calibrate adds a new mode to the model (none for `algorithm: []`). Since
+                # auto_quantize mixes the quantization recipes across layers, lets not save it in
+                # the modelopt state.
                 # TODO: This is a hack. We need to create a mode for auto_quantize to handle this in a clean way.
-                ModeloptStateManager(self.model).state_dict().pop()
+                del ModeloptStateManager(self.model).state_dict()[num_modes:]
                 if _rewrites_weights(recipe):
                     self._replay_pinned_codes(quant_recipe_hparams)
                     self._restore_source_weights(source_weights)

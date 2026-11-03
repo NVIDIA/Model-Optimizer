@@ -627,6 +627,9 @@ def test_auto_quantize_refusal_or_failure_hands_back_the_source_weights(case):
     for weight, original in zip(model.parameters(), source.parameters()):
         assert torch.equal(weight, original)
     assert model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS
+    if case == "non_ggml":  # Refused from its config, before the model is converted.
+        assert not mto.ModeloptStateManager.is_converted(model)
+        assert [type(m) for m in model.modules()] == [type(m) for m in source.modules()]
 
 
 def test_a_replayed_pin_fake_quantizes_to_exactly_its_decoding_in_bf16():
