@@ -200,6 +200,11 @@ def get_args():
         help="Use the student's recurrence backend for the teacher, with all quantizers disabled.",
     )
     parser.add_argument("--recompute_gdn", action="store_true", help="Recompute GDN activations.")
+    parser.add_argument(
+        "--compile_gdn_decode",
+        action="store_true",
+        help="Experimentally compile native GDN decode chunks; requires Inductor precision-cast emulation.",
+    )
     # Parallelism arguments
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
@@ -596,6 +601,7 @@ def get_args():
         or args.train_linear_attention_only
         or args.teacher_serving_arithmetic
         or args.recompute_gdn
+        or args.compile_gdn_decode
     ):
         raise ValueError("Linear-attention options require --linear_attention_recipe.")
 
@@ -1024,6 +1030,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
                         train_all_weights=not args.train_linear_attention_only,
                         teacher_serving_arithmetic=args.teacher_serving_arithmetic,
                         recompute_gdn=args.recompute_gdn,
+                        compile_gdn_decode=args.compile_gdn_decode,
                     )
                 )
             # Restore before linear-attention setup, and before the KD conversion hook.

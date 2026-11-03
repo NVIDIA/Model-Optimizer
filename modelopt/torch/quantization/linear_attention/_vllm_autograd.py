@@ -192,7 +192,7 @@ def step(q, k, v, gate, beta, state, scale, normalize=False, gate_inputs=None, p
     from ...kernels.quantization.linear_attention.serving.forward import step as native_step
 
     with torch.no_grad():
-        out, final = native_step(
+        inputs = (
             q.to(torch.bfloat16),
             k.to(torch.bfloat16),
             v.to(torch.bfloat16),
@@ -201,9 +201,19 @@ def step(q, k, v, gate, beta, state, scale, normalize=False, gate_inputs=None, p
             state.float(),
             scale,
             normalize,
-            gate_inputs,
-            precision=precision,
         )
+        if (
+            torch.compiler.is_compiling()
+            and precision == "vllm"
+            and gate.ndim == 1
+            and gate_inputs is not None
+        ):
+            # Defer Inductor support until compilation is explicitly selected.
+            from ._compiled_decode import native_gdn_step
+
+            out, final = native_gdn_step(*inputs, *gate_inputs)
+        else:
+            out, final = native_step(*inputs, gate_inputs, precision=precision)
     if not torch.is_grad_enabled() or not any(
         x.requires_grad for x in (q, k, v, gate, beta, state)
     ):

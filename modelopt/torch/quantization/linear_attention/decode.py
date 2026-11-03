@@ -15,6 +15,7 @@
 
 """Differentiable token-state and encoded-update replay for QAT."""
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 import torch
@@ -25,6 +26,8 @@ from ._vllm_autograd import normalized
 from .utils import _state_qdq, forward_value
 
 __all__ = []
+
+_compile_recurrent_decode = ContextVar("compile_gdn_decode", default=False)
 
 
 @dataclass
@@ -109,6 +112,31 @@ def _sum_keys(value):
     return value[..., 0, :]
 
 
+def _run_decode_chunk(
+    state, q, k, v, g, beta, gates, state_quantizer, block_v, precision, scale, normalize
+):
+    # Import the optional native backend only for the ordinary state-QDQ path.
+    from ._vllm_autograd import step
+
+    outputs = []
+    for t in range(len(q)):
+        output, working = step(
+            q[t],
+            k[t],
+            v[t],
+            g[t],
+            beta[t],
+            state,
+            scale,
+            normalize,
+            precision=precision,
+            gate_inputs=(gates[0][t], gates[1][t], *gates[2:]) if gates is not None else None,
+        )
+        outputs.append(output)
+        state = _state_qdq(working, state_quantizer, block_v)
+    return torch.stack(outputs), state
+
+
 def _recurrent_decode(
     q,
     k,
@@ -136,6 +164,9 @@ def _recurrent_decode(
         zero = (q.sum() + k.sum() + v.sum() + g.sum() + beta.sum()) * 0
         return v + zero, initial_state if output_final_state else None
     scale = q.shape[-1] ** -0.5 if scale is None else scale
+    compiled = _compile_recurrent_decode.get()
+    if compiled and (config.precision != "vllm" or g.ndim != 2 or gate_inputs is None):
+        raise ValueError("Compiled decode supports only the native vLLM GDN raw-gate profile")
     if config.precision == "replayssm_two_precision":
         return two_precision_decode(
             q, k, v, g, beta, initial_state, gate_inputs, read_mode, read_rounding
@@ -155,27 +186,28 @@ def _recurrent_decode(
             gate_inputs,
         )
         return output, carry.reconstruct() if output_final_state else None
-    # Import the optional native backend only for the ordinary state-QDQ path.
-    from ._vllm_autograd import step
 
     def run_chunk(state, q, k, v, g, beta, gates):
-        outputs = []
-        for t in range(len(q)):
-            output, working = step(
-                q[t],
-                k[t],
-                v[t],
-                g[t],
-                beta[t],
-                state,
-                scale,
-                use_qk_l2norm_in_kernel,
-                precision=config.precision,
-                gate_inputs=(gates[0][t], gates[1][t], *gates[2:]) if gates is not None else None,
-            )
-            outputs.append(output)
-            state = _state_qdq(working, state_quantizer, config.state_block_v)
-        return torch.stack(outputs), state
+        fn = _run_decode_chunk
+        if compiled and len(q) == 64:
+            # Inductor is optional and initialized only when explicitly requested.
+            from ._compiled_decode import compiled_chunk
+
+            fn = compiled_chunk(q.device)
+        return fn(
+            state,
+            q,
+            k,
+            v,
+            g,
+            beta,
+            gates,
+            state_quantizer,
+            config.state_block_v,
+            config.precision,
+            scale,
+            use_qk_l2norm_in_kernel,
+        )
 
     state = _state_qdq(initial_state, state_quantizer, config.state_block_v)
     with torch.autocast(device_type=q.device.type, enabled=False):
@@ -184,7 +216,7 @@ def _recurrent_decode(
             and torch.is_grad_enabled()
             and any(x.requires_grad for x in (q, k, v, g, beta, state))
         )
-        if recompute:
+        if recompute or compiled:
             outputs = []
             for start in range(0, len(q), 64):
                 sl = slice(start, start + 64)
@@ -194,8 +226,7 @@ def _recurrent_decode(
                     else None
                 )
                 # Keep state attached across chunks. Only the original handoff applies initial QDQ.
-                output, state = activation_checkpoint(
-                    run_chunk,
+                chunk_args = (
                     state,
                     q[sl],
                     k[sl],
@@ -203,7 +234,11 @@ def _recurrent_decode(
                     g[sl],
                     beta[sl],
                     gates,
-                    use_reentrant=False,
+                )
+                output, state = (
+                    activation_checkpoint(run_chunk, *chunk_args, use_reentrant=False)
+                    if recompute
+                    else run_chunk(*chunk_args)
                 )
                 outputs.append(output)
             output = torch.cat(outputs)

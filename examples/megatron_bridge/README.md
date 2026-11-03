@@ -573,3 +573,12 @@ python generate_vllm.py --model /tmp/Qwen3-8B-Pruned-6B
 - 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
 - 🐛 [File a bug](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=1_bug_report.md)
 - ✨ [File a Feature Request](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=2_feature_request.md)
+
+For long per-token GDN state-QAD suffixes, `--compile_gdn_decode` optionally
+compiles 64-token recurrence chunks with Inductor and CUDA graphs. It requires
+the native vLLM GDN policy and a PyTorch build supporting Inductor's
+`emulate_precision_casts` option. Native forward kernels remain opaque to the
+compiler; state QDQ still occurs at the original handoff and every decode write.
+Chunk boundaries retain attached states, and shorter tails execute eagerly.
+Compilation is an experimental training optimization, defaults off, and does
+not change the saved state-quantization policy.

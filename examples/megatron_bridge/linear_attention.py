@@ -17,6 +17,7 @@
 
 from contextlib import ExitStack, contextmanager
 
+import torch
 from linear_attention_batch import mask_prefix_labels, phase_lengths
 from megatron.bridge.training.config import FinetuningDatasetConfig
 from megatron.bridge.training.gpt_step import forward_step_modelopt
@@ -48,6 +49,7 @@ def linear_attention_training(
     train_all_weights=True,
     teacher_serving_arithmetic=False,
     recompute_gdn=False,
+    compile_gdn_decode=False,
 ):
     """Install quantization hooks and yield a phase-aware ModelOpt forward step."""
     if not quant_config.linear_attention:
@@ -63,6 +65,17 @@ def linear_attention_training(
     fixed_phase = config.dataset.seq_length if operand_qat else prefill_tokens
     resume = config.checkpoint.load and has_modelopt_state(config.checkpoint.load)
     with ExitStack() as phases:
+        if compile_gdn_decode:
+            if any(
+                entry.cfg.backend != "serving" or entry.cfg.precision != "vllm"
+                for entry in quant_config.linear_attention
+            ):
+                raise ValueError("Compiled decode requires the native vLLM GDN state policy")
+            from modelopt.torch.quantization.linear_attention._compiled_decode import (
+                compiled_gdn_decode,
+            )
+
+            phases.enter_context(compiled_gdn_decode())
 
         def prepare_student(models):
             # Restore the saved policy before quantization and before the QAD conversion hook.
@@ -78,6 +91,10 @@ def linear_attention_training(
                         "Each local model chunk must contain Megatron GatedDeltaNet or "
                         "KimiDeltaAttention; choose a pipeline layout with linear attention on every stage"
                     )
+                if compile_gdn_decode and any(
+                    not isinstance(layer, gated_delta_net.GatedDeltaNet) for layer in layers
+                ):
+                    raise ValueError("Compiled recurrence currently supports GDN only")
                 student.requires_grad_(train_all_weights)
                 if not train_all_weights:
                     for layer in layers:
@@ -106,6 +123,9 @@ def linear_attention_training(
             yield batch
 
         def forward_step(state: GlobalState, data_iterator, model, return_schedule_plan=False):
+            if compile_gdn_decode:
+                # Graph outputs remain live through this microbatch's backward and recomputation.
+                torch.compiler.cudagraph_mark_step_begin()
             if data_lengths:
                 # Bridge consumes and inspects the data iterator on every TP rank before
                 # broadcasting tensor fields. Supplying None on non-source ranks crashes.

@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+
 import pytest
 import torch
 from _test_utils.torch.quantization.linear_attention_reference import (
@@ -197,7 +199,10 @@ def compiled_serving_case(request):
 
 
 @pytest.mark.parametrize("compiled_serving_case", ["gdn"], indirect=True, scope="module")
-def test_long_decode_checkpoint_preserves_state_and_gradients(compiled_serving_case, monkeypatch):
+@pytest.mark.parametrize("compile_decode", [False, True], ids=["eager", "inductor"])
+def test_long_decode_checkpoint_preserves_state_and_gradients(
+    compiled_serving_case, monkeypatch, compile_decode
+):
     from modelopt.torch.quantization.linear_attention import decode
 
     args, _, forward, _, _ = compiled_serving_case
@@ -214,7 +219,17 @@ def test_long_decode_checkpoint_preserves_state_and_gradients(compiled_serving_c
         )
     ).cuda()
     expected = _native_forward(inputs, quantizer, False, False)
-    actual = forward(inputs=inputs, state_quantizer=quantizer)
+    if compile_decode:
+        from modelopt.torch.kernels.quantization.linear_attention.serving import forward as native
+
+        # The fixture has already decoded eagerly; exercise the cold production cache as well.
+        native._decode_metadata.cache_clear()
+    token = decode._compile_recurrent_decode.set(compile_decode)
+    try:
+        torch.compiler.cudagraph_mark_step_begin()
+        actual = forward(inputs=inputs, state_quantizer=quantizer)
+    finally:
+        decode._compile_recurrent_decode.reset(token)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     loss = actual[0][:, 65:].float().square().mean() + actual[1].square().mean()
     gradients = torch.autograd.grad(loss, inputs)
@@ -224,8 +239,26 @@ def test_long_decode_checkpoint_preserves_state_and_gradients(compiled_serving_c
     retained_loss = retained[0][:, 65:].float().square().mean() + retained[1].square().mean()
     expected_gradients = torch.autograd.grad(retained_loss, inputs)
     for actual_gradient, expected_gradient in zip(gradients, expected_gradients):
-        torch.testing.assert_close(actual_gradient, expected_gradient, rtol=0, atol=0)
+        torch.testing.assert_close(
+            actual_gradient,
+            expected_gradient,
+            rtol=(0.01 if actual_gradient.dtype == torch.bfloat16 else 1e-4)
+            if compile_decode
+            else 0,
+            atol=1e-6 if compile_decode else 0,
+        )
     assert gradients[1][:, :65].abs().sum() > 0
+    if compile_decode:
+        # A distinct layer's quantizer and the no-grad recomputation pass share the compiler.
+        other_quantizer = copy.deepcopy(quantizer)
+        token = decode._compile_recurrent_decode.set(True)
+        try:
+            torch.compiler.cudagraph_mark_step_begin()
+            with torch.no_grad():
+                repeated = forward(inputs=inputs, state_quantizer=other_quantizer)
+            torch.testing.assert_close(repeated, expected, rtol=0, atol=0)
+        finally:
+            decode._compile_recurrent_decode.reset(token)
 
 
 def test_serving_state_qdq_and_handoff_gradient(compiled_serving_case):
