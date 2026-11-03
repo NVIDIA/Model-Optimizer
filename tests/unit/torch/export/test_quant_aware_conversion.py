@@ -1241,6 +1241,35 @@ def test_stacked_experts_guard():
     _assert_experts_pre_expanded(bad, [])
 
 
+def test_sharded_export_keeps_a_renamed_vlm_part_wildcard():
+    """A wildcard over a renamed VLM part stays one entry, not every module beneath it."""
+    pytest.importorskip("transformers.core_model_loading")
+    from transformers.core_model_loading import WeightRenaming
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.visual = torch.nn.Module()
+    model.model.visual.patch_embed = torch.nn.Linear(2, 2, bias=False)
+    model.model.language_model = torch.nn.Module()
+    model.model.language_model.layers = torch.nn.ModuleList([torch.nn.Linear(2, 2, bias=False)])
+    model.lm_head = torch.nn.Linear(2, 2, bias=False)
+    # Qwen2.5-VL's renames: the hub checkpoint has ``model.layers`` and ``visual``.
+    model._weight_conversions = [
+        WeightRenaming(r"^visual", "model.visual"),
+        WeightRenaming(r"^model(?!\.(language_model|visual))", "model.language_model"),
+    ]
+    config = {
+        "quantization": {
+            "quant_algo": "FP8",
+            "exclude_modules": ["lm_head", "model.language_model*", "model.visual.patch_embed*"],
+        }
+    }
+
+    config = _revert_quant_config_names_best_effort(model, config)
+
+    assert config["quantization"]["exclude_modules"] == ["lm_head", "model*", "visual.patch_embed*"]
+
+
 def test_revert_quant_config_names_mapper():
     """exclude_modules / quantized_layers keys revert to hub names, preserving wildcards.
 

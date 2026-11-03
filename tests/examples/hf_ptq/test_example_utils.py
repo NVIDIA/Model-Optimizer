@@ -35,7 +35,15 @@ from transformers import AutoModelForCausalLM, LlamaConfig
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 
-@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+@pytest.mark.parametrize(
+    ("model_type", "architectures"),
+    [
+        ("qwen3_5", None),
+        ("qwen3_5_moe", None),
+        ("llava", ["LlavaForConditionalGeneration"]),
+        ("NemotronH_Nano_VL_V2", ["NemotronH_Nano_VL_V2"]),
+    ],
+)
 @pytest.mark.parametrize(
     ("calib_with_images", "packed_location", "error"),
     [
@@ -45,15 +53,64 @@ from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
         (False, "text", "pack-quantized"),
     ],
 )
-def test_fsdp2_qwen_vlm_requires_text_only_calibration(
-    model_type, calib_with_images, packed_location, error
+def test_fsdp2_vlm_requires_text_only_calibration(
+    model_type, architectures, calib_with_images, packed_location, error
 ):
     args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=calib_with_images)
-    config = SimpleNamespace(model_type=model_type, vision_config={}, text_config=SimpleNamespace())
+    config = SimpleNamespace(
+        model_type=model_type,
+        architectures=architectures,
+        vision_config={},
+        text_config=SimpleNamespace(),
+    )
     if packed_location is not None:
         target = config if packed_location == "root" else config.text_config
         target.quantization_config = {"quant_method": "compressed-tensors"}
     expected = pytest.raises(NotImplementedError, match=error) if error else nullcontext()
+    with expected:
+        example_utils.validate_fsdp2_supported(args, config)
+
+
+def test_fsdp2_refuses_encoder_decoder():
+    args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=False)
+    config = SimpleNamespace(model_type="t5", architectures=["T5ForConditionalGeneration"])
+    config.is_encoder_decoder = True
+    with pytest.raises(NotImplementedError, match="encoder-decoder"):
+        example_utils.validate_fsdp2_supported(args, config)
+
+
+class _ImageOnlyVLM(torch.nn.Module):
+    def forward(self, pixel_values, input_ids=None):  # e.g. Nemotron Nano VL
+        pass
+
+
+class _TextCapableVLM(torch.nn.Module):
+    def forward(self, input_ids=None, pixel_values=None):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("model", "requires_images"),
+    [(_ImageOnlyVLM, True), (_TextCapableVLM, False), (torch.nn.Linear, False)],
+)
+def test_forward_requires_images(model, requires_images):
+    assert example_utils.forward_requires_images(model) is requires_images
+    assert example_utils.forward_requires_images(model.__new__(model)) is requires_images
+
+
+@pytest.mark.parametrize(
+    ("model_class", "refused"), [(_ImageOnlyVLM, True), (_TextCapableVLM, False)]
+)
+def test_fsdp2_refuses_image_only_forward_before_loading(monkeypatch, model_class, refused):
+    """Refused from the config alone, before any rank reads the checkpoint."""
+    monkeypatch.setattr(example_utils, "resolve_model_class", lambda *_: model_class)
+    args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=False)
+    config = SimpleNamespace(model_type="vlm", architectures=["VLM"], vision_config={})
+    expected = (
+        pytest.raises(NotImplementedError, match="requires image inputs")
+        if refused
+        else nullcontext()
+    )
     with expected:
         example_utils.validate_fsdp2_supported(args, config)
 

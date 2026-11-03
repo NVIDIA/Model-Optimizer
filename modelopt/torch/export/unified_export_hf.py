@@ -96,6 +96,7 @@ from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import is_fsdp2_model
+from modelopt.torch.utils.fsdp2_utils import fsdp2_root_unsharded
 from modelopt.torch.utils.perf import maybe_clear_cuda_cache
 
 try:
@@ -523,8 +524,10 @@ def _llm_dummy_forward(model: torch.nn.Module) -> None:
             print(
                 f"Running optimization on language model with fake_input shape: {fake_input.shape}"
             )
-            # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
-            language_model(fake_input, use_cache=False)
+            # Calling the submodule skips the FSDP2 root's pre-forward; gather the root's params.
+            with fsdp2_root_unsharded(model):
+                # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
+                language_model(fake_input, use_cache=False)
         else:
             raise ValueError(
                 f"Cannot extract language_model from Nemotron VL model ({type(model).__name__}). "
@@ -1703,10 +1706,12 @@ def _revert_quant_config_names_best_effort(
     try:
         name_mapper = build_reverse_name_mapper(model)
         if name_mapper is not None and hf_quant_config:
+            # Parameter owners only, as the resident export passes: a container or quantizer whose
+            # name a rename moves into a wildcard would expand that wildcard into every module.
             return _revert_hf_quant_config_names(
                 hf_quant_config,
                 name_mapper,
-                module_names=(name for name, _ in model.named_modules()),
+                module_names={name.rpartition(".")[0] for name, _ in model.named_parameters()},
             )
     except Exception as exc:
         warnings.warn(
