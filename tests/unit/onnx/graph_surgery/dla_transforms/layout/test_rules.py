@@ -24,7 +24,12 @@ from onnxscript import ir
 
 from modelopt.onnx.graph_surgery.dla_transforms.common import static_shape
 from modelopt.onnx.graph_surgery.dla_transforms.context import DlaGraph
-from modelopt.onnx.graph_surgery.dla_transforms.layout.rules import SHAPE_RULES
+from modelopt.onnx.graph_surgery.dla_transforms.layout.passes import snapshot
+from modelopt.onnx.graph_surgery.dla_transforms.layout.rules import (
+    AXIS_RULES,
+    INDEXING_RULES,
+    SHAPE_RULES,
+)
 
 
 def _apply_rules(model, *, native_shapes, planned_shapes, group, force_fp16_activations=False):
@@ -34,10 +39,127 @@ def _apply_rules(model, *, native_shapes, planned_shapes, group, force_fp16_acti
     if group is SHAPE_RULES:
         controls = {}
         rules = [rule.rule(graph, controls) for rule in group]
+    elif group is INDEXING_RULES:
+        controls, views = {}, {}
+        rules = [rule.rule(graph, controls, views) for rule in group]
     else:
         rules = [rule.rule(graph) for rule in group]
     count = graph.apply_patterns(rules)
-    return (graph, rules, count)
+    return graph, rules, count
+
+
+@pytest.mark.parametrize("kind", ["Softmax", "LogSoftmax", "Concat", "TopK", "QuantizeLinear"])
+def test_axis_promotion(kind):
+    shape = [2, 6]
+    inputs = ["x"]
+    outputs = ["y"]
+    controls = {}
+    if kind == "Concat":
+        inputs.append("x")
+    elif kind == "TopK":
+        inputs.append("control")
+        controls["control"] = np.array([3], np.int64)
+        outputs.append("z")
+    elif kind == "QuantizeLinear":
+        inputs.extend(["scale", "zero"])
+        controls.update(scale=np.full(6, 0.125, np.float32), zero=np.zeros(6, np.uint8))
+    output_shape = [2, 12 if kind == "Concat" else 3 if kind == "TopK" else 6]
+    graph = helper.make_graph(
+        [
+            helper.make_node(
+                kind, inputs, outputs, **({} if kind == "QuantizeLinear" else {"axis": 1})
+            )
+        ],
+        "axes",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+        [
+            helper.make_tensor_value_info(
+                name,
+                TensorProto.INT64
+                if kind == "TopK" and name == "z"
+                else TensorProto.UINT8
+                if kind == "QuantizeLinear"
+                else TensorProto.FLOAT,
+                output_shape,
+            )
+            for name in outputs
+        ],
+        [numpy_helper.from_array(value, name) for name, value in controls.items()],
+    )
+    source = onnx.shape_inference.infer_shapes(
+        helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)], ir_version=10)
+    )
+    model = ir.serde.deserialize_model(source)
+    native = {
+        node: (
+            tuple(static_shape(value) for value in node.inputs),
+            tuple(static_shape(value) for value in node.outputs),
+        )
+        for node in model.graph
+    }
+    planned = {"x": (1, 1, *shape), **dict.fromkeys(outputs, (1, 1, *output_shape))}
+    context, rules, count = _apply_rules(
+        model, native_shapes=native, planned_shapes=planned, group=AXIS_RULES
+    )
+    assert count == 1
+    model.graph.inputs[0].shape = ir.Shape(planned["x"])
+    for node in model.graph:
+        for value in node.outputs:
+            if value.name in planned:
+                value.shape = ir.Shape(planned[value.name])
+    result = onnx.shape_inference.infer_shapes(ir.serde.serialize_model(model), strict_mode=True)
+    onnx.checker.check_model(result, full_check=True)
+    x = np.arange(12, dtype=np.float32).reshape(shape) / 16
+    expected = ReferenceEvaluator(source).run(None, {"x": x})
+    actual = ReferenceEvaluator(result).run(None, {"x": x.reshape(planned["x"])})
+    for before, after in zip(expected, actual, strict=True):
+        np.testing.assert_array_equal(before, after.reshape(before.shape))
+    assert next(iter(model.graph)).attributes["axis"].value == 3
+    assert context.apply_patterns(rules) == 0
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_contrib_quantizer_default_axis_and_version_boundary(version):
+    """Only the supported contrib schema gets its default per-channel axis remapped."""
+    source = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "QuantizeLinear", ["x", "scale", "zero"], ["y"], domain="com.microsoft"
+                )
+            ],
+            "contrib_axes",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3])],
+            [helper.make_tensor_value_info("y", TensorProto.UINT8, [2, 3])],
+            [
+                numpy_helper.from_array(np.full(3, 0.125, np.float32), "scale"),
+                numpy_helper.from_array(np.zeros(3, np.uint8), "zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", version)],
+        ir_version=10,
+    )
+    model = ir.serde.deserialize_model(source)
+    native, planned = snapshot(model)
+    if version != 1:
+        assert not planned
+        planned = {"x": (1, 1, 2, 3), "y": (1, 1, 2, 3)}
+    _, _, count = _apply_rules(
+        model, native_shapes=native, planned_shapes=planned, group=AXIS_RULES
+    )
+    assert count == int(version == 1)
+    if version != 1:
+        assert not next(iter(model.graph)).attributes
+        return
+    model.graph.inputs[0].shape = ir.Shape(planned["x"])
+    model.graph.outputs[0].shape = ir.Shape(planned["y"])
+    result = ir.serde.serialize_model(model)
+    onnx.checker.check_model(result, full_check=True)
+    values = np.arange(6, dtype=np.float32).reshape(2, 3) / 8
+    np.testing.assert_array_equal(
+        _execute(result, {"x": values.reshape(1, 1, 2, 3)}, True).reshape(2, 3),
+        _execute(source, {"x": values}, True),
+    )
 
 
 def _lower_shapes(model, planned):
@@ -184,3 +306,152 @@ def test_five_dimensional_shape_rules_use_original_snapshot(target, transpose, p
     feeds = {"x": np.arange(24, dtype=np.float32).reshape(1, 2, 3, 4)}
     expected = ReferenceEvaluator(model).run(None, feeds)[0].reshape(planned_shape)
     np.testing.assert_array_equal(ReferenceEvaluator(transformed).run(None, feeds)[0], expected)
+
+
+def _execute(model, feeds, use_ort):
+    if not use_ort:
+        return ReferenceEvaluator(model).run(None, feeds)[0]
+    ort = pytest.importorskip("onnxruntime")
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = options.inter_op_num_threads = 1
+    return ort.InferenceSession(
+        model.SerializeToString(), sess_options=options, providers=["CPUExecutionProvider"]
+    ).run(None, feeds)[0]
+
+
+def _lower_indexing(model, planned):
+    working = ir.serde.deserialize_model(onnx.shape_inference.infer_shapes(model, strict_mode=True))
+    native = {
+        n: (tuple(static_shape(v) for v in n.inputs), tuple(static_shape(v) for v in n.outputs))
+        for n in working.graph
+    }
+    _, _, count = _apply_rules(
+        working, native_shapes=native, planned_shapes=planned, group=INDEXING_RULES
+    )
+    x = working.graph.inputs[0]
+    x.shape = ir.Shape((1,) * (4 - len(x.shape)) + tuple(x.shape))
+    for value in [*working.graph.inputs, *[v for n in working.graph for v in n.outputs]]:
+        if value.name in planned:
+            value.shape = ir.Shape(planned[value.name])
+    ir.passes.common.RemoveUnusedNodesPass()(working)
+    result = onnx.shape_inference.infer_shapes(ir.serde.serialize_model(working), strict_mode=True)
+    onnx.checker.check_model(result, full_check=True)
+    return result, count
+
+
+@pytest.mark.parametrize(
+    ("kind", "index_values", "axis", "runtime", "promote_indices"),
+    [
+        ("Gather", [2, 0], 1, False, False),
+        ("Gather", [[0, 1]], 0, False, False),
+        ("Gather", 0, 0, False, False),
+        ("GatherElements", [[2, 0], [1, 2]], -1, False, False),
+        ("GatherElements", [[2, 0], [1, 2]], 1, True, False),
+        ("GatherElements", [[2, 0], [1, 2]], 1, True, True),
+    ],
+)
+def test_index_ranks(kind, index_values, axis, runtime, promote_indices):
+    """Gather keeps native controls; GatherElements receives one matching index view."""
+    indices = np.asarray(index_values, np.int32)
+    shape = [1, 3] if indices.ndim == 0 else [2, 3]
+    inputs = [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)]
+    inits = []
+    if runtime:
+        inputs.append(helper.make_tensor_value_info("indices", TensorProto.INT32, indices.shape))
+    else:
+        inits.append(numpy_helper.from_array(indices, "indices"))
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node(kind, ["x", "indices"], ["y"], axis=axis)],
+            "index_layout",
+            inputs,
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, None)],
+            inits,
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=10,
+    )
+    feeds = {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape)}
+    if runtime:
+        feeds["indices"] = indices
+    # ReferenceEvaluator 1.23.2 does not normalize negative GatherElements axes.
+    use_ort = kind == "GatherElements"
+    expected = _execute(model, feeds, use_ort)
+    target = (1,) * (4 - expected.ndim) + expected.shape
+    planned = {"y": target}
+    if promote_indices:
+        planned["indices"] = (1, 1, *indices.shape)
+    transformed, count = _lower_indexing(model, planned)
+    assert count == 1
+    feeds["x"] = feeds["x"].reshape(1, 1, *shape)
+    if promote_indices:
+        feeds["indices"] = indices.reshape(1, 1, *indices.shape)
+    np.testing.assert_array_equal(_execute(transformed, feeds, use_ort), expected.reshape(target))
+
+
+@pytest.mark.parametrize(
+    ("kind", "version", "axes", "keepdims"),
+    [
+        ("ReduceSum", 17, [1], 0),
+        ("ReduceMean", 17, [-1], 1),
+        ("ReduceMax", 21, [0], 0),
+        ("ReduceMin", 21, None, 0),
+    ],
+)
+def test_reduction_axes_and_output_restore(kind, version, axes, keepdims):
+    """Reductions preserve values and output rank across supported schema forms."""
+    operands, inits, attrs = ["x"], [], {"keepdims": keepdims}
+    if axes is not None:
+        if kind == "ReduceSum" or version >= 18:
+            operands.append("axes")
+            inits.append(numpy_helper.from_array(np.asarray(axes, np.int64), "axes"))
+        else:
+            attrs["axes"] = axes
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node(kind, operands, ["y"], **attrs)],
+            "reduction_layout",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3, 4])],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, None)],
+            inits,
+        ),
+        opset_imports=[helper.make_opsetid("", version)],
+    )
+    x = np.arange(24, dtype=np.float32).reshape(2, 3, 4) / 8
+    expected = ReferenceEvaluator(model).run(None, {"x": x})[0]
+    target = (1,) * (4 - expected.ndim) + expected.shape
+    transformed, count = _lower_indexing(model, {"y": target})
+    assert count == 1
+    actual = ReferenceEvaluator(transformed).run(None, {"x": x.reshape(1, 2, 3, 4)})[0]
+    np.testing.assert_array_equal(actual, expected.reshape(target))
+
+
+def test_shared_reduction_axes_get_separate_live_owners():
+    """Rewritten reductions each retain their own axes while sharing data safely."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("ReduceSum", ["x", "axes"], [name], keepdims=1)
+                for name in ("y", "z")
+            ],
+            "shared_axes",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3, 4])],
+            [
+                helper.make_tensor_value_info(name, TensorProto.FLOAT, [2, 1, 4])
+                for name in ("y", "z")
+            ],
+            [numpy_helper.from_array(np.array([1], np.int64), "axes")],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+    )
+    transformed, count = _lower_indexing(model, {"y": (1, 2, 1, 4), "z": (1, 2, 1, 4)})
+    assert count == 2
+    axes = [node.input[1] for node in transformed.graph.node if node.op_type == "ReduceSum"]
+    assert len(set(axes)) == 2
+    x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    for actual, expected in zip(
+        ReferenceEvaluator(transformed).run(None, {"x": x.reshape(1, 2, 3, 4)}),
+        ReferenceEvaluator(model).run(None, {"x": x}),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(actual, expected.reshape(1, 2, 1, 4))
