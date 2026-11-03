@@ -853,7 +853,15 @@ class _QuantTEMCoreColumnParallelLinear(_QuantTELinear, _MegatronColumnParallelL
 
 @QuantModuleRegistry.register({TELinear: "te_mcore_Linear"})
 class _QuantTEMCoreLinear(_QuantTELinear):
-    pass
+    def _setup(self):
+        # Sync ranges over the replicas of this layer: its pipeline stage's tensor-, data- and
+        # context-parallel ranks (which may see different sequence shards). The default group
+        # spans all ranks, which hangs or mixes layers across pipeline stages.
+        if self.parallel_state is None and mcore_parallel.model_parallel_is_initialized():
+            self.parallel_state = ParallelState(
+                mcore_parallel.get_tensor_and_data_parallel_group(with_context_parallel=True)
+            )
+        super()._setup()
 
 
 @QuantModuleRegistry.register(
