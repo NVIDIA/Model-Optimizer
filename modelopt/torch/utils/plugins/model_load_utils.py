@@ -15,8 +15,12 @@
 
 """HuggingFace model loading: :func:`load_pretrained`, by a plan to distribute the model."""
 
+import contextlib
 import copy
+import dataclasses
+import json
 import logging
+import math
 import os
 import re
 import warnings
@@ -28,10 +32,12 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
+import transformers.distributed as hf_distributed
 from huggingface_hub import snapshot_download
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+from torch.distributed import device_mesh
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.fsdp import FSDPModule
@@ -49,9 +55,10 @@ from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
 
 from modelopt.torch.utils import distributed as dist
-from modelopt.torch.utils import env
+from modelopt.torch.utils import env, moe
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
+    ParallelState,
     barrier,
     broadcast_state_dict,
     is_initialized,
@@ -60,11 +67,22 @@ from modelopt.torch.utils.distributed import (
 from modelopt.torch.utils.fsdp2_utils import fsdp2_wrap
 from modelopt.torch.utils.logging import print_rank_0, warn_rank_0
 from modelopt.torch.utils.moe import (
+    _EP_MIN_TRANSFORMERS,
+    _EXPERTS_STYLES,
+    _FSDP2_TAKES,
+    _SUB_CONFIG_ATTRS,
     _choose_ep_degree,
     _ep_config,
+    _fsdp2_way_out,
     _num_experts_from_config,
     _routed_expert_keys,
     _routed_expert_modules,
+    _spec_ep_plan,
+    _spec_refusal,
+    _spec_refuses_ep,
+    apply_distributed_support,
+    check_distributed_support,
+    register_torch_a2a,
 )
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     checkpoint_tensor_files,
@@ -72,6 +90,18 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     indexed_weight_map,
     read_safetensors_subset,
 )
+
+__all__ = [
+    "build_meta_causal_lm",
+    "fsdp2_wrap",
+    "is_fsdp2_text_only_vlm",
+    "load_and_prepare_ep",
+    "load_pretrained",
+    "parallel_load_and_prepare_fsdp2",
+    "record_unplaced_source_keys",
+    "resolve_distribution_plan",
+    "unplaced_source_keys",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -432,16 +462,32 @@ def record_unplaced_source_keys(
     return keys
 
 
+_EXPERT_PARALLEL = "expert-parallel"
 _FSDP2 = "FSDP2"
 # What each sharded load takes besides the checkpoint. These loads build the model class and place
 # it themselves, so from_pretrained's own arguments (device_map, max_memory, ...) do not reach them.
 _FSDP2_ONLY = frozenset({"cpu_offload", "mp_policy", "broadcast_chunk_size"})
 _SHARDED_LOAD_OPTIONS = {
-    _FSDP2: _FSDP2_ONLY | {"trust_remote_code", "attn_implementation", "hf_config"}
+    _EXPERT_PARALLEL: frozenset(
+        {
+            "trust_remote_code",
+            "attn_implementation",
+            "hf_config",
+            "freeze",
+            "require_lm_head",
+        }
+    ),
+    _FSDP2: _FSDP2_ONLY | {"trust_remote_code", "attn_implementation", "hf_config"},
 }
-# The FSDP2-only values that ask nothing of a whole load: the FSDP2 load's defaults, and None where
-# that leaves the option unset (a None broadcast_chunk_size asks for all of a source's layers).
+# The FSDP2-only values that ask nothing of any load but the FSDP2 one: its defaults, and None where
+# that leaves the option unset (a None broadcast_chunk_size asks for all of a source's layers). Any
+# other option asks nothing at None, from_pretrained's own default (device_map=None, say).
 _ASKS_NOTHING = {"cpu_offload": (False, None), "mp_policy": (None,), "broadcast_chunk_size": (8,)}
+
+
+# The options only the expert-parallel load takes, which a whole-model load would hand on to
+# from_pretrained.
+_EP_ONLY_LOAD_OPTIONS = _SHARDED_LOAD_OPTIONS[_EXPERT_PARALLEL] - _SHARDED_LOAD_OPTIONS[_FSDP2]
 
 
 def _route(plan: DistributionPlan) -> str | None:
@@ -451,11 +497,21 @@ def _route(plan: DistributionPlan) -> str | None:
             f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}."
         )
     if plan.is_expert_parallel:
-        raise NotImplementedError(
-            f"{plan!r} shards the routed experts, which load_pretrained has no load for. Plan "
-            "ep_size=1 (MODELOPT_EP_DEGREE=1) to give every rank the whole model, or shard it "
-            "with FSDP2."
-        )
+        if plan.is_fsdp_dense:
+            # Refused before anything loads, where the remedies can be named: the expert-parallel
+            # load replicates the dense part, so it cannot honor this plan.
+            raise NotImplementedError(
+                f"{plan!r} FSDP2-shards the dense part, but the expert-parallel load replicates it "
+                "on every rank. Sharding the dense part under expert parallelism is not supported "
+                "yet. An EP degree left to the decision gives way to FSDP2 for the whole model when "
+                "a whole copy of the dense part and a rank's share of the routed experts would take "
+                f"more than {_REPLICATED_SHARE:.0%} of a GPU; the degree asked for stands. "
+                "Replicate the dense part anyway (MODELOPT_FSDP_SIZE=1, or "
+                "a plan with dense='replicate'), or shard the whole model with FSDP2 "
+                "(MODELOPT_EP_DEGREE=1 with MODELOPT_FSDP_SIZE=world) if the checkpoint is an "
+                "unquantized causal LM."
+            )
+        return _EXPERT_PARALLEL
     return _FSDP2 if plan.is_fsdp_dense else None
 
 
@@ -490,60 +546,125 @@ def _init_quantized_weights() -> bool:
     return getattr(AutoModelForCausalLM.from_pretrained, "_modelopt_init_quantized_weights", False)
 
 
-def _whole_instead(decided: bool) -> str:
-    """How to have every rank load the model whole: the knob counts only for a decided plan."""
-    plan = f"distribution=DistributionPlan({dist.size()}, dense='replicate')"
-    return f"MODELOPT_FSDP_SIZE=1 or {plan}" if decided else plan
+def _whole_instead(decided: bool, route: str = _FSDP2) -> str:
+    """How to have every rank load the model whole: the knob counts only for a decided plan.
+
+    Instead of the expert-parallel load it takes both knobs, as the plan decision refuses to
+    replicate an expert-parallel MoE unasked.
+    """
+    if route == _EXPERT_PARALLEL:
+        plan = f"distribution=DistributionPlan({dist.size()}, 1, 'replicate')"
+        knobs = "MODELOPT_EP_DEGREE=1 with MODELOPT_FSDP_SIZE=1"
+    else:
+        plan = f"distribution=DistributionPlan({dist.size()}, dense='replicate')"
+        knobs = "MODELOPT_FSDP_SIZE=1"
+    return f"{knobs} or {plan}" if decided else plan
 
 
 def _refuse_sharded_load_options(
     route, auto_class, kwargs, decided: bool, measured: bool = False
 ) -> None:
-    """Refuse what the sharded load ``route`` cannot honor; ``measured``: GPU memory chose it."""
-    # An option passed as None, from_pretrained's own default (device_map=None, say), asks nothing.
-    passed = {name for name, value in kwargs.items() if value is not None}
+    """Refuse what the sharded load ``route`` cannot honor; ``measured``: the decision chose it.
+
+    By rank 0's GPU memory for the FSDP2 load, by the model's experts for the expert-parallel one.
+    """
+    # The options that ask anything (_ASKS_NOTHING).
+    passed = {
+        name
+        for name, value in kwargs.items()
+        if (value not in _ASKS_NOTHING[name] if name in _ASKS_NOTHING else value is not None)
+    }
     unknown = sorted(passed - _SHARDED_LOAD_OPTIONS[route] - {"dtype", "torch_dtype"})
     # torch_dtype is from_pretrained's older name for dtype, and None means "auto" to it.
     dtypes = [name for name in ("dtype", "torch_dtype") if kwargs.get(name) not in (None, "auto")]
-    if measured and (refused := sorted({*unknown, *dtypes})):
+    # What does not apply to a sharded load: a dtype to load in, or an option neither load takes.
+    taken = _SHARDED_LOAD_OPTIONS[_FSDP2] | _SHARDED_LOAD_OPTIONS[_EXPERT_PARALLEL]
+    refused = sorted({*(passed - taken - {"dtype", "torch_dtype"}), *dtypes})
+    if measured and refused:
         # Say so, rather than refuse the options below as if the caller had asked for this load.
+        chose = (
+            "no plan or MODELOPT_EP_DEGREE asked for a layout, and the plan decision shards the "
+            "model's routed experts over the ranks"
+            if route == _EXPERT_PARALLEL
+            else "no plan or MODELOPT_FSDP_SIZE asked for a layout, and by rank 0's GPU memory the "
+            f"model does not fit one GPU, so the {route} load shards it"
+        )
         raise TypeError(
-            f"{refused} do not apply to a sharded load, but no plan or MODELOPT_FSDP_SIZE asked for "
-            f"a layout, and by rank 0's GPU memory the model does not fit one GPU, so the {route} "
-            f"load shards it. To load it whole on every rank: {_whole_instead(decided)}."
+            f"{refused} do not apply to a sharded load, but {chose}. To load it whole on every "
+            f"rank: {_whole_instead(decided, route)}."
         )
     if _init_quantized_weights():
+        how = (
+            "builds the model through from_pretrained with its own config and device mesh, so "
+            "init_quantized_weights' placement and compression do not apply"
+            if route == _EXPERT_PARALLEL
+            else "builds the model without from_pretrained, so it would skip "
+            "init_quantized_weights' quantization"
+        )
         raise NotImplementedError(
-            f"The {route} load builds the model without from_pretrained, so it would skip "
-            "init_quantized_weights' quantization; load the model whole on every rank: "
-            f"{_whole_instead(decided)}."
+            f"The {route} load {how}; load the model whole on every rank: "
+            f"{_whole_instead(decided, route)}."
         )
     if auto_class not in (None, AutoModelForCausalLM):
         name = getattr(auto_class, "__name__", repr(auto_class))
+        builds = (
+            "the checkpoint's own, a VLM's image-text class included"
+            if route == _EXPERT_PARALLEL
+            else "a causal LM's or a text-only VLM's image-text class"
+        )
         raise NotImplementedError(
-            f"The {route} load builds its model class itself, a causal LM's or a text-only VLM's "
-            f"image-text class, so it takes no auto_class={name}: leave it out to have the load "
-            f"pick, or load the model whole with it: {_whole_instead(decided)}."
+            f"The {route} load builds its model class itself, {builds}, so it takes no "
+            f"auto_class={name}: leave it out to have the load pick, or load the model whole with "
+            f"it: {_whole_instead(decided, route)}."
         )
     if dtypes:  # A sharded load keeps the checkpoint's dtype.
         name = dtypes[0]
+        # Only the FSDP2 load computes in another dtype, through its mp_policy.
+        computes = "; FSDP2's mp_policy sets the dtype it computes in" if route == _FSDP2 else ""
         raise TypeError(
             f"The {route} load reads the checkpoint's tensors as stored and keeps their dtype, so "
-            f"{name}={kwargs[name]!r} does not apply to it; FSDP2's mp_policy sets the dtype it "
-            "computes in."
+            f"{name}={kwargs[name]!r} does not apply to it{computes}."
+        )
+    other = _FSDP2 if route == _EXPERT_PARALLEL else _EXPERT_PARALLEL
+    if elsewhere := sorted(passed & (_SHARDED_LOAD_OPTIONS[other] - _SHARDED_LOAD_OPTIONS[route])):
+        # Not placement: a whole model on every rank, the way out below, would refuse them too. An
+        # expert-parallel plan that FSDP2-shards the dense part is refused as well (_route).
+        instead = (
+            "pass a plan with ep_size > 1 to shard an MoE's routed experts"
+            if other == _EXPERT_PARALLEL
+            else "pass a plan with ep_size=1 and dense='fsdp' to shard the whole model with FSDP2"
+        )
+        raise TypeError(
+            f"{elsewhere} only apply to the {other} load, and the {route} load takes "
+            f"{sorted(_SHARDED_LOAD_OPTIONS[route])}; drop them, or {instead}."
         )
     if unknown:
         raise TypeError(
             f"{unknown} do not apply to the {route} load, which places the model itself; it "
             f"takes {sorted(_SHARDED_LOAD_OPTIONS[route])}. To place the model yourself, have "
-            f"every rank load it whole: {_whole_instead(decided)}."
+            f"every rank load it whole: {_whole_instead(decided, route)}."
         )
 
 
 def _sharded_load_kwargs(
-    route, ckpt_path, auto_class, model_type, kwargs, hub_options, decided: bool, measured: bool
+    route,
+    plan,
+    ckpt_path,
+    auto_class,
+    model_type,
+    kwargs,
+    hub_options,
+    decided: bool,
+    measured: bool,
+    prepared: bool = False,
 ) -> dict:
-    """What the sharded load ``route`` names takes, refusing what it cannot honor."""
+    """What the sharded load ``route`` names takes, refusing what it cannot honor.
+
+    ``prepared`` is whether an ``hf_config`` in ``kwargs`` is prepared by the model's spec already:
+    one the caller or the plan decision handed in is; the checkpoint's own config read for the load,
+    or a copy of a ``config`` passed for it, is not. Left out, it is taken as not, as preparing
+    again is harmless (:attr:`~modelopt.torch.models.EPSpec.prepare`) and skipping it is not.
+    """
     from modelopt.torch.models.hf import checkpoint_has_mtp
 
     _refuse_sharded_load_options(route, auto_class, kwargs, decided, measured)
@@ -553,10 +674,33 @@ def _sharded_load_kwargs(
         # The head is built on a whole model only; carried over, it would export unquantized.
         raise NotImplementedError(
             f"The {route} load cannot build the MTP head this {model_type} checkpoint carries. To "
-            f"load it whole on every rank: {_whole_instead(decided)}."
+            f"load it whole on every rank: {_whole_instead(decided, route)}."
         )
     trust_remote_code = kwargs.pop("trust_remote_code", False)
     hf_config = kwargs.pop("hf_config", None)
+    if route == _EXPERT_PARALLEL:
+        _refuse_a_rank_without_its_gpu(route, decided)
+        if hf_config is None or not prepared:
+            if hf_config is None:
+                hf_config = AutoConfig.from_pretrained(
+                    ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+                )
+            hf_config = apply_distributed_support(
+                model_type, hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code
+            )
+        else:
+            # Prepared with its plan, and preparing can patch modeling code, so it is not prepared
+            # again; a model its spec refuses is refused all the same.
+            check_distributed_support(model_type)
+        # Unfrozen unless asked, as the other loads return the model: which load runs is decided.
+        kwargs.setdefault("freeze", False)
+        return {
+            "plan": plan,
+            "trust_remote_code": trust_remote_code,
+            "hf_config": hf_config,
+            "hub_options": hub_options,
+            **kwargs,
+        }
     if hf_config is None:
         hf_config = AutoConfig.from_pretrained(
             ckpt_path, trust_remote_code=trust_remote_code, **hub_options
@@ -585,14 +729,23 @@ def _sharded_load_kwargs(
             f"The {route} load shards through a process group, even on one rank, which a process "
             "started without a launcher cannot set up; launch it with `torchrun --nproc_per_node=1`."
         )
+    _refuse_a_rank_without_its_gpu(route, decided)
+    return {"trust_remote_code": trust_remote_code, "hf_config": hf_config, **kwargs}
+
+
+def _refuse_a_rank_without_its_gpu(route, decided: bool) -> None:
+    """Refuse a rank without a GPU of its own before the ``route`` load, with the other ranks.
+
+    Inside the FSDP2 load, the others would wait for this rank in its collectives; the
+    expert-parallel load refuses only a run in which some ranks have one, and neither names the way
+    to a whole model.
+    """
     if not _has_own_gpu():
-        # Refused with the other ranks, not inside the load, where they would wait for this one.
         raise RuntimeError(
             f"The {route} load shards onto each rank's own GPU, and this rank has none: it sees "
             f"{torch.cuda.device_count()} GPU(s) as local rank {dist.local_rank()}. To load it "
-            f"whole on every rank: {_whole_instead(decided)}."
+            f"whole on every rank: {_whole_instead(decided, route)}."
         )
-    return {"trust_remote_code": trust_remote_code, "hf_config": hf_config, **kwargs}
 
 
 def _own_gpu_index() -> int | None:
@@ -613,8 +766,10 @@ def _has_own_gpu() -> bool:
     return _own_gpu_index() is not None
 
 
-def _load_sharded(ckpt_path, load_kwargs) -> nn.Module:
-    """The FSDP2 load, by the arguments :func:`_sharded_load_kwargs` checked."""
+def _load_sharded(route, ckpt_path, load_kwargs) -> nn.Module:
+    """The sharded load ``route`` names, by the arguments :func:`_sharded_load_kwargs` checked."""
+    if route == _EXPERT_PARALLEL:
+        return load_and_prepare_ep(ckpt_path, **load_kwargs)
     if not dist.is_initialized():
         # A single process's group of one, which the sharded model needs while it lives.
         dist.setup()
@@ -640,6 +795,11 @@ def load_pretrained(
     ``distribution`` is the :class:`~modelopt.torch.utils.distributed.DistributionPlan` to load by:
     every rank takes rank 0's or, when rank 0 passes none, :func:`resolve_distribution_plan`'s.
 
+    * ``ep_size > 1``: :func:`load_and_prepare_ep` shards an MoE's routed experts over the process
+      group as they load and replicates the dense part, so a plan with ``dense="fsdp"`` as well is
+      refused. It builds and places the model itself, so it takes its own options but no
+      ``auto_class``, placement or ``dtype``, and refuses a quantized checkpoint. Here it leaves the
+      model unfrozen, as the other loads do, unless ``freeze=True``.
     * ``dense="fsdp"``: :func:`parallel_load_and_prepare_fsdp2` shards a causal LM, or a text-only
       VLM it supports, over the process group (one process needs ``torchrun --nproc_per_node=1``).
       It builds and places the model itself, so it takes its own options but no ``auto_class``,
@@ -648,8 +808,7 @@ def load_pretrained(
       ``AutoModelForCausalLM``); on a distributed run every rank loads the whole model, onto its own
       GPU unless ``device_map`` is passed or ``init_quantized_weights`` places it.
 
-    No load here shards the routed experts: a plan with ``ep_size > 1`` is refused. A refusal on any
-    rank raises on every rank, before the load. The plan is recorded on the model
+    A refusal on any rank raises on every rank, before the load. The plan is recorded on the model
     (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`) for calibration and export, so
     :func:`~modelopt.torch.utils.fsdp2_utils.fsdp2_wrap` refuses it: to shard a model yourself,
     load it with ``from_pretrained``. :doc:`/guides/_distributed_loading` has the routing in full.
@@ -658,10 +817,11 @@ def load_pretrained(
     * A Hub model ID is made local first (:func:`ensure_local_checkpoint`, which takes the
       ``revision``, ``token``, ``cache_dir`` and ``local_files_only`` ``kwargs``): the export reads
       the source checkpoint from disk. Under ``torch.distributed`` every rank must call this. The
-      config read and a whole-model load still take all but ``revision``: an ``auto_map`` entry can
-      name custom code in another Hub repo, which Transformers fetches with them. A sharded load
-      builds the model with ``from_config``, which takes none. A ``subfolder`` is part of where the
-      checkpoint is: the config, the loading hook and the record below read it, as the load does.
+      config read, a whole-model load and the expert-parallel load still take all but
+      ``revision``: an ``auto_map`` entry can name custom code in another Hub repo, which
+      Transformers fetches with them. The FSDP2 load builds the model with ``from_config``, which
+      takes none. A ``subfolder`` is part of where the checkpoint is: the config, the loading hook
+      and the record below read it, as the load does.
     * The model type's loading hook runs
       (:func:`~modelopt.torch.models.hf.prepare_model_for_loading`), e.g. to keep the MTP head a
       Nemotron-H checkpoint carries. ``model_type`` selects it; when omitted, the type of the
@@ -694,16 +854,14 @@ def load_pretrained(
     if alone and distribution is None:
         # Knobs asking to shard over the launch are refused, as is a value that is no EP degree.
         ep, world = _ep_degree(None), int(os.environ["WORLD_SIZE"])
-        experts = ep != "auto" and ep > 1
-        asked = [f"MODELOPT_EP_DEGREE={env.ep_degree()}"] if experts else []
+        asked = [f"MODELOPT_EP_DEGREE={env.ep_degree()}"] if ep != "auto" and ep > 1 else []
         if _dense_from_env(world) == "fsdp":
             asked.append(f"MODELOPT_FSDP_SIZE={env.fsdp_size()}")
         if asked:
-            ep_way = ", with MODELOPT_EP_DEGREE=1: no load here shards the routed experts"
             raise RuntimeError(
                 f"{' and '.join(asked)} ask to shard the model over this "
                 f"{os.environ['WORLD_SIZE']}-rank launch, whose process group is not set up; load "
-                f"inside distributed_run(), which sets it up{ep_way if experts else ''}."
+                "inside distributed_run(), which sets it up."
             )
     # None is these options' own default: passed explicitly, it is no option to refuse.
     for name in ("config", "variant", "hf_config"):
@@ -730,9 +888,9 @@ def load_pretrained(
     decided = plan is None and dist.size() > 1
     # Each rank checks its own arguments; a refusal on one fails every rank before the fetch.
     with _refused_together("load arguments", alone):
-        # No load here shards the routed experts yet, so an EP degree left to the decision is 1.
-        # Parsed in this check, a knob one rank cannot parse fails every rank.
-        ep_size = 1 if decided and _ep_degree(None) == "auto" else None
+        if decided:
+            # Parsed in this check, a knob one rank cannot parse fails every rank.
+            _ep_degree(None)
         if kwargs.pop("output_loading_info", False):
             raise ValueError(
                 "load_pretrained returns the model alone and does not take "
@@ -784,7 +942,6 @@ def load_pretrained(
             config=config,
             auto_class=auto_class,
             trust_remote_code=trust_remote_code,
-            ep_size=ep_size,
             **hub_options,
         )
         if _route(plan) is not None:
@@ -805,20 +962,40 @@ def load_pretrained(
                 f"{sharded} only apply to the FSDP2 load, but {plan!r} gives every rank the whole "
                 "model; pass a plan with dense='fsdp' to shard it."
             )
-        measured = decided and route == _FSDP2 and _dense_from_env(plan.world_size) == "auto"
+        # As do the options only the expert-parallel load takes, but for one passed as None, which
+        # asks nothing of either load: its default holds, rather than None read as False.
+        for name in _EP_ONLY_LOAD_OPTIONS:
+            if name in kwargs and kwargs[name] is None:
+                del kwargs[name]
+        if route is None and (sharded := sorted(set(kwargs) & _EP_ONLY_LOAD_OPTIONS)):
+            raise TypeError(
+                f"{sharded} only apply to the expert-parallel load, but {plan!r} gives every rank "
+                "the whole model; pass a plan with ep_size > 1 to shard an MoE's routed experts."
+            )
+        # Whether the decision chose this sharded layout with nothing asking for it: by rank 0's GPU
+        # memory for the FSDP2 load, by the model's routed experts for the expert-parallel one.
+        measured = decided and (
+            (route == _FSDP2 and _dense_from_env(plan.world_size) == "auto")
+            or (route == _EXPERT_PARALLEL and _ep_degree(None) == "auto")
+        )
+        # Whether hf_config is prepared by the model's spec: handed in with its plan, it is; read or
+        # copied here, the expert-parallel load prepares it, once its own checks pass.
+        prepared = True
         if route is not None and config is not None:
             # The sharded load builds from hf_config, a copy, as building writes to the config.
             del kwargs["config"]
             if "hf_config" not in kwargs:
                 kwargs["hf_config"] = copy.deepcopy(config)
+                prepared = False
         if model_type is None:
             # The load uses the config passed for it, if any, so the loading hook follows that one.
-            if route == _FSDP2 and hf_config is None and config is None:
-                # The FSDP2 load builds from the checkpoint's config too: read it once, for both.
+            if route is not None and hf_config is None and config is None:
+                # A sharded load builds from the checkpoint's config too: read it once, for both.
                 hf_config = AutoConfig.from_pretrained(
                     ckpt_path, trust_remote_code=trust_remote_code, **hub_options
                 )
                 kwargs["hf_config"] = hf_config
+                prepared = False
             chosen = hf_config if hf_config is not None else config
             model_type = getattr(chosen, "model_type", None) or (
                 _read_config(ckpt_path, auto_class, trust_remote_code, **hub_options).model_type
@@ -827,11 +1004,20 @@ def load_pretrained(
             {}
             if route is None
             else _sharded_load_kwargs(
-                route, ckpt_path, auto_class, model_type, kwargs, hub_options, decided, measured
+                route,
+                plan,
+                ckpt_path,
+                auto_class,
+                model_type,
+                kwargs,
+                hub_options,
+                decided,
+                measured,
+                prepared=prepared,
             )
         )
     if route is not None:
-        model = _load_sharded(ckpt_path, load_kwargs)
+        model = _load_sharded(route, ckpt_path, load_kwargs)
         # A sharded load finds the unplaced keys while it places the weights.
         keys = model._modelopt_unplaced_source_keys
     else:
@@ -1370,11 +1556,20 @@ def _dense_from_env(world_size: int) -> str:
     )
 
 
-def _ep_degree(ep_size) -> int | str:
-    """``ep_size`` as an EP degree or ``"auto"``; ``None`` reads ``MODELOPT_EP_DEGREE``."""
+# How ep_size and MODELOPT_EP_DEGREE spell "auto", for every reading of them to agree.
+_EP_AUTO = ("auto", "0")
+
+
+def _ep_degree(ep_size, model_type: str | None = None) -> int | str:
+    """``ep_size`` as an EP degree or ``"auto"``; ``None`` reads ``MODELOPT_EP_DEGREE``.
+
+    Auto is 1 for a model whose spec refuses expert parallelism on the installed transformers, for
+    good or below the release it needs: only an EP degree asked for explicitly meets that refusal.
+    Without ``model_type``, where no config is read yet, auto stays auto.
+    """
     value = env.ep_degree() if ep_size is None else ep_size
-    if str(value).lower() in ("auto", "0"):
-        return "auto"
+    if str(value).strip().lower() in _EP_AUTO:
+        return 1 if model_type is not None and _spec_refuses_ep(model_type) else "auto"
     try:
         degree = int(value)
     except (ValueError, TypeError):  # TypeError: an argument that is no number at all, as [2]
@@ -1391,8 +1586,10 @@ def _decide_distribution(
     ckpt_path: str, hf_config, world_size: int, ep_size, dense, trust_remote_code: bool, auto_class
 ) -> DistributionPlan:
     """The plan :func:`resolve_distribution_plan` returns, decided by this rank alone."""
-    # What the caller set the EP degree with, for a refusal to name it.
+    # What the caller set the EP degree and the dense layout with, for a refusal to name them.
     knob = "MODELOPT_EP_DEGREE" if ep_size is None else "ep_size"
+    replicate = "MODELOPT_FSDP_SIZE=1" if dense is None else "dense='replicate'"
+    fsdp = "MODELOPT_FSDP_SIZE=world" if dense is None else "dense='fsdp'"
     if world_size == 1:
         # Nothing to shard over, so nothing about the model matters, nor do the knobs: a shell still
         # exporting a multi-GPU run's would otherwise reshape a single process's load. The caller's
@@ -1402,8 +1599,14 @@ def _decide_distribution(
             ep_size=single if isinstance(single, int) else 1,
             dense="replicate" if dense in (None, "auto") else dense,
         )
-    ep_size = _ep_degree(ep_size)
+    # Read before _ep_degree, which takes auto as 1 for a model whose spec refuses expert
+    # parallelism: only an EP degree the caller set can ask for a replication.
+    ep_asked = str(env.ep_degree() if ep_size is None else ep_size).strip().lower() not in _EP_AUTO
+    ep_size = _ep_degree(ep_size, hf_config.model_type)
     dense = _dense_from_env(world_size) if dense is None else dense
+    # A replication both knobs ask for is the caller's choice, and loads; one reached from "auto"
+    # would leave an expert-parallel MoE whole on every rank unasked, and is refused below.
+    asked_to_replicate = ep_asked and ep_size == 1 and dense == "replicate"
     if (
         (auto_class not in (None, AutoModelForCausalLM) or _init_quantized_weights())
         and ep_size in ("auto", 1)
@@ -1415,7 +1618,7 @@ def _decide_distribution(
         # Refused here, rather than build the decision's own pick of class, which may not build.
         name = getattr(auto_class, "__name__", repr(auto_class))
         raise NotImplementedError(
-            f"A sharded load builds its model class itself, a causal LM's or a text-only VLM's "
+            f"A sharded load builds its model class itself, a causal LM's or a supported VLM's "
             f"image-text class, so it takes no auto_class={name} while ep_size={ep_size!r}, "
             f"dense={dense!r} ask to shard. To give every rank the whole model, plan ep_size=1 and "
             "dense='replicate' (MODELOPT_EP_DEGREE=1, MODELOPT_FSDP_SIZE=1)."
@@ -1441,6 +1644,12 @@ def _decide_distribution(
         ) from e
     ep_plan = getattr(_ep_config(hf_config), "base_model_ep_plan", None) or {}
     experts = _routed_expert_modules(model, ep_plan)
+    if not experts and ep_size == 1:
+        # An EP degree of 1 skips the model's spec (resolve_distribution_plan), so a model whose plan
+        # only its spec supplies shows no routed experts: look for them through the plan the spec
+        # would supply, or such an MoE would load whole on every rank where one with its own refuses.
+        ep_plan = _spec_ep_plan(hf_config.model_type)
+        experts = _routed_expert_modules(model, ep_plan)
     num_experts = _num_experts_from_config(_ep_config(hf_config)) if experts else 0
     if ep_plan and not experts and ep_size != 1 and _num_experts_from_config(_ep_config(hf_config)):
         # The plan names routed experts the built model has none of under those names: deciding
@@ -1450,8 +1659,8 @@ def _decide_distribution(
         raise ValueError(
             f"{hf_config.model_type} has routed experts and a base_model_ep_plan, but none of the "
             f"plan's expert containers ({containers}) names a module of the built model, so they "
-            f"can be neither counted nor sharded. Set {knob}=1 to load it without expert "
-            "parallelism."
+            f"can be neither counted nor sharded. Set {knob}=1 and {replicate} to load it without "
+            "expert parallelism, whole on every rank."
         )
     if experts and not num_experts and ep_size != 1:
         # The mirror case: the containers are there, but no count to choose a degree by, which
@@ -1459,11 +1668,22 @@ def _decide_distribution(
         raise ValueError(
             f"{hf_config.model_type}'s base_model_ep_plan names routed experts the built model has, "
             "but its config gives no expert count (num_experts, num_local_experts, "
-            f"n_routed_experts or num_routed_experts) to shard them by. Set {knob}=1 to load it "
-            "without expert parallelism."
+            f"n_routed_experts or num_routed_experts) to shard them by. Set {knob}=1 and "
+            f"{replicate} to load it without expert parallelism, whole on every rank."
         )
+    chosen = ep_size == "auto"  # an EP degree no knob or argument set
+    # Why the expert-parallel load would refuse this MoE, or None, whatever EP degree is set: its
+    # spec, the transformers it needs, its checkpoint or its plan. An MoE it refuses cannot be
+    # expert-parallel here, so is not refused below for being left whole.
+    refusal = (
+        (_spec_refusal(hf_config.model_type) or _ep_load_refusal(hf_config, ep_plan))
+        if experts
+        else None
+    )
     if ep_size == "auto":
-        ep_size = _choose_ep_degree(world_size, num_experts)
+        # The expert-parallel load would refuse this model, for some reasons only after the
+        # checkpoint's download: with nothing asking for expert parallelism, plan without it.
+        ep_size = 1 if refusal is not None else _choose_ep_degree(world_size, num_experts)
     elif ep_size > 1 and world_size % ep_size:
         raise ValueError(f"{knob}={ep_size} must divide the world size ({world_size}).")
     elif ep_size > 1 and (num_experts == 0 or num_experts % ep_size):
@@ -1471,6 +1691,15 @@ def _decide_distribution(
             f"{knob}={ep_size} must divide the routed experts {hf_config.model_type} shards "
             f"({num_experts})."
         )
+    if refusal is not None and ep_size == 1 and not asked_to_replicate:
+        # It loads as a dense model does, whole on every rank or FSDP2-sharded, whether the decision
+        # or the caller set the EP degree to 1: say why its experts are not sharded, and the fix
+        # where the load names one. A replication both knobs ask for is the caller's choice.
+        warn_rank_0(
+            f"{hf_config.model_type} loads without expert parallelism, as a dense model does, since "
+            f"the expert-parallel load cannot take it: {refusal}"
+        )
+    dense_chosen = dense == "auto"  # a dense layout no knob or argument set
     if dense == "auto":
         # A rank holds a whole copy of what expert parallelism does not shard, and its 1/ep_size
         # share of the routed experts it does.
@@ -1484,6 +1713,56 @@ def _decide_distribution(
         memory = _gpu_memory()
         too_big = memory is not None and held > _REPLICATED_SHARE * memory
         dense = "fsdp" if too_big else "replicate"
+    if chosen and ep_size > 1 and dense == "fsdp":
+        # The expert-parallel load replicates the dense part, and no load shards both yet: with
+        # nothing asking for expert parallelism, FSDP2-shard the whole model instead.
+        why = (
+            "would not fit one GPU beside a rank's experts" if dense_chosen else "is to be sharded"
+        )
+        print_rank_0(
+            f"{hf_config.model_type}: FSDP2-sharded whole, without expert parallelism, as the "
+            f"expert-parallel load replicates the dense part, which {why}. To shard the experts "
+            f"anyway, the dense part replicated: {knob}={ep_size} with {replicate}."
+        )
+        ep_size = 1
+    if experts and asked_to_replicate:
+        print_rank_0(
+            f"{hf_config.model_type}: ep_size=1 and dense='replicate' as asked, so every rank "
+            "holds the whole MoE."
+        )
+    elif experts and refusal is None and ep_size == 1 and dense == "replicate":
+        # The ways out besides sharding the experts, then what the FSDP2 load takes: inside the
+        # list, that caveat would read as part of the ways after it.
+        others = (
+            f"shard the whole model with FSDP2 {_fsdp2_way_out(fsdp)}, load it in a single "
+            f"process, or replicate it on every rank outright: {knob}=1 with {replicate}, or "
+            f"load_pretrained(..., distribution=DistributionPlan({world_size}, 1, 'replicate')). "
+            f"The FSDP2 load takes {_FSDP2_TAKES}."
+        )
+        # Name a way to shard the experts only where one exists: a count the config spells none of
+        # the ways ModelOpt reads leaves no EP degree to name, as does one sharing no factor above 1
+        # with the world size.
+        if not num_experts:
+            way_out = (
+                "Its config names its routed-expert count none of the ways ModelOpt reads, so "
+                f"no EP degree can shard its experts. {others[:1].upper()}{others[1:]}"
+            )
+        elif math.gcd(num_experts, world_size) == 1:
+            way_out = (
+                f"No EP degree above 1 divides both its {num_experts} experts and the world size, "
+                f"so none can shard its experts on {world_size} ranks. "
+                f"{others[:1].upper()}{others[1:]}"
+            )
+        else:
+            way_out = (
+                f"Shard its experts ({knob} above 1, dividing both its {num_experts} experts and "
+                f"the world size), {others}"
+            )
+        # A ValueError, as the decision's other refusals of what its inputs resolve to are.
+        raise ValueError(
+            f"{hf_config.model_type} can be expert-parallel, but the plan resolved to ep_size=1 at "
+            f"world_size={world_size}, so every rank would hold the whole MoE. {way_out}"
+        )
     return DistributionPlan(world_size, ep_size, dense)
 
 
@@ -1517,7 +1796,9 @@ def resolve_distribution_plan(
     hang. Collective: every rank must call it.
 
     * ``ep_size``: the expert-parallel degree, or ``"auto"``, the largest that divides both the
-      world and the routed-expert count of a model whose config carries a ``base_model_ep_plan``.
+      world and the routed-expert count of a model whose config carries a ``base_model_ep_plan``,
+      or 1 where the dense part is FSDP2-sharded, which the expert-parallel load does not do, and
+      for a model whose spec refuses expert parallelism on the installed transformers.
     * ``dense``: ``"replicate"`` or ``"fsdp"`` for the rest of the model, or ``"auto"``, which
       FSDP2-shards it when a whole copy of it and the rank's share of the routed experts would take
       more than 60% of one GPU's memory. That GPU is rank 0's, by its total memory, so ``"auto"``
@@ -1540,6 +1821,21 @@ def resolve_distribution_plan(
     is the class the load builds with: with one the sharded loads refuse, or inside
     ``init_quantized_weights``, and nothing asking to shard, the plan loads the model whole, decided
     without a build.
+
+    Unless the call or rank 0's knobs rule expert parallelism out (a single process, an
+    ``auto_class`` the sharded loads refuse, or an EP degree of 1, which auto is for a model whose
+    spec refuses expert parallelism on the installed transformers), every rank applies the model's
+    spec to a copy of the config first
+    (:func:`~modelopt.torch.utils.moe.apply_distributed_support`): for several models it is what
+    supplies the expert-parallel plan, and an expert-parallel plan returns that copy. Any other
+    plan returns the config without it, which the export would otherwise write out; the spec's
+    ``prepare`` has run for it all the same, which its contract allows
+    (:attr:`~modelopt.torch.models.EPSpec.prepare`). A plan that
+    leaves an expert-parallel MoE whole on every rank raises, unless both knobs ask for exactly
+    that: ``ep_size=1`` with ``dense="replicate"`` (``MODELOPT_EP_DEGREE=1`` and
+    ``MODELOPT_FSDP_SIZE=1``) replicates it, noting that every rank holds the whole MoE. An MoE the
+    expert-parallel load cannot take is planned as a dense model is, at an EP degree left to the
+    decision or set to 1, with a warning saying why.
     """
     # Each rank reads the checkpoint for itself. One that cannot must fail every rank here, rather
     # than leave the others waiting in a broadcast below for a rank that already raised.
@@ -1572,12 +1868,484 @@ def resolve_distribution_plan(
     dist.all_reduce("checkpoint read", checkpoint_read, all)
     ckpt_path, hf_config = read[0]
     world_size = dist.size()
+    # Whether the run rules expert parallelism out is rank 0's call, as the plan is: a rank that
+    # skipped the spec while the others applied it would load without the expert-parallel plan
+    # they shard by, and fail once the mesh is up, leaving them waiting in a collective. A model
+    # class the sharded loads refuse rules it out too, as does init_quantized_weights with the EP
+    # degree left to auto: the decision then plans the whole model on every rank, or a sharded
+    # load that is refused, without the spec, whose prepare could fail, or patch the process, for a
+    # load that never shards. An EP degree asked for under init_quantized_weights still takes the
+    # spec, for the decision to find the experts the load then refuses to shard.
+    prepared = [hf_config]
+    if dist.broadcast_from(
+        "spec",
+        lambda: (
+            world_size > 1
+            and auto_class in (None, AutoModelForCausalLM)
+            and (ep := _ep_degree(ep_size, hf_config.model_type)) != 1
+            and not (ep == "auto" and _init_quantized_weights())
+        ),
+    ):
+        # Before deciding: deciding without the spec would read an expert-parallel MoE as dense. A
+        # rank that cannot apply it fails every rank, as a checkpoint read does above.
+        def spec_applied() -> bool:
+            prepared[0] = apply_distributed_support(
+                hf_config.model_type,
+                copy.deepcopy(hf_config),
+                ckpt_path=ckpt_path,
+                trust_remote_code=trust_remote_code,
+            )
+            return True
+
+        dist.all_reduce("model spec", spec_applied, all)
     plan = dist.broadcast_from(
         "plan",
         lambda: _decide_distribution(
-            ckpt_path, hf_config, world_size, ep_size, dense, trust_remote_code, auto_class
+            ckpt_path, prepared[0], world_size, ep_size, dense, trust_remote_code, auto_class
         ),
     )
     if plan != DistributionPlan():
         print_rank_0(f"Distribution: {plan!r}")
-    return plan, hf_config
+    # Only the expert-parallel load shards by the plan the spec attached.
+    return plan, prepared[0] if plan.is_expert_parallel else hf_config
+
+
+def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_state) -> None:
+    """Seed every module's ``_parallel_state`` for calibration's amax sync.
+
+    The routed-expert containers named in ``expert_names`` and everything under them get
+    ``expert_state``; every other module gets ``dense_state``. Seeding the plain modules works because
+    quantization keeps a ``_parallel_state`` that is already present when it converts a module -- the same
+    way Megatron's expert MLPs seed theirs.
+    """
+    prefixes = tuple(name + "." for name in expert_names)
+    for name, module in model.named_modules():
+        module._parallel_state = (
+            expert_state if prefixes and (name + ".").startswith(prefixes) else dense_state
+        )
+
+
+# The checkpoint formats load_and_prepare_ep dequantizes as it loads, beside unquantized ones (None).
+# Not MXFP4: transformers dequantizes it into GPT-OSS's transposed expert layout, whatever the model's.
+_EP_SOURCE_FORMATS: frozenset[str | None] = frozenset({None})
+
+# The ep_plan styles the expert-parallel load swaps for its torch_a2a styles. It keeps these and
+# grouped_gemm, and drops any other.
+_EP_STYLE_SWAP = {
+    "ep_router": "torch_a2a_router",
+    "moe_tp_experts": "torch_a2a_experts",
+    "nemotron_experts_ep": "torch_a2a_experts",
+}
+
+
+def _ep_plan_refusal(ep_plan: dict[str, str]) -> str | None:
+    """Why the expert-parallel load refuses ``ep_plan``'s styles, or ``None``: by the plan alone."""
+    if not _routed_expert_keys(ep_plan):
+        return (
+            f"base_model_ep_plan={ep_plan} styles no routed experts ({', '.join(_EXPERTS_STYLES)} "
+            "or grouped_gemm), so this load would leave them whole on every rank."
+        )
+    # Only grouped_gemm entries shard an expert's weights here: the torch_a2a styles the
+    # containers take for the load shard nothing themselves (any other style is refused below).
+    unsharded = sorted(
+        key
+        for key in _routed_expert_keys(ep_plan)
+        if not any(
+            style == "grouped_gemm" and name.startswith(key + ".")
+            for name, style in ep_plan.items()
+        )
+    )
+    if unsharded:
+        return (
+            f"base_model_ep_plan={ep_plan} shards no weights of {', '.join(unsharded)} through "
+            "grouped_gemm, the only expert-weight style this load shards by, so every rank would "
+            "hold every expert."
+        )
+    # The load drops any other style an expert weight takes, so that weight would load whole
+    # beside its sharded siblings, and the grouped forward would pair slices of different experts.
+    containers = _routed_expert_keys(ep_plan)
+    kept_styles = {"grouped_gemm", *_EP_STYLE_SWAP}
+    dropped = sorted(
+        name
+        for name, style in ep_plan.items()
+        if style not in kept_styles
+        and name not in containers
+        and any(name.startswith(key + ".") for key in containers)
+    )
+    if dropped:
+        return (
+            f"base_model_ep_plan={ep_plan} styles {', '.join(dropped)} by a style this load "
+            "drops, so those expert weights would load whole on every rank beside their sharded "
+            "siblings."
+        )
+    return None
+
+
+def _ep_load_refusal(hf_config, ep_plan: dict[str, str]) -> Exception | None:
+    """The error the expert-parallel load refuses this model with, by its config, or ``None``.
+
+    A checkpoint format the load does not take (``NotImplementedError``) and the plan's styles
+    (``ValueError``); the rest shows only as the experts load. A model spec ruling expert
+    parallelism out, or the transformers release it needs, is not asked here: the plan decision and
+    the load ask the spec first (:func:`~modelopt.torch.utils.moe.check_distributed_support`).
+    """
+    if (method := _ckpt_quant_method(hf_config)) not in _EP_SOURCE_FORMATS:
+        return NotImplementedError(
+            f"The expert-parallel load cannot dequantize a {method!r} checkpoint; an unquantized "
+            "copy of the model would load expert-parallel."
+        )
+    refusal = _ep_plan_refusal(ep_plan)
+    return ValueError(refusal) if refusal is not None else None
+
+
+def _ckpt_quant_method(cfg):
+    """Return the checkpoint's native quantization method, or ``None``.
+
+    Return the checkpoint's native quantization method (e.g. ``"fp8"`` for block-fp8 DeepSeek-V3),
+    or ``None`` if the checkpoint isn't natively quantized. Checks the top config, then a VLM's
+    ``text_config`` or ``llm_config``.
+    """
+    for c in (cfg, getattr(cfg, "text_config", None), getattr(cfg, "llm_config", None)):
+        qc = getattr(c, "quantization_config", None)
+        m = qc.get("quant_method") if isinstance(qc, dict) else getattr(qc, "quant_method", None)
+        if m:
+            # transformers' config objects carry a QuantizationMethod enum, whose str() is not its value.
+            return str(getattr(m, "value", m))
+    return None
+
+
+_UNDECLARED = object()
+
+
+def _declared_ep_plan(ckpt_dir: str, hf_config, ep_cfg):
+    """The plan the checkpoint's ``config.json`` declares for ``ep_cfg``, or ``_UNDECLARED``.
+
+    ``ep_cfg`` is ``hf_config`` or one of its nested configs, and the plan is read from the same
+    place in the file. Read from the file, not the config: a plan the config carries besides is
+    ModelOpt's -- the one a model spec attaches
+    (:func:`~modelopt.torch.utils.moe.apply_distributed_support`) -- the config class's, or one set
+    on a config passed to the load, and the loaded model keeps none of them: an export writes out
+    what the checkpoint declares, if anything. A file this rank cannot read as a JSON object
+    declares none, with a warning on this rank, which may be the only one that cannot: what the
+    checkpoint declared is lost to its model's config then.
+    """
+    path = os.path.join(ckpt_dir, "config.json")
+    keeps_none = (
+        f"so rank {dist.rank()}'s model keeps no expert-parallel plan of its own, and an export "
+        "from it writes none"
+    )
+    try:
+        with open(path, encoding="utf-8") as f:
+            source = json.load(f)
+    except (OSError, ValueError) as e:
+        warnings.warn(f"Cannot read {path} ({e}), {keeps_none}.")
+        return _UNDECLARED
+    if not isinstance(source, dict):
+        warnings.warn(f"{path} is not a JSON object, {keeps_none}.")
+        return _UNDECLARED
+    if ep_cfg is not hf_config:
+        attr = next((a for a in _SUB_CONFIG_ATTRS if getattr(hf_config, a, None) is ep_cfg), None)
+        source = source.get(attr) if attr else None
+    if isinstance(source, dict) and "base_model_ep_plan" in source:
+        return source["base_model_ep_plan"]
+    return _UNDECLARED
+
+
+def _transformers_mesh_builder():
+    """The module whose ``initialize_distributed_mesh`` ``from_pretrained`` calls, or ``None``.
+
+    Newer transformers drops ``from_pretrained``'s ``device_mesh`` once ``distributed_config`` is
+    given: it builds its own world-sized ``tp`` mesh from the config's sizes. That shards the experts
+    over every rank instead of this rank's EP group whenever the EP degree is below the world size.
+    Older releases honor ``device_mesh`` and have no such builder.
+    """
+    try:
+        import transformers.distributed.mixin as mixin
+    except ImportError:
+        return None
+    return mixin if hasattr(mixin, "initialize_distributed_mesh") else None
+
+
+@contextlib.contextmanager
+def _experts_sharded_over(ep_mesh):
+    """Make ``from_pretrained`` shard the experts over ``ep_mesh`` on releases that build their own mesh."""
+    mixin = _transformers_mesh_builder()
+    if mixin is None:
+        yield
+        return
+
+    def _ep_mesh(*args, **kwargs):
+        index = torch.cuda.current_device() if ep_mesh.device_type == "cuda" else None
+        return torch.device(ep_mesh.device_type, index), ep_mesh
+
+    original = mixin.initialize_distributed_mesh
+    mixin.initialize_distributed_mesh = _ep_mesh
+    try:
+        yield
+    finally:
+        mixin.initialize_distributed_mesh = original
+
+
+def load_and_prepare_ep(
+    ckpt_path: str,
+    plan: DistributionPlan,
+    trust_remote_code: bool = False,
+    attn_implementation: str | None = None,
+    freeze: bool = True,
+    hf_config=None,
+    require_lm_head: bool = True,
+    hub_options: dict | None = None,
+) -> nn.Module:
+    """Load a MoE causal LM expert-parallel for PTQ: each rank holds its share of the routed experts.
+
+    Collective: every rank of the process group calls it with the same ``plan``, an expert-parallel
+    :class:`~modelopt.torch.utils.distributed.DistributionPlan` for the whole group. The caller sets
+    the group up and binds each rank to its own GPU first, as
+    :func:`~modelopt.torch.utils.distributed.distributed_run` does. Each rank holds
+    ``num_experts / ep_size`` routed experts and a replica of the dense part, and tokens reach their
+    experts' ranks by all-to-all, so every rank must calibrate on data of its own.
+
+    It loads unquantized checkpoints, on transformers 5.7 or later. A refusal on any rank -- of its
+    transformers, the config, the checkpoint, its GPU, or in the load -- raises on every rank. In
+    the load that rests on ``from_pretrained`` running no collective, as transformers'
+    expert-parallel load does not on 5.7 through 5.18.
+
+    The model builds with its LM head where an auto class builds one; ``require_lm_head=False``
+    builds a VLM without it. Without ``hf_config`` every rank reads the checkpoint's config itself;
+    on many ranks, pass it. ``hub_options`` (``token``, ``cache_dir``, ``local_files_only``, as
+    :func:`load_pretrained` takes them) go to the checkpoint's download, its config read and
+    ``from_pretrained``. The caller records the plan on the model
+    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), as :func:`load_pretrained`
+    does; :func:`~modelopt.torch.utils.moe.expert_parallel_mesh` then finds its mesh.
+    """
+    if not plan.is_expert_parallel:
+        raise ValueError(f"{plan!r} shards no routed experts, which is what this load is for.")
+    if plan.is_fsdp_dense:
+        raise NotImplementedError(f"{plan!r}: this load replicates the dense part on every rank.")
+    # Bringing the group up is the launcher's job; this load needs it live and device-bound.
+    if not dist.is_initialized():
+        raise RuntimeError(
+            "load_and_prepare_ep requires a live, device-bound process group; set it up first, e.g. "
+            "with modelopt.torch.utils.distributed.distributed_run() under torchrun."
+        )
+    if plan.world_size != dist.size():
+        raise ValueError(
+            f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}."
+        )
+    world_size, ep_degree, edp = plan.world_size, plan.ep_size, plan.edp
+    hub_options = dict(hub_options or {})
+    swap, kept_styles = _EP_STYLE_SWAP, {"grouped_gemm", *_EP_STYLE_SWAP}
+    # Each rank checks its own transformers, the config it reads or was handed, and the plan against
+    # it: one refusing fails every rank here, before the checkpoint's fetch and the meshes.
+    with _refused_together("the expert-parallel load's checks", alone=False):
+        # 5.7 is the first release that builds a model with the torch_a2a experts.
+        moe.require_transformers(
+            _EP_MIN_TRANSFORMERS,
+            "ModelOpt DP=EP expert-parallel PTQ (transformers MoE EP framework)",
+        )
+        if hf_config is None:
+            config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code, **hub_options}
+            if attn_implementation is not None:
+                config_kwargs["attn_implementation"] = attn_implementation
+            hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
+        # A model spec ruling expert parallelism out, or stating a later transformers, refuses it
+        # first, as load_pretrained does, for an EP degree asked for or a plan handed in: no other
+        # checkpoint of the model, nor a plan of its own, would load.
+        check_distributed_support(hf_config.model_type)
+        quant_method = _ckpt_quant_method(hf_config)
+        if quant_method not in _EP_SOURCE_FORMATS:
+            # transformers' own quantizer would load it as stored, for PTQ to treat as plain weights.
+            dequantized = ", ".join(sorted(f for f in _EP_SOURCE_FORMATS if f))
+            loads = "unquantized checkpoints" + (
+                f" and dequantizes {dequantized}" if dequantized else ""
+            )
+            raise NotImplementedError(
+                f"The expert-parallel load cannot dequantize a {quant_method!r} checkpoint: it loads "
+                f"{loads}. Start from an unquantized copy of the model."
+            )
+        # The swapped plan is this load's own: the caller's config keeps the plan its checkpoint declares.
+        hf_config = copy.deepcopy(hf_config)
+        ep_cfg = _ep_config(hf_config)  # for VLMs the plan lives on .text_config
+        ep_plan = dict(getattr(ep_cfg, "base_model_ep_plan", None) or {})
+        if not ep_plan:
+            raise ValueError("expert-parallel PTQ requires the model to declare base_model_ep_plan")
+        # The plan's styles, which the plan decision gives way for too.
+        if (refusal := _ep_load_refusal(hf_config, ep_plan)) is not None:
+            raise refusal
+        # The all-to-all transport needs every rank to hold as many experts, counted as the plan's
+        # decision counts them; a count the config does not name is checked once the experts load.
+        num_experts = _num_experts_from_config(ep_cfg)
+        if num_experts % ep_degree:
+            raise ValueError(
+                f"{plan!r}: ep_size={ep_degree} must divide the {num_experts} routed experts, which the "
+                "all-to-all transport shares out equally over the expert-parallel ranks."
+            )
+
+    # Each rank builds the meshes on the GPU it is bound to, and DeviceMesh binds one not bound yet
+    # by its local rank. A rank that would so end up on no GPU, or on one another rank is on (as an
+    # import that initializes CUDA leaves every rank of a launch that binds none), fails alone in the
+    # meshes while the others wait: every rank decides from one gather, and all refuse alike.
+    def gpu() -> tuple[bool, bool, str | None]:
+        """Whether this rank has a GPU, whether it waits to be bound to one, and the bound one's UUID."""
+        if not torch.cuda.is_initialized():
+            return _has_own_gpu(), torch.cuda.is_available(), None
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        return _has_own_gpu(), False, str(props.uuid)
+
+    gpus = dist.all_reduce(
+        "each rank's GPU",
+        lambda: [gpu()],
+        combine=lambda ranks: [g for facts in ranks for g in facts],
+    )
+    unbound = [rank for rank, (has, waits, _) in enumerate(gpus) if waits and not has]
+    if unbound:
+        raise RuntimeError(
+            "The expert-parallel load builds its meshes on the GPU each rank is bound to, and rank(s) "
+            f"{unbound} are bound to none yet, nor does their local rank name one they see. Bind each "
+            "rank to its GPU before the load (torch.cuda.set_device), as distributed_run() does."
+        )
+    without = [rank for rank, (has, _, _) in enumerate(gpus) if not has]
+    if without and len(without) < len(gpus):
+        raise RuntimeError(
+            "The expert-parallel load builds its meshes on each rank's own GPU, and rank(s) "
+            f"{without} have none while the others have theirs. Run one process per GPU, as "
+            "torchrun --nproc_per_node=<GPUs per node> does."
+        )
+    uuids = [uuid for _, _, uuid in gpus]
+    shared = [rank for rank, uuid in enumerate(uuids) if uuid is not None and uuids.count(uuid) > 1]
+    if shared:
+        raise RuntimeError(
+            "The expert-parallel load builds its meshes on the GPU each rank is bound to, and rank(s) "
+            f"{shared} are bound to the same one. Bind each rank to its own GPU before the load "
+            "(torch.cuda.set_device), as distributed_run() does."
+        )
+    dtype = getattr(hf_config, "dtype", None) or torch.bfloat16
+    # The load and the export both read the local snapshot, made only once the checks pass, so a
+    # refused load downloads nothing.
+    with _refused_together("the local checkpoint", alone=False):
+        _, ckpt_path = ensure_local_checkpoint(ckpt_path, **hub_options)
+
+    # Experts are sharded over ``ep`` and replicated over ``edp``; the dense part is replicated over
+    # the whole world (``dp``).
+    sparse_moe_mesh = device_mesh.init_device_mesh(
+        "cuda", (edp, ep_degree), mesh_dim_names=("edp", "ep")
+    )
+    dense_mesh = device_mesh.init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp",))
+    ep_submesh = sparse_moe_mesh["ep"]
+
+    # No tensor parallelism: tp_plan="auto" only switches on the path through which transformers
+    # applies the expert plan, and the swapped plan holds expert entries only. Each argument goes on
+    # DistributedConfig where this release has a field for it, else to from_pretrained.
+    _dc_fields = {f.name for f in dataclasses.fields(hf_distributed.DistributedConfig)}
+    _dc_has_tp_plan = "tp_plan" in _dc_fields
+    dc_kwargs: dict[str, Any] = {"enable_expert_parallel": True}
+    if _dc_has_tp_plan:
+        dc_kwargs["tp_plan"] = "auto"
+    if _transformers_mesh_builder() is not None and "tp_size" in _dc_fields:
+        # This release sizes its own mesh from tp_size; _experts_sharded_over swaps in the EP mesh.
+        dc_kwargs["tp_size"] = ep_degree
+    distributed_config = hf_distributed.DistributedConfig(**dc_kwargs)
+    from_pretrained_kwargs: dict[str, Any] = {
+        "dtype": dtype,
+        "device_mesh": ep_submesh,
+        "distributed_config": distributed_config,
+        "trust_remote_code": trust_remote_code,
+        **hub_options,
+    }
+    if not _dc_has_tp_plan:
+        from_pretrained_kwargs["tp_plan"] = "auto"
+    if attn_implementation is not None:
+        from_pretrained_kwargs["attn_implementation"] = attn_implementation
+    # Swap the plan to the torch_a2a styles and select the torch_a2a experts forward: tokens reach
+    # their experts' ranks by all-to-all around the quantizable grouped GEMM.
+    register_torch_a2a()  # idempotent; register the experts forward + the two styles, right before use
+    # Keep expert-related entries (grouped_gemm expert params + the router/experts styles); DROP the TP
+    # styles (a2a builds no TP group for them -> would shard attention across the wrong mesh).
+    swapped_plan = {k: swap.get(v, v) for k, v in ep_plan.items() if v in kept_styles}
+    # Tag every routed-experts container torch_a2a_experts, found as the plan's decision finds them:
+    # some plans style only their parameters, grouped_gemm.
+    swapped_plan.update(dict.fromkeys(_routed_expert_keys(ep_plan), "torch_a2a_experts"))
+    from_pretrained_kwargs["experts_implementation"] = "torch_a2a"
+    ep_cfg.base_model_ep_plan = swapped_plan
+    from_pretrained_kwargs["config"] = hf_config
+    print_rank_0(f"[ep] ep_plan={swapped_plan} experts_implementation=torch_a2a")
+    # A rank failing in the load fails every rank here, before the warmup's collectives:
+    # from_pretrained runs no collective, so the others finish it and meet the failure in the gather.
+    with _refused_together("the expert-parallel load", alone=False):
+        # The checkpoint's own plan, for the config the model keeps (below). The read raises on no
+        # failure of the file's, but sits in this block regardless: a rank failing there alone
+        # would leave the others in the load.
+        declared_plan = _declared_ep_plan(ckpt_path, hf_config, ep_cfg)
+        # The class the plan's decision chose, with its LM head where an auto class builds one.
+        loader = _auto_class(hf_config, require_lm_head, trust_remote_code=trust_remote_code)
+        print_rank_0(f"[ep] loader={loader.__name__} (require_lm_head={require_lm_head})")
+        with _experts_sharded_over(ep_submesh):
+            model = loader.from_pretrained(ckpt_path, **from_pretrained_kwargs)
+        model.eval()
+        # The config the model keeps goes back to the checkpoint's plan, as an export writes it out
+        # and nothing without ModelOpt knows the torch_a2a styles.
+        kept_config = getattr(model, "config", None)
+        if kept_config is not None:
+            kept_ep_config = _ep_config(kept_config)
+            if declared_plan is _UNDECLARED:
+                vars(kept_ep_config).pop("base_model_ep_plan", None)
+            else:
+                kept_ep_config.base_model_ep_plan = declared_plan
+        # The experts forward reads the implementation from the config when it runs, which
+        # from_pretrained left on grouped_mm: torch_a2a on every (sub)config. An export writes none.
+        for _m in model.modules():
+            _cfg = getattr(_m, "config", None)
+            if _cfg is not None and hasattr(_cfg, "_experts_implementation"):
+                _cfg._experts_implementation = "torch_a2a"
+
+        # The checkpoint tensors the model has no parameter for (an MTP head), worked out once, at load,
+        # for the export to carry.
+        record_unplaced_source_keys(model, ckpt_path)
+
+        # The model carries the ep submesh, for calibration to re-install the all-to-all forwards
+        # over (expert_parallel_mesh); transformers sets it differently by release.
+        model._device_mesh = ep_submesh
+        if hasattr(model, "tie_weights"):
+            model.tie_weights()
+        if freeze:
+            model.requires_grad_(False)
+
+        # The routed-expert containers, from the plan that drove the sharding.
+        expert_modules = _routed_expert_modules(model, ep_plan)
+        if not expert_modules:
+            raise ValueError(
+                f"base_model_ep_plan={ep_plan} names routed-expert containers that no module of "
+                f"{type(model).__name__} matches, so calibration would reduce the experts' amax over "
+                "ranks holding different experts. Quantize the model without expert parallelism."
+            )
+
+    # Each module's ParallelState for calibration's amax sync: dense modules reduce over the whole world;
+    # routed experts reduce over their expert-data-parallel replicas, and share one input amax across the
+    # layer's experts over the expert-parallel group. A size-1 axis is left unused (-1): no collective.
+    def _axis(mesh):
+        return mesh.get_group() if mesh.size() > 1 else -1
+
+    _seed_parallel_states(
+        model,
+        expert_modules,
+        dense_state=ParallelState(data_parallel_group=_axis(dense_mesh["dp"])),
+        expert_state=ParallelState(
+            data_parallel_group=_axis(sparse_moe_mesh["edp"]),
+            expert_model_parallel_group=_axis(sparse_moe_mesh["ep"]),
+        ),
+    )
+    print_rank_0(
+        f"[ep] seeded the expert-parallel state of {len(expert_modules)} routed-expert "
+        "module(s) from base_model_ep_plan"
+    )
+    # Build each amax collective's NCCL comm now, in the same order on every rank, rather than lazily
+    # mid-calibration, where subgroups phase-skewed at DP>1 deadlock. Size-1 axes run none.
+    warm_device = next(model.parameters()).device
+    for _sub in (dense_mesh["dp"], sparse_moe_mesh["ep"], sparse_moe_mesh["edp"]):
+        if _sub.size() <= 1:
+            continue
+        torch.distributed.barrier()
+        torch.distributed.all_reduce(torch.ones(1, device=warm_device), group=_sub.get_group())
+        torch.cuda.synchronize()
+    torch.distributed.barrier()
+    return model
