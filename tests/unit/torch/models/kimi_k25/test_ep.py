@@ -229,9 +229,32 @@ def test_a_transformers_too_old_to_decompress_is_refused_before_prepare(monkeypa
         check_distributed_support("kimi_k25")
 
 
-def test_prepare_refuses_transformers_own_port():
-    """From 5.13 a load without ``trust_remote_code`` builds transformers' port, which the patch
-    never reaches; ``prepare`` must refuse it rather than run unpatched."""
+@pytest.mark.parametrize("quantized", [False, True], ids=["unquantized", "compressed"])
+def test_transformers_own_port_loads_as_it_is_unless_its_checkpoint_is_quantized(
+    monkeypatch, quantized
+):
+    """From 5.13 a load without ``trust_remote_code`` builds transformers' port, whose text config
+    carries deepseek_v3's plan. An unquantized checkpoint read that way loads expert-parallel as it
+    is, so ``prepare`` returns it unchanged and ``prepare_refusal`` finds nothing; a compressed one,
+    whose experts only the checkpoint's own code decompresses here, is refused."""
     native = pytest.importorskip("transformers.models.kimi_k25.configuration_kimi_k25")
-    with pytest.raises(ValueError, match="runs on the checkpoint's own modeling code"):
-        kimi_k25.prepare(native.Kimi_K25Config(), ckpt_path="/ckpt", trust_remote_code=True)
+    monkeypatch.setattr(
+        dmu,
+        "get_class_from_dynamic_module",
+        lambda *args, **kwargs: pytest.fail("the checkpoint's code was imported"),
+    )
+    config = native.Kimi_K25Config()
+    text = config.text_config
+    if quantized:
+        text.quantization_config = dict(QUANT)
+    kwargs = {"ckpt_path": "/ckpt", "trust_remote_code": False}
+
+    if quantized:
+        assert "own port" in kimi_k25.prepare_refusal(config, **kwargs)
+        with pytest.raises(ValueError, match="runs on the checkpoint's own modeling code"):
+            kimi_k25.prepare(config, **kwargs)
+    else:
+        assert kimi_k25.prepare_refusal(config, **kwargs) is None
+        assert kimi_k25.prepare(config, **kwargs) is config
+        assert config.text_config is text
+        assert text.base_model_ep_plan == DeepseekV3Config.base_model_ep_plan

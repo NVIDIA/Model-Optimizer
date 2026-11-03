@@ -36,10 +36,11 @@ register(
         model_type="kimi_k25",
         # transformers ships Kimi-K2.5 itself from 5.13, so modeling_source stays "transformers": the
         # registry pairs it with that release, and a "remote_code" claim would be stale from 5.13 on.
-        # Expert parallelism still runs on the checkpoint's own code (``trust_remote_code=True``),
-        # which ``prepare`` patches, refusing the port. So the version describes transformers' port,
-        # not the model this spec's load builds: a MoE or export section added here must name the
-        # native deepseek_v3 language model's modules.
+        # Expert parallelism runs on the checkpoint's own code (``trust_remote_code=True``), which
+        # ``prepare`` patches, or on the port of an unquantized checkpoint, which it leaves as it is.
+        # So the version describes transformers' port, not every model this spec's load builds: a
+        # MoE or export section added here must name the native deepseek_v3 language model's
+        # modules, which both build.
         min_transformers_version="5.13",
         # prepare swaps a native deepseek_v3 in as the language model, with deepseek_v3's plan,
         # and decompresses the experts as they load, which needs transformers 5.8.

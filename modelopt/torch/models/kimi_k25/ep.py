@@ -18,7 +18,9 @@
 ``prepare`` replaces the per-expert DeepSeek-V3 language model the checkpoint's own code builds with
 transformers' native DeepSeek-V3, whose experts the expert-parallel load can shard, and keeps the
 vision tower and projector from that code. A compressed-tensors checkpoint's experts decompress as
-they load (``_onfly_decompress``). It needs trusted remote code and transformers 5.8.
+they load (``_onfly_decompress``). It needs trusted remote code and transformers 5.8. transformers'
+own port (from 5.13) of an unquantized checkpoint builds that native language model itself, with
+its plan, so ``prepare`` leaves it as it is.
 """
 
 from .. import _kimi, _onfly_decompress
@@ -32,6 +34,19 @@ def _decompresses(hf_config) -> bool:
     """Whether :func:`prepare` has this checkpoint's experts decompress as they load."""
     quantization_config = _onfly_decompress._find_quantization_config(hf_config) or {}
     return quantization_config.get("quant_method") in DECOMPRESSED_FORMATS
+
+
+def _port_with_its_own_plan(hf_config) -> bool:
+    """Whether ``hf_config`` is transformers' own port of an unquantized checkpoint with a plan.
+
+    Its text config carries the plan the expert-parallel load shards by, so it loads expert-parallel
+    as it is.
+    """
+    return (
+        type(hf_config).__module__.startswith("transformers.")
+        and _onfly_decompress._find_quantization_config(hf_config) is None
+        and bool(getattr(getattr(hf_config, "text_config", None), "base_model_ep_plan", None))
+    )
 
 
 def make_buildable(
@@ -58,6 +73,8 @@ def prepare_refusal(
     Its own refusals, and the decompressor's for a compressed-tensors checkpoint, without
     installing the decompressor.
     """
+    if _port_with_its_own_plan(hf_config):
+        return None
     why = _kimi.prepare_refusal("kimi_k25", hf_config, ckpt_path, trust_remote_code)
     if why is not None:
         return why
@@ -75,8 +92,11 @@ def prepare(hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool 
 
     Installs the decompressor for a compressed-tensors checkpoint, gives ``text_config`` a native
     deepseek_v3 config with deepseek_v3's plan, and has the checkpoint's code build the native
-    language model from it.
+    language model from it. transformers' own port of an unquantized checkpoint, which already
+    builds it, is returned as it is.
     """
+    if _port_with_its_own_plan(hf_config):
+        return hf_config
     # Not at module scope: the model registry imports this module, and modelopt.torch.utils.moe
     # imports the registry.
     from modelopt.torch.utils.moe import apply_distributed_support

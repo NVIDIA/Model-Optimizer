@@ -37,6 +37,7 @@ def checkpoint_to_patch(
     if type(hf_config).__module__.startswith("transformers."):
         # transformers' own port (Kimi-K2.5's, from 5.13), which the patch never reaches: a load
         # without trust_remote_code builds it, and so does one of a checkpoint naming no config class.
+        # Kimi-K2.5's adapter lets the port of an unquantized checkpoint through before it asks.
         raise ValueError(
             f"{label}: expert parallelism runs on the checkpoint's own modeling code, but this "
             f"config is transformers' own port ({type(hf_config).__module__}). Load it with "

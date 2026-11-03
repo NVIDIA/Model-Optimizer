@@ -1043,7 +1043,8 @@ def test_a_checkpoint_its_spec_decompresses_is_decided_expert_parallel(
     assert resolve_distribution_plan(str(tmp_path))[0].is_expert_parallel == expert_parallel
 
 
-# transformers' own Kimi-K2.5 port (from 5.13), which a load without trust_remote_code builds.
+# transformers' own Kimi-K2.5 port (from 5.13), which a load without trust_remote_code builds; the
+# checkpoint below is compressed, which only the checkpoint's own code decompresses here.
 _KimiK25PortConfig = type(
     "KimiK25Config", (SimpleNamespace,), {"__module__": "transformers.models.kimi_k25.config"}
 )
@@ -1084,6 +1085,72 @@ def test_a_checkpoint_its_spec_s_prepare_refuses_is_planned_without_expert_paral
         plan, _ = resolve_distribution_plan(str(tmp_path), trust_remote_code=trust_remote_code)
 
     assert not plan.is_expert_parallel
+
+
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.13"),
+    reason="transformers ships Kimi-K2.5 itself from 5.13",
+)
+def test_transformers_own_kimi_k25_port_of_an_unquantized_checkpoint_is_planned_expert_parallel(
+    run_as, serve, gpu_memory, monkeypatch, tmp_path
+):
+    """transformers' port, which a load without trust_remote_code builds, carries deepseek_v3's plan
+    on its text config, so an unquantized checkpoint read that way loads expert-parallel on it, as
+    it is. On a GPU the whole model overfills but a rank's share of it with the experts sharded
+    fits, the decision shards the experts rather than FSDP2-shard the whole model, whose load takes
+    no image-text config."""
+    from transformers.models.kimi_k25.configuration_kimi_k25 import Kimi_K25Config
+
+    monkeypatch.setattr(
+        "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+        lambda *args, **kwargs: pytest.fail("the checkpoint's code was imported"),
+    )
+    text = {
+        "model_type": "deepseek_v3",
+        "hidden_size": 32,
+        "intermediate_size": 64,
+        "moe_intermediate_size": 128,
+        "n_routed_experts": 8,
+        "num_experts_per_tok": 2,
+        "num_hidden_layers": 2,
+        "first_k_dense_replace": 0,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2,
+        "vocab_size": 64,
+        "kv_lora_rank": 8,
+        "q_lora_rank": None,
+        "qk_rope_head_dim": 8,
+        "qk_nope_head_dim": 8,
+        "v_head_dim": 8,
+        "n_group": 1,
+        "topk_group": 1,
+        "tie_word_embeddings": False,
+    }
+    vision = {"hidden_size": 16, "intermediate_size": 32, "num_hidden_layers": 1}
+    config = serve(
+        Kimi_K25Config(
+            text_config=text,
+            vision_config=vision,
+            projection_hidden_size=16,
+            tie_word_embeddings=False,
+        )
+    )
+    model = model_load_utils.build_meta_causal_lm(
+        str(tmp_path), False, None, copy.deepcopy(config), auto_class=AutoModelForImageTextToText
+    )
+    whole = sum(p.numel() * p.element_size() for p in model.parameters())
+    experts = sum(
+        p.numel() * p.element_size() for n, p in model.named_parameters() if ".mlp.experts." in n
+    )
+    # Below the whole model, above a rank's share with the 8 experts in quarters.
+    gpu_memory(int((whole - experts // 2) / model_load_utils._REPLICATED_SHARE))
+    run_as(4)
+
+    plan, prepared = resolve_distribution_plan(str(tmp_path))
+
+    assert plan == DistributionPlan(4, 4, "replicate")
+    assert type(prepared) is Kimi_K25Config
+    assert prepared.text_config.base_model_ep_plan == config.text_config.base_model_ep_plan
 
 
 def _remote_kimi():
