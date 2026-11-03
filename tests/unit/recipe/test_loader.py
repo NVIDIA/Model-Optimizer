@@ -1081,6 +1081,12 @@ def test_load_recipe_mtp_boost_builtin():
     assert recipe.data.mode == "offline"
     assert recipe.mtp_boost.ttt_steps == 1
     assert recipe.mtp_boost.hsm_mode == "off"
+    assert recipe.mtp_boost.sliding_window is None
+    config_type = type(recipe.mtp_boost)
+    assert config_type(sliding_window=8192).sliding_window == 8192
+    for invalid in (0, -1, True, 1.5):
+        with pytest.raises(ValueError):
+            config_type(sliding_window=invalid)
 
 
 def test_load_recipe_mtp_boost_requires_section_and_online_target(tmp_path):

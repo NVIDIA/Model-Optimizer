@@ -33,6 +33,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
+from modelopt.torch.speculative.mtp import resolve_native_mtp_sliding_window
 from modelopt.torch.speculative.plugins.master_weight_adamw import MasterWeightAdamW
 from modelopt.torch.speculative.utils import get_ttt_msk_func
 from modelopt.torch.utils import print_rank_0
@@ -381,6 +382,9 @@ class EagleTrainerWithAccLog(Trainer):
         if not getattr(native_model, "is_native_mtp_boost", False):
             return super()._load_from_checkpoint(resume_from_checkpoint, model=model)
 
+        resolve_native_mtp_sliding_window(
+            resume_from_checkpoint, native_model.config.sliding_window
+        )
         if self.is_fsdp_enabled:
             # FSDP checkpoints use sharded/DTensor parameters. Trainer saves
             # matching FSDP model shards alongside the compact MTP snapshot,

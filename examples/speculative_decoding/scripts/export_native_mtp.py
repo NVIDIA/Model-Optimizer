@@ -56,6 +56,7 @@ def main() -> None:
         dtype=torch.bfloat16,
         device=args.device,
         adapter=args.adapter,
+        training_checkpoint=args.training_checkpoint,
     )
     load_native_mtp_boost_checkpoint(model, args.training_checkpoint)
     output = export_native_mtp_checkpoint(

@@ -16,13 +16,18 @@
 """Small forward coverage for the checkpoint-native MTP loss contract."""
 
 import copy
+import json
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
 
 from modelopt.torch.speculative.eagle.utils import masked_soft_target_cross_entropy
-from modelopt.torch.speculative.mtp.adapter import load_native_mtp_boost_checkpoint
+from modelopt.torch.speculative.mtp.adapter import (
+    load_native_mtp_boost_checkpoint,
+    resolve_native_mtp_sliding_window,
+)
 from modelopt.torch.speculative.mtp.deepseek_v4 import NativeMTPBoostModel
 
 
@@ -221,6 +226,7 @@ def test_native_mtp_round_recomputation_preserves_hsm_loss_and_gradients(monkeyp
 def test_native_mtp_training_checkpoint_is_mtp_only_and_resumable(tmp_path):
     """Trainer saves masters independently of frozen target endpoints and restores them."""
     model = _toy_mtp_model()
+    model.config.sliding_window = 8192
     with torch.no_grad():
         model.mtp.e_proj.weight.fill_(0.25)
     model.save_pretrained(tmp_path)
@@ -240,7 +246,13 @@ def test_native_mtp_training_checkpoint_is_mtp_only_and_resumable(tmp_path):
     alias_state = torch.load(tmp_path / "pytorch_model.bin", weights_only=True)
     assert torch.equal(alias_state["mtp.e_proj.weight"], model.mtp.e_proj.weight)
 
+    assert (
+        json.loads((tmp_path / "mtp_boost_config.json").read_text())["mtp_sliding_window"] == 8192
+    )
     restored = _toy_mtp_model()
+    with pytest.raises(ValueError, match="MTP window mismatch"):
+        load_native_mtp_boost_checkpoint(restored, tmp_path)
+    restored.config.sliding_window = resolve_native_mtp_sliding_window(tmp_path)
     load_native_mtp_boost_checkpoint(restored, tmp_path)
     assert torch.equal(restored.mtp.e_proj.weight, model.mtp.e_proj.weight)
     assert torch.equal(restored.embedding.weight, torch.eye(4))

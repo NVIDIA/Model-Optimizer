@@ -15,11 +15,17 @@
 
 """Native MTP attention must preserve HF outputs and gradients when chunked."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
 
-from modelopt.torch.speculative.mtp.deepseek_v4 import _chunked_mtp_attention_forward
+from modelopt.torch.speculative.mtp.deepseek_v4 import (
+    DeepSeekV4MTPAdapter,
+    NativeMTPBoostModel,
+    _chunked_mtp_attention_forward,
+)
 
 hf_dsv4 = pytest.importorskip("transformers.models.deepseek_v4.modeling_deepseek_v4")
 
@@ -60,3 +66,35 @@ def test_chunked_attention_matches_native_sinks_and_compressed_mask(masked):
     actual_grads = torch.autograd.grad(actual, (query, kv, module.sinks), upstream)
     for actual_grad, expected_grad in zip(actual_grads, expected_grads):
         torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_window", "override", "expected"),
+    [(None, None, 128), (8192, None, 8192), (128, 8192, 8192)],
+)
+def test_mtp_window_config_and_mask(checkpoint_window, override, expected):
+    """The MTP-only config controls the decoder and exact causal window boundary."""
+    source = {"num_hidden_layers": 1, "sliding_window": 128, "compress_ratios": [0, 0]}
+    if checkpoint_window is not None:
+        source["mtp_sliding_window"] = checkpoint_window
+    config, layer = DeepSeekV4MTPAdapter._transformers_config(
+        SimpleNamespace(config=source), sliding_window=override
+    )
+    with torch.device("meta"):
+        attention = hf_dsv4.DeepseekV4Attention(config, layer)
+    assert attention.sliding_window == expected
+    assert attention.compressor is None
+    assert source["sliding_window"] == 128
+    model = NativeMTPBoostModel.__new__(NativeMTPBoostModel)
+    nn.Module.__init__(model)
+    model.config = config
+    padding = torch.ones(1, expected + 1, dtype=torch.bool)
+    padding[:, 1] = False
+    mask = model._attention_mask(
+        padding, sequence_length=expected + 1, dtype=torch.bfloat16, device=torch.device("cpu")
+    )[0, 0]
+    assert mask[expected, 0] < 0  # Exactly one window behind is excluded.
+    assert mask[expected - 1, 0] == 0
+    assert mask[0, 2] < 0  # Future token.
+    assert mask[expected, 1] < 0  # Padding remains excluded.
+    assert mask[expected, expected] == 0

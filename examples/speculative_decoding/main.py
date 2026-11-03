@@ -280,7 +280,10 @@ def train():
             adapter=recipe.mtp_boost.adapter,
             ttt_steps=recipe.mtp_boost.ttt_steps,
             hsm_mode=recipe.mtp_boost.hsm_mode,
+            sliding_window=recipe.mtp_boost.sliding_window,
+            training_checkpoint=checkpoint,
         )
+        print_rank_0(f"Native MTP attention window: {model.config.sliding_window}")
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_name_or_path,
             model_max_length=training_args.training_seq_len,

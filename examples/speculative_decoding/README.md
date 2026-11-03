@@ -286,6 +286,20 @@ size (eight GPUs in this example):
     training.output_dir=ckpts/dsv4-mtp-smoke
 ```
 
+To train only the MTP with an 8k attention window, add
+`mtp_boost.sliding_window=8192 training.training_seq_len=8192`. The target backbone
+keeps its original window, so existing target hidden-state dumps remain usable.
+When omitted, the window comes from the checkpoint's `mtp_sliding_window`, falling
+back to `sliding_window`. On resume, the saved training window takes precedence;
+a conflicting explicit override is rejected. Older training checkpoints without
+window metadata continue to inherit the base configuration.
+
+Native exports preserve the target's `sliding_window` and write the trained window
+as `mtp_sliding_window`. Serving must support this MTP-only field (for example, the
+DSV4 MTP sliding-window patch for vLLM); an unpatched server may ignore it. With
+8192-token records, an 8192 window covers the entire causal prefix within each
+record, but cannot provide context preceding that record.
+
 Each checkpoint directory contains an MTP-only BF16 `mtp_boost.pt` snapshot
 for export. It is saved as BF16 even when FSDP keeps FP32 optimizer masters in
 memory. The native-MTP Trainer path intentionally omits FSDP optimizer and

@@ -38,6 +38,8 @@ training:
 
 mtp_boost:
   adapter: auto
+  # MTP-only window; null inherits the checkpoint. Use 8192 for an 8k MTP.
+  sliding_window:
   hsm_mode: "off"
   ttt_steps: 1
   # Required online: vendor-converted file (single GPU) or model{rank}-mp{world}.safetensors dir.

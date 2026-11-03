@@ -1017,6 +1017,7 @@ class NativeMTPBoostModel(nn.Module):
                     "mtp_layer_index": self.mtp_layer_index,
                     "ttt_steps": self.ttt_steps,
                     "hsm_mode": self.hsm_mode,
+                    "mtp_sliding_window": self.config.sliding_window,
                 },
                 handle,
                 indent=2,
@@ -1085,7 +1086,9 @@ class DeepSeekV4MTPAdapter(NativeMTPAdapter):
         )
 
     @classmethod
-    def _transformers_config(cls, layout: _CheckpointLayout) -> tuple[Any, int]:
+    def _transformers_config(
+        cls, layout: _CheckpointLayout, sliding_window: int | None = None
+    ) -> tuple[Any, int]:
         # This adapter is instantiated only after the optional HF backend is available.
         from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
@@ -1097,6 +1100,15 @@ class DeepSeekV4MTPAdapter(NativeMTPAdapter):
         # checkpoint schedule entry while instantiating the single MTP layer.
         config_data["num_hidden_layers"] = base_layers + 1
         config = config_cls(**config_data)
+        window = sliding_window
+        if window is None:
+            window = config_data.get("mtp_sliding_window")
+        if window is None:
+            window = config.sliding_window
+        if type(window) is not int or window <= 0:
+            raise ValueError("MTP sliding_window must be a positive integer")
+        config.sliding_window = window
+        config.mtp_sliding_window = window
         ALL_ATTENTION_FUNCTIONS.register(
             "modelopt_dsv4_mtp_chunked_eager", _chunked_mtp_attention_forward
         )
@@ -1258,10 +1270,11 @@ class DeepSeekV4MTPAdapter(NativeMTPAdapter):
         device: torch.device | str | None,
         ttt_steps: int,
         hsm_mode: str,
+        sliding_window: int | None = None,
     ) -> NativeMTPBoostModel:
         """Load native MTP weights only on rank zero under CPU-efficient FSDP2."""
         layout = _checkpoint_layout(model_path, strict=True)
-        config, mtp_layer_index = cls._transformers_config(layout)
+        config, mtp_layer_index = cls._transformers_config(layout, sliding_window=sliding_window)
         skip_checkpoint_load = _is_fsdp_efficient_nonzero_rank()
         # Accelerate rebinds optimizer parameters by storage address before sharding.
         # Empty CPU storage is distinct; meta tensors all have address zero.
@@ -1371,13 +1384,17 @@ class DeepSeekV4MTPAdapter(NativeMTPAdapter):
         try:
             for source_item in layout.path.iterdir():
                 destination = output / source_item.name
-                if source_item.name in mtp_shards:
+                if source_item.name in mtp_shards or source_item.name == "config.json":
                     continue
                 if source_item.is_file():
                     cls._link_or_copy(source_item, destination)
                 elif source_item.is_dir():
                     shutil.copytree(source_item, destination, copy_function=cls._link_or_copy)
 
+            # Write a new inode: mutating a linked config would change the base checkpoint.
+            export_config = dict(layout.config)
+            export_config["mtp_sliding_window"] = model.config.sliding_window
+            (output / "config.json").write_text(json.dumps(export_config, indent=2) + "\n")
             safe_open, save_file = _require_safetensors()
             for shard_name in mtp_shards:
                 shard_path = layout.path / shard_name

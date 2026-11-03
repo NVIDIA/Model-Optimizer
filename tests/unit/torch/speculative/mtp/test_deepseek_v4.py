@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -69,7 +70,7 @@ def test_dsv4_adapter_uses_empty_cpu_storage_on_nonzero_fsdp_ranks(monkeypatch):
     monkeypatch.setattr(
         DeepSeekV4MTPAdapter,
         "_transformers_config",
-        classmethod(lambda _cls, _layout: (object(), 61)),
+        classmethod(lambda _cls, _layout, **_kwargs: (object(), 61)),
     )
 
     def build(_cls, _config, _layer_index, **kwargs):
@@ -166,6 +167,7 @@ def test_synthetic_dsv4_mtp_load_and_native_export_round_trip(tmp_path):
     source_tensors: dict[str, torch.Tensor] = {}
     expected_state: dict[str, torch.Tensor] = {}
     config = {
+        "sliding_window": 128,
         "model_type": "deepseek_v4",
         "n_routed_experts": 1,
         "num_nextn_predict_layers": 1,
@@ -241,6 +243,7 @@ def test_synthetic_dsv4_mtp_load_and_native_export_round_trip(tmp_path):
     layout = _checkpoint_layout(tmp_path, strict=True)
     model = NativeMTPBoostModel.__new__(NativeMTPBoostModel)
     nn.Module.__init__(model)
+    model.config = SimpleNamespace(sliding_window=8192)
     for name, value in expected_state.items():
         _register_parameter(model, name, value)
 
@@ -254,6 +257,11 @@ def test_synthetic_dsv4_mtp_load_and_native_export_round_trip(tmp_path):
 
     output_dir = tmp_path / "native-export"
     DeepSeekV4MTPAdapter.export(model, tmp_path, output_dir, state_dict=loaded_state)
+    exported_config = json.loads((output_dir / "config.json").read_text())
+    assert exported_config["sliding_window"] == 128
+    assert exported_config["mtp_sliding_window"] == 8192
+    assert json.loads((tmp_path / "config.json").read_text()) == config
+    assert (output_dir / "config.json").stat().st_ino != (tmp_path / "config.json").stat().st_ino
     with safetensors_torch.safe_open(
         str(output_dir / "model.safetensors"), framework="pt", device="cpu"
     ) as exported:

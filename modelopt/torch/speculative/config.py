@@ -473,6 +473,13 @@ class MedusaConfig(ModeloptBaseConfig):
 class MTPBoostConfig(ModeloptBaseConfig):
     """Configuration for training a checkpoint-native MTP module."""
 
+    sliding_window: int | None = ModeloptField(
+        default=None,
+        strict=True,
+        gt=0,
+        description="MTP-only attention window; defaults to the checkpoint configuration.",
+    )
+
     adapter: str = ModeloptField(
         default="auto",
         description=(

@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -32,6 +33,7 @@ __all__ = [
     "get_native_mtp_adapter",
     "load_native_mtp_boost_checkpoint",
     "register_native_mtp_adapter",
+    "resolve_native_mtp_sliding_window",
 ]
 
 
@@ -59,6 +61,7 @@ class NativeMTPAdapter(ABC):
         device: torch.device | str | None,
         ttt_steps: int,
         hsm_mode: str,
+        sliding_window: int | None = None,
     ) -> nn.Module:
         """Construct a trainable native-MTP model from ``model_path``."""
 
@@ -147,6 +150,31 @@ def get_native_mtp_adapter(model_path: str | Path, adapter: str = "auto") -> typ
     return matches[0]
 
 
+def resolve_native_mtp_sliding_window(
+    checkpoint_path: str | Path | None,
+    sliding_window: int | None = None,
+) -> int | None:
+    """Restore a saved MTP window, rejecting conflicting explicit overrides."""
+    if sliding_window is not None and (type(sliding_window) is not int or sliding_window <= 0):
+        raise ValueError("MTP sliding_window must be a positive integer")
+    if checkpoint_path is None:
+        return sliding_window
+    path = Path(checkpoint_path)
+    metadata = (path if path.is_dir() else path.parent) / "mtp_boost_config.json"
+    if not metadata.is_file():
+        return sliding_window
+    saved_window = json.loads(metadata.read_text()).get("mtp_sliding_window")
+    if saved_window is None:
+        return sliding_window  # Legacy checkpoints inherit the base model configuration.
+    if type(saved_window) is not int or saved_window <= 0:
+        raise NativeMTPCheckpointError("Invalid mtp_sliding_window in training checkpoint")
+    if sliding_window is not None and sliding_window != saved_window:
+        raise NativeMTPCheckpointError(
+            f"MTP window mismatch: checkpoint={saved_window}, requested={sliding_window}"
+        )
+    return saved_window
+
+
 def create_native_mtp_boost_model(
     model_path: str | Path,
     *,
@@ -155,13 +183,18 @@ def create_native_mtp_boost_model(
     adapter: str = "auto",
     ttt_steps: int = 1,
     hsm_mode: str = "off",
+    sliding_window: int | None = None,
+    training_checkpoint: str | Path | None = None,
 ) -> nn.Module:
     """Load a checkpoint-native MTP as a standalone trainable draft model.
 
     The returned module owns only the MTP as trainable state.  Its copied token
     embedding and LM head are frozen, allowing offline training without loading
-    the target backbone.
+    the target backbone. ``sliding_window`` overrides only the MTP attention;
+    ``training_checkpoint`` restores its saved window before model construction
+    (weights are loaded separately).
     """
+    sliding_window = resolve_native_mtp_sliding_window(training_checkpoint, sliding_window)
     selected = get_native_mtp_adapter(model_path, adapter)
     return selected.create(
         model_path,
@@ -169,6 +202,7 @@ def create_native_mtp_boost_model(
         device=device,
         ttt_steps=ttt_steps,
         hsm_mode=hsm_mode,
+        sliding_window=sliding_window,
     )
 
 
@@ -229,6 +263,7 @@ def load_native_mtp_boost_checkpoint(
     be either the file written by :meth:`NativeMTPBoostModel.save_pretrained`
     or its containing Trainer checkpoint directory.
     """
+    resolve_native_mtp_sliding_window(checkpoint_path, model.config.sliding_window)
     path = Path(checkpoint_path)
     if path.is_dir():
         candidates = (
