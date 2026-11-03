@@ -230,6 +230,15 @@ class EPSpec(SpecSection):
     the modules the code imports, and adapt a method to the arguments transformers now passes it,
     but patches no MoE or expert class, config, weight converter or weight-loading hook."""
 
+    prepare_refusal: "Callable[..., str | None] | None" = None
+    """Why ``prepare`` would refuse this checkpoint, or ``None``, found without changing anything.
+
+    Called as ``prepare_refusal(hf_config, ckpt_path=..., trust_remote_code=...)`` by the plan
+    decision, which runs no ``prepare`` before the plan is decided. An EP degree left to ``auto``
+    then plans the model without expert parallelism, with the decision's warning, rather than decide
+    expert parallelism ``prepare`` then refuses on every rank; one asked for meets the refusal from
+    ``prepare``."""
+
     decompressed_formats: tuple[str, ...] = ()
     """The checkpoint formats (a ``quantization_config``'s ``quant_method``) whose experts
     ``prepare`` has decompress as they load, which the expert-parallel load then takes beside

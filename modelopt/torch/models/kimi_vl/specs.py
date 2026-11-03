@@ -27,7 +27,7 @@ MoE-block handling skips them. Sharing the sections is left to a follow-up.
 
 from ..deepseek_v3.specs import BASE_MODEL_EP_PLAN
 from ..specs import EPSpec, ModelSpec, register
-from .ep import make_buildable, prepare
+from .ep import make_buildable, prepare, prepare_refusal
 
 __all__: list[str] = []
 
@@ -38,6 +38,7 @@ register(
         # prepare swaps a native deepseek_v3 in as the language model, with deepseek_v3's plan.
         ep_spec=EPSpec(
             prepare=prepare,
+            prepare_refusal=prepare_refusal,
             prepared_ep_plan=BASE_MODEL_EP_PLAN,
             plan_config_attr="text_config",
             make_buildable=make_buildable,

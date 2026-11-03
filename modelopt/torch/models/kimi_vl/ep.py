@@ -39,6 +39,19 @@ def make_buildable(
     )
 
 
+def prepare_refusal(
+    hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool = False, **_
+) -> str | None:
+    """Why :func:`prepare` would refuse this checkpoint, or ``None``, found changing nothing."""
+    why = _kimi.prepare_refusal("kimi_vl", hf_config, ckpt_path, trust_remote_code)
+    if why is None:
+        try:
+            _kimi.refuse_quantization_only_on_text_config("kimi_vl", hf_config)
+        except ValueError as e:
+            why = str(e)
+    return why
+
+
 def prepare(hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool = False, **_):
     """Load Kimi-VL's language model as the transformers-native deepseek_v3.
 

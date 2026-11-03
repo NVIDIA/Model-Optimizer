@@ -140,6 +140,16 @@ def test_a_spec_states_a_prepared_plan_only_with_a_prepare(model_type):
 
 
 @pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
+def test_a_spec_states_what_prepare_refuses_only_with_a_prepare(model_type):
+    """The decision plans a model whose spec states a refusal without expert parallelism: with no
+    ``prepare`` to make that refusal, it would rule expert parallelism out for nothing."""
+    ep = get_spec(model_type).ep_spec
+    assert not ep.prepare_refusal or ep.prepare, (
+        f"{model_type} states a prepare_refusal and no prepare, which nothing then refuses for"
+    )
+
+
+@pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
 def test_a_plan_goes_where_the_load_reads_one(model_type):
     """A spelling the load does not read is read as no plan at all, and the MoE planned as dense."""
     attrs = get_spec(model_type).ep_spec.plan_config_attr or ()

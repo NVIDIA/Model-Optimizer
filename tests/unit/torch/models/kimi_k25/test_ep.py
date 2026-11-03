@@ -194,6 +194,32 @@ def test_a_checkpoint_the_decompressor_refuses_is_refused_before_anything_change
     assert dmu.get_cached_module_file is staging
 
 
+@pytest.mark.parametrize(
+    ("dtype", "refused_scheme", "why"),
+    [("float16", False, "decompress to bfloat16"), (None, True, "config groups")],
+    ids=["not-bf16", "scheme"],
+)
+def test_prepare_refusal_finds_what_the_decompressor_would_refuse(
+    monkeypatch, dtype, refused_scheme, why
+):
+    """The plan decision asks before ``prepare`` runs, so ``prepare_refusal`` checks what the
+    decompressor would refuse a compressed-tensors checkpoint for, installing nothing."""
+
+    def read(cfg):
+        if refused_scheme:
+            raise NotImplementedError("the checkpoint has 2 compressed-tensors config groups")
+
+    monkeypatch.setattr(_onfly_decompress, "_read_compression", read)
+    monkeypatch.setattr(
+        _onfly_decompress, "install_onfly_decompress", lambda cfg: pytest.fail("installed")
+    )
+    config = _vlm_config()
+    config.quantization_config = {"quant_method": "compressed-tensors"}
+    config.text_config.dtype = dtype
+
+    assert why in kimi_k25.prepare_refusal(config, ckpt_path="/ckpt", trust_remote_code=True)
+
+
 def test_a_transformers_too_old_to_decompress_is_refused_before_prepare(monkeypatch):
     """The experts decompress as they load from transformers 5.8: the spec refuses an older
     release before prepare swaps the language model's config."""

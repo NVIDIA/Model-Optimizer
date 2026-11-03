@@ -25,6 +25,7 @@ import contextlib
 import copy
 import importlib
 import json
+import re
 import shutil
 import sys
 import types
@@ -495,7 +496,8 @@ def test_the_swap_fails_loudly_when_the_remote_modeling_has_nothing_to_swap(
 )
 def test_prepare_refuses_before_patching_anything(monkeypatch, adapter, config, kwargs, match):
     """Before prepare patches anything process-wide, such as the loader's remote-code staging, or
-    imports the checkpoint's code."""
+    imports the checkpoint's code. The spec's ``prepare_refusal``, which the plan decision asks,
+    finds the same refusal."""
 
     def unstaged_loader(*args, **kwargs):
         """The loader before any staging shim wraps it."""
@@ -507,10 +509,17 @@ def test_prepare_refuses_before_patching_anything(monkeypatch, adapter, config, 
         lambda *args, **kwargs: pytest.fail("the checkpoint's code was imported"),
     )
 
+    assert re.search(match, adapter.prepare_refusal(config(), **kwargs))
     with pytest.raises(ValueError, match=match):
         adapter.prepare(config(), **kwargs)
 
     assert dmu.get_cached_module_file is unstaged_loader
+
+
+@pytest.mark.parametrize("adapter", [kimi_vl, kimi_k25], ids=["vl", "k25"])
+def test_prepare_refusal_finds_nothing_in_a_checkpoint_prepare_takes(adapter):
+    """A trusted checkpoint of the model's own code, unquantized: ``prepare`` takes it."""
+    assert adapter.prepare_refusal(_vlm_config(), ckpt_path="/ckpt", trust_remote_code=True) is None
 
 
 @pytest.mark.parametrize(

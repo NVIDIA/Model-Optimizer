@@ -58,6 +58,19 @@ def checkpoint_to_patch(
     return ckpt_path
 
 
+def prepare_refusal(
+    label: str, hf_config, ckpt_path: str | None, trust_remote_code: bool
+) -> str | None:
+    """Why the adapter ``label``'s ``prepare`` would refuse this checkpoint before it changes
+    anything, or ``None``: :func:`checkpoint_to_patch`'s refusals, asked without raising, for the
+    plan decision (``EPSpec.prepare_refusal``)."""
+    try:
+        checkpoint_to_patch(label, hf_config, ckpt_path, trust_remote_code)
+    except ValueError as e:
+        return str(e)
+    return None
+
+
 def refuse_quantization_only_on_text_config(label: str, hf_config) -> None:
     """Refuse a checkpoint whose ``quantization_config`` only its ``text_config`` declares.
 

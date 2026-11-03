@@ -1031,6 +1031,8 @@ def test_a_checkpoint_its_spec_decompresses_is_decided_expert_parallel(
     spec = get_spec(model_type).ep_spec
     monkeypatch.setattr(spec, "prepare", _prepares_as_its_spec_states(model_type))
     monkeypatch.setattr(spec, "make_buildable", lambda *args, **kwargs: None)
+    # What prepare itself would refuse is the next test's.
+    monkeypatch.setattr(spec, "prepare_refusal", None)
     monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi())
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
     run_as(4)
@@ -1039,6 +1041,49 @@ def test_a_checkpoint_its_spec_decompresses_is_decided_expert_parallel(
     serve(SimpleNamespace(model_type=model_type, quantization_config=scheme, text_config=text))
 
     assert resolve_distribution_plan(str(tmp_path))[0].is_expert_parallel == expert_parallel
+
+
+# transformers' own Kimi-K2.5 port (from 5.13), which a load without trust_remote_code builds.
+_KimiK25PortConfig = type(
+    "KimiK25Config", (SimpleNamespace,), {"__module__": "transformers.models.kimi_k25.config"}
+)
+
+
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version(_ep_floor("kimi_k25")),
+    reason="Kimi-K2.5's expert parallelism needs a later transformers",
+)
+@pytest.mark.parametrize(
+    ("config_class", "trust_remote_code", "dtype", "why"),
+    [
+        (_KimiK25PortConfig, False, None, "transformers' own port"),
+        (SimpleNamespace, False, None, "trust_remote_code=True"),
+        (SimpleNamespace, True, "float16", "decompress to bfloat16"),
+    ],
+    ids=["transformers-port", "untrusted", "not-bf16"],
+)
+def test_a_checkpoint_its_spec_s_prepare_refuses_is_planned_without_expert_parallelism(
+    run_as, serve, monkeypatch, tmp_path, config_class, trust_remote_code, dtype, why
+):
+    """``prepare`` runs only once the plan is decided expert-parallel, and refuses some checkpoints
+    its spec's formats count as ones the expert-parallel load takes: transformers' own Kimi-K2.5
+    port, code the load may not run, or experts the decompressor cannot take. The decision asks the
+    spec first, so an EP degree left to auto plans the model without expert parallelism, with the
+    warning naming why, rather than decide expert parallelism that ``prepare`` refuses on every rank."""
+    spec = get_spec("kimi_k25").ep_spec
+    monkeypatch.setattr(spec, "prepare", lambda *a, **k: pytest.fail("ran prepare"))
+    monkeypatch.setattr(spec, "make_buildable", lambda *args, **kwargs: None)
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi())
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+    run_as(4)
+    scheme = {"quant_method": "compressed-tensors"}
+    text = SimpleNamespace(n_routed_experts=4, quantization_config=scheme, dtype=dtype)
+    serve(config_class(model_type="kimi_k25", quantization_config=scheme, text_config=text))
+
+    with pytest.warns(UserWarning, match=f"loads without expert parallelism.*{why}"):
+        plan, _ = resolve_distribution_plan(str(tmp_path), trust_remote_code=trust_remote_code)
+
+    assert not plan.is_expert_parallel
 
 
 def _remote_kimi():
@@ -1071,15 +1116,16 @@ def test_a_remote_moe_whose_prepare_attaches_its_plan_left_whole_is_an_error(
     if Version(transformers.__version__) < Version(_ep_floor(model_type)):
         pytest.skip(f"{model_type} cannot be expert-parallel on this transformers")
     monkeypatch.setenv("MODELOPT_EP_DEGREE", "1")
-    monkeypatch.setattr(
-        get_spec(model_type).ep_spec, "prepare", lambda *a, **k: pytest.fail("ran prepare")
-    )
+    spec = get_spec(model_type).ep_spec
+    monkeypatch.setattr(spec, "prepare", lambda *a, **k: pytest.fail("ran prepare"))
+    # The build step's own work is tested with each checkpoint's code.
+    monkeypatch.setattr(spec, "make_buildable", lambda *args, **kwargs: None)
     monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi())
     run_as(4)
     serve(SimpleNamespace(model_type=model_type, text_config=SimpleNamespace(n_routed_experts=8)))
 
     with pytest.raises(ValueError, match="can be expert-parallel, but the plan resolved"):
-        resolve_distribution_plan(str(tmp_path))
+        resolve_distribution_plan(str(tmp_path), trust_remote_code=True)
 
 
 @pytest.mark.parametrize(
