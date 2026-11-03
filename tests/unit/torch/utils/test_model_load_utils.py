@@ -2778,7 +2778,7 @@ def test_a_plan_whose_expert_containers_match_no_module_is_refused(ep_world_of_t
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args, **kwargs: [])
     config = SimpleNamespace(
         model_type=_NO_SPEC,
         base_model_ep_plan={"layers.*.mlp.experts.*.gate_up_proj": "grouped_gemm"},
@@ -2827,7 +2827,7 @@ def test_the_model_keeps_the_plan_its_checkpoint_declares(
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args, **kwargs: [])
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
 
     class _Config(transformers.PretrainedConfig):
@@ -2889,7 +2889,7 @@ def test_a_loaded_model_keeps_its_sharding_styles_out_of_its_saved_config(
         "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: mesh
     )
     monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
-    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
+    monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args, **kwargs: [])
     monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
     config = Qwen3MoeConfig(
         hidden_size=16,

@@ -401,7 +401,9 @@ def _group_sources_by_layer(
     return layer_sources, non_layer_sources, unplaced
 
 
-def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
+def unplaced_source_keys(
+    model: nn.Module, ckpt_path: str, tensor_files: "dict[str, str] | None" = None
+) -> list[str]:
     """Checkpoint tensors the loaded ``model`` has no parameter for, e.g. an MTP head.
 
     Every tensor in the weight files the loader opened
@@ -424,8 +426,10 @@ def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
     and a model our own loader built from its config has none, so the stock mapping answers there.
 
     A checkpoint without safetensors (``pytorch_model.bin``) has nothing the export can carry: ``[]``.
+    Pass ``tensor_files``, the checkpoint's ``tensor name -> file`` map, when the load already read it.
     """
-    tensor_files = checkpoint_tensor_files(ckpt_path)
+    if tensor_files is None:
+        tensor_files = checkpoint_tensor_files(ckpt_path)
     if not tensor_files:
         return []
     # Every name of a tied parameter: a checkpoint can store the one named_parameters() drops by
@@ -448,7 +452,10 @@ def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
 
 
 def record_unplaced_source_keys(
-    model: nn.Module, ckpt_path: str, keys: "Iterable[str] | None" = None
+    model: nn.Module,
+    ckpt_path: str,
+    keys: "Iterable[str] | None" = None,
+    tensor_files: "dict[str, str] | None" = None,
 ) -> list[str]:
     """Record on ``model`` the checkpoint tensors it has no parameter for, for the export to carry.
 
@@ -456,10 +463,11 @@ def record_unplaced_source_keys(
     at load time, and the export reads it back (``_modelopt_unplaced_source_keys``, beside the
     checkpoint in ``_modelopt_source_checkpoint``) rather than deriving it again. Pass ``keys`` when
     the loader already found them while placing the weights; otherwise :func:`unplaced_source_keys`
-    derives them from the loaded model. Every loader of a model that may be exported calls this:
-    :func:`load_pretrained` and :func:`parallel_load_and_prepare_fsdp2` do.
+    derives them from the loaded model, from ``tensor_files`` when the load already read them. Every
+    loader of a model that may be exported calls this: :func:`load_pretrained` and
+    :func:`parallel_load_and_prepare_fsdp2` do.
     """
-    keys = sorted(unplaced_source_keys(model, ckpt_path) if keys is None else keys)
+    keys = sorted(unplaced_source_keys(model, ckpt_path, tensor_files) if keys is None else keys)
     model._modelopt_unplaced_source_keys = keys
     model._modelopt_source_checkpoint = str(ckpt_path)
     return keys
@@ -2252,6 +2260,7 @@ def load_and_prepare_ep(
     # The load and the export both read the local snapshot, made only once the checks pass, so a
     # refused load downloads nothing.
     compressed_names: set[str] = set()
+    tensor_files: dict[str, str] | None = None  # read once, by the decompressing load's checks
     with _refused_together("the local checkpoint", alone=False):
         _, ckpt_path = ensure_local_checkpoint(ckpt_path, **hub_options)
         if _decompressed_as_loaded(hf_config):
@@ -2381,7 +2390,7 @@ def load_and_prepare_ep(
 
         # The checkpoint tensors the model has no parameter for (an MTP head), worked out once, at load,
         # for the export to carry.
-        unplaced = record_unplaced_source_keys(model, ckpt_path)
+        unplaced = record_unplaced_source_keys(model, ckpt_path, tensor_files=tensor_files)
         # The export would copy them as stored, and this load dropped the quantization_config that
         # reads a compressed one, such as an MTP layer's experts. A suffix is enough to tell them:
         # check_compressed_keys refused any compressed tensor outside the experts.
