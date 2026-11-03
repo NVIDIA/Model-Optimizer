@@ -25,6 +25,7 @@ from .layout import passes as layout_passes
 from .layout import rules as layout_rules
 from .operators import passes as operator_passes
 from .operators import rules as operator_rules
+from .patterns import rules as pattern_rules
 from .preprocessing import passes as preprocessing_passes
 from .preprocessing import rules as preprocessing_rules
 
@@ -68,6 +69,20 @@ def preprocessing(graph: DlaGraph, *, quantized_dtypes=None, remove_all_qdq=Fals
             for domain in ("", "com.microsoft")
         ]
     )
+    graph.apply_pass(ir.passes.common.RemoveUnusedNodesPass())
+    return count
+
+
+def pattern_rewrites(graph: DlaGraph) -> int:
+    """Apply connected native-layout patterns before lowering their constituent operators."""
+    count = 0
+    for definition in (
+        pattern_rules.ReshapeTransposeReshape,
+        pattern_rules.ReshapeQDQReduceSum,
+        pattern_rules.ReshapeReduceSum,
+        pattern_rules.TopKVectorGather,
+    ):
+        count += graph.apply_pattern(definition.rule(graph))
     graph.apply_pass(ir.passes.common.RemoveUnusedNodesPass())
     return count
 
