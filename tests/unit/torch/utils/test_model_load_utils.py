@@ -75,7 +75,7 @@ import modelopt.torch.models.hf as models_hf
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 import modelopt.torch.utils.moe as moe
-from modelopt.torch.models import get_spec
+from modelopt.torch.models import _onfly_decompress, get_spec
 from modelopt.torch.quantization.plugins import accelerate as accelerate_plugin
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -2974,7 +2974,6 @@ def test_a_compressed_checkpoint_a_spec_decompresses_as_it_loads_passes(
     So is one that compresses more than its experts, by the names it stores, before it loads, and a
     config whose class keeps quantization_config, which the load cannot clear; one whose class only
     forwards its text config's loads."""
-    from modelopt.torch.models import _onfly_decompress
 
     class _LoadedError(Exception):
         """Stops the load at from_pretrained."""
@@ -3062,7 +3061,6 @@ def test_a_decompressed_load_refuses_compressed_tensors_its_model_does_not_place
     not. Compressed experts stored past the config's decoder layers are refused before anything
     loads. Which keys go unplaced is stood in for here; a real decompressed load's are pinned in
     test_unplaced_source_keys.py."""
-    from modelopt.torch.models import _onfly_decompress
 
     class _PastError(Exception):
         """Raised by the load's next check."""
