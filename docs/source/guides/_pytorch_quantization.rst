@@ -394,6 +394,15 @@ Here is an example of creating custom calibration mode:
         def convert(self) -> ConvertEntrypoint:
         ...
 
+        # whether it calibrates correctly when every rank calibrates on its own data
+        _distributed_calibration = False
+
+A custom calibration mode declares ``_distributed_calibration`` on its descriptor: ``True`` if the
+algorithm calibrates correctly when every rank of a distributed model calibrates on its own data,
+for example by syncing what it gathers across the ranks, and ``False`` if it keeps statistics on
+each rank. A mode that declares neither is refused on a model whose recorded distribution plan
+spans several ranks.
+
 
 You can specify ``custom_calib`` as ``algorithm`` in ``quant_cfg`` to use it. Here is an example of using a custom calibrator to quantize your model:
 

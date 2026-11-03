@@ -26,6 +26,7 @@ import transformer_engine.pytorch.module.layernorm_linear as te_layernorm_linear
 import transformer_engine.pytorch.module.linear as te_linear
 
 from modelopt.torch.quantization.utils import replace_function
+from modelopt.torch.quantization.utils.core_utils import apply_without_qdq
 
 from ..nn import GroupedQuantizer, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from .custom import _ParallelLinear
@@ -315,19 +316,41 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, inp, ln_weight, ln_bias, weight, *args, **kwargs):
-        input_quantizer, weight_quantizer = _QuantLayerNormLinearFunc.modelopt_quantizers
+        input_quantizer, weight_quantizer, unquantized_rows = (
+            _QuantLayerNormLinearFunc.modelopt_quantizers
+        )
 
         qweight = weight_quantizer(weight)
+        if unquantized_rows is not None:
+            # Deployment keeps these rows in BF16: they skip QDQ but keep the quantizers' scaling
+            # and rotation. Not in place: the fake-quant weight cache may hold qweight.
+            row_weight = apply_without_qdq(weight_quantizer, weight[unquantized_rows])
+            qweight = torch.cat(
+                (
+                    qweight[: unquantized_rows.start],
+                    row_weight.to(qweight.dtype),
+                    qweight[unquantized_rows.stop :],
+                )
+            )
         qweight.requires_grad = weight.requires_grad
         if ctx is not None:
             # We need to recompute the quantized input for the backward pass, so we save the input_quantizer
             ctx.modelopt_input_quantizer = input_quantizer
+            ctx.modelopt_unquantized_rows = unquantized_rows
 
         original_gemm = te_layernorm_linear.general_gemm
 
-        def _patched_general_gemm(weight, input, *gemm_args, **gemm_kwargs):
+        def _patched_general_gemm(gemm_weight, input, *gemm_args, **gemm_kwargs):
             qinput = input_quantizer(input)
-            return original_gemm(weight, qinput, *gemm_args, **gemm_kwargs)
+            outputs = original_gemm(gemm_weight, qinput, *gemm_args, **gemm_kwargs)
+            if unquantized_rows is not None:
+                bias = gemm_kwargs.get("bias")
+                outputs[0][..., unquantized_rows] = torch.nn.functional.linear(
+                    apply_without_qdq(input_quantizer, input).to(row_weight.dtype),
+                    row_weight,
+                    None if bias is None else bias[unquantized_rows],
+                ).to(outputs[0].dtype)
+            return outputs
 
         with replace_function(
             te_layernorm_linear,
@@ -366,7 +389,16 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
             # but gemm is called with the unquantized input (a)
             # So lets first get the quantized input (qinput) and then call the gemm
             qinput = ctx.modelopt_input_quantizer(a)
-            return original_gemm(qinput, b, *gemm_args, **gemm_kwargs)
+            outputs = original_gemm(qinput, b, *gemm_args, **gemm_kwargs)
+            rows = ctx.modelopt_unquantized_rows
+            if rows is not None and outputs[0] is not None:
+                # The forward computed these rows from the unquantized input.
+                x = apply_without_qdq(ctx.modelopt_input_quantizer, a)
+                dy = b[..., rows].reshape(-1, rows.stop - rows.start)
+                outputs[0][rows] = (dy.t() @ x.reshape(dy.shape[0], -1).to(dy.dtype)).to(
+                    outputs[0].dtype
+                )
+            return outputs
 
         with replace_function(
             te_layernorm_linear,
@@ -378,6 +410,7 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
             outputs = te_layernorm_linear._LayerNormLinear.backward(ctx, *grad_outputs)
 
         delattr(ctx, "modelopt_input_quantizer")
+        delattr(ctx, "modelopt_unquantized_rows")
         return outputs
 
 
@@ -394,6 +427,18 @@ class _QuantTELayerNormLinear(_ParallelLinear):
             )
             self.fuse_wgrad_accumulation = False
 
+    def fold_weight(self, keep_attrs: bool = False):
+        """Fold the weight quantizer, keeping the rows the forward pass leaves unquantized."""
+        rows = getattr(self, "_modelopt_unquantized_output_rows", None)
+        unquantized = None
+        if rows is not None:
+            with torch.no_grad():
+                # Cloned: without transforms this returns a view of the weight that folding overwrites.
+                unquantized = apply_without_qdq(self.weight_quantizer, self.weight[rows]).clone()
+        super().fold_weight(keep_attrs)
+        if unquantized is not None:
+            self.weight.data[rows] = unquantized.to(self.weight.dtype)
+
     def forward(self, *args, **kwargs):
         """Call ModelOpt patch for _LayerNormLinear functional."""
         _assert_te_fp8_enabled()
@@ -401,6 +446,7 @@ class _QuantTELayerNormLinear(_ParallelLinear):
         _QuantLayerNormLinearFunc.modelopt_quantizers = (
             self.input_quantizer,
             self.weight_quantizer,
+            getattr(self, "_modelopt_unquantized_output_rows", None),
         )
         with replace_function(
             te_layernorm_linear,

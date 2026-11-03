@@ -18,8 +18,11 @@ model's record of it, the collectives that fail together, and the process group'
 
 import os
 import pickle
+import sys
 from contextlib import nullcontext
 from datetime import timedelta
+from functools import partial
+from unittest import mock
 
 import pytest
 import torch
@@ -27,7 +30,7 @@ import torch.distributed
 import torch.nn as nn
 from _test_utils.torch.distributed.utils import bounded_collectives
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp import FSDPModule, fully_shard
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.nas.hparams.container import DepthHparam
@@ -35,7 +38,6 @@ from modelopt.torch.utils.distributed import (
     DistributedState,
     DistributionPlan,
     _deserialize,
-    _off_dtype_params,
     _serialize,
     all_reduce,
     broadcast_from,
@@ -43,47 +45,6 @@ from modelopt.torch.utils.distributed import (
     distribution_plan,
     set_distribution_plan,
 )
-
-
-def _model(*sizes_and_dtypes) -> nn.Module:
-    model = nn.Module()
-    for i, (numel, dtype) in enumerate(sizes_and_dtypes):
-        model.register_parameter(f"p{i}", nn.Parameter(torch.zeros(numel, dtype=dtype)))
-    return model
-
-
-def test_off_dtype_params_uniform_is_empty(recwarn):
-    model = _model((8, torch.bfloat16), (4, torch.bfloat16))
-    assert _off_dtype_params(model) == set()
-    assert not recwarn.list
-
-
-def test_off_dtype_params_returns_only_the_minority():
-    # An fp32 MoE router gate next to bf16 weights, as Nemotron-3-Nano ships it.
-    model = _model((100, torch.bfloat16), (5, torch.float32))
-    with pytest.warns(UserWarning, match="mixed parameter dtypes"):
-        off = _off_dtype_params(model)
-    assert off == {model.p1}
-
-
-@pytest.mark.parametrize(
-    ("params", "expected"),
-    [
-        # Dominant dtype is by element count, not parameter count: three small fp32 params
-        # lose to one large bf16 param, and vice versa.
-        ([(100, torch.bfloat16), (5, torch.float32), (5, torch.float32), (5, torch.float32)], "p0"),
-        (
-            [(100, torch.float32), (5, torch.bfloat16), (5, torch.bfloat16), (5, torch.bfloat16)],
-            "p0",
-        ),
-    ],
-)
-def test_off_dtype_params_dominant_is_by_numel(params, expected):
-    model = _model(*params)
-    with pytest.warns(UserWarning, match="mixed parameter dtypes"):
-        off = _off_dtype_params(model)
-    kept = {n for n, p in model.named_parameters() if p not in off}
-    assert kept == {expected}
 
 
 class _Gadget:
@@ -190,6 +151,52 @@ def _no_plan_on_several_ranks_job(rank, size):
 def test_a_model_with_no_plan_raises_in_a_run_of_several_ranks(cpu_dist_workers):
     """On two ranks a model needs a recorded plan, whole, FSDP2-sharded or added to later."""
     cpu_dist_workers.run(_no_plan_on_several_ranks_job)
+
+
+class _Decoder(nn.Module):
+    """Decoder layers of plain PyTorch, which no Hugging Face plugin knows."""
+
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.ModuleList([nn.Linear(4, 4), nn.Linear(4, 4)])
+
+
+# As an install without the hf extra has them: importing any of them fails.
+_HUGGING_FACE = ("transformers", "huggingface_hub", "accelerate")
+
+
+def _wraps_without_hugging_face_job(rank, size):
+    # Imported while the Hugging Face packages are there, as the pooled worker keeps them.
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+    from modelopt.torch.utils import fsdp2_utils
+
+    model, mesh = _Decoder(), init_device_mesh("cpu", (size,))
+    hidden = (*_HUGGING_FACE, "modelopt.torch.utils.plugins.model_load_utils")
+    saved = {name: sys.modules.pop(name) for name in hidden if name in sys.modules}
+    sys.modules.update(dict.fromkeys(_HUGGING_FACE))
+    try:
+        with (
+            mock.patch.object(LayerActivationCollector, "_decoder_layer_support", []),
+            # A CPU mesh, whatever accelerator the host has.
+            mock.patch.object(fsdp2_utils, "fully_shard", partial(fully_shard, mesh=mesh)),
+        ):
+            LayerActivationCollector.register_decoder_layer_support(
+                lambda model: isinstance(model, _Decoder), lambda model: model.layers
+            )
+            layers = dist.fsdp2_wrap(model, shard_root=False)
+    finally:
+        for name in hidden:
+            sys.modules.pop(name, None)
+        sys.modules.update(saved)
+    assert layers is model.layers
+    assert all(isinstance(layer, FSDPModule) for layer in layers)
+    assert not isinstance(model, FSDPModule)
+
+
+def test_fsdp2_wrap_needs_no_hugging_face(cpu_dist_workers):
+    """The old path wraps a model whose decoder layers are registered, with no Hugging Face package
+    to import and the loaders unimportable, as it did before fsdp2_wrap moved."""
+    cpu_dist_workers.run(_wraps_without_hugging_face_job)
 
 
 # ------------------------------------------------------------------------------------ collectives
