@@ -527,20 +527,6 @@ def _route(plan: DistributionPlan) -> str | None:
             f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}."
         )
     if plan.is_expert_parallel:
-        if plan.is_fsdp_dense:
-            # Refused before anything loads, where the remedies can be named: the expert-parallel
-            # load replicates the dense part, so it cannot honor this plan.
-            raise NotImplementedError(
-                f"{plan!r} FSDP2-shards the dense part, but the expert-parallel load replicates it "
-                "on every rank. Sharding the dense part under expert parallelism is not supported "
-                "yet. An EP degree left to the decision gives way to FSDP2 for the whole model when "
-                "a whole copy of the dense part and a rank's share of the routed experts would take "
-                f"more than {_REPLICATED_SHARE:.0%} of a GPU; the degree asked for stands. "
-                "Replicate the dense part anyway (MODELOPT_FSDP_SIZE=1, or "
-                "a plan with dense='replicate'), or shard the whole model with FSDP2 "
-                "(MODELOPT_EP_DEGREE=1 with MODELOPT_FSDP_SIZE=world) if the checkpoint is an "
-                "unquantized causal LM."
-            )
         return _EXPERT_PARALLEL
     return _FSDP2 if plan.is_fsdp_dense else None
 
@@ -826,10 +812,10 @@ def load_pretrained(
     every rank takes rank 0's or, when rank 0 passes none, :func:`resolve_distribution_plan`'s.
 
     * ``ep_size > 1``: :func:`load_and_prepare_ep` shards an MoE's routed experts over the process
-      group as they load and replicates the dense part, so a plan with ``dense="fsdp"`` as well is
-      refused. It builds and places the model itself, so it takes its own options but no
-      ``auto_class``, placement or ``dtype``, and refuses a quantized checkpoint. Here it leaves the
-      model unfrozen, as the other loads do, unless ``freeze=True``.
+      group as they load, with the dense part replicated or FSDP2-sharded as the plan says. It
+      builds and places the model itself, so it takes its own options but no ``auto_class``,
+      placement or ``dtype``, and refuses a quantized checkpoint. Here it leaves the model unfrozen,
+      as the other loads do, unless ``freeze=True``.
     * ``dense="fsdp"``: :func:`parallel_load_and_prepare_fsdp2` shards a causal LM, or a text-only
       VLM it supports, over the process group (one process needs ``torchrun --nproc_per_node=1``).
       It builds and places the model itself, so it takes its own options but no ``auto_class``,

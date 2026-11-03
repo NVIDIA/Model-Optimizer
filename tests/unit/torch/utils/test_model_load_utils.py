@@ -769,20 +769,27 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
         assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
 
 
-@pytest.mark.parametrize("ep_degree", [None, "1"], ids=["auto", "set-to-1"])
+@pytest.mark.parametrize(
+    "ep_degree",
+    [pytest.param(None, marks=needs_ep_transformers), "1"],  # below it the plan goes without EP
+    ids=["auto", "set-to-1"],
+)
 def test_an_ep_capable_moe_may_be_fsdp2_sharded_instead(
     run_as, serve, monkeypatch, tmp_path, ep_degree
 ):
-    """Asked for dense sharding, the MoE is sharded whole by FSDP2, which is not the waste of a
-    replica on every rank: an EP degree left to the decision gives way, as the expert-parallel
-    load replicates the dense part."""
+    """Asked for dense sharding, an MoE left to decide shards its experts expert-parallel and the
+    rest with FSDP2; with expert parallelism set to 1, FSDP2 shards it whole. Neither is the waste
+    of a replica on every rank."""
     if ep_degree is not None:
         monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
     run_as(2)
     serve(_deepseek_v3(n_routed_experts=8))
 
-    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2, dense="fsdp")
+    expected = (
+        DistributionPlan(2, 2, "fsdp") if ep_degree is None else DistributionPlan(2, dense="fsdp")
+    )
+    assert resolve_distribution_plan(str(tmp_path))[0] == expected
 
 
 @needs_qwen3_moe_ep_plan
@@ -916,9 +923,7 @@ def test_what_a_rank_holds_with_the_dense_part_replicated_must_fit(
 ):
     """At EP 4 a rank holds the rest of the model whole and a quarter of the routed experts, so the
     dense part is sharded when that does not fit one GPU, however small the rest; with no EP the
-    whole MoE must fit, and here it does not. The expert-parallel load replicates the dense part,
-    so an EP degree left to the decision gives way to FSDP2 for the whole model, where one asked
-    for stands, for the load to refuse."""
+    whole MoE must fit, and here it does not. An EP degree asked for gives the same plan."""
     run_as(4)
     config = serve(_qwen3_moe(num_experts=8))
     model = _meta(config)
@@ -926,8 +931,7 @@ def test_what_a_rank_holds_with_the_dense_part_replicated_must_fit(
     # A GPU 60% of which holds the rest of the model and that share of the experts.
     gpu_memory(int((_bytes(model) - experts + experts_fitting * experts) / 0.6))
 
-    decided = DistributionPlan(4, 4) if dense == "replicate" else DistributionPlan(4, dense="fsdp")
-    assert resolve_distribution_plan(str(tmp_path))[0] == decided
+    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4, dense)
     assert resolve_distribution_plan(str(tmp_path), ep_size=4)[0] == DistributionPlan(4, 4, dense)
     assert resolve_distribution_plan(str(tmp_path), ep_size=1)[0] == DistributionPlan(
         4, dense="fsdp"
@@ -1657,13 +1661,9 @@ def test_an_expert_parallel_plan_loads_through_the_ep_loader(
     """Decided automatically, an EP plan loads through load_and_prepare_ep -- with the plan, the
     spec-prepared config and the Hub options the load was given -- and through no other load. It
     returns the model unfrozen, as the other loads do, and an option passed as None asks nothing
-    of it. That load replicates the dense part, so a plan that asks for expert parallelism and
-    FSDP2-shards the dense part too is refused before anything loads, naming the ways out. A launch
-    that shows each process one GPU, bound to cuda:0, gives a rank of any local rank a GPU of its
-    own."""
+    of it, whether the plan replicates the dense part or FSDP2-shards it. A launch that shows each
+    process one GPU, bound to cuda:0, gives a rank of any local rank a GPU of its own."""
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", {"replicate": "1", "fsdp": "world"}[dense])
-    if dense == "fsdp":  # left to the decision, the EP degree would give way to FSDP2
-        monkeypatch.setenv("MODELOPT_EP_DEGREE", "4")
     run_as(4, rank=1 if one_gpu_per_process else 0)
     if one_gpu_per_process:
         monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
@@ -1677,26 +1677,20 @@ def test_an_expert_parallel_plan_loads_through_the_ep_loader(
         "local_files_only": True,
     }
 
-    if dense == "fsdp":
-        with pytest.raises(
-            NotImplementedError, match=r"load replicates it on every rank\..*\(MODELOPT_FSDP_SIZE=1"
-        ):
-            load_pretrained(str(tmp_path), **options)
-    else:
-        model = load_pretrained(str(tmp_path), **options)
-        call = loaders.pop("ep")
-        plan = DistributionPlan(4, ep_size=4, dense=dense)
-        assert (call["ckpt_path"], call["plan"]) == (str(tmp_path), plan)
-        assert (call["trust_remote_code"], call["attn_implementation"]) == (True, "eager")
-        assert call["freeze"] is False
-        assert "require_lm_head" not in call  # its default, not None read as False
-        assert call["hub_options"] == {"local_files_only": True}
-        assert (
-            call["hf_config"].base_model_ep_plan
-            == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
-        )
-        assert served.base_model_ep_plan is None
-        assert distribution_plan(model) == plan
+    model = load_pretrained(str(tmp_path), **options)
+
+    call = loaders.pop("ep")
+    plan = DistributionPlan(4, ep_size=4, dense=dense)
+    assert (call["ckpt_path"], call["plan"]) == (str(tmp_path), plan)
+    assert (call["trust_remote_code"], call["attn_implementation"]) == (True, "eager")
+    assert call["freeze"] is False
+    assert "require_lm_head" not in call  # its default, not None read as False
+    assert call["hub_options"] == {"local_files_only": True}
+    assert (
+        call["hf_config"].base_model_ep_plan == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
+    )
+    assert served.base_model_ep_plan is None
+    assert distribution_plan(model) == plan
     assert loaders == {}
     assert auto_class.calls == []
 
@@ -3655,7 +3649,7 @@ def test_a_block_fp8_checkpoint_is_refused_as_a_format_whatever_its_dense_layout
     monkeypatch.setattr("modelopt.torch.utils.distributed.is_initialized", lambda: True)
     monkeypatch.setattr("modelopt.torch.utils.distributed.size", lambda group=None: 2)
     monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
-    config = SimpleNamespace(quantization_config={"quant_method": "fp8"})
+    config = SimpleNamespace(model_type=_NO_SPEC, quantization_config={"quant_method": "fp8"})
 
     with pytest.raises(NotImplementedError, match="cannot dequantize a 'fp8' checkpoint"):
         load_and_prepare_ep("unused", DistributionPlan(2, 2, "fsdp"), hf_config=config)
@@ -3955,6 +3949,7 @@ def test_a_dense_part_from_pretrained_did_not_leave_on_meta_is_refused(
     monkeypatch.setattr(model_load_utils, "record_unplaced_source_keys", lambda *args: [])
     monkeypatch.setattr(model_load_utils, "_load_ep_dense_distributed", dense_load)
     config = SimpleNamespace(
+        model_type=_NO_SPEC,
         base_model_ep_plan={
             "layers.*.mlp.gate": "ep_router",
             "layers.*.mlp.experts": "moe_tp_experts",
