@@ -1097,8 +1097,7 @@ def test_transformers_own_kimi_k25_port_of_an_unquantized_checkpoint_is_planned_
     """transformers' port, which a load without trust_remote_code builds, carries deepseek_v3's plan
     on its text config, so an unquantized checkpoint read that way loads expert-parallel on it, as
     it is. On a GPU the whole model overfills but a rank's share of it with the experts sharded
-    fits, the decision shards the experts rather than FSDP2-shard the whole model, whose load takes
-    no image-text config."""
+    fits, the decision shards the experts rather than FSDP2-shard the whole model."""
     # Local: this module exists only from transformers 5.13, so a module-level import would break
     # collection on older releases.
     from transformers.models.kimi_k25.configuration_kimi_k25 import Kimi_K25Config
