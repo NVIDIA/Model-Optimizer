@@ -27,6 +27,7 @@ Changelog
 
 *Speculative Decoding*
 
+- Add uniform-layer hidden-state mixing for Hugging Face and Megatron EAGLE training. Enable it with ``eagle_mix_hidden_states=True`` and ``eagle_mix_hidden_states_mode="uniform_layer_sample"``. When enabling hidden-state mixing, explicitly select ``sparse_replace`` or ``uniform_layer_sample`` with ``eagle_mix_hidden_states_mode``.
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
 
 *Megatron Framework (M-LM / M-Bridge)*

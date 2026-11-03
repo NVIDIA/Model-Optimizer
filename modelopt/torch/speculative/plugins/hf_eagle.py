@@ -760,6 +760,12 @@ class HFEagleModel(EagleModel):
 
         # ====Run eagle forward with extra training-time-test steps====
         num_ttt_steps = self.eagle_ttt_steps if self.training else 1
+        aligned_hidden_states_history = (
+            [eagle_input_hiddens]
+            if self.eagle_mix_hidden_states
+            and self.eagle_mix_hidden_states_mode == "uniform_layer_sample"
+            else None
+        )
         for ttt_step in range(num_ttt_steps):
             eagle_attention_mask = (
                 eagle_attn_mask_0
@@ -787,20 +793,27 @@ class HFEagleModel(EagleModel):
             eagle_output_hiddens = eagle_output_hiddens.roll(1, 1)
 
             if self.eagle_mix_hidden_states:
-                batch_size, seq_len_s, _ = eagle_input_hiddens.shape
-                num_to_replace = max(1, seq_len_s // (2**ttt_step + 1))
+                if self.eagle_mix_hidden_states_mode == "uniform_layer_sample":
+                    assert aligned_hidden_states_history is not None
+                    aligned_hidden_states_history.append(eagle_output_hiddens)
+                    eagle_input_hiddens = self._sample_uniform_hidden_state_history(
+                        aligned_hidden_states_history
+                    )
+                elif self.eagle_mix_hidden_states_mode == "sparse_replace":
+                    batch_size, seq_len_s, _ = eagle_input_hiddens.shape
+                    num_to_replace = max(1, seq_len_s // (2**ttt_step + 1))
 
-                # Randomly select positions for each batch to replace
-                rand_indices = torch.rand(
-                    batch_size, seq_len_s, device=eagle_input_hiddens.device
-                ).argsort(dim=1)[:, :num_to_replace]
+                    # Randomly select positions for each batch to replace
+                    rand_indices = torch.rand(
+                        batch_size, seq_len_s, device=eagle_input_hiddens.device
+                    ).argsort(dim=1)[:, :num_to_replace]
 
-                # Clone to avoid inplace modification that breaks autograd
-                eagle_input_hiddens = eagle_input_hiddens.clone()
-                batch_indices = torch.arange(batch_size)[:, None]
-                eagle_input_hiddens[batch_indices, rand_indices] = eagle_output_hiddens[
-                    batch_indices, rand_indices
-                ]
+                    # Clone to avoid inplace modification that breaks autograd
+                    eagle_input_hiddens = eagle_input_hiddens.clone()
+                    batch_indices = torch.arange(batch_size)[:, None]
+                    eagle_input_hiddens[batch_indices, rand_indices] = eagle_output_hiddens[
+                        batch_indices, rand_indices
+                    ]
             else:
                 eagle_input_hiddens = eagle_output_hiddens
 

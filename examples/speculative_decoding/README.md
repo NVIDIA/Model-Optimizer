@@ -86,6 +86,14 @@ For small base models that fit in GPU memory, we can collocate them with draft m
 
 All default training settings are in `eagle3.yaml`. You can adjust them by editing the YAML file or by specifying command-line overrides with OmegaConf dotlist arguments.
 
+To enable uniform hidden-state mixing, add `eagle.eagle_mix_hidden_states=true` and
+`eagle.eagle_mix_hidden_states_mode=uniform_layer_sample`. Each token samples a complete hidden vector
+from the original input and aligned outputs of prior training-time-test rounds.
+The mode defaults to `None` while mixing is disabled and must be specified when mixing
+is enabled. Select `sparse_replace` to use the existing mixing behavior.
+Megatron EAGLE supports the same mode: set `eagle_mix_hidden_states=True` and
+`eagle_mix_hidden_states_mode="uniform_layer_sample"` in the `EagleConfig` passed to `mtsp.convert`.
+
 To enable context parallelism for long-context training, add `training.cp_size=<N>`.
 The saved modelopt checkpoint is similar in architecture to HF models. It can be further optimized through **ModelOpt**, e.g., PTQ and QAT.
 

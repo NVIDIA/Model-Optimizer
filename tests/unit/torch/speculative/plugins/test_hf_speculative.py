@@ -26,10 +26,12 @@ from transformers import AutoModelForCausalLM
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import EAGLE3_DEFAULT_CFG
+from modelopt.torch.speculative.plugins.hf_eagle import HFEagleModel
 
 
 @pytest.mark.parametrize("eagle_config", [EAGLE3_DEFAULT_CFG])
-def test_eagle_model_convert_save_and_restore(tmp_path, eagle_config):
+@pytest.mark.parametrize("mix_mode", [None, "sparse_replace", "uniform_layer_sample"])
+def test_eagle_model_convert_save_and_restore(tmp_path, eagle_config, mix_mode):
     model_ref = get_tiny_llama(num_hidden_layers=8)
 
     config = deepcopy(eagle_config["config"])
@@ -46,6 +48,8 @@ def test_eagle_model_convert_save_and_restore(tmp_path, eagle_config):
     )
     # torch.compile(max-autotune) is a GPU optimization; on CPU it only adds compile time.
     config["eagle_use_torch_compile"] = False
+    config["eagle_mix_hidden_states"] = mix_mode is not None
+    config["eagle_mix_hidden_states_mode"] = mix_mode
 
     mtsp.convert(model_ref, mode=[("eagle", config)])
     assert isinstance(model_ref, mtsp.plugins.HFEagleModel)
@@ -60,7 +64,10 @@ def test_eagle_model_convert_save_and_restore(tmp_path, eagle_config):
 
 @pytest.mark.parametrize("eagle_config", [EAGLE3_DEFAULT_CFG])
 @pytest.mark.parametrize("eagle_ttt_steps", [1, 2])
-def test_eagle_mix_hidden_states_backward(eagle_config, eagle_ttt_steps):
+@pytest.mark.parametrize("eagle_mix_hidden_states_mode", ["sparse_replace", "uniform_layer_sample"])
+def test_eagle_mix_hidden_states_backward(
+    eagle_config, eagle_ttt_steps, eagle_mix_hidden_states_mode
+):
     """Regression test for GitHub issue #1088.
 
     Verifies that the EAGLE training forward+backward pass does not crash with
@@ -77,6 +84,7 @@ def test_eagle_mix_hidden_states_backward(eagle_config, eagle_ttt_steps):
         }
     )
     config["eagle_mix_hidden_states"] = True
+    config["eagle_mix_hidden_states_mode"] = eagle_mix_hidden_states_mode
     config["eagle_ttt_steps"] = eagle_ttt_steps
     config["eagle_use_torch_compile"] = False
 
@@ -92,3 +100,21 @@ def test_eagle_mix_hidden_states_backward(eagle_config, eagle_ttt_steps):
 
     eagle_grads = [p.grad for p in model.eagle_module.parameters() if p.grad is not None]
     assert len(eagle_grads) > 0, "Expected gradients to flow to eagle_module"
+
+
+def test_eagle_uniform_layer_sample_picks_whole_candidate_per_token(monkeypatch):
+    """Uniform layer sampling must select one full hidden vector per token."""
+    hidden_states_history = [torch.full((2, 3, 4), float(candidate)) for candidate in range(3)]
+    selected_candidates = torch.tensor([[[[0], [1], [2]], [[2], [1], [0]]]])
+
+    def fake_randint(high, size, *, device=None):
+        assert high == len(hidden_states_history)
+        assert tuple(size) == tuple(selected_candidates.shape)
+        return selected_candidates.to(device)
+
+    monkeypatch.setattr(torch, "randint", fake_randint)
+
+    mixed = HFEagleModel._sample_uniform_hidden_state_history(hidden_states_history)
+    expected = selected_candidates.squeeze(0).float().expand(-1, -1, 4)
+
+    assert torch.equal(mixed, expected)

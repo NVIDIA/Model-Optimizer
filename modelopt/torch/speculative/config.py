@@ -615,6 +615,16 @@ class EagleConfig(ModeloptBaseConfig):
         ),
     )
 
+    eagle_mix_hidden_states_mode: Literal["sparse_replace", "uniform_layer_sample"] | None = (
+        ModeloptField(
+            default=None,
+            description=(
+                "Hidden state mixing variant, required when eagle_mix_hidden_states=True. "
+                "Available options: sparse_replace, uniform_layer_sample."
+            ),
+        )
+    )
+
     eagle_use_torch_compile: bool = ModeloptField(
         default=True,
         description="Whether to use torch.compile on eagle forward/loss methods for faster training.",
@@ -693,6 +703,16 @@ class EagleConfig(ModeloptBaseConfig):
             "of base model quality. 1.0 = always detach (no logits gradient), 0.0 = never detach."
         ),
     )
+
+    @model_validator(mode="after")
+    def _check_mix_hidden_states_mode_consistency(self) -> Self:
+        if self.eagle_mix_hidden_states and self.eagle_mix_hidden_states_mode is None:
+            raise ValueError(
+                "eagle_mix_hidden_states_mode is required when eagle_mix_hidden_states=True."
+            )
+        if self.eagle_mix_hidden_states_mode is not None and not self.eagle_mix_hidden_states:
+            raise ValueError("eagle_mix_hidden_states_mode requires eagle_mix_hidden_states=True.")
+        return self
 
     @model_validator(mode="after")
     def _check_rope_scaling_consistency(self) -> Self:
