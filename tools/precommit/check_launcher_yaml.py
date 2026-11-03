@@ -33,8 +33,6 @@ staged in the commit). Recipe schema validity is the responsibility of the
 re-scan the full launcher YAML set.
 """
 
-from __future__ import annotations
-
 import re
 import sys
 from pathlib import Path

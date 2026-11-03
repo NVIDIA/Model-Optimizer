@@ -9,13 +9,16 @@ Cherry-pick all merged `main` PRs labeled `cherry-pick-<version>` (but not `cher
 
 ## Step 1 — Identify the target version
 
-Ask the user for the release version (e.g. `0.44.0`) if not already provided.
+Ask the user for the release version (e.g. `0.44.0`) and target release candidate (e.g. `rc2`) if not already provided. Confirm whether this is the final RC.
 
 Set `VERSION=<version>` for use in subsequent steps.
 
 ## Step 2 — Audit candidates for missing labels
 
-Before fetching the labeled queue, audit release NVBugs and recent merged PRs so bug fixes are not omitted.
+Before fetching the labeled queue, audit for missing bug fixes:
+
+- **Non-final RC:** audit release NVBugs and recent merged PRs.
+- **Final RC:** audit only fixes tied to NVBugs with the exact keyword `Committed_ModelOpt_<VERSION>` and QA-verification evidence for the fix. Verify that evidence in the NVBug or linked QA results before recommending **Needs label**; if missing or unclear, classify as **Unknown** and ask for confirmation. Skip the general recent-PR audit; do not introduce general bug-fix PRs or fixes tied only to NVBugs committed for another release.
 
 ### Audit release NVBugs
 
@@ -25,7 +28,7 @@ Fetch each matching NVBug with its comments. Extract every Model-Optimizer PR li
 
 ### Audit recent merged PRs
 
-Audit PRs merged into `main` since the latest release candidate. Exclude PRs that already have `cherry-pick-<VERSION>` and changes already present on the release branch:
+For non-final RCs only: Audit PRs merged into `main` since the latest release candidate. Exclude PRs that already have `cherry-pick-<VERSION>` and changes already present on the release branch:
 
 ```bash
 git fetch origin main "release/$VERSION" --tags

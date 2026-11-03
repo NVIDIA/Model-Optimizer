@@ -133,7 +133,7 @@ The output should be similar to the following:
 ROUGE scores: {'rouge1': 42.174, 'rouge2': 19.2724, 'rougeL': 28.6989, 'rougeLsum': 39.1394}
 ```
 
-Please refer to [link](../llm_eval/README.md#Evaluation-scripts-for-LLM-tasks) for more details of how to evaluate the sparsified models on other benchmarks, such as MMLU and HumanEval.
+Please refer to [link](../../llm_eval/README.md#evaluation-scripts-for-llm-tasks) for more details of how to evaluate the sparsified models on other benchmarks, such as MMLU and HumanEval.
 
 ## Export and Serve a Hugging Face Checkpoint
 

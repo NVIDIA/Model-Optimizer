@@ -21,6 +21,7 @@ from unittest import mock
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from _test_utils.torch.quantization.quantize_common import (
     INT4_AWQ_CLIP_CFG,
@@ -30,6 +31,8 @@ from _test_utils.torch.quantization.quantize_common import (
     save_restore_test,
 )
 from pydantic import ValidationError
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -39,7 +42,11 @@ from modelopt.torch.quantization.conversion import set_quantizer_attributes_full
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     SequentialQuantizer,
     TensorQuantizer,
+    register_quant_backend,
+    unregister_quant_backend,
 )
+from modelopt.torch.quantization.utils import is_quantized
+from modelopt.torch.utils.distributed import ParallelState
 
 # A test config with double-quant (using `SequentialQuantizers`)
 WINT4INT8_CFG = {
@@ -625,6 +632,235 @@ def test_skip_weight_quant_check_env_var_bypasses_the_guard():
         mtq.quantize(model, config, lambda m: m(m.get_input()))
 
 
+class _ToyIndexer(torch.nn.Module):
+    """Stands in for a framework's sparse-attention indexer (vLLM ``Indexer``, MCore ``CSAIndexer``)."""
+
+    def __init__(self):
+        super().__init__()
+        self.wk = torch.nn.Linear(16, 8)
+
+    def forward(self, x):
+        return self.wk(x)
+
+
+class _QuantToyIndexer(_ToyIndexer):
+    def _setup(self):
+        self.indexer_k_quantizer = TensorQuantizer()
+        # Like a pipeline stage's own layer: no amax sync with the other ranks.
+        self.parallel_state = ParallelState(data_parallel_group=-1)
+
+    def forward(self, x):
+        return self.indexer_k_quantizer(super().forward(x))
+
+
+class _ToyIndexerModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(16, 16)
+        self.indexer = _ToyIndexer()
+
+    def forward(self, x):
+        return self.indexer(self.linear(x))
+
+
+INDEXER_K_ONLY_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*indexer_k_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+    ],
+    "algorithm": "max",
+}
+
+
+def test_indexer_k_patterns_on_unconverted_indexer_raise():
+    """An indexer the plugins do not recognize must fail instead of leaving its K cache unquantized."""
+    with pytest.raises(RuntimeError, match=r"indexer_k_quantizer.*\(_ToyIndexer\)"):
+        mtq.quantize(_ToyIndexerModel(), INDEXER_K_ONLY_CFG, lambda m: m(torch.randn(2, 16)))
+
+
+def test_indexer_k_patterns_on_model_without_indexer_are_allowed():
+    """Other architectures and pipeline stages without an indexer layer have nothing to quantize."""
+    model = SimpleLinear()
+    mtq.quantize(model, INDEXER_K_ONLY_CFG, lambda m: m(m.get_input()))
+
+
+def test_indexer_k_patterns_on_converted_indexer_pass():
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        model = mtq.quantize(
+            _ToyIndexerModel(), INDEXER_K_ONLY_CFG, lambda m: m(torch.randn(2, 16))
+        )
+    finally:
+        mtq.unregister(_ToyIndexer)
+    assert model.indexer.indexer_k_quantizer.is_enabled
+    assert model.indexer.indexer_k_quantizer.amax is not None
+
+
+class _ToyStage(torch.nn.Module):
+    """A pipeline stage holding the indexer layers ``layer_ids``."""
+
+    def __init__(self, layer_ids):
+        super().__init__()
+        self.layers = torch.nn.ModuleDict({str(i): _ToyIndexerModel() for i in layer_ids})
+
+    def forward(self, x):
+        return [layer(x) for layer in self.layers.values()]
+
+
+def _test_indexer_check_covers_all_ranks(rank, size):
+    # Rank 0 holds no indexer and rank 1 one that no plugin converted: every rank raises.
+    model = SimpleLinear() if rank == 0 else _ToyIndexerModel()
+    with pytest.raises(RuntimeError, match=r"indexer_k_quantizer.*\(_ToyIndexer\)"):
+        mtq.quantize(model, INDEXER_K_ONLY_CFG, lambda m: None)
+
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        # A layer-selective recipe: the stage holding layer 0 has no selected indexer, which is fine.
+        config = copy.deepcopy(INDEXER_K_ONLY_CFG)
+        config["quant_cfg"][1]["quantizer_name"] = "*layers.1.indexer.indexer_k_quantizer"
+        model = mtq.quantize(_ToyStage([rank]), config, lambda m: m(torch.randn(2, 16)))
+        assert model.layers[str(rank)].indexer.indexer_k_quantizer.is_enabled == (rank == 1)
+
+        # A pattern that matches no stage: every rank raises.
+        config["quant_cfg"][1]["quantizer_name"] = "*layers.9.indexer.indexer_k_quantizer"
+        with pytest.raises(RuntimeError, match="no sparse-attention indexer has an enabled one"):
+            mtq.quantize(_ToyStage([rank]), config, lambda m: None)
+    finally:
+        mtq.unregister(_ToyIndexer)
+
+
+def test_indexer_k_check_covers_all_ranks(cpu_dist_workers):
+    cpu_dist_workers.run(_test_indexer_check_covers_all_ranks)
+
+
+def _awq_on_a_sharded_fsdp2_model_job(rank, size):
+    model = SimpleLinear()
+    fully_shard(model, mesh=init_device_mesh("cpu", (size,)))
+    forward_loop = lambda m: m(m.get_input())  # noqa: E731
+    with bounded_collectives():
+        for config in (mtq.W4A8_AWQ_BETA_CFG, INT4_AWQ_FULL_CFG):  # awq_lite, awq_full
+            with pytest.raises(NotImplementedError, match=f"FSDP2 model sharded over {size} ranks"):
+                mtq.quantize(model, config, forward_loop)
+        # AutoQuantize checks every candidate before it calibrates the first one.
+        with pytest.raises(NotImplementedError, match="AutoQuantize candidate 'W4A8_AWQ_BETA_CFG'"):
+            mtq.auto_quantize(
+                model,
+                constraints={"effective_bits": 6.0},
+                quantization_formats=[mtq.FP8_DEFAULT_CFG, mtq.W4A8_AWQ_BETA_CFG],
+                data_loader=[SimpleLinear.get_input()],
+                forward_step=lambda m, batch: m(batch),
+                loss_func=lambda output, batch: output.sum(),
+            )
+        assert not is_quantized(model)
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
+        with pytest.raises(NotImplementedError, match="awq_lite"):
+            mtq.calibrate(model, "awq_lite", forward_loop)
+
+
+def test_awq_on_a_sharded_fsdp2_model_is_refused(cpu_dist_workers):
+    """Each rank would fold its own AWQ scale into its shard: every rank refuses alike, before the
+    model changes, through ``mtq.quantize``, ``mtq.auto_quantize`` and ``mtq.calibrate``."""
+    cpu_dist_workers.run(_awq_on_a_sharded_fsdp2_model_job)
+
+
+@pytest.mark.parametrize(
+    ("quantizer_name", "supported"),
+    [
+        ("indexer_q_quantizer", r"configs/ptq/units/indexer_\*_nvfp4"),
+        ("indexer_scorer_kwargs_quantizer", r"scorer kernel arguments.*examples/vllm_serve"),
+    ],
+)
+def test_indexer_patterns_need_their_own_quantizer(quantizer_name, supported):
+    """Each indexer quantizer is checked on its own: a converted key quantizer does not count."""
+    config = copy.deepcopy(INDEXER_K_ONLY_CFG)
+    config["quant_cfg"].append(
+        {"quantizer_name": f"*{quantizer_name}", "cfg": {"num_bits": 8, "axis": None}}
+    )
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        with pytest.raises(RuntimeError, match=rf"enables {quantizer_name}, but no.*{supported}"):
+            mtq.quantize(_ToyIndexerModel(), config, lambda m: m(torch.randn(2, 16)))
+    finally:
+        mtq.unregister(_ToyIndexer)
+
+
+class _QuantToyScorerIndexer(_QuantToyIndexer):
+    def _setup(self):
+        super()._setup()
+        # Like the vLLM indexers' scorer quantizers: it carries a config and never sees a tensor.
+        self.indexer_scorer_kwargs_quantizer = TensorQuantizer()
+
+
+def _never_on_a_tensor(inputs, quantizer):
+    raise AssertionError("a quantizer that only carries a config ran on a tensor")
+
+
+def test_config_only_quantizer_survives_calibration_fold_summary_and_restore():
+    """An enabled quantizer that never sees a tensor gets no amax and keeps its config."""
+    config = copy.deepcopy(INDEXER_K_ONLY_CFG)
+    config["quant_cfg"] += [
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {
+            "quantizer_name": "*indexer_scorer_kwargs_quantizer",
+            "cfg": {"backend": "config_only", "backend_extra_args": {"mma_accum": "fp16"}},
+        },
+    ]
+    register_quant_backend("config_only", _never_on_a_tensor)
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyScorerIndexer)
+    try:
+        model = mtq.quantize(_ToyIndexerModel(), config, lambda m: m(torch.randn(2, 16)))
+        state, weights = mto.modelopt_state(model), copy.deepcopy(model.state_dict())
+        # The steps of vLLM fake-quant serving after quantization.
+        mtq.print_quant_summary(model)
+        mtq.fold_weight(model)
+        restored = mto.restore_from_modelopt_state(_ToyIndexerModel(), state)
+        restored.load_state_dict(weights)
+    finally:
+        mtq.unregister(_ToyIndexer)
+        unregister_quant_backend("config_only")
+    for quantizer in (
+        model.indexer.indexer_scorer_kwargs_quantizer,
+        restored.indexer.indexer_scorer_kwargs_quantizer,
+    ):
+        assert quantizer.is_enabled and quantizer._if_quant
+        assert quantizer.backend == "config_only"
+        assert quantizer.backend_extra_args == {"mma_accum": "fp16"}
+        assert not hasattr(quantizer, "_amax")
+
+
+class _ToyMegaMoEExperts(torch.nn.Module):
+    """Stands in for MoE experts no plugin converts, like vLLM's fused Mega-MoE kernels."""
+
+    def forward(self, x):
+        return x
+
+
+@pytest.mark.parametrize("quantizer_name", ["dispatch_quantizer", "combine_quantizer"])
+def test_moe_comm_patterns_on_unconverted_experts_raise(quantizer_name):
+    model = torch.nn.Sequential(torch.nn.Linear(16, 16), _ToyMegaMoEExperts())
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": f"*{quantizer_name}", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    with pytest.raises(RuntimeError, match=rf"{quantizer_name}.*\(_ToyMegaMoEExperts\)"):
+        mtq.quantize(model, config, lambda m: m(torch.randn(2, 16)))
+
+
+def test_indexer_k_sequential_cfg_on_converted_indexer_pass():
+    """A list-valued cfg makes the quantizer a SequentialQuantizer, which still counts as attached."""
+    config = copy.deepcopy(INDEXER_K_ONLY_CFG)
+    config["quant_cfg"][1]["cfg"] = [{"num_bits": 8, "axis": None}, {"num_bits": 8, "axis": None}]
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        model = mtq.quantize(_ToyIndexerModel(), config, lambda m: m(torch.randn(2, 16)))
+    finally:
+        mtq.unregister(_ToyIndexer)
+    assert isinstance(model.indexer.indexer_k_quantizer, SequentialQuantizer)
+
+
 def test_atomicity_later_cfg_entry_does_not_inherit_earlier():
     """When two cfg-bearing entries match the same quantizer, the second fully replaces the first."""
     model = SimpleLinear()
@@ -671,3 +907,50 @@ def test_legacy_dict_format_end_to_end():
                 # but weight/input quantizers are re-enabled by subsequent entries.
                 # output_quantizer is NOT re-enabled so it stays disabled.
                 assert not module.is_enabled
+
+
+@pytest.mark.parametrize("config", ["INT8_DEFAULT_CFG", "W4A8_AWQ_BETA_CFG"])
+@pytest.mark.parametrize("model_mode", ["train", "eval"])
+def test_quantize_keeps_the_training_mode_of_each_module(model_mode, config):
+    # A model can hold a submodule in eval mode, for example a frozen encoder.
+    model = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Sequential(torch.nn.Linear(8, 8)))
+    model.train(model_mode == "train")
+    model[1].eval()
+    modes_during_calibration = []
+
+    def forward_loop(m):
+        modes_during_calibration.extend(module.training for module in m.modules())
+        m(torch.randn(2, 8))
+
+    mtq.quantize(model, getattr(mtq, config), forward_loop)
+    assert not any(modes_during_calibration)
+    # Every module, the inserted quantizers included, is back in its own mode or its parent's.
+    assert all(module.training == (model_mode == "train") for module in model[0].modules())
+    assert model.training == (model_mode == "train")
+    assert not any(module.training for module in model[1].modules())
+
+
+def test_quantize_restores_training_modes_through_train():
+    # Modules can do work in train(), such as dropping a cache, so the mode is put back through it.
+    class Tracked(torch.nn.Sequential):
+        def train(self, mode=True):
+            self.last_mode = mode
+            return super().train(mode)
+
+    model = torch.nn.Sequential(Tracked(torch.nn.Linear(8, 8)), Tracked(torch.nn.Linear(8, 8)))
+    model.train()
+    model[1].eval()
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 8)))
+    assert model[0].last_mode is True and model[0].training
+    assert model[1].last_mode is False and not model[1].training
+
+
+def test_calibrate_gives_quantizer_containers_the_mode_of_their_module():
+    # Some plugins keep quantizers in a plain container created during conversion, in training mode.
+    model = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Sequential(torch.nn.Linear(8, 8)))
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 8)))
+    model.eval()
+    model[1][0].quantizers = torch.nn.ModuleList([TensorQuantizer()])
+    assert model[1][0].quantizers.training
+    mtq.calibrate(model, "max", lambda m: m(torch.randn(2, 8)))
+    assert not any(module.training for module in model.modules())

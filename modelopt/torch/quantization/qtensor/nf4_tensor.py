@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from ..extensions import get_cuda_ext
-from ..qtensor.base_qtensor import BaseQuantizedTensor
+from ..qtensor.base_qtensor import BaseQuantizedTensor, _refuse_dtensor
 from ..utils import reduce_amax, reduce_block_padding
 
 nf4_table = torch.tensor(
@@ -87,6 +87,7 @@ class NF4QTensor(BaseQuantizedTensor):
         Returns:
             tuple: Contains quantized data, input quantization config, and scale quantization config.
         """
+        _refuse_dtensor(input, cls.__name__)
         cuda_ext = get_cuda_ext()
 
         # pad the input if needed
@@ -116,7 +117,10 @@ class NF4QTensor(BaseQuantizedTensor):
             # pack the int4 weights into a uint8 tensor
             # packing format: w0, w1, w2, w3, w4, w5, ...
             #               | byte  | byte  | byte  |
-            packed_output_uint8 = quantized_output_uint8[::2] << 4 | quantized_output_uint8[1::2]
+            packed_output_uint8 = (
+                torch.bitwise_left_shift(quantized_output_uint8[::2], 4)
+                | quantized_output_uint8[1::2]
+            )
 
         # pad the scales if needed
         scales = reduce_block_padding(scales.view(-1), block_sizes={-1: scale_block_size})

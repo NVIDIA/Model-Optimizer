@@ -194,7 +194,15 @@ if [ "$mpi_rank" -eq 0 ]; then
             if [ -n "${ASSISTANT_PREFIX:-}" ]; then
                 cmd+=(--assistant_prefix "$ASSISTANT_PREFIX")
             fi
+            if [ "${FAIL_ON_ERROR:-0}" = "1" ]; then
+                cmd+=(--fail_on_error)
+            fi
+            if [ "${RETRY_FAILED:-0}" = "1" ]; then
+                cmd+=(--retry_failed)
+            fi
             echo "Running: ${cmd[*]}"
+            # Sample failures are journaled separately by default, so later shards still run.
+            # Fatal errors and opt-in strict failures retain the worker's nonzero exit behavior.
             "${cmd[@]}"
         done
     }

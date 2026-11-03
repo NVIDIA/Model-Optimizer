@@ -26,7 +26,9 @@ imports:
 metadata:
   description: >-
     MiniMax M2.7 expert-only NVFP4 weights and activations with max calibration;
-    FP8 KV-cache cast mode; attention projections, router, and LM head stay BF16.
+    FP8 KV-cache cast mode; attention projections, router, and LM head are
+    excluded from additional quantization. The source stores attention weights
+    in FP8, router weights in FP32, and LM-head weights in BF16.
     Reproduces the published nvidia/MiniMax-M2.7-NVFP4 checkpoint from
     MiniMaxAI/MiniMax-M2.7.
 
@@ -39,6 +41,10 @@ quantize:
     - quantizer_name: '*block_sparse_moe.experts.*weight_quantizer'
       cfg: {$import: nvfp4}
     - quantizer_name: '*block_sparse_moe.experts.*input_quantizer'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*mlp.experts.*weight_quantizer'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*mlp.experts.*input_quantizer'
       cfg: {$import: nvfp4}
     - $import: kv_fp8_cast
     - $import: default_disabled_quantizers

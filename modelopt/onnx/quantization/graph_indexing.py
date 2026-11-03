@@ -79,8 +79,8 @@ def has_path_type(
     graph: Graph,
     path_type: list[str],
     is_forward: bool,
-    wild_card_types: list[str] = [],
-    path_nodes: list[Node] = [],
+    wild_card_types: list[str] | None = None,
+    path_nodes: list[Node] | None = None,
 ) -> bool:
     """Checks if the given node is start/end of a given forward/backward path type.
 
@@ -98,6 +98,10 @@ def has_path_type(
     Returns:
         Bool, whether the given node is start/end of the given forward/backward path type.
     """
+    if wild_card_types is None:
+        wild_card_types = []
+    if path_nodes is None:
+        path_nodes = []
     optional_path_types = ["BiasAdd", "ConstMul"]
     if not path_type:
         # All types matched

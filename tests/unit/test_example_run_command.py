@@ -21,6 +21,28 @@ import time
 
 import pytest
 from _test_utils.examples import run_command
+from _test_utils.transient_errors import TransientError
+
+
+@pytest.mark.parametrize(
+    ("error", "transient"),
+    [
+        ("HfHubHTTPError: 503 Server Error: Service Unavailable", True),
+        ("DistNetworkError: port: 38789, name: EADDRINUSE, message: address already in use", True),
+        ("AssertionError: the quantized model diverged", False),
+    ],
+)
+def test_run_example_command_flags_only_transient_errors(monkeypatch, error, transient):
+    def failing_step(cmd_parts, example_path):
+        raise RuntimeError(error)  # a marker on a source line must not count: ConnectionError
+
+    monkeypatch.setattr(run_command, "_in_process_runner", failing_step)
+    with pytest.raises(RuntimeError) as excinfo:
+        run_command.run_example_command(["torchrun", "step.py"], "hf_ptq")
+    # TransientError is what the rerun marker in tests/conftest.py matches
+    assert isinstance(excinfo.value, TransientError) == transient
+    original = excinfo.value.__cause__ if transient else excinfo.value
+    assert str(original) == error
 
 
 def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(

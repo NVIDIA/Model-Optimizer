@@ -146,6 +146,7 @@ def get_mcore_gpt_model(
     transformer_impl: str = "modelopt" if HAS_TE else "local",
     use_cpu_initialization: bool = False,
     bf16: bool = True,
+    sequence_parallel: bool = False,
     use_te: bool = False,
     # MoE-specific parameters
     moe_grouped_gemm: bool = False,
@@ -215,7 +216,7 @@ def get_mcore_gpt_model(
         pipeline_model_parallel_size=pipeline_model_parallel_size,
         expert_model_parallel_size=expert_model_parallel_size,
         expert_tensor_parallel_size=expert_tensor_parallel_size,
-        sequence_parallel=False,
+        sequence_parallel=sequence_parallel,
         num_layers=num_layers,
         num_layers_in_first_pipeline_stage=num_layers_in_first_pipeline_stage,
         num_layers_in_last_pipeline_stage=num_layers_in_last_pipeline_stage,
@@ -434,7 +435,7 @@ def get_mcore_hybrid_model(
     # runtime-slices). This matches how bridge-loaded models are pruned; ModelOpt's depth-pruning
     # slicer is not `|`-aware, so pipe stage separators would break pattern slicing -- reject them.
     assert "|" not in hybrid_layer_pattern, "Pipeline separators (`|`) are not supported"
-    assert len(hybrid_layer_pattern) == num_layers
+    assert len(hybrid_layer_pattern.split("/", 1)[0]) == num_layers
 
     common_kwargs = {
         "config": config,

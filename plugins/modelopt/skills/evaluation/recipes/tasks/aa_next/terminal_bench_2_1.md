@@ -10,6 +10,21 @@ TB 2.1 is the successor to TB 2.0 — **identical harbor flow; only the playbook
 name changes** (`terminal_bench_2_1` vs `terminal_bench_2`). The 2.1 task set is
 pinned via a vendored registry override shipped in the `nemo-evaluator` package.
 
+## Output-token policy
+
+ModelOpt's Terminal-Bench / Terminus-2 protocol uses **no configured per-response output-token cap**,
+overriding model-card budgets and generic fallbacks per [generation-policy precedence](../../../references/model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
+Keep `drop_params` stripping `max_tokens`/`max_completion_tokens`. In the merged config
+(fragments plus CLI overrides), don't reintroduce a numeric cap via `services.<svc>.generation`,
+`proxy.extra_body`, solver/agent/LLM kwargs, interceptors, or server flags
+(`--override-generation-config`, `--max-new-tokens`, or backend equivalents).
+Stripping request fields doesn't remove inherited caps (`generation_config.json`, backend defaults).
+Check effective defaults for the backend/version and neutralize any numeric `max_new_tokens`
+(vLLM: `--override-generation-config '{"max_new_tokens":null}'` where supported) without changing
+sampling or stop/EOS settings. Never substitute a numeric fallback.
+Continue model-card lookup for sampling/thinking. Keep context limits (e.g. `--max-model-len`),
+agent/task timeouts and sandbox/SLURM lifetimes separate; record them for baseline/candidate comparison.
+
 ## Task-specific values
 
 | Field | Value |
@@ -80,6 +95,38 @@ sandboxes (`N × concurrency`). Trials are partitioned and merged, preserving th
 intended trial set. Sharding or concurrency changes can still affect scores when
 serving speed or queueing changes timeout rates. `shards: 4` suits 89 × r8 = 712 trials. Check
 `N × concurrency` against the Fargate quota and `N × gpus_per_node` against your allocation.
+
+Apply `references/run-validation.md`'s bounded policy before reporting scores:
+solver/harness timeouts and terminal transport/action errors may count only when
+recorded and scored as protocol-valid failures. Keep all expected trials and
+repeats, including zero scores; incomplete coverage remains a blocker.
+
+## Run health screen
+
+For a full scored run, inspect the merged run and per-trial records before trusting
+`pass@1`. Use all expected task × repeat trials (712 at 89 × 8), including zero
+rewards. Use one final merged record per task/repeat for rewards and match its
+per-trial timing; unresolved duplicates make trial-derived signals unknown. Flag
+the run if **any** of these hold:
+
+| Signal | Unhealthy threshold |
+|---|---|
+| Agent completion (`mean/terminus2_completed`) | < 0.90 |
+| Evaluation completion (completed evaluations / expected trials) | < 0.95 |
+| Instant failure | Shortest rollout < 30 s |
+| Mid-run failure burst | After the first 5% of completed trials, any successive 5%-of-expected-trials window closes within 4 min with mean reward < 15% |
+
+At 712 trials, a 5% window is about 36 trials. Order trials by completion time;
+measure a window's time between its two progress boundaries and compute reward
+over the trials in that window. Use per-trial durations, timestamps, and rewards
+for the last two checks and the run's completion metrics for the first two.
+If an input is unavailable, report that signal as unknown rather than healthy.
+
+**Required score handoff:** Before quoting or comparing `pass@1`, report each
+signal's measured value, denominator/window, threshold, and artifact path, then
+state `TB2.1 health` as `flagged` for any breached threshold, `unknown` for
+missing evidence, or `healthy` otherwise. A flagged or unknown run needs
+investigation before a reliable-score verdict.
 
 ## Score Extraction
 

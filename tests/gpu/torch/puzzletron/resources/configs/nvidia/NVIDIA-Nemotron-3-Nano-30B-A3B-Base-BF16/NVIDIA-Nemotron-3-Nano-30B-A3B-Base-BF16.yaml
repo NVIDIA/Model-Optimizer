@@ -20,7 +20,7 @@ build_replacement_library:
   add_attention_no_ops: true
 
 calc_subblock_stats:
-  batch_sizes: [64, 96, 128]
+  batch_sizes: [96]  # must include the batch_size in mip.subblock_stats_args
   prefill_seq_len: 4096
   generation_seq_len: 4096
   num_active_tokens_override:       # Optional override for sequence lengths

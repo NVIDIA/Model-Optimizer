@@ -24,6 +24,7 @@ import modelopt.torch.quantization.qtensor.nvfp4_tensor as nvfp4_tensor
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import (
     NVFP4QTensor,
     _cast_per_block_scale_to_fp8,
+    cutlass_fp4_scale_to_modelopt_fp4_scale,
 )
 
 _FP8_E4M3FN_MIN = 2**-9  # 0.001953125 — smallest positive FP8 E4M3FN subnormal
@@ -105,6 +106,32 @@ class TestNVFP4ScaleClamping:
         out = _cast_per_block_scale_to_fp8(tiny).float()
         assert (out > 0).all(), f"FP8 cast produced zero scales: {out.tolist()}"
 
+    @staticmethod
+    def _dynamic_block_scales():
+        weight = torch.zeros(1, 48)
+        weight[0, 16] = 6.0  # amax 6 at a second-level scale of 1: block scale exactly 1
+        weight[0, 32] = 3.0  # amax 3: block scale 0.5
+        scale, _ = NVFP4QTensor.get_weights_scaling_factor(weight, 16, torch.tensor(1.0))
+        return scale.float()[0]
+
+    @staticmethod
+    def _static_block_scales():
+        q = SimpleNamespace(
+            block_sizes={-1: 16},
+            global_amax=torch.tensor(6.0 * 448.0),  # a second-level scale of 1
+            _amax=torch.tensor([0.0, 6.0, 3.0]),
+        )
+        scale, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(q, torch.randn(1, 48))
+        return scale.float()[0]
+
+    @pytest.mark.parametrize("path", ["dynamic", "static"])
+    def test_an_all_zero_block_gets_a_scale_of_one(self, path):
+        """Blocks of amax 0, 6 and 3: the zero block gets 1, as the amax-6 block does, not the clamp."""
+        zero, unit, half = getattr(self, f"_{path}_block_scales")().tolist()
+
+        assert zero == unit == 1.0
+        assert half == 0.5
+
     def test_static_path_no_nan_when_block_amax_zero(self):
         """Static path: zero-amax block + small global_amax must clamp to 448, not cast to NaN."""
         block_size = 16
@@ -127,3 +154,25 @@ class TestNVFP4ScaleClamping:
         assert (per_block_scale_f32 <= _FP8_E4M3FN_MAX).all(), (
             f"Static per-block scale exceeds FP8 max 448: {per_block_scale_f32.tolist()}"
         )
+
+
+def _cublas_swizzle(scale):
+    """Flat cuBLAS tiled layout of a ``[rows, cols]`` block-scale matrix (the 128x4-tile swizzle)."""
+    rows, cols = scale.shape
+    row_blocks, col_blocks = -(-rows // 128), -(-cols // 4)
+    padded = torch.zeros(row_blocks * 128, col_blocks * 4, dtype=scale.dtype)
+    padded[:rows, :cols] = scale
+    blocks = padded.view(row_blocks, 128, col_blocks, 4).permute(0, 2, 1, 3)
+    return blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1)
+
+
+@pytest.mark.parametrize("weight_shape", [(128, 64), (3, 16), (130, 80), (256, 128)])
+def test_cutlass_fp4_scale_to_modelopt_fp4_scale_undoes_the_swizzle(weight_shape):
+    m, n = weight_shape
+    scale = torch.randint(0, 256, (m, n // 16), dtype=torch.uint8)
+
+    restored = cutlass_fp4_scale_to_modelopt_fp4_scale(_cublas_swizzle(scale), weight_shape)
+
+    assert restored.dtype == torch.float8_e4m3fn
+    assert restored.is_contiguous()  # consumers index it flatly
+    assert torch.equal(restored.view(torch.uint8), scale)

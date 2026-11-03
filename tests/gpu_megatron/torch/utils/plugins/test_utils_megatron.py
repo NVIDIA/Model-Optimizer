@@ -20,7 +20,7 @@ from _test_utils.torch.megatron.utils import initialize_for_megatron
 from megatron.core.transformer import MegatronModule, TransformerConfig
 from transformers import AutoTokenizer
 
-from modelopt.torch.utils.plugins import megatron_generate, megatron_mmlu
+from modelopt.torch.utils.plugins import megatron_generate, megatron_mmlu, megatron_prefill
 
 SEED = 1234
 
@@ -35,8 +35,11 @@ def _test_megatron_generate_and_mmlu(rank, size, parallelism):
         initialize_for_megatron(pipeline_model_parallel_size=size, seed=SEED)
         model = get_mcore_qwen3_600m(pipeline_model_parallel_size=size).cuda().eval()
     elif parallelism == "cp":
-        initialize_for_megatron(context_parallel_size=size, seed=SEED)
-        model = get_mcore_qwen3_600m(context_parallel_size=size).cuda().eval()
+        # CP=4 hangs in the first MMLU batch on 4-GPU nodes; CI has <=2 GPUs.
+        # See https://github.com/NVIDIA/Model-Optimizer/issues/3178
+        cp_size = min(size, 2)
+        initialize_for_megatron(context_parallel_size=cp_size, seed=SEED)
+        model = get_mcore_qwen3_600m(context_parallel_size=cp_size).cuda().eval()
     elif parallelism == "dp":
         # Data parallel is implicit: with all model-parallel sizes 1, DP == world size.
         initialize_for_megatron(seed=SEED)
@@ -64,6 +67,9 @@ def _test_megatron_generate_and_mmlu(rank, size, parallelism):
     assert 0.36 < megatron_mmlu(model, tokenizer, fraction=0.1, batch_size=16) < 0.39
 
 
+@pytest.mark.manual(
+    reason="Real Qwen3-0.6B weights and a 1.2-1.5 GB download; run with --run-manual."
+)
 @pytest.mark.parametrize("parallelism", ["tp", "pp", "cp", "dp"])
 def test_megatron_generate_and_mmlu(dist_workers, parallelism, num_gpus):
     if num_gpus == 1 and parallelism != "tp":
@@ -134,3 +140,38 @@ def _test_megatron_generate_vlm_vision_inputs(rank, size):
 
 def test_megatron_generate_vlm_vision_inputs(dist_workers):
     dist_workers.run(_test_megatron_generate_vlm_vision_inputs)
+
+
+class _MaskRecorder(_VisionArgRecorder):
+    """Records whether every forward call received an explicit attention mask."""
+
+    def __init__(self):
+        super().__init__()
+        self.masks = []
+
+    def forward(self, input_ids, position_ids=None, attention_mask=None, **kwargs):
+        self.masks.append(attention_mask is not None)
+        return torch.zeros(*input_ids.shape, self.vocab_size, device=input_ids.device)
+
+
+def _test_dsv4_hybrid_gets_no_attention_mask(rank, size):
+    initialize_for_megatron(seed=SEED)
+    model = _MaskRecorder().cuda()
+    input_ids = torch.zeros((1, 4), dtype=torch.long, device="cuda")
+
+    # Standard attention gets an explicit causal mask for prefill and every no-cache decode step.
+    megatron_prefill(model, input_ids)
+    megatron_generate(model, input_ids, osl=2, enable_kv_cache=False)
+    assert model.masks == [True, True, True]
+
+    # DeepSeek-V4 hybrid attention (CompressedSparseAttention) masks causally itself and raises on
+    # an explicit mask, which used to break calibration and generation.
+    model.config.experimental_attention_variant = "dsv4_hybrid"
+    model.masks = []
+    megatron_prefill(model, input_ids)
+    megatron_generate(model, input_ids, osl=2, enable_kv_cache=False)
+    assert model.masks == [False, False, False]
+
+
+def test_dsv4_hybrid_gets_no_attention_mask(dist_workers):
+    dist_workers.run(_test_dsv4_hybrid_gets_no_attention_mask)
