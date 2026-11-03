@@ -1701,7 +1701,9 @@ def _transposed_experts(modules) -> list[str]:
 
     A container may say so (``is_transposed``), and a gated fused-experts one shows it either way:
     stored ``(num_experts, out_dim, in_dim)``, its first projection takes the dim ``down_proj`` puts
-    out, which stored transposed it never does.
+    out, which stored transposed it never does. A non-gated container (``up_proj``, as Nemotron-H's)
+    matches no :func:`_fused_experts_wrapper`, so only its ``is_transposed`` is read, and its own
+    wrapper is responsible for the layout.
     """
     return sorted(
         {
