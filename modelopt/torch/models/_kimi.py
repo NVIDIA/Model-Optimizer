@@ -148,24 +148,35 @@ def make_buildable(
     """
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
+    from modelopt.torch.utils.logging import warn_rank_0
+
     if type(hf_config).__module__.startswith("transformers.") or ckpt_path is None:
         return
     if not trust_remote_code:
         return
     make_importable()
-    get_class_from_dynamic_module(
-        f"{modeling}.{vlm_class}", ckpt_path, trust_remote_code=trust_remote_code
-    )
-    # Kept, as prepare keeps its swap: transformers re-executes a remote module when the files it
-    # hashes change, and loads it afresh for another path to the checkpoint, and a plan kept off
-    # expert parallelism runs no prepare to put the shim back (prepare's swap, kept in its place,
-    # shims it too). Re-applying a wrapper that only drops keyword arguments changes nothing the
-    # model computes or loads. Remote code only: transformers' own port of a model can share the
-    # module's name.
-    if not keep_patched(f".{modeling}", lambda module: _shim_tie_weights(module, vlm_class)):
-        raise RuntimeError(
-            f"kimi: could not find a loaded {modeling} in sys.modules to adapt its tie_weights in"
+    try:
+        get_class_from_dynamic_module(
+            f"{modeling}.{vlm_class}", ckpt_path, trust_remote_code=trust_remote_code
         )
+    except (OSError, ImportError, AttributeError) as e:
+        why = f"{type(e).__name__}: {e}"
+    else:
+        # Kept, as prepare keeps its swap: transformers re-executes a remote module when the files
+        # it hashes change, and loads it afresh for another path to the checkpoint, and a plan kept
+        # off expert parallelism runs no prepare to put the shim back. Re-applying a wrapper that
+        # only drops keyword arguments changes nothing the model computes or loads. Remote code
+        # only: transformers' own port of a model can share the module's name.
+        if keep_patched(f".{modeling}", lambda module: _shim_tie_weights(module, vlm_class)):
+            return
+        why = f"no {modeling} module is loaded"
+    # Warned, not raised: every plan runs this step, and a load kept off expert parallelism builds
+    # the checkpoint's own code from its auto_map, whatever the module is named. A build the shim
+    # was needed for then fails on its own, naming the keyword arguments.
+    warn_rank_0(
+        f"kimi: the build step could not adapt {vlm_class}.tie_weights ({why}); building the "
+        "checkpoint's own code may fail on the keyword arguments transformers passes it."
+    )
 
 
 def _shim_tie_weights(module, vlm_class: str) -> bool:

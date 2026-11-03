@@ -338,6 +338,26 @@ def _tiny_kimi_vl_checkpoint(path):
     return remote
 
 
+@pytest.mark.parametrize("missing", ["code", "module"])
+def test_the_build_step_warns_rather_than_fails_when_it_cannot_shim(monkeypatch, remote, missing):
+    """Every plan runs the build step, and a load kept off expert parallelism builds the checkpoint's
+    own code from its ``auto_map``, whatever its module is named. Code the step cannot load by the
+    module name it knows, or no such module loaded, is warned about rather than failing that load."""
+    if missing == "code":
+
+        def no_such_file(*args, **kwargs):
+            raise OSError("does not appear to have a file named modeling_kimi_vl.py")
+
+        monkeypatch.setattr(dmu, "get_class_from_dynamic_module", no_such_file)
+    else:
+        monkeypatch.setattr(dmu, "get_class_from_dynamic_module", lambda *args, **kwargs: None)
+
+    with pytest.warns(
+        UserWarning, match="could not adapt KimiVLForConditionalGeneration.tie_weights"
+    ):
+        kimi_vl.make_buildable(_vlm_config(), ckpt_path="/ckpt", trust_remote_code=True)
+
+
 def test_the_build_step_keeps_its_shim_on_a_module_transformers_loads_again(monkeypatch, tmp_path):
     """transformers executes a remote module again when the files it hashes change (forced here),
     which rebinds the VLM class without the shim, and a plan kept off expert parallelism runs no
