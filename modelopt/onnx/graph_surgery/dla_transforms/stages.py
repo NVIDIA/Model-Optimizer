@@ -96,6 +96,7 @@ def individual_op_rewrites(graph: DlaGraph) -> int:
     count = 0
     for definitions in (
         operator_rules.INDEXING_RULES,
+        operator_rules.RECURRENT_RULES,
         operator_rules.MATRIX_RULES,
     ):
         count += apply_rules(graph, definitions, views={})
