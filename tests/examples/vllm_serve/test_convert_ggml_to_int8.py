@@ -23,8 +23,14 @@ from _test_utils.examples.run_command import run_example_command
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.inputs import TokensPrompt
+from vllm.model_executor.layers.quantization import modelopt as vllm_modelopt
 
 from modelopt.torch.export import export_hf_checkpoint
+
+pytestmark = pytest.mark.skipif(
+    "W8A16" not in getattr(vllm_modelopt, "QUANT_ALGOS", ()),
+    reason="vLLM's ModelOpt loader serves W8A16 layers from vllm-project/vllm#65272 on",
+)
 
 
 @pytest.fixture(scope="module")
