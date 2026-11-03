@@ -75,12 +75,15 @@ def test_ggml_export_converts_to_int8_levels_and_steps(ggml_export, tmp_path):
     }
     # Only the GGML layers' entries change; the FP8 attention's are kept as they are.
     original = json.loads(ggml_files[Path("hf_quant_config.json")])["quantization"]
-    w8a16 = {
-        layer: {"quant_algo": "W8A16", "group_size": GGML_FORMAT_REGISTRY[name].int8_group_size}
+    int8 = {
+        layer: {
+            "quant_algo": "INT8_PB_WO",
+            "group_size": GGML_FORMAT_REGISTRY[name].int8_group_size,
+        }
         for i, name in LAYER_FORMATS.items()
         for layer in layers[i]
     }
-    expected = {**original, "quantized_layers": {**original["quantized_layers"], **w8a16}}
+    expected = {**original, "quantized_layers": {**original["quantized_layers"], **int8}}
     assert {expected["quantized_layers"][layer]["quant_algo"] for layer in FP8_LAYERS} == {"FP8"}
     assert json.loads((int8_dir / "hf_quant_config.json").read_text())["quantization"] == expected
     config = json.loads((int8_dir / "config.json").read_text())["quantization_config"]

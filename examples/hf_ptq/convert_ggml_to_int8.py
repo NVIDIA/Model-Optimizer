@@ -48,14 +48,14 @@ def convert_ggml_export_to_int8(
     output_dir: str | os.PathLike,
     max_shard_size: int = 10 * 2**30,
 ) -> None:
-    """Rewrite a GGML export's GGML layers as ModelOpt W8A16 (INT8 weight-only) layers.
+    """Rewrite a GGML export's GGML layers as ModelOpt INT8 per-block weight-only layers.
 
     Every GGML weight is an integer level of at most 8 bits times the step of its 16- or
     32-weight sub-block, so storing the levels as the int8 ``weight`` and the steps as a group
     ``weight_scale`` reproduces the GGML weights up to rounding the steps to the model dtype. Each
-    GGML layer becomes ``{"quant_algo": "W8A16", "group_size": <16 or 32>}``; every other tensor,
-    file and quantization config entry, of any format, is copied as it is. The GGML export is left
-    unchanged.
+    GGML layer becomes ``{"quant_algo": "INT8_PB_WO", "group_size": <16 or 32>}``; every other
+    tensor, file and quantization config entry, of any format, is copied as it is. The GGML export
+    is left unchanged.
 
     Args:
         ggml_dir: A Hugging Face export holding GGML layers, as written by hf_ptq.py with a GGML
@@ -78,7 +78,7 @@ def convert_ggml_export_to_int8(
     scale_dtype = getattr(torch, dtype)
     weight_map = indexed_weight_map(ggml_dir)
     layer_formats = _ggml_layer_formats(ggml_dir, weight_map, hf_quant_config["quantization"])
-    hf_quant_config["quantization"] = _w8a16_quantization(
+    hf_quant_config["quantization"] = _int8_quantization(
         hf_quant_config["quantization"], layer_formats
     )
     if output_dir.exists() and any(output_dir.iterdir()):
@@ -152,18 +152,18 @@ def _ggml_layer_formats(
     return layer_formats
 
 
-def _w8a16_quantization(quantization: dict, layer_formats: dict[str, GGMLFormat]) -> dict:
-    """``quantization`` with each GGML layer described as W8A16 at its INT8 group size."""
+def _int8_quantization(quantization: dict, layer_formats: dict[str, GGMLFormat]) -> dict:
+    """``quantization`` with each GGML layer described as INT8_PB_WO at its INT8 group size."""
     quantization = copy.deepcopy(quantization)
     if quantization.get("quant_algo") == "MIXED_PRECISION":
         for layer, ggml_format in layer_formats.items():
             quantization["quantized_layers"][layer] = {
-                "quant_algo": "W8A16",
+                "quant_algo": "INT8_PB_WO",
                 "group_size": ggml_format.int8_group_size,
             }
     else:
         (ggml_format,) = set(layer_formats.values())
-        quantization.update(quant_algo="W8A16", group_size=ggml_format.int8_group_size)
+        quantization.update(quant_algo="INT8_PB_WO", group_size=ggml_format.int8_group_size)
     return quantization
 
 
@@ -216,7 +216,7 @@ def _int8_tensors(
     scale_dtype: torch.dtype,
     device: str,
 ) -> dict[str, torch.Tensor]:
-    """A layer's GGML payload as W8A16 ``weight`` levels and their group ``weight_scale``."""
+    """A layer's GGML payload as int8 ``weight`` levels and their group ``weight_scale``."""
     shape = torch.tensor((*payload.shape[:-2], payload.shape[-2] * ggml_format.block_size))
     levels, steps = ggml_format.decode_int8(payload.to(device), shape)
     return {
