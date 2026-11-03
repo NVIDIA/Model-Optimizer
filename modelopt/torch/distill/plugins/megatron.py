@@ -117,6 +117,12 @@ class DistillationConfig:
         assert all(len(pair) in (2, 3) for pair in self.intermediate_layer_pairs), (
             f"{self.intermediate_layer_pairs=}"
         )
+        for pair in self.intermediate_layer_pairs:
+            if self.freeze_mtp and any("mtp" in layer.split(".") for layer in pair[:2]):
+                raise ValueError(
+                    "freeze_mtp=True bypasses MTP forward, so intermediate_layer_pairs cannot "
+                    f"reference MTP modules: {pair[:2]}. Remove this pair or set freeze_mtp=False."
+                )
         assert 0 <= self.kd_loss_alpha <= 1, f"{self.kd_loss_alpha=}"
         assert self.logit_kl_temperature > 0, f"{self.logit_kl_temperature=}"
         if self.logit_kl_top_p is not None:

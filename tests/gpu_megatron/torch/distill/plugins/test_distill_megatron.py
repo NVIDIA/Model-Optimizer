@@ -660,7 +660,7 @@ def test_topk_logits_kl_loss_top_p_masks_tail():
     assert student.grad is not None and torch.isfinite(student.grad).all()
 
 
-def test_distillation_config_top_p_validation():
+def test_distillation_config_validation():
     with pytest.raises(AssertionError):
         DistillationConfig(logit_kl_top_p=0.9)  # requires logit_kl_topk
     with pytest.raises(AssertionError):
@@ -668,6 +668,24 @@ def test_distillation_config_top_p_validation():
     with pytest.raises(AssertionError):
         DistillationConfig(logit_kl_topk=8, logit_kl_top_p=0.9, logit_kl_top_p_min_k=0)
     DistillationConfig(logit_kl_topk=8, logit_kl_top_p=1.0, logit_kl_top_p_min_k=2)
+
+    for pair in (
+        ("mtp", "decoder.final_layernorm"),
+        ("decoder.final_layernorm", "mtp.layers.0.hnorm", "mse"),
+        ("language_model.mtp.layers.0.hnorm", "decoder.final_layernorm"),
+    ):
+        with pytest.raises(ValueError):
+            DistillationConfig(freeze_mtp=True, intermediate_layer_pairs=[pair])
+        for freeze_mtp in (None, False):
+            DistillationConfig(freeze_mtp=freeze_mtp, intermediate_layer_pairs=[pair])
+
+    DistillationConfig(
+        freeze_mtp=True,
+        intermediate_layer_pairs=[
+            ("decoder.final_layernorm", "decoder.final_layernorm"),
+            ("decoder.mtp_projection", "decoder.mtp_projection", "cosine"),
+        ],
+    )
 
 
 @pytest.mark.parametrize(
