@@ -166,7 +166,10 @@ def make_buildable(
         # it hashes change, and loads it afresh for another path to the checkpoint, and a plan kept
         # off expert parallelism runs no prepare to put the shim back. Re-applying a wrapper that
         # only drops keyword arguments changes nothing the model computes or loads. Remote code
-        # only: transformers' own port of a model can share the module's name.
+        # only: transformers' own port of a model can share the module's name. The patch is kept
+        # under the module's name, as prepare's swap is, so the later of the two replaces the other:
+        # the expert-parallel route runs this step in the plan decision and prepare after it, whose
+        # swap shims tie_weights too, and a load without prepare keeps this shim alone.
         if keep_patched(f".{modeling}", lambda module: _shim_tie_weights(module, vlm_class)):
             return
         why = f"no {modeling} module is loaded"
