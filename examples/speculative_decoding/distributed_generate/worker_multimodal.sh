@@ -114,6 +114,14 @@ if [ "$API_MODE" = "openai" ]; then
     fi
 fi
 
+# Remote code stays off unless the caller opts in. Set TRUST_REMOTE_CODE=true
+# only for a checkpoint you trust; Cosmos3-Edge needs its registered model code.
+trust_remote_code="${TRUST_REMOTE_CODE:-false}"
+VLLM_TRUST_ARGS=()
+if [[ "${trust_remote_code,,}" == "true" || "$trust_remote_code" == "1" ]]; then
+    VLLM_TRUST_ARGS+=(--trust-remote-code)
+fi
+
 SERVER_PORTS=()
 if [ "$SGLANG_TP_SIZE" -eq 1 ]; then
     for gpu in $(seq 0 $((NUM_TEMPERATURES - 1))); do
@@ -122,7 +130,8 @@ if [ "$SGLANG_TP_SIZE" -eq 1 ]; then
         if [ "$BACKEND" = "vllm" ]; then
             CUDA_VISIBLE_DEVICES=$gpu vllm serve /model/ \
                 --tensor-parallel-size 1 --served-model-name model \
-                --port "$port" --host 0.0.0.0 --trust-remote-code \
+                --port "$port" --host 0.0.0.0 \
+                "${VLLM_TRUST_ARGS[@]}" \
                 --media-io-kwargs "{\"video\":{\"num_frames\":$NUM_FRAMES}}" &
         else
             CUDA_VISIBLE_DEVICES=$gpu \
@@ -143,7 +152,8 @@ else
     if [ "$BACKEND" = "vllm" ]; then
         CUDA_VISIBLE_DEVICES=$gpu_list vllm serve /model/ \
             --tensor-parallel-size "$SGLANG_TP_SIZE" --served-model-name model \
-            --port "$BASE_PORT" --host 0.0.0.0 --trust-remote-code \
+            --port "$BASE_PORT" --host 0.0.0.0 \
+            "${VLLM_TRUST_ARGS[@]}" \
             --media-io-kwargs "{\"video\":{\"num_frames\":$NUM_FRAMES}}" &
     else
         CUDA_VISIBLE_DEVICES=$gpu_list \
