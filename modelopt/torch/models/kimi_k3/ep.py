@@ -416,10 +416,6 @@ def prepare_refusal(
     Its own refusals, a config naming no class to load the checkpoint's code by, and the
     decompressor's for a quantized checkpoint, without installing the decompressor.
     """
-    # Not at module scope: the model registry imports this module, and modelopt.torch.utils.moe
-    # imports the registry.
-    from modelopt.torch.utils.moe import config_levels
-
     if ckpt_path is None:
         return _NO_CHECKPOINT
     if not trust_remote_code:
@@ -428,25 +424,7 @@ def prepare_refusal(
         return _NO_MODEL_CLASS
     if not _quantized(hf_config, ckpt_path):
         return None
-    # What install_onfly_decompress checks before it installs anything: the dtype the experts
-    # decompress to, at every config level, and the checkpoint's compressed-tensors scheme.
-    for level in config_levels(hf_config):
-        dtype = getattr(level, "dtype", None)
-        if dtype is not None and str(dtype).removeprefix("torch.") != "bfloat16":
-            return (
-                f"kimi_k3: the experts decompress to bfloat16, but this config loads in {dtype}. "
-                "Load the checkpoint in bfloat16."
-            )
-    try:
-        compression = _onfly_decompress._read_compression(hf_config)
-    except (ImportError, NotImplementedError, ValueError) as e:
-        return str(e)
-    if compression is None and not _onfly_decompress.is_marked(hf_config):
-        return (
-            "kimi_k3: the checkpoint's experts are quantized, but this config has no "
-            "compressed-tensors quantization_config to decompress them by"
-        )
-    return None
+    return _onfly_decompress.decompression_refusal(hf_config)
 
 
 def prepare(

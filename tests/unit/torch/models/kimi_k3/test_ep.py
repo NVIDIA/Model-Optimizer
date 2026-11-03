@@ -707,6 +707,31 @@ def test_prepare_refusal_finds_a_compressed_tensors_the_decompressor_cannot_use(
     assert why in kimi_k3.prepare_refusal(config, ckpt_path="/ckpt", trust_remote_code=True)
 
 
+@pytest.mark.usefixtures("restore_loader_hooks")
+def test_prepare_refusal_finds_a_process_decompressing_another_checkpoint(monkeypatch):
+    """The decompressor's hooks are process-wide, so a packed checkpoint compressed differently from
+    one this process already decompresses needs a process of its own: ``prepare`` refuses it, and
+    the plan decision asks before deciding."""
+
+    def mapping(model, **kwargs):
+        return []
+
+    mapping._onfly_compression = (None, None, ("weight", "weight_scale"), "other-format")
+    monkeypatch.setattr(mu, "get_model_conversion_mapping", mapping)
+    packed = (None, None, ("weight_packed", "weight_scale"), "mxfp4-pack-quantized")
+    monkeypatch.setattr(_onfly_decompress, "_read_compression", lambda cfg: packed)
+    scheme = {"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"}
+    config = SimpleNamespace(
+        text_config=SimpleNamespace(quantization_config=scheme),
+        quantization_config=scheme,
+        auto_map=_AUTO_MAP,
+    )
+
+    why = kimi_k3.prepare_refusal(config, ckpt_path="/ckpt", trust_remote_code=True)
+
+    assert "needs a process of its own" in why
+
+
 def test_prepare_refusal_finds_a_config_naming_no_model_class():
     """``prepare`` loads the checkpoint's code through the class its ``auto_map`` names."""
     config = SimpleNamespace(text_config=SimpleNamespace())
