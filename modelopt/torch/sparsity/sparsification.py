@@ -32,6 +32,7 @@ from .attention_sparsity.config import (
     VSAAttributeConfig,
 )
 from .attention_sparsity.conversion import _check_methods_and_backends, is_attn_sparsified
+from .attention_sparsity.methods import get_sparse_method
 from .attention_sparsity.mode import SparseAttentionModeRegistry
 from .attention_sparsity.model_sparsify import calibrate
 from .weight_sparsity import sparsification as weight_sparsification
@@ -116,9 +117,12 @@ def sparsify(
     for (m, mode_config), searcher in zip(modes, searchers):
         model = apply_mode(model, [(m, mode_config)])
         search_keys = searcher.default_search_config.keys()
-        searcher.search(model, {}, (), {k: v for k, v in config.items() if k in search_keys})
-    # A search gives every module the training mode of the model.
-    restore_training_modes(model, training_modes)
+        try:
+            searcher.search(model, {}, (), {k: v for k, v in config.items() if k in search_keys})
+        finally:
+            # A search gives every module the training mode of the model; restore them before the
+            # next search runs its forward loop.
+            restore_training_modes(model, training_modes)
     return model
 
 
@@ -136,7 +140,8 @@ def _check_attention_config(config: SparseAttentionConfig, has_data: bool) -> No
         else:
             attribute_cfg = {k: v for k, v in cfg.items() if k != "calibration"}
             is_vsa = attribute_cfg.get("method") == "vsa"
-            (VSAAttributeConfig if is_vsa else SparseAttentionAttributeConfig)(**attribute_cfg)
+            config_class = VSAAttributeConfig if is_vsa else SparseAttentionAttributeConfig
+            get_sparse_method(config_class(**attribute_cfg).method)  # raises if not registered
 
 
 def export(model: nn.Module) -> nn.Module:

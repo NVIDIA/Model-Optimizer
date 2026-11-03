@@ -16,6 +16,7 @@
 """Tests for sparse attention conversion and replacement."""
 
 import copy
+from functools import partial
 
 import pytest
 
@@ -300,9 +301,10 @@ class TestConversionEdgeCases:
                 None,
             ),
             (mts.SKIP_SOFTMAX_CALIB, None, print),  # decode calibration needs RULER data
-            *(  # conversion rejects mixed methods or backends only after the weights are pruned
+            *(  # conversion rejects these only after the weights are pruned
                 ([("sparse_magnitude", {}), ("sparse_attention", {"sparse_cfg": cfg})], None, None)
                 for cfg in [
+                    {"*attention*": {"method": "not_registered"}},
                     {"*attention*": {"method": "vsa"}, "*fc*": {"method": "flash_skip_softmax"}},
                     {
                         "*attention*": {"method": "triton_skip_softmax", "backend": "triton"},
@@ -328,11 +330,27 @@ class TestConversionEdgeCases:
         assert all(torch.equal(v, state_dict[k]) for k, v in model.state_dict().items())
 
     @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-    @pytest.mark.parametrize("sparsify", [mts.sparsify, sparse_attn.sparsify])
-    def test_sparsify_keeps_training_modes(self, sparsify):
+    @pytest.mark.parametrize(
+        ("sparsify", "mode"),
+        [
+            (mts.sparsify, FLASH_SKIP_SOFTMAX_DEFAULT_CFG),
+            (sparse_attn.sparsify, FLASH_SKIP_SOFTMAX_DEFAULT_CFG),
+            (  # SparseGPT runs its forward loop after the attention search
+                partial(mts.sparsify, config={"device": "cpu"}),
+                [("sparse_attention", FLASH_SKIP_SOFTMAX_DEFAULT_CFG), ("sparsegpt", {})],
+            ),
+        ],
+    )
+    def test_sparsify_keeps_training_modes(self, sparsify, mode):
         model = SimpleAttentionModel()
         model.attention.eval()
-        sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+        x = SimpleAttentionModel.get_input()
+
+        def forward_loop(m):
+            assert not any(sub.training for sub in model.attention.modules())
+            m(x)
+
+        sparsify(model, mode, forward_loop=forward_loop)
         assert model.training
         assert not any(m.training for m in model.attention.modules())
 
