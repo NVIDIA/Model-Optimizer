@@ -5,31 +5,24 @@ run. Validation owns acceptance; recovery does not relax its gates. Do not retry
 solely for accepted bounded failures or ordinary wrong answers. Expected NEL
 walltime/resume chains are not failed evaluations.
 
-## Parent and evaluator contract
+## Recovery workflow
 
-The **evaluator sub-agent** diagnoses and proposes recovery; the **parent** owns
-the decision, comparison protocol, shared resources, and submission budget. In a
-standalone evaluation, the agent acts as parent within the user's authorization.
-
-1. **Evaluator → parent:** return run/task IDs, validation verdict, fault counts
-   and denominators, effective limits, and evidence paths. Identify the first
-   causative failure, uncertainty, affected baseline/candidate tasks, and a
-   proposed config diff with expected benefit and cost. Do not resubmit merely
-   because validation failed.
-2. **Parent → evaluator:** approve, revise, or reject the proposal. Approval must
-   name the tasks/models, exact changes, resume versus fresh-run strategy,
-   canary/full stages, maximum submissions and resource/time limits, and stop
-   conditions. Count canaries and failed submissions under existing user limits;
-   recovery does not reset them. A bounded recovery plan may be approved before
-   delegation; the evaluator must return for changes outside it.
-3. **Evaluator executes only that plan:** register invocation/job IDs before
-   further delegation; monitor existing jobs rather than duplicate them. Return
-   each stage's evidence and revalidation verdict. Proceed canary → full only if
-   explicitly authorized and the canary passes the applicable operational checks.
-4. **Parent closes the loop:** accept a validated replacement, authorize another
-   evidence-backed plan within the remaining budget, or report the blocker.
-   Repeated failure is not permission for an unbounded retry loop. Ask the user
-   before exceeding authority, resource limits, or fixed benchmark requirements.
+1. **Diagnose:** record run/task IDs, validation verdict, fault counts and
+   denominators, effective limits, and evidence paths. Identify the first
+   causative failure, uncertainty, and affected baseline/candidate tasks.
+2. **Plan:** record the exact config diff, expected benefit and cost, resume
+   versus fresh-run strategy, canary/full stages, maximum submissions,
+   resource/time limits, and stop conditions. Count canaries and failed
+   submissions under existing user limits; recovery does not reset them.
+3. **Check authority:** execute recovery within the user's authorized scope and
+   budget. Ask the user before changing fixed benchmark requirements or
+   exceeding that authority. Validation failure alone does not authorize retries.
+4. **Execute:** register invocation/job IDs and monitor existing jobs rather than
+   duplicate them. Proceed canary → full only within the plan and after the
+   canary passes applicable operational checks.
+5. **Revalidate:** accept a validated replacement, revise the plan from new
+   evidence within the remaining authorization, or report the blocker. Repeated
+   failure is not permission for an unbounded retry loop.
 
 ## Choose recovery from evidence
 
@@ -44,10 +37,10 @@ standalone evaluation, the agent acts as parent within the user's authorization.
 | Missing scores/coverage, parser errors, wrong identity/configuration | Repair accounting or configuration first. Never fill missing outcomes with invented zeros or retry only wrong answers. |
 | Authentication, permission, secret exposure, unsupported protocol | Stop affected work and escalate. Retries cannot bypass access controls, hide exposure, or waive benchmark rules. |
 
-Transient failures may justify one unchanged retry in the approved plan. A
-recurrence requires a new diagnosis/parent decision, not another identical retry.
-Delegate serving failures to **deployment**, evaluation/harness failures to
-**evaluation**, and comparison decisions to **compare-results**.
+Transient failures may justify one unchanged retry within the recovery plan. A
+recurrence requires a new diagnosis and plan, not another identical retry.
+Use **deployment** for serving failures, **evaluation** for evaluation/harness
+failures, and **compare-results** for comparison decisions.
 
 ### Length-capped responses
 
@@ -58,9 +51,9 @@ Distinguish output caps, total-context exhaustion, agent step/total-token limits
 parser loss, and repetition; `finish_reason: length` alone does not identify which
 limit fired. A normal stop can still contain an empty final.
 
-For a failed validation caused by output/context limits, the parent should
-approve a supported increase and rerun unless task policy, resources, or remaining
-budget prevents it; otherwise return the specific blocker. For example, try
+For failed validation caused by output/context limits, try a supported increase
+and rerun within the authorized scope unless task policy, resources, or remaining
+budget prevents it; otherwise report the specific blocker. For example, try
 `65536 → 131072` output tokens when task policy permits and evidence shows genuine
 unfinished reasoning. This is a recovery diagnostic, not a new universal default.
 
@@ -94,7 +87,7 @@ unfinished reasoning. This is a recovery diagnostic, not a new universal default
   protocol. Unaffected validated tasks may be reused with explicit provenance.
 - Reapply all of [run-validation.md](run-validation.md), not only the previously
   failing check. Carry original/replacement IDs, config diffs, fault rates,
-  approval/budget ledger, and unresolved limitations into the handoff. Keep
+  authorization/budget ledger, and unresolved limitations into the handoff. Keep
   scheduler completion, MLflow delivery, and evaluation validity separate.
 - After both sides validate, repeat external baseline sanity and use
   **compare-results**. Otherwise withhold the failed task's score/comparison and

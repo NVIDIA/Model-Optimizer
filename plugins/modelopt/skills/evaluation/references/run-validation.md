@@ -36,20 +36,20 @@ single-model run:
 Report the run-validation summary before any score: log scan status, coverage,
 reasoning/answer parsing status, and any errors or warnings found. If an
 independent validation item fails, label the result incomplete or invalid and
-return findings and a recommendation to the parent (or user); do not
-automatically resubmit a completed run. Follow [recovery.md](recovery.md) for
-parent-approved token/context increases, resource repairs, and bounded retries;
-revalidate replacements before reporting scores.
+record findings and a recommendation; do not automatically resubmit a completed
+run. Follow [recovery.md](recovery.md) for token/context increases, resource
+repairs, and bounded retries within the user's authorization; ask the user when
+additional authorization is needed. Revalidate replacements before reporting scores.
 
 For Terminal-Bench 2.1, also complete the [run health screen](../recipes/tasks/aa_next/terminal_bench_2_1.md#run-health-screen)
 and include its evidence and verdict before reporting `pass@1`.
 
-### Bounded Evaluation-Failure Policy (Parent and Evaluator)
+### Bounded Evaluation-Failure Policy
 
 Accept complete runs with **<2% failures in each applicable gate**, measured
 before rounding. Warn for nonzero rates; do not abort, invalidate, or retry solely
-for bounded failures. At or above 2%, return findings to the parent/user without
-automatic retry or a success verdict.
+for bounded failures. At or above 2%, record findings without automatic retry or
+a success verdict; use the recovery workflow before deciding to rerun.
 
 Skip the 2% cutoff in both gates for a canary
 that will be followed by a full evaluation.
@@ -79,7 +79,7 @@ benchmark rules remain blockers. Never select passing repeats or silently regrad
 
 Keep protocol limits fixed, verify prompt/history plus output fits deployed
 context, and report mismatches or unknown reference settings; proposed changes
-need parent/user approval. Tolerance does not prove negligible score impact or
+must remain within the user's authorization. Tolerance does not prove negligible score impact or
 leaderboard comparability.
 
 Keep score, validation, and MLflow delivery separate. Carry counts, rates, and
