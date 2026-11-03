@@ -37,6 +37,7 @@ from megatron.core.transformer import MegatronModule, TransformerLayer
 from megatron.core.utils import get_model_config
 from torch import Tensor
 from torch.nn.modules.loss import _Loss
+from torch.utils.checkpoint import checkpoint
 
 import modelopt.torch.distill as mtd
 from modelopt.torch.distill.config import Criterion
@@ -67,6 +68,8 @@ class DistillationConfig:
             the standard language model loss is skipped entirely (see :attr:`skip_lm_loss`).
         logit_kl_temperature: Temperature for the logit KL-divergence loss.
         logit_kl_topk: If not None, use TopLogitsKLLoss instead of LogitsKLLoss with this top-k value.
+        logit_loss_chunk_size: Compute Top-K KL and student CE in sequence chunks to bound
+            temporary memory, including validation CE. Recompute chunks during backward.
         logit_kl_top_p: Optional nucleus (top-P) threshold applied on top of the teacher's Top-K.
             Only the smallest prefix of the (sorted) Top-K whose cumulative teacher probability
             reaches this value contributes to the loss. Requires ``logit_kl_topk``. Must be in (0, 1].
@@ -80,6 +83,7 @@ class DistillationConfig:
     kd_loss_alpha: float = 1.0
     logit_kl_temperature: float = 1.0
     logit_kl_topk: int | None = None
+    logit_loss_chunk_size: int | None = None
     logit_kl_top_p: float | None = None
     logit_kl_top_p_min_k: int = 1
     freeze_mtp: bool = False
@@ -118,6 +122,9 @@ class DistillationConfig:
             assert self.logit_kl_topk is not None, "logit_kl_top_p requires logit_kl_topk"
             assert 0 < self.logit_kl_top_p <= 1, f"{self.logit_kl_top_p=}"
         assert self.logit_kl_top_p_min_k >= 1, f"{self.logit_kl_top_p_min_k=}"
+        if self.logit_loss_chunk_size is not None:
+            assert self.logit_kl_topk is not None, "logit_loss_chunk_size requires logit_kl_topk"
+            assert self.logit_loss_chunk_size > 0, f"{self.logit_loss_chunk_size=}"
 
     @staticmethod
     def parse_intermediate_entry(entry: tuple[str, ...]) -> tuple[str, str, Callable]:
@@ -175,6 +182,7 @@ def setup_distillation_config(
                     top_k=cfg.logit_kl_topk,
                     top_p=cfg.logit_kl_top_p,
                     top_p_min_k=cfg.logit_kl_top_p_min_k,
+                    chunk_size=cfg.logit_loss_chunk_size,
                 )
             else:
                 criterion[tuple(cfg.logit_layers)] = LogitsKLLoss(
@@ -431,6 +439,7 @@ class TopLogitsKLLoss(LogitsKLLoss):
         *,
         top_p: float | None = None,
         top_p_min_k: int = 1,
+        chunk_size: int | None = None,
     ):
         """Constructor.
 
@@ -441,6 +450,7 @@ class TopLogitsKLLoss(LogitsKLLoss):
             top_k: The number of top vocabulary entries to keep from the teacher's distribution.
             top_p: Optional nucleus threshold in (0, 1] applied on top of the Top-K selection.
             top_p_min_k: Minimum number of entries kept per token when ``top_p`` is active.
+            chunk_size: Sequence positions per checkpointed loss chunk. Original logits remain live.
         """
         super().__init__(model_config, temperature, reverse)
         assert top_k >= 1, f"{top_k=}"
@@ -449,6 +459,9 @@ class TopLogitsKLLoss(LogitsKLLoss):
         self.top_k = top_k
         self.top_p = top_p
         self.top_p_min_k = top_p_min_k
+        if chunk_size is not None and chunk_size < 1:
+            raise ValueError("chunk_size must be positive")
+        self.chunk_size = chunk_size
 
     def forward(self, predictions: Tensor, targets: Tensor) -> Tensor:
         """Forward function.
@@ -462,6 +475,26 @@ class TopLogitsKLLoss(LogitsKLLoss):
         """
         predictions, targets = self.pre_forward(predictions, targets)
 
+        if self.chunk_size is not None and predictions.shape[0] > self.chunk_size:
+            losses = []
+            for student, teacher in zip(
+                predictions.split(self.chunk_size), targets.split(self.chunk_size)
+            ):
+                if torch.is_grad_enabled() and student.requires_grad:
+                    loss = checkpoint(
+                        self._forward_chunk,
+                        student,
+                        teacher,
+                        use_reentrant=False,
+                        preserve_rng_state=False,
+                    )
+                else:
+                    loss = self._forward_chunk(student, teacher)
+                losses.append(loss)
+            return self.post_forward(torch.cat(losses))
+        return self.post_forward(self._forward_chunk(predictions, targets))
+
+    def _forward_chunk(self, predictions: Tensor, targets: Tensor) -> Tensor:
         tp_size = self._config.tensor_model_parallel_size
         assert self.top_k <= targets.size(-1) * tp_size, (
             f"top_k ({self.top_k}) is larger than total vocab size ({targets.size(-1) * tp_size})"
@@ -555,7 +588,7 @@ class TopLogitsKLLoss(LogitsKLLoss):
             loss = loss.detach() + (loss - loss.detach()) / tp_size
 
         # No need to reduce since all ranks compute same global Top-K
-        return self.post_forward(loss, tp_reduce=False)
+        return loss
 
 
 class TopKLogitsKLLoss(TopLogitsKLLoss):
@@ -736,7 +769,30 @@ def adjust_distillation_model_for_mcore(
         is_mtp_call = self._lm_loss_call_count <= mtp_num_layers
         if self.training and (skip_mtp_loss if is_mtp_call else skip_lm_loss):
             return torch.zeros_like(labels, dtype=logits.dtype)
-        return type(self).compute_language_model_loss(self, labels, logits)
+        compute_loss = type(self).compute_language_model_loss
+        chunk_size = distill_cfg.logit_loss_chunk_size
+        if chunk_size is None:
+            return compute_loss(self, labels, logits)
+
+        def loss_chunk(chunk_logits, chunk_labels):
+            # MCore CE may mutate FP32 logits in place. Preserve the split views for
+            # KL and recomputation while keeping the additional copy chunk-sized.
+            return compute_loss(
+                self,
+                chunk_labels.contiguous(),
+                chunk_logits.clone(memory_format=torch.contiguous_format),
+            )
+
+        losses = []
+        for chunk_logits, chunk_labels in zip(
+            logits.split(chunk_size, dim=0), labels.split(chunk_size, dim=1), strict=True
+        ):
+            if torch.is_grad_enabled() and chunk_logits.requires_grad:
+                loss = checkpoint(loss_chunk, chunk_logits, chunk_labels, use_reentrant=False)
+            else:
+                loss = loss_chunk(chunk_logits, chunk_labels)
+            losses.append(loss)
+        return torch.cat(losses, dim=1)
 
     model.compute_language_model_loss = MethodType(_compute_student_lm_loss, model)
 

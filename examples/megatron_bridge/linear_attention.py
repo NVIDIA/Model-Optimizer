@@ -50,8 +50,6 @@ def linear_attention_training(
     recompute_gdn=False,
 ):
     """Install quantization hooks and yield a phase-aware ModelOpt forward step."""
-    if config.model.context_parallel_size != 1:
-        raise ValueError("Linear-attention QAT/QAD currently requires CP=1")
     if not quant_config.linear_attention:
         raise ValueError("A linear-attention quantization policy is required")
     operand_qat = any(entry.cfg.backend == "gdn_prefill" for entry in quant_config.linear_attention)

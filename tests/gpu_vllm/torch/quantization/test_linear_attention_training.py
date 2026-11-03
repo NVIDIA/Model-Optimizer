@@ -95,7 +95,7 @@ def _native_forward(args, quantizer, kda, kimi_k3):
     outputs = [prefix]
     indices = torch.ones(1, device=q.device, dtype=torch.int32)
     cu = torch.tensor([0, 1], device=q.device, dtype=torch.int32)
-    for token in range(65, 67):
+    for token in range(65, q.shape[1]):
         operands = [x[:, token : token + 1].contiguous() for x in (q, k, v)]
         if kimi_k3:
             output, _ = native.fused_recurrent_kda_packed_decode(
@@ -194,6 +194,38 @@ def compiled_serving_case(request):
     expected = _native_forward(args, quantizer, kda, kimi_k3)
     torch.cuda.synchronize()
     return args, quantizer, forward, expected, kimi_k3
+
+
+@pytest.mark.parametrize("compiled_serving_case", ["gdn"], indirect=True, scope="module")
+def test_long_decode_checkpoint_preserves_state_and_gradients(compiled_serving_case, monkeypatch):
+    from modelopt.torch.quantization.linear_attention import decode
+
+    args, _, forward, _, _ = compiled_serving_case
+    inputs = [
+        (x.repeat(1, 3, *([1] * (x.ndim - 2))) if i < 5 else x).detach().requires_grad_()
+        for i, x in enumerate(args)
+    ]
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            type="dynamic",
+            block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            pass_through_bwd=True,
+        )
+    ).cuda()
+    expected = _native_forward(inputs, quantizer, False, False)
+    actual = forward(inputs=inputs, state_quantizer=quantizer)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    loss = actual[0][:, 65:].float().square().mean() + actual[1].square().mean()
+    gradients = torch.autograd.grad(loss, inputs)
+    # Bypass only recomputation to compare against the original retained autograd graph.
+    monkeypatch.setattr(decode, "activation_checkpoint", lambda fn, *args, **kwargs: fn(*args))
+    retained = forward(inputs=inputs, state_quantizer=quantizer)
+    retained_loss = retained[0][:, 65:].float().square().mean() + retained[1].square().mean()
+    expected_gradients = torch.autograd.grad(retained_loss, inputs)
+    for actual_gradient, expected_gradient in zip(gradients, expected_gradients):
+        torch.testing.assert_close(actual_gradient, expected_gradient, rtol=0, atol=0)
+    assert gradients[1][:, :65].abs().sum() > 0
 
 
 def test_serving_state_qdq_and_handoff_gradient(compiled_serving_case):

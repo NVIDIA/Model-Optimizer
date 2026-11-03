@@ -107,14 +107,49 @@ recurrence backend for the frozen teacher with all quantizers disabled. Full-voc
 KL remains the default; `--logit_kl_top_k` uses the teacher's top-k entries plus a
 residual probability bucket, with full-vocabulary normalization.
 Token-only data requires `--prefill_tokens`; prompt-completion SFT derives lengths
-from the collator. CP must be 1, and SFT also requires PP=1. Chat/document packing
-is rejected because it does not supply the required per-segment phase metadata.
+from the collator. SFT requires PP=1. Native Megatron GDN headwise context
+parallelism supports CP>1 for the ordinary `serving`/`vllm` state policy. Each
+recurrence receives the full conversation and a local subset of heads. Other CP
+implementations, KDA, and ReplaySSM CP remain unsupported. Generic chat/document
+packing is rejected because it does not supply the required per-segment phase metadata.
 
 Resume with the same output directory, recipe, and phase options and a larger
 `--train_iters`. Checkpoints preserve the quantization policy; phase selection and
 trainable-parameter scope remain run configuration. The old `train.py` Python API
 and CLI remain compatible for QAT and existing study launchers; they now use the
 same linear-attention hooks and Bridge training loop.
+
+### Offline packed conversations
+
+For long packed batches, add `--linear_attention_packed_data --mbs 1` and point
+`--sft_dataset_root` to offline tokenized packs. Each `training/` and `validation/`
+split contains:
+
+| File | Contents |
+| --- | --- |
+| `tokens.bin` | Little-endian uint32 token IDs, including each conversation's final next-token label |
+| `sequences.npy` | Int64 rows `[token_offset, token_count, prefill_tokens]` |
+| `packs.npy` | Int64 rows `[first_sequence, sequence_count]` |
+| `manifest.json` | `sequence_length` matching `--seq_length`, and `alignment` divisible by `2 * CP` |
+
+Build packs from complete conversations, keeping training and validation prompts
+disjoint. The sum of individually aligned input lengths (`token_count - 1`) must
+fit the pack width. The collator resets attention, recurrent state, and positions
+between conversations and masks padding and prompt labels. A 128K pack can
+contain many shorter conversations; it does not create a continuous 128K context.
+Global batch size counts **packs**, so `--gbs 256 --seq_length 131072` processes
+33,554,432 physical input token slots per optimizer update. The sampler cycles
+prepared packs as needed; provision enough unique data for the intended run.
+
+`--logit_kl_top_k 256 --logit_loss_chunk_size 1024` checkpoints KL computation in
+sequence chunks while retaining full-vocabulary normalization and the residual
+bucket. Student cross-entropy, including the validation metric, uses the same
+chunk size. This bounds FP32 loss intermediates; the full BF16 student and teacher
+logits are still allocated. Ordinary recurrent suffixes longer than 64 tokens
+also use activation recomputation in 64-token chunks. State remains attached
+across chunks, and chunk boundaries introduce no extra state QDQ. These memory
+changes preserve the quantization schedule and STE gradient; they do not qualify
+full-model memory, throughput, or long-context accuracy without a model-level run.
 
 ## Use prompt boundaries from data
 

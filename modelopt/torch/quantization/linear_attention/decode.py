@@ -18,6 +18,7 @@
 from dataclasses import dataclass
 
 import torch
+from torch.utils.checkpoint import checkpoint as activation_checkpoint
 
 from ._two_precision import two_precision_decode
 from ._vllm_autograd import normalized
@@ -157,11 +158,9 @@ def _recurrent_decode(
     # Import the optional native backend only for the ordinary state-QDQ path.
     from ._vllm_autograd import step
 
-    state = _state_qdq(initial_state, state_quantizer, config.state_block_v)
-    with torch.autocast(device_type=q.device.type, enabled=False):
+    def run_chunk(state, q, k, v, g, beta, gates):
         outputs = []
         for t in range(len(q)):
-            # The output reads the working state before QDQ writes the next token's cache.
             output, working = step(
                 q[t],
                 k[t],
@@ -172,14 +171,45 @@ def _recurrent_decode(
                 scale,
                 use_qk_l2norm_in_kernel,
                 precision=config.precision,
-                gate_inputs=(gate_inputs[0][t], gate_inputs[1][t], *gate_inputs[2:])
-                if gate_inputs is not None
-                else None,
+                gate_inputs=(gates[0][t], gates[1][t], *gates[2:]) if gates is not None else None,
             )
             outputs.append(output)
-            # A new tensor preserves the state saved by earlier tokens' backward passes.
             state = _state_qdq(working, state_quantizer, config.state_block_v)
-    return torch.stack(outputs), state if output_final_state else None
+        return torch.stack(outputs), state
+
+    state = _state_qdq(initial_state, state_quantizer, config.state_block_v)
+    with torch.autocast(device_type=q.device.type, enabled=False):
+        recompute = (
+            len(q) > 64
+            and torch.is_grad_enabled()
+            and any(x.requires_grad for x in (q, k, v, g, beta, state))
+        )
+        if recompute:
+            outputs = []
+            for start in range(0, len(q), 64):
+                sl = slice(start, start + 64)
+                gates = (
+                    (gate_inputs[0][sl], gate_inputs[1][sl], *gate_inputs[2:])
+                    if gate_inputs
+                    else None
+                )
+                # Keep state attached across chunks. Only the original handoff applies initial QDQ.
+                output, state = activation_checkpoint(
+                    run_chunk,
+                    state,
+                    q[sl],
+                    k[sl],
+                    v[sl],
+                    g[sl],
+                    beta[sl],
+                    gates,
+                    use_reentrant=False,
+                )
+                outputs.append(output)
+            output = torch.cat(outputs)
+        else:
+            output, state = run_chunk(state, q, k, v, g, beta, gate_inputs)
+    return output, state if output_final_state else None
 
 
 def _replay_decode(q, k, v, g, beta, initial_state, window, enabled, scale, normalize, gate_inputs):

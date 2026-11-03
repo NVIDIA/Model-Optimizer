@@ -346,6 +346,20 @@ def get_args():
         "bucket for the remaining probability mass (distributions are still normalized over the full vocab).",
     )
     parser.add_argument(
+        "--linear_attention_packed_data",
+        action="store_true",
+        help="Read pretokenized state-QAD packs and prompt boundaries from --sft_dataset_root; "
+        "requires --sft, --linear_attention_recipe, and --mbs 1. Global batch counts packs.",
+    )
+    parser.add_argument(
+        "--logit_loss_chunk_size",
+        type=int,
+        default=None,
+        help="Compute top-k KL and student cross-entropy in sequence chunks, with backward "
+        "recomputation, to bound FP32 temporary memory including validation; "
+        "the output projection still produces full logits.",
+    )
+    parser.add_argument(
         "--logit_kl_top_p",
         type=float,
         default=None,
@@ -533,21 +547,41 @@ def get_args():
         )
     if args.sft_dataset_root and not args.sft:
         raise ValueError("--sft_dataset_root requires --sft; without it the SFT path is not used.")
+    if args.linear_attention_packed_data and not (
+        args.sft
+        and args.sft_dataset_root
+        and args.linear_attention_recipe
+        and args.mbs == 1
+        and args.prefill_tokens is None
+        and not args.sft_hf_dataset
+    ):
+        raise ValueError(
+            "Packed state QAD requires SFT root, state recipe, mbs=1 and data-derived phases"
+        )
     if args.sft and args.sft_dataset_root:
         # Fail on a mistyped root here rather than after both checkpoints have loaded onto GPUs.
-        required = ["training.jsonl"] + (["validation.jsonl"] if args.eval_iters > 0 else [])
+        if args.linear_attention_packed_data:
+            required = [
+                f"{split}/{name}"
+                for split in (["training", "validation"] if args.eval_iters > 0 else ["training"])
+                for name in ("manifest.json", "tokens.bin", "sequences.npy", "packs.npy")
+            ]
+        else:
+            required = ["training.jsonl"] + (["validation.jsonl"] if args.eval_iters > 0 else [])
         absent = [f for f in required if not os.path.isfile(os.path.join(args.sft_dataset_root, f))]
         if absent:
             raise ValueError(f"--sft_dataset_root {args.sft_dataset_root} is missing: {absent}.")
         # Decided once here so it reaches print_args and costs a single tokenizer load.
-        args.sft_add_bos = _tokenizer_prepends_bos(args)
+        args.sft_add_bos = (
+            False if args.linear_attention_packed_data else _tokenizer_prepends_bos(args)
+        )
 
     if args.linear_attention_recipe:
         recipe = load_recipe(args.linear_attention_recipe)
         if not isinstance(recipe, ModelOptPTQRecipe) or not recipe.quantize.linear_attention:
             raise ValueError("--linear_attention_recipe must contain a linear-attention policy.")
-        if args.cp_size != 1 or (args.sft and args.pp_size != 1):
-            raise ValueError("Linear-attention QAD needs CP=1; data-derived phases also need PP=1.")
+        if args.sft and args.pp_size != 1:
+            raise ValueError("Data-derived linear-attention QAD phases require PP=1.")
         if args.sft_hf_dataset or args.document_boundaries:
             raise ValueError(
                 "Linear-attention QAD needs prompt-completion SFT or a fixed token split; "
@@ -740,6 +774,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     kd_config = ModelOptDistillConfig(
         kd_loss_alpha=args.kd_loss_alpha,
         logit_kl_topk=args.logit_kl_top_k,
+        logit_loss_chunk_size=args.logit_loss_chunk_size,
         logit_kl_top_p=args.logit_kl_top_p,
         logit_kl_top_p_min_k=args.logit_kl_top_p_min_k,
         freeze_mtp=args.freeze_mtp,
@@ -826,7 +861,18 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         "dataloader_type": "single",
         "skip_getting_attention_mask_from_dataset": True,
     }
-    if args.sft and args.sft_hf_dataset:
+    if args.linear_attention_packed_data:
+        # Imported only for the optional packed state-QAD data adapter.
+        from linear_attention_data import LinearAttentionPackedDatasetConfig
+
+        dataset_config = LinearAttentionPackedDatasetConfig(
+            dataset_root=args.sft_dataset_root,
+            seq_length=args.seq_length,
+            context_parallel_size=args.cp_size,
+            seed=args.seed,
+            do_validation=args.eval_iters > 0,
+        )
+    elif args.sft and args.sft_hf_dataset:
         # Chat rows rendered by the model's own chat template, with the loss covering every
         # assistant turn, so multi-round records train all of their responses rather than the last.
         dataset_config = DirectHFSFTDatasetConfig(

@@ -17,6 +17,7 @@ import json
 import runpy
 import sys
 
+import numpy as np
 import pytest
 import torch
 import yaml
@@ -376,12 +377,12 @@ def replay_hf_model(linear_attention_hf_model, tmp_path_factory):
 
 
 @pytest.mark.parametrize(
-    ("prompt_data", "state_quantization"),
-    [(False, False), (True, False), (True, True)],
-    ids=["replay-fixed", "replay-sft", "nvfp4-state-sft"],
+    ("prompt_data", "state_quantization", "packed_cp"),
+    [(False, False, False), (True, False, False), (True, True, False), (True, True, True)],
+    ids=["replay-fixed", "replay-sft", "nvfp4-state-sft", "nvfp4-packed-cp"],
 )
 def test_standard_distill_linear_attention_resume(
-    replay_hf_model, tmp_path, prompt_data, state_quantization
+    replay_hf_model, tmp_path, prompt_data, state_quantization, packed_cp
 ):
     """The public QAD CLI trains and restores full-state and replay-read policies."""
     hf_model = replay_hf_model
@@ -402,10 +403,30 @@ def test_standard_distill_linear_attention_resume(
             json.dumps({"input": "a b c d ", "output": "e f g h"}) + "\n"
         )
         data_args = ["--sft", "--sft_dataset_root", str(tmp_path)]
+    if packed_cp:
+        if torch.cuda.device_count() < 2:
+            pytest.skip("Packed CP QAD requires two GPUs")
+        for split in ("training", "validation"):
+            data_dir = tmp_path / split
+            data_dir.mkdir()
+            tokens = np.arange(18, dtype="<u4")
+            (tokens if split == "training" else tokens[::-1]).tofile(data_dir / "tokens.bin")
+            np.save(data_dir / "sequences.npy", np.array([[0, 9, 4], [9, 9, 5]]))
+            np.save(data_dir / "packs.npy", np.array([[0, 2]]))
+            (data_dir / "manifest.json").write_text(
+                json.dumps({"sequence_length": 64, "alignment": 4})
+            )
+        data_args += [
+            "--linear_attention_packed_data",
+            "--cp_size",
+            "2",
+            "--logit_loss_chunk_size",
+            "8",
+        ]
     command = extend_cmd_parts(
         [
             "torchrun",
-            "--nproc_per_node=1",
+            f"--nproc_per_node={2 if packed_cp else 1}",
             "distill.py",
             "--no_async_save",
             "--teacher_serving_arithmetic",
@@ -424,7 +445,7 @@ def test_standard_distill_linear_attention_resume(
         min_lr=1e-3,
         lr_warmup_iters=0,
         logit_kl_top_k=8,
-        eval_iters=0,
+        eval_iters=1 if packed_cp else 0,
         eval_interval=1,
         save_interval=1,
         log_interval=1,

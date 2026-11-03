@@ -17,6 +17,7 @@ import dataclasses
 import warnings
 from functools import partial
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -457,6 +458,85 @@ def _make_loss_inputs(seq=4, batch=3, vocab=16):
     return student, teacher
 
 
+def _test_chunked_student_lm_loss(dtype, fused, rank, size):
+    set_seed(SEED)
+    model_kwargs = {
+        "tensor_model_parallel_size": size,
+        "pipeline_model_parallel_size": 1,
+        "num_layers": 2,
+        "hidden_size": 8,
+        "num_attention_heads": 4,
+        "num_query_groups": 2,
+        "ffn_hidden_size": 8,
+        "max_sequence_length": 8,
+        "vocab_size": 32 * size,
+        "activation_func": "squared_relu",
+        "cross_entropy_loss_fusion": fused,
+    }
+    teacher = get_mcore_gpt_model(**model_kwargs, initialize_megatron=True).cuda()
+    student = get_mcore_gpt_model(**model_kwargs, initialize_megatron=False).cuda()
+    cfg = setup_distillation_config(
+        DistillationConfig(kd_loss_alpha=0.5, logit_kl_topk=4, logit_loss_chunk_size=3),
+        student.config,
+        teacher.config,
+    )
+    model = mtd.convert(
+        student,
+        mode=[
+            (
+                "kd_loss",
+                {
+                    "teacher_model": teacher,
+                    "criterion": cfg.criterion,
+                    "loss_balancer": cfg.loss_balancer,
+                },
+            )
+        ],
+    )
+    adjust_distillation_model_for_mcore(model, cfg)
+    # Independent full-vocabulary reference, including an uneven last sequence chunk.
+    torch.manual_seed(SEED + 1)
+    full = torch.randn(7, 2, 32 * size, device="cuda", dtype=dtype, requires_grad=True)
+    labels = torch.randint(32 * size, (7, 2), device="cuda").t()
+    local = full.chunk(size, dim=-1)[rank].detach().contiguous().requires_grad_()
+    expected = (
+        F.cross_entropy(full.float().flatten(0, 1), labels.t().flatten(), reduction="none")
+        .view(7, 2)
+        .t()
+    )
+    original_loss = type(model).compute_language_model_loss
+    calls = []
+
+    def bounded_loss(self, chunk_labels, chunk_logits):
+        calls.append(chunk_logits.shape[0])
+        assert chunk_logits.shape[0] <= 3
+        return original_loss(self, chunk_labels, chunk_logits)
+
+    with patch.object(type(model), "compute_language_model_loss", bounded_loss):
+        model._lm_loss_call_count = 0
+        model.eval()
+        with torch.no_grad():
+            validation = model.compute_language_model_loss(labels, local)
+        torch.testing.assert_close(local, full.chunk(size, dim=-1)[rank], rtol=0, atol=0)
+        torch.testing.assert_close(validation, expected, rtol=1e-5, atol=1e-6)
+        assert calls == [3, 3, 1]
+        model.train()
+        actual = model.compute_language_model_loss(labels, local)
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+        actual.mean().backward()
+    expected.mean().backward()
+    torch.testing.assert_close(
+        local.grad, full.grad.chunk(size, dim=-1)[rank], rtol=0.01, atol=1e-6
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("fused", [False, True])
+def test_chunked_student_lm_loss(dist_workers_size_2, dtype, fused):
+    """TP student CE keeps validation and training values and gradients with bounded chunks."""
+    dist_workers_size_2.run(partial(_test_chunked_student_lm_loss, dtype, fused))
+
+
 def test_topk_logits_kl_loss_numerics_full_vocab_matches_dense():
     """With K = vocab and ghost token, Top-K KL equals the dense full-vocab KL (residual ~0)."""
     cfg = SimpleNamespace(tensor_model_parallel_size=1)
@@ -467,7 +547,7 @@ def test_topk_logits_kl_loss_numerics_full_vocab_matches_dense():
 
 
 def _test_topk_logits_kl_loss_numerics_ghost_token_reference(
-    top_p, reverse, temperature, rank, size
+    top_p, reverse, temperature, chunk_size, rank, size
 ):
     parallel_state.initialize_model_parallel(tensor_model_parallel_size=size)
     cfg = SimpleNamespace(tensor_model_parallel_size=size)
@@ -479,9 +559,9 @@ def _test_topk_logits_kl_loss_numerics_ghost_token_reference(
     student_shard = student.chunk(size, dim=-1)[rank].detach().contiguous().requires_grad_()
     teacher_shard = teacher.chunk(size, dim=-1)[rank].contiguous()
     k = 4
-    loss = TopLogitsKLLoss(cfg, top_k=k, top_p=top_p, reverse=reverse, temperature=temperature)(
-        student_shard, teacher_shard
-    )[0]
+    loss = TopLogitsKLLoss(
+        cfg, top_k=k, top_p=top_p, reverse=reverse, temperature=temperature, chunk_size=chunk_size
+    )(student_shard, teacher_shard)[0]
 
     q_full = F.log_softmax(teacher / temperature, dim=-1)
     p_full = F.log_softmax(student / temperature, dim=-1)
@@ -515,13 +595,18 @@ def _test_topk_logits_kl_loss_numerics_ghost_token_reference(
     ("top_p", "reverse", "temperature"),
     [(None, False, 1.0), (0.5, False, 2.0), (0.5, True, 1.0)],
 )
+@pytest.mark.parametrize("chunk_size", [None, 1])
 def test_topk_logits_kl_loss_numerics_ghost_token_reference(
-    dist_workers_size_2, top_p, reverse, temperature
+    dist_workers_size_2, top_p, reverse, temperature, chunk_size
 ):
     """TP loss and gradients match a full-vocab reference on the K+1 bucketed distributions."""
     dist_workers_size_2.run(
         partial(
-            _test_topk_logits_kl_loss_numerics_ghost_token_reference, top_p, reverse, temperature
+            _test_topk_logits_kl_loss_numerics_ghost_token_reference,
+            top_p,
+            reverse,
+            temperature,
+            chunk_size,
         )
     )
 

@@ -1325,7 +1325,19 @@ class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
         if active and not serving:
             self.validate_linear_attention()
         if self.config.context_parallel_size > 1 and active:
-            raise NotImplementedError("GDN/KDA QAT does not support Megatron context parallelism.")
+            # Headwise CP restores complete sequences before invoking the recurrence.
+            # Phase lengths therefore stay global while gates and state heads are local.
+            if not (
+                HAS_GDN
+                and isinstance(self, GatedDeltaNet)
+                and serving
+                and self.linear_attention_config.precision == "vllm"
+                and getattr(self, "cp_size", None) == self.config.context_parallel_size
+                and hasattr(self, "pre_gated_delta_rule")
+            ):
+                raise NotImplementedError(
+                    "State QAT context parallelism requires GDN headwise CP with vllm precision"
+                )
         if active and self.training and self.config.recompute_granularity == "full":
             raise NotImplementedError(
                 "State QAT supports selective GDN recompute, not full-layer recompute"
