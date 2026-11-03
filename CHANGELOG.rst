@@ -151,7 +151,7 @@ Changelog
 
 **Backward Breaking Changes**
 
-- Remove the legacy DLA graph-cache and graph-mutation helpers from ``graph_surgery.utils.graph_utils``; use ONNXScript IR APIs for new transformations. General graph-surgery utilities remain available.
+- Remove the legacy DLA helpers from ``graph_surgery.utils.graph_utils``, including graph-cache and graph-mutation helpers, ``resolve_reshape_shape``, and ``parse_qdq_quantized_dtype_list``. Update direct imports of removed helpers and use ONNXScript IR APIs for new transformations.
 
 - Offline speculative-training ``.pt`` files now use ``training.data_seed`` (falling back to ``training.seed``) to shuffle before applying ``data.sample_size``, and model initialization now follows ``training.seed``. Runs resumed from earlier versions may see a different sample order or selected subset.
 - ``QDQAutotunerBase.export_onnx(output_path=...)`` now returns ``None`` instead of serialized bytes. Omit ``output_path`` to keep the bytes-returning behavior, which remains subject to protobuf size limits.
