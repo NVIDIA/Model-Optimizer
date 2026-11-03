@@ -206,7 +206,7 @@ def _mapped_axis(axis, source, target):
         for index, dim in enumerate(source)
         if dim == 1 and source[:index] + source[index + 1 :] == tuple(target)
     ]
-    if len(removed) != 1 or axis % len(source) == removed[0]:
+    if not removed or axis % len(source) == removed[0]:
         raise ValueError("TODO: define an unambiguous axis map for this collapsed tensor")
     mapped = axis % len(source) - int(axis % len(source) > removed[0])
     return mapped - len(target) if axis < 0 else mapped

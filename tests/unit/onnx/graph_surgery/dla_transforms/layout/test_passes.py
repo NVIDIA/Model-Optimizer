@@ -30,16 +30,25 @@ from modelopt.onnx.graph_surgery.dla_transforms.layout.passes import (
 
 
 @pytest.mark.parametrize("output_count", [2, 4])
-def test_split_axis_layout(output_count):
-    """Split keeps arbitrary live output arity while its axis moves to the 4D view."""
+@pytest.mark.parametrize(
+    ("shape", "axis", "mapped_axis"),
+    [((2, 3), 1, 3), ((1, 1, 3, 2, 3), 2, 1), ((2, 3, 1, 1, 4), -4, -3)],
+)
+def test_split_axis_layout(output_count, shape, axis, mapped_axis):
+    """Split remaps positive/negative axes through promotion and first-singleton collapse."""
     names = [f"y{i}" for i in range(output_count)]
-    shape = [2, 3 * output_count]
+    output_shape = list(shape)
+    shape = list(shape)
+    shape[axis] *= output_count
     source = helper.make_model(
         helper.make_graph(
-            [helper.make_node("Split", ["x", "sizes"], names, axis=1)],
+            [helper.make_node("Split", ["x", "sizes"], names, axis=axis)],
             "split_layout",
             [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
-            [helper.make_tensor_value_info(name, TensorProto.FLOAT, [2, 3]) for name in names],
+            [
+                helper.make_tensor_value_info(name, TensorProto.FLOAT, output_shape)
+                for name in names
+            ],
             [numpy_helper.from_array(np.full(output_count, 3, np.int64), "sizes")],
         ),
         opset_imports=[helper.make_opsetid("", 21)],
@@ -57,7 +66,7 @@ def test_split_axis_layout(output_count):
     onnx.checker.check_model(transformed, full_check=True)
     split = next(node for node in transformed.graph.node if node.op_type == "Split")
     assert len(split.output) == output_count
-    assert next(attr.i for attr in split.attribute if attr.name == "axis") == 3
+    assert next(attr.i for attr in split.attribute if attr.name == "axis") == mapped_axis
     feeds = {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape)}
     for expected, actual in zip(
         ReferenceEvaluator(source).run(None, feeds),
