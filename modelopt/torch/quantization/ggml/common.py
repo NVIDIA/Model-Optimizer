@@ -231,7 +231,10 @@ def fake_quantize_with_cache(
         dtype=inputs.dtype,
         block_chunk_size=decode_chunk_size,
     )
-    return inputs + (reconstructed - inputs).detach()
+    # Exactly the reconstruction export decodes, with a straight-through gradient. The usual
+    # ``inputs + (reconstructed - inputs).detach()`` rounds twice in a narrow dtype, so it can
+    # differ wherever the two are far apart, as when a pinned payload replays over a source weight.
+    return reconstructed + (inputs - inputs.detach())
 
 
 @dataclass(frozen=True)

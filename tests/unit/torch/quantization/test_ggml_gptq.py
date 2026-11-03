@@ -29,9 +29,16 @@ from _test_utils.torch.quantization.models import TOY_MOE_EXPERTS, TOY_MOE_HIDDE
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
+from modelopt.torch.opt.utils import named_hparams
 from modelopt.torch.quantization import model_calib
+from modelopt.torch.quantization.algorithms import QuantRecipeHparam
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.ggml.common import _row_keys, pinned_packed_weight
+from modelopt.torch.quantization.ggml.common import (
+    PIN_OVERRIDES_WEIGHT,
+    _row_keys,
+    pin_packed_weight,
+    pinned_packed_weight,
+)
 from modelopt.torch.quantization.ggml.gptq import gptq_group_update
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.quantization.utils.calib_utils import (
@@ -510,7 +517,8 @@ def _search(model, inputs, formats, effective_bits):
     _, state = mtq.auto_quantize(
         model,
         constraints={"effective_bits": effective_bits},
-        quantization_formats=[recipe(*f) for f in formats],
+        # A format is (algorithm, GGML format), or a ready (config, name) pair.
+        quantization_formats=[f if "quant_cfg" in f[0] else recipe(*f) for f in formats],
         data_loader=[inputs],
         forward_step=lambda m, x: m(x),
         loss_func=lambda output, x: output.square().sum(),
@@ -547,15 +555,90 @@ def test_auto_quantize_scores_other_candidates_on_the_source_weights_gptq_rewrot
         assert torch.equal(selected, original)
 
 
-def test_auto_quantize_selects_the_codes_gptq_chose():
+@pytest.mark.parametrize(
+    ("algorithm", "num_bits", "pinned"),
+    [(GPTQ, "iq2_xxs", True), ({"method": "imatrix"}, "q8_0", False)],  # imatrix skips Q8_0
+)
+def test_auto_quantize_selects_the_codes_calibration_chose(algorithm, num_bits, pinned):
     inputs = _inputs()
     source = _two_layers()
     model = copy.deepcopy(source)
-    _search(model, inputs, [(GPTQ, "iq2_xxs")], GGML_FORMAT_REGISTRY["iq2_xxs"].effective_bits)
+    # Just enough bits to quantize the larger first layer and keep the second in BF16.
+    bits = GGML_FORMAT_REGISTRY[num_bits].effective_bits
+    sizes = [layer.weight.numel() for layer in source]
+    _search(model, inputs, [(algorithm, num_bits)], (sizes[0] * bits + sizes[1] * 16) / sum(sizes))
 
+    ggml_format = GGML_FORMAT_REGISTRY[num_bits]
+    first, second = model
+    assert first.weight_quantizer.num_bits == num_bits
+    assert not second.weight_quantizer.is_enabled
+    payload = pinned_packed_weight(first.weight_quantizer, num_bits)
+    if pinned:
+        decoded = ggml_format.dequantize(
+            payload, torch.tensor(first.weight.shape), dtype=torch.float32
+        )
+        assert torch.equal(first.weight, decoded)
+        assert not torch.equal(payload, ggml_format.quantize(source[0].weight.detach())[0])
+    else:
+        assert payload is None
+        assert torch.equal(first.weight, source[0].weight)
+    assert torch.equal(second.weight, source[1].weight)
+    assert not any(
+        getattr(module, PIN_OVERRIDES_WEIGHT, False)
+        for hparam in _quant_recipe_hparams(model)
+        for quantizers in hparam._all_quantizer_choices.values()
+        for by_attr in quantizers.values()
+        for module in by_attr.values()
+    )
+
+
+def _quant_recipe_hparams(model):
+    return [h for _, h in named_hparams(model, unique=True) if isinstance(h, QuantRecipeHparam)]
+
+
+@pytest.mark.parametrize("case", ["non_ggml", "tied", "rewrite_then_fail"])
+def test_auto_quantize_refusal_or_failure_hands_back_the_source_weights(case):
+    inputs = _inputs()
+    source = _two_layers()
+    formats = [(GPTQ, "iq2_xxs")]
+    if case == "non_ggml":
+        int4 = {"num_bits": 4, "block_sizes": {-1: 128}, "effective_bits": 4.25}
+        config = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": int4, "enable": True},
+            ],
+            "algorithm": GPTQ,
+        }
+        formats = [(config, "INT4_GPTQ")]
+    elif case == "tied":
+        source[1] = torch.nn.Linear(512, 512, bias=False)
+        source[1].weight = source[0].weight
+    else:
+        # GPTQ rewrites the first weight, then cannot encode the second's 640 columns.
+        source = torch.nn.Sequential(
+            torch.nn.Linear(512, 640, bias=False), torch.nn.Linear(640, 256, bias=False)
+        )
+    model = copy.deepcopy(source)
+
+    with pytest.raises((ValueError, NotImplementedError, RuntimeError)):
+        _search(model, inputs, formats, 16.0)
+
+    for weight, original in zip(model.parameters(), source.parameters()):
+        assert torch.equal(weight, original)
+    assert model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS
+
+
+def test_a_replayed_pin_fake_quantizes_to_exactly_its_decoding_in_bf16():
+    torch.manual_seed(0)
+    layer = torch.nn.Linear(512, 64, bias=False).to(torch.bfloat16)
+    mtq.quantize(layer, _iq_config("max", "iq2_xxs"), forward_loop=lambda m: m(layer.weight))
     iq2_xxs = GGML_FORMAT_REGISTRY["iq2_xxs"]
-    for layer, original in zip(model, source):
-        pinned = pinned_packed_weight(layer.weight_quantizer, "iq2_xxs")
-        decoded = iq2_xxs.dequantize(pinned, torch.tensor(layer.weight.shape), dtype=torch.float32)
-        assert torch.equal(layer.weight, decoded)
-        assert not torch.equal(pinned, iq2_xxs.quantize(original.weight.detach())[0])
+    # Codes far smaller than the source weight they replay over.
+    other = torch.randn(layer.weight.shape) * 1e-3
+    pin_packed_weight(layer.weight_quantizer, "iq2_xxs", iq2_xxs.quantize(other)[0])
+    setattr(layer.weight_quantizer, PIN_OVERRIDES_WEIGHT, True)
+
+    replayed = layer.weight_quantizer(layer.weight)
+
+    assert torch.equal(replayed, iq2_xxs.decode_pinned(layer.weight_quantizer, layer.weight))

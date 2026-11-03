@@ -31,6 +31,7 @@ import regex as re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
 from tqdm import tqdm
 
 from modelopt.torch.opt.conversion import ModeloptStateManager
@@ -1157,83 +1158,119 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         ):
             func(self.model, data)
 
-    @staticmethod
-    def _snapshot_source_weights(quant_recipe_hparams, search_recipes):
-        """CPU copies of the searched weights when a candidate's calibration rewrites them.
+    def _snapshot_source_weights(self, quant_recipe_hparams, search_recipes):
+        """CPU copies of the weights a weight-rewriting candidate quantizes, or None if none does.
 
-        Refuses, before any calibration, a weight-rewriting candidate whose result its quantizers
-        cannot hold: only GGML formats pin the codes GPTQ chose.
+        Refuses, before any calibration, a candidate whose result its quantizers cannot hold (only
+        a single GGML quantizer pins the codes GPTQ chose) and a weight shared with another module,
+        which the rewrite would change under that module too.
         """
-        rewriting = [recipe for recipe in search_recipes if _rewrites_weights(recipe)]
-        if not rewriting:
-            return None
-        for recipe in rewriting:
+        modules = {}
+        for recipe in search_recipes:
+            if not _rewrites_weights(recipe):
+                continue
             for hparam in quant_recipe_hparams:
-                for quantizers in hparam._all_quantizer_choices.get(recipe, {}).values():
+                for module, quantizers in hparam._all_quantizer_choices.get(recipe, {}).items():
                     for attr, quantizer in quantizers.items():
-                        if "weight_quantizer" not in attr:
+                        enabled = [q for q in _iter_tensor_quantizers(quantizer) if q.is_enabled]
+                        if "weight_quantizer" not in attr or not enabled:
                             continue
-                        for q in _iter_tensor_quantizers(quantizer):
-                            if q.is_enabled and q.backend != "ggml":
-                                raise ValueError(
-                                    f"AutoQuantize candidate {recipe} calibrates with "
-                                    f"{sorted(_algorithm_methods(recipe.config.algorithm))}, "
-                                    f"which rewrites {hparam.name}'s weights, but its {attr} "
-                                    "is not a GGML format that keeps the rewritten codes. Search "
-                                    "this format with a calibration that leaves weights unchanged."
-                                )
+                        if any(
+                            isinstance(m, SequentialQuantizer) for m in quantizer.modules()
+                        ) or any(q.backend != "ggml" for q in enabled):
+                            raise ValueError(
+                                f"AutoQuantize candidate {recipe} calibrates with "
+                                f"{sorted(_algorithm_methods(recipe.config.algorithm))}, "
+                                f"which rewrites {hparam.name}'s weights, but its {attr} "
+                                "is not a single GGML quantizer that keeps the rewritten codes. "
+                                "Search this format with a calibration that leaves weights unchanged."
+                            )
+                        modules[module] = hparam.name
+        if not modules:
+            return None
         params = {
-            param: None
-            for hparam in quant_recipe_hparams
-            for module in hparam.quant_modules
-            for param in module.parameters(recurse=False)
+            param: name
+            for module, name in modules.items()
+            for param_name, param in module.named_parameters(recurse=False)
+            if not param_name.endswith("bias")
         }
-        from torch.distributed.tensor import DTensor
-
-        if any(param.is_meta or isinstance(param, DTensor) for param in params):
-            raise NotImplementedError(
-                "Weight-rewriting AutoQuantize candidates need materialized, unsharded weights; "
-                "meta-device (offloaded) and DTensor (FSDP2) weights are not supported."
-            )
+        uses = defaultdict(int)
+        for _, param in self.model.named_parameters(remove_duplicate=False):
+            uses[param] += 1
+        for param, name in params.items():
+            if param.is_meta or isinstance(param, DTensor):
+                raise NotImplementedError(
+                    f"Weight-rewriting AutoQuantize candidates need materialized, unsharded "
+                    f"weights; {name}'s are on the meta device (offloaded) or a DTensor (FSDP2)."
+                )
+            if uses[param] > 1:
+                raise NotImplementedError(
+                    f"{name}'s weight is shared with another module (tied weights), which a "
+                    "weight-rewriting AutoQuantize candidate would change too. Exclude it from the "
+                    "search or search it with a calibration that leaves weights unchanged."
+                )
         return {param: param.detach().to("cpu", copy=True) for param in params}
 
     @staticmethod
-    def _keep_rewritten_weights_in_quantizers(quant_recipe_hparams, source_weights):
-        """Make the active candidate replay its pinned codes, then restore the source weights."""
+    def _restore_source_weights(source_weights):
+        with torch.no_grad():
+            for param, source in (source_weights or {}).items():
+                param.copy_(source)
+
+    @staticmethod
+    def _replay_pinned_codes(quant_recipe_hparams):
+        """Make the active candidate replay the codes its calibration pinned, over any weight.
+
+        A weight the calibration left alone holds no pin, such as one imatrix skips for an
+        unweighted format like Q8_0; it keeps quantizing the source weight, as the selected model
+        will.
+        """
+        from .ggml import GGML_FORMAT_REGISTRY
         from .ggml.common import PIN_OVERRIDES_WEIGHT, pinned_packed_weight
 
         for hparam in quant_recipe_hparams:
             for module in hparam.quant_modules:
-                for _, quantizer in module.iter_weights_for_calibration():
-                    if not quantizer.is_enabled:
+                for weight, quantizer in module.iter_weights_for_calibration():
+                    num_bits = getattr(quantizer, "num_bits", None)
+                    if not quantizer.is_enabled or not isinstance(num_bits, str):
                         continue
-                    if pinned_packed_weight(quantizer, quantizer.num_bits) is None:
-                        raise RuntimeError(
-                            f"Weight-rewriting calibration left no pinned payload for {hparam.name}"
-                        )
-                    setattr(quantizer, PIN_OVERRIDES_WEIGHT, True)
-        with torch.no_grad():
-            for param, source in source_weights.items():
-                param.copy_(source)
+                    ggml_format = GGML_FORMAT_REGISTRY.get(num_bits)
+                    pinned = pinned_packed_weight(quantizer, num_bits) if ggml_format else None
+                    if pinned is not None and pinned.numel() == (
+                        weight.numel() // ggml_format.block_size * ggml_format.block_bytes
+                    ):
+                        setattr(quantizer, PIN_OVERRIDES_WEIGHT, True)
 
     def _write_selected_codes_to_weights(self):
         """Leave each selected weight-rewriting candidate's weights as its codes decode, as GPTQ does."""
         from .ggml import GGML_FORMAT_REGISTRY
         from .ggml.common import PIN_OVERRIDES_WEIGHT
 
+        def replays(quantizer):
+            return getattr(quantizer, PIN_OVERRIDES_WEIGHT, False)
+
         with torch.no_grad():
             for _, hparam in named_hparams(self.model, unique=True):
                 if not isinstance(hparam, QuantRecipeHparam):
                     continue
                 for module in hparam.quant_modules:
+                    # Quantizers first: a fused-experts weight slice is a gather under FSDP2.
+                    if not any(map(replays, module.iter_weight_quantizers_for_calibration())):
+                        continue
                     for weight, quantizer in module.iter_weights_for_calibration():
-                        if getattr(quantizer, PIN_OVERRIDES_WEIGHT, False):
+                        if replays(quantizer):
                             weight.copy_(
                                 GGML_FORMAT_REGISTRY[quantizer.num_bits].decode_pinned(
                                     quantizer, weight
                                 )
                             )
-                            setattr(quantizer, PIN_OVERRIDES_WEIGHT, False)
+                # Including the candidates not selected, which would otherwise replay their codes
+                # over the selected weights if made active again.
+                for quantizers in hparam._all_quantizer_choices.values():
+                    for quantizer in (q for qs in quantizers.values() for q in qs.values()):
+                        for q in _iter_tensor_quantizers(quantizer):
+                            if replays(q):
+                                setattr(q, PIN_OVERRIDES_WEIGHT, False)
 
     def before_search(self):
         """Prepare the model for search by calibrating the quantizers  and collecting ``AutoQuantize`` score."""
@@ -1390,8 +1427,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.resolved_search_setup_signature = resolved_search_setup_signature
         self._verify_resolved_constraint(quant_recipe_hparams)
 
-        QuantRecipe.disable_folding_pqs_to_weights()
         source_weights = self._snapshot_source_weights(quant_recipe_hparams, search_recipes)
+        folding_pqs_to_weights = model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS
+        QuantRecipe.disable_folding_pqs_to_weights()
 
         # Iterate over the search recipes and calibrate the quantizers for each recipe
         calibrated_new = False
@@ -1411,7 +1449,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     )
                     set_quantizer_state_dict(self.model, saved["state_dict"])
                     if _rewrites_weights(recipe):
-                        self._keep_rewritten_weights_in_quantizers(quant_recipe_hparams, {})
+                        self._replay_pinned_codes(quant_recipe_hparams)
                     if self.config["verbose"]:
                         print_rank_0(f"AutoQuantize: Restored calibration for {recipe}")
                     continue
@@ -1440,7 +1478,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 # TODO: This is a hack. We need to create a mode for auto_quantize to handle this in a clean way.
                 ModeloptStateManager(self.model).state_dict().pop()
                 if _rewrites_weights(recipe):
-                    self._keep_rewritten_weights_in_quantizers(quant_recipe_hparams, source_weights)
+                    self._replay_pinned_codes(quant_recipe_hparams)
+                    self._restore_source_weights(source_weights)
                 metadata: dict = {}
                 # config is unused by update_quantize_metadata
                 update_quantize_metadata(self.model, QuantizeConfig(), metadata)
@@ -1449,9 +1488,17 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     "state_dict": get_quantizer_state_dict(self.model),
                 }
                 calibrated_new = True
+        except BaseException:
+            # Hand back the weights and folding policy the search started from, without folding
+            # the candidate that failed.
+            self._restore_source_weights(source_weights)
+            model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = folding_pqs_to_weights
+            raise
         finally:
             for hparam in quant_recipe_hparams:
                 hparam.restore_active_quantizers()
+        # Host memory the size of the rewritten weights; scoring does not read it.
+        del source_weights
 
         if calibrated_new:
             self.save_search_checkpoint(verbose=self.config["verbose"])
