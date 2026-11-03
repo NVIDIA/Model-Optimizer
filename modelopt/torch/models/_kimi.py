@@ -159,7 +159,7 @@ def make_buildable(
         get_class_from_dynamic_module(
             f"{modeling}.{vlm_class}", ckpt_path, trust_remote_code=trust_remote_code
         )
-    except (OSError, ImportError, AttributeError) as e:
+    except Exception as e:  # running the checkpoint's own code can raise anything
         why = f"{type(e).__name__}: {e}"
     else:
         # Kept, as prepare keeps its swap: transformers re-executes a remote module when the files

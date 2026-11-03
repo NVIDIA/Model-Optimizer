@@ -338,17 +338,20 @@ def _tiny_kimi_vl_checkpoint(path):
     return remote
 
 
-@pytest.mark.parametrize("missing", ["code", "module"])
+@pytest.mark.parametrize("missing", ["code", "running-code", "module"])
 def test_the_build_step_warns_rather_than_fails_when_it_cannot_shim(monkeypatch, remote, missing):
     """Every plan runs the build step, and a load kept off expert parallelism builds the checkpoint's
     own code from its ``auto_map``, whatever its module is named. Code the step cannot load by the
-    module name it knows, or no such module loaded, is warned about rather than failing that load."""
-    if missing == "code":
+    module name it knows, code that raises as it runs, or no such module loaded, is warned about
+    rather than failing that load."""
+    if missing in ("code", "running-code"):
 
-        def no_such_file(*args, **kwargs):
-            raise OSError("does not appear to have a file named modeling_kimi_vl.py")
+        def no_code(*args, **kwargs):
+            if missing == "code":
+                raise OSError("does not appear to have a file named modeling_kimi_vl.py")
+            raise SyntaxError("invalid syntax (modeling_kimi_vl.py, line 1)")
 
-        monkeypatch.setattr(dmu, "get_class_from_dynamic_module", no_such_file)
+        monkeypatch.setattr(dmu, "get_class_from_dynamic_module", no_code)
     else:
         monkeypatch.setattr(dmu, "get_class_from_dynamic_module", lambda *args, **kwargs: None)
 
