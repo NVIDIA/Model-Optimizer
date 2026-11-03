@@ -1344,6 +1344,24 @@ def test_an_expert_parallel_export_refuses_to_save_the_modelopt_state(tmp_path):
     assert not (tmp_path / "export").exists()
 
 
+def test_an_offloaded_expert_parallel_export_is_refused_before_folding(tmp_path, monkeypatch):
+    """The offloaded streaming path is not expert-parallel-aware: every rank would write its own
+    experts over the others'. Refused before anything is folded or written."""
+    model = torch.nn.Sequential(torch.nn.Linear(16, 16))
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))
+    set_distribution_plan(model, DistributionPlan(2, ep_size=2))
+    monkeypatch.setattr(unified_export_hf, "has_accelerate_offload", lambda model: True)
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+
+    with pytest.raises(NotImplementedError, match="offloaded streaming path"):
+        export_hf_checkpoint(model, export_dir=tmp_path / "export")
+
+    after = model.state_dict()
+    assert after.keys() == before.keys()
+    assert all(torch.equal(after[k], v) for k, v in before.items())
+    assert not (tmp_path / "export").exists()
+
+
 def test_an_expert_parallel_plan_with_replicated_dense_shards_is_refused_before_folding(tmp_path):
     """Below the world size, EP leaves FSDP2's dense shards replicated across the expert-parallel
     groups, which the no-gather writer cannot write: refused before the export folds anything."""

@@ -2120,6 +2120,15 @@ def export_hf_checkpoint(
                 "MODELOPT_FSDP_SIZE=1 to replicate the dense part."
             )
     if _ep_sharded:
+        # An offloaded model would take the streaming path below, which is not expert-parallel-aware:
+        # every rank would write its own experts over the others', with no error. Offload is set up
+        # per rank, so the ranks decide together and refuse alike, before anything is folded.
+        if all_reduce("accelerate offload", lambda: has_accelerate_offload(model), any):
+            raise NotImplementedError(
+                "An expert-parallel export cannot take the offloaded streaming path: it is not "
+                "expert-parallel-aware, and every rank would write its own experts over the "
+                "others'. Load the expert-parallel model without accelerate offload."
+            )
         # Each rank holds only its own experts' quantizers, so they are agreed on before any folds.
         _agree_on_fused_expert_quantization(model)
     # Either form of sharding, including the hybrid where both hold: a model can be FSDP2-dense AND
