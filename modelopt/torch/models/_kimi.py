@@ -17,8 +17,9 @@
 
 Both checkpoints' own VLM class builds its language model as ``DeepseekV3ForCausalLM(
 config.text_config)``, a DeepSeek-V3 whose MoE is an ``nn.ModuleList`` of per-expert Linears that
-expert parallelism cannot shard. The adapters point that name at transformers' native class, and
-keep the vision tower and projector from the checkpoint's code.
+expert parallelism cannot shard. The adapters rebind that name to a per-config build, which makes
+transformers' native class for the native config ``prepare`` gives ``text_config``, and keep the
+vision tower and projector from the checkpoint's code.
 """
 
 # modelopt.torch.utils and transformers are imported inside the functions: the model registry imports

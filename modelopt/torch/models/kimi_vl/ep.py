@@ -68,9 +68,10 @@ def prepare(hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool 
 
     _kimi.make_importable()  # the swap below loads the code and adapts its tie_weights
 
-    # Native deepseek_v3 config for the LM (drops the remote auto_map so the native class is used).
+    # A native deepseek_v3 config, with deepseek_v3's plan, which reaches the VLM root under
+    # language_model.*. Its type is what has the swapped name below build the native class;
+    # dropping auto_map only keeps it from naming the checkpoint's classes.
     hf_config.text_config = _onfly_decompress.to_native_backbone_config(hf_config)
-    # EP plan onto the native text_config (bubbles up to the VLM root under language_model.*).
     hf_config.text_config = apply_distributed_support("deepseek_v3", hf_config.text_config)
 
     _kimi.patch_language_model_to_native(
