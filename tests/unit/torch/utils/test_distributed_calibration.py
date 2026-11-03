@@ -51,8 +51,8 @@ from modelopt.torch.quantization.model_quant import _refuse_unsupported_distribu
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
     ParallelState,
-    _reinstall_a2a_forwards,
     distributed_forward_loop,
+    reinstall_a2a_forwards,
     set_distribution_plan,
     shard_dataloader,
 )
@@ -262,7 +262,7 @@ def test_sharded_loader_keeps_the_original_loader_settings(dataset):
         assert getattr(shard, setting) == getattr(loader, setting), setting
 
 
-# -------------------------------------------------------------------------- _reinstall_a2a_forwards
+# -------------------------------------------------------------------------- reinstall_a2a_forwards
 
 _TP_MODULE = "transformers.distributed.tensor_parallel"
 _LEGACY_TP_MODULE = "transformers.integrations.tensor_parallel"
@@ -398,7 +398,7 @@ def test_reinstall_is_a_noop_without_an_ep_mesh(monkeypatch):
     """A single-process or non-EP model is left untouched, even with the torch_a2a styles around."""
     styles = _install_fake_tp(monkeypatch)
 
-    assert _reinstall_a2a_forwards(_MoEModel(), None) == 0
+    assert reinstall_a2a_forwards(_MoEModel(), None) == 0
     assert not any(style.installed for style in styles.values())
 
 
@@ -423,7 +423,7 @@ def test_reinstall_skips_styles_whose_transforms_are_pre_hooks(monkeypatch, expe
     for layer in model.layers:  # quantizer insertion rebinds the planned modules' forwards
         _drop_tp_wrapper(layer.gate)
         _drop_tp_wrapper(layer.experts)
-    assert _reinstall_a2a_forwards(model, _FakeMesh()) == planted
+    assert reinstall_a2a_forwards(model, _FakeMesh()) == planted
 
 
 def test_reinstall_leaves_a_module_the_load_did_not_wrap(monkeypatch):
@@ -431,7 +431,7 @@ def test_reinstall_leaves_a_module_the_load_did_not_wrap(monkeypatch):
     the load did not wrap keeps running as it did, without the style's transforms."""
     styles = _install_fake_tp(monkeypatch)
 
-    assert _reinstall_a2a_forwards(_MoEModel(), _FakeMesh()) == 0
+    assert reinstall_a2a_forwards(_MoEModel(), _FakeMesh()) == 0
     assert not any(style.installed for style in styles.values())
 
 
@@ -519,7 +519,7 @@ def test_forward_loop_frees_the_allocator_cache_around_the_forwards(monkeypatch,
     """
     events = []
     monkeypatch.setattr(
-        mto_dist, "_reinstall_a2a_forwards", lambda *args: events.append(("reinstall", *args))
+        mto_dist, "reinstall_a2a_forwards", lambda *args: events.append(("reinstall", *args))
     )
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: cuda_started)
     monkeypatch.setattr(mto_dist.gc, "collect", lambda: events.append("collect"))

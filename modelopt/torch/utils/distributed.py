@@ -844,17 +844,18 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
     )
 
 
-def _reinstall_a2a_forwards(model, ep_mesh) -> int:
-    """Re-plant the torch_a2a TP forward wrappers that quantizer insertion clobbered.
+def reinstall_a2a_forwards(model, ep_mesh) -> int:
+    """Re-plant the routed experts' all-to-all forwards that quantizer insertion dropped.
 
     transformers installs its TP transforms by replacing ``module.forward`` on the instance
     (``install_forward``); for torch_a2a_experts that wrapper passes the EP ``process_group`` to the
     experts forward. Quantizer insertion rebinds ``module.forward``, dropping it, and the experts
-    forward then raises. Called after conversion, before the first forward: by the calibration
-    loop, and through :func:`reinstall_a2a_forwards` by a caller that quantizes without one. Only a
-    forward quantizer insertion rebound is planted again: a wrapper still in place is kept, since
-    wrapping it again would run its transforms twice. Without an ``ep_mesh`` there is nothing to
-    re-plant.
+    forward then raises. Call this after conversion, before the first forward:
+    :func:`distributed_forward_loop` does, and so must a caller that quantizes an expert-parallel
+    model without that loop (a recipe that runs no calibration runs no loop). Only a forward
+    quantizer insertion rebound is planted again: a wrapper still in place is kept, since wrapping
+    it again would run its transforms twice. ``ep_mesh`` is the mesh the experts are sharded over;
+    without one there is nothing to re-plant. Returns how many forwards it planted again.
     """
     if ep_mesh is None:
         return 0
@@ -893,16 +894,6 @@ def _reinstall_a2a_forwards(model, ep_mesh) -> int:
             flush=True,
         )
     return n
-
-
-def reinstall_a2a_forwards(model, ep_mesh) -> int:
-    """Re-plant the routed experts' all-to-all forwards that quantizer insertion dropped.
-
-    For a caller that quantizes an expert-parallel model without :func:`distributed_forward_loop`,
-    which does it itself: a recipe that runs no calibration runs no loop. ``ep_mesh`` is the mesh the
-    experts are sharded over. Returns how many forwards it planted again.
-    """
-    return _reinstall_a2a_forwards(model, ep_mesh)
 
 
 def _release_cached_cuda_memory():
@@ -954,7 +945,7 @@ def distributed_forward_loop(
         raise ValueError(f"{plan!r}: the ep_mesh spans {ep_mesh.size()} ranks, not {plan.ep_size}.")
 
     def calibrate(_inner_model):
-        _reinstall_a2a_forwards(model, ep_mesh)
+        reinstall_a2a_forwards(model, ep_mesh)
         with _disable_use_cache(model), torch.no_grad():
             # Hand the caching allocator's unused pool back: NCCL allocates its buffers outside it.
             _release_cached_cuda_memory()
