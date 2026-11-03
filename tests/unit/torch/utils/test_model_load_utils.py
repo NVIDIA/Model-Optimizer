@@ -3113,6 +3113,68 @@ def test_a_decompressed_load_refuses_compressed_tensors_its_model_does_not_place
         )
 
 
+@pytest.mark.parametrize("compressed", [False, True], ids=["plain", "compressed"])
+def test_a_decompressed_load_refuses_compressed_tensors_in_a_file_it_never_opens(
+    ep_world_of_two, monkeypatch, tmp_path, compressed
+):
+    """The export copies the safetensors files the load never opens as stored (GLM-4.7 keeps its MTP
+    head in a standalone ``mtp.safetensors``), and this load drops the quantization_config a
+    compressed tensor there needs: such a file is refused before anything loads. A plain one is
+    carried, and the load goes on."""
+
+    class _NextCheckError(Exception):
+        """Raised by the load's next check."""
+
+    def next_check(*args, **kwargs):
+        raise _NextCheckError
+
+    model = model_with_decoder_at("model.")
+    loads = []
+
+    class _Loader:
+        @staticmethod
+        def from_pretrained(path, config, **kwargs):
+            loads.append(path)
+            model.config = copy.deepcopy(config)
+            return model
+
+    stored_as = {"weight_packed": torch.int32, "weight_scale": torch.bfloat16}
+    experts = "model.layers.0.mlp.experts.0.up_proj"
+    save_file(
+        {f"{experts}.{n}": torch.ones(1, dtype=d) for n, d in stored_as.items()},
+        str(tmp_path / "model.safetensors"),
+    )
+    mtp = "model.layers.1.mlp.experts.0.up_proj"
+    off_index = stored_as if compressed else {"weight": torch.bfloat16}
+    save_file(
+        {f"{mtp}.{n}": torch.ones(1, dtype=d) for n, d in off_index.items()},
+        str(tmp_path / "mtp.safetensors"),
+    )
+    monkeypatch.setattr(
+        "torch.distributed.device_mesh.init_device_mesh", lambda *args, **kwargs: _Mesh()
+    )
+    monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
+    monkeypatch.setattr(model_load_utils, "unplaced_source_keys", lambda *args: [])
+    monkeypatch.setattr(model_load_utils, "_seed_parallel_states", next_check)
+    config = SimpleNamespace(
+        model_type=_NO_SPEC,
+        num_experts=8,
+        num_hidden_layers=2,
+        base_model_ep_plan=dict(_EP_PLAN),
+        quantization_config={"quant_method": "compressed-tensors"},
+    )
+    _onfly_decompress._mark(config, tuple(stored_as))
+
+    with pytest.raises(NotImplementedError if compressed else _NextCheckError) as refused:
+        load_and_prepare_ep(str(tmp_path), DistributionPlan(2, ep_size=2), hf_config=config)
+    assert bool(loads) != compressed
+    if compressed:
+        assert (
+            f"2 compressed tensors in files the load never opens, such as mtp.safetensors's {mtp}."
+            in str(refused.value)
+        )
+
+
 # ----------------------------------------------------------------------- _seed_parallel_states
 
 

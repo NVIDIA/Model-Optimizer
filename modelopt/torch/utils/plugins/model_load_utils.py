@@ -37,6 +37,7 @@ from huggingface_hub import snapshot_download
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+from safetensors.torch import safe_open
 from torch.distributed import device_mesh
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
@@ -89,6 +90,7 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     checkpoint_tensor_files,
     ensure_local_checkpoint,
     indexed_weight_map,
+    off_index_safetensors_files,
     read_safetensors_subset,
 )
 
@@ -2285,6 +2287,23 @@ def load_and_prepare_ep(
                     f"decoder layers, such as {past[0]} (an MTP layer's, typically): the model builds "
                     "no parameter for them, and the export would copy them as stored, with no "
                     "quantization_config to read them. Decompress the checkpoint first."
+                )
+            # The files the load never opens (GLM-4.7's standalone mtp.safetensors, say) the export
+            # copies as stored, and this load drops the config a compressed tensor there needs:
+            # refused here too. A plain one is carried as before.
+            sidecar = []
+            for file_name in off_index_safetensors_files(ckpt_path):
+                with safe_open(os.path.join(ckpt_path, file_name), framework="pt") as f:
+                    sidecar += [
+                        f"{file_name}'s {name}"
+                        for name in f.keys()  # noqa: SIM118 - safe_open is not iterable
+                        if name.rpartition(".")[2] in compressed_names
+                    ]
+            if sidecar:
+                raise NotImplementedError(
+                    f"The checkpoint stores {len(sidecar)} compressed tensors in files the load "
+                    f"never opens, such as {sidecar[0]}: the export would copy them as stored, with "
+                    "no quantization_config to read them. Decompress the checkpoint first."
                 )
 
     # Experts are sharded over ``ep`` and replicated over ``edp``; the dense part is replicated over
