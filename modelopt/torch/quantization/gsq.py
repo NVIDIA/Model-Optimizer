@@ -75,13 +75,13 @@ def gsq(model, forward_loop, **kwargs):
         return
     device = modules[0][1].weight.device
     cuda_devices = [device.index] if device.type == "cuda" else []
-    with _calibration_state(model), torch.random.fork_rng(devices=cuda_devices):
+    with _calibration_state(model) as originals, torch.random.fork_rng(devices=cuda_devices):
         # Seed only the devices whose RNG states fork_rng preserves.
         torch.random.default_generator.manual_seed(config.seed)
         if cuda_devices:
             torch.cuda.default_generators[device.index].manual_seed(config.seed)
         if config.reconstruction == "staged":
-            replay = StagedReplay(model, forward_loop, config)
+            replay = StagedReplay(model, forward_loop, config, originals)
             initializer_loop = replay.initialize
         else:
             samples = _collect_targets(model, modules, forward_loop, config.max_tokens)
@@ -164,7 +164,7 @@ def _validate_model(model):
 def _calibration_state(model):
     parameters = list(model.parameters())
     tensors = list(dict.fromkeys([*parameters, *model.buffers()]))
-    originals = [(t, t.detach().cpu().clone()) for t in tensors]
+    originals = [(t, t.detach().to("cpu", copy=True)) for t in tensors]
     module_states = {
         m: {
             **m.__dict__,
@@ -194,7 +194,7 @@ def _calibration_state(model):
         model.eval()
         for p in parameters:
             p.requires_grad_(False)
-        yield
+        yield {id(tensor): original for tensor, original in originals}
     except BaseException:
         with torch.no_grad():
             for tensor, original in originals:

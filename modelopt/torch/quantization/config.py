@@ -722,6 +722,21 @@ class LayerwiseConfig(ModeloptBaseConfig):
         ),
     )
 
+    activation_cache_device: Literal["device", "cpu"] = ModeloptField(
+        default="device",
+        description="Keep captured inputs on their original device, or stream batches from CPU.",
+    )
+    activation_cache_dir: str | None = ModeloptField(
+        default=None,
+        description="Optional scratch directory for file-backed CPU activation buffers.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_activation_storage(self):
+        if self.activation_cache_dir is not None and self.activation_cache_device != "cpu":
+            raise ValueError("activation_cache_dir requires activation_cache_device='cpu'")
+        return self
+
     get_qdq_activations_from_prev_layer: bool = ModeloptField(
         default=True,
         title="Cache next-layer inputs from QDQ outputs of prior layers.",

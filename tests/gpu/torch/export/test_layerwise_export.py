@@ -44,7 +44,7 @@ CALIB_BATCHES = [torch.randint(0, 32, (1, 16)) for _ in range(2)]
 
 def _calib(model):
     for batch in CALIB_BATCHES:
-        model(batch.cuda())
+        model(batch.cuda(), use_cache=False)
 
 
 def _build_model():
@@ -262,6 +262,12 @@ def _dies_at_layer(layer_idx: int):
     [
         # NVFP4 fuses q/k/v and gate/up scales, so per-layer rediscovery has to match.
         pytest.param(_nvfp4_cfg, {}, ("weight_scale_2",), id="nvfp4"),
+        pytest.param(
+            _nvfp4_cfg,
+            {"activation_cache_device": "cpu"},
+            ("weight_scale_2",),
+            id="nvfp4_cpu_cache",
+        ),
         # The probe runs the layer directly, so the capture must leave it in "original".
         pytest.param(
             _nvfp4_cfg,

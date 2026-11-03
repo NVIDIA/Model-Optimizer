@@ -276,6 +276,8 @@ def wrapped_calib_func(
                 get_qdq_activations_from_prev_layer=qdq_from_prev,
                 save_every=save_every,
                 calib_mutates_weights=calib_mutates_weights,
+                activation_cache_device=layerwise_cfg.get("activation_cache_device", "device"),
+                activation_cache_dir=layerwise_cfg.get("activation_cache_dir"),
                 **kwargs,
             )
         else:

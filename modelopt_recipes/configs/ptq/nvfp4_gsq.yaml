@@ -27,6 +27,7 @@ algorithm:
     method: gptq
   layerwise:
     enable: true
+    activation_cache_device: cpu
 quant_cfg:
   - $import: base_disable_all
   - quantizer_name: '*weight_quantizer'

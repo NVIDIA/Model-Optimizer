@@ -19,6 +19,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.utils import layerwise_calib
 from modelopt.torch.quantization.utils.layerwise_calib import (
@@ -104,6 +105,46 @@ def _register_test_discoverer(monkeypatch):
         "_decoder_layer_support",
         [(lambda m: hasattr(m, "layers"), lambda m: m.layers)],
     )
+
+
+@pytest.mark.parametrize("disk_backed", [False, True])
+def test_quantize_streams_activation_dataset_without_gpu_cache_growth(
+    monkeypatch, tmp_path, disk_backed, record_property
+):
+    _register_test_discoverer(monkeypatch)
+
+    def peak(samples):
+        model = _SimpleTransformerModel(n_layers=2, dim=256).cuda().bfloat16().eval()
+        config = {
+            "quant_cfg": [{"quantizer_name": "*", "enable": False}],
+            "algorithm": {
+                "method": "max",
+                "layerwise": {
+                    "enable": True,
+                    "activation_cache_device": "cpu",
+                    "activation_cache_dir": str(tmp_path) if disk_backed else None,
+                },
+            },
+        }
+
+        def forward(m):
+            for _ in range(samples):
+                m(torch.zeros(1, 512, dtype=torch.long, device="cuda"))
+
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        start = torch.cuda.memory_allocated()
+        mtq.quantize(model, config, forward)
+        torch.cuda.synchronize()
+        return torch.cuda.max_memory_allocated() - start
+
+    peak(2)  # Warm up kernels before comparing allocations.
+    small, large = peak(4), peak(64)
+    record_property("small_peak_bytes", small)
+    record_property("large_peak_bytes", large)
+    assert large < small + 8 * 1024**2
+    if disk_backed:
+        assert not list(tmp_path.iterdir())
 
 
 def test_layerwise_calib_func_called_per_layer(monkeypatch):

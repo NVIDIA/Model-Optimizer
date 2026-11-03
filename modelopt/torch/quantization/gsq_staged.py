@@ -59,10 +59,14 @@ class StagedReplay:
         if any(m.input_quantizer.pre_quant_scale is not None for _, m in modules):
             raise ValueError("Staged GSQ requires unscaled inputs; select AWQ through initializer")
 
-    def __init__(self, model, forward_loop, config):
+    def __init__(self, model, forward_loop, config, originals=None):
         self.device = next(model.parameters()).device
-        self.originals = {n: p.detach().cpu().clone() for n, p in model.named_parameters()}
+        self.originals = {
+            n: originals[id(p)] if originals is not None else p.detach().to("cpu", copy=True)
+            for n, p in model.named_parameters()
+        }
         self.samples = []
+        cached_inputs = getattr(forward_loop, "_layerwise_cpu_inputs", None)
 
         def capture(module, args, kwargs):
             hidden = args[0] if args else kwargs["hidden_states"]
@@ -80,19 +84,23 @@ class StagedReplay:
                         return t
                     if t.ndim >= 2 and t.shape[0] == batch:
                         t = t[i : i + 1]
-                    return t.detach().to("cpu", copy=True)
+                    return t.detach().to("cpu", copy=cached_inputs is None)
 
                 self.samples.append(tree_map(copy, (args, kwargs)))
 
-        handle = model.register_forward_pre_hook(capture, with_kwargs=True)
-        try:
-            with (
-                torch.no_grad(),
-                set_quantizer_by_cfg_context(model, [{"quantizer_name": "*", "enable": False}]),
-            ):
-                forward_loop(model)
-        finally:
-            handle.remove()
+        if cached_inputs is not None:
+            for args, kwargs in cached_inputs:
+                capture(model, args, kwargs)
+        else:
+            handle = model.register_forward_pre_hook(capture, with_kwargs=True)
+            try:
+                with (
+                    torch.no_grad(),
+                    set_quantizer_by_cfg_context(model, [{"quantizer_name": "*", "enable": False}]),
+                ):
+                    forward_loop(model)
+            finally:
+                handle.remove()
         required = config.initializer_samples + config.train_samples
         if len(self.samples) != required:
             raise ValueError(
@@ -231,7 +239,7 @@ def refine_staged(model, modules, replay, config):
                 hessian.diagonal()[dead] = 1
                 hessian.diagonal().add_(config.hessian_damping * hessian.diagonal().mean())
                 factor = torch.linalg.cholesky(hessian).to(module.weight.dtype).float()
-                target = replay.originals[name + ".weight"].to(replay.device)
+                target = replay.originals[name + ".weight"].to(replay.device, copy=True)
                 pre = module.input_quantizer.pre_quant_scale
                 if pre is not None:
                     target = (target.float() / pre.float()).to(target.dtype)

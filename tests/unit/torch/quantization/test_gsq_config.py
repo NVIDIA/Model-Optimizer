@@ -33,6 +33,8 @@ def test_weight_only_gsq_recipes(recipe):
     algorithm = GSQCalibConfig(**config.algorithm)
     assert algorithm.initializer == {"method": recipe}
     assert algorithm.layerwise.enable
+    assert algorithm.reconstruction == "staged"
+    assert algorithm.layerwise.activation_cache_device == "cpu"
     model = torch.nn.Linear(64, 16)
     mtq.quantize(model, {**config.model_dump(), "algorithm": None})
     assert model.weight_quantizer.is_nvfp4_static

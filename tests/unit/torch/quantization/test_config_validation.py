@@ -639,6 +639,8 @@ class TestLayerwiseNestedConfig:
         dumped = MaxCalibConfig().model_dump()
         assert dumped["layerwise"] == {
             "enable": False,
+            "activation_cache_device": "device",
+            "activation_cache_dir": None,
             "get_qdq_activations_from_prev_layer": True,
             "checkpoint_dir": None,
             "save_every": 1,

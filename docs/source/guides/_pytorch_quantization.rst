@@ -482,6 +482,26 @@ learned. Distinct native scale groups remain distinct within joint regions.
 CPU memory holds replay sequences and original weights; device memory holds
 five logits per trained weight, gradients, and Lion momentum for one region.
 
+The GSQ recipes set ``layerwise.activation_cache_device="cpu"`` so the outer
+layerwise collector also streams inputs from CPU. Other layerwise algorithms
+keep their existing device-cache default. To back CPU buffers with temporary
+files, set ``layerwise.activation_cache_dir`` to a writable scratch directory.
+Calibration forwards must use ``use_cache=False`` with CPU activation storage.
+For example::
+
+    config["algorithm"]["layerwise"].update(
+        activation_cache_device="cpu",
+        activation_cache_dir="/path/to/activation-scratch",
+        checkpoint_dir="/path/to/layer-checkpoints",
+    )
+
+Inputs stay unchanged throughout refinement and compatible buffers are reused
+when propagating through the completed layer. CPU mode retains only the latest
+committed activation boundary on disk, alongside all layer weight checkpoints.
+Scratch files are separate from checkpoints and removed on normal return or
+exception. CPU transfers preserve tensor dtypes and metadata but add transfer
+overhead; file-backed caches also require sufficient storage and I/O bandwidth.
+
 For independent linear reconstruction, set ``reconstruction="linear"``.
 ``steps``, ``max_tokens`` (cached tokens per linear), and
 ``gradient_accumulation_steps`` control that mode. It supports arbitrary dense

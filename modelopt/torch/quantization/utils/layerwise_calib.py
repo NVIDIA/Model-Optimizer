@@ -25,6 +25,7 @@ import functools
 import json
 import os
 import shutil
+import tempfile
 from collections import deque
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack, contextmanager
@@ -55,6 +56,75 @@ from .core_utils import has_accelerate_offload
 
 class _EarlyStopForwardError(Exception):
     """Raised to halt the forward pass after capturing layer inputs."""
+
+
+class _ActivationCache:
+    """Own CPU scratch buffers independently of committed layer checkpoints."""
+
+    def __init__(self, device="device", directory=None):
+        self.on_cpu = device == "cpu"
+        self.directory = None
+        self.files = 0
+        self.bytes = 0
+        if directory is not None:
+            os.makedirs(directory, exist_ok=True)
+            self.directory = tempfile.TemporaryDirectory(prefix="layerwise-", dir=directory)
+
+    def store(self, obj, previous=None):
+        if not self.on_cpu:
+            return obj
+        if isinstance(obj, torch.Tensor):
+            if obj.layout != torch.strided or obj.is_meta:
+                raise ValueError("CPU activation storage requires materialized strided tensors")
+            if (
+                isinstance(previous, torch.Tensor)
+                and previous.device.type == "cpu"
+                and previous.shape == obj.shape
+                and previous.dtype == obj.dtype
+            ):
+                previous.copy_(obj)
+                return previous
+            self.bytes += obj.numel() * obj.element_size()
+            if self.directory is not None and obj.numel():
+                path = os.path.join(self.directory.name, f"{self.files}.bin")
+                self.files += 1
+                result = torch.from_file(
+                    path, shared=True, size=obj.numel(), dtype=obj.dtype
+                ).reshape(obj.shape)
+                result.copy_(obj)
+                return result
+            return obj.detach().to("cpu", copy=True)
+        if type(obj) is dict:
+            if any(type(k) not in (str, bytes, int, float, bool, type(None)) for k in obj):
+                raise ValueError("Unsupported CPU activation metadata dictionary key")
+            old = previous if isinstance(previous, dict) else {}
+            return {k: self.store(v, old.get(k)) for k, v in obj.items()}
+        if type(obj) in (tuple, list, torch.Size):
+            old = (
+                previous
+                if isinstance(previous, type(obj)) and len(previous) == len(obj)
+                else [None] * len(obj)
+            )
+            return type(obj)(self.store(v, p) for v, p in zip(obj, old))
+        if isinstance(obj, _hf_cache_types()):
+            raise ValueError("CPU activation storage requires use_cache=False")
+        if type(obj) in (
+            str,
+            bytes,
+            int,
+            float,
+            complex,
+            bool,
+            type(None),
+            torch.dtype,
+            torch.device,
+        ):
+            return obj
+        raise ValueError(f"Unsupported CPU activation metadata type: {type(obj).__name__}")
+
+    def close(self):
+        if self.directory is not None:
+            self.directory.cleanup()
 
 
 @dataclass
@@ -219,13 +289,21 @@ class LayerActivationCollector:
     _decoder_layer_support: list[tuple[Any, Any]] = []
     _LAYER_ATTR = "_layerwise_calib"
 
-    def __init__(self, model: nn.Module, status_callback: Callable[[str], None] | None = None):
+    def __init__(
+        self,
+        model: nn.Module,
+        status_callback: Callable[[str], None] | None = None,
+        activation_cache=None,
+    ):
         """Initialize the collector for the given model."""
         self.model = model
         self._decoder_layers: nn.ModuleList | None = None
         self._layer_to_idx: dict[nn.Module, int] = {}
         self._patched = False
         self._status_callback = status_callback
+        self.activation_cache = activation_cache or _ActivationCache()
+        self._reuse_cache = False
+        self._replayed_inputs = None
 
     def _swap_to_dummy(self, idx: int):
         """Replace decoder layer *idx* with a parameter-free dummy.
@@ -307,6 +385,7 @@ class LayerActivationCollector:
             decoder_layers: Pre-resolved decoder layers. If *None*, layers are
                 discovered via :meth:`get_decoder_layers`.
         """
+        collector = self
 
         def _patched_forward(self, *args, **kwargs):
             info: _LayerCalibState = self._layerwise_calib
@@ -325,12 +404,21 @@ class LayerActivationCollector:
                     f"Layer {info.name} is in 'run' mode but has no cached inputs to replay."
                 )
                 real_args, real_kwargs = info.cached_inputs.popleft()
+                collector._replayed_inputs = (real_args, real_kwargs)
+                if collector.activation_cache.on_cpu:
+                    real_args, real_kwargs = _move_to_device(
+                        (real_args, real_kwargs), get_module_device(self)
+                    )
                 output = self._original_forward(*real_args, **real_kwargs)
                 info.output_meta = LayerActivationCollector._extract_output_meta(output)
                 return output
 
             if info.mode == "capture":
-                info.collected_inputs.append((args, kwargs))
+                previous = collector._replayed_inputs if collector._reuse_cache else None
+                info.collected_inputs.append(
+                    collector.activation_cache.store((args, kwargs), previous)
+                )
+                collector._replayed_inputs = None
                 raise _EarlyStopForwardError()
 
             return self._original_forward(*args, **kwargs)
@@ -568,7 +656,7 @@ class LayerActivationCollector:
 
     @torch.no_grad()
     def cache_outputs_for_next_layer_calib(
-        self, layer: torch.nn.Module, forward_loop: ForwardLoop
+        self, layer: torch.nn.Module, forward_loop: ForwardLoop, *, reuse_inputs: bool = False
     ) -> list:
         """Run a forward pass after calibrating *layer* to capture the next layer's inputs.
 
@@ -586,7 +674,12 @@ class LayerActivationCollector:
         assert next_idx < len(self._decoder_layers), "No next layer to capture inputs for."
 
         next_layer = self._decoder_layers[next_idx]
-        return self.get_input_activations(next_layer, forward_loop)
+        self._reuse_cache = reuse_inputs and self.activation_cache.on_cpu
+        try:
+            return self.get_input_activations(next_layer, forward_loop)
+        finally:
+            self._reuse_cache = False
+            self._replayed_inputs = None
 
 
 def _cuda_bytes_per_gpu(obj: Any, out: dict[int, int] | None = None) -> dict[int, int]:
@@ -773,7 +866,9 @@ def _hf_cache_types() -> tuple[type, ...]:
     )
 
 
-def _load_checkpoint_file(path: str, map_location: Any, *, allow_caches: bool = False) -> Any:
+def _load_checkpoint_file(
+    path: str, map_location: Any, *, allow_caches: bool = False, mmap: bool = False
+) -> Any:
     """Load a checkpoint file without unpickling arbitrary objects.
 
     The checkpoint directory is user-chosen and may be writable by others, so its files are
@@ -784,7 +879,7 @@ def _load_checkpoint_file(path: str, map_location: Any, *, allow_caches: bool = 
     """
     try:
         with torch.serialization.safe_globals(_hf_cache_types() if allow_caches else ()):
-            return safe_load(path, map_location=map_location, weights_only=True)
+            return safe_load(path, map_location=map_location, weights_only=True, mmap=mmap)
     except (OSError, MemoryError, torch.OutOfMemoryError):
         raise  # not a checkpoint problem; a fresh directory would not help
     except Exception as e:  # a corrupt or forged file can fail the unpickler in many ways
@@ -1002,7 +1097,7 @@ class _CheckpointState:
             save_layer_state=save_layer_state,
         )
 
-    def setup_resume(self, layers: nn.ModuleList) -> list | None:
+    def setup_resume(self, layers: nn.ModuleList, activation_cache=None) -> list | None:
         """Load output_meta for skip layers 0..K-1, return next_inputs for layer K.
 
         Sets ``output_meta`` on each already-calibrated layer so that
@@ -1024,7 +1119,10 @@ class _CheckpointState:
         next_inputs_path = os.path.join(d, "next_inputs.pt")
         if not os.path.isfile(next_inputs_path):
             raise FileNotFoundError(f"Cannot resume: next_inputs.pt missing for layer {last_ckpt}")
-        next_inputs = _load_checkpoint_file(next_inputs_path, "cpu", allow_caches=True)
+        on_cpu = activation_cache is not None and activation_cache.on_cpu
+        next_inputs = _load_checkpoint_file(next_inputs_path, "cpu", allow_caches=True, mmap=on_cpu)
+        if on_cpu:
+            return [activation_cache.store(batch) for batch in next_inputs]
         resume_device = get_module_device(layers[self.start_layer])
         next_inputs = _move_to_device(next_inputs, resume_device)
         return next_inputs
@@ -1058,7 +1156,8 @@ class _CheckpointState:
                 buffers_path = os.path.join(d, "quantizer_buffers.pt")
                 if os.path.isfile(weights_path):
                     weights = _load_checkpoint_file(weights_path, layer_device)
-                    layer.load_state_dict(weights, strict=False, assign=True)
+                    # Copy into shared quantizer buffers instead of replacing their aliases.
+                    layer.load_state_dict(weights, strict=False)
                 elif os.path.isfile(buffers_path):
                     # Non-mutating calibration mode: restore just the TensorQuantizer
                     # state_dict (carries _amax). The layer's other weights were not
@@ -1093,6 +1192,8 @@ class _CheckpointState:
         model: nn.Module,
         layers: nn.ModuleList,
         next_layer_inputs: list | None = None,
+        *,
+        keep_only_latest_inputs: bool = False,
     ) -> None:
         """Snapshot the just-calibrated layer; commit the window at boundaries.
 
@@ -1153,10 +1254,9 @@ class _CheckpointState:
             calib_mutates_weights=self.calib_mutates_weights,
             save_layer_state=self.save_layer_state,
         )
-        # Per-layer export only: its resume dir is auto-derived, so an activation set per
-        # layer would dwarf a checkpoint the user never opted into. After the manifest, so
-        # a crash mid-write still resumes from the previous boundary.
-        if not self.save_layer_state:
+        # Prune only after committing the new boundary, preserving crash recovery.
+        # Device-cache checkpoints retain their existing history policy.
+        if not self.save_layer_state or keep_only_latest_inputs:
             self._prune_stale_next_inputs(keep=layer_idx)
         window_start = self._last_saved_layer + 1
         self._last_saved_layer = layer_idx

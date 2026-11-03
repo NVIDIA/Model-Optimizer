@@ -24,7 +24,9 @@ quantize:
   $import: nvfp4_gsq
   algorithm:
     method: gsq
+    reconstruction: staged
     layerwise:
       enable: true
+      activation_cache_device: cpu
     initializer:
       method: gptq

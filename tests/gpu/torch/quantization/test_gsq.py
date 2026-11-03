@@ -16,6 +16,7 @@
 
 """Real calibration, AWQ smoothing, and native GSQ checkpoint/export contracts."""
 
+import json
 from copy import deepcopy
 from importlib import import_module
 
@@ -59,6 +60,82 @@ def _config(initializer):
         layerwise={"enable": False},
     )
     return config
+
+
+@pytest.mark.parametrize("method", ["gptq", "awq_lite", "awq_full"])
+@pytest.mark.parametrize("cache", ["cpu", "mmap"])
+@pytest.mark.parametrize("baseline", [False, True])
+def test_staged_gsq_streaming_matches_device_cache_and_checkpoint(
+    method, cache, baseline, tmp_path
+):
+    torch.manual_seed(42)
+    reference = (
+        get_tiny_llama(
+            hidden_size=64,
+            intermediate_size=64,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_hidden_layers=2,
+        )
+        .cuda()
+        .bfloat16()
+        .eval()
+    )
+    streamed = deepcopy(reference)
+    fresh = deepcopy(reference)
+    ids = torch.arange(16, device="cuda").reshape(1, -1)
+
+    def forward(m):
+        for i in range(4):
+            mask = torch.ones_like(ids)
+            mask[:, 2 + i] = 0
+            m((ids + i) % 32, use_cache=False, attention_mask=mask, position_ids=ids * (i + 1))
+
+    config = _config({"method": method})
+    config["algorithm"].update(
+        reconstruction="staged",
+        qk_steps=2,
+        epochs=1,
+        initializer_samples=1,
+        train_samples=3,
+        batch_size=2,
+        microbatch_size=1,
+        layerwise={"enable": True},
+    )
+    if baseline:
+        for prepared in (reference, streamed, fresh):
+            mtq.quantize(prepared, {**config, "algorithm": "max"}, forward)
+        config["algorithm"] = {"method": method, "layerwise": {"enable": True}}
+
+    def apply(model):
+        if baseline:
+            return mtq.calibrate(model, config["algorithm"], forward)
+        return mtq.quantize(model, config, forward)
+
+    apply(reference)
+    config["algorithm"]["layerwise"].update(
+        activation_cache_device="cpu",
+        checkpoint_dir=str(tmp_path / "checkpoints"),
+        activation_cache_dir=str(tmp_path / "cache") if cache == "mmap" else None,
+    )
+    visits = 0
+
+    def interrupt(module, inputs):
+        nonlocal visits
+        visits += 1
+        if visits == 5:
+            raise RuntimeError("interrupt after the first committed block")
+
+    handle = streamed.model.layers[1].register_forward_pre_hook(interrupt)
+    with pytest.raises(RuntimeError):
+        apply(streamed)
+    handle.remove()
+    manifest = json.loads((tmp_path / "checkpoints" / "manifest.json").read_text())
+    assert manifest["last_completed_layer"] == 0
+    apply(fresh)
+    torch.testing.assert_close(fresh(ids).logits, reference(ids).logits, rtol=0, atol=0)
+    if cache == "mmap":
+        assert not list((tmp_path / "cache").iterdir())
 
 
 @pytest.mark.parametrize("method", ["max", "gptq", "awq_lite", "awq_full", "mse"])
