@@ -402,10 +402,9 @@ def _quantized(hf_config, ckpt_path: str) -> bool:
     By the config, or by the checkpoint's own ``config.json`` for a config prepared and loaded
     before.
     """
-    text_cfg = getattr(hf_config, "text_config", None) or hf_config
-    return any(
-        getattr(cfg, "quantization_config", None) is not None for cfg in (hf_config, text_cfg)
-    ) or _checkpoint_quantized(ckpt_path)
+    # At any level the decompressor reads one, llm_config's included.
+    found = _onfly_decompress._find_quantization_config(hf_config) is not None
+    return found or _checkpoint_quantized(ckpt_path)
 
 
 def prepare_refusal(
