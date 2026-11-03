@@ -315,6 +315,53 @@ def test_the_build_step_installs_nothing_when_there_is_nothing_to_build(monkeypa
     assert not hasattr(import_utils, "is_torch_fx_available")
 
 
+def _restore_the_loader(monkeypatch):
+    """Have ``monkeypatch`` undo what a real build step installs: the import shims, the staging and
+    the patches it keeps on the loader's class resolution."""
+    for module_name, name in COMPAT_SYMBOLS:
+        with contextlib.suppress(ImportError):
+            _restore(monkeypatch, importlib.import_module(module_name), name)
+    monkeypatch.setattr(dmu, "get_cached_module_file", dmu.get_cached_module_file)
+    monkeypatch.setattr(dmu, "get_class_in_module", dmu.get_class_in_module)
+    monkeypatch.setattr(_remote_code, "_KEPT_PATCHES", {})
+
+
+def _tiny_kimi_vl_checkpoint(path):
+    """A tiny Kimi-VL checkpoint carrying its own modeling code; returns its VLM class reference."""
+    shutil.copy(kimi_vl_tiny_modeling.__file__, path / "modeling_kimi_vl.py")
+    remote = "modeling_kimi_vl.KimiVLForConditionalGeneration"
+    auto_map = {"AutoConfig": "modeling_kimi_vl.KimiVLConfig", "AutoModelForCausalLM": remote}
+    text = {"model_type": "deepseek_v3", "hidden_size": 16, "num_hidden_layers": 1}
+    stored = {"model_type": "kimi_vl", "auto_map": auto_map, "text_config": text}
+    (path / "config.json").write_text(json.dumps(stored))
+    return remote
+
+
+def test_the_build_step_keeps_its_shim_on_a_module_transformers_loads_again(monkeypatch, tmp_path):
+    """transformers executes a remote module again when the files it hashes change (forced here),
+    which rebinds the VLM class without the shim, and a plan kept off expert parallelism runs no
+    ``prepare`` to put it back. The build step keeps its shim, as ``prepare`` keeps its swap, so the
+    class still builds from the module loaded again."""
+    _restore_the_loader(monkeypatch)
+    remote = _tiny_kimi_vl_checkpoint(tmp_path)
+    loaded = set(sys.modules)
+    try:
+        config = AutoConfig.from_pretrained(tmp_path, trust_remote_code=True)
+        kimi_vl.make_buildable(config, ckpt_path=str(tmp_path), trust_remote_code=True)
+
+        again = dmu.get_class_from_dynamic_module(remote, str(tmp_path), force_download=True)
+        model = model_load_utils.build_meta_causal_lm(
+            str(tmp_path), True, None, copy.deepcopy(config), auto_class=AutoModelForCausalLM
+        )
+
+        assert getattr(again.tie_weights, "_kimi_tie_weights_shim", False)
+        assert type(model).tie_weights._kimi_tie_weights_shim
+    finally:
+        for name in set(sys.modules) - loaded:
+            if name.startswith("transformers_modules."):
+                del sys.modules[name]
+
+
 def test_the_build_step_lets_the_checkpoint_s_own_vlm_build_on_this_transformers(
     monkeypatch, tmp_path
 ):
@@ -322,16 +369,8 @@ def test_the_build_step_lets_the_checkpoint_s_own_vlm_build_on_this_transformers
     runs, and Kimi-VL's VLM class has a ``tie_weights`` that takes none of the keyword arguments
     transformers' ``post_init`` passes it. ``make_buildable`` adapts it, and swaps nothing: the
     module still builds the language model from its own ``DeepseekV3ForCausalLM``."""
-    for module_name, name in COMPAT_SYMBOLS:
-        with contextlib.suppress(ImportError):
-            _restore(monkeypatch, importlib.import_module(module_name), name)
-    monkeypatch.setattr(dmu, "get_cached_module_file", dmu.get_cached_module_file)
-    shutil.copy(kimi_vl_tiny_modeling.__file__, tmp_path / "modeling_kimi_vl.py")
-    remote = "modeling_kimi_vl.KimiVLForConditionalGeneration"
-    auto_map = {"AutoConfig": "modeling_kimi_vl.KimiVLConfig", "AutoModelForCausalLM": remote}
-    text = {"model_type": "deepseek_v3", "hidden_size": 16, "num_hidden_layers": 1}
-    stored = {"model_type": "kimi_vl", "auto_map": auto_map, "text_config": text}
-    (tmp_path / "config.json").write_text(json.dumps(stored))
+    _restore_the_loader(monkeypatch)
+    _tiny_kimi_vl_checkpoint(tmp_path)
     loaded = set(sys.modules)
     try:
         config = AutoConfig.from_pretrained(tmp_path, trust_remote_code=True)
@@ -363,10 +402,7 @@ def test_an_ep_degree_of_1_builds_the_checkpoint_s_own_vlm_to_decide(
     on the meta device, its ``tie_weights`` without the keyword arguments transformers' ``post_init``
     passes: the build step runs all the same, and no ``prepare``. The decision reaches its outcome:
     the 8 experts left whole on 4 ranks are refused, or the model is planned FSDP2-sharded."""
-    for module_name, name in COMPAT_SYMBOLS:
-        with contextlib.suppress(ImportError):
-            _restore(monkeypatch, importlib.import_module(module_name), name)
-    monkeypatch.setattr(dmu, "get_cached_module_file", dmu.get_cached_module_file)
+    _restore_the_loader(monkeypatch)
     monkeypatch.setattr(
         get_spec("kimi_vl").ep_spec, "prepare", lambda *a, **k: pytest.fail("ran prepare")
     )

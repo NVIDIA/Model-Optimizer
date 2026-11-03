@@ -23,7 +23,7 @@ keep the vision tower and projector from the checkpoint's code.
 
 # modelopt.torch.utils and transformers are imported inside the functions: the model registry imports
 # this module, and it must import without transformers, the optional [hf] extra.
-from ._remote_code import _apply, keep_patched, stage_full_remote_closure
+from ._remote_code import keep_patched, stage_full_remote_closure
 
 
 def checkpoint_to_patch(
@@ -129,8 +129,9 @@ def make_buildable(
     The names newer transformers dropped, the code's two-deep relative imports staged, and the VLM
     class's ``tie_weights`` taking the keyword arguments transformers' ``post_init`` passes it. None
     of it changes what the model computes or loads, so the plan decision runs it before ``prepare``,
-    whatever plan comes out. A config of transformers' own port, or code this load may not run, has
-    nothing of the checkpoint's to build. Idempotent.
+    whatever plan comes out. The adapted method stays on the module when transformers loads it
+    again. A config of transformers' own port, or code this load may not run, has nothing of the
+    checkpoint's to build. Idempotent.
     """
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
@@ -142,11 +143,16 @@ def make_buildable(
     get_class_from_dynamic_module(
         f"{modeling}.{vlm_class}", ckpt_path, trust_remote_code=trust_remote_code
     )
-    # Once, not kept (keep_patched): the builds that follow resolve the class from this same local
-    # path, so transformers reuses the module, re-executing it only if its files change, and keeping
-    # it would hook the loader, which the build step never does. Remote code only: transformers' own
-    # port of a model can share the module's name.
-    _apply(f".{modeling}", lambda module: _shim_tie_weights(module, vlm_class))
+    # Kept, as prepare keeps its swap: transformers re-executes a remote module when the files it
+    # hashes change, and loads it afresh for another path to the checkpoint, and a plan kept off
+    # expert parallelism runs no prepare to put the shim back (prepare's swap, kept in its place,
+    # shims it too). Re-applying a wrapper that only drops keyword arguments changes nothing the
+    # model computes or loads. Remote code only: transformers' own port of a model can share the
+    # module's name.
+    if not keep_patched(f".{modeling}", lambda module: _shim_tie_weights(module, vlm_class)):
+        raise RuntimeError(
+            f"kimi: could not find a loaded {modeling} in sys.modules to adapt its tie_weights in"
+        )
 
 
 def _shim_tie_weights(module, vlm_class: str) -> bool:
