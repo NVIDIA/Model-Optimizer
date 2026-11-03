@@ -109,9 +109,11 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": gs},
         }
     elif quant_algo == "W8A16":
-        return {
-            "weights": {"dynamic": False, "num_bits": 8, "type": "int"},
-        }
+        # Per output channel, or per group of input columns when group_size is set.
+        weights: dict[str, Any] = {"dynamic": False, "num_bits": 8, "type": "int"}
+        if group_size is not None:
+            weights["group_size"] = group_size
+        return {"weights": weights}
     elif quant_algo == "W8A8_SQ_PER_CHANNEL":
         return {
             "input_activations": {"dynamic": False, "num_bits": 8, "type": "int"},
