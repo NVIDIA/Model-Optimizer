@@ -41,6 +41,11 @@ This changes storage precision and arithmetic rounding. ONNX validation and
 unchanged public shapes/types do not establish numerical equivalence or task
 accuracy; evaluate FP16 outputs on representative inputs.
 
+Eligible FLOAT initializers clamp finite overflow to the FP16 limits, ±65504,
+before casting. Existing NaN and infinities are preserved; ordinary rounding and
+underflow retain NumPy's cast behavior. Temporary conversion buffers are bounded
+and the source payload is preserved.
+
 ## Execution order and related rules
 
 [stages.precision](../stages.py) executes:
