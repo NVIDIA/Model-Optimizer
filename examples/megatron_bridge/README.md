@@ -392,7 +392,7 @@ The distilled checkpoint retains the ModelOpt quantization state, so it can be c
 
 #### Scale Learning (LSQ)
 
-QAD can also train the NVFP4 per-block weight scales of a student quantized with a learnable-scale recipe such as `general/qad/nvfp4_lsq-mse_init-fp8_kv`. This needs a Megatron-Bridge with [NVIDIA-NeMo/Megatron-Bridge#6699](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/6699), and resuming a scale-only run also needs [NVIDIA-NeMo/Megatron-Bridge#6698](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/6698); until a NeMo container includes both, install Megatron-Bridge from source as [described above](#pre-requisites), at a commit that contains them. Static-block NVFP4 needs `--tp_size 1` in both `quantize.py` and `distill.py`:
+QAD can also train the NVFP4 per-block weight scales of a student quantized with a learnable-scale recipe such as `general/qad/nvfp4_lsq-mse_init-fp8_kv`. This needs two Megatron-Bridge changes that are **not merged yet**: [NVIDIA-NeMo/Megatron-Bridge#6699](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/6699) (scale learning) and [NVIDIA-NeMo/Megatron-Bridge#6698](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/6698) (per-group learning rates on resume). Until both are merged, the commands below do not run with any Megatron-Bridge release or `main`, and `distill.py` raises if either change is missing. Once they are merged, install Megatron-Bridge from source as [described above](#pre-requisites) until a NeMo container includes them. Static-block NVFP4 needs `--tp_size 1` in both `quantize.py` and `distill.py`:
 
 ```bash
 torchrun --nproc_per_node 8 quantize.py \

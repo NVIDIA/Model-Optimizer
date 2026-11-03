@@ -60,7 +60,11 @@ try:
     HAS_DIRECT_HF_SFT = True
 except ImportError:
     HAS_DIRECT_HF_SFT = False
+# LSQ scale learning needs NVIDIA-NeMo/Megatron-Bridge#6699. Without #6698, a resumed run moves
+# the scales from --lsq_scale_lr to --lr.
+# TODO: replace this probe with a version check once a Megatron-Bridge release carries both.
 try:
+    from megatron.bridge.training.checkpointing import _param_group_lr_bounds  # noqa: F401
     from megatron.bridge.training.post_training.lsq import (
         LSQOptimizerConfigOverrideProvider,
         freeze_all_but_lsq_scales,
@@ -548,8 +552,8 @@ def get_args():
         raise ValueError("--sft_dataset_root requires --sft; without it the SFT path is not used.")
     if (args.lsq_scale_lr is not None or args.lsq_scale_only) and not HAS_LSQ:
         raise ValueError(
-            "--lsq_scale_lr / --lsq_scale_only need a newer Megatron-Bridge "
-            "(megatron.bridge.training.post_training.lsq, NVIDIA-NeMo/Megatron-Bridge#6699)."
+            "--lsq_scale_lr / --lsq_scale_only need a Megatron-Bridge with "
+            "NVIDIA-NeMo/Megatron-Bridge#6699 (scale learning) and #6698 (per-group LR on resume)."
         )
     if args.lsq_scale_only and args.student_megatron_path is None:
         raise ValueError("--lsq_scale_only requires an LSQ-quantized --student_megatron_path.")
