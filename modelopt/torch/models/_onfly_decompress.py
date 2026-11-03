@@ -377,7 +377,7 @@ def install_onfly_decompress(hf_config):
     for it marks that config too, and one compressed differently is refused.
     """
     compression, installed = _checked_compression(hf_config)
-    # Imported once the release is known to have them: transformers 4 has no core_model_loading.
+    # transformers is optional: this module imports without it.
     import transformers.modeling_utils as mu
     from transformers.core_model_loading import WeightConverter
 
