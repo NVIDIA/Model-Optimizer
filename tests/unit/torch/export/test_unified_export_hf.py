@@ -1258,6 +1258,27 @@ def test_every_rank_stops_before_the_write_when_one_ranks_processing_failed(
     cpu_dist_workers.run(_one_rank_fails_processing_job, tmp_dir=tmp_path)
 
 
+def _only_rank_0_writes_the_configs_job(rank, size, tmp_dir):
+    model = torch.nn.Linear(2, 2)
+    set_distribution_plan(model, DistributionPlan(size, ep_size=size))
+    with (
+        bounded_collectives(),
+        mock.patch.object(unified_export_hf, "_process_hf_model_for_export", return_value={}),
+        mock.patch.object(distributed_writer, "distributed_save_hf_checkpoint", return_value=True),
+        mock.patch.object(unified_export_hf, "_write_base_config") as base_config,
+        mock.patch.object(unified_export_hf, "_write_hf_export_config") as quant_config,
+    ):
+        unified_export_hf.export_hf_checkpoint(model, export_dir=tmp_dir)
+    calls = (base_config.call_count, quant_config.call_count)
+    assert calls == ((1, 1) if rank == 0 else (0, 0)), (rank, calls)
+
+
+def test_only_rank_0_writes_the_configs_of_an_expert_parallel_export(cpu_dist_workers, tmp_path):
+    """Each rank of an expert-parallel export takes its own rank, so rank 0 alone writes
+    config.json and hf_quant_config.json. Ranks that all took rank 0 would each rewrite them."""
+    cpu_dist_workers.run(_only_rank_0_writes_the_configs_job, tmp_dir=tmp_path)
+
+
 class _FusedExpertsQuantizers(torch.nn.Module):
     """What the export reads of a fused-experts container: each projection's weight quantizers."""
 
