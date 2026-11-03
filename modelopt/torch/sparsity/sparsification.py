@@ -31,7 +31,7 @@ from .attention_sparsity.config import (
     SparseAttentionConfig,
     VSAAttributeConfig,
 )
-from .attention_sparsity.conversion import is_attn_sparsified
+from .attention_sparsity.conversion import _check_methods_and_backends, is_attn_sparsified
 from .attention_sparsity.mode import SparseAttentionModeRegistry
 from .attention_sparsity.model_sparsify import calibrate
 from .weight_sparsity import sparsification as weight_sparsification
@@ -124,6 +124,7 @@ def sparsify(
 
 def _check_attention_config(config: SparseAttentionConfig, has_data: bool) -> None:
     """Validate what conversion and calibration would otherwise check only after changing the model."""
+    _check_methods_and_backends(config.sparse_cfg)
     for pattern, cfg in config.sparse_cfg.items():
         if pattern == "calibration":
             calib = CalibrationConfig(**cfg)

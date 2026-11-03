@@ -23,12 +23,14 @@ exponential-model fit used by the PyTorch path.
 
 import copy
 import itertools
+import math
 
 import pytest
 import torch
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from transformers import AutoModelForCausalLM
 
+import modelopt.torch.opt as mto
 import modelopt.torch.sparsity as mts
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 from modelopt.torch.kernels.common.attention.hf_triton_attention import triton_attention_forward
@@ -36,6 +38,7 @@ from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_TRITO
 from modelopt.torch.sparsity.attention_sparsity.methods.triton_skip_softmax import (
     TritonSkipSoftmaxMethod,
 )
+from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
 pytestmark = [
     pytest.mark.filterwarnings("ignore::UserWarning"),
@@ -82,6 +85,14 @@ def _make_forward_loop(vocab_size, lengths=(128, 256, 384, 512)):
     return forward_loop
 
 
+def _calibration_params(model):
+    return [
+        m._sparse_method_instance.calibration_params
+        for m in model.modules()
+        if isinstance(m, SparseAttentionModule)
+    ]
+
+
 def _calibration_module(threshold_trials):
     """Build a bare module whose ``_sparse_method_instance`` is in calibration mode.
 
@@ -120,6 +131,36 @@ class TestTritonCalibrationHF:
             out = sparse_model(input_ids, use_cache=False)
         assert out.logits is not None
         assert not torch.isnan(out.logits).any()
+
+    @pytest.mark.parametrize("weight_first", [True, False])
+    def test_calibration_chain_with_sparsegpt(self, tiny_llama_dir, tmp_path, weight_first):
+        """SparseGPT and prefill calibration share one data loader in either order, and the
+        fitted calibration survives save/restore."""
+        model = _load_eager(tiny_llama_dir)
+        config = copy.deepcopy(SKIP_SOFTMAX_TRITON_CALIB)
+        config["sparse_cfg"]["calibration"]["target_sparse_ratio"] = {"prefill": 0.5}
+        modes = [("sparsegpt", {}), ("sparse_attention", config)]
+        torch.manual_seed(0)
+        vocab_size = model.config.vocab_size
+        data_loader = [
+            {"input_ids": torch.randint(0, vocab_size, (1, seq_len)), "use_cache": False}
+            for seq_len in (128, 256, 384, 512)
+        ]
+        model = mts.sparsify(
+            model,
+            modes if weight_first else modes[::-1],
+            config={"data_loader": data_loader, "collect_func": lambda x: x},
+        )
+
+        assert (model.model.layers[0].self_attn.q_proj.weight == 0).float().mean().item() == 0.5
+        params = _calibration_params(model)
+        assert len(params) == model.config.num_hidden_layers
+        for p in params:
+            assert math.isfinite(p["prefill"]["a"]) and math.isfinite(p["prefill"]["b"])
+
+        mto.save(model, tmp_path / "model.pth")
+        restored = mto.restore(_load_eager(tiny_llama_dir), tmp_path / "model.pth")
+        assert _calibration_params(restored) == params
 
     def test_decode_branch_reports_decode_phase(self):
         """The HF calibration branch routes decode-shaped calls through the kernel

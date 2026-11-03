@@ -62,6 +62,35 @@ def export_config_producer() -> dict[str, str]:
     return {"name": "modelopt", "version": mo_version}
 
 
+def _check_methods_and_backends(sparse_cfg: dict) -> tuple[set[str], set[str]]:
+    """Return the methods and backends of the layer configs, rejecting mixes conversion can't apply.
+
+    It reads only ``sparse_cfg``, so ``mts.sparsify`` can call it before changing the model.
+    """
+    # Collect methods and backends only from layer configs (identified by having a "method" key).
+    # Other dict entries (e.g. "calibration") are not layer configs.
+    layer_cfgs = [v for v in sparse_cfg.values() if isinstance(v, dict) and "method" in v]
+    methods = {v["method"] for v in layer_cfgs}
+    backends = {v.get("backend", "pytorch") for v in layer_cfgs}
+
+    if "vsa" in methods:
+        # Reject mixed VSA + non-VSA configs (VSA patches SDPA globally per-module,
+        # while softmax-patching methods need attn_implementation="eager").
+        non_vsa_methods = methods - {"vsa"}
+        if non_vsa_methods:
+            raise ValueError(
+                f"Cannot mix VSA with other sparse attention methods ({non_vsa_methods}). "
+                f"VSA patches F.scaled_dot_product_attention, which is incompatible "
+                f"with softmax-patching or triton methods."
+            )
+    elif "triton" in backends and "pytorch" in backends:
+        raise ValueError(
+            "Mixed backends ('triton' and 'pytorch') in the same model are not "
+            "supported. All sparse attention layers must use the same backend."
+        )
+    return methods, backends
+
+
 def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) -> None:
     """Set the correct attn_implementation based on the sparse attention method/backend.
 
@@ -78,35 +107,14 @@ def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) ->
     to manually set ``attn_implementation``.
     """
     sparse_cfg = config.sparse_cfg if hasattr(config, "sparse_cfg") else {}
-
-    # Collect methods and backends only from layer configs (identified by having a "method" key).
-    # Other dict entries (e.g. "calibration") are not layer configs.
-    layer_cfgs = [v for v in sparse_cfg.values() if isinstance(v, dict) and "method" in v]
-    methods = {v.get("method") for v in layer_cfgs}
-    backends = {v.get("backend", "pytorch") for v in layer_cfgs}
+    methods, backends = _check_methods_and_backends(sparse_cfg)
 
     # VSA patches F.scaled_dot_product_attention directly — it does not change
     # attn_implementation.  Skip the rest for VSA-only configs.
     if methods == {"vsa"}:
         return
 
-    # Reject mixed VSA + non-VSA configs (VSA patches SDPA globally per-module,
-    # while softmax-patching methods need attn_implementation="eager").
-    non_vsa_methods = methods - {"vsa"}
-    if "vsa" in methods and non_vsa_methods:
-        raise ValueError(
-            f"Cannot mix VSA with other sparse attention methods ({non_vsa_methods}). "
-            f"VSA patches F.scaled_dot_product_attention, which is incompatible "
-            f"with softmax-patching or triton methods."
-        )
-
     model_config = getattr(model, "config", None)
-
-    if "triton" in backends and "pytorch" in backends:
-        raise ValueError(
-            "Mixed backends ('triton' and 'pytorch') in the same model are not "
-            "supported. All sparse attention layers must use the same backend."
-        )
 
     if "triton" in backends:
         from modelopt.torch.kernels.sparsity.attention import register_triton_attention

@@ -300,6 +300,16 @@ class TestConversionEdgeCases:
                 None,
             ),
             (mts.SKIP_SOFTMAX_CALIB, None, print),  # decode calibration needs RULER data
+            *(  # conversion rejects mixed methods or backends only after the weights are pruned
+                ([("sparse_magnitude", {}), ("sparse_attention", {"sparse_cfg": cfg})], None, None)
+                for cfg in [
+                    {"*attention*": {"method": "vsa"}, "*fc*": {"method": "flash_skip_softmax"}},
+                    {
+                        "*attention*": {"method": "triton_skip_softmax", "backend": "triton"},
+                        "*fc*": {"method": "flash_skip_softmax"},
+                    },
+                ]
+            ),
             (
                 [("sparsegpt", {}), ("sparse_attention", FLASH_SKIP_SOFTMAX_DEFAULT_CFG)],
                 {"data_loader": iter([None])},  # a second mode would find it consumed
@@ -310,9 +320,11 @@ class TestConversionEdgeCases:
     def test_sparsify_rejects_invalid_input_before_converting(self, mode, config, forward_loop):
         model = SimpleAttentionModel()
         state_dict = copy.deepcopy(model.state_dict())
+        module_types = [type(m) for m in model.modules()]
         with pytest.raises((AssertionError, ValueError)):
             mts.sparsify(model, mode, config, forward_loop=forward_loop)
         assert not mto.ModeloptStateManager.is_converted(model)
+        assert [type(m) for m in model.modules()] == module_types
         assert all(torch.equal(v, state_dict[k]) for k, v in model.state_dict().items())
 
     @pytest.mark.filterwarnings("ignore::DeprecationWarning")
