@@ -57,6 +57,12 @@ from .. import _kimi, _onfly_decompress
 DECOMPRESSED_FORMATS = ("compressed-tensors",)
 
 
+def _decompresses(hf_config) -> bool:
+    """Whether :func:`prepare` has this checkpoint's experts decompress as they load."""
+    quantization_config = _onfly_decompress._find_quantization_config(hf_config) or {}
+    return quantization_config.get("quant_method") in DECOMPRESSED_FORMATS
+
+
 def make_buildable(
     hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool = False, **_
 ) -> None:
@@ -84,8 +90,7 @@ def prepare_refusal(
     why = _kimi.prepare_refusal("kimi_k25", hf_config, ckpt_path, trust_remote_code)
     if why is not None:
         return why
-    quantization_config = _onfly_decompress._find_quantization_config(hf_config) or {}
-    if quantization_config.get("quant_method") in DECOMPRESSED_FORMATS:
+    if _decompresses(hf_config):
         return _onfly_decompress.decompression_refusal(hf_config)
     try:
         _kimi.refuse_quantization_only_on_text_config("kimi_k25", hf_config)
@@ -115,8 +120,7 @@ def prepare(hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool 
     #    otherwise are left to the expert-parallel load's format handling, which reads their scheme
     #    from the copy of quantization_config Kimi's config class keeps on the top-level config;
     #    step 2 leaves that copy alone. A checkpoint without that copy is refused.
-    quantization_config = _onfly_decompress._find_quantization_config(hf_config) or {}
-    if quantization_config.get("quant_method") in DECOMPRESSED_FORMATS:
+    if _decompresses(hf_config):
         _onfly_decompress.install_onfly_decompress(hf_config)
     else:
         _kimi.refuse_quantization_only_on_text_config("kimi_k25", hf_config)
