@@ -37,7 +37,9 @@ Report the run-validation summary before any score: log scan status, coverage,
 reasoning/answer parsing status, and any errors or warnings found. If an
 independent validation item fails, label the result incomplete or invalid and
 return findings and a recommendation to the parent (or user); do not
-automatically resubmit a completed run.
+automatically resubmit a completed run. Follow [recovery.md](recovery.md) for
+parent-approved token/context increases, resource repairs, and bounded retries;
+revalidate replacements before reporting scores.
 
 For Terminal-Bench 2.1, also complete the [run health screen](../recipes/tasks/aa_next/terminal_bench_2_1.md#run-health-screen)
 and include its evidence and verdict before reporting `pass@1`.

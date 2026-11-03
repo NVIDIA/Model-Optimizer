@@ -275,7 +275,10 @@ For completed evaluations, apply
 triage; its policy overrides retry actions below. Warn but do not retry solely
 for failures below tolerance. For runs that fail tolerance or an independent
 validation check, return findings and a recommendation to the parent/user for
-review; do not automatically resubmit.
+review; do not automatically resubmit. The parent then follows
+[evaluation recovery](../evaluation/references/recovery.md) to approve a bounded
+repair/rerun plan or report a blocker. For genuine output/context exhaustion,
+consider supported matched limit increases before declaring the point infeasible.
 
 Map a gate's `failure_class` to the next action:
 
