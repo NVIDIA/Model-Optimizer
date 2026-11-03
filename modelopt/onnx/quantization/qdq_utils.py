@@ -41,7 +41,7 @@ from modelopt.onnx.quantization.quant_utils import (
     pack_weights_to_int4,
     quantize,
 )
-from modelopt.onnx.utils import get_attribute, has_attribute, read_f16_tensor_as_fp32
+from modelopt.onnx.utils import export_onnx, get_attribute, has_attribute, read_f16_tensor_as_fp32
 
 QUANTIZE_NODE_NAME = "QuantizeLinear"
 DEQUANTIZE_NODE_NAME = "DequantizeLinear"
@@ -971,7 +971,7 @@ def remove_input_dq_and_output_q(
     # Cleanup graph to remove any dangling Q/DQ nodes
     graph = gs.import_onnx(onnx_model)
     graph.cleanup()
-    onnx_model = gs.export_onnx(graph)
+    onnx_model = export_onnx(graph)
 
     # TODO: remove manual ir_version change once ORT supports ir_version 11
     onnx_model.ir_version = 10
