@@ -20,7 +20,14 @@ decompressed at load.
 """
 
 from ..specs import EPSpec, ModelSpec, register
-from .ep import BASE_MODEL_EP_PLAN, MODEL_TYPE, PATCHED_EVERY_LOAD, make_buildable, prepare
+from .ep import (
+    BASE_MODEL_EP_PLAN,
+    MODEL_TYPE,
+    PATCHED_EVERY_LOAD,
+    make_buildable,
+    prepare,
+    prepare_refusal,
+)
 
 __all__: list[str] = []
 
@@ -30,6 +37,7 @@ register(
         modeling_source="remote_code",
         ep_spec=EPSpec(
             prepare=prepare,
+            prepare_refusal=prepare_refusal,
             prepared_ep_plan=BASE_MODEL_EP_PLAN,
             plan_config_attr="text_config",
             make_buildable=make_buildable,

@@ -46,6 +46,7 @@ import transformers.core_model_loading as cml
 import transformers.dynamic_module_utils as dmu
 import transformers.modeling_utils as mu
 import transformers.utils.generic as hf_generic
+import transformers.utils.versions as versions
 from _test_utils.torch import kimi_k3_tiny_modeling
 from transformers.core_model_loading import build_glob_alternation
 from transformers.integrations.moe import ALL_EXPERTS_FUNCTIONS
@@ -507,6 +508,7 @@ def test_prepare_refuses_before_changing_anything(monkeypatch, kwargs, match):
     )
     text = SimpleNamespace()
 
+    assert match in kimi_k3.prepare_refusal(SimpleNamespace(text_config=text), **kwargs)
     with pytest.raises(ValueError, match=match):
         kimi_k3.prepare(SimpleNamespace(text_config=text), **kwargs)
     assert vars(text) == {}
@@ -664,6 +666,7 @@ def test_prepare_lets_an_error_reading_the_quant_config_through(
     before = copy.deepcopy(config)
     hooks = (mu.get_model_conversion_mapping, cml.spawn_materialize)
 
+    assert match in kimi_k3.prepare_refusal(config, ckpt_path="/ckpt", trust_remote_code=True)
     with pytest.raises(error, match=match):
         _prepare(config)
     assert isinstance(remote_checkpoint.KimiSparseMoeBlock(_config()).experts, nn.ModuleList)
@@ -672,6 +675,45 @@ def test_prepare_lets_an_error_reading_the_quant_config_through(
     assert not any("block_sparse_moe.experts.*.w1.weight" in c.source_patterns for c in registered)
     assert "torch_a2a" not in type(ALL_EXPERTS_FUNCTIONS)._global_mapping
     assert (mu.get_model_conversion_mapping, cml.spawn_materialize) == hooks
+
+
+@pytest.mark.parametrize(
+    ("installed", "why"),
+    [
+        (None, "needs the compressed-tensors package"),
+        ("0.15.0", "compressed-tensors>=0.16"),
+    ],
+    ids=["missing", "older-than-0.16"],
+)
+def test_prepare_refusal_finds_a_compressed_tensors_the_decompressor_cannot_use(
+    monkeypatch, installed, why
+):
+    """The plan decision asks before ``prepare`` runs: a packed checkpoint whose experts the
+    installed compressed-tensors cannot decompress, missing or older than 0.16, is one ``prepare``
+    refuses."""
+    if installed is None:
+        for name in ("compressed_tensors", "compressed_tensors.compressors.base"):
+            monkeypatch.setitem(sys.modules, name, None)
+    else:
+        pytest.importorskip("compressed_tensors")
+        monkeypatch.setattr(versions.importlib.metadata, "version", lambda name: installed)
+    scheme = {"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"}
+    config = SimpleNamespace(
+        text_config=SimpleNamespace(quantization_config=scheme),
+        quantization_config=scheme,
+        auto_map=_AUTO_MAP,
+    )
+
+    assert why in kimi_k3.prepare_refusal(config, ckpt_path="/ckpt", trust_remote_code=True)
+
+
+def test_prepare_refusal_finds_a_config_naming_no_model_class():
+    """``prepare`` loads the checkpoint's code through the class its ``auto_map`` names."""
+    config = SimpleNamespace(text_config=SimpleNamespace())
+
+    assert "auto_map" in kimi_k3.prepare_refusal(config, ckpt_path="/ckpt", trust_remote_code=True)
+    config.auto_map = _AUTO_MAP
+    assert kimi_k3.prepare_refusal(config, ckpt_path="/ckpt", trust_remote_code=True) is None
 
 
 @pytest.mark.usefixtures("private_conversion_registry", "restore_loader_hooks")
@@ -752,6 +794,8 @@ def test_only_an_expert_parallel_plan_patches_kimi_k3s_code(
         scheme = {"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"}
         as_read.quantization_config = as_read.text_config.quantization_config = scheme
         monkeypatch.setattr(_onfly_decompress, "install_onfly_decompress", installs.append)
+        # The decompressor takes the scheme: what it refuses is prepare_refusal's own test's.
+        monkeypatch.setattr(_onfly_decompress, "_read_compression", lambda cfg: ("stand-in",))
     monkeypatch.setattr(dist, "size", lambda group=None: ranks)
     monkeypatch.setattr(
         transformers.AutoConfig, "from_pretrained", lambda *a, **k: copy.deepcopy(as_read)
