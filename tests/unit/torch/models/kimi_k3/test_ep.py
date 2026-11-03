@@ -346,7 +346,8 @@ def test_prepare_sets_the_plan_and_a2a_experts_and_hands_the_quant_config_to_the
     """The plan goes on the text config (its globs are written against the language model) and is
     the one the spec states for a run that skips prepare, the experts forward is ``torch_a2a``, the
     kimi_linear fusion is registered, and the decompressor sees the compressed-tensors config before
-    it is dropped (so transformers builds no competing quantizer)."""
+    it is dropped at every level the decompressor reads one (so transformers builds no competing
+    quantizer)."""
     seen = []
     monkeypatch.setattr(
         _onfly_decompress,
@@ -356,6 +357,7 @@ def test_prepare_sets_the_plan_and_a2a_experts_and_hands_the_quant_config_to_the
     quant = {"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"}
     text = SimpleNamespace(quantization_config=quant.copy())
     config = SimpleNamespace(text_config=text, quantization_config=quant.copy(), auto_map=_AUTO_MAP)
+    config.llm_config = SimpleNamespace(quantization_config=quant.copy())
 
     assert _prepare(config) is config
 
@@ -369,6 +371,7 @@ def test_prepare_sets_the_plan_and_a2a_experts_and_hands_the_quant_config_to_the
     assert seen == [(quant, quant)]
     assert config.quantization_config is None
     assert text.quantization_config is None
+    assert config.llm_config.quantization_config is None
 
 
 @pytest.fixture
