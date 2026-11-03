@@ -17,6 +17,7 @@
 
 import numpy as np
 import onnx
+import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 from onnx.reference import ReferenceEvaluator
@@ -393,7 +394,12 @@ def test_lstm_unrolling(direction, runtime_state, outputs, public_states, known_
     ir.passes.common.TopologicalSortPass()(model)
     result = onnx.shape_inference.infer_shapes(ir.serde.serialize_model(model), strict_mode=True)
     onnx.checker.check_model(result, full_check=True)
-    expected = ReferenceEvaluator(source).run(None, feeds)
+    # ONNX 1.21's reference LSTM does not implement Y_c or bidirectional execution.
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = options.inter_op_num_threads = 1
+    expected = ort.InferenceSession(
+        source.SerializeToString(), options, providers=["CPUExecutionProvider"]
+    ).run(None, feeds)
     actual = ReferenceEvaluator(result).run(None, feeds)
     for before, after in zip(expected, actual, strict=True):
         np.testing.assert_allclose(before, after, rtol=2e-6, atol=2e-7)
