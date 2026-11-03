@@ -15,6 +15,7 @@
 
 """End-to-end cleanup checks for public names and shared layout views."""
 
+import tracemalloc
 from types import SimpleNamespace
 
 import numpy as np
@@ -85,13 +86,59 @@ def test_cleanup_preserves_public_names_and_shared_reshape_consumers(shared, pre
         np.testing.assert_array_equal(original, transformed)
 
 
-@pytest.mark.parametrize("kind", ["noncontiguous", "strings", "hash_collision"])
-def test_initializer_deduplication_preserves_storage_contents(kind, monkeypatch):
-    """Exact contents decide reuse for strided/string tensors and hash collisions."""
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "noncontiguous",
+        "strings",
+        "hash_collision",
+        "int4",
+        "uint4",
+        "int4_proto",
+        "uint4_proto",
+        "int4_int32",
+        "uint4_external",
+        "int4_collision",
+    ],
+)
+def test_initializer_deduplication_preserves_storage_contents(kind, monkeypatch, tmp_path):
+    """Reuse logical contents across storage forms without fully unpacking INT4 weights."""
+    packed = kind.startswith(("int4", "uint4"))
+    from_proto = kind.endswith(("_proto", "_int32"))
+    measure_memory = kind in {"int4", "uint4"}
     if kind in {"noncontiguous", "hash_collision"}:
         source = np.arange(6, dtype=np.float32).reshape(2, 3).T
         tensors = [ir.tensor(source), ir.tensor(source.copy()), ir.tensor(source + 1)]
         assert not tensors[0].numpy().flags.c_contiguous
+    elif packed:
+        dtype = ir.DataType.UINT4 if kind.startswith("uint4") else ir.DataType.INT4
+        source = np.arange(4 * 1024 * 1024 + 1 if measure_memory else 65537, dtype=np.uint8)
+        source &= 0x0F
+        storage = source[::2].copy()
+        storage[:-1] |= source[1::2] << 4
+        padding = storage.copy()
+        padding[-1] |= 0xA0
+        different = storage.copy()
+        different[-1] ^= 1
+        tensors = [
+            ir.PackedTensor(storage, dtype, shape=source.shape),
+            ir.PackedTensor(padding, dtype, shape=source.shape),
+            ir.tensor((source | 0xB0).view(dtype.numpy())),
+            ir.PackedTensor(different, dtype, shape=source.shape),
+        ]
+        if kind.endswith("_external"):
+            for i in (0, 1, 3):
+                filename = f"constant_{i}.bin"
+                (tmp_path / filename).write_bytes(b"pad" + tensors[i].numpy_packed().tobytes())
+                tensors[i] = ir.ExternalTensor(
+                    filename,
+                    offset=3,
+                    length=storage.nbytes,
+                    dtype=dtype,
+                    shape=ir.Shape(source.shape),
+                    name=f"constant_{i}",
+                    base_dir=tmp_path,
+                )
     else:
         tensors = [
             ir.StringTensor([b"a", b"b\x00"], shape=ir.Shape([2])),
@@ -127,16 +174,38 @@ def test_initializer_deduplication_preserves_storage_contents(kind, monkeypatch)
         ),
         ir_version=10,
     )
+    if from_proto:
+        serialized = ir.serde.serialize_model(working)
+        assert serialized.graph.initializer[0].raw_data != serialized.graph.initializer[1].raw_data
+        if kind.endswith("_int32"):
+            for tensor in serialized.graph.initializer:
+                tensor.int32_data.extend(tensor.raw_data)
+                tensor.ClearField("raw_data")
+        working = ir.serde.deserialize_model(serialized)
+        nodes = list(working.graph)
     with monkeypatch.context() as patch:
-        if kind == "hash_collision":
+        if kind == "hash_collision" or kind.endswith("_collision"):
             patch.setattr(
                 "modelopt.onnx.graph_surgery.dla_transforms.cleanup.hashlib.sha256",
                 lambda: SimpleNamespace(update=lambda data: None, digest=lambda: b"collision"),
             )
-        assert deduplicate_initializers(working) == 1
+        if measure_memory:
+            tracemalloc.start()
+        try:
+            assert deduplicate_initializers(working) == (2 if packed else 1)
+            if measure_memory:
+                _, peak = tracemalloc.get_traced_memory()
+                assert peak < 2 * 1024 * 1024
+        finally:
+            if measure_memory:
+                tracemalloc.stop()
     assert nodes[0].inputs[0] is nodes[1].inputs[0]
-    assert nodes[0].inputs[0] is not nodes[2].inputs[0]
+    if packed:
+        assert nodes[0].inputs[0] is nodes[2].inputs[0]
+    assert nodes[0].inputs[0] is not nodes[-1].inputs[0]
     result = ir.serde.serialize_model(working)
+    if kind.endswith("_external"):
+        onnx.external_data_helper.load_external_data_for_model(result, str(tmp_path))
     onnx.checker.check_model(result, full_check=True)
     if kind == "strings":
         assert list(result.graph.initializer[0].string_data) == [b"a", b"b\x00"]

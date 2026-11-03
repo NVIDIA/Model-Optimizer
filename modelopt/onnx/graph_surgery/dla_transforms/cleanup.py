@@ -21,6 +21,7 @@ from itertools import zip_longest
 from typing import TYPE_CHECKING
 
 import numpy as np
+from onnx import TensorProto
 from onnxscript import ir
 from onnxscript.rewriter import pattern
 
@@ -198,6 +199,18 @@ def _tensor_chunks(tensor: ir.TensorProtocol) -> Iterator[bytes]:
             for offset in range(0, len(data), 65536):
                 yield data[offset : offset + 65536]
     else:
+        low_bit = tensor.dtype in {ir.DataType.INT4, ir.DataType.UINT4}
+        storage = _packed_storage(tensor) if low_bit else None
+        if storage is not None:
+            if len(storage) != (tensor.size + 1) // 2:
+                raise ValueError("Packed storage size does not match the tensor shape.")
+            for offset in range(0, len(storage), 32768):
+                packed = np.asarray(storage[offset : offset + 32768], dtype=np.uint8)
+                logical = np.empty(min(packed.size * 2, tensor.size - offset * 2), np.uint8)
+                np.bitwise_and(packed, 0x0F, out=logical[::2])
+                np.right_shift(packed[: logical.size // 2], 4, out=logical[1::2])
+                yield logical.tobytes()
+            return
         array = tensor.numpy()
         for chunk in np.nditer(
             array,
@@ -206,4 +219,28 @@ def _tensor_chunks(tensor: ir.TensorProtocol) -> Iterator[bytes]:
             order="C",
             buffersize=max(1, 65536 // array.dtype.itemsize),
         ):
-            yield chunk.tobytes()
+            # Four-bit NumPy dtypes can carry unused high bits in their byte storage.
+            yield (chunk.view(np.uint8) & 0x0F).tobytes() if low_bit else chunk.tobytes()
+
+
+def _packed_storage(tensor: ir.TensorProtocol):
+    if isinstance(tensor, ir.PackedTensor):
+        return tensor.numpy_packed().flat
+    if isinstance(tensor, ir.ExternalTensor):
+        if not tensor.valid():
+            raise ValueError("Cannot read an invalidated external tensor.")
+        view = ir.ExternalTensor(
+            tensor.location,
+            tensor.offset,
+            tensor.length,
+            ir.DataType.UINT8,
+            shape=ir.Shape([tensor.nbytes]),
+            name=tensor.name,
+            base_dir=tensor.base_dir,
+        )
+        return view.numpy().flat
+    raw = tensor.raw
+    if isinstance(raw, TensorProto):
+        data = raw.raw_data
+        return np.frombuffer(data, dtype=np.uint8) if data else raw.int32_data
+    return None
