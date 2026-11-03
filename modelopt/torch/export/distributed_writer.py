@@ -27,6 +27,7 @@ import os
 import re
 import warnings
 from collections import Counter
+from functools import partial
 from pathlib import Path
 
 import torch
@@ -535,6 +536,25 @@ def _in_rank_order(values: list[list]) -> list:
     return [value for (value,) in values]
 
 
+def _check_expert_numbers(expected: int, numbers: list[dict]) -> None:
+    """Raise unless the ranks number each fused-experts module's experts 0..E-1, once each.
+
+    ``numbers`` holds every rank's ``{prefix: expert numbers}``. ``E`` is ``expected`` when given, the
+    config's count under expert parallelism, else as many as the ranks write. A layout the local
+    split misreads, such as a DTensor over every expert under a count the config does not name,
+    would otherwise shift a rank's experts past the end, or leave some unwritten, with no error.
+    """
+    for prefix in sorted({prefix for rank_numbers in numbers for prefix in rank_numbers}):
+        written = sorted(n for rank_numbers in numbers for n in rank_numbers.get(prefix, ()))
+        count = expected or len(written)
+        if written != list(range(count)):
+            shown = ", ".join(map(str, written[:8])) + (", ..." if len(written) > 8 else "")
+            raise RuntimeError(
+                f"{prefix}: the ranks would write experts [{shown}] ({len(written)} in all), not "
+                f"0..{count - 1} once each, so the checkpoint would number experts wrongly."
+            )
+
+
 def _refuse_an_existing_checkpoint(export_dir: Path) -> None:
     """Raise if ``export_dir`` holds a checkpoint, which the distributed export never overwrites."""
     existing = sorted(p.name for p in export_dir.iterdir() if _CHECKPOINT_FILES.fullmatch(p.name))
@@ -859,15 +879,31 @@ def _distributed_save_hf_checkpoint_impl(
         for j, k in enumerate(in_keys):
             sharded_sd[k] = stacked[j].clone()
     # (1) Experts: split this rank's local shard into per-expert keys (global idx); stays local.
-    # Skipped on dp-replica ranks under DP x EP (their experts are written by dp group 0).
+    # Skipped on dp-replica ranks under DP x EP (their experts are written by dp group 0). The split
+    # can fail on one rank, and only the ranks together can tell whether every expert got its own
+    # number, so it runs in all_reduce: every rank refuses alike, before anything is written.
     local_sd: dict = {}
-    if write_experts:
-        for prefix in prefixes:
-            local_sd.update(
-                _split_local_fused_module(
-                    prefix, sharded_sd, ep_rank=ep_rank, total_experts=total_experts
+
+    def split_experts(sharded: dict, into: dict) -> dict:
+        numbers = {}
+        if write_experts:
+            for prefix in prefixes:
+                split = _split_local_fused_module(
+                    prefix, sharded, ep_rank=ep_rank, total_experts=total_experts
                 )
-            )
+                numbers[prefix] = sorted(
+                    {int(k[len(prefix) + 1 :].split(".", 1)[0]) for k in split}
+                )
+                into.update(split)
+        return numbers
+
+    expected = total_experts if plan.is_expert_parallel else 0
+    all_reduce(
+        "expert split",
+        partial(split_experts, sharded_sd, local_sd),
+        partial(_check_expert_numbers, expected),
+    )
+    if write_experts:
         local_sd = postprocess_state_dict(
             local_sd, maxbound, kv_cache_format, is_modelopt_qlora, tied_map=tied_map
         )

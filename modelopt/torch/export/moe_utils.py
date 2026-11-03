@@ -851,16 +851,22 @@ def _split_local_fused_module(
     def _loc_scale(key):
         # Weight scales are dim-0 (per-expert) tensors. A DTensor scale shards with the weight ->
         # to_local() aligns. The keep-fused fold emits DTensor scales for a sharded weight, but a
-        # scale handed in as a PLAIN tensor over every expert of the group is accepted too: slice
-        # it by the weight's within-group dp_offset so each scale pairs with its own dp-local expert.
+        # scale handed in as a PLAIN tensor over every expert of the weight's dim 0 is accepted too:
+        # slice it by the weight's dp_offset so each scale pairs with its own dp-local expert. A
+        # plain scale for any other number of experts would pair scales with other experts' weights.
         v = sharded_sd.get(key)
         if v is None:
             return None
         if isinstance(v, DTensor):
             return v.to_local()
-        if v.dim() >= 1 and v.shape[0] > n_local and dp_offset + n_local <= v.shape[0]:
-            return v[dp_offset : dp_offset + n_local]
-        return v
+        if v.dim() == 0 or v.shape[0] == n_local:
+            return v
+        if v.shape[0] != group_size:
+            raise ValueError(
+                f"{key}: {v.shape[0]} per-expert scales for a weight of {group_size} experts, "
+                f"{n_local} of them on this rank."
+            )
+        return v[dp_offset : dp_offset + n_local]
 
     # Build a fused sub-dict of this rank's local experts (plain), then split + reindex.
     local_fused: dict = {

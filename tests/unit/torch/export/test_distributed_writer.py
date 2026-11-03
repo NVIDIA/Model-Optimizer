@@ -286,6 +286,56 @@ def test_only_the_first_expert_replica_writes_the_experts(cpu_dist_workers, tmp_
     cpu_dist_workers.run(_expert_replicas_job, tmp_dir=tmp_path)
 
 
+def _expert_numbers_job(rank, world_size, tmp_dir, count_known):
+    # Each fused expert weight a DTensor over every expert, as transformers' expert-parallel load
+    # leaves it from 5.16, with each rank its own expert-parallel coordinate.
+    model = _fsdp2_shard(_load(tmp_dir / "src"), init_device_mesh("cpu", (world_size,)))
+    state = ParallelState()
+    state.expert_model_parallel_group = _coordinate(rank, world_size)
+    state.data_parallel_group = _coordinate(0, 1)
+    for layer in model.model.layers:
+        layer.mlp.experts._parallel_state = state
+    export = tmp_dir / f"export-{count_known}"
+    refused = None
+    with (
+        mock.patch.object(
+            distributed_writer,
+            "distribution_plan",
+            return_value=DistributionPlan(world_size, ep_size=world_size),
+        ),
+        mock.patch.object(
+            distributed_writer,
+            "_num_experts_from_config",
+            return_value=model.config.num_local_experts if count_known else 0,
+        ),
+        bounded_collectives(),
+    ):
+        # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
+        # the shared worker down instead of failing this test alone.
+        try:
+            _write(model, export)
+        except RuntimeError as e:
+            refused = str(e)
+    if count_known:
+        assert refused is None, refused
+        expert = re.compile(r"\.experts\.(\d+)\.")
+        found = {int(m.group(1)) for k in _load_checkpoint(export) if (m := expert.search(k))}
+        assert found == set(range(model.config.num_local_experts)), found
+    else:
+        assert refused is not None and "would write experts" in refused, refused
+        assert not list(export.glob("*.safetensors"))
+
+
+@pytest.mark.parametrize("count_known", [True, False], ids=["count-known", "count-unknown"])
+def test_the_ranks_write_every_expert_number_once(cpu_dist_workers, tmp_path, count_known):
+    """Each rank's experts get their global numbers, and the ranks between them write 0..E-1 once
+    each. Without the config's expert count, the split takes a weight over every expert for its
+    group's slice and would shift rank 1's experts past the end: refused on every rank before
+    anything is written."""
+    _save(_mixtral_config(), tmp_path / "src")
+    cpu_dist_workers.run(_expert_numbers_job, tmp_dir=tmp_path, count_known=count_known)
+
+
 # FP8 weights, with an FP8 KV cache in layer 0 and an NVFP4 one in layer 1: a mixed-precision KV
 # cache, whose per-layer formats the export reads from the quantization config.
 _FP8_MIXED_KV_CFG = copy.deepcopy(mtq.FP8_DEFAULT_CFG)

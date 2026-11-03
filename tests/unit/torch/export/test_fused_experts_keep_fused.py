@@ -591,6 +591,16 @@ def test_split_local_numbers_experts_globally(ep_rank, total_experts, first_inde
     _assert_byte_identical(out, want)
 
 
+def test_split_refuses_scales_for_another_number_of_experts():
+    """A plain per-expert scale holds this rank's experts or every expert of the weight; a scale for
+    any other number would pair this rank's experts with other experts' scales."""
+    sd = _fused_state_dict(gated=True)
+    sd[f"{PREFIX}.down_proj_weight_scale"] = torch.arange(LOCAL_EXPERTS + 1) + 3.0
+
+    with pytest.raises(ValueError, match="per-expert scales for a weight of"):
+        _split_local_fused_module(PREFIX, sd, ep_rank=1, total_experts=2 * LOCAL_EXPERTS)
+
+
 # ------------------------------------------------------------------ sharded (DTensor) experts
 
 
