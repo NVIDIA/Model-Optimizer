@@ -17,9 +17,11 @@ of operators. Add those rules to [rules.py](rules.py). Use
 | `TopKVectorGather` | `TopK -> Cast -> Reshape -> Tile -> [integer Casts] -> GatherElements` | Replaces tiled indices with a channel-axis TopK and INT32 vector indices passed to Gather. Requires the precise private index chain, singleton score dimensions before the final axis, and fixed valid K/Tile/Reshape controls. |
 | `TerminalProjection` | Terminal `Conv -> Transpose -> Concat -> ReduceSum -> Concat -> Cast(FLOAT) -> Squeeze` with singleton Concats | Splits more than 8192 output channels into Conv chunks of at most 8192, reshapes/casts each chunk to FP32, and concatenates on axis 2. Requires the specific private terminal tail and fixed FP16 or scalar-dequantized UINT8 kernels. |
 
-For the Reshape rules, fixed controls may use copied `0` dimensions and one
-inferred `-1`; `allowzero=1`, dynamic controls and nonpositive resolved dimensions
-are unsupported. A matched five-dimensional candidate with an unsupported form
+For the Reshape rules, fixed controls with `allowzero=0` may use copied `0`
+dimensions and one inferred `-1`. With `allowzero=1`, the target must be nonempty
+and all dimensions must be positive. Dynamic controls and nonpositive resolved
+dimensions are unsupported.
+A matched five-dimensional candidate with an unsupported form
 raises an error. The branch computations are 4D, while an output adapter may
 temporarily restore the original higher rank for later layout processing.
 
