@@ -35,14 +35,17 @@ from modelopt.onnx.graph_surgery.make_dla_compatible import (
 )
 
 
-def _matrix_model():
+def _matrix_model(width=4):
     """Compose matrix lowering, axis promotion and a public native-rank endpoint."""
+    weights = np.arange(12, dtype=np.float32).reshape(3, 4) / 16
+    if width != 4:
+        weights = np.repeat(weights[:, :1], width, axis=1)
     graph = h.make_graph(
         [h.make_node("MatMul", ["x", "w"], ["m"]), h.make_node("Softmax", ["m"], ["y"], axis=1)],
         "matrix_pipeline",
         [h.make_tensor_value_info("x", T.FLOAT, [2, 3])],
-        [h.make_tensor_value_info("y", T.FLOAT, [2, 4])],
-        [nh.from_array(np.arange(12, dtype=np.float32).reshape(3, 4) / 16, "w")],
+        [h.make_tensor_value_info("y", T.FLOAT, [2, width])],
+        [nh.from_array(weights, "w")],
     )
     return h.make_model(graph, opset_imports=[h.make_opsetid("", 18)], ir_version=10)
 
@@ -82,10 +85,11 @@ def _constants_graph(graph):
 
 
 @pytest.mark.parametrize("fp16", [False, True])
-@pytest.mark.parametrize("entry", ["python", "cli"])
+@pytest.mark.parametrize("entry", ["python", "cli", "python_external"])
 def test_complete_matrix_pipeline(tmp_path, monkeypatch, fp16, entry):
     """The file API preserves endpoints and executes the coordinated Conv/axis graph."""
-    original = _matrix_model()
+    external = entry == "python_external"
+    original = _matrix_model(width=256 if external else 4)
     source, target = tmp_path / "source.onnx", tmp_path / "converted.onnx"
     onnx.save(original, source)
     if entry == "cli":
@@ -108,16 +112,16 @@ def test_complete_matrix_pipeline(tmp_path, monkeypatch, fp16, entry):
         actual = dla_make_dla_compatible(
             str(source),
             str(target),
-            use_external_data=False,
             force_fp16_activations=fp16,
             verbose=False,
+            **({} if external else {"use_external_data": False}),
         )
     onnx.checker.check_model(onnx.load(target), full_check=True)
     assert [node.op_type for node in actual.graph.node].count("Conv") == 1
     assert not any(node.op_type == "MatMul" for node in actual.graph.node)
     assert actual.graph.input[0] == original.graph.input[0]
     assert actual.graph.output[0] == original.graph.output[0]
-    if not fp16:
+    if not fp16 and not external:
         assert_isomorphic_graph(
             _constants_graph(actual.graph), _constants_graph(_expected_matrix_graph())
         )
@@ -125,6 +129,36 @@ def test_complete_matrix_pipeline(tmp_path, monkeypatch, fp16, entry):
     expected = ReferenceEvaluator(original).run(None, feeds)[0]
     result = ReferenceEvaluator(actual).run(None, feeds)[0]
     np.testing.assert_allclose(result, expected, rtol=2e-3 if fp16 else 1e-6, atol=1e-6)
+    if external:
+        metadata = onnx.load(target, load_external_data=False)
+        assert any(value.data_location == T.EXTERNAL for value in metadata.graph.initializer)
+        for value in actual.graph.initializer:
+            assert value.data_location == T.DEFAULT
+            assert not value.external_data
+            nh.to_array(value)
+        conv = next(node for node in actual.graph.node if node.op_type == "Conv")
+        kernel = next(value for value in actual.graph.initializer if value.name == conv.input[1])
+        assert len(kernel.raw_data) > 1024
+        assert kernel.data_type == (T.FLOAT16 if fp16 else T.FLOAT)
+        expected_kernel = nh.to_array(original.graph.initializer[0]).T[:, :, None, None]
+        expected_kernel = expected_kernel.astype(np.float16 if fp16 else np.float32)
+        np.testing.assert_array_equal(nh.to_array(kernel), expected_kernel)
+        portable = tmp_path / "portable" / "copy.onnx"
+        portable.parent.mkdir()
+        onnx.save(actual, portable)
+        assert list(portable.parent.iterdir()) == [portable]
+        onnx.checker.check_model(str(portable), full_check=True)
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = options.inter_op_num_threads = 1
+        for model in (actual, onnx.load(target), onnx.load(portable)):
+            saved_kernel = next(
+                value for value in model.graph.initializer if value.name == kernel.name
+            )
+            np.testing.assert_array_equal(nh.to_array(saved_kernel), expected_kernel)
+            output = ort.InferenceSession(
+                model.SerializeToString(), options, providers=["CPUExecutionProvider"]
+            ).run(None, feeds)[0]
+            np.testing.assert_allclose(output, expected, rtol=2e-3 if fp16 else 1e-6, atol=1e-6)
 
 
 def test_shared_data_and_control_initializer():

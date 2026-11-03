@@ -106,6 +106,9 @@ def dla_make_dla_compatible(
     with possible overflow and underflow.
     FP16 QDQ may upgrade accepted opset 17/18 inputs to opset 19 before any phase.
     See dla_transforms/README.md for supported forms and how to add a transform.
+
+    The returned model retains initializer data in memory, including when the
+    saved model uses external data.
     """
     model = _transform_make_dla_compatible(
         onnx.load(model_path, load_external_data=True),
@@ -115,8 +118,9 @@ def dla_make_dla_compatible(
         verbose=verbose,
     )
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    # External-data saving clears raw_data; preserve the returned model's weights.
     onnx.save(
-        model,
+        copy.deepcopy(model) if use_external_data else model,
         output_path,
         save_as_external_data=use_external_data,
         all_tensors_to_one_file=True,
