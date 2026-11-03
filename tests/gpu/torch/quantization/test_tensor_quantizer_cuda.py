@@ -144,7 +144,7 @@ class TestTensorQuantizerfp4:
         quantizer(x)
         finish_stats_collection(quantizer)
 
-        assert torch.equal(quantizer(x), x)
+        torch.testing.assert_close(quantizer(x), x, rtol=0, atol=0)
 
 
 def test_use_constant_amax_captures_in_cuda_graph():
