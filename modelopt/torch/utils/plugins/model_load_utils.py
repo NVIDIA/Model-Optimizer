@@ -2091,7 +2091,10 @@ def resolve_distribution_plan(
     # spec, for the decision to find the experts the load then refuses to shard.
     stated = [hf_config]
     # "build" for an EP degree of 1, whose decision still builds the checkpoint's own code, and for
-    # one left to auto under init_quantized_weights, which needs no plan.
+    # one left to auto under init_quantized_weights, which needs no plan. The build step also readies
+    # that code for the load that follows (it keeps its shims on the module), so it runs even where
+    # the decision then builds nothing: under init_quantized_weights with a dense layout left to
+    # auto or replicated, the whole load still builds the checkpoint's own code.
     step = dist.broadcast_from(
         "spec",
         lambda: (
