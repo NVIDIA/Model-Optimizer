@@ -311,6 +311,43 @@ def stored_names(hf_config) -> tuple[str, ...]:
     raise ValueError("The config is not marked for on-the-fly decompression: install it first.")
 
 
+def decompression_refusal(hf_config) -> str | None:
+    """Why :func:`install_onfly_decompress` would refuse ``hf_config``, or ``None``, installing nothing.
+
+    What it checks before it installs anything, for a model spec's ``prepare_refusal`` to ask before
+    the plan is decided: the dtype the experts decompress to, at every config level, the
+    checkpoint's compressed-tensors scheme, a config with nothing to decompress, and a process
+    already decompressing a checkpoint compressed differently.
+    """
+    for level in config_levels(hf_config):
+        dtype = getattr(level, "dtype", None)
+        if dtype is not None and str(dtype).removeprefix("torch.") != "bfloat16":
+            return (
+                f"the experts decompress to bfloat16, but this config loads in {dtype}. Load the "
+                "checkpoint in bfloat16."
+            )
+    try:
+        compression = _read_compression(hf_config)
+    except (ImportError, NotImplementedError, ValueError) as e:
+        return str(e)
+    # transformers is optional: this module imports without it.
+    import transformers.modeling_utils as mu
+
+    installed = getattr(mu.get_model_conversion_mapping, "_onfly_compression", None)
+    if compression is None:
+        if installed is not None and is_marked(hf_config):
+            return None
+        return (
+            "the config has no compressed-tensors quantization_config to decompress the experts by"
+        )
+    if installed is not None and compression != installed:
+        return (
+            f"this process already decompresses a '{installed[3]}' checkpoint; one compressed "
+            f"differently ('{compression[3]}') needs a process of its own"
+        )
+    return None
+
+
 def install_onfly_decompress(hf_config):
     """Make ``from_pretrained`` decompress the experts of the checkpoint ``hf_config`` describes.
 

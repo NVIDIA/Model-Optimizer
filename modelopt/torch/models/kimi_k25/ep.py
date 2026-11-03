@@ -81,29 +81,15 @@ def prepare_refusal(
     Its own refusals, and the decompressor's for a compressed-tensors checkpoint, without
     installing the decompressor.
     """
-    # Not at module scope: the model registry imports this module, and modelopt.torch.utils.moe
-    # imports the registry.
-    from modelopt.torch.utils.moe import config_levels
-
     why = _kimi.prepare_refusal("kimi_k25", hf_config, ckpt_path, trust_remote_code)
     if why is not None:
         return why
     quantization_config = _onfly_decompress._find_quantization_config(hf_config) or {}
+    if quantization_config.get("quant_method") in DECOMPRESSED_FORMATS:
+        return _onfly_decompress.decompression_refusal(hf_config)
     try:
-        if quantization_config.get("quant_method") not in DECOMPRESSED_FORMATS:
-            _kimi.refuse_quantization_only_on_text_config("kimi_k25", hf_config)
-            return None
-        # What install_onfly_decompress checks before it installs anything: the dtype the experts
-        # decompress to, at every config level, and the checkpoint's compressed-tensors scheme.
-        for level in config_levels(hf_config):
-            dtype = getattr(level, "dtype", None)
-            if dtype is not None and str(dtype).removeprefix("torch.") != "bfloat16":
-                return (
-                    f"kimi_k25: the experts decompress to bfloat16, but this config loads in "
-                    f"{dtype}. Load the checkpoint in bfloat16."
-                )
-        _onfly_decompress._read_compression(hf_config)
-    except (ImportError, NotImplementedError, ValueError) as e:
+        _kimi.refuse_quantization_only_on_text_config("kimi_k25", hf_config)
+    except ValueError as e:
         return str(e)
     return None
 

@@ -420,6 +420,49 @@ def test_installing_twice_wraps_the_loader_once(monkeypatch):
 
 
 @pytest.mark.usefixtures("restore_loader_hooks")
+@pytest.mark.parametrize(
+    "refused",
+    ["not-bf16", "unreadable-scheme", "nothing-to-decompress", "compressed-differently", None],
+)
+def test_decompression_refusal_finds_what_the_install_refuses(monkeypatch, refused):
+    """A model spec asks before the plan is decided what the install would refuse, installing
+    nothing: the dtype at every config level, the scheme, a config with nothing to decompress, and a
+    process already decompressing a checkpoint compressed differently. It finds a refusal exactly
+    where the install raises one."""
+    first = (_ScaledCompressor, None, PACKED, "stub-format")
+    other = (_ScaledCompressor, None, ("weight", "weight_scale"), "other-format")
+
+    def read(cfg):
+        if refused == "unreadable-scheme":
+            raise NotImplementedError("the checkpoint has 2 compressed-tensors config groups")
+        if refused == "nothing-to-decompress":
+            return None
+        return getattr(cfg, "compression", first)
+
+    monkeypatch.setattr(onfly, "_read_compression", read)
+    monkeypatch.setattr(mu, "get_model_conversion_mapping", lambda model, **kw: [])
+    if refused == "compressed-differently":
+        onfly.install_onfly_decompress(SimpleNamespace())
+    config = SimpleNamespace(text_config=SimpleNamespace())
+    if refused == "not-bf16":
+        config.text_config.dtype = torch.float16
+    if refused == "compressed-differently":
+        config.compression = other
+    hooks = (mu.get_model_conversion_mapping, cml.spawn_materialize)
+
+    why = onfly.decompression_refusal(config)
+
+    assert (mu.get_model_conversion_mapping, cml.spawn_materialize) == hooks
+    if refused is None:
+        assert why is None
+        onfly.install_onfly_decompress(config)
+    else:
+        assert why
+        with pytest.raises((NotImplementedError, ValueError, RuntimeError)):
+            onfly.install_onfly_decompress(config)
+
+
+@pytest.mark.usefixtures("restore_loader_hooks")
 def test_a_checkpoint_compressed_differently_needs_a_process_of_its_own(monkeypatch):
     """The hooks are process-wide: decompressing a second checkpoint with the first one's scheme and
     stored params would load it wrong without a word, so its install is refused and the hooks stay as
