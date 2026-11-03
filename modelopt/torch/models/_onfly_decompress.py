@@ -316,8 +316,8 @@ def decompression_refusal(hf_config) -> str | None:
 
     What it checks before it installs anything, for a model spec's ``prepare_refusal`` to ask before
     the plan is decided: the dtype the experts decompress to, at every config level, the
-    checkpoint's compressed-tensors scheme, a config with nothing to decompress, and a process
-    already decompressing a checkpoint compressed differently.
+    transformers release, the checkpoint's compressed-tensors scheme, a config with nothing to
+    decompress, and a process already decompressing a checkpoint compressed differently.
     """
     for level in config_levels(hf_config):
         dtype = getattr(level, "dtype", None)
@@ -327,8 +327,9 @@ def decompression_refusal(hf_config) -> str | None:
                 "checkpoint in bfloat16."
             )
     try:
+        require_transformers("5.8", "on-the-fly compressed-tensors decompression")
         compression = _read_compression(hf_config)
-    except (ImportError, NotImplementedError, ValueError) as e:
+    except (ImportError, NotImplementedError, RuntimeError, ValueError) as e:
         return str(e)
     # transformers is optional: this module imports without it.
     import transformers.modeling_utils as mu

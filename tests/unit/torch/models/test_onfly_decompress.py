@@ -42,6 +42,7 @@ from packaging.version import Version
 if Version(transformers.__version__) < Version("5.8"):
     pytest.skip("the on-the-fly decompression needs transformers >= 5.8", allow_module_level=True)
 
+import transformers
 import transformers.core_model_loading as cml
 import transformers.modeling_utils as mu
 from transformers import (
@@ -422,7 +423,14 @@ def test_installing_twice_wraps_the_loader_once(monkeypatch):
 @pytest.mark.usefixtures("restore_loader_hooks")
 @pytest.mark.parametrize(
     "refused",
-    ["not-bf16", "unreadable-scheme", "nothing-to-decompress", "compressed-differently", None],
+    [
+        "not-bf16",
+        "transformers-before-5.8",
+        "unreadable-scheme",
+        "nothing-to-decompress",
+        "compressed-differently",
+        None,
+    ],
 )
 def test_decompression_refusal_finds_what_the_install_refuses(monkeypatch, refused):
     """A model spec asks before the plan is decided what the install would refuse, installing
@@ -446,6 +454,8 @@ def test_decompression_refusal_finds_what_the_install_refuses(monkeypatch, refus
     config = SimpleNamespace(text_config=SimpleNamespace())
     if refused == "not-bf16":
         config.text_config.dtype = torch.float16
+    if refused == "transformers-before-5.8":
+        monkeypatch.setattr(transformers, "__version__", "5.7.0")
     if refused == "compressed-differently":
         config.compression = other
     hooks = (mu.get_model_conversion_mapping, cml.spawn_materialize)
