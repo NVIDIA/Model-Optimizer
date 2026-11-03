@@ -49,6 +49,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- Remove the legacy DLA graph-cache and graph-mutation helpers from ``graph_surgery.utils.graph_utils``; use ONNXScript IR APIs for new transformations. General graph-surgery utilities remain available.
+
 - ``QDQAutotunerBase.export_onnx(output_path=...)`` now returns ``None`` instead of serialized bytes. Omit ``output_path`` to keep the bytes-returning behavior, which remains subject to protobuf size limits.
 - ``export_mcore_gpt_to_hf`` given a Hugging Face Hub model ID no longer writes the tokenizer, processor, generation config or remote-code files. Pass a local directory instead, e.g. from ``modelopt.torch.export.ensure_local_checkpoint``.
 - Drop support for Python 3.10, which has reached end-of-life. ModelOpt now requires Python 3.11 or later.

@@ -59,7 +59,7 @@ onnx = [
     "onnx~=1.21.0; platform_system != 'Windows'",
     "onnx~=1.23.2; platform_system == 'Windows'",
     "onnxconverter-common~=1.16.0",
-    "onnxscript",
+    "onnxscript>=0.7.2",
     "onnxslim>=0.1.76",
     "polygraphy>=0.53.4",
     # Linux x86-64: CUDA 13. For CUDA 12, see docs/source/getting_started/_installation_for_Linux.rst.
