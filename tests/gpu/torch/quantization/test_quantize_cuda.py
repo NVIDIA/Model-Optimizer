@@ -27,7 +27,6 @@ from _test_utils.torch.quantization.quantize_common import (
     quantize_model_and_forward,
     save_restore_test,
 )
-from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization import tensor_quant
@@ -153,6 +152,9 @@ def test_quantize(model_cls, config):
 )
 def test_quantize_nvfp4_block_size(config):
     """NVFP4 presets fake-quantize weights in the block size they configure, end to end."""
+    # Local import: transformers is optional and only this test in the module needs it.
+    from _test_utils.torch.transformers_models import get_tiny_llama
+
     model = get_tiny_llama().cuda()
     down_proj = model.model.layers[0].mlp.down_proj
     with torch.no_grad():
