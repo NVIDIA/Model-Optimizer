@@ -2663,3 +2663,37 @@ def test_mla_fused_down_projections_share_ranges(distributed_setup_size_1, quant
                 assert torch.equal(q_down.weight_quantizer.amax, kv_down.weight_quantizer.amax)
     finally:
         destroy_model_parallel()  # not a spawned process
+
+
+def _test_te_linear_ranges_stay_in_pipeline_stage_helper(rank, size):
+    initialize_for_megatron(pipeline_model_parallel_size=size, seed=SEED)
+    model = get_mcore_gpt_model(
+        pipeline_model_parallel_size=size,
+        num_layers=size,
+        hidden_size=128,
+        num_attention_heads=2,
+        vocab_size=128,
+        max_sequence_length=32,
+        transformer_impl="transformer_engine",
+        multi_latent_attention=True,
+    ).cuda()
+    (attention,) = [layer.self_attention for layer in model.decoder.layers]
+    with torch.no_grad():  # give each stage's MLA down-projections their own range
+        for linear in (attention.linear_q_down_proj, attention.linear_kv_down_proj):
+            linear.weight.mul_(rank + 1)
+    expected = max(
+        linear.weight.abs().amax().float()
+        for linear in (attention.linear_q_down_proj, attention.linear_kv_down_proj)
+    )
+
+    # Weights only: each stage calibrates the TELinear down-projections of its own layer.
+    mtq.quantize(model, copy.deepcopy(mtq.FP8_DEFAULT_CFG))
+
+    for linear in (attention.linear_q_down_proj, attention.linear_kv_down_proj):
+        assert linear.parallel_state.data_parallel_group.world_size() == 1
+        assert torch.equal(linear.weight_quantizer.amax.float(), expected)
+
+
+def test_te_linear_ranges_stay_in_pipeline_stage(dist_workers_size_2):
+    """Megatron-Core TELinear syncs ranges over Megatron's DP group, not over all ranks, which spans PP stages."""
+    dist_workers_size_2.run(_test_te_linear_ranges_stay_in_pipeline_stage_helper)
