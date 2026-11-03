@@ -25,6 +25,7 @@ import json
 
 import pytest
 import torch
+from packaging.version import Version
 from safetensors.torch import load_file, save_file
 
 pytest.importorskip("accelerate")
@@ -40,7 +41,9 @@ from transformers import (
     LlamaForCausalLM,
     Mxfp4Config,
 )
+from transformers import __version__ as transformers_version
 
+from modelopt.torch.models import _onfly_decompress
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.plugins import model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import (
@@ -404,15 +407,12 @@ def test_compressed_experts_decompressed_at_load_are_placed(tmp_path, monkeypatc
         minversion="0.16",
         reason="needs compressed-tensors (CI's unit session installs it)",
     )
-    import transformers.core_model_loading as cml
-    import transformers.modeling_utils as mu
-    from packaging.version import Version
-    from transformers import __version__ as transformers_version
-
-    from modelopt.torch.models import _onfly_decompress
-
     if Version(transformers_version) < Version("5.8"):
         pytest.skip("the on-the-fly decompression needs transformers >= 5.8")
+    # Imported once the release is known to have them: transformers 4 has no core_model_loading.
+    import transformers.core_model_loading as cml
+    import transformers.modeling_utils as mu
+
     # The decompressor's hooks are process-wide: undone after the test.
     for owner, name in ((cml, "spawn_materialize"), (mu, "get_model_conversion_mapping")):
         monkeypatch.setattr(owner, name, getattr(owner, name))
