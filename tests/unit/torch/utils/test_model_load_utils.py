@@ -756,6 +756,7 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     if refused_by == "its-plan":
         config.base_model_ep_plan = {"layers.*.mlp.experts": "moe_tp_experts"}
     elif refused_by == "its-format":
+        # fp8 naming no block size: the load dequantizes block-fp8 only.
         config.quantization_config = {"quant_method": "fp8"}
     else:
         monkeypatch.setattr(transformers, "__version__", "5.6.2")
@@ -763,7 +764,7 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
     why = {
         "its-plan": "shards no weights of",
-        "its-format": "'fp8' checkpoint; an unquantized copy of the model would load",
+        "its-format": "'fp8-per-tensor' checkpoint; an unquantized copy of the model would load",
         "its-transformers": r"transformers >= 5\.7, but 5\.6\.2 is installed\. Upgrade",
     }[refused_by]
 
@@ -2719,7 +2720,9 @@ def test_a_block_fp8_checkpoint_needs_the_transformers_that_dequantizes_its_expe
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(dist, "size", lambda group=None: 2)
     monkeypatch.setattr("transformers.__version__", "5.7.0")
-    config = SimpleNamespace(base_model_ep_plan=_EP_PLAN, quantization_config=_BLOCK_FP8)
+    config = SimpleNamespace(
+        model_type=_NO_SPEC, base_model_ep_plan=_EP_PLAN, quantization_config=_BLOCK_FP8
+    )
 
     with pytest.raises(RuntimeError, match=r"requires transformers >= 5\.8, but 5\.7\.0"):
         load_and_prepare_ep("unused", DistributionPlan(2, ep_size=2), hf_config=config)
