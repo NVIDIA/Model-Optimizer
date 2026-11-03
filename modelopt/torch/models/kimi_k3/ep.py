@@ -295,14 +295,22 @@ def _force_load_remote_modeling(hf_config, ckpt_path: str, trust_remote_code: bo
     _make_importable()
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
-    auto_map = getattr(hf_config, "auto_map", None) or {}
-    class_ref = auto_map.get("AutoModelForCausalLM") or auto_map.get("AutoModel")
+    class_ref = _model_class_ref(hf_config)
     if not class_ref:
-        raise RuntimeError(
-            "kimi_k3: config.auto_map has no AutoModel/AutoModelForCausalLM entry to force-load the remote "
-            "modeling"
-        )
+        raise RuntimeError(_NO_MODEL_CLASS)
     return get_class_from_dynamic_module(class_ref, ckpt_path, trust_remote_code=trust_remote_code)
+
+
+_NO_MODEL_CLASS = (
+    "kimi_k3: config.auto_map has no AutoModel/AutoModelForCausalLM entry to force-load the remote "
+    "modeling"
+)
+
+
+def _model_class_ref(hf_config) -> str | None:
+    """The model class the checkpoint's config declares in its ``auto_map``, or ``None``."""
+    auto_map = getattr(hf_config, "auto_map", None) or {}
+    return auto_map.get("AutoModelForCausalLM") or auto_map.get("AutoModel")
 
 
 def _checkpoint_quantized(ckpt_path: str) -> bool:
@@ -377,6 +385,70 @@ def _register_kimi_k3_conversions() -> None:
     )
 
 
+# What prepare refuses before it reads anything.
+_NO_CHECKPOINT = (
+    "kimi_k3: expert parallelism patches the checkpoint's own modeling code, so it needs "
+    "the checkpoint's path (apply_distributed_support's ckpt_path)."
+)
+_UNTRUSTED = (
+    "kimi_k3: expert parallelism imports the checkpoint's own modeling code; "
+    "load it with trust_remote_code=True."
+)
+
+
+def _quantized(hf_config, ckpt_path: str) -> bool:
+    """Whether the checkpoint's experts need the decompressor.
+
+    By the config, or by the checkpoint's own ``config.json`` for a config prepared and loaded
+    before.
+    """
+    text_cfg = getattr(hf_config, "text_config", None) or hf_config
+    return any(
+        getattr(cfg, "quantization_config", None) is not None for cfg in (hf_config, text_cfg)
+    ) or _checkpoint_quantized(ckpt_path)
+
+
+def prepare_refusal(
+    hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool = False, **_
+) -> str | None:
+    """Why :func:`prepare` would refuse this checkpoint, or ``None``, found changing nothing.
+
+    Its own refusals, a config naming no class to load the checkpoint's code by, and the
+    decompressor's for a quantized checkpoint, without installing the decompressor.
+    """
+    # Not at module scope: the model registry imports this module, and modelopt.torch.utils.moe
+    # imports the registry.
+    from modelopt.torch.utils.moe import config_levels
+
+    if ckpt_path is None:
+        return _NO_CHECKPOINT
+    if not trust_remote_code:
+        return _UNTRUSTED
+    if _model_class_ref(hf_config) is None:
+        return _NO_MODEL_CLASS
+    if not _quantized(hf_config, ckpt_path):
+        return None
+    # What install_onfly_decompress checks before it installs anything: the dtype the experts
+    # decompress to, at every config level, and the checkpoint's compressed-tensors scheme.
+    for level in config_levels(hf_config):
+        dtype = getattr(level, "dtype", None)
+        if dtype is not None and str(dtype).removeprefix("torch.") != "bfloat16":
+            return (
+                f"kimi_k3: the experts decompress to bfloat16, but this config loads in {dtype}. "
+                "Load the checkpoint in bfloat16."
+            )
+    try:
+        compression = _onfly_decompress._read_compression(hf_config)
+    except (ImportError, NotImplementedError, ValueError) as e:
+        return str(e)
+    if compression is None and not _onfly_decompress.is_marked(hf_config):
+        return (
+            "kimi_k3: the checkpoint's experts are quantized, but this config has no "
+            "compressed-tensors quantization_config to decompress them by"
+        )
+    return None
+
+
 def prepare(
     hf_config,
     *,
@@ -407,17 +479,11 @@ def prepare(
     from modelopt.torch.utils.moe import mark_patched_every_load, register_torch_a2a
 
     if ckpt_path is None:
-        raise ValueError(
-            "kimi_k3: expert parallelism patches the checkpoint's own modeling code, so it needs "
-            "the checkpoint's path (apply_distributed_support's ckpt_path)."
-        )
+        raise ValueError(_NO_CHECKPOINT)
     if not trust_remote_code:
         # Patching below imports the checkpoint's own modeling code, and transformers'
         # get_class_from_dynamic_module runs it without checking trust_remote_code itself.
-        raise ValueError(
-            "kimi_k3: expert parallelism imports the checkpoint's own modeling code; "
-            "load it with trust_remote_code=True."
-        )
+        raise ValueError(_UNTRUSTED)
 
     text_cfg = getattr(hf_config, "text_config", None) or hf_config
 
@@ -429,9 +495,7 @@ def prepare(
     # checkpoint's own config counts too: a config prepared and loaded before has lost both its
     # quantization_config and the mark, and the install refuses it rather than let the experts load
     # newly initialized.
-    if any(
-        getattr(cfg, "quantization_config", None) is not None for cfg in (hf_config, text_cfg)
-    ) or _checkpoint_quantized(ckpt_path):
+    if _quantized(hf_config, ckpt_path):
         _onfly_decompress.install_onfly_decompress(hf_config)
 
     # This checkpoint's remote code, not whichever revision this process imported first. Every patch

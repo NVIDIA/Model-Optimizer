@@ -1362,11 +1362,47 @@ def test_a_remote_kimi_k3_whose_prepare_attaches_its_plan_left_whole_is_an_error
     monkeypatch.setattr(spec, "make_buildable", lambda hf_config, **kwargs: built.append(kwargs))
     monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi_k3())
     run_as(4)
-    serve(SimpleNamespace(model_type="kimi_k3", text_config=SimpleNamespace(num_experts=8)))
+    auto_map = {"AutoModelForCausalLM": "modeling_kimi_k3.KimiK3ForConditionalGeneration"}
+    text = SimpleNamespace(num_experts=8)
+    serve(SimpleNamespace(model_type="kimi_k3", text_config=text, auto_map=auto_map))
 
     with pytest.raises(ValueError, match="can be expert-parallel, but the plan resolved"):
-        resolve_distribution_plan(str(tmp_path))
+        resolve_distribution_plan(str(tmp_path), trust_remote_code=True)
     assert len(built) == 1
+
+
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version(_ep_floor("kimi_k3")),
+    reason="Kimi-K3's expert parallelism needs a later transformers",
+)
+def test_a_packed_kimi_k3_its_prepare_refuses_is_planned_without_expert_parallelism(
+    run_as, serve, monkeypatch, tmp_path
+):
+    """Kimi-K3's spec counts compressed-tensors checkpoints as ones the expert-parallel load takes,
+    as its ``prepare`` installs the decompressor, which needs compressed-tensors 0.16. Without it the
+    decision, asking the spec first, plans the model without expert parallelism, with the warning
+    naming why, rather than decide expert parallelism that ``prepare`` refuses on every rank."""
+    for name in ("compressed_tensors", "compressed_tensors.compressors.base"):
+        monkeypatch.setitem(sys.modules, name, None)
+    spec = get_spec("kimi_k3").ep_spec
+    monkeypatch.setattr(spec, "prepare", lambda *a, **k: pytest.fail("ran prepare"))
+    monkeypatch.setattr(spec, "make_buildable", lambda *args, **kwargs: None)
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi_k3())
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+    run_as(4)
+    scheme = {"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"}
+    auto_map = {"AutoModelForCausalLM": "modeling_kimi_k3.KimiK3ForConditionalGeneration"}
+    text = SimpleNamespace(num_experts=8, quantization_config=scheme)
+    serve(
+        SimpleNamespace(
+            model_type="kimi_k3", quantization_config=scheme, text_config=text, auto_map=auto_map
+        )
+    )
+
+    with pytest.warns(UserWarning, match="loads without expert parallelism.*compressed-tensors"):
+        plan, _ = resolve_distribution_plan(str(tmp_path), trust_remote_code=True)
+
+    assert not plan.is_expert_parallel
 
 
 def test_a_packed_kimi_k3_loaded_through_another_class_is_planned_without_its_spec(
