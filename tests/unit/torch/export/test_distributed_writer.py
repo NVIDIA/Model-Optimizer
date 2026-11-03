@@ -28,6 +28,7 @@ import copy
 import json
 import math
 import os
+import re
 import types
 from unittest import mock
 
@@ -220,6 +221,69 @@ def test_an_expert_parallel_export_checks_its_experts_groups_against_the_plan(
     pass."""
     _save(_llama_config(), tmp_path / "src")
     cpu_dist_workers.run(_expert_parallel_groups_job, tmp_dir=tmp_path)
+
+
+def _coordinate(rank, size):
+    """A group as the writer reads it: this rank's index in a group of ``size``."""
+    return types.SimpleNamespace(
+        rank=lambda: rank, world_size=lambda: size, is_initialized=lambda: True
+    )
+
+
+def _expert_replicas_job(rank, world_size, tmp_dir):
+    # The four ranks of an (edp=2, ep=2) plan, two per export: each rank keeps its own EP
+    # coordinate, first in the replica that writes the experts, then in the one that skips them.
+    # The run has two ranks, so the writer is handed the four-rank plan rather than reading the one
+    # recorded on the model, which must match the run.
+    plan = DistributionPlan(4, ep_size=2)
+    written = {}
+    for replica in (0, 1):
+        model = _load(tmp_dir / "src")  # this EP rank's 2 of the 4 experts
+        model.config.num_local_experts = 4
+        set_distribution_plan(model, DistributionPlan(world_size, ep_size=world_size))
+        state = ParallelState()
+        state.expert_model_parallel_group = _coordinate(rank, 2)
+        state.data_parallel_group = _coordinate(replica, 2)
+        for layer in model.model.layers:
+            layer.mlp.experts._parallel_state = state
+        keys = []
+
+        def record(local_sd, *args, original=distributed_writer._write_even_shards, **kwargs):
+            keys.append(set(local_sd))
+            return original(local_sd, *args, **kwargs)
+
+        with (
+            mock.patch.object(distributed_writer, "distribution_plan", return_value=plan),
+            mock.patch.object(distributed_writer, "_write_even_shards", record),
+            bounded_collectives(),
+        ):
+            _write(model, tmp_dir / f"replica{replica}")
+        written[replica] = [None] * world_size
+        dist.all_gather_object(written[replica], keys[0])
+
+    expert = re.compile(r"\.experts\.(\d+)\.")
+    # The second replica's ranks write no expert, but still write the dense tensors they own.
+    for keys in written[1]:
+        assert keys and not any(expert.search(k) for k in keys), sorted(keys)
+    dense = {k for keys in written[0] for k in keys if not expert.search(k)}
+    assert set().union(*written[1]) == dense
+    # The first replica writes every one of the four experts, each once, between its EP ranks.
+    expert_keys = [k for keys in written[0] for k in keys if expert.search(k)]
+    assert len(expert_keys) == len(set(expert_keys)), "an expert written twice"
+    indices = {}
+    for key in expert_keys:
+        indices.setdefault(expert.sub(".experts.#.", key), []).append(
+            int(expert.search(key).group(1))
+        )
+    assert indices and all(sorted(i) == [0, 1, 2, 3] for i in indices.values()), indices
+
+
+def test_only_the_first_expert_replica_writes_the_experts(cpu_dist_workers, tmp_path):
+    """Experts replicated across expert-data-parallel groups are written by the first replica
+    alone, each once; the other replica's ranks write only the dense tensors they own. Two gloo
+    ranks play the four ranks of an (edp=2, ep=2) plan, one replica per export."""
+    _save(_mixtral_config(num_local_experts=2), tmp_path / "src")
+    cpu_dist_workers.run(_expert_replicas_job, tmp_dir=tmp_path)
 
 
 # FP8 weights, with an FP8 KV cache in layer 0 and an NVFP4 one in layer 1: a mixed-precision KV
