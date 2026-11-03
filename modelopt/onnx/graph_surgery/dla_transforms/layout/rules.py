@@ -63,10 +63,10 @@ class _ShapeRule(_LayoutRule):
         super().__init__(graph)
         self.controls = controls
 
-    def _control(self, op, source, values, label):
-        array = np.asarray(values, dtype=np.int64)
+    def _control(self, op, source, values, label, dtype=np.int64):
+        array = np.asarray(values, dtype=dtype)
         owner = source.meta.get("dla_shape_source", source) if source is not None else None
-        key = (owner, tuple(array.shape), tuple(array.reshape(-1)))
+        key = (owner, array.dtype, tuple(array.shape), tuple(array.reshape(-1)))
         if key not in self.controls:
             self.controls[key] = self.graph.add_initializer(op, array, label)
         return self.controls[key]
@@ -291,7 +291,7 @@ class SliceLayout(_ShapeRule):
         node = result.producer()
         operands = list(node.inputs)
         source = operands[3] if len(operands) > 3 else operands[1]
-        axes = self._control(op, source, self.values, "slice_axes")
+        axes = self._control(op, source, self.values, "slice_axes", dtype=operands[1].dtype.numpy())
         if len(operands) > 3:
             operands[3] = axes
         else:
