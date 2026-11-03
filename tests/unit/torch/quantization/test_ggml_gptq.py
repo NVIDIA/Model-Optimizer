@@ -124,10 +124,10 @@ def _inputs():
     return torch.randn(128, 512, generator=generator) @ torch.randn(512, 512, generator=generator)
 
 
-def _gptq_model(rows=8, num_bits="iq1_s", algorithm=GPTQ):
+def _gptq_model(rows=8, num_bits="iq1_s", algorithm=GPTQ, dtype=torch.float32):
     torch.manual_seed(0)
-    model = torch.nn.Linear(512, rows, bias=False)
-    inputs = _inputs()
+    model = torch.nn.Linear(512, rows, bias=False, dtype=dtype)
+    inputs = _inputs().to(dtype)
     mtq.quantize(model, _iq_config(algorithm, num_bits), forward_loop=lambda m: m(inputs))
     return model, inputs
 
@@ -353,6 +353,25 @@ def test_a_format_that_keeps_its_scales_encodes_gptqs_weight_to_the_pin(num_bits
     assert torch.equal(packed, expected)
     assert torch.equal(
         ggml_format.payload_scales(packed.reshape(-1, ggml_format.block_bytes)), scales
+    )
+
+
+@pytest.mark.parametrize("num_bits", ["iq2_xxs", "iq2_xs", "iq2_s", "iq1_m"])
+def test_casting_the_model_keeps_the_importance_its_weight_encodes_to_the_pin_with(num_bits):
+    # Enough rows that a bfloat16 importance changes some blocks' codes.
+    model, _ = _gptq_model(
+        rows=128,
+        num_bits=num_bits,
+        algorithm={**GPTQ, "importance_weighted": True},
+        dtype=torch.bfloat16,
+    )
+    pinned = pinned_packed_weight(model.weight_quantizer, num_bits)
+
+    # Megatron's Float16Module calls bfloat16() on the model, which casts its float buffers.
+    model.bfloat16()
+
+    assert torch.equal(
+        GGML_FORMAT_REGISTRY[num_bits].pack(model.weight, model.weight_quantizer), pinned
     )
 
 

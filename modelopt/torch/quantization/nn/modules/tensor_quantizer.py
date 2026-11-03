@@ -1549,6 +1549,27 @@ class TensorQuantizer(nn.Module):
         else:
             self.register_buffer(key, value)
 
+    def _apply(self, fn, recurse=True):
+        """Apply module transforms without rounding a pinned GGML payload's importance.
+
+        A pinned payload is re-encoded under the importance its search was weighted with, and only
+        that exact importance encodes the weight the payload came from to the payload again. Casting
+        a model, as ``model.bfloat16()`` or Megatron's ``Float16Module`` do, moves it but keeps it
+        float32.
+        """
+        from ...ggml.common import PINNED_IMPORTANCE_PREFIX
+
+        importance = {
+            key: value
+            for key, value in self._buffers.items()
+            if key.startswith(PINNED_IMPORTANCE_PREFIX) and value is not None
+        }
+        module = super()._apply(fn, recurse=recurse)
+        for key, value in importance.items():
+            if self._buffers[key].dtype != value.dtype:
+                self._buffers[key] = value.to(self._buffers[key].device)
+        return module
+
 
 class HardDisabledTensorQuantizer(TensorQuantizer):
     """TensorQuantizer slot that is structurally never enabled.
