@@ -588,8 +588,18 @@ class GPTModelImporter:
         self.rules["A_log"](layer.mixer.A_log, layer_id)
         self.rules["D"](layer.mixer.D, layer_id)
         self.rules["dt_bias"](layer.mixer.dt_bias, layer_id)
-        self.rules["conv1d"](_get_mamba_conv1d(layer.mixer), layer_id)
-        self.rules["in_proj"](layer.mixer.in_proj, layer_id)
+        # conv1d ([x|B|C]) and in_proj ([z|x|B|C|dt]) are fused: TP-shard each part on its own.
+        x, bc = layer.mixer.d_inner, layer.mixer.ngroups * layer.mixer.d_state
+        self.rules["conv1d"](
+            _get_mamba_conv1d(layer.mixer),
+            layer_id,
+            parallel_config=ParallelConfig(0, "TP", [x, bc, bc]),
+        )
+        self.rules["in_proj"](
+            layer.mixer.in_proj,
+            layer_id,
+            parallel_config=ParallelConfig(0, "TP", [x, x, bc, bc, layer.mixer.nheads]),
+        )
         self.rules["out_proj"](layer.mixer.out_proj, layer_id)
 
         # TE spec: layer norm is fused into in_proj (TELayerNormColumnParallelLinear).

@@ -50,7 +50,7 @@ def test_get_mamba_conv1d_wraps_direct_params():
 # (conv1d/in_proj/out_proj), attention, MLP, and MoE expert layers.
 
 
-def _build_mcore_nemotron_h(config, size, initialize=True):
+def _build_mcore_nemotron_h(config, size, initialize=True, **kwargs):
     return get_mcore_hybrid_model(
         tensor_model_parallel_size=size,
         pipeline_model_parallel_size=1,
@@ -70,6 +70,7 @@ def _build_mcore_nemotron_h(config, size, initialize=True):
         num_moe_experts=config.n_routed_experts,
         moe_ffn_hidden_size=config.moe_intermediate_size,
         moe_shared_expert_intermediate_size=config.moe_shared_expert_intermediate_size,
+        **kwargs,
     ).cuda()
 
 
@@ -100,3 +101,45 @@ def _test_nemotron_h_export_import(tmp_path, model_dir, rank, size):
 def test_nemotron_h_export_import(dist_workers_size_1, tmp_path):
     model_dir = create_tiny_nemotron_h_dir(tmp_path)
     dist_workers_size_1.run(partial(_test_nemotron_h_export_import, tmp_path, model_dir))
+
+
+def _test_nemotron_h_import_tp(model_dir, rank, size):
+    config = transformers.AutoConfig.from_pretrained(model_dir)
+    # Match the HF checkpoint itself (RMSNorm, fused experts), not a Megatron export of it.
+    model = _build_mcore_nemotron_h(config, size, normalization="RMSNorm", moe_grouped_gemm=True)
+    import_mcore_gpt_from_hf(model, str(model_dir))
+
+    prefix = "backbone.layers.0.mixer."  # "ME*E": layer 0 is Mamba
+    hf = {}
+    for sf in model_dir.glob("*.safetensors"):
+        with safe_open(str(sf), framework="pt") as f:
+            hf.update({k: f.get_tensor(k) for k in f.keys() if k.startswith(prefix)})  # noqa: SIM118
+
+    mixer = model.decoder.layers[0].mixer
+    bc = mixer.ngroups * mixer.d_state
+
+    def local_shard(name, split_sizes=None):
+        # Megatron's per-rank layout: each part of a fused tensor is TP-sharded on its own.
+        parts = hf[prefix + name].split(split_sizes) if split_sizes else [hf[prefix + name]]
+        return torch.cat([part.chunk(size)[rank] for part in parts])
+
+    conv1d = _get_mamba_conv1d(mixer)
+    for actual, expected in [
+        (conv1d.weight, local_shard("conv1d.weight", [mixer.d_inner, bc, bc])),
+        (conv1d.bias, local_shard("conv1d.bias", [mixer.d_inner, bc, bc])),
+        (
+            mixer.in_proj.weight,
+            local_shard("in_proj.weight", [mixer.d_inner, mixer.d_inner, bc, bc, mixer.nheads]),
+        ),
+        (mixer.A_log, local_shard("A_log")),
+        (mixer.D, local_shard("D")),
+        (mixer.dt_bias, local_shard("dt_bias")),
+        (mixer.norm.weight, local_shard("norm.weight")),
+    ]:
+        torch.testing.assert_close(actual, expected.to(actual.device, actual.dtype))
+
+
+def test_nemotron_h_import_tp(dist_workers_size_2, tmp_path):
+    # In the tiny model x is half of conv1d, so a contiguous TP=2 slice gives rank 0 only x.
+    model_dir = create_tiny_nemotron_h_dir(tmp_path)
+    dist_workers_size_2.run(partial(_test_nemotron_h_import_tp, model_dir))

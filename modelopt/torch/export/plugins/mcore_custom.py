@@ -52,10 +52,13 @@ class ParallelConfig:
     Args:
         sharding_dim: The dimension (0 or 1) to shard the tensor.
         parallel_group: The parallel group (TP or ETP) to shard the tensor.
+        split_sizes: Sizes of the parts concatenated along dim 0 in the full (unsharded) tensor,
+                     e.g. [x, B, C] for Mamba's conv1d. Each part is split across TP ranks.
     """
 
     sharding_dim: int | None = None
     parallel_group: str | None = None
+    split_sizes: list[int] | None = None
 
 
 COL_TP = {"parallel_config": ParallelConfig(sharding_dim=0, parallel_group="TP")}
@@ -514,6 +517,27 @@ def _get_safetensor_slices(
                     tp_size = get_expert_tensor_parallel_world_size()
                 else:
                     raise ValueError(f"Unsupported parallel group [tp|etp]: {parallel_group}")
+                if parallel_config.split_sizes is not None:
+                    assert sharding_dim == 0, "split_sizes applies to dim 0"
+                    if tp_size == 1 and key.endswith("_scale_inv"):
+                        # A block-FP8 scale has one row per 128 weight rows, not the weight's parts.
+                        return f.get_tensor(key)
+                    if sum(parallel_config.split_sizes) != shape[0] or any(
+                        size <= 0 or size % tp_size for size in parallel_config.split_sizes
+                    ):
+                        raise ValueError(
+                            f"{key} {shape} does not split into {parallel_config.split_sizes}"
+                            f" over {tp_size} ranks"
+                        )
+                    if tp_size == 1:
+                        return f.get_tensor(key)
+                    parts, start = [], 0
+                    for size in parallel_config.split_sizes:
+                        per_rank_size = size // tp_size
+                        offset = start + tp_rank * per_rank_size
+                        parts.append(tensor_slice[offset : offset + per_rank_size])
+                        start += size
+                    return torch.cat(parts)
                 per_rank_size = shape[sharding_dim] // tp_size
                 rank_offset = tp_rank * per_rank_size
 
