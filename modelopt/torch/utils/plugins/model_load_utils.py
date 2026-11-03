@@ -37,6 +37,7 @@ from huggingface_hub import snapshot_download
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+from safetensors.torch import safe_open
 from torch.distributed import device_mesh
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
@@ -82,12 +83,14 @@ from modelopt.torch.utils.moe import (
     _spec_refuses_ep,
     apply_distributed_support,
     check_distributed_support,
+    config_levels,
     register_torch_a2a,
 )
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     checkpoint_tensor_files,
     ensure_local_checkpoint,
     indexed_weight_map,
+    off_index_safetensors_files,
     read_safetensors_subset,
 )
 
@@ -398,7 +401,9 @@ def _group_sources_by_layer(
     return layer_sources, non_layer_sources, unplaced
 
 
-def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
+def unplaced_source_keys(
+    model: nn.Module, ckpt_path: str, tensor_files: "dict[str, str] | None" = None
+) -> list[str]:
     """Checkpoint tensors the loaded ``model`` has no parameter for, e.g. an MTP head.
 
     Every tensor in the weight files the loader opened
@@ -421,8 +426,10 @@ def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
     and a model our own loader built from its config has none, so the stock mapping answers there.
 
     A checkpoint without safetensors (``pytorch_model.bin``) has nothing the export can carry: ``[]``.
+    Pass ``tensor_files``, the checkpoint's ``tensor name -> file`` map, when the load already read it.
     """
-    tensor_files = checkpoint_tensor_files(ckpt_path)
+    if tensor_files is None:
+        tensor_files = checkpoint_tensor_files(ckpt_path)
     if not tensor_files:
         return []
     # Every name of a tied parameter: a checkpoint can store the one named_parameters() drops by
@@ -445,7 +452,10 @@ def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
 
 
 def record_unplaced_source_keys(
-    model: nn.Module, ckpt_path: str, keys: "Iterable[str] | None" = None
+    model: nn.Module,
+    ckpt_path: str,
+    keys: "Iterable[str] | None" = None,
+    tensor_files: "dict[str, str] | None" = None,
 ) -> list[str]:
     """Record on ``model`` the checkpoint tensors it has no parameter for, for the export to carry.
 
@@ -453,10 +463,19 @@ def record_unplaced_source_keys(
     at load time, and the export reads it back (``_modelopt_unplaced_source_keys``, beside the
     checkpoint in ``_modelopt_source_checkpoint``) rather than deriving it again. Pass ``keys`` when
     the loader already found them while placing the weights; otherwise :func:`unplaced_source_keys`
-    derives them from the loaded model. Every loader of a model that may be exported calls this:
-    :func:`load_pretrained` and :func:`parallel_load_and_prepare_fsdp2` do.
+    derives them from the loaded model, from ``tensor_files`` when the load already read them. Every
+    loader of a model that may be exported calls this: :func:`load_pretrained` and
+    :func:`parallel_load_and_prepare_fsdp2` do.
     """
-    keys = sorted(unplaced_source_keys(model, ckpt_path) if keys is None else keys)
+    if keys is None:
+        # The map by keyword, and only when the load read it: a caller that replaced
+        # unplaced_source_keys with its two-argument form gets its keys as before.
+        keys = (
+            unplaced_source_keys(model, ckpt_path)
+            if tensor_files is None
+            else unplaced_source_keys(model, ckpt_path, tensor_files=tensor_files)
+        )
+    keys = sorted(keys)
     model._modelopt_unplaced_source_keys = keys
     model._modelopt_source_checkpoint = str(ckpt_path)
     return keys
@@ -1998,6 +2017,14 @@ def _ep_load_refusal(hf_config, ep_plan: dict[str, str]) -> Exception | None:
     return ValueError(refusal) if refusal is not None else None
 
 
+def _decompressed_as_loaded(cfg) -> bool:
+    """Whether a model spec installed the on-the-fly decompressor for this config's checkpoint."""
+    # Importing modelopt.torch.models registers every model spec; only expert-parallel loads need them.
+    from modelopt.torch.models import _onfly_decompress
+
+    return _onfly_decompress.is_marked(cfg)
+
+
 def _ckpt_quant_method(cfg):
     """Return the checkpoint's native quantization method, or ``None``.
 
@@ -2005,7 +2032,7 @@ def _ckpt_quant_method(cfg):
     or ``None`` if the checkpoint isn't natively quantized. Checks the top config, then a VLM's
     ``text_config`` or ``llm_config``.
     """
-    for c in (cfg, getattr(cfg, "text_config", None), getattr(cfg, "llm_config", None)):
+    for c in config_levels(cfg):
         qc = getattr(c, "quantization_config", None)
         m = qc.get("quant_method") if isinstance(qc, dict) else getattr(qc, "quant_method", None)
         if m:
@@ -2153,7 +2180,7 @@ def load_and_prepare_ep(
         # checkpoint of the model, nor a plan of its own, would load.
         check_distributed_support(hf_config.model_type)
         quant_method = _ckpt_quant_method(hf_config)
-        if quant_method not in _EP_SOURCE_FORMATS:
+        if quant_method not in _EP_SOURCE_FORMATS and not _decompressed_as_loaded(hf_config):
             # transformers' own quantizer would load it as stored, for PTQ to treat as plain weights.
             dequantized = ", ".join(sorted(f for f in _EP_SOURCE_FORMATS if f))
             loads = "unquantized checkpoints" + (
@@ -2165,6 +2192,24 @@ def load_and_prepare_ep(
             )
         # The swapped plan is this load's own: the caller's config keeps the plan its checkpoint declares.
         hf_config = copy.deepcopy(hf_config)
+        if _decompressed_as_loaded(hf_config):
+            # The decompressor hands the experts over dequantized. Left on the config (Kimi-K2.5's
+            # config class copies its text config's to the top level), the checkpoint's
+            # quantization_config would build transformers' compressed-tensors quantizer, which from
+            # 5.13 claims the same expert converters first. Deleted rather than set to None: before
+            # 5.11 transformers takes any quantization_config attribute, None too, for a quantized
+            # checkpoint. Every level _ckpt_quant_method reads is cleared.
+            levels = config_levels(hf_config)
+            for cfg in levels:
+                vars(cfg).pop("quantization_config", None)
+            # Checked once every level is cleared: a property forwarding to a nested level's is gone
+            # then, while a class attribute, or a property of its own, is not.
+            if kept := [cfg for cfg in levels if hasattr(cfg, "quantization_config")]:
+                raise NotImplementedError(
+                    f"{type(kept[0]).__name__} keeps quantization_config off its instance, so this "
+                    "load cannot clear it, and transformers' own quantizer would compete with the "
+                    "decompressor. Decompress the checkpoint first."
+                )
         ep_cfg = _ep_config(hf_config)  # for VLMs the plan lives on .text_config
         ep_plan = dict(getattr(ep_cfg, "base_model_ep_plan", None) or {})
         if not ep_plan:
@@ -2222,8 +2267,61 @@ def load_and_prepare_ep(
     dtype = getattr(hf_config, "dtype", None) or torch.bfloat16
     # The load and the export both read the local snapshot, made only once the checks pass, so a
     # refused load downloads nothing.
+    compressed_names: set[str] = set()
+    tensor_files: dict[str, str] | None = None  # read once, by the decompressing load's checks
     with _refused_together("the local checkpoint", alone=False):
         _, ckpt_path = ensure_local_checkpoint(ckpt_path, **hub_options)
+        if _decompressed_as_loaded(hf_config):
+            # Only the experts decompress as they load, and the config cannot say what else the
+            # checkpoint compressed, or in which dtypes: what it stores is checked before anything
+            # loads. Imported here for the reason _decompressed_as_loaded gives.
+            from modelopt.torch.models import _onfly_decompress
+
+            tensor_files = _onfly_decompress.check_compressed_keys(hf_config, ckpt_path)
+            # Minus "weight": a float format's anchor is .weight itself, and an unplaced plain weight
+            # is what the export has always carried as stored.
+            compressed_names = set(_onfly_decompress.stored_names(hf_config)) - {"weight"}
+            # An MTP layer is stored past the decoder layers the model builds, so its compressed
+            # experts would be refused only after the whole load, by the check that follows it.
+            # Refused here instead, before anything loads, from the names just read; that check
+            # stays for any other shape. transformers 5.18 builds no decoder layer past
+            # num_hidden_layers, so this refuses nothing that check would let through there.
+            built = getattr(ep_cfg, "num_hidden_layers", None)
+            past = (
+                []
+                if built is None
+                else sorted(
+                    name
+                    for name in tensor_files
+                    if name.rpartition(".")[2] in compressed_names
+                    and (layer := re.search(r"(?:^|\.)layers\.(\d+)\.", name))
+                    and int(layer[1]) >= built
+                )
+            )
+            if past:
+                raise NotImplementedError(
+                    f"The checkpoint stores {len(past)} compressed tensors past the model's {built} "
+                    f"decoder layers, such as {past[0]} (an MTP layer's, typically): the model builds "
+                    "no parameter for them, and the export would copy them as stored, with no "
+                    "quantization_config to read them. Decompress the checkpoint first."
+                )
+            # The files the load never opens (GLM-4.7's standalone mtp.safetensors, say) the export
+            # copies as stored, and this load drops the config a compressed tensor there needs:
+            # refused here too. A plain one is carried as before.
+            sidecar = []
+            for file_name in off_index_safetensors_files(ckpt_path):
+                with safe_open(os.path.join(ckpt_path, file_name), framework="pt") as f:
+                    sidecar += [
+                        f"{file_name}'s {name}"
+                        for name in f.keys()  # noqa: SIM118 - safe_open is not iterable
+                        if name.rpartition(".")[2] in compressed_names
+                    ]
+            if sidecar:
+                raise NotImplementedError(
+                    f"The checkpoint stores {len(sidecar)} compressed tensors in files the load "
+                    f"never opens, such as {sidecar[0]}: the export would copy them as stored, with "
+                    "no quantization_config to read them. Decompress the checkpoint first."
+                )
 
     # Experts are sharded over ``ep`` and replicated over ``edp``; the dense part is replicated over
     # the whole world (``dp``).
@@ -2300,7 +2398,16 @@ def load_and_prepare_ep(
 
         # The checkpoint tensors the model has no parameter for (an MTP head), worked out once, at load,
         # for the export to carry.
-        record_unplaced_source_keys(model, ckpt_path)
+        unplaced = record_unplaced_source_keys(model, ckpt_path, tensor_files=tensor_files)
+        # The export would copy them as stored, and this load dropped the quantization_config that
+        # reads a compressed one, such as an MTP layer's experts. A suffix is enough to tell them:
+        # check_compressed_keys refused any compressed tensor outside the experts.
+        if carried := [key for key in unplaced if key.rpartition(".")[2] in compressed_names]:
+            raise NotImplementedError(
+                f"The checkpoint stores {len(carried)} compressed tensors the model has no parameter "
+                f"for, such as {carried[0]}: the export would copy them as stored, with no "
+                "quantization_config to read them. Decompress the checkpoint first."
+            )
 
         # The model carries the ep submesh, for calibration to re-install the all-to-all forwards
         # over (expert_parallel_mesh); transformers sets it differently by release.
