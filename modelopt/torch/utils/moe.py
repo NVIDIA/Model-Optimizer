@@ -156,48 +156,75 @@ def _ep_spec(model_type: str):
     return getattr(get_spec(model_type), "ep_spec", None)
 
 
+def _ep_floor(model_type: str) -> str:
+    """The transformers release ``model_type``'s expert parallelism needs.
+
+    The expert-parallel load's own, or its spec's when that is later. A model whose spec states no
+    release, or that has no spec, still needs the load's: auto must pick no EP degree below it,
+    rather than reach the load and fail there.
+    """
+    ep = _ep_spec(model_type)
+    stated = ep.requires_transformers if ep is not None else None
+    return max(_EP_MIN_TRANSFORMERS, stated or _EP_MIN_TRANSFORMERS, key=parse)
+
+
+# What the FSDP2 load takes, as a refusal offering it says. It builds a causal LM and reads its
+# tensors as stored, so a quantized or multimodal checkpoint (GPT-OSS's MXFP4, Llama-4's) needs a
+# single process, as does one with an MTP head the load cannot build (--use_fsdp2 refuses
+# Nemotron-H's).
+_FSDP2_TAKES = "an unquantized causal LM with no MTP head it cannot build (such as Nemotron-H's)"
+
+
+def _fsdp2_way_out(fsdp: str = "MODELOPT_FSDP_SIZE=world") -> str:
+    """How a refusal asks for FSDP2, the way around expert parallelism ``fsdp`` spells."""
+    return f"(--use_fsdp2 in examples/hf_ptq/hf_ptq.py, or {fsdp})"
+
+
+def _spec_refusal(model_type: str) -> RuntimeError | None:
+    """Why ``model_type``'s expert parallelism is refused here, or ``None``.
+
+    A ``NotImplementedError`` where its spec rules it out, a ``RuntimeError`` below its transformers
+    floor: the expert-parallel load's own, or its spec's release when that is later; a model with
+    no spec or no EP section still needs the load's. The reason alone, which a plan loading the
+    model without expert parallelism warns with: :func:`check_distributed_support` refuses with it
+    and the way around expert parallelism.
+    """
+    ep = _ep_spec(model_type)
+    if ep is not None and ep.unsupported:
+        return NotImplementedError(
+            f"{model_type} cannot be quantized expert-parallel yet: {ep.unsupported}"
+        )
+    try:
+        require_transformers(_ep_floor(model_type), f"{model_type} expert-parallel PTQ")
+    except RuntimeError as e:
+        return e
+    return None
+
+
 def check_distributed_support(model_type: str) -> None:
     """Refuse ``model_type``'s expert parallelism if its spec does, or below its transformers floor.
 
-    The floor is the expert-parallel load's own, or its spec's release when that is later; a model
-    with no spec or no EP section still needs the load's.
+    With :func:`_spec_refusal`'s reason, and the way around expert parallelism.
     :func:`apply_distributed_support` checks this before it prepares a config; a config already
     prepared with its plan needs only the check. An EP degree left to ``auto`` picks none for a
     model this refuses (:func:`_spec_refuses_ep`), so only an EP degree asked for explicitly, or an
-    expert-parallel plan handed in, meets these errors; both name the way around expert parallelism.
+    expert-parallel plan handed in, meets these errors.
     """
-    ep = _ep_spec(model_type)
-    # The FSDP2 load builds a causal LM and reads its tensors as stored, so a quantized or
-    # multimodal checkpoint (GPT-OSS's MXFP4, Llama-4's) needs a single process, as does one with
-    # an MTP head the load cannot build (--use_fsdp2 refuses Nemotron-H's).
+    refusal = _spec_refusal(model_type)
+    if refusal is None:
+        return
     without_ep = (
-        "without expert parallelism: in a single process, or FSDP2-sharded (--use_fsdp2 in "
-        "examples/hf_ptq/hf_ptq.py, or MODELOPT_FSDP_SIZE=world) if the FSDP2 load supports the "
-        "checkpoint, which takes an unquantized causal LM with no MTP head it cannot build (such "
-        "as Nemotron-H's)"
+        f"without expert parallelism: in a single process, or FSDP2-sharded {_fsdp2_way_out()} if "
+        f"the FSDP2 load supports the checkpoint, which takes {_FSDP2_TAKES}"
     )
-    if ep is not None and ep.unsupported:
-        raise NotImplementedError(
-            f"{model_type} cannot be quantized expert-parallel yet: {ep.unsupported} Quantize it "
-            f"{without_ep}."
-        )
-    # A model whose spec states no release, or that has no spec, still needs the load's floor: auto
-    # must pick no EP degree below it, rather than reach the load and fail there.
-    stated = ep.requires_transformers if ep is not None else None
-    floor = max(_EP_MIN_TRANSFORMERS, stated or _EP_MIN_TRANSFORMERS, key=parse)
-    try:
-        require_transformers(floor, f"{model_type} expert-parallel PTQ")
-    except RuntimeError as e:
-        raise RuntimeError(f"{e} Or quantize it {without_ep}.") from None
+    if isinstance(refusal, NotImplementedError):
+        raise NotImplementedError(f"{refusal} Quantize it {without_ep}.")
+    raise RuntimeError(f"{refusal} Or quantize it {without_ep}.")
 
 
 def _spec_refuses_ep(model_type: str) -> bool:
     """Whether :func:`check_distributed_support` refuses ``model_type``'s expert parallelism here."""
-    try:
-        check_distributed_support(model_type)
-    except RuntimeError:  # NotImplementedError is one too
-        return True
-    return False
+    return _spec_refusal(model_type) is not None
 
 
 def apply_distributed_support(
@@ -285,9 +312,9 @@ def _spec_ep_plan(model_type: str) -> dict[str, str]:
     (``unsupported``). Empty, too, where the plan ships with transformers rather than the spec
     (``qwen3_moe``, ``minimax_m3_vl``): the config carries it, and
     :func:`apply_distributed_support` keeps it as it is. A model below its spec's transformers floor
-    keeps its plan: its experts are routed all the same, so a run holding them whole on every rank
-    is refused rather than replicated. Only reads the spec: nothing is applied, checked or patched,
-    and ``prepare`` does not run.
+    keeps its plan: its experts are routed all the same, and the plan decision finds them by it to
+    warn that the model loads without expert parallelism, and why. Only reads the spec: nothing is
+    applied, checked or patched, and ``prepare`` does not run.
     """
     ep = _ep_spec(model_type)
     if ep is None or ep.unsupported:
