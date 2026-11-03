@@ -2655,7 +2655,8 @@ def test_native_fp8_experts_unpacked_temporary_fold(has_gate, exception, snapsho
     ("cfg", "algorithm"),
     [
         ({"num_bits": 4, "block_sizes": {-1: 128}}, {"method": "gptq", "block_size": 128}),
-        ({"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"}, "imatrix"),
+        # IQ1_S, since IQ formats that keep their scales leave the weight unrounded and pin codes.
+        ({"num_bits": "iq1_s", "block_sizes": {-1: 256}, "backend": "ggml"}, "imatrix"),
     ],
     ids=["gptq", "imatrix"],
 )
