@@ -35,7 +35,8 @@ def _test_megatron_generate_and_mmlu(rank, size, parallelism):
         initialize_for_megatron(pipeline_model_parallel_size=size, seed=SEED)
         model = get_mcore_qwen3_600m(pipeline_model_parallel_size=size).cuda().eval()
     elif parallelism == "cp":
-        # CP=4 hangs in the first MMLU batch (TE ring-attention P2P) on 4-GPU nodes; CI only has <=2.
+        # CP=4 hangs in the first MMLU batch on 4-GPU nodes; CI has <=2 GPUs.
+        # See https://github.com/NVIDIA/Model-Optimizer/issues/3178
         cp_size = min(size, 2)
         initialize_for_megatron(context_parallel_size=cp_size, seed=SEED)
         model = get_mcore_qwen3_600m(context_parallel_size=cp_size).cuda().eval()

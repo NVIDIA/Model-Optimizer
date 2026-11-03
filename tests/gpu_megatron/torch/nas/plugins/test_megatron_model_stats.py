@@ -518,7 +518,7 @@ def _test_formula_matches_hybrid_model(rank, size, parallelism):
         num_attention_heads=8,
         mamba_head_dim=mamba_head_dim,
         mamba_num_heads=mamba_num_heads,
-        mamba_num_groups=size if parallelism == "tp" else 2,  # must be divisible by tp_size
+        mamba_num_groups=max(size, 2) if parallelism == "tp" else 2,  # divisible by tp_size
         vocab_size=128,
         hybrid_layer_pattern=pattern,
         moe_grouped_gemm=False,
