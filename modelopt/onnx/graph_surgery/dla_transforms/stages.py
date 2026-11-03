@@ -81,6 +81,8 @@ def layout(graph: DlaGraph) -> int:
         split = layout_passes.SplitAxisLayout(graph)
         graph.apply_pass(split)
         count += split.transformed_nodes
+        count += apply_rules(graph, layout_rules.NORMALIZATION_RULES)
+        count += apply_rules(graph, layout_rules.NATIVE_RULES)
         count += apply_rules(graph, layout_rules.RANK_ADAPTER_RULES)
         boundaries = layout_passes.LayoutBoundaryCommit(graph)
         graph.apply_pass(boundaries)
