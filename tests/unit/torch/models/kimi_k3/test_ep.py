@@ -732,6 +732,19 @@ def test_prepare_refusal_finds_a_process_decompressing_another_checkpoint(monkey
     assert "needs a process of its own" in why
 
 
+@pytest.mark.parametrize("level", ["quantization_config", "text_config", "llm_config"])
+def test_a_quantization_config_counts_at_every_level_the_decompressor_reads(level):
+    """Whether prepare installs the decompressor follows where the decompressor itself finds a
+    quantization_config: at the top level, on text_config, or on llm_config."""
+    scheme = {"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"}
+    if level == "quantization_config":
+        config = SimpleNamespace(quantization_config=scheme)
+    else:
+        config = SimpleNamespace(**{level: SimpleNamespace(quantization_config=scheme)})
+
+    assert kimi_k3._quantized(config, "/ckpt")
+
+
 def test_prepare_refusal_finds_a_config_naming_no_model_class():
     """``prepare`` loads the checkpoint's code through the class its ``auto_map`` names."""
     config = SimpleNamespace(text_config=SimpleNamespace())
