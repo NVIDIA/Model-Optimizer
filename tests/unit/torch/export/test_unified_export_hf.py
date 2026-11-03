@@ -1354,47 +1354,43 @@ def test_expert_parallel_ranks_agree_on_their_experts_quantization_before_foldin
     )
 
 
-def test_an_expert_parallel_export_refuses_to_save_the_modelopt_state(tmp_path):
-    """Each expert-parallel rank holds only its own experts' ModelOpt state, so saving rank 0's
-    would write an incomplete one: refused before anything is written."""
+@pytest.mark.parametrize(
+    ("plan", "offloaded", "options", "refusal"),
+    [
+        # Each rank holds only its own experts' ModelOpt state: rank 0's would be incomplete.
+        (
+            DistributionPlan(2, ep_size=2),
+            False,
+            {"save_modelopt_state": True},
+            "expert-parallel export",
+        ),
+        # The offloaded streaming path is not expert-parallel-aware: each rank would write its own
+        # experts over the others'.
+        (DistributionPlan(2, ep_size=2), True, {}, "offloaded streaming path"),
+        # Below the world size, EP leaves FSDP2's dense shards replicated across the expert-parallel
+        # groups, which the no-gather writer cannot write.
+        (
+            DistributionPlan(4, ep_size=2, dense="fsdp"),
+            False,
+            {},
+            r"MODELOPT_EP_DEGREE=4 .* MODELOPT_FSDP_SIZE=1",
+        ),
+    ],
+    ids=["modelopt-state", "offloaded", "replicated-dense-shards"],
+)
+def test_an_expert_parallel_export_it_cannot_write_is_refused_before_folding(
+    tmp_path, monkeypatch, plan, offloaded, options, refusal
+):
+    """Refused before anything is folded or written, leaving the model as it was."""
     model = torch.nn.Sequential(torch.nn.Linear(16, 16))
     mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))
-    set_distribution_plan(model, DistributionPlan(2, ep_size=2))
-
-    with pytest.raises(NotImplementedError, match="expert-parallel export"):
-        export_hf_checkpoint(model, export_dir=tmp_path / "export", save_modelopt_state=True)
-
-    assert not (tmp_path / "export").exists()
-
-
-def test_an_offloaded_expert_parallel_export_is_refused_before_folding(tmp_path, monkeypatch):
-    """The offloaded streaming path is not expert-parallel-aware: every rank would write its own
-    experts over the others'. Refused before anything is folded or written."""
-    model = torch.nn.Sequential(torch.nn.Linear(16, 16))
-    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))
-    set_distribution_plan(model, DistributionPlan(2, ep_size=2))
-    monkeypatch.setattr(unified_export_hf, "has_accelerate_offload", lambda model: True)
+    set_distribution_plan(model, plan)
+    if offloaded:
+        monkeypatch.setattr(unified_export_hf, "has_accelerate_offload", lambda model: True)
     before = {k: v.clone() for k, v in model.state_dict().items()}
 
-    with pytest.raises(NotImplementedError, match="offloaded streaming path"):
-        export_hf_checkpoint(model, export_dir=tmp_path / "export")
-
-    after = model.state_dict()
-    assert after.keys() == before.keys()
-    assert all(torch.equal(after[k], v) for k, v in before.items())
-    assert not (tmp_path / "export").exists()
-
-
-def test_an_expert_parallel_plan_with_replicated_dense_shards_is_refused_before_folding(tmp_path):
-    """Below the world size, EP leaves FSDP2's dense shards replicated across the expert-parallel
-    groups, which the no-gather writer cannot write: refused before the export folds anything."""
-    model = torch.nn.Sequential(torch.nn.Linear(16, 16))
-    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))
-    set_distribution_plan(model, DistributionPlan(4, ep_size=2, dense="fsdp"))
-    before = {k: v.clone() for k, v in model.state_dict().items()}
-
-    with pytest.raises(NotImplementedError, match=r"MODELOPT_EP_DEGREE=4 .* MODELOPT_FSDP_SIZE=1"):
-        export_hf_checkpoint(model, export_dir=tmp_path / "export")
+    with pytest.raises(NotImplementedError, match=refusal):
+        export_hf_checkpoint(model, export_dir=tmp_path / "export", **options)
 
     after = model.state_dict()
     assert after.keys() == before.keys()
