@@ -18,7 +18,8 @@
 from onnxscript import ir
 from onnxscript.rewriter import pattern
 
-from .common import initializer_factory
+from .common import initializer_factory, static_shape
+from .layout.passes import snapshot
 
 __all__ = ["DlaGraph"]
 
@@ -50,6 +51,19 @@ class DlaGraph:
     def outputs(self):
         """Return current public output values."""
         return self.model.graph.outputs
+
+    def begin_layout(self) -> None:
+        """Capture the original shapes after preceding rewrites have finished."""
+        self.public_outputs = [
+            (value.name, static_shape(value), value.type) for value in self.outputs
+        ]
+        self.native_shapes, self.planned_shapes = snapshot(self.model)
+
+    def end_layout(self) -> None:
+        """Release phase snapshots before later precision conversion allocates new tensors."""
+        self.native_shapes.clear()
+        self.planned_shapes.clear()
+        self.public_outputs.clear()
 
     def apply_pattern(self, rule: pattern.RewriteRule) -> int:
         """Apply a single-rule batch with its own snapshot of existing nodes."""
