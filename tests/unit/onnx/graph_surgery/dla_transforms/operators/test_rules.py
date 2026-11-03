@@ -22,10 +22,12 @@ from onnx import TensorProto, helper, numpy_helper
 from onnx.reference import ReferenceEvaluator
 from onnxscript import ir
 
+from modelopt.onnx.graph_surgery.dla_transforms import stages
 from modelopt.onnx.graph_surgery.dla_transforms.context import DlaGraph
 from modelopt.onnx.graph_surgery.dla_transforms.operators import (
     INDEXING_RULES,
     MATRIX_RULES,
+    RECURRENT_RULES,
     weight_eligible,
 )
 
@@ -277,3 +279,148 @@ def _model(nodes, inputs, outputs, initializers=()):
         helper.make_graph(nodes, "logical", inputs, outputs, initializers),
         opset_imports=[helper.make_opsetid("", 21)],
     )
+
+
+@pytest.mark.parametrize(
+    ("direction", "runtime_state", "outputs", "public_states", "known_output_shape"),
+    [
+        ("forward", False, 3, True, True),
+        ("forward", False, 1, True, True),
+        ("forward", False, 3, False, True),
+        ("forward", False, 2, True, True),
+        ("forward", False, 1, True, False),
+        ("reverse", True, 3, True, True),
+        ("bidirectional", False, 3, True, True),
+    ],
+)
+def test_lstm_unrolling(direction, runtime_state, outputs, public_states, known_output_shape):
+    directions, hidden, features, steps = (2 if direction == "bidirectional" else 1), 2, 3, 3
+    names, shapes = (
+        ["Y", "Y_h", "Y_c"][:outputs],
+        [[steps, directions, 1, hidden], [directions, 1, hidden], [directions, 1, hidden]][
+            :outputs
+        ],
+    )
+    parameters = {
+        "W": ((np.arange(directions * 4 * hidden * features) % 9 - 4) / 32)
+        .astype(np.float32)
+        .reshape(directions, 4 * hidden, features),
+        "R": ((np.arange(directions * 4 * hidden * hidden) % 7 - 3) / 32)
+        .astype(np.float32)
+        .reshape(directions, 4 * hidden, hidden),
+        "B": ((np.arange(directions * 8 * hidden) % 5 - 2) / 64)
+        .astype(np.float32)
+        .reshape(directions, 8 * hidden),
+        "H": np.full([directions, 1, hidden], 0.125, np.float32),
+        "C": np.full([directions, 1, hidden], -0.25, np.float32),
+    }
+    inputs = [helper.make_tensor_value_info("X", TensorProto.FLOAT, [steps, 1, features])]
+    feeds = {"X": np.arange(steps * features, dtype=np.float32).reshape(steps, 1, features) / 16}
+    if runtime_state:
+        for name in ("H", "C"):
+            inputs.append(
+                helper.make_tensor_value_info(name, TensorProto.FLOAT, [directions, 1, hidden])
+            )
+            feeds[name] = parameters.pop(name)
+    graph = helper.make_graph(
+        [
+            helper.make_node(
+                "LSTM",
+                ["X", "W", "R", "B", "", "H", "C"],
+                names,
+                hidden_size=hidden,
+                direction=direction,
+            ),
+        ],
+        "lstm",
+        inputs,
+        [
+            helper.make_tensor_value_info(name, TensorProto.FLOAT, shape)
+            for index, (name, shape) in enumerate(zip(names, shapes, strict=True))
+            if public_states or index == 0
+        ],
+        [numpy_helper.from_array(value, name) for name, value in parameters.items()],
+    )
+    if directions == 2:
+        graph.node.extend(
+            [
+                helper.make_node("Transpose", ["Y"], ["moved"], perm=[0, 2, 1, 3]),
+                helper.make_node("Reshape", ["moved", "sequence_shape"], ["sequence_view"]),
+                helper.make_node("Transpose", ["Y"], ["moved_again"], perm=[0, 2, 1, 3]),
+                helper.make_node("Reshape", ["moved_again", "sequence_shape"], ["second_view"]),
+                helper.make_node("Reshape", ["X", "sequence_shape"], ["input_view"]),
+                helper.make_node("Identity", ["Y"], ["direct_sequence"]),
+                helper.make_node("Transpose", ["Y"], ["reordered"], perm=[1, 0, 2, 3]),
+                helper.make_node("Transpose", ["Y"], ["shared_moved"], perm=[0, 2, 1, 3]),
+                helper.make_node("Identity", ["shared_moved"], ["direct_moved"]),
+                helper.make_node("Reshape", ["shared_moved", "four_shape"], ["four_view"]),
+            ]
+        )
+        graph.initializer.append(
+            numpy_helper.from_array(np.array([0, 0, -1], np.int64), "sequence_shape")
+        )
+        graph.initializer.append(
+            numpy_helper.from_array(
+                np.array([steps, 1, directions, hidden], np.int64), "four_shape"
+            )
+        )
+        graph.output.append(
+            helper.make_tensor_value_info(
+                "sequence_view", TensorProto.FLOAT, [steps, 1, directions * hidden]
+            )
+        )
+        graph.output.append(
+            helper.make_tensor_value_info("input_view", TensorProto.FLOAT, [steps, 1, features])
+        )
+        graph.output.extend(
+            helper.make_tensor_value_info(name, TensorProto.FLOAT, shape)
+            for name, shape in [
+                ("second_view", [steps, 1, directions * hidden]),
+                ("direct_sequence", [steps, directions, 1, hidden]),
+                ("reordered", [directions, steps, 1, hidden]),
+                ("direct_moved", [steps, 1, directions, hidden]),
+                ("four_view", [steps, 1, directions, hidden]),
+            ]
+        )
+    source = onnx.shape_inference.infer_shapes(
+        helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)], ir_version=10)
+    )
+    model = ir.serde.deserialize_model(source)
+    if not known_output_shape:
+        model.graph[0].outputs[0].shape = None
+    assert _apply_rules(model, RECURRENT_RULES) == (3 if directions == 2 else 1)
+    ir.passes.common.RemoveUnusedNodesPass()(model)
+    ir.passes.common.TopologicalSortPass()(model)
+    result = onnx.shape_inference.infer_shapes(ir.serde.serialize_model(model), strict_mode=True)
+    onnx.checker.check_model(result, full_check=True)
+    expected = ReferenceEvaluator(source).run(None, feeds)
+    actual = ReferenceEvaluator(result).run(None, feeds)
+    for before, after in zip(expected, actual, strict=True):
+        np.testing.assert_allclose(before, after, rtol=2e-6, atol=2e-7)
+    assert all(node.op_type != "LSTM" for node in result.graph.node)
+    if not public_states:
+        assert sum(node.op_type == "Squeeze" for node in result.graph.node) == 0
+    assert any(node.op_type == "Conv" for node in result.graph.node)
+    if directions == 2:
+        consumer = next(
+            node
+            for node in model.graph
+            if node.op_type == "Transpose" and node.inputs[0].name == "Y"
+        )
+        assert consumer.attributes.get_ints("perm") == (0, 1, 2, 3)
+        stages.layout(DlaGraph(model))
+        promoted = onnx.shape_inference.infer_shapes(
+            ir.serde.serialize_model(model), strict_mode=True
+        )
+        onnx.checker.check_model(promoted, full_check=True)
+        for before, after in zip(
+            expected, ReferenceEvaluator(promoted).run(None, feeds), strict=True
+        ):
+            np.testing.assert_allclose(before, after, rtol=2e-6, atol=2e-7)
+        targets = {
+            value.name
+            for value in promoted.graph.initializer
+            if np.array_equal(numpy_helper.to_array(value), np.array([1, steps, 1, -1], np.int64))
+        }
+        assert len(targets) == 1
+    assert _apply_rules(model, RECURRENT_RULES) == 0
