@@ -46,6 +46,7 @@ import transformers.dynamic_module_utils as dmu
 import transformers.modeling_utils as mu
 import transformers.utils.import_utils as import_utils
 from _test_utils.torch import kimi_vl_tiny_modeling
+from safetensors.torch import save_file
 from torch import nn
 from transformers import (
     AutoConfig,
@@ -411,6 +412,59 @@ def test_the_build_step_lets_the_checkpoint_s_own_vlm_build_on_this_transformers
         assert type(model.language_model) is own
     finally:
         # The checkpoint's code stays imported otherwise, for later tests to find as a Kimi module.
+        for name in set(sys.modules) - loaded:
+            if name.startswith("transformers_modules."):
+                del sys.modules[name]
+
+
+@pytest.mark.parametrize("tied", [False, True], ids=["untied", "tied"])
+def test_a_load_after_the_build_step_holds_the_checkpoint_as_its_own_code_does(
+    monkeypatch, tmp_path, tied
+):
+    """What the build step leaves in place for a load off expert parallelism -- the import shims,
+    the staging and the ``tie_weights`` wrapper -- changes nothing it loads or computes: every stored
+    tensor loads as stored, tied as the checkpoint ties it, and the logits are those of the
+    checkpoint's own language model built with no patch. Dense only: the stand-in's per-expert
+    Linears have no forward."""
+    _restore_the_loader(monkeypatch)
+    _tiny_kimi_vl_checkpoint(tmp_path)
+    stored_config = json.loads((tmp_path / "config.json").read_text())
+    stored_config["tie_word_embeddings"] = tied
+    text = stored_config["text_config"]
+    text.update(intermediate_size=32, first_k_dense_replace=1, tie_word_embeddings=tied)
+    text.update(num_attention_heads=2, num_key_value_heads=2, kv_lora_rank=8, q_lora_rank=None)
+    text.update(qk_rope_head_dim=4, qk_nope_head_dim=4, v_head_dim=4, vocab_size=32)
+    (tmp_path / "config.json").write_text(json.dumps(stored_config))
+    loaded = set(sys.modules)
+    try:
+        config = AutoConfig.from_pretrained(tmp_path, trust_remote_code=True)
+        kimi_vl.make_buildable(config, ckpt_path=str(tmp_path), trust_remote_code=True)
+        built = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+        stored = {
+            name: tensor
+            for name, tensor in built.state_dict().items()
+            if not (tied and name == "language_model.lm_head.weight")
+        }
+        save_file(stored, str(tmp_path / "model.safetensors"))
+
+        model = AutoModelForCausalLM.from_pretrained(tmp_path, trust_remote_code=True).eval()
+        # The checkpoint's own language model with no patch: its tie_weights is transformers' own.
+        own = type(model.language_model)(config.text_config).eval()
+        prefix = "language_model."
+        own.load_state_dict(
+            {n.removeprefix(prefix): t for n, t in stored.items() if n.startswith(prefix)},
+            strict=not tied,
+        )
+        own.tie_weights()
+        ids = torch.randint(0, 32, (2, 8), generator=torch.Generator().manual_seed(0))
+
+        state = model.state_dict()
+        assert all(torch.equal(state[name], tensor) for name, tensor in stored.items())
+        lm = model.language_model
+        assert (lm.lm_head.weight.data_ptr() == lm.model.embed_tokens.weight.data_ptr()) == tied
+        with torch.no_grad():
+            assert torch.equal(model(ids).logits, own(ids).logits)
+    finally:
         for name in set(sys.modules) - loaded:
             if name.startswith("transformers_modules."):
                 del sys.modules[name]
