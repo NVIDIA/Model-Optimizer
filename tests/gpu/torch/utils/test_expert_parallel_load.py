@@ -55,6 +55,23 @@ from modelopt.torch.utils.plugins.model_load_utils import load_and_prepare_ep
 NUM_EXPERTS = 8
 
 
+def _decisive_router(model):
+    """Route token ``t`` to expert ``t % 8`` and one more its id picks, by a code its embedding
+    carries: every token's top two scores clear the third by over 2 in both layers. A random router
+    leaves near ties, which bf16 rounding flips on some GPUs (an RTX 6000 Ada), and a token that
+    takes other experts sends its gradient to other weights."""
+    with torch.no_grad():
+        embed = model.model.embed_tokens.weight
+        embed[:, :NUM_EXPERTS] = 0
+        for token in range(embed.shape[0]):
+            first = token % NUM_EXPERTS
+            second = (first + 1 + (token // NUM_EXPERTS) % (NUM_EXPERTS - 1)) % NUM_EXPERTS
+            embed[token, first], embed[token, second] = 1.0, 0.8
+        for layer in model.model.layers:
+            layer.mlp.gate.weight.zero_()
+            layer.mlp.gate.weight[:, :NUM_EXPERTS] = 0.5 * torch.eye(NUM_EXPERTS)
+
+
 def _save_tiny_qwen3_moe(ckpt_dir):
     config = Qwen3MoeConfig(
         hidden_size=64,
@@ -69,7 +86,9 @@ def _save_tiny_qwen3_moe(ckpt_dir):
         max_position_embeddings=64,
     )
     torch.manual_seed(0)
-    AutoModelForCausalLM.from_config(config).to(torch.bfloat16).save_pretrained(ckpt_dir)
+    model = AutoModelForCausalLM.from_config(config)
+    _decisive_router(model)
+    model.to(torch.bfloat16).save_pretrained(ckpt_dir)
 
 
 def _local(tensor):
@@ -300,6 +319,38 @@ def _relative_error(actual, expected):
     ).item()
 
 
+def _routes(model, batch):
+    """Each layer's experts for every token of ``batch``, sorted: both routers emit global ids."""
+    routes = []
+    hooks = [
+        layer.mlp.gate.register_forward_hook(
+            lambda module, args, output: routes.append(output[2].sort(-1).values)
+        )
+        for layer in model.model.layers
+    ]
+    try:
+        with torch.no_grad():
+            model(batch)
+    finally:
+        for hook in hooks:
+            hook.remove()
+    return routes
+
+
+def _assert_routes_match_the_whole_model(model, whole, batch):
+    """The gradients compare only if every token takes the same experts in both models: one routed
+    elsewhere sends its gradient to other weights, which no tolerance should absorb. Said so, rather
+    than as the gradient errors it would cause."""
+    problems = []
+    for layer, (sharded, reference) in enumerate(zip(_routes(model, batch), _routes(whole, batch))):
+        if differ := (sharded != reference).any(-1).sum().item():
+            problems.append(
+                f"routing differs: layer {layer} sends {differ} of {sharded.shape[0]} tokens to "
+                "other experts than the whole model"
+            )
+    _fail_together(problems)
+
+
 def _assert_grads_match_the_whole_model(model, per_batch, rank, size, ep_degree):
     """Routed experts collect the gradient of every token routed to them, their EP group's batches;
     FSDP2-sharded dense parameters hold the gradient averaged over every rank; replicated dense
@@ -347,6 +398,7 @@ def _sharded_model_backward_matches_the_whole_one(rank, size, ckpt_dir, fsdp_den
 
     batches = _batches(size)
     mine = batches[rank].to(device)
+    _assert_routes_match_the_whole_model(model, whole, mine)
     model(mine, labels=mine).loss.backward()
     _assert_grads_match_the_whole_model(
         model, _whole_model_grads_per_batch(whole, batches, device), rank, size, ep_degree
@@ -420,6 +472,7 @@ def _quantized_sharded_model_trains_like_the_whole_one(
         quantizer.amax = reference.amax
     _fail_together(problems)
 
+    _assert_routes_match_the_whole_model(model, whole, mine)
     model(mine, labels=mine).loss.backward()
     _assert_grads_match_the_whole_model(
         model, _whole_model_grads_per_batch(whole, batches, device), rank, size, ep_degree
