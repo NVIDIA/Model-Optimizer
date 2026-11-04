@@ -849,6 +849,7 @@ def _distributed_save_hf_checkpoint_impl(
         sharded_sd[_k] = _to_normal(sharded_sd[_k])
     prefixes = _fused_experts_prefixes(sharded_sd)
     prefix_set = set(prefixes)
+    prefix_dots = tuple(prefix + "." for prefix in prefixes)
 
     def _is_expert_key(key: str) -> bool:
         for proj in _FUSED_PROJ:
@@ -895,6 +896,25 @@ def _distributed_save_hf_checkpoint_impl(
     local_sd: dict = {}
 
     def split_experts(sharded: dict, into: dict) -> dict:
+        if plan.is_expert_parallel:
+            # Only the experts' own weights and scales are split by expert. Any other plain tensor
+            # under a fused-experts module (a fused bias, say) is this rank's own slice under
+            # expert parallelism, which the dense path would take for one tensor every rank holds
+            # whole, writing a single rank's slice with no error.
+            sliced = sorted(
+                k
+                for k, v in sharded.items()
+                if k.startswith(prefix_dots)
+                and not _is_expert_key(k)
+                and "_quantizer" not in k
+                and not isinstance(v, DTensor)
+            )
+            if sliced:
+                raise NotImplementedError(
+                    f"The expert-parallel export cannot write {sliced[:3]}: plain tensors under a "
+                    "fused-experts module other than its experts' weights and scales are not "
+                    "split by expert, and each rank holds only its own experts' share of them."
+                )
         numbers = {}
         if write_experts:
             for prefix in prefixes:

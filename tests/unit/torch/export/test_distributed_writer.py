@@ -329,6 +329,41 @@ def _expert_numbers_job(rank, world_size, tmp_dir, count_known):
         assert not list(export.glob("*.safetensors"))
 
 
+def _sliced_bias_job(rank, world_size, tmp_dir):
+    # Each rank holds its own two of the four experts as plain tensors, as an expert-parallel load
+    # leaves them before transformers 5.16, and a fused bias over those two: a slice of the same
+    # shape on every rank.
+    model = _load(tmp_dir / "src")
+    model.config.num_local_experts = 4
+    set_distribution_plan(model, DistributionPlan(world_size, ep_size=world_size))
+    state = ParallelState()
+    state.expert_model_parallel_group = _coordinate(rank, world_size)
+    state.data_parallel_group = _coordinate(0, 1)
+    for layer in model.model.layers:
+        layer.mlp.experts._parallel_state = state
+        layer.mlp.experts.register_buffer("gate_up_proj_bias", torch.full((2, 64), float(rank)))
+    refused = None
+    with bounded_collectives():
+        # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
+        # the shared worker down instead of failing this test alone.
+        try:
+            _write(model, tmp_dir / "export")
+        except NotImplementedError as e:
+            refused = str(e)
+    assert refused is not None and "gate_up_proj_bias" in refused, refused
+    assert not list((tmp_dir / "export").glob("*.safetensors"))
+
+
+def test_an_expert_parallel_export_refuses_a_sliced_tensor_beside_the_experts(
+    cpu_dist_workers, tmp_path
+):
+    """A fused bias under expert parallelism is each rank's own slice, the same shape on every rank,
+    which the writer does not split by expert: refused on every rank rather than written from one
+    rank alone."""
+    _save(_mixtral_config(num_local_experts=2), tmp_path / "src")
+    cpu_dist_workers.run(_sliced_bias_job, tmp_dir=tmp_path)
+
+
 @pytest.mark.parametrize("count_known", [True, False], ids=["count-known", "count-unknown"])
 def test_the_ranks_write_every_expert_number_once(cpu_dist_workers, tmp_path, count_known):
     """Each rank's experts get their global numbers, and the ranks between them write 0..E-1 once
