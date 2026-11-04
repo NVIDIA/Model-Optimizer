@@ -100,6 +100,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.fsdp2_utils import fsdp2_root_unsharded
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.mlflow import add_mlflow_args, resolve_mlflow_args
@@ -248,6 +249,8 @@ def make_calib_dataloader(
             seed=42,
             use_media_shards=True,
             max_shards=1,
+            dp_size=args.dist_state.world_size if args.use_fsdp2 else 1,
+            dp_rank=args.dist_state.rank if args.use_fsdp2 else 0,
         )
     elif model_type == "whisper":
         assert processor is not None and isinstance(processor, WhisperProcessor), (
@@ -350,6 +353,10 @@ def load_model(args: argparse.Namespace):
             attn_implementation=args.attn_implementation,
             hf_config=hf_config,
         )
+        # Calibration sizes its batch, and the export writes, by how the model is distributed.
+        set_distribution_plan(
+            full_model, DistributionPlan(args.dist_state.world_size, dense="fsdp")
+        )
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
             args.local_checkpoint_path,
@@ -416,7 +423,7 @@ def load_model(args: argparse.Namespace):
     # Default to image-text calibration for VLM models. Skip for the AutoQuantize recipe path, whose
     # text-only path does not support image-text calibration yet (auto_quantize() would raise);
     # auto-enabling it here would make Nemotron-VL AutoQuantize fail unconditionally. Nor for FSDP2,
-    # which calibrates on text only.
+    # where image-text calibration is opt-in via --calib_with_images.
     if (
         is_nemotron_vl_model
         and not args.calib_with_images
@@ -1370,9 +1377,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Run calibration under PyTorch FSDP2 (requires torchrun); takes precedence over "
             "--use_seq_device_map. Includes experimental weight and KV-cache AutoQuantize. "
-            "Supports causal LMs and VLMs with text-only calibration (no VILA / encoder-decoder / "
-            "image-text calibration / models whose forward requires images / pack-quantized / "
-            "speculative / sparsity / MTP)."
+            "Supports causal LMs and VLMs, calibrated on text or, with --calib_with_images, on "
+            "image-text samples (required for a VLM whose forward needs images). Not supported: "
+            "VILA / encoder-decoder / pack-quantized / speculative / sparsity / MTP."
         ),
     )
     parser.add_argument(

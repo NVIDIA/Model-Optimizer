@@ -13,7 +13,7 @@ Changelog
 - Add ``use_weight_scale=False`` to ``awq_lite`` and ``awq_full`` calibration for activation-only AWQ scale search. Existing weight-and-activation scaling remains the default.
 - Support text-only Qwen conditional-generation checkpoints in the experimental FSDP2 weight
   AutoQuantize path and preserve their linear-attention fusion groups during mixed-format export.
-- ``--use_fsdp2`` PTQ in ``examples/hf_ptq`` now supports vision-language models with text-only calibration, not only Qwen3.5. Image-text calibration (``--calib_with_images``), models whose forward requires images (such as Nemotron Nano VL) and encoder-decoder models are still rejected.
+- ``--use_fsdp2`` PTQ in ``examples/hf_ptq`` now supports vision-language models, not only Qwen3.5, calibrated on text or, with ``--calib_with_images``, on image-text samples; the vision tower is quantized only if the recipe enables it. A model whose forward requires images needs ``--calib_with_images``, and encoder-decoder models and Nemotron Nano VL are not supported yet.
 - Add experimental data-parallel/FSDP2 KV-cache AutoQuantize, including composed weight-then-KV searches in ``examples/hf_ptq`` with synchronized calibration, scoring, selection, and resumable per-rank checkpoints. FSDP2 recipe scoring uses a global sample budget and defaults to a calibration batch size of 1 per rank.
 - Add imatrix calibration (``algorithm: {method: imatrix}``) for the GGML formats with a weighted search: each weight is encoded once, its search weighted by the square root of its inputs' per-column ``E[x^2]`` (llama.cpp's imatrix statistic), and HF fused-MoE experts get one statistic per expert. A weight that already holds final codes is left alone, so ``[{method: gptq}, {method: imatrix}]`` runs GPTQ where it applies and imatrix on the rest; the built-in IQ1 and IQ2 recipes now do this, and new ``<format>_experts_only`` recipes apply imatrix to the routed MoE experts alone.
 - GPTQ now also quantizes HuggingFace fused MoE experts, each with its own Hessian from the tokens routed to it; they were previously skipped. The built-in IQ1 and IQ2 recipes therefore run GPTQ on the experts too, and large MoEs need layerwise calibration to hold one layer's expert Hessians at a time.
@@ -25,10 +25,12 @@ Changelog
 - Speed up NVFP4 QAT and QAD of Hugging Face fused MoE experts: all experts of a projection are now fake-quantized in one kernel launch instead of one per expert, about 2x faster per MoE layer on Qwen3-30B-A3B with FSDP2.
 - ``hf_ptq.py`` calibrates Qwen3.8 (``qwen4_exp``) without running its QSA indexer's per-query Python loop when every visible key fits the indexer's token budget, with bit-identical results. On Qwen3.8-Flash-Next this saves about two hours of layerwise calibration.
 - Speed up Hugging Face QAT and QAD with ``QATTrainer``, ``QADTrainer`` or ``--manual_gc``: the ``gc.collect()`` run before each training step now skips the model and optimizer state, saving about 1 s per step (30%) on Qwen3-30B-A3B.
+- Add an opt-in no-gather HuggingFace export for FSDP2-sharded models: with ``MODELOPT_FSDP2_EXPORT=nogather``, ``export_hf_checkpoint`` moves each tensor once, to the one rank that writes it, instead of all-gathering each FSDP2 unit on every rank as the default export does. Fused MoE experts stay sharded, each rank writing its own, and a conversion mapping that splits or merges tensors, which the default export refuses, is reversed as a single-process export reverses it.
 
 *Speculative Decoding*
 
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
+- Add support for the `SPEED-Bench v1.1 <https://huggingface.co/datasets/nvidia/SPEED-Bench>`_ dataset.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
@@ -52,6 +54,7 @@ Changelog
 **Backward Breaking Changes**
 
 - ``QDQAutotunerBase.export_onnx(output_path=...)`` now returns ``None`` instead of serialized bytes. Omit ``output_path`` to keep the bytes-returning behavior, which remains subject to protobuf size limits.
+- ``examples/hf_ptq/hf_ptq.py --use_fsdp2`` on more than one GPU now refuses calibration that keeps its statistics on each rank, which calibrated the ranks' shards of a weight differently: AWQ-Lite, AWQ-Full, SVDQuant, local Hessian and imatrix, also as an AutoQuantize candidate (run them without ``--use_fsdp2``). It also raises when a calibration batch runs out of GPU memory, instead of retrying it in smaller pieces: set ``--batch_size`` to one that fits.
 - ``export_mcore_gpt_to_hf`` given a Hugging Face Hub model ID no longer writes the tokenizer, processor, generation config or remote-code files. Pass a local directory instead, e.g. from ``modelopt.torch.export.ensure_local_checkpoint``.
 - Drop support for Python 3.10, which has reached end-of-life. ModelOpt now requires Python 3.11 or later.
 - Bump minimum required PyTorch version to 2.10.
@@ -63,11 +66,13 @@ Changelog
 - Diffusion HF exports now omit attention quantizer buffers by default, except for FLUX.1, which retains enabled Q/K/V ``_amax`` keys for runtime compatibility; other consumers of those keys can opt in with ``export_attention_quantizers=True`` (CLI: ``--extra-param export_attention_quantizers=true``). Disabled attention quantizers remain excluded, and diffusion components, including LTX-2, no longer emit KV-cache quantization metadata.
 - ``hf_quant_config.json`` of an INT4 or W4A8 AWQ checkpoint now sets ``pre_quant_scale`` per layer, only for layers that have the tensor. A model whose fused-MoE experts have none (AWQ never applies to them) is now exported as ``MIXED_PRECISION`` with per-layer entries instead of a uniform algorithm.
 - The Windows FVD example rejects I3D checkpoints requiring unrestricted pickle loading. Custom TorchScript archives now require ``--weights-sha256`` with a trusted checksum; tensor state dictionaries continue to load directly.
+- SPEED-Bench preparation script in ``examples/specdec_bench/prepare_data.py`` now supports only the latest version (v1.1); older versions of the dataset, including v1.0, are no longer supported.
 - A ``modelopt_state`` saved by an earlier release for a Hugging Face model whose fused MoE experts are stored transposed without a quantized wrapper of their own (for example Aria's) no longer restores, since those experts are now left unquantized. The checkpoints such a state exported had wrong expert weights, so there is nothing to migrate.
 - ``mtq.quantize`` and ``mto.restore`` no longer force a Hugging Face model's fused MoE experts onto the ``eager`` backend: calibration and every later forward (QAT/QAD training, AutoQuantize scoring, fake-quant evaluation) run on the ``grouped_mm`` backend Transformers selects by default, so calibrated activation scales (some of Qwen3-30B-A3B's moved by up to about 10%), step time and memory can differ from earlier releases. Load the model with ``experts_implementation="eager"`` (``--experts_implementation eager`` in ``hf_ptq.py``) to run as earlier releases did.
 - ``mtq.calibrate`` now raises an error, naming the modules, when a Hugging Face fused-experts forward reaches neither quantizer hook (a hand-written ``bmm`` forward that transformers cannot redirect, say), instead of exporting weight-derived input scales with a warning.
 
 - Layerwise-calibration resume (``checkpoint_dir``) now loads checkpoint files with ``weights_only=True``. A checkpoint directory written by an earlier release whose layer inputs hold objects other than tensors, plain containers or Hugging Face dynamic caches can no longer be resumed; recalibrate in a fresh directory, or disable checkpointing.
+- ``export_hf_checkpoint`` now reads how a model is distributed from the plan recorded on it, and raises for an FSDP2-sharded model, or one in a multi-rank run, that carries none. ``load_pretrained`` and ``examples/hf_ptq/hf_ptq.py --use_fsdp2`` record it; for a model you distribute yourself (``fsdp2_wrap`` and ``parallel_load_and_prepare_fsdp2`` record none), or export from several ranks as a DDP script does, record one with ``modelopt.torch.utils.distributed.set_distribution_plan`` before calibrating or exporting it, e.g. ``DistributionPlan(world_size)`` when every rank holds the whole model.
 
 **Deprecations**
 
@@ -122,6 +127,7 @@ Changelog
 - Fix ``export_hf_checkpoint`` of an FSDP2 model quantized with W4A8 AWQ (``W4A8_AWQ_BETA_CFG``), which failed with an ``AttributeError`` on every rank.
 - AWQ calibration (``awq_lite``, ``awq_full``) of an FSDP2 model sharded over more than one rank is now rejected with ``NotImplementedError`` by ``mtq.quantize``, ``mtq.calibrate`` and ``mtq.auto_quantize`` (before its search starts, its default formats included), and by ``examples/hf_ptq --use_fsdp2`` before loading the model: each rank would fold a different smoothing scale into its weight shard. Calibrate in a single process, or use a non-AWQ algorithm.
 - ``mtq.compress`` now rejects W4A8 weights with ``NotImplementedError``: a compressed W4A8 model could neither run nor be reloaded.
+- Fix dynamic NVFP4 fake quantization with a block size other than 16, such as the block-32 weights of ``W4A8_NVFP4_FP8_CFG`` and ``NVFP4_MLP_WEIGHT_ONLY_CFG``, using blocks of 16 on GPUs with compute capability 8.9 or newer. Regular checkpoint exports after non-layerwise ``max`` calibration are unaffected; redo QAT, QAD, GPTQ, AWQ and layerwise calibration, vLLM fake-quant exports and fake-quantized accuracy evaluation done with such configs.
 - The ``evaluation`` agent skill's NeMo Gym MRCR recipe no longer passes ``HF_TOKEN`` on the command line, where other users on the node could read it, and keeps its rollout script in a private temporary directory instead of a fixed ``/tmp`` path.
 - Fake quantization of an NVFP4 affine KV cache (``nvfp4_affine``) now applies its calibrated bias; it ignored the bias and saturated the simulated KV cache. Re-quantize and re-evaluate models quantized with it.
 

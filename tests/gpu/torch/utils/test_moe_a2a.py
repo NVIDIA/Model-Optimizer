@@ -13,18 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GPU tests for the ``torch_a2a`` expert-parallel MoE transport (``a2a_moe``)."""
+"""GPU tests for the ``torch_a2a`` expert-parallel MoE transport (``a2a_moe``), and for a model
+loaded expert-parallel on it, calibrated and exported."""
 
 import copy
-import dataclasses
-from datetime import timedelta
+import json
 
 import pytest
 import torch
 import torch.distributed as dist
 from _test_utils.torch.distributed.utils import bounded_collectives
 from packaging.version import Version
-from torch.distributed.device_mesh import init_device_mesh
+from safetensors.torch import load_file
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.moe as moe
@@ -33,12 +33,17 @@ from modelopt.torch.utils.distributed import (
     DistributionPlan,
     ParallelState,
     distributed_forward_loop,
-    set_distribution_plan,
 )
 
 transformers = pytest.importorskip("transformers")
-from transformers import AutoConfig, AutoModelForCausalLM, Qwen3MoeConfig
-from transformers.distributed import DistributedConfig
+from transformers import AutoModelForCausalLM, Qwen3MoeConfig
+
+from modelopt.torch.export.quant_aware_conversion import revert_weight_conversion_quant_aware
+from modelopt.torch.export.unified_export_hf import (
+    _export_transformers_checkpoint,
+    export_hf_checkpoint,
+)
+from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 # One MoE layer's expert stage, big enough that the order of each token's top-k adds shows in bf16.
 TOKENS, HIDDEN, EXPERTS, TOP_K = 4096, 1024, 16, 8
@@ -88,7 +93,7 @@ def test_torch_a2a_gives_grouped_mms_result_bit_for_bit(dist_workers):
     dist_workers.run(_grouped_mm_bit_for_bit_job)
 
 
-NUM_EXPERTS = 8
+NUM_LAYERS, NUM_EXPERTS = 2, 8
 
 
 def _save_tiny_qwen3_moe(ckpt_dir):
@@ -96,7 +101,7 @@ def _save_tiny_qwen3_moe(ckpt_dir):
         hidden_size=64,
         intermediate_size=128,
         moe_intermediate_size=32,
-        num_hidden_layers=2,
+        num_hidden_layers=NUM_LAYERS,
         num_attention_heads=4,
         num_key_value_heads=2,
         num_experts=NUM_EXPERTS,
@@ -108,34 +113,6 @@ def _save_tiny_qwen3_moe(ckpt_dir):
     AutoModelForCausalLM.from_config(config).to(torch.bfloat16).save_pretrained(ckpt_dir)
 
 
-def _load_expert_parallel(ckpt_dir, size):
-    """The model with its experts sharded over every rank by transformers' own expert-parallel load,
-    on the ``torch_a2a`` styles and experts forward, and the mesh they are sharded over."""
-    moe.register_torch_a2a()
-    config = AutoConfig.from_pretrained(ckpt_dir)
-    swap = {"ep_router": "torch_a2a_router", "moe_tp_experts": "torch_a2a_experts"}
-    config.base_model_ep_plan = {k: swap.get(v, v) for k, v in config.base_model_ep_plan.items()}
-    mesh = init_device_mesh("cuda", (size,), mesh_dim_names=("ep",))
-    # Each option where this release takes it: on DistributedConfig when it has a field for it.
-    fields = {field.name for field in dataclasses.fields(DistributedConfig)}
-    options = {"tp_plan": "auto", "tp_size": size}
-    model = AutoModelForCausalLM.from_pretrained(
-        ckpt_dir,
-        config=config,
-        dtype=torch.bfloat16,
-        device_mesh=mesh,
-        distributed_config=DistributedConfig(
-            enable_expert_parallel=True, **{k: v for k, v in options.items() if k in fields}
-        ),
-        experts_implementation="torch_a2a",
-        **({} if "tp_plan" in fields else {"tp_plan": "auto"}),
-    )
-    for module in model.modules():  # the experts forward reads it at forward time
-        if hasattr(getattr(module, "config", None), "_experts_implementation"):
-            module.config._experts_implementation = "torch_a2a"
-    return model, mesh
-
-
 def _calibrated(model):
     return {
         name: module.amax.float().cpu()
@@ -144,58 +121,102 @@ def _calibrated(model):
     }
 
 
-def _expert_parallel_calibration_job(rank, size, ckpt_dir):
+def _relative_error(got, want):
+    got, want = got.float().cpu(), want.float().cpu()
+    return ((got - want).norm() / want.norm().clamp_min(1e-12)).item()
+
+
+def _raw_bytes(tensor):
+    return tensor.contiguous().reshape(-1).view(torch.uint8)
+
+
+def _export_problems(export_dir, want):
+    """How the checkpoint in ``export_dir`` differs from ``want``, the single-process export's.
+
+    Each tensor sits in exactly one shard, the one the index names for it, under a name ``want``
+    has, every expert of every layer among them. Each is byte-identical but the activation scales:
+    those come from bf16 activations computed in another order, so they agree within 2e-2.
+    """
+    weight_map = json.loads((export_dir / "model.safetensors.index.json").read_text())["weight_map"]
+    got, problems = {}, []
+    for path in sorted(export_dir.glob("*.safetensors")):
+        for key, tensor in load_file(path).items():
+            if weight_map.get(key) != path.name:  # written twice, or not where the index says
+                problems.append(f"{key} is in {path.name}; the index names {weight_map.get(key)}")
+            got[key] = tensor
+    problems += [f"the index names {key}, but no shard holds it" for key in weight_map.keys() - got]
+    experts = [key for key in want if ".mlp.experts." in key and key.endswith("_proj.weight")]
+    if len(experts) != NUM_LAYERS * NUM_EXPERTS * 3:  # gate, up and down
+        problems.append(f"the single-process export has {len(experts)} expert weights, not all")
+    problems += [f"{key} is not written" for key in want.keys() - got.keys()]
+    problems += [f"{key} is not in the single-process export" for key in got.keys() - want.keys()]
+    for key in want.keys() & got.keys():
+        tensor, expected = got[key], want[key].cpu()
+        if (tensor.dtype, tensor.shape) != (expected.dtype, expected.shape):
+            problems.append(
+                f"{key}: {tensor.dtype} {list(tensor.shape)}, not {expected.dtype} "
+                f"{list(expected.shape)}"
+            )
+        elif key.endswith("input_scale"):
+            if not (error := _relative_error(tensor, expected)) < 2e-2:
+                problems.append(f"{key}: off by {error:.3g} (relative)")
+        elif not torch.equal(_raw_bytes(tensor), _raw_bytes(expected)):
+            problems.append(f"{key} is not byte-identical")
+    return sorted(problems)
+
+
+def _expert_parallel_calibration_and_export_job(rank, size, ckpt_dir, export_dir, ep_degree):
     device = torch.device("cuda", rank)
     batches = [
         torch.randint(0, 128, (2, 16), generator=torch.Generator().manual_seed(r))
         for r in range(size)
     ]
-    # The scales' syncs give up in seconds on this group of every rank: the experts' expert-parallel
-    # group (they span every rank), and the dense modules' data-parallel one.
-    group = dist.new_group(timeout=timedelta(seconds=120))
-    dist.barrier(group=group)
-    try:
-        with bounded_collectives(seconds=120):
-            model, mesh = _load_expert_parallel(ckpt_dir, size)
-            for name, module in model.named_modules():
-                module._parallel_state = (
-                    ParallelState(data_parallel_group=-1, expert_model_parallel_group=group)
-                    if ".mlp.experts" in name
-                    else ParallelState(data_parallel_group=group)
-                )
-            set_distribution_plan(model, DistributionPlan(size, ep_size=size))
-            # Each rank its own batch, through the quantized model's re-planted torch_a2a forwards.
-            forward_loop = distributed_forward_loop(
-                model, [{"input_ids": batches[rank]}], device=device, ep_mesh=mesh
-            )
-            mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop)
+    with bounded_collectives(seconds=120):
+        # The production load: each expert on one rank of every expert-parallel group of ep_degree
+        # ranks, and every module's ParallelState seeded for the scales' syncs.
+        model = load_pretrained(ckpt_dir, distribution=DistributionPlan(size, ep_size=ep_degree))
+        # Each rank its own batch, through the quantized model's re-planted torch_a2a forwards.
+        forward_loop = distributed_forward_loop(
+            model,
+            [{"input_ids": batches[rank]}],
+            device=device,
+            ep_mesh=moe.expert_parallel_mesh(model),
+        )
+        mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop)
 
-            # The whole model, calibrated in one process on every rank's batch.
-            whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16).to(device)
-            for module in whole.modules():
-                module._parallel_state = ParallelState(data_parallel_group=-1)
-            mtq.quantize(whole, mtq.FP8_DEFAULT_CFG, lambda m: [m(b.to(device)) for b in batches])
+        # The whole model, calibrated in one process on every rank's batch.
+        whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16).to(device)
+        for module in whole.modules():
+            module._parallel_state = ParallelState(data_parallel_group=-1)
+        mtq.quantize(whole, mtq.FP8_DEFAULT_CFG, lambda m: [m(b.to(device)) for b in batches])
 
-            sharded, reference = _calibrated(model), _calibrated(whole)
-            problems, compared = [] if sharded else ["no quantizer was calibrated"], []
-            per_rank = NUM_EXPERTS // size
-            for name, amax in sharded.items():
-                if "_weight_quantizers." in name:  # this rank's local expert -> the global one
-                    prefix, index = name.rsplit(".", 1)
-                    name = f"{prefix}.{rank * per_rank + int(index)}"
-                compared.append(name)
-                want = reference.get(name)
-                if want is None:
-                    problems.append(f"{name} is calibrated here but not in the whole model")
-                    continue
-                # bf16 activations, computed in another order: compare by relative norm.
-                error = ((amax - want).norm() / want.norm().clamp_min(1e-12)).item()
-                if not error < 2e-2:
-                    problems.append(f"{name}: amax off by {error:.3g} (relative)")
-            gathered = [None] * size
-            dist.all_gather_object(gathered, (problems, compared))
-    finally:
-        dist.destroy_process_group(group)
+        sharded, reference = _calibrated(model), _calibrated(whole)
+        problems, compared = [] if sharded else ["no quantizer was calibrated"], []
+        per_rank = NUM_EXPERTS // ep_degree
+        for name, amax in sharded.items():
+            if "_weight_quantizers." in name:  # this rank's local expert -> the global one
+                prefix, index = name.rsplit(".", 1)
+                # An expert-parallel group's ranks are consecutive.
+                name = f"{prefix}.{rank % ep_degree * per_rank + int(index)}"
+            compared.append(name)
+            want = reference.get(name)
+            if want is None:
+                problems.append(f"{name} is calibrated here but not in the whole model")
+                continue
+            # bf16 activations, computed in another order: compare by relative norm.
+            error = _relative_error(amax, want)
+            if not error < 2e-2:
+                problems.append(f"{name}: amax off by {error:.3g} (relative)")
+
+        # The no-gather writer's checkpoint, against what the single-process export writes for the
+        # whole model.
+        export_hf_checkpoint(model, dtype=torch.bfloat16, export_dir=export_dir)
+        if rank == 0:
+            written, _ = _export_transformers_checkpoint(whole, torch.bfloat16)
+            written = revert_weight_conversion_quant_aware(whole, dict(written))
+            problems += _export_problems(export_dir, written)
+        gathered = [None] * size
+        dist.all_gather_object(gathered, (problems, compared))
 
     found = [problem for problems, _ in gathered for problem in problems]
     assert not found, "\n".join(found[:20])
@@ -203,15 +224,26 @@ def _expert_parallel_calibration_job(rank, size, ckpt_dir):
     assert experts and experts <= {name for _, names in gathered for name in names}, experts
 
 
-def test_expert_parallel_calibration_matches_the_whole_model(need_2_gpus, dist_workers, tmp_path):
-    """transformers' own expert-parallel load on the torch_a2a transport, quantized and calibrated
-    through distributed_forward_loop, each rank on its own batch: every expert's weight scales and
-    every activation scale match the whole model calibrated on every rank's batch. Quantizer
-    insertion drops the transport's forward wrappers on transformers >= 5.16, which the loop
-    re-plants."""
+@pytest.mark.parametrize("ep_share", [1, 2], ids=["ep-world", "ep-half"])
+def test_expert_parallel_calibration_and_export_match_the_whole_model(
+    need_2_gpus, dist_workers, tmp_path, ep_share
+):
+    """The production expert-parallel load on the torch_a2a transport, with the experts sharded over
+    every rank, or over half of them and replicated across the halves, quantized and calibrated
+    through distributed_forward_loop, each rank on its own batch, then exported by the no-gather
+    writer. Every expert's weight scales and every activation scale match the whole model
+    calibrated on every rank's batch, and the checkpoint matches the whole model's single-process
+    export (:func:`_export_problems`). Quantizer insertion drops the transport's forward wrappers on
+    transformers >= 5.16, which the loop re-plants."""
     if Version(transformers.__version__) < Version("5.16"):
         pytest.skip("the torch_a2a forward wrappers are pre-hooks below transformers 5.16")
-    if NUM_EXPERTS % torch.cuda.device_count():
-        pytest.skip(f"{NUM_EXPERTS} experts do not shard over {torch.cuda.device_count()} GPUs")
-    _save_tiny_qwen3_moe(tmp_path)
-    dist_workers.run(_expert_parallel_calibration_job, ckpt_dir=str(tmp_path))
+    ep_degree = dist_workers.world_size // ep_share
+    if ep_degree < 2 or dist_workers.world_size % ep_share or NUM_EXPERTS % ep_degree:
+        pytest.skip(f"{NUM_EXPERTS} experts do not shard over EP {ep_degree} on these GPUs")
+    _save_tiny_qwen3_moe(tmp_path / "ckpt")
+    dist_workers.run(
+        _expert_parallel_calibration_and_export_job,
+        ckpt_dir=str(tmp_path / "ckpt"),
+        export_dir=tmp_path / "export",
+        ep_degree=ep_degree,
+    )
