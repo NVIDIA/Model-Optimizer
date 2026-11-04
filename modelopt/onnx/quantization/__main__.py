@@ -120,7 +120,10 @@ def get_parser() -> argparse.ArgumentParser:
         type=str,
         choices=["fp8", "int8", "int4"],
         default="int8",
-        help="Quantization mode for the given ONNX model.",
+        help=(
+            "Quantization mode for the given ONNX model. "
+            "NVFP4 is not supported here, including for convolutional (CNN detector) graphs."
+        ),
     )
     argparser.add_argument(
         "--calibration_method",
