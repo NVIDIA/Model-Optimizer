@@ -2767,6 +2767,13 @@ def _imatrix_sum_of_squares(x: torch.Tensor) -> torch.Tensor:
     return sum_sq
 
 
+def _imatrix_encodes(quantizer) -> bool:
+    """Whether imatrix calibration encodes the weight ``quantizer`` quantizes."""
+    backend = getattr(quantizer, "backend", None)
+    encoder = _IMATRIX_ENCODER_REGISTRY.get(backend) if isinstance(backend, str) else None
+    return encoder is not None and encoder.accepts(quantizer)
+
+
 @torch.no_grad()
 def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None):
     """Encode weights once with their inputs' per-column second moments, llama.cpp's imatrix.
@@ -2786,17 +2793,14 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
     names = module_name_maps(model)
 
     # Pick the targets before the forward disables every weight quantizer.
-    def _accepted(quantizer):
-        backend = getattr(quantizer, "backend", None)
-        encoder = _IMATRIX_ENCODER_REGISTRY.get(backend) if isinstance(backend, str) else None
-        return encoder is not None and encoder.accepts(quantizer)
-
     targets: dict[int, list] = {}  # id(weight quantizer) -> [sum of x^2 per column, token count]
     target_modules = []
     for name, module in names.name_to_module.items():
         if not isinstance(module, QuantModule):
             continue
-        accepted = [q for q in module.iter_weight_quantizers_for_calibration() if _accepted(q)]
+        accepted = [
+            q for q in module.iter_weight_quantizers_for_calibration() if _imatrix_encodes(q)
+        ]
         if accepted:
             target_modules.append((name, module))
             targets.update((id(q), [None, 0]) for q in accepted)

@@ -31,7 +31,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.opt.utils import named_hparams
 from modelopt.torch.quantization import model_calib
-from modelopt.torch.quantization.algorithms import QuantRecipeHparam
+from modelopt.torch.quantization.algorithms import QuantRecipeHparam, _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import (
     PIN_OVERRIDES_WEIGHT,
@@ -507,18 +507,18 @@ def test_row_keys_do_not_depend_on_the_batch_a_row_is_hashed_in(dtype):
     assert len(keys.unique()) == len(table)
 
 
-def _search(model, inputs, formats, effective_bits):
-    def recipe(algorithm, num_bits):
-        config = _iq_config(algorithm, num_bits)
-        weight_cfg = config["quant_cfg"][1]["cfg"]
-        weight_cfg["effective_bits"] = GGML_FORMAT_REGISTRY[num_bits].effective_bits
-        return config, num_bits
+def _recipe(algorithm, num_bits):
+    """An AutoQuantize format: ``num_bits`` GGML weights calibrated with ``algorithm``."""
+    config = _iq_config(algorithm, num_bits)
+    config["quant_cfg"][1]["cfg"]["effective_bits"] = GGML_FORMAT_REGISTRY[num_bits].effective_bits
+    return config, num_bits
 
+
+def _search(model, inputs, formats, effective_bits):
     _, state = mtq.auto_quantize(
         model,
         constraints={"effective_bits": effective_bits},
-        # A format is (algorithm, GGML format), or a ready (config, name) pair.
-        quantization_formats=[f if "quant_cfg" in f[0] else recipe(*f) for f in formats],
+        quantization_formats=formats,
         data_loader=[inputs],
         forward_step=lambda m, x: m(x),
         loss_func=lambda output, x: output.square().sum(),
@@ -545,9 +545,9 @@ def _raw_scores(state, recipe_name):
 def test_auto_quantize_scores_other_candidates_on_the_source_weights_gptq_rewrote():
     inputs = _inputs()
     source = _two_layers()
-    alone = _search(copy.deepcopy(source), inputs, [("max", "iq2_s")], 16.0)
+    alone = _search(copy.deepcopy(source), inputs, [_recipe("max", "iq2_s")], 16.0)
     model = copy.deepcopy(source)
-    state = _search(model, inputs, [(GPTQ, "iq2_xxs"), ("max", "iq2_s")], 16.0)
+    state = _search(model, inputs, [_recipe(GPTQ, "iq2_xxs"), _recipe("max", "iq2_s")], 16.0)
 
     assert _raw_scores(state, "iq2_s") == pytest.approx(_raw_scores(alone, "iq2_s"))
     # 16 bits selects BF16 everywhere, so the source weights come back untouched.
@@ -556,19 +556,29 @@ def test_auto_quantize_scores_other_candidates_on_the_source_weights_gptq_rewrot
 
 
 @pytest.mark.parametrize(
-    ("algorithm", "num_bits", "pinned"),
-    [(GPTQ, "iq2_xxs", True), ({"method": "imatrix"}, "q8_0", False)],  # imatrix skips Q8_0
+    ("algorithm", "num_bits", "pinned", "replaces_int4"),
+    [
+        (GPTQ, "iq2_xxs", True, False),
+        # The GGML entry replaces an earlier INT4 entry for the same quantizers.
+        (GPTQ, "iq2_xxs", True, True),
+        ({"method": "imatrix"}, "q8_0", False, False),  # imatrix leaves Q8_0 to plain PTQ
+    ],
 )
-def test_auto_quantize_selects_the_codes_calibration_chose(algorithm, num_bits, pinned):
+def test_auto_quantize_selects_the_codes_calibration_chose(
+    algorithm, num_bits, pinned, replaces_int4
+):
     inputs = _inputs()
     source = _two_layers()
     model = copy.deepcopy(source)
+    config, name = _recipe(algorithm, num_bits)
+    if replaces_int4:
+        config["quant_cfg"].insert(1, _int4_config(algorithm)["quant_cfg"][1])
     # Just enough bits to quantize the larger first layer and keep the second in BF16.
-    bits = GGML_FORMAT_REGISTRY[num_bits].effective_bits
-    sizes = [layer.weight.numel() for layer in source]
-    _search(model, inputs, [(algorithm, num_bits)], (sizes[0] * bits + sizes[1] * 16) / sum(sizes))
-
     ggml_format = GGML_FORMAT_REGISTRY[num_bits]
+    sizes = [layer.weight.numel() for layer in source]
+    bits = (sizes[0] * ggml_format.effective_bits + sizes[1] * 16) / sum(sizes)
+    _search(model, inputs, [(config, name)], bits)
+
     first, second = model
     assert first.weight_quantizer.num_bits == num_bits
     assert not second.weight_quantizer.is_enabled
@@ -596,40 +606,76 @@ def _quant_recipe_hparams(model):
     return [h for _, h in named_hparams(model, unique=True) if isinstance(h, QuantRecipeHparam)]
 
 
-@pytest.mark.parametrize("case", ["non_ggml", "tied", "rewrite_then_fail"])
-def test_auto_quantize_refusal_or_failure_hands_back_the_source_weights(case):
+@pytest.mark.parametrize("down_proj", ["disabled", "q8_0"])
+def test_auto_quantize_snapshots_only_the_weights_calibration_rewrites(moe, monkeypatch, down_proj):
+    # imatrix rewrites the IQ2_XXS gate_up_proj and leaves down_proj, disabled or Q8_0, alone.
+    snapshots = []
+    snapshot = _AutoQuantizeBaseSearcher._snapshot_source_weights
+
+    def record(self, *args):
+        snapshots.append(snapshot(self, *args))
+        return snapshots[-1]
+
+    monkeypatch.setattr(_AutoQuantizeBaseSearcher, "_snapshot_source_weights", record)
+    config, name = _recipe({"method": "imatrix"}, "iq2_xxs")
+    config["quant_cfg"][1]["quantizer_name"] = "*gate_up_proj_weight_quantizer"
+    if down_proj == "q8_0":
+        q8_0 = _recipe({"method": "imatrix"}, "q8_0")[0]["quant_cfg"][1]
+        config["quant_cfg"].append({**q8_0, "quantizer_name": "*down_proj_weight_quantizer"})
+    _search(moe, _inputs()[:96, :TOY_MOE_HIDDEN], [(config, name)], 16.0)
+
+    [source_weights] = snapshots
+    assert [id(p) for p in source_weights] == [id(moe.mlp.experts.gate_up_proj)]
+
+
+@pytest.mark.parametrize("case", ["non_ggml", "tied"])
+def test_auto_quantize_refusal_hands_back_the_unconverted_model(case):
     inputs = _inputs()
     source = _two_layers()
-    formats = [(GPTQ, "iq2_xxs")]
     if case == "non_ggml":
-        int4 = {"num_bits": 4, "block_sizes": {-1: 128}, "effective_bits": 4.25}
-        config = {
-            "quant_cfg": [
-                {"quantizer_name": "*", "enable": False},
-                {"quantizer_name": "*weight_quantizer", "cfg": int4, "enable": True},
-            ],
-            "algorithm": GPTQ,
-        }
-        formats = [(config, "INT4_GPTQ")]
-    elif case == "tied":
+        # An INT4 weight quantizer cannot hold the codes GPTQ would choose.
+        formats = [(_int4_config(GPTQ), "INT4_GPTQ")]
+    else:
+        # GPTQ would rewrite the weight under both layers.
         source[1] = torch.nn.Linear(512, 512, bias=False)
         source[1].weight = source[0].weight
-    else:
+        formats = [_recipe(GPTQ, "iq2_xxs")]
+    model = copy.deepcopy(source)
+
+    with pytest.raises((ValueError, NotImplementedError)):
+        _search(model, inputs, formats, 16.0)
+
+    assert not mto.ModeloptStateManager.is_converted(model)
+    assert [type(m) for m in model.modules()] == [type(m) for m in source.modules()]
+    for weight, original in zip(model.parameters(), source.parameters()):
+        assert torch.equal(weight, original)
+    # The same model can search again: here Q8_0, which imatrix leaves alone even when tied.
+    _search(model, inputs, [_recipe({"method": "imatrix"}, "q8_0")], 16.0)
+
+
+@pytest.mark.parametrize("case", ["rewrite_then_fail", "algorithm_list_fails_midway"])
+def test_auto_quantize_calibration_failure_hands_back_the_source_weights(case):
+    inputs = _inputs()
+    if case == "rewrite_then_fail":
         # GPTQ rewrites the first weight, then cannot encode the second's 640 columns.
         source = torch.nn.Sequential(
             torch.nn.Linear(512, 640, bias=False), torch.nn.Linear(640, 256, bias=False)
         )
+        algorithm = GPTQ
+    else:
+        # GPTQ completes and adds its mode, then layerwise imatrix finds no decoder layers.
+        source = _two_layers()
+        algorithm = [GPTQ, {"method": "imatrix", "layerwise": {"enable": True}}]
     model = copy.deepcopy(source)
 
-    with pytest.raises((ValueError, NotImplementedError, RuntimeError)):
-        _search(model, inputs, formats, 16.0)
+    with pytest.raises((ValueError, RuntimeError)):
+        _search(model, inputs, [_recipe(algorithm, "iq2_xxs")], 16.0)
 
     for weight, original in zip(model.parameters(), source.parameters()):
         assert torch.equal(weight, original)
     assert model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS
-    if case == "non_ggml":  # Refused from its config, before the model is converted.
-        assert not mto.ModeloptStateManager.is_converted(model)
-        assert [type(m) for m in model.modules()] == [type(m) for m in source.modules()]
+    # The model stays converted, without a mode of the calibration that failed.
+    assert [mode for mode, _ in mto.ModeloptStateManager(model).state_dict()] == ["auto_quantize"]
 
 
 def test_a_replayed_pin_fake_quantizes_to_exactly_its_decoding_in_bf16():

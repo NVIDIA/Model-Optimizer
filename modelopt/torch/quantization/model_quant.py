@@ -15,11 +15,13 @@
 
 """User-facing quantization API."""
 
+import copy
 import fnmatch
 import inspect
 import os
 import sys
 import warnings
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
 from typing import Any, cast
@@ -43,12 +45,7 @@ from modelopt.torch.quantization.conversion import (
 from modelopt.torch.utils import atomic_print
 
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
-from .algorithms import (
-    AUTO_QUANTIZE_SEARCHERS,
-    QuantRecipe,
-    _algorithm_methods,
-    _refuse_unpinnable_weight_rewrite,
-)
+from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe, _algorithm_methods
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
 from .kv_cache_auto_quant import (
@@ -768,6 +765,44 @@ def _auto_quantize_kv_cache(
     return model, searcher.state_dict()
 
 
+# Module attributes that conversion changes in place, such as hook and submodule dicts and the
+# ModelOpt state list. Their contents are saved, so a rollback keeps each object's identity.
+_CONTAINERS = (dict, OrderedDict, list, set)
+
+
+def _save_module_attributes(model: nn.Module) -> Callable[[], None]:
+    """Return a callable that hands back the modules of ``model`` as they are now.
+
+    Conversion and the AutoQuantize search change module classes and add quantizers, hparams,
+    hooks and ModelOpt state through module attributes; restoring each module's class and
+    attributes undoes them. Parameter values are not covered.
+    """
+    saved = [
+        (
+            module,
+            type(module),
+            dict(vars(module)),
+            {k: copy.copy(v) for k, v in vars(module).items() if type(v) in _CONTAINERS},
+        )
+        for module in model.modules()
+    ]
+
+    def restore():
+        for module, cls, attrs, contents in saved:
+            module.__class__ = cls
+            vars(module).clear()
+            vars(module).update(attrs)
+            for key, content in contents.items():
+                container = attrs[key]
+                container.clear()
+                if isinstance(container, list):
+                    container.extend(content)
+                else:
+                    container.update(content)
+
+    return restore
+
+
 def auto_quantize(
     model: nn.Module,
     constraints: dict[str, Any] | None = None,
@@ -1149,8 +1184,7 @@ def auto_quantize(
         ),
     ]
     for quant_cfg, name in all_processed_formats:
-        recipe = QuantRecipe(quant_cfg, name=name)
-        algo = recipe.config.algorithm
+        algo = QuantRecipe(quant_cfg, name=name).config.algorithm
         if unsupported := _algorithm_methods(algo) - _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
             algo_method = ", ".join(sorted(map(str, unsupported)))
             raise ValueError(
@@ -1161,7 +1195,6 @@ def auto_quantize(
         # Every candidate, before the search calibrates any: calibrate() would refuse mid-search.
         _refuse_awq_on_a_sharded_fsdp2_model(model, algo, candidate=name)
         _refuse_unsupported_distributed_calibration(model, algo)
-        _refuse_unpinnable_weight_rewrite(recipe)
 
     # Select the appropriate searcher based on method
     if method_name not in AUTO_QUANTIZE_SEARCHERS:
@@ -1202,18 +1235,27 @@ def auto_quantize(
     search_constraints = cast("ConstraintsDict", constraints or {})
     searcher.validate_search_input(search_constraints, search_config)
 
-    model = apply_mode(
-        model,
-        mode="auto_quantize",
-        registry=QuantizeModeRegistry,
-    )
-    # Disable all quantizers; AutoQuantize will enable the needed ones
-    set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
-    if processed_fixed_quantization_config is not None:
-        fixed_cfg, fixed_name = processed_fixed_quantization_config
-        fixed_recipe = QuantRecipe(fixed_cfg, name=fixed_name)
-        set_quantizer_by_cfg(model, fixed_recipe.config.quant_cfg)
-    searcher.search(model, search_constraints, config=search_config)
+    # Some refusals need the converted quantizers to tell which weights a candidate rewrites. A
+    # failure before any candidate calibrates hands back the unconverted modules, so the caller can
+    # retry on the same model, which a converted model would refuse.
+    restore_modules = _save_module_attributes(model)
+    try:
+        model = apply_mode(
+            model,
+            mode="auto_quantize",
+            registry=QuantizeModeRegistry,
+        )
+        # Disable all quantizers; AutoQuantize will enable the needed ones
+        set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
+        if processed_fixed_quantization_config is not None:
+            fixed_cfg, fixed_name = processed_fixed_quantization_config
+            fixed_recipe = QuantRecipe(fixed_cfg, name=fixed_name)
+            set_quantizer_by_cfg(model, fixed_recipe.config.quant_cfg)
+        searcher.search(model, search_constraints, config=search_config)
+    except BaseException:
+        if not searcher.calibration_started:
+            restore_modules()
+        raise
 
     return model, searcher.state_dict()
 

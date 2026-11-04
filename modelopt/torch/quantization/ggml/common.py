@@ -374,9 +374,7 @@ class GGMLFormat:
         ):
             return None
         pinned = pinned.to(weight.device).reshape(-1, width, self.block_bytes)
-        if getattr(quantizer, PIN_OVERRIDES_WEIGHT, False) and pinned.numel() == (
-            weight.numel() // self.block_size * self.block_bytes
-        ):
+        if getattr(quantizer, PIN_OVERRIDES_WEIGHT, False) and self.has_full_pin(quantizer, weight):
             return pinned.reshape(*weight.shape[:-1], width, self.block_bytes)
         shape = torch.tensor((pinned.shape[0], weight.shape[-1]))
         rows = weight.reshape(-1, weight.shape[-1])
@@ -401,13 +399,20 @@ class GGMLFormat:
                 return pinned[index].reshape(*weight.shape[:-1], width, self.block_bytes)
         return None
 
+    def has_full_pin(self, quantizer, weight: torch.Tensor) -> bool:
+        """Whether ``quantizer`` pins a payload for all of ``weight``, not just some of its rows."""
+        pinned = pinned_packed_weight(quantizer, self.name)
+        return pinned is not None and (
+            pinned.numel() == weight.numel() // self.block_size * self.block_bytes
+        )
+
     def decode_pinned(self, quantizer, weight: torch.Tensor) -> torch.Tensor:
         """``weight`` as its pinned payload decodes, rounded once to its dtype as GPTQ wrote it."""
-        pinned = pinned_packed_weight(quantizer, self.name)
-        if pinned is None or pinned.numel() != weight.numel() // self.block_size * self.block_bytes:
+        if not self.has_full_pin(quantizer, weight):
             raise ValueError(
                 f"No {self.name.upper()} payload pinned for a {tuple(weight.shape)} weight"
             )
+        pinned = pinned_packed_weight(quantizer, self.name)
         return self.dequantize(
             pinned.to(weight.device).reshape(-1, self.block_bytes),
             torch.tensor(weight.shape),

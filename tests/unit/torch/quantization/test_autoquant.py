@@ -26,6 +26,7 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.model_quant as model_quant
+from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization._auto_quantize_cost import (
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
     _get_module_weight_numel,
@@ -1222,6 +1223,7 @@ def test_auto_quantize_fails_fast_on_nonfinite_gradients(bad_gradient):
 
     assert "torch.backends.cuda.enable_cudnn_sdp(False)" in str(exc_info.value)
     assert torch.backends.cuda.cudnn_sdp_enabled() == original_cudnn
+    assert model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS  # a scoring failure hands back folding
     assert any(
         f"module '{name}'" in str(exc_info.value)
         for name, module in model.named_modules()
