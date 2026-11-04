@@ -473,7 +473,7 @@ def test_fsdp2_rejects_mtp_before_distributed_loading(monkeypatch, tmp_path, has
 
     monkeypatch.setattr(hf_ptq, "parallel_load_and_prepare_fsdp2", distributed_load)
     error, message = (
-        (NotImplementedError, "Nemotron-H MTP")
+        (NotImplementedError, "MTP weights")
         if has_mtp
         else (RuntimeError, "distributed loader reached")
     )
@@ -1036,8 +1036,8 @@ def test_post_quantize_export_survives_a_failed_sanity_generate(monkeypatch):
             preview_input_ids=torch.zeros(1, 4, dtype=torch.long),
             preview_attention_mask=None,
             generated_ids_before_ptq=torch.zeros(1, 4, dtype=torch.long),
-            is_nemotron_vl_model=False,
-            first_text_speech_dataset=None,
+            vlm_wrapper=False,
+            preview_input_text=None,
             calib_dataloader=None,
         )
 

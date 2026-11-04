@@ -40,13 +40,10 @@ from example_utils import (
     create_vlm_calibration_loop,
     generate_excludes_prompt,
     get_model,
-    get_processor,
     get_tokenizer,
-    is_nemotron_vl,
-    is_trtllm_enc_dec_export,
     mlflow_run,
     recipe_layerwise_blocks,
-    run_nemotron_vl_preview,
+    run_vlm_preview,
     save_source_config,
     setup_distributed_args,
     validate_fsdp2_supported,
@@ -60,7 +57,6 @@ from transformers import (
     PreTrainedTokenizerBase,
     PreTrainedTokenizerFast,
     ProcessorMixin,
-    WhisperProcessor,
 )
 
 import modelopt.torch.opt as mto
@@ -83,8 +79,14 @@ from modelopt.torch.export import (
 from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
-from modelopt.torch.models import hf_model_type
-from modelopt.torch.models.hf import prepare_model_for_calibration
+from modelopt.torch.export.trtllm.enc_dec import is_trtllm_enc_dec_export
+from modelopt.torch.models import get_ptq_spec, hf_model_type
+from modelopt.torch.models.hf import (
+    calibration_sample_input,
+    load_calibration_processor,
+    make_calibration_dataloader,
+    prepare_model_for_calibration,
+)
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
@@ -112,7 +114,6 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     load_pretrained,
     parallel_load_and_prepare_fsdp2,
 )
-from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
@@ -209,7 +210,7 @@ def make_calib_dataloader(
     autoquant_gradient_recipe: bool = False,
 ) -> tuple[DataLoader | _DeviceDataLoader, str | None]:
     calib_dataloader = None
-    first_text_speech_dataset = None
+    preview_input_text = None
     if args.specdec_offline_dataset is not None:
         offline_data_path = Path(args.specdec_offline_dataset)
         dumped_files = sorted(str(p) for p in offline_data_path.glob("*.pt"))
@@ -252,21 +253,19 @@ def make_calib_dataloader(
             dp_size=args.dist_state.world_size if args.use_fsdp2 else 1,
             dp_rank=args.dist_state.rank if args.use_fsdp2 else 0,
         )
-    elif model_type == "whisper":
-        assert processor is not None and isinstance(processor, WhisperProcessor), (
-            "The AutoProcessor must be set."
+    elif (
+        provided := make_calibration_dataloader(
+            model_type,
+            language_model,
+            processor,
+            args.dataset,
+            args.calib_size,
+            args.batch_size,
+            device,
         )
-        assert len(args.calib_size) == 1, (
-            "whisper only supports one dataset for calibration, can extend this in the future"
-        )
-        calib_dataloader, first_text_speech_dataset = get_speech_dataset_dataloader(
-            dataset_name=args.dataset[0] if args.dataset else "peoples_speech",
-            processor=processor,
-            batch_size=args.batch_size,
-            num_samples=args.calib_size[0],
-            device=device,
-            dtype=language_model.dtype,
-        )
+    ) is not None:
+        # The model type brings its own calibration data (speech features, not token ids).
+        calib_dataloader, preview_input_text = provided
     else:
         assert tokenizer is not None and isinstance(
             tokenizer, PreTrainedTokenizer | PreTrainedTokenizerFast
@@ -289,7 +288,7 @@ def make_calib_dataloader(
                 else None
             ),
         )
-    return calib_dataloader, first_text_speech_dataset
+    return calib_dataloader, preview_input_text
 
 
 def _resolve_kv_auto_quantize_checkpoint(args: argparse.Namespace) -> str | None:
@@ -418,27 +417,27 @@ def load_model(args: argparse.Namespace):
     tokenizer = None
     language_model = full_model
 
-    is_nemotron_vl_model = is_nemotron_vl(full_model)
+    vlm_wrapper = get_ptq_spec(model_type).vlm_wrapper
 
-    # Default to image-text calibration for VLM models. Skip for the AutoQuantize recipe path, whose
+    # Default to image-text calibration for VLM wrappers. Skip for the AutoQuantize recipe path, whose
     # text-only path does not support image-text calibration yet (auto_quantize() would raise);
-    # auto-enabling it here would make Nemotron-VL AutoQuantize fail unconditionally. Nor for FSDP2,
-    # where image-text calibration is opt-in via --calib_with_images.
+    # auto-enabling it here would make a VLM wrapper's AutoQuantize fail unconditionally. Nor for
+    # FSDP2, where image-text calibration is opt-in via --calib_with_images.
     if (
-        is_nemotron_vl_model
+        vlm_wrapper
         and not args.calib_with_images
         and not args.use_fsdp2
         and not _recipe_is_auto_quantize(args.recipe)
     ):
-        print("Nemotron VL model detected. Enabling image-text calibration by default.")
+        print("VLM wrapper detected. Enabling image-text calibration by default.")
         args.calib_with_images = True
 
-    if model_type == "whisper":
-        processor = get_processor(
-            args.local_checkpoint_path,
-            model_type,
-            trust_remote_code=args.trust_remote_code,
-        )
+    processor = load_calibration_processor(
+        model_type, args.local_checkpoint_path, args.trust_remote_code
+    )
+    if processor is not None:
+        # The model type brings its own calibration data, which needs only its processor.
+        pass
     elif args.calib_with_images:
         # For VLM image calibration, we need an AutoProcessor to build multimodal inputs.
         processor = AutoProcessor.from_pretrained(
@@ -454,7 +453,7 @@ def load_model(args: argparse.Namespace):
                 args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
             )
 
-        # Some Nemotron tokenizers may not define pad_token by default; but we use padding=True during calibration.
+        # Some tokenizers may not define pad_token by default; but we use padding=True during calibration.
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         assert tokenizer.pad_token is not None, (
@@ -553,7 +552,7 @@ def mono_quantize(
     model_type: str | None,
     calibration_only: bool,
     calib_dataloader: DataLoader,
-    is_nemotron_vl_model: bool,
+    vlm_wrapper: bool,
 ):
     """Plain quantization of the selected model target to one quantization configuration."""
 
@@ -604,7 +603,7 @@ def mono_quantize(
             language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
 
         # For VL models, update full_model to use the quantized language model
-        if is_nemotron_vl_model and language_model is not full_model:
+        if vlm_wrapper and language_model is not full_model:
             language_model_lineage = get_language_model_from_vl(full_model)
             if language_model_lineage is not None:
                 print("Updating full_model with quantized language_model...")
@@ -622,7 +621,7 @@ def _run_auto_quantize_recipe(
     model_type: str | None,
     calibration_only: bool,
     calib_dataloader: DataLoader,
-    is_nemotron_vl_model: bool,
+    vlm_wrapper: bool,
 ) -> None:
     """Run the recipe's fixed PTQ, weight search, and KV search in order."""
     primary = recipe.auto_quantize
@@ -647,7 +646,7 @@ def _run_auto_quantize_recipe(
             model_type,
             calibration_only,
             calib_dataloader,
-            is_nemotron_vl_model,
+            vlm_wrapper,
         )
         fixed_quantize_config = None
 
@@ -783,7 +782,7 @@ def pre_quantize(
     model_type: str | None,
     tokenizer: PreTrainedTokenizerBase | None,
     calib_dataloader: DataLoader | None,
-    is_nemotron_vl_model: bool,
+    vlm_wrapper: bool,
 ):
     """
     Processing before the quantization.
@@ -799,7 +798,8 @@ def pre_quantize(
     # Only run single sample for preview
     assert calib_dataloader is not None, "calib_dataloader is required for pre-quantize preview"
     batch = next(iter(calib_dataloader))
-    input_key = "input_features" if model_type == "whisper" else "input_ids"
+    # A speech batch carries ``input_features`` and no ``input_ids``.
+    input_key = "input_ids" if "input_ids" in batch else "input_features"
     preview_input_ids = batch[input_key][0:1]
     # Pass attention_mask to generate(): HF cannot infer it when pad_token == eos_token.
     preview_attention_mask = batch["attention_mask"][0:1] if "attention_mask" in batch else None
@@ -810,17 +810,11 @@ def pre_quantize(
     # Generate preview before quantization
     if args.skip_generate:
         generated_ids_before_ptq = None
-    elif model_type is not None and model_type.startswith(("deepseek", "kimi_k2")):
-        # DeepSeek generation may go OOM, so we skip it. Kimi-K2 (kimi_k2) and Kimi-K2.5
-        # (kimi_k25) are DeepSeek-V3 architectures under their own model_type.
+    elif (reason := get_ptq_spec(model_type).preview_unsupported) is not None:
+        print(f"Skipping the generation preview: {reason}")
         generated_ids_before_ptq = None
-    elif model_type == "nemotron_h":
-        # NemotronH (SSM/Mamba hybrid) modeling code does not work with accelerate's big model inference
-        # when multiple GPUs are used. So we skip generation for NemotronH models. The issue presents in
-        # the remote code and also in transformers library integration code from v5.3
-        generated_ids_before_ptq = None
-    elif is_nemotron_vl_model and tokenizer is not None:
-        generated_ids_before_ptq = run_nemotron_vl_preview(
+    elif vlm_wrapper and tokenizer is not None:
+        generated_ids_before_ptq = run_vlm_preview(
             full_model,
             tokenizer,
             preview_input_ids,
@@ -849,8 +843,8 @@ def post_quantize(
     preview_input_ids: torch.Tensor | None,
     preview_attention_mask: torch.Tensor | None,
     generated_ids_before_ptq: Any,
-    is_nemotron_vl_model: bool,
-    first_text_speech_dataset: str | None,
+    vlm_wrapper: bool,
+    preview_input_text: str | None,
     calib_dataloader: DataLoader,
 ):
     """
@@ -879,9 +873,10 @@ def post_quantize(
     # Run some samples
     torch.cuda.empty_cache()
     generated_ids_after_ptq = None
+    post_ptq_unsupported = get_ptq_spec(model_type).post_ptq_generation_unsupported
     if generated_ids_before_ptq is None:
         pass
-    elif model_type not in ("llama4", "llama4_text") and not is_nemotron_vl_model:
+    elif post_ptq_unsupported is None and not vlm_wrapper:
         # Our fake quantizer may not be fully compatible with torch.compile.
         # This is a best-effort sanity check: e.g. a `device_map="auto"` load that offloads
         # part of the model to CPU (seen on unified-memory single-GPU hosts) can make a
@@ -895,8 +890,8 @@ def post_quantize(
             )
         except Exception as e:
             warnings.warn(f"Post-quantization generation sanity check failed, skipping it: {e}")
-    elif is_nemotron_vl_model and tokenizer is not None:
-        generated_ids_after_ptq = run_nemotron_vl_preview(
+    elif vlm_wrapper and tokenizer is not None:
+        generated_ids_after_ptq = run_vlm_preview(
             full_model,
             tokenizer,
             preview_input_ids,
@@ -907,12 +902,12 @@ def post_quantize(
         )
     else:
         warnings.warn(
-            "Llama4 Maverick generation after quantization has a bug. Skipping generation sample."
+            f"{post_ptq_unsupported or 'The preview needs a tokenizer'}. Skipping generation sample."
         )
 
     def input_decode(input_ids):
-        if processor is not None and isinstance(processor, WhisperProcessor):
-            return first_text_speech_dataset
+        if preview_input_text is not None:
+            return preview_input_text
         elif tokenizer is not None:
             return tokenizer.batch_decode(input_ids)
         else:
@@ -925,7 +920,7 @@ def post_quantize(
             generated_ids = generated_ids.sequences
 
         if generate_excludes_prompt(full_model):
-            if processor is not None and isinstance(processor, WhisperProcessor):
+            if tokenizer is None and processor is not None:
                 return processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
             elif tokenizer is not None:
                 return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
@@ -936,9 +931,9 @@ def post_quantize(
 
     if generated_ids_after_ptq is not None:
         print("--------")
-        if is_nemotron_vl_model:
-            # For Nemotron VL models, generated_ids are text strings from model.chat()
-            print("Nemotron VL model text-only generation results:")
+        if vlm_wrapper:
+            # For VLM wrappers, generated_ids are text strings from model.chat()
+            print("VLM wrapper text-only generation results:")
             print(f"Text response before quantization: {generated_ids_before_ptq}")
             print("--------")
             print(f"Text response after quantization: {generated_ids_after_ptq}")
@@ -1053,21 +1048,9 @@ def quantize_main(
             sample_memory_usage_ratio = (
                 2 if "awq" in args.qformat or "smoothquant" in args.qformat else 1.1
             )
-            # Whisper model expects mel-spectrogram input features of length 3000
-            # Whisper model needs input of shape (batch_size, num_mel_bins, 3000)
-            # As the encoder of Whisper doesn't have embedding layer, input dtype has to be float
-            # For non-Whisper models (language models), sample_input will be set up inside get_max_batch_size()
-            if model_type == "whisper":
-                max_sample_length = 3000
-                num_mel_bins = language_model.config.num_mel_bins
-                sample_input_single_batch = (
-                    torch.ones([1, num_mel_bins, max_sample_length], dtype=language_model.dtype).to(
-                        language_model.device
-                    )
-                    * 100
-                )
-            else:
-                sample_input_single_batch = None
+            # A model type that takes something other than token ids supplies its own sample; for
+            # the rest the sample input is set up inside get_max_batch_size().
+            sample_input_single_batch = calibration_sample_input(model_type, language_model)
 
             run_auto_quant = aq_config is not None
 
@@ -1089,7 +1072,7 @@ def quantize_main(
 
     print(f"Use calib batch_size {args.batch_size}")
 
-    calib_dataloader, first_text_speech_dataset = make_calib_dataloader(
+    calib_dataloader, preview_input_text = make_calib_dataloader(
         args,
         language_model,
         processor,
@@ -1101,11 +1084,10 @@ def quantize_main(
         ),
     )
 
-    # Detect if this is a Nemotron VL model using architecture-based detection
-    is_nemotron_vl_model = is_nemotron_vl(full_model)
+    vlm_wrapper = get_ptq_spec(model_type).vlm_wrapper
 
     preview_input_ids, preview_attention_mask, generated_ids_before_ptq = pre_quantize(
-        args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
+        args, full_model, model_type, tokenizer, calib_dataloader, vlm_wrapper
     )
 
     if aq_config is not None:
@@ -1118,7 +1100,7 @@ def quantize_main(
             model_type,
             calibration_only,
             calib_dataloader,
-            is_nemotron_vl_model,
+            vlm_wrapper,
         )
 
     else:
@@ -1164,7 +1146,7 @@ def quantize_main(
                 model_type,
                 calibration_only,
                 calib_dataloader,
-                is_nemotron_vl_model,
+                vlm_wrapper,
             )
         else:
             print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
@@ -1189,8 +1171,8 @@ def quantize_main(
         preview_input_ids,
         preview_attention_mask,
         generated_ids_before_ptq,
-        is_nemotron_vl_model,
-        first_text_speech_dataset,
+        vlm_wrapper,
+        preview_input_text,
         calib_dataloader,
     )
 

@@ -54,7 +54,9 @@ __all__ = [
     "ExportSpec",
     "MoESpec",
     "ModelSpec",
+    "PTQSpec",
     "SpecSection",
+    "get_ptq_spec",
     "get_spec",
     "get_specs",
     "hf_model_type",
@@ -304,6 +306,54 @@ class ExportSpec(SpecSection):
 
 
 @dataclass(kw_only=True)
+class PTQSpec(SpecSection):
+    """Subsystem section: per-model facts the Hugging Face PTQ flow needs to load and preview a model.
+
+    Each field stands in for a check on the model's name that the flow would otherwise carry.
+    A reason string says why the model is special and turns the behavior on, and the flow reports
+    it when it acts: ``None`` is the flow's generic behavior. The cause is always in the model's
+    own code or size, never in the flow, which is why it is stated here and not there.
+    """
+
+    no_auto_device_map: str | None = None
+    """Why ``device_map="auto"`` cannot be used for the model, so the flow loads it whole and moves
+    it to the target device, unless the run itself asks for a sequential map."""
+
+    no_device_map: str | None = None
+    """Why no device map can be used for the model: the flow loads it whole and moves it to the
+    target device, whatever the run asks for."""
+
+    sequential_device_map: str | None = None
+    """Why a load on several GPUs uses ``device_map="sequential"`` and not the balanced ``"auto"``.
+
+    A single GPU keeps ``"auto"``: it cannot split what is tied, and a sequential map would only
+    cap its memory."""
+
+    vlm_wrapper: bool = False
+    """Whether the flow treats the model as a VLM wrapper: it calibrates with image-text data by
+    default, previews through the wrapper's own chat path rather than ``generate`` on token ids,
+    and puts the quantized language model back into the wrapper."""
+
+    preview_unsupported: str | None = None
+    """Why the flow skips the generation preview, the sample before and after quantization.
+
+    The preview is a sanity check on top of calibration, so a model that cannot run it still
+    quantizes and exports."""
+
+    post_ptq_generation_unsupported: str | None = None
+    """Why the quantized model cannot generate the after-quantization sample though the original
+    could, so the flow keeps the first sample and skips the second."""
+
+    generate_includes_prompt: str | None = None
+    """Why ``generate()`` returns the prompt with the answer though the model is encoder-decoder,
+    so the preview decodes it the way a decoder-only model's is, slicing the prompt off."""
+
+    fsdp2_unsupported: str | None = None
+    """What about the model ``--use_fsdp2`` cannot calibrate, as the refusal lists it before
+    anything loads."""
+
+
+@dataclass(kw_only=True)
 class ModelSpec:
     """The one global per-model descriptor, holding each section as an attribute.
 
@@ -346,6 +396,10 @@ class ModelSpec:
     """Per-model data of the expert-parallel PTQ path, or ``None`` when the model is dense
     or needs nothing beyond what stock transformers already ships."""
 
+    ptq_spec: PTQSpec | None = None
+    """Per-model facts of the Hugging Face PTQ flow, or ``None`` when the flow's generic
+    behavior fits the model. Read it through :func:`get_ptq_spec`."""
+
 
 _SPECS: dict[str, ModelSpec] = {}
 
@@ -366,6 +420,16 @@ def get_spec(model_type: str) -> ModelSpec | None:
 def get_specs() -> list[ModelSpec]:
     """Return all registered specs, in registration order."""
     return list(_SPECS.values())
+
+
+def get_ptq_spec(model_type: str | None) -> PTQSpec:
+    """Return ``model_type``'s PTQ section, or an all-default one when it has none.
+
+    The default section is the flow's generic behavior, so the flow reads one answer for every
+    model, registered or not, instead of handling an absent spec and an absent section apart.
+    """
+    spec = get_spec(model_type) if model_type else None
+    return spec.ptq_spec if spec is not None and spec.ptq_spec is not None else PTQSpec()
 
 
 @functools.cache
