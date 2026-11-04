@@ -49,7 +49,8 @@ def test_eagle_model_convert_save_and_restore(tmp_path, eagle_config, mix_mode):
     # torch.compile(max-autotune) is a GPU optimization; on CPU it only adds compile time.
     config["eagle_use_torch_compile"] = False
     config["eagle_mix_hidden_states"] = mix_mode is not None
-    config["eagle_mix_hidden_states_mode"] = mix_mode
+    if mix_mode is not None:
+        config["eagle_mix_hidden_states_mode"] = mix_mode
 
     mtsp.convert(model_ref, mode=[("eagle", config)])
     assert isinstance(model_ref, mtsp.plugins.HFEagleModel)

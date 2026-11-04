@@ -26,11 +26,12 @@ from modelopt.torch.speculative.config import EagleConfig
 # --- Hidden-state mixing mode validator tests ---
 
 
-def test_mix_hidden_states_mode_default_none():
-    """Disabled mixing does not require a mode."""
-    cfg = EagleConfig.model_validate({})
+@pytest.mark.parametrize("mix_hidden_states", [False, True])
+def test_mix_hidden_states_mode_default_sparse_replace(mix_hidden_states):
+    """Existing configs retain sparse mixing without specifying a mode."""
+    cfg = EagleConfig.model_validate({"eagle_mix_hidden_states": mix_hidden_states})
 
-    assert cfg.eagle_mix_hidden_states_mode is None
+    assert cfg.eagle_mix_hidden_states_mode == "sparse_replace"
 
 
 @pytest.mark.parametrize("mode", ["sparse_replace", "uniform_layer_sample"])
@@ -42,23 +43,12 @@ def test_mix_hidden_states_mode_valid(mode):
     assert cfg.eagle_mix_hidden_states_mode == mode
 
 
-def test_mix_hidden_states_mode_unknown_error():
+@pytest.mark.parametrize("mode", [None, "random_weights"])
+def test_mix_hidden_states_mode_unknown_error(mode):
     """Unknown mixing modes fail Literal validation."""
     with pytest.raises(ValidationError) as exc_info:
-        EagleConfig.model_validate({"eagle_mix_hidden_states_mode": "random_weights"})
-    assert exc_info.value.errors()[0]["type"] == "literal_error"
-
-
-@pytest.mark.parametrize("config", [{}, {"eagle_mix_hidden_states_mode": None}])
-def test_mix_hidden_states_mode_required_when_enabled(config):
-    with pytest.raises(ValidationError):
-        EagleConfig.model_validate({**config, "eagle_mix_hidden_states": True})
-
-
-@pytest.mark.parametrize("mode", ["sparse_replace", "uniform_layer_sample"])
-def test_mix_hidden_states_mode_requires_mixing_enabled(mode):
-    with pytest.raises(ValidationError):
         EagleConfig.model_validate({"eagle_mix_hidden_states_mode": mode})
+    assert exc_info.value.errors()[0]["type"] == "literal_error"
 
 
 # --- rope scaling consistency validator tests ---

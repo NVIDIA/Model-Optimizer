@@ -152,9 +152,6 @@ class ModeloptStateManager:
         state_dict = copy.deepcopy(state_dict)
         # add modes one-by-one
         for m_str, m_state in state_dict:
-            m_state["config"] = _ModeRegistryCls.get_from_any(m_str).update_config_for_restore(
-                m_state["config"]
-            )
             # adds config and metadata with sanity checks
             config = self.get_config_class(m_str, m_state["config"])
             self.add_mode(m_str, config, m_state["metadata"])
