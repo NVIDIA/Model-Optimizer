@@ -863,10 +863,21 @@ def _distributed_save_hf_checkpoint_impl(
     # scales' own device, as the shard transport moves every tensor: the GPU in a GPU run, the CPU
     # under gloo.
     in_keys = sorted(k for k in sharded_sd if k.endswith("_input_scale") and _is_expert_key(k))
+    stacked: list = []
+
+    def stack_input_scales(sharded: dict) -> list:
+        # Stacked inside the step, so a rank that cannot stack its scales (one holding more than a
+        # single value, say) fails every rank here instead of leaving them in the reduce below.
+        if in_keys:
+            stacked.append(torch.stack([sharded[k].detach().reshape(()).float() for k in in_keys]))
+        return [in_keys]
+
     # Every rank must reduce the same keys: a rank holding none would skip the reduce and leave the
     # others waiting in it, and lists of different lengths would mismatch its size, neither saying
     # why. So the ranks agree on the keys first, and a difference fails on every rank, naming it.
-    key_lists = all_reduce("expert input-scale keys", lambda: [in_keys], _in_rank_order)
+    key_lists = all_reduce(
+        "expert input-scale keys", partial(stack_input_scales, sharded_sd), _in_rank_order
+    )
     if any(keys != in_keys for keys in key_lists):
         differ = sorted(set().union(*key_lists) - set(key_lists[0]).intersection(*key_lists))
         raise RuntimeError(
@@ -874,10 +885,9 @@ def _distributed_save_hf_checkpoint_impl(
             f"max; first few held by only some ranks: {differ[:5]}"
         )
     if in_keys:
-        stacked = torch.stack([sharded_sd[k].detach().reshape(()).float() for k in in_keys])
-        dist.all_reduce(stacked, op=dist.ReduceOp.MAX)
+        dist.all_reduce(stacked[0], op=dist.ReduceOp.MAX)
         for j, k in enumerate(in_keys):
-            sharded_sd[k] = stacked[j].clone()
+            sharded_sd[k] = stacked[0][j].clone()
     # (1) Experts: split this rank's local shard into per-expert keys (global idx); stays local.
     # Skipped on dp-replica ranks under DP x EP (their experts are written by dp group 0). The split
     # can fail on one rank, and only the ranks together can tell whether every expert got its own

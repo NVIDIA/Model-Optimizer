@@ -2487,7 +2487,10 @@ def _finish_export_together(error: BaseException | None) -> None:
     A barrier alone lets the ranks whose writes succeeded return, and the run carries on as if the
     checkpoint were whole while another rank's export raised. Every rank's outcome is gathered
     instead (:func:`~modelopt.torch.utils.distributed.all_reduce`), so every rank raises with the
-    failing rank's error.
+    failing rank's error. That holds for a rank that fails outside the writer's raw collectives,
+    whose peers meet it here or in one of the writer's labeled steps. A rank failing while its peers
+    wait in a raw collective, the point-to-point transfers that move the dense tensors to their
+    owners (a receive buffer that does not fit, say), still leaves them waiting there.
     """
 
     def exported() -> bool:

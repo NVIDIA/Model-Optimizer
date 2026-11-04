@@ -30,6 +30,8 @@ import math
 import os
 import re
 import types
+from datetime import timedelta
+from functools import partial
 from unittest import mock
 
 import pytest
@@ -1324,10 +1326,36 @@ def _expert_input_scale_job(rank, world_size, tmp_dir):
         raised = "no error"
     assert "different expert input scales" in raised, raised
 
+    # A scale one rank cannot reduce, two values where one belongs, fails on both rather than leave
+    # the other in the reduce. The reduce gives up in seconds here, so that leaving fails fast.
+    def with_a_wide_scale(*args, **kwargs):
+        return {
+            k: torch.ones(2) if rank == 1 and k.endswith("gate_up_proj_input_scale") else v
+            for k, v in real(*args, **kwargs).items()
+        }
+
+    model = _load(tmp_dir / "src")
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randint(0, 64, (2, 8))))
+    reduce_group = dist.new_group(timeout=timedelta(seconds=10))
+    try:
+        with (
+            bounded_collectives(),
+            mock.patch.object(distributed_writer, "get_model_state_dict", with_a_wide_scale),
+            mock.patch.object(dist, "all_reduce", partial(dist.all_reduce, group=reduce_group)),
+        ):
+            _nogather_export(_fsdp2_shard(model, mesh), tmp_dir / "wide")
+    except RuntimeError as error:
+        raised = str(error)
+    else:
+        raised = "no error"
+    finally:
+        dist.destroy_process_group(reduce_group)
+    assert "input of size 2" in raised, raised
+
 
 def test_two_ranks_write_every_expert_with_the_largest_input_scale(cpu_dist_workers, tmp_path):
     """The experts' shared input scale is reduced across the ranks that fold them, to its max, and
-    ranks that hold different scales fail alike, naming them."""
+    ranks that hold different scales, or a scale one rank cannot reduce, fail alike, naming them."""
     _save(_qwen2_moe_config(), tmp_path / "src")
 
     cpu_dist_workers.run(_expert_input_scale_job, tmp_dir=tmp_path)
