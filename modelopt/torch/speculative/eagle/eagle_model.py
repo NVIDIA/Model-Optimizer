@@ -63,12 +63,12 @@ class EagleModel(DynamicModule):
         process_group: torch.distributed.ProcessGroup | None = None,
     ) -> torch.Tensor:
         """Sample whole hidden vectors from history in either batch- or sequence-first layout."""
-        stacked = torch.stack(hidden_states_history, dim=0)
-        num_candidates, dim0, dim1, hidden_size = stacked.shape
+        num_candidates = len(hidden_states_history)
+        dim0, dim1, _ = hidden_states_history[0].shape
         candidate_indices = torch.randint(
             num_candidates,
             (1, dim0, dim1, 1),
-            device=stacked.device,
+            device=hidden_states_history[0].device,
         )
         if process_group is not None and torch.distributed.get_world_size(process_group) > 1:
             # Replicated activations must use the same candidates on every TP rank.
@@ -77,7 +77,9 @@ class EagleModel(DynamicModule):
                 src=torch.distributed.get_global_rank(process_group, 0),
                 group=process_group,
             )
-        return stacked.gather(
-            0,
-            candidate_indices.expand(-1, -1, -1, hidden_size),
-        ).squeeze(0)
+        candidate_indices = candidate_indices.squeeze(0)
+        # Avoid retaining a full stacked history for gather's backward pass.
+        mixed = hidden_states_history[-1]
+        for i, hidden_states in enumerate(hidden_states_history[:-1]):
+            mixed = torch.where(candidate_indices == i, hidden_states, mixed)
+        return mixed

@@ -103,19 +103,27 @@ def test_eagle_mix_hidden_states_backward(
     assert len(eagle_grads) > 0, "Expected gradients to flow to eagle_module"
 
 
-def test_eagle_uniform_layer_sample_picks_whole_candidate_per_token(monkeypatch):
-    """Uniform layer sampling must select one full hidden vector per token."""
-    hidden_states_history = [torch.full((2, 3, 4), float(candidate)) for candidate in range(3)]
-    selected_candidates = torch.tensor([[[[0], [1], [2]], [[2], [1], [0]]]])
+@pytest.mark.parametrize("shape", [(2, 7, 4), (7, 2, 4)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("num_candidates", [1, 4])
+def test_eagle_uniform_layer_sample_matches_stacked_history(shape, dtype, num_candidates):
+    """Sampling preserves the original outputs, gradients, and RNG consumption in both layouts."""
+    hidden_states_history = [
+        torch.randn(shape, dtype=dtype, requires_grad=True) for _ in range(num_candidates)
+    ]
+    rng_state = torch.get_rng_state()
+    stacked = torch.stack(hidden_states_history)
+    selected_candidates = torch.randint(num_candidates, (1, *shape[:2], 1))
+    expected = stacked.gather(0, selected_candidates.expand(1, *shape)).squeeze(0)
+    expected_rng_state = torch.get_rng_state()
 
-    def fake_randint(high, size, *, device=None):
-        assert high == len(hidden_states_history)
-        assert tuple(size) == tuple(selected_candidates.shape)
-        return selected_candidates.to(device)
-
-    monkeypatch.setattr(torch, "randint", fake_randint)
-
+    torch.set_rng_state(rng_state)
     mixed = HFEagleModel._sample_uniform_hidden_state_history(hidden_states_history)
-    expected = selected_candidates.squeeze(0).float().expand(-1, -1, 4)
+    assert torch.equal(torch.get_rng_state(), expected_rng_state)
+    torch.testing.assert_close(mixed, expected, rtol=0, atol=0)
 
-    assert torch.equal(mixed, expected)
+    grad = torch.randn_like(mixed)
+    expected_grads = torch.autograd.grad(expected, hidden_states_history, grad)
+    actual_grads = torch.autograd.grad(mixed, hidden_states_history, grad)
+    for actual, reference in zip(actual_grads, expected_grads):
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
