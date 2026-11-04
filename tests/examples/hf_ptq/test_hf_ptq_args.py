@@ -474,7 +474,7 @@ def test_fsdp2_rejects_mtp_before_distributed_loading(monkeypatch, tmp_path, has
 
     monkeypatch.setattr(hf_ptq, "load_pretrained", distributed_load)
     error, message = (
-        (NotImplementedError, "Nemotron-H MTP")
+        (NotImplementedError, "MTP weights")
         if has_mtp
         else (RuntimeError, "distributed loader reached")
     )

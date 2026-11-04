@@ -46,7 +46,7 @@ from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
-from modelopt.torch.models import hf_model_type
+from modelopt.torch.models import get_ptq_spec, hf_model_type
 from modelopt.torch.models.hf import (
     checkpoint_has_mtp,
     prefers_bundled_code,
@@ -97,8 +97,8 @@ def _awq_calibrations(args) -> set[str]:
 def validate_fsdp2_supported(args, config):
     """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
     issues = []
-    if "vila" in args.local_checkpoint_path.lower():
-        issues.append("VILA (custom builder + non-standard layer layout)")
+    if (unsupported := get_ptq_spec(hf_model_type(config)).fsdp2_unsupported) is not None:
+        issues.append(unsupported)
     # A layout whose decoder layers cannot be found fails in fsdp2_wrap. Encoder-decoder models
     # have no single decoder stack. Without --calib_with_images a VLM calibrates on text, which a
     # forward that requires images cannot run.
@@ -127,7 +127,7 @@ def validate_fsdp2_supported(args, config):
             "use a non-AWQ format)"
         )
     if not issues and checkpoint_has_mtp(config.model_type, args.local_checkpoint_path):
-        issues.append("Nemotron-H MTP (auxiliary modules are not constructed by the FSDP2 loader)")
+        issues.append("MTP weights (auxiliary modules are not constructed by the FSDP2 loader)")
 
     if issues:
         raise NotImplementedError(
@@ -519,20 +519,6 @@ def is_speculative(hf_config):
     )
 
 
-def is_diffusion_gemma(hf_config) -> bool:
-    """Check if the model architecture is DiffusionGemma.
-
-    Underscores are ignored: the family is spelled ``diffusion_gemma`` in configs
-    and ``DiffusionGemma`` in class names. The nested ``text_config`` is checked too,
-    since multi-modal wrappers keep the family name there.
-    """
-    names = []
-    for cfg in (hf_config, getattr(hf_config, "text_config", None)):
-        names.append(getattr(cfg, "model_type", None) or "")
-        names.extend(getattr(cfg, "architectures", None) or [])
-    return any("diffusiongemma" in name.lower().replace("_", "") for name in names)
-
-
 def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTokenizerBase:
     print(f"Initializing tokenizer from {ckpt_path}")
 
@@ -731,12 +717,9 @@ def _get_config_dtype(config):
     return config_dtype
 
 
-def _apply_dtype_to_config(model_kwargs, config_dtype, architecture, apply_config_dtype=False):
+def _apply_dtype_to_config(model_kwargs, config_dtype, apply_config_dtype=False):
     model_kwargs = model_kwargs.copy()
-    if "DeciLM" in architecture:
-        model_kwargs["torch_dtype"] = config_dtype
-        model_kwargs.pop("dtype", None)
-    elif apply_config_dtype:
+    if apply_config_dtype:
         model_kwargs["dtype"] = config_dtype
     return model_kwargs
 
@@ -822,6 +805,7 @@ def get_model(
     except Exception as e:
         print(f"Error: Could not load config from {ckpt_path}: {e}")
         raise RuntimeError(f"Failed to load model configuration from {ckpt_path}") from e
+    ptq = get_ptq_spec(hf_model_type(hf_config))
     if attn_implementation is not None:
         config_kwargs["attn_implementation"] = attn_implementation
 
@@ -834,22 +818,15 @@ def get_model(
     )
     model_kwargs.update(experts_kwargs)
 
-    # DiffusionGemma ties encoder/decoder weights. device_map "auto" (balanced) can split
-    # a tied pair across GPUs, leaving one side on the meta device and breaking generation.
-    # Sequential packs the model onto GPU 0 first (up to gpu_mem_percentage), keeping tied
-    # modules together for checkpoints that fit; larger ones can still spill and split a
-    # tied pair, and need an explicit single-device map. Multi-GPU only: a single-GPU split
-    # cannot separate a tied pair, and sequential would needlessly cap max_memory there.
+    # Multi-GPU only: a single GPU cannot split what is tied, and sequential would needlessly cap
+    # max_memory there.
     if (
         not pinned
         and not on_cpu
         and torch.cuda.device_count() > 1
-        and is_diffusion_gemma(hf_config)
+        and ptq.sequential_device_map is not None
     ):
-        print(
-            "Detected DiffusionGemma model. Using device_map='sequential'; the balanced "
-            "'auto' mapping can split its tied encoder/decoder weights across GPUs."
-        )
+        print(f"Using device_map='sequential': {ptq.sequential_device_map}.")
         use_seq_device_map = True
 
     if use_seq_device_map and pinned:
@@ -865,14 +842,8 @@ def get_model(
         max_memory = {key: value * gpu_mem_percentage for key, value in max_memory.items()}
         model_kwargs["max_memory"] = max_memory
 
-    if hf_config.model_type == "bart":
-        # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors
-        device_map = None
-
-    if hf_config.model_type == "t5":
-        # device_map "auto" can naively shard T5's tied encoder/decoder embeddings and
-        # position-bias buffers across GPUs, which non-deterministically produces NaN
-        # activations during calibration on multi-GPU machines (see HF transformers #21093).
+    if ptq.no_device_map is not None:
+        print(f"Loading without a device map: {ptq.no_device_map}.")
         device_map = None
 
     # Helper function to check if model has pack-quantized config. Checks both the top-level
@@ -958,16 +929,13 @@ def get_model(
             raise ValueError(f"Model config at {ckpt_path} has no architectures defined")
         architecture = hf_config.architectures[0]
 
-        # DeepSeek ships bundled modeling code, but the built-in class is what the
-        # disk-offload and streaming-export paths are validated against.
-        # Also use it when the model plugin says the built-in class can't represent the checkpoint
-        # (dense Nemotron-H on Transformers 5.5, whose built-in class is MoE-only).
-        use_bundled_code = trust_remote_code and (
-            "Deepseek" in architecture
-            or (
-                hasattr(transformers, architecture)
-                and prefers_bundled_code(hf_config.model_type, hf_config, ckpt_path, config_kwargs)
-            )
+        # Use the checkpoint's bundled code when the model plugin says the built-in class can't
+        # represent it (dense Nemotron-H on Transformers 5.5, whose built-in class is MoE-only) or
+        # is the wrong one for it (a DeepSeek architecture).
+        use_bundled_code = (
+            trust_remote_code
+            and hasattr(transformers, architecture)
+            and prefers_bundled_code(hf_config.model_type, hf_config, ckpt_path, config_kwargs)
         )
 
         if not hasattr(transformers, architecture) or use_bundled_code:
@@ -1011,7 +979,7 @@ def get_model(
             # unless specified by the hf_config.
             config_dtype = _get_config_dtype(config_for_init)
             model_kwargs2 = _apply_dtype_to_config(
-                model_kwargs, config_dtype, architecture, apply_config_dtype=True
+                model_kwargs, config_dtype, apply_config_dtype=True
             )
             if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                 model_kwargs2.pop("trust_remote_code", None)
@@ -1053,7 +1021,7 @@ def get_model(
                 )
                 model_kwargs["max_memory"] = max_memory
 
-        model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, architecture)
+        model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype)
         if _disk_offload:
             model_kwargs2["offload_folder"] = offload_folder
         model = load_pretrained(
@@ -1097,11 +1065,12 @@ def generate_excludes_prompt(model) -> bool:
     """Return whether ``model.generate()`` returns only the decoder sequence, without the prompt.
 
     True for encoder-decoder models, so ``hf_ptq.py`` decodes their preview output whole instead
-    of slicing off a prompt-length prefix. ``diffusion_gemma`` is structurally encoder-decoder but
-    returns prompt+canvas concatenated, so it is excluded (AR-style decode applies).
+    of slicing off a prompt-length prefix. A model whose spec says ``generate()`` includes the
+    prompt, though it is structurally encoder-decoder, is excluded (AR-style decode applies).
     """
     config = model.config
-    return bool(getattr(config, "is_encoder_decoder", False)) and not is_diffusion_gemma(config)
+    includes_prompt = get_ptq_spec(hf_model_type(config)).generate_includes_prompt
+    return bool(getattr(config, "is_encoder_decoder", False)) and includes_prompt is None
 
 
 def save_source_config(args, export_path) -> None:

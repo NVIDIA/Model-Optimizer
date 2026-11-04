@@ -31,6 +31,11 @@ _HOOKS = frozenset(
     {"prepare_for_loading", "has_mtp_weights", "prefers_bundled_code", "prepare_for_calibration"}
 )
 _PLUGINS = {
+    "deepseek": "deepseek.bundled_code",
+    "deepseek_v3": "deepseek.bundled_code",
+    "deepseek_v32": "deepseek.bundled_code",
+    "deepseek_v4": "deepseek.bundled_code",
+    "kimi_k2": "deepseek.bundled_code",
     "nemotron_h": "nemotron_h.mtp",
     "nemotron_h_omni": "nemotron_h.mtp",
     "qwen4_exp": "qwen4_exp.qsa_indexer",

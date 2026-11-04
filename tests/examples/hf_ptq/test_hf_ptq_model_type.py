@@ -155,3 +155,42 @@ def test_post_quantize_preview_keeps_whole_answer(
     )
 
     assert "example outputs after ptq: ['7 8']" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("model_type", "generates"), [("llama4", False), ("llama4_text", False), ("llama", True)]
+)
+def test_post_quantize_generation_skip(
+    hf_ptq, monkeypatch: pytest.MonkeyPatch, recwarn, model_type: str, generates: bool
+):
+    monkeypatch.setattr(hf_ptq, "export_quantized", lambda *args, **kwargs: None)
+    generate_calls = []
+
+    def generate(*args, **kwargs):
+        generate_calls.append(1)
+        return torch.tensor([[1, 2, 3, 4, 5]])
+
+    full_model = _Model(generate, _config(model_type, False))
+    tokenizer = SimpleNamespace(
+        batch_decode=lambda ids, **kwargs: [" ".join(map(str, row.tolist())) for row in ids]
+    )
+    args = SimpleNamespace(specdec_offline_dataset=None, verbose=False)
+
+    hf_ptq.post_quantize(
+        args,
+        full_model,
+        full_model,
+        model_type,
+        tokenizer,
+        None,
+        torch.tensor([[1, 2, 3, 4, 5]]),
+        None,
+        torch.tensor([[1, 2, 3, 4, 5]]),
+        False,
+        None,
+        None,
+    )
+
+    assert len(generate_calls) == (1 if generates else 0)
+    skipped = any("Skipping generation sample" in str(w.message) for w in recwarn)
+    assert skipped is not generates
