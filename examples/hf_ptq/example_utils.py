@@ -45,6 +45,7 @@ from transformers import (
 from modelopt.recipe import load_recipe
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.export import has_spec_opt
+from modelopt.torch.export.trtllm.enc_dec import is_trtllm_enc_dec_export
 from modelopt.torch.models import get_ptq_spec, hf_model_type
 from modelopt.torch.models.hf import (
     checkpoint_has_mtp,
@@ -53,14 +54,13 @@ from modelopt.torch.models.hf import (
     prepare_model_for_loading,
 )
 from modelopt.torch.quantization.mode import get_modelike_from_algo_cfg
+from modelopt.torch.speculative.utils import is_speculative_config
 from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils.fsdp2_utils import fsdp2_root_unsharded
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained, resolve_model_class
 
 logger = logging.getLogger(__name__)
-
-SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 
 @dataclass
@@ -120,8 +120,8 @@ def _awq_calibrations(args) -> set[str]:
 def validate_fsdp2_supported(args, config):
     """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
     issues = []
-    if "vila" in args.local_checkpoint_path.lower():
-        issues.append("VILA (custom builder + non-standard layer layout)")
+    if (unsupported := get_ptq_spec(hf_model_type(config)).fsdp2_unsupported) is not None:
+        issues.append(unsupported)
     # A layout whose decoder layers cannot be found fails in fsdp2_wrap. Encoder-decoder models
     # have no single decoder stack. Without --calib_with_images a VLM calibrates on text, which a
     # forward that requires images cannot run.
@@ -320,27 +320,6 @@ def build_quant_cfg(
             )
 
     return quant_cfg
-
-
-def is_speculative(hf_config):
-    """Check if the model architecture is a speculative model."""
-    return hf_config.architectures and any(
-        name in hf_config.architectures[0] for name in SPECULATIVE_MODEL_LIST
-    )
-
-
-def is_diffusion_gemma(hf_config) -> bool:
-    """Check if the model architecture is DiffusionGemma.
-
-    Underscores are ignored: the family is spelled ``diffusion_gemma`` in configs
-    and ``DiffusionGemma`` in class names. The nested ``text_config`` is checked too,
-    since multi-modal wrappers keep the family name there.
-    """
-    names = []
-    for cfg in (hf_config, getattr(hf_config, "text_config", None)):
-        names.append(getattr(cfg, "model_type", None) or "")
-        names.extend(getattr(cfg, "architectures", None) or [])
-    return any("diffusiongemma" in name.lower().replace("_", "") for name in names)
 
 
 def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTokenizerBase:
@@ -585,11 +564,8 @@ def get_model(
     # modules together for checkpoints that fit; larger ones can still spill and split a
     # tied pair, and need an explicit single-device map. Multi-GPU only: a single-GPU split
     # cannot separate a tied pair, and sequential would needlessly cap max_memory there.
-    if device != "cpu" and torch.cuda.device_count() > 1 and is_diffusion_gemma(hf_config):
-        print(
-            "Detected DiffusionGemma model. Using device_map='sequential'; the balanced "
-            "'auto' mapping can split its tied encoder/decoder weights across GPUs."
-        )
+    if device != "cpu" and torch.cuda.device_count() > 1 and ptq.sequential_device_map is not None:
+        print(f"Using device_map='sequential': {ptq.sequential_device_map}.")
         use_seq_device_map = True
 
     if use_seq_device_map:
@@ -621,7 +597,7 @@ def get_model(
     # Only the general load path below threads max_memory/offload_folder into
     # from_pretrained; the specialized loaders build their own calls.
     if _disk_offload and (
-        is_speculative(hf_config)
+        is_speculative_config(hf_config)
         or has_pack_quantized_config(hf_config)
         or get_original_hf_quant_method(hf_config) == "mxfp4"
     ):
@@ -632,7 +608,7 @@ def get_model(
             UserWarning,
         )
 
-    if is_speculative(hf_config):
+    if is_speculative_config(hf_config):
         model = load_pretrained(
             ckpt_path,
             AutoModelForCausalLM,
@@ -803,24 +779,16 @@ def is_model_on_gpu(model) -> bool:
     return all("cuda" in str(param.device) for param in model.parameters())
 
 
-def is_trtllm_enc_dec_export(model_type: str | None) -> bool:
-    """Return whether the root Hugging Face model_type still exports a TensorRT-LLM checkpoint.
-
-    These are the encoder-decoder families the deprecated TensorRT-LLM exporter supports. Other
-    encoder-decoder models (e.g. LongT5, PLBart, T5Gemma) use the unified HF export.
-    """
-    return model_type in ["t5", "mt5", "umt5", "bart", "mbart", "whisper"]
-
-
 def generate_excludes_prompt(model) -> bool:
     """Return whether ``model.generate()`` returns only the decoder sequence, without the prompt.
 
     True for encoder-decoder models, so ``hf_ptq.py`` decodes their preview output whole instead
-    of slicing off a prompt-length prefix. ``diffusion_gemma`` is structurally encoder-decoder but
-    returns prompt+canvas concatenated, so it is excluded (AR-style decode applies).
+    of slicing off a prompt-length prefix. A model whose spec says ``generate()`` includes the
+    prompt, though it is structurally encoder-decoder, is excluded (AR-style decode applies).
     """
     config = model.config
-    return bool(getattr(config, "is_encoder_decoder", False)) and not is_diffusion_gemma(config)
+    includes_prompt = get_ptq_spec(hf_model_type(config)).generate_includes_prompt
+    return bool(getattr(config, "is_encoder_decoder", False)) and includes_prompt is None
 
 
 def save_source_config(args, export_path) -> None:

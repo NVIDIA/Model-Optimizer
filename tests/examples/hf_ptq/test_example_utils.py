@@ -69,6 +69,14 @@ def test_fsdp2_vlm_validation(model_type, architectures, calib_with_images, pack
         example_utils.validate_fsdp2_supported(args, config)
 
 
+def test_fsdp2_refuses_a_model_its_spec_lists():
+    """Found by model type, not by what the checkpoint path is called."""
+    args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=False)
+    config = SimpleNamespace(model_type="llava_llama", architectures=["LlavaLlamaModel"])
+    with pytest.raises(NotImplementedError, match="VILA"):
+        example_utils.validate_fsdp2_supported(args, config)
+
+
 def test_fsdp2_refuses_encoder_decoder():
     args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=False)
     config = SimpleNamespace(model_type="t5", architectures=["T5ForConditionalGeneration"])
@@ -388,7 +396,6 @@ def test_get_model_uses_expected_dtype_kwarg(
         monkeypatch.delattr(example_utils.transformers, architecture, raising=False)
     else:
         monkeypatch.setattr(example_utils.transformers, model_class_name, FakeLlamaForCausalLM)
-    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
@@ -410,8 +417,6 @@ def test_get_model_uses_expected_dtype_kwarg(
         # DiffusionGemma ties encoder/decoder weights; "auto" can split a tied pair
         # across GPUs, so multi-GPU loads must fall back to "sequential".
         ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 2, "sequential"),
-        # Detection must also work off ``architectures`` alone, without ``model_type``.
-        (None, "DiffusionGemmaForConditionalGeneration", 2, "sequential"),
         # Single GPU cannot split a tied pair, so it keeps the unrestricted "auto" map.
         ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 1, "auto"),
         # "gemma" is a substring of "diffusiongemma"; other Gemmas must not match.
@@ -457,7 +462,6 @@ def test_get_model_device_map(
     # (e.g. Gemma3ForCausalLM) reappears on the next ``hasattr`` and the real one loads.
     # raising=False: DiffusionGemma may not exist in the installed transformers.
     monkeypatch.setattr(example_utils.transformers, architecture, FakeArchitecture, raising=False)
-    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
@@ -471,43 +475,6 @@ def test_get_model_device_map(
         assert calls["from_pretrained"]["max_memory"] == {0: 1024 * 0.8}
     else:
         assert "max_memory" not in calls["from_pretrained"]
-
-
-@pytest.mark.parametrize(
-    ("hf_config", "expected"),
-    [
-        (SimpleNamespace(model_type="diffusion_gemma", architectures=None), True),
-        (SimpleNamespace(model_type=None, architectures=["DiffusionGemmaForCausalLM"]), True),
-        (SimpleNamespace(model_type="gemma3", architectures=["Gemma3ForCausalLM"]), False),
-        # Multi-modal wrappers keep the family name on the nested ``text_config``.
-        (
-            SimpleNamespace(
-                model_type="multimodal",
-                architectures=["SomeWrapperForConditionalGeneration"],
-                text_config=SimpleNamespace(model_type="diffusion_gemma"),
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model_type="multimodal",
-                text_config=SimpleNamespace(architectures=["DiffusionGemmaForCausalLM"]),
-            ),
-            True,
-        ),
-        # A non-DiffusionGemma nested config must not match.
-        (
-            SimpleNamespace(
-                model_type="multimodal", text_config=SimpleNamespace(model_type="gemma3")
-            ),
-            False,
-        ),
-        # Stub configs may omit either attribute entirely.
-        (SimpleNamespace(), False),
-    ],
-)
-def test_is_diffusion_gemma(hf_config, expected):
-    assert example_utils.is_diffusion_gemma(hf_config) is expected
 
 
 @pytest.mark.parametrize(
@@ -585,7 +552,6 @@ def test_get_model_selects_bundled_or_builtin_class(
     monkeypatch.setattr(example_utils, "AutoModelForCausalLM", _record("bundled"))
     monkeypatch.setattr(example_utils.transformers, architecture, _record("builtin"), raising=False)
     monkeypatch.setattr(example_utils, "prepare_model_for_loading", lambda *a, **k: nullcontext())
-    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})

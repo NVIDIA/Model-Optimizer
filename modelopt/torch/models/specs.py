@@ -323,6 +323,12 @@ class PTQSpec(SpecSection):
     """Why no device map can be used for the model: the flow loads it whole and moves it to the
     target device, whatever the run asks for."""
 
+    sequential_device_map: str | None = None
+    """Why a load on several GPUs uses ``device_map="sequential"`` and not the balanced ``"auto"``.
+
+    A single GPU keeps ``"auto"``: it cannot split what is tied, and a sequential map would only
+    cap its memory."""
+
     dtype_kwarg: Literal["dtype", "torch_dtype"] = "dtype"
     """The keyword the model's loading code takes its precision by. A checkpoint's own code that
     predates transformers renaming ``torch_dtype`` to ``dtype`` knows only the old one, and would
@@ -342,6 +348,14 @@ class PTQSpec(SpecSection):
     post_ptq_generation_unsupported: str | None = None
     """Why the quantized model cannot generate the after-quantization sample though the original
     could, so the flow keeps the first sample and skips the second."""
+
+    generate_includes_prompt: str | None = None
+    """Why ``generate()`` returns the prompt with the answer though the model is encoder-decoder,
+    so the preview decodes it the way a decoder-only model's is, slicing the prompt off."""
+
+    fsdp2_unsupported: str | None = None
+    """What about the model ``--use_fsdp2`` cannot calibrate, as the refusal lists it before
+    anything loads."""
 
 
 @dataclass(kw_only=True)

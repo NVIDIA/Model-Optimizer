@@ -41,7 +41,6 @@ from example_utils import (
     generate_excludes_prompt,
     get_model,
     get_tokenizer,
-    is_trtllm_enc_dec_export,
     mlflow_run,
     recipe_layerwise_blocks,
     run_vlm_preview,
@@ -80,6 +79,7 @@ from modelopt.torch.export import (
 from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
+from modelopt.torch.export.trtllm.enc_dec import is_trtllm_enc_dec_export
 from modelopt.torch.models import get_ptq_spec, hf_model_type
 from modelopt.torch.models.hf import (
     calibration_sample_input,
