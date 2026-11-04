@@ -35,25 +35,56 @@ class Timing(Metric):
     def process_final(self, text_outputs):
         e2e_time = []
         ttft_time = []
-        tpot_time = []
+        itl_time = []
         gen_tp_time = []
         start_time = min([t[0] for t in self.timing])
         end_time = max([t[-1] for t in self.timing])
-        self.out["Output TPS"] = sum(self.total_tokens) / (end_time - start_time)
-        self.out["Output TPS/gpu"] = self.out["Output TPS"] / self.tp_size
+        duration = end_time - start_time
+        self.out["Output Token Throughput (tokens/sec)"] = sum(self.total_tokens) / duration
+        # No AIPerf equivalent -- AIPerf measures an endpoint and cannot know the
+        # deployment's GPU count. Kept because it is how specdec results get compared
+        # across parallelism settings.
+        self.out["Output Token Throughput Per GPU (tokens/sec/gpu)"] = (
+            self.out["Output Token Throughput (tokens/sec)"] / self.tp_size
+        )
+        self.out["Request Throughput (requests/sec)"] = len(self.timing) / duration
+        self.out["Request Count (requests)"] = len(self.timing)
         for tokens, times in zip(self.total_tokens, self.timing):
             if len(times) > 1:
                 e2e_time.append(times[-1] - times[0])
                 ttft_time.append(times[1] - times[0])
-            if len(times) > 2:
-                gen_tp_time.append((tokens - 1) / (times[-1] - times[1]))
-                tpot_time.extend([a - b for a, b in zip(times[1:], times[:-1])])
-        self.out["E2E Request Time"] = compute_statistics(e2e_time)
-        self.out["TTFT Time"] = compute_statistics(ttft_time)
-        if tpot_time:
-            self.out["Request Generation Step Time"] = compute_statistics(tpot_time)
-            self.out["Request Generation Tokens Per Second"] = compute_statistics(gen_tp_time)
-        self.out["Number of Output Tokens"] = compute_statistics(self.total_tokens)
+            # times[1] is the first token's arrival, so times[-1] - times[1] is the
+            # generation phase with prefill excluded. `tokens > 1` guards the
+            # single-token response, which has no inter-token interval at all and
+            # would divide by zero below.
+            if len(times) > 2 and tokens > 1:
+                generation_time = times[-1] - times[1]
+                if generation_time > 0:
+                    gen_tp_time.append((tokens - 1) / generation_time)
+                # AIPerf defines inter-token latency as the reciprocal of per-user
+                # output token throughput: one value per request, prefill excluded,
+                # divided by tokens rather than by engine steps. Computing it any
+                # other way publishes two metrics side by side that claim to be
+                # reciprocals and are not.
+                #
+                # The previous implementation pooled raw per-step gaps, which was
+                # wrong twice over. The first gap is times[1] - times[0] -- TTFT
+                # itself -- so prefill landed in the p95/p99 buckets this metric
+                # exists to expose. And token_times holds one timestamp per engine
+                # stream chunk, while a speculative-decoding chunk carries every
+                # accepted draft token: each gap therefore spanned roughly
+                # accept_length tokens, so reported ITL *rose as the draft model
+                # improved*, inverting the quantity specdec_bench exists to measure.
+                itl_time.append(generation_time / (tokens - 1))
+        self.out["Request Latency (ms)"] = compute_statistics(e2e_time, scale=_S_TO_MS)
+        self.out["Time to First Token (ms)"] = compute_statistics(ttft_time, scale=_S_TO_MS)
+        if itl_time:
+            self.out["Inter Token Latency (ms)"] = compute_statistics(itl_time, scale=_S_TO_MS)
+        if gen_tp_time:
+            self.out["Output Token Throughput Per User (tokens/sec/user)"] = compute_statistics(
+                gen_tp_time
+            )
+        self.out["Output Sequence Length (tokens)"] = compute_statistics(self.total_tokens)
         for k, v in self.out.items():
             print(k, v)
         self.write()
@@ -62,9 +93,18 @@ class Timing(Metric):
         self.timing = []
 
 
-def compute_statistics(data, quantiles=[0.25, 0.5, 0.75]):
-    # Convert the data to a numpy array for easier calculations
-    data = np.array(data)
+# AIPerf's percentile set. The previous 0.25/0.5/0.75 stopped short of the tail, so
+# nothing could be said about p90/p99 -- which is where serving decisions are made.
+_AIPERF_QUANTILES = (0.25, 0.5, 0.75, 0.90, 0.95, 0.99)
+_S_TO_MS = 1000.0
+
+
+def compute_statistics(data, quantiles=_AIPERF_QUANTILES, scale=1.0):
+    # Convert the data to a numpy array for easier calculations. ``scale`` converts
+    # units at the boundary -- AIPerf reports latencies in milliseconds while the
+    # timestamps collected here are seconds, and the key names carry the unit so the
+    # conversion is visible rather than implied.
+    data = np.array(data) * scale
 
     # Compute the statistics
     min_val = np.min(data)

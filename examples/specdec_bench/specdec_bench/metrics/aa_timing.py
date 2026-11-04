@@ -47,12 +47,16 @@ class AATiming(Metric):
         gen_tp_time = []
         start_time = min([t[0] for t in self.timing])
         end_time = max([t[-1] for t in self.timing])
-        self.out["AA Output TPS"] = sum(self.total_tokens) / (end_time - start_time)
+        self.out["AA Output Token Throughput (tokens/sec)"] = sum(self.total_tokens) / (
+            end_time - start_time
+        )
         for tokens, times in zip(self.total_tokens, self.timing):
             if len(times) > 2:
                 gen_tp_time.append((tokens - 1) / (times[-1] - times[1]))
         if gen_tp_time:
-            self.out["AA Generation Tokens Per Second"] = compute_statistics(gen_tp_time)
+            self.out["AA Output Token Throughput Per User (tokens/sec/user)"] = compute_statistics(
+                gen_tp_time
+            )
         for k, v in self.out.items():
             print(k, v)
         self.write()
