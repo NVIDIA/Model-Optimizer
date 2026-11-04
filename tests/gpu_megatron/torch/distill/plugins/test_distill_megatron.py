@@ -467,6 +467,106 @@ def _test_freeze_mtp_training_step(mtp_quantized, freeze_mtp, kd_loss_alpha, moe
         handle.remove()
 
 
+def _test_freeze_mtp_tied_weights_pp(rank, size):
+    set_seed(SEED)
+    hidden_size, seq_length, batch_size, vocab_size = 8, 8, 2, 32
+    model_kwargs = {
+        "pipeline_model_parallel_size": size,
+        "num_layers": 2,
+        "hidden_size": hidden_size,
+        "num_attention_heads": 4,
+        "num_query_groups": 2,
+        "ffn_hidden_size": 8,
+        "max_sequence_length": seq_length,
+        "vocab_size": vocab_size,
+        "mtp_num_layers": 1,
+        "share_embeddings_and_output_weights": True,
+    }
+    teacher = get_mcore_gpt_model(initialize_megatron=True, **model_kwargs).cuda()
+    student = get_mcore_gpt_model(**model_kwargs).cuda()
+    cfg = setup_distillation_config(
+        DistillationConfig(freeze_mtp=True), student.config, teacher.config
+    )
+    model = mtd.convert(
+        student,
+        mode=[
+            (
+                "kd_loss",
+                {
+                    "teacher_model": teacher,
+                    "criterion": cfg.criterion,
+                    "loss_balancer": cfg.loss_balancer,
+                },
+            )
+        ],
+    )
+    adjust_distillation_model_for_mcore(model, cfg)
+
+    captured = {}
+    originals = {lm: lm.shared_embedding_or_output_weight for lm in (model, teacher)}
+
+    def capture_output(lm, module, args, output):
+        captured[lm] = (args[0].detach(), output[0].detach())
+
+    def reject_mtp(module, args):
+        raise AssertionError("Frozen MTP must not execute")
+
+    handles = []
+    shared_before = {}
+    if parallel_state.is_pipeline_last_stage():
+        for lm in (model, teacher):
+            shared_before[lm] = lm.embedding.word_embeddings.weight.detach().clone()
+            # Make selecting the unused output-layer weight numerically observable.
+            if (
+                lm.output_layer.weight is not None
+                and lm.output_layer.weight is not lm.embedding.word_embeddings.weight
+            ):
+                with torch.no_grad():
+                    lm.output_layer.weight.zero_()
+            handles.append(lm.output_layer.register_forward_hook(partial(capture_output, lm)))
+            handles.append(lm.mtp.register_forward_pre_hook(reject_mtp))
+
+    tokens = torch.randint(0, vocab_size, (batch_size, seq_length), device="cuda")
+    positions = torch.arange(seq_length, device="cuda").unsqueeze(0).expand_as(tokens)
+    with torch.no_grad():
+        if parallel_state.is_pipeline_first_stage():
+            hidden = model(tokens, positions, None)
+            torch.distributed.send(hidden.contiguous(), dst=1)
+        else:
+            hidden = torch.empty(
+                seq_length, batch_size, 2 * hidden_size, dtype=torch.bfloat16, device="cuda"
+            )
+            torch.distributed.recv(hidden, src=0)
+            model.set_student_input_tensor_shape([(seq_length, batch_size, hidden_size)])
+            model.set_input_tensor([hidden])
+            logits = model(tokens, positions, None)
+            for lm in (model, teacher):
+                activation, actual = captured[lm]
+                checkpoint = lm.state_dict()
+                weight = checkpoint["embedding.word_embeddings.weight"]
+                torch.testing.assert_close(weight, shared_before[lm])
+                torch.testing.assert_close(actual, F.linear(activation, weight))
+                assert lm.mtp_process and lm.config.mtp_num_layers == 1
+            torch.testing.assert_close(logits, captured[model][1].transpose(0, 1).contiguous())
+
+            with (
+                patch.object(model.decoder, "forward", side_effect=RuntimeError("probe")),
+                pytest.raises(RuntimeError, match="probe"),
+            ):
+                model(tokens, positions, None)
+
+    for lm in (model, teacher):
+        assert lm.shared_embedding_or_output_weight == originals[lm]
+        assert lm.config is lm.decoder.config
+    for handle in handles:
+        handle.remove()
+
+
+def test_freeze_mtp_tied_weights_pp(dist_workers_size_2):
+    """PP2 main logits use the tied checkpoint weight while both MTP paths are bypassed."""
+    dist_workers_size_2.run(_test_freeze_mtp_tied_weights_pp)
+
+
 def test_logits_kl_loss(dist_workers):
     """Test LogitsKLLoss with TP parallelism."""
     dist_workers.run(_test_logits_kl_loss)

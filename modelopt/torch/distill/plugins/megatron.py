@@ -838,7 +838,12 @@ def adjust_distillation_model_for_mcore(
         if not distill_cfg.freeze_mtp or not (mtp_process or mtp_num_layers):
             yield
             return
+        tied_mtp = mtp_process and getattr(lm, "share_embeddings_and_output_weights", False)
+        shared_weight_fn = lm.__dict__.get("shared_embedding_or_output_weight")
         try:
+            if tied_mtp:
+                # MTP also selects the canonical tied weight on the last pipeline stage.
+                lm.shared_embedding_or_output_weight = lambda: lm.embedding.word_embeddings.weight
             # GPT gates the block and loss separately. Do not alter the decoder's shared config.
             lm.mtp_process = False
             lm.config = copy(config)
@@ -846,6 +851,11 @@ def adjust_distillation_model_for_mcore(
             yield
         finally:
             lm.mtp_process, lm.config = mtp_process, config
+            if tied_mtp:
+                if shared_weight_fn is None:
+                    del lm.shared_embedding_or_output_weight
+                else:
+                    lm.shared_embedding_or_output_weight = shared_weight_fn
 
     # HACK: Pipeline-parallel Distillation requires splitting input tensor into student and teacher parts.
     def _set_student_input_tensor_shape(self, shapes: list[tuple[int]]):
