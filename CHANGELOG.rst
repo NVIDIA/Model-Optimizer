@@ -76,7 +76,7 @@ Changelog
 
 **Bug Fixes**
 
-- QAT and QAD of the GGML formats (IQ, ``q8_0``) now re-encode each weight after every optimizer step. Under optimizers that write weights through a shared buffer or ``.data``, such as Megatron's distributed optimizer, the GGML codes stayed those of each job's first forward, so earlier Megatron QAD runs trained only the non-GGML layers. Re-run them.
+- QAT and QAD of the GGML formats (IQ, ``q8_0``) now re-encode trainable weights after every optimizer step, including under optimizers that write weights through a shared buffer or ``.data`` such as Megatron's distributed optimizer. With those optimizers the GGML codes used to stay those of each job's first forward, so re-run earlier Megatron QAD of these formats.
 - Fix ONNX loading and quantization graph exports failing on individual initializers larger than 2 GiB, while preserving nested scopes and sequence/optional value types.
 - Saving ONNX external weights to another directory no longer removes a same-named weight file from the working directory. Existing external weights remain intact when saving a model loaded without weight data.
 - ONNX autotuner file exports now save external weight data without serializing the full model to bytes first.

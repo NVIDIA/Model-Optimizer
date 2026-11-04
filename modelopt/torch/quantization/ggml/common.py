@@ -231,6 +231,8 @@ def fake_quantize_with_cache(
     cache = _matching_cache(quantizer, inputs, format_name)
     if cache is not None and cache.block_chunk_size == block_chunk_size:
         packed_weights, weight_shape = cache.packed_weights, cache.weight_shape
+        # A weight frozen when it was packed may since have been made trainable in place.
+        _track_trainable(cache, _cache_base(inputs))
     else:
         packed_weights, weight_shape = quantize(inputs, block_chunk_size=block_chunk_size)
         input_key = _input_cache_key(inputs)
