@@ -126,7 +126,7 @@ def test_document_eod_id(tmp_path, append_eod):
         append_eod=append_eod,
     )
     args = argparse.Namespace(
-        student_hf_path=str(tmp_path / "tokenizer"),
+        student_model_name_or_path=str(tmp_path / "tokenizer"),
         trust_remote_code=False,
         data_paths=["1.0", prefix],
     )
