@@ -233,6 +233,9 @@ def make_calib_dataloader(
     model_type: str | None,
     autoquant_gradient_recipe: bool = False,
 ) -> tuple[DataLoader | _DeviceDataLoader, str | None]:
+    # Every distributed plan is data-parallel over the world: each rank calibrates on its own shard,
+    # and the quantizers' amax is synced across the ranks.
+    world_size = distribution_plan(language_model).world_size
     calib_dataloader = None
     first_text_speech_dataset = None
     if args.specdec_offline_dataset is not None:
@@ -274,8 +277,10 @@ def make_calib_dataloader(
             seed=42,
             use_media_shards=True,
             max_shards=1,
-            dp_size=args.dist_state.world_size if args.use_fsdp2 else 1,
-            dp_rank=args.dist_state.rank if args.use_fsdp2 else 0,
+            # Sharded here, so each rank drops its own undecodable images and pads to the others'
+            # batch count: an empty batch on one rank would leave the others in a collective.
+            dp_size=world_size,
+            dp_rank=args.dist_state.rank,
         )
     elif model_type == "whisper":
         assert processor is not None and isinstance(processor, WhisperProcessor), (
@@ -308,10 +313,7 @@ def make_calib_dataloader(
             device=device,
             include_labels=include_labels,
         )
-    world_size = distribution_plan(language_model).world_size
-    if world_size > 1 and calib_dataloader is not None:
-        # Every distributed plan is data-parallel over the world: each rank calibrates on its own
-        # shard, and the quantizers' amax is synced across the ranks.
+    if world_size > 1 and calib_dataloader is not None and not args.calib_with_images:
         calib_dataloader = _shard_calib_dataloader(
             calib_dataloader, args.dist_state.rank, world_size
         )

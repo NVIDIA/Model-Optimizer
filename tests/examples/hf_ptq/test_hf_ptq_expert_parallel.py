@@ -610,6 +610,39 @@ def test_distributed_calibration_gives_each_rank_its_own_shard(hf_ptq, monkeypat
     assert calib_loader(world_size=1) is loader
 
 
+@pytest.mark.parametrize(
+    "plan",
+    [DistributionPlan(2), DistributionPlan(2, ep_size=2), DistributionPlan(2, dense="fsdp")],
+    ids=["replicated", "expert_parallel", "fsdp2"],
+)
+def test_image_calibration_data_is_sharded_once_by_its_loader(hf_ptq, monkeypatch, plan):
+    """The image loader shards its stream itself, so each rank drops its own undecodable images
+    and the ranks keep the same number of batches: every distributed plan hands it the rank and the
+    world size, and the loader it returns is not sharded again."""
+    loader = DataLoader(list(range(8)), batch_size=1)
+    asked = []
+    monkeypatch.setattr(
+        hf_ptq, "get_vlm_dataset_dataloader", lambda **kwargs: asked.append(kwargs) or loader
+    )
+    args = SimpleNamespace(
+        specdec_offline_dataset=None,
+        calib_with_images=True,
+        batch_size=1,
+        calib_size=[8],
+        use_fsdp2=plan.is_fsdp_dense and not plan.is_expert_parallel,
+        dist_state=_dist_state(2, 1),
+    )
+    model = torch.nn.Linear(2, 2)
+    set_distribution_plan(model, plan)
+
+    built, _ = hf_ptq.make_calib_dataloader(
+        args, model, object(), None, torch.device("cpu"), "llama"
+    )
+
+    assert built is loader
+    assert (asked[0]["dp_size"], asked[0]["dp_rank"]) == (2, 1)
+
+
 @pytest.mark.parametrize("images", [False, True], ids=["text", "images"])
 @pytest.mark.parametrize(
     ("plan", "loop"),
