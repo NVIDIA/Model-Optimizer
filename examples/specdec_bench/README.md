@@ -147,43 +147,111 @@ python3 run.py \
     --runtime_params runtime_args_long_context.yaml
 ```
 
-## Measuring acceptance with AIPerf
+## Measuring acceptance and throughput with AIPerf
 
-`run.py` drives an in-process engine and derives acceptance from its own token bookkeeping.
-That is accurate, but it makes a number comparable only to other `specdec_bench` numbers.
-`aiperf/run_aiperf_acceptance.sh` measures the same quantity through a served vLLM endpoint and
-[AIPerf](https://github.com/ai-dynamo/aiperf), so acceptance is comparable to anything else
-measured with the standard client.
+`run.py` drives an in-process engine and derives acceptance from its own token
+bookkeeping. That is accurate, but it makes a number comparable only to other
+`specdec_bench` numbers, and it cannot measure the serving stack under load.
+`aiperf/run_aiperf.sh` measures both through a served vLLM endpoint and
+[AIPerf](https://github.com/ai-dynamo/aiperf), the standard LLM benchmarking
+client, in a layout the Speed visualizer can publish directly.
 
-Both paths are supported; neither replaces the other. Use `run.py` when you want a single
-self-contained process and no server; use the AIPerf path when the number has to line up with
-other AIPerf measurements, or when you want to measure the serving stack as deployed.
+Both paths are supported; neither replaces the other. Use `run.py` when you want
+a single self-contained process and no server; use the AIPerf path when the
+number has to line up with other AIPerf measurements, when you need throughput
+under concurrency, or when you want to publish to the Speed view.
 
-Requires a vLLM build exposing `--per-request-spec-decode-metrics` and `aiperf` built from main
-(the `spec_al_*` public datasets are not in a released tag yet).
+Requires a vLLM build exposing `--per-request-spec-decode-metrics` and `aiperf`
+built from main (the `spec_al_*` and `speed_bench_*` public datasets are not in
+a released tag yet).
 
 ```bash
 MODEL=/path/to/target \
 DRAFT_MODEL=/path/to/draft \
-SPEC_METHOD=eagle3 \
-NUM_SPEC_TOKENS=3 \
-TP_SIZE=1 \
-OUTPUT_LENGTH=4096 \
-REQUEST_COUNT=160 \
-TEMPERATURE=0 \
-ARTIFACT_DIR=./aiperf_acceptance \
-    bash aiperf/run_aiperf_acceptance.sh
+MODEL_REVISION=<sha> DRAFT_REVISION=<sha> \
+SPEC_METHOD=dflash NUM_SPEC_TOKENS=3 \
+TP_SIZE=4 GPU_COUNT=4 \
+DATASETS="spec_al_mtbench" \
+CONCURRENCIES="1" \
+OUTPUT_LENGTH=4096 TEMPERATURE=0 \
+ARTIFACT_ROOT=./aiperf_results \
+    bash aiperf/run_aiperf.sh
 ```
 
-Checkpoints that ship custom modelling code (MiniMax, many MoE variants) additionally need
-`TRUST_REMOTE_CODE=1`. It is off by default because it lets the checkpoint's own Python execute,
-which is not a safe unconditional default when `MODEL` may name a remote repo.
+Checkpoints that ship custom modelling code (MiniMax, many MoE variants) also
+need `TRUST_REMOTE_CODE=1`. It is off by default because it lets the
+checkpoint's own Python execute, which is not a safe unconditional default when
+`MODEL` may name a remote repo.
 
-The script probes `metrics.speculative_decoding` on a single request before starting the sweep,
-and requires that block to be non-empty *and* non-zero. A build without the flag produces a full
-run of records with no acceptance field; a build that accepts the speculative config and then
-silently ignores it produces records reporting AL ~1.0, which reads as a real measurement of a
-useless draft rather than as a broken setup. Both now fail before any GPU time is spent.
+The script probes `metrics.speculative_decoding` on one request before the
+sweep, and requires that block to be non-empty *and* non-zero. A build without
+the flag produces records with no acceptance field; a build that accepts the
+speculative config and then ignores it produces records reporting AL ~1.0,
+which reads as a real measurement of a useless draft. Both fail before any
+sweep time is spent.
+
+### Datasets
+
+Any AIPerf public dataset, named in `DATASETS`:
+
+- acceptance: `spec_al_mtbench`, `spec_al_gsm8k`, `spec_al_humaneval`,
+  `spec_al_math500`, `spec_al_mbpp`
+- SPEED-Bench categories: `speed_bench_qualitative`, `speed_bench_coding`,
+  `speed_bench_math`, `speed_bench_reasoning`, `speed_bench_qa`,
+  `speed_bench_rag`, `speed_bench_stem`, `speed_bench_writing`,
+  `speed_bench_roleplay`, `speed_bench_humanities`,
+  `speed_bench_summarization`, `speed_bench_multilingual`
+- SPEED-Bench throughput shapes: `speed_bench_throughput_{1k,2k,8k,16k,32k}`,
+  each also in `_low_entropy` / `_high_entropy` / `_mixed` variants
+
+### Acceptance versus throughput
+
+Acceptance is a per-step property, so measure it at `CONCURRENCIES="1"`, where
+no queueing distorts the per-step statistics. Throughput is the opposite: it
+only means something under load, so sweep it. `CONCURRENCIES` defaults to
+`1 4 16 32 64 128 256 512`, the Speed view's `batch` axis.
+
+The server starts once and stays up for every dataset and concurrency.
+Restarting per point would waste the allocation and risk a different serving
+configuration between cells, which the publisher rejects.
+
+Set `SPEC_METHOD=none` for a matched baseline arm: same hardware, image,
+precision, parallelism, workload and budgets, with speculation off.
+
+### Publishing
+
+The script writes one directory per dataset (a *sweep*) containing one
+subdirectory per concurrency (a *cell*):
+
+```text
+${ARTIFACT_ROOT}/<dataset>/
+  c1/
+    metadata.json                     client type, serving command, hardware
+    recipe.json                       model/draft revisions, GPU count
+    aiperf0_aiperf_results/
+      profile_export_aiperf.json      AIPerf's own export, untouched
+  c4/ ...
+```
+
+That is what [specdec-visualizer](https://modelopt.nvidia.com/speed)'s
+publishers consume:
+
+```bash
+# Throughput / Pareto -> MLflow experiment specdec_bench/btk_results
+python3 btk_results.py ${ARTIFACT_ROOT}/<dataset> --name <sweep-name> --publish
+
+# Acceptance -> MLflow experiment specdec_bench/results
+python3 acceptance_results.py ${ARTIFACT_ROOT}/<dataset>/c1/aiperf0_aiperf_results \
+    --manifest <manifest>.json --publish
+```
+
+Pass `--al-run-id` to `btk_results.py` to tie a throughput sweep to the
+acceptance run it should be read with. Datasets are the outer loop because the
+publisher treats the dataset as part of a sweep's workload identity and rejects
+a directory mixing them; concurrency is the dimension allowed to vary.
+
+Uploading the BTK archive to the IB platform is a separate step. `btk_results.py`
+records the linkage from a `.btk_uploaded` receipt and does not upload itself.
 
 ### Cross-validating against the in-process harness
 
