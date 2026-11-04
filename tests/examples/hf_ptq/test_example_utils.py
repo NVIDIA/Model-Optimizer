@@ -412,22 +412,32 @@ def test_get_model_uses_expected_dtype_kwarg(
 
 
 @pytest.mark.parametrize(
-    ("model_type", "architecture", "device_count", "expected_device_map"),
+    ("model_type", "architecture", "device_count", "use_seq_device_map", "expected_device_map"),
     [
         # DiffusionGemma ties encoder/decoder weights; "auto" can split a tied pair
         # across GPUs, so multi-GPU loads must fall back to "sequential".
-        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 2, "sequential"),
+        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 2, False, "sequential"),
         # Single GPU cannot split a tied pair, so it keeps the unrestricted "auto" map.
-        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 1, "auto"),
+        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 1, False, "auto"),
         # "gemma" is a substring of "diffusiongemma"; other Gemmas must not match.
-        ("gemma3", "Gemma3ForCausalLM", 2, "auto"),
-        # T5 and BART cannot take a device map at all.
-        ("t5", "T5ForConditionalGeneration", 2, None),
-        ("bart", "BartForConditionalGeneration", 2, None),
+        ("gemma3", "Gemma3ForCausalLM", 2, False, "auto"),
+        # T5 and BART cannot take a device map at all, whatever the run asks for.
+        ("t5", "T5ForConditionalGeneration", 2, False, None),
+        ("t5", "T5ForConditionalGeneration", 2, True, None),
+        ("bart", "BartForConditionalGeneration", 2, False, None),
+        # A wrapper that cannot take "auto" loads on one device, unless the run asks for sequential.
+        ("NemotronH_Nano_VL_V2", "NemotronH_Nano_VL_V2", 2, False, None),
+        ("NemotronH_Nano_VL_V2", "NemotronH_Nano_VL_V2", 2, True, "sequential"),
     ],
 )
 def test_get_model_device_map(
-    monkeypatch, tmp_path, model_type, architecture, device_count, expected_device_map
+    monkeypatch,
+    tmp_path,
+    model_type,
+    architecture,
+    device_count,
+    use_seq_device_map,
+    expected_device_map,
 ):
     calls = {}
     hf_config = SimpleNamespace(
@@ -467,13 +477,18 @@ def test_get_model_device_map(
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
     monkeypatch.setattr(torch.cuda, "device_count", lambda: device_count)
 
-    example_utils.get_model(str(tmp_path), device="cuda", trust_remote_code=True)
+    example_utils.get_model(
+        str(tmp_path),
+        device="cuda",
+        trust_remote_code=True,
+        use_seq_device_map=use_seq_device_map,
+    )
 
     assert calls["from_pretrained"]["device_map"] == expected_device_map
     # Sequential caps per-GPU memory; "auto" must stay unrestricted.
     if expected_device_map == "sequential":
         assert calls["from_pretrained"]["max_memory"] == {0: 1024 * 0.8}
-    else:
+    elif not use_seq_device_map:
         assert "max_memory" not in calls["from_pretrained"]
 
 

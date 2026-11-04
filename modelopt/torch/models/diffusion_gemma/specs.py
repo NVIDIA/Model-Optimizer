@@ -22,8 +22,9 @@ __all__: list[str] = []
 SEQUENTIAL_DEVICE_MAP = (
     'it ties its encoder and decoder weights, and the balanced "auto" map can split a tied pair '
     "across GPUs, leaving one side on the meta device and breaking generation. Sequential packs "
-    "the model onto GPU 0 first, keeping tied modules together for a checkpoint that fits; a "
-    "larger one can still spill and split a tied pair, and needs an explicit single-device map"
+    "the model onto GPU 0 first (up to the GPU memory fraction), keeping tied modules together "
+    "for a checkpoint that fits; a larger one can still spill and split a tied pair, and needs an "
+    "explicit single-device map"
 )
 
 # Structurally encoder-decoder, but generate() runs the whole denoising loop over the prompt and a

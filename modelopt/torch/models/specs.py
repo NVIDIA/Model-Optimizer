@@ -330,9 +330,8 @@ class PTQSpec(SpecSection):
     cap its memory."""
 
     dtype_kwarg: Literal["dtype", "torch_dtype"] = "dtype"
-    """The keyword the model's loading code takes its precision by. A checkpoint's own code that
-    predates transformers renaming ``torch_dtype`` to ``dtype`` knows only the old one, and would
-    load at its default precision if given the new."""
+    """The keyword the model's loading code takes its precision by: ``dtype`` for transformers'
+    own classes, ``torch_dtype`` for a checkpoint whose own code was written for the old name."""
 
     vlm_wrapper: bool = False
     """Whether the flow treats the model as a VLM wrapper: it calibrates with image-text data by

@@ -184,6 +184,20 @@ def test_pre_quantize_previews_the_batchs_speech_features(hf_ptq):
     assert generate_calls[0].shape == (1, 80, 3000)
 
 
+def test_pre_quantize_prefers_token_ids_when_a_batch_carries_both(hf_ptq):
+    """An audio-capable VLM's image-text batch can carry ``input_features`` beside ``input_ids``."""
+    full_model = SimpleNamespace(generate=lambda ids, **kwargs: "out")
+    args = SimpleNamespace(specdec_offline_dataset=None, skip_generate=False)
+    batch = {
+        "input_ids": torch.ones(2, 4, dtype=torch.long),
+        "input_features": torch.ones(2, 80, 3000),
+    }
+
+    preview, _, _ = hf_ptq.pre_quantize(args, full_model, "llama", None, [batch], False)
+
+    assert preview.shape == (1, 4)
+
+
 def test_post_quantize_decodes_through_the_processor_when_there_is_no_tokenizer(
     hf_ptq, monkeypatch: pytest.MonkeyPatch, capsys
 ):

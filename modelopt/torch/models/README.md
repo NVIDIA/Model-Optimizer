@@ -41,8 +41,9 @@ them:
 `test_specs_vs_transformers.py` needs no edit: it reads which models to check, and
 which to skip, from the registry.
 
-A model type that a module name cannot hold (`nemotron-nas`) gets a package named for it with the
-offending characters replaced (`nemotron_nas`); the spec's `model_type` stays the HF one.
+A model type that is not a lowercase module name (`nemotron-nas`, `NemotronH_Nano_VL_V2`) gets a
+package named for it, lowercased with hyphens as underscores (`nemotron_nas`,
+`nemotron_h_nano_vl_v2`); the spec's `model_type` stays the HF one.
 
 The file is named for what it holds, not for who reads it: a model's spec is general
 model data, and export is only its first consumer.

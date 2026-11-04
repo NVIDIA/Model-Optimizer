@@ -798,7 +798,8 @@ def pre_quantize(
     # Only run single sample for preview
     assert calib_dataloader is not None, "calib_dataloader is required for pre-quantize preview"
     batch = next(iter(calib_dataloader))
-    input_key = "input_features" if "input_features" in batch else "input_ids"
+    # A speech batch carries ``input_features`` and no ``input_ids``.
+    input_key = "input_ids" if "input_ids" in batch else "input_features"
     preview_input_ids = batch[input_key][0:1]
     # Pass attention_mask to generate(): HF cannot infer it when pad_token == eos_token.
     preview_attention_mask = batch["attention_mask"][0:1] if "attention_mask" in batch else None

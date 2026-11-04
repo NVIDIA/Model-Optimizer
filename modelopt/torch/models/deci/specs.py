@@ -19,8 +19,8 @@ from ..specs import ModelSpec, PTQSpec, register
 
 __all__: list[str] = []
 
-# The checkpoint's own code takes its precision as ``torch_dtype``: it predates transformers'
-# rename to ``dtype``. ``nemotron-nas`` is the same architecture under another model type.
+# The checkpoint's own code takes its precision as ``torch_dtype``. ``nemotron-nas`` is the same
+# architecture under another model type.
 register(
     ModelSpec(
         model_type="deci",

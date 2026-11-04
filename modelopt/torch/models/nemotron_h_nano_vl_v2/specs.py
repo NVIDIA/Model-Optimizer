@@ -15,10 +15,9 @@
 
 """Nemotron Nano VL v2 specs (trust-remote-code model type ``NemotronH_Nano_VL_V2``).
 
-The first of the Nemotron VL wrappers, which ``llama_nemotron_nano_vl``, ``nemotron_parse`` and
-``nemotron_h_omni`` share its PTQ facts with. ``calibration.py`` is the calibration support all
-of them but Nemotron-Parse use; the package name lowercases the model type, which a module name
-may not carry in capitals.
+The first of the Nemotron VL wrappers: ``llama_nemotron_nano_vl``, ``nemotron_parse`` and
+``nemotron_h_omni`` take their PTQ facts from here. ``calibration.py`` is the calibration support
+of every one of them but Nemotron-Parse. The package name lowercases the model type.
 """
 
 from ..specs import ModelSpec, PTQSpec, register

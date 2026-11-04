@@ -558,12 +558,8 @@ def get_model(
     )
     model_kwargs.update(experts_kwargs)
 
-    # DiffusionGemma ties encoder/decoder weights. device_map "auto" (balanced) can split
-    # a tied pair across GPUs, leaving one side on the meta device and breaking generation.
-    # Sequential packs the model onto GPU 0 first (up to gpu_mem_percentage), keeping tied
-    # modules together for checkpoints that fit; larger ones can still spill and split a
-    # tied pair, and need an explicit single-device map. Multi-GPU only: a single-GPU split
-    # cannot separate a tied pair, and sequential would needlessly cap max_memory there.
+    # Multi-GPU only: a single GPU cannot split what is tied, and sequential would needlessly cap
+    # max_memory there.
     if device != "cpu" and torch.cuda.device_count() > 1 and ptq.sequential_device_map is not None:
         print(f"Using device_map='sequential': {ptq.sequential_device_map}.")
         use_seq_device_map = True
