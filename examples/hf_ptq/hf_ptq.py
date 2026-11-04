@@ -85,7 +85,7 @@ from modelopt.torch.export import (
 from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
-from modelopt.torch.models import hf_model_type
+from modelopt.torch.models import get_ptq_spec, hf_model_type
 from modelopt.torch.models.hf import prepare_model_for_calibration
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
@@ -862,14 +862,8 @@ def pre_quantize(
     # Generate preview before quantization
     if args.skip_generate:
         generated_ids_before_ptq = None
-    elif model_type is not None and model_type.startswith(("deepseek", "kimi_k2")):
-        # DeepSeek generation may go OOM, so we skip it. Kimi-K2 (kimi_k2) and Kimi-K2.5
-        # (kimi_k25) are DeepSeek-V3 architectures under their own model_type.
-        generated_ids_before_ptq = None
-    elif model_type == "nemotron_h":
-        # NemotronH (SSM/Mamba hybrid) modeling code does not work with accelerate's big model inference
-        # when multiple GPUs are used. So we skip generation for NemotronH models. The issue presents in
-        # the remote code and also in transformers library integration code from v5.3
+    elif (reason := get_ptq_spec(model_type).preview_unsupported) is not None:
+        print(f"Skipping the generation preview: {reason}")
         generated_ids_before_ptq = None
     elif is_nemotron_vl_model and tokenizer is not None:
         generated_ids_before_ptq = run_nemotron_vl_preview(
@@ -933,9 +927,10 @@ def post_quantize(
     # Run some samples
     torch.cuda.empty_cache()
     generated_ids_after_ptq = None
+    post_ptq_unsupported = get_ptq_spec(model_type).post_ptq_generation_unsupported
     if generated_ids_before_ptq is None:
         pass
-    elif model_type not in ("llama4", "llama4_text") and not is_nemotron_vl_model:
+    elif post_ptq_unsupported is None and not is_nemotron_vl_model:
         # Our fake quantizer may not be fully compatible with torch.compile.
         # This is a best-effort sanity check: e.g. a `device_map="auto"` load that offloads
         # part of the model to CPU (seen on unified-memory single-GPU hosts) can make a
@@ -971,7 +966,7 @@ def post_quantize(
             raise RuntimeError(_PREVIEW_STOPS_THE_RUN) from e
     else:
         warnings.warn(
-            "Llama4 Maverick generation after quantization has a bug. Skipping generation sample."
+            f"{post_ptq_unsupported or 'The preview needs a tokenizer'}. Skipping generation sample."
         )
 
     def input_decode(input_ids):

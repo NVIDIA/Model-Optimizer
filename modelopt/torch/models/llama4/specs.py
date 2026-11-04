@@ -15,7 +15,7 @@
 
 """Llama4 specs (HF model type ``llama4``)."""
 
-from ..specs import EPSpec, ModelSpec, MoESpec, register
+from ..specs import EPSpec, ModelSpec, MoESpec, PTQSpec, register
 
 __all__: list[str] = []
 
@@ -27,6 +27,9 @@ EP_UNSUPPORTED = (
     "(num_experts, in, out), which the expert-parallel export cannot write."
 )
 
+# Generation from the quantized model, not the original, is what breaks.
+POST_PTQ_GENERATION_UNSUPPORTED = "Llama4 Maverick generation after quantization has a bug"
+
 # Llama4TextExperts is fused: one module holding 3-D gate_up_proj and down_proj
 # parameters, run through torch.bmm. There is no (gate, up) pair left to fuse, and the
 # grouped-export path (get_experts_list) does not apply. The block also carries a
@@ -36,6 +39,7 @@ register(
         model_type="llama4",
         min_transformers_version="5.5",
         ep_spec=EPSpec(unsupported=EP_UNSUPPORTED),
+        ptq_spec=PTQSpec(post_ptq_generation_unsupported=POST_PTQ_GENERATION_UNSUPPORTED),
         moe_spec=MoESpec(
             block_names=("Llama4TextMoe",),
             expert_linear_names=("gate_up_proj", "down_proj"),
