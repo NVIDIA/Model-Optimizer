@@ -73,8 +73,6 @@ VERDICT_SCHEMA: dict[str, Any] = {
             },
             "description": "Inline comments, each on a line of the PR head file inside a diff hunk.",
         },
-        "nudge_reason": {"type": "string"},
-        "size_exception": {"type": "string"},
     },
     "required": ["decision", "summary", "complete"],
 }
