@@ -19,6 +19,8 @@ from types import SimpleNamespace
 
 import pytest
 
+# speculative.utils imports transformers at module level; the torch-only install has none.
+pytest.importorskip("transformers")
 from modelopt.torch.speculative.utils import is_speculative_config
 
 
