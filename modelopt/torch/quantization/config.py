@@ -1487,9 +1487,9 @@ class LSQConfig(QuantizeAlgorithmConfig):
 class GSQCalibConfig(QuantizeAlgorithmConfig):
     """Local-shift Gumbel-Softmax refinement of dense NVFP4 weight-only quantization.
 
-    ``initializer`` accepts an existing calibration method or its full config. GPTQ
-    is the default; AWQ smoothing is retained. Structural initializers (SVDQuant
-    and LSQ), distributed calibration, and fused experts are not supported.
+    ``initializer`` accepts GPTQ, max or mse and their full configs. Staged
+    reconstruction supports replicated data parallel calibration over WORLD.
+    Sample counts and batch_size are global; microbatch_size is per rank.
     """
 
     method: Literal["gsq"] = ModeloptField("gsq")
@@ -1530,7 +1530,11 @@ class GSQCalibConfig(QuantizeAlgorithmConfig):
     @classmethod
     def _normalize_initializer(cls, value):
         """Accept validated initializer configs without losing their options."""
-        return value.model_dump() if isinstance(value, QuantizeAlgorithmConfig) else value
+        value = value.model_dump() if isinstance(value, QuantizeAlgorithmConfig) else value
+        method = value.get("method") if isinstance(value, dict) else value
+        if method not in ("gptq", "max", "mse"):
+            raise ValueError("GSQ initializer must be gptq, max or mse")
+        return value
 
 
 QuantizeQuantCfgType = list[QuantizerCfgEntry]

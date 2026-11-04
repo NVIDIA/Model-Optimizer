@@ -14,14 +14,17 @@
 # limitations under the License.
 
 
-"""Real calibration, AWQ smoothing, and native GSQ checkpoint/export contracts."""
+"""Real calibration and native GSQ checkpoint/export contracts."""
 
 import json
 from copy import deepcopy
 from importlib import import_module
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from _test_utils.torch.transformers_models import get_tiny_llama
@@ -30,11 +33,323 @@ from safetensors.torch import load_file
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
+from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.quant_utils import preprocess_linear_fusion
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight, export_hf_checkpoint
 from modelopt.torch.quantization.config import GSQCalibConfig
 from modelopt.torch.quantization.gsq import _LocalShift, gsq
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
+from modelopt.torch.utils.distributed import (
+    DistributedProcessGroup,
+    DistributionPlan,
+    broadcast_from,
+    set_distribution_plan,
+)
+
+
+def _distributed_staged_gsq(rank, size, method, train_samples):
+    torch.manual_seed(42)
+    model = (
+        get_tiny_llama(
+            hidden_size=64,
+            intermediate_size=64,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_hidden_layers=2,
+        )
+        .to(f"cuda:{rank}")
+        .eval()
+    )
+    set_distribution_plan(model, DistributionPlan(world_size=size))
+    ids = torch.arange(8, device=f"cuda:{rank}").reshape(1, -1)
+
+    def forward(m):
+        for i in range(rank, 1, size):
+            m(ids + i, use_cache=False)
+        for i in range(rank, train_samples, size):
+            m(ids + i + 1, use_cache=False)
+
+    config = _config({"method": method})
+    config["algorithm"].update(
+        reconstruction="staged",
+        initializer_samples=1,
+        train_samples=train_samples,
+        batch_size=2,
+        microbatch_size=1,
+        qk_steps=2,
+        epochs=1,
+        layerwise={"enable": True, "activation_cache_device": "cpu"},
+    )
+    mtq.quantize(model, config, forward)
+    for value in model.state_dict().values():
+        expected = value.clone()
+        dist.broadcast(expected, 0)
+        torch.testing.assert_close(value, expected, rtol=0, atol=0)
+    assert torch.isfinite(model(ids).logits).all()
+
+
+@pytest.mark.parametrize("method", ["gptq", "max", "mse"])
+@pytest.mark.parametrize("train_samples", [1, 3])
+def test_distributed_staged_gsq_with_uneven_shards(
+    need_2_gpus, dist_workers, method, train_samples
+):
+    dist_workers.run(_distributed_staged_gsq, method=method, train_samples=train_samples)
+
+
+def _distributed_gsq_resume(rank, size, checkpoint_dir, train_samples, failure_mode):
+    torch.manual_seed(42)
+    base = (
+        get_tiny_llama(
+            hidden_size=64,
+            intermediate_size=64,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_hidden_layers=3,
+        )
+        .to(f"cuda:{rank}")
+        .eval()
+    )
+    set_distribution_plan(base, DistributionPlan(world_size=size))
+    ids = torch.arange(8, device=f"cuda:{rank}").reshape(1, -1)
+
+    def forward(m):
+        for count in (1, train_samples):
+            for i in range(rank, count, size):
+                m(ids + i, use_cache=False)
+
+    config = _config({"method": "max"})
+    config["algorithm"].update(
+        reconstruction="staged",
+        initializer_samples=1,
+        train_samples=train_samples,
+        batch_size=2,
+        microbatch_size=1,
+        qk_steps=2,
+        epochs=1,
+        layerwise={"enable": True, "activation_cache_device": "cpu"},
+    )
+    reference = deepcopy(base)
+    mtq.quantize(reference, config, forward)
+    config["algorithm"]["layerwise"]["checkpoint_dir"] = checkpoint_dir
+    interrupted = deepcopy(base)
+    manifest_path = Path(checkpoint_dir) / "manifest.json"
+
+    def interrupt(module, inputs):
+        if failure_mode == "forward" and rank == 0 and manifest_path.exists():
+            raise RuntimeError("interrupted layer")
+
+    original_save = torch.save
+
+    def interrupted_save(value, path, *args, **kwargs):
+        if rank == 1 and failure_mode == "write" and "layer_0001/next_inputs" in str(path):
+            Path(path).write_bytes(b"incomplete")
+            raise OSError("interrupted write")
+        return original_save(value, path, *args, **kwargs)
+
+    handle = interrupted.model.layers[1].register_forward_pre_hook(interrupt)
+    failing_rank = 0 if failure_mode == "forward" else 1
+    message = (
+        f"interrupted {failure_mode if failure_mode == 'write' else 'layer'}"
+        if rank == failing_rank
+        else "another rank"
+    )
+    with (
+        patch("torch.save", interrupted_save),
+        pytest.raises((RuntimeError, OSError), match=message),
+    ):
+        mtq.quantize(interrupted, config, forward)
+    handle.remove()
+    assert json.loads(manifest_path.read_text())["last_completed_layer"] == 0
+    for r in range(size):
+        assert (Path(checkpoint_dir) / "layer_0000" / f"next_inputs_rank_{r:05d}.pt").is_file()
+    resumed = deepcopy(base)
+    mtq.quantize(resumed, config, forward)
+    for name, value in reference.state_dict().items():
+        torch.testing.assert_close(resumed.state_dict()[name], value, rtol=0, atol=0)
+    complete = deepcopy(base)
+    mtq.quantize(complete, config, lambda m: pytest.fail("Completed resume must not replay data"))
+    torch.testing.assert_close(complete(ids).logits, reference(ids).logits, rtol=0, atol=0)
+    native = Path(checkpoint_dir) / "native.pth"
+    broadcast_from("save native GSQ", lambda: mto.save(complete, native))
+    restored = mto.restore(deepcopy(base), native).eval()
+    torch.testing.assert_close(restored(ids).logits, reference(ids).logits, rtol=0, atol=0)
+    config["algorithm"]["seed"] = 10
+    with pytest.raises(ValueError):
+        mtq.quantize(deepcopy(base), config, forward)
+
+
+@pytest.mark.parametrize("train_samples", [1, 3])
+@pytest.mark.parametrize("failure_mode", ["forward", "write"])
+def test_distributed_gsq_checkpoint_resume(
+    need_2_gpus, dist_workers, tmp_path, train_samples, failure_mode
+):
+    dist_workers.run(
+        _distributed_gsq_resume,
+        checkpoint_dir=str(tmp_path / "checkpoints"),
+        train_samples=train_samples,
+        failure_mode=failure_mode,
+    )
+    model = (
+        get_tiny_llama(
+            hidden_size=64,
+            intermediate_size=64,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_hidden_layers=3,
+        )
+        .cuda()
+        .eval()
+    )
+    config = _config({"method": "max"})
+    config["algorithm"].update(
+        reconstruction="staged",
+        initializer_samples=1,
+        train_samples=train_samples,
+        batch_size=2,
+        microbatch_size=1,
+        qk_steps=2,
+        epochs=1,
+        layerwise={
+            "enable": True,
+            "activation_cache_device": "cpu",
+            "checkpoint_dir": str(tmp_path / "checkpoints"),
+        },
+    )
+    with pytest.raises(ValueError):
+        mtq.quantize(
+            model, config, lambda m: pytest.fail("GPU count mismatch must refuse before replay")
+        )
+
+
+def _distributed_gsq_layerwise_export(rank, size, export_dir):
+    torch.manual_seed(42)
+    base = (
+        get_tiny_llama(
+            hidden_size=64,
+            intermediate_size=64,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_hidden_layers=2,
+        )
+        .to(f"cuda:{rank}")
+        .bfloat16()
+        .eval()
+    )
+    set_distribution_plan(base, DistributionPlan(world_size=size))
+    ids = torch.arange(8, device=f"cuda:{rank}").reshape(1, -1)
+
+    def forward(m):
+        for _ in range(2) if rank == 0 else ():
+            m(ids, use_cache=False)
+
+    config = _config({"method": "max"})
+    config["algorithm"].update(
+        reconstruction="staged",
+        initializer_samples=1,
+        train_samples=1,
+        batch_size=1,
+        microbatch_size=1,
+        qk_steps=2,
+        epochs=1,
+        layerwise={"enable": True, "activation_cache_device": "cpu"},
+    )
+    reference = deepcopy(base)
+    mtq.quantize(reference, config, forward)
+    expected = deepcopy(reference.model.layers[0].self_attn.q_proj)
+    _export_quantized_weight(expected, torch.bfloat16)
+    config["algorithm"]["layerwise"].update(
+        export_dir=export_dir,
+        checkpoint_dir=export_dir + "-checkpoints",
+    )
+    for _ in range(2):
+        candidate = deepcopy(base)
+        exporter = LayerwiseExporter(candidate, export_dir, dtype=torch.bfloat16)
+        mtq.quantize(candidate, config, forward)
+        broadcast_from("finalize GSQ export", exporter.finalize)
+        tensors = {}
+        for shard in Path(export_dir).glob("*.safetensors"):
+            tensors.update(load_file(shard))
+        for key in ("weight", "weight_scale", "weight_scale_2"):
+            actual = tensors[f"model.layers.0.self_attn.q_proj.{key}"]
+            assert torch.equal(
+                actual.reshape(-1).view(torch.uint8),
+                getattr(expected, key).cpu().reshape(-1).view(torch.uint8),
+            )
+
+
+def test_distributed_gsq_layerwise_export(need_2_gpus, dist_workers, tmp_path):
+    dist_workers.run(_distributed_gsq_layerwise_export, export_dir=str(tmp_path / "export"))
+
+
+def _distributed_gsq_refusal(rank, size, refusal):
+    torch.manual_seed(42)
+    model = (
+        get_tiny_llama(
+            hidden_size=64,
+            intermediate_size=64,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_hidden_layers=1,
+        )
+        .to(f"cuda:{rank}")
+        .eval()
+    )
+    config = _config({"method": "max"})
+    config["algorithm"].update(
+        reconstruction="staged",
+        initializer_samples=1,
+        train_samples=3,
+        batch_size=2,
+        microbatch_size=1,
+        qk_steps=2,
+        epochs=1,
+        layerwise={"enable": True, "activation_cache_device": "cpu"},
+    )
+    mtq.quantize(model, {**config, "algorithm": None})
+    set_distribution_plan(
+        model, DistributionPlan(world_size=size, dense="fsdp" if refusal == "plan" else "replicate")
+    )
+    group = None
+    if refusal == "subgroup":
+        group = dist.new_group()
+        linear = model.model.layers[0].self_attn.q_proj
+        linear.parallel_state.data_parallel_group = DistributedProcessGroup(group)
+    if refusal == "linear":
+        config["algorithm"].update(reconstruction="linear", layerwise={"enable": False})
+    if refusal == "rank_config":
+        config["algorithm"]["seed"] = rank
+    before = deepcopy(model.state_dict())
+
+    def forward(m):
+        if refusal != "nonfinite":
+            raise AssertionError("Invalid placement or config must refuse before data replay")
+        for count in (1, 3):
+            for _ in range(rank, count, size):
+                hidden = torch.full(
+                    (1, 8, 64),
+                    float("nan") if rank == 1 else 0.25,
+                    device=f"cuda:{rank}",
+                    dtype=next(m.parameters()).dtype,
+                )
+                m(inputs_embeds=hidden, use_cache=False)
+
+    try:
+        expected = (FloatingPointError, RuntimeError) if refusal == "nonfinite" else ValueError
+        message = "Nonfinite|another rank" if refusal == "nonfinite" else None
+        with pytest.raises(expected, match=message):
+            mtq.calibrate(model, config["algorithm"], forward)
+        assert before.keys() == model.state_dict().keys()
+        for name, value in before.items():
+            torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
+        assert all(p.requires_grad for p in model.parameters())
+    finally:
+        if group is not None:
+            dist.destroy_process_group(group)
+
+
+@pytest.mark.parametrize("refusal", ["plan", "linear", "subgroup", "rank_config", "nonfinite"])
+def test_distributed_gsq_refuses_or_rolls_back(need_2_gpus, dist_workers, refusal):
+    dist_workers.run(_distributed_gsq_refusal, refusal=refusal)
 
 
 class _Projections(nn.Module):
@@ -62,7 +377,7 @@ def _config(initializer):
     return config
 
 
-@pytest.mark.parametrize("method", ["gptq", "awq_lite", "awq_full"])
+@pytest.mark.parametrize("method", ["gptq", "max", "mse"])
 @pytest.mark.parametrize("cache", ["cpu", "mmap"])
 @pytest.mark.parametrize("baseline", [False, True])
 def test_staged_gsq_streaming_matches_device_cache_and_checkpoint(
@@ -138,7 +453,7 @@ def test_staged_gsq_streaming_matches_device_cache_and_checkpoint(
         assert not list((tmp_path / "cache").iterdir())
 
 
-@pytest.mark.parametrize("method", ["max", "gptq", "awq_lite", "awq_full", "mse"])
+@pytest.mark.parametrize("method", ["max", "gptq", "mse"])
 def test_gsq_quality_restore_and_native_export(method, tmp_path):
     torch.manual_seed(9)
     model = _Projections().cuda().bfloat16().eval()
@@ -147,8 +462,6 @@ def test_gsq_quality_restore_and_native_export(method, tmp_path):
     reference = model(x).detach()
     baseline = deepcopy(model)
     initializer = {"method": method}
-    if "awq" in method:
-        initializer["alpha_step"] = 0.5
     if method == "gptq":
         initializer.update(perc_damp=0.1, block_size=64)
     config = _config(initializer)
@@ -162,12 +475,6 @@ def test_gsq_quality_restore_and_native_export(method, tmp_path):
     actual_loss = F.mse_loss(actual.float(), reference.float())
     assert torch.isfinite(actual_loss)
     assert all(not m.input_quantizer.is_enabled for m in (model.q_proj, model.k_proj, model.v_proj))
-    if "awq" in method:
-        for name in ("q_proj", "k_proj", "v_proj"):
-            torch.testing.assert_close(
-                getattr(model, name).input_quantizer.pre_quant_scale,
-                getattr(baseline, name).input_quantizer.pre_quant_scale,
-            )
     shared = [m.weight_quantizer.global_amax for m in (model.q_proj, model.k_proj, model.v_proj)]
     assert all(s is shared[0] for s in shared)
     checkpoint = tmp_path / "gsq.pth"
@@ -280,7 +587,7 @@ def test_staged_gsq_rejects_preexisting_awq_scaling_without_mutation():
         torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("method", ["gptq", "awq_lite", "awq_full"])
+@pytest.mark.parametrize("method", ["gptq", "max", "mse"])
 @pytest.mark.parametrize("change", ["tokens", "mask", "positions"])
 def test_staged_gsq_isolates_initializer_data_and_trains_both_joint_regions(method, change):
     model = (
@@ -345,8 +652,8 @@ def test_staged_gsq_isolates_initializer_data_and_trains_both_joint_regions(meth
         )
 
 
-@pytest.mark.parametrize("method", ["max", "awq_lite"])
-def test_staged_gsq_qk_responds_to_correlations_between_hessian_blocks(method):
+def test_staged_gsq_qk_responds_to_correlations_between_hessian_blocks():
+    method = "max"
     base = (
         get_tiny_llama(
             hidden_size=256,
@@ -368,9 +675,6 @@ def test_staged_gsq_qk_responds_to_correlations_between_hessian_blocks(method):
     with torch.no_grad():
         rotary = base.model.rotary_emb(x, positions)
     initializer = {"method": method}
-    if method == "awq_lite":
-        # A single alpha candidate makes initialization independent of input signs.
-        initializer["alpha_step"] = 1.0
     config = _config(initializer)
     config["algorithm"].update(
         reconstruction="staged",
@@ -407,13 +711,6 @@ def test_staged_gsq_qk_responds_to_correlations_between_hessian_blocks(method):
         torch.testing.assert_close(
             first.weight_quantizer.amax, second.weight_quantizer.amax, rtol=0, atol=0
         )
-        if method == "awq_lite":
-            torch.testing.assert_close(
-                first.input_quantizer.pre_quant_scale,
-                second.input_quantizer.pre_quant_scale,
-                rtol=0,
-                atol=0,
-            )
         assert not torch.equal(
             getattr(trained[0].self_attn, name).weight, getattr(trained[1].self_attn, name).weight
         )
@@ -487,14 +784,9 @@ def test_gsq_uses_cosine_rates_and_no_scale_decay(monkeypatch, steps):
     assert len(calls) == steps
 
 
-@pytest.mark.parametrize("method", ["gptq", "awq_full"])
-def test_gsq_rolls_back_mutating_initializer_failure(method):
+def test_gsq_rolls_back_mutating_initializer_failure():
     model = _Projections().cuda().eval()
-    initializer = (
-        {"method": "gptq", "block_size": 64}
-        if method == "gptq"
-        else {"method": "awq_full", "alpha_step": 0.5}
-    )
+    initializer = {"method": "gptq", "block_size": 64}
     config = _config(initializer)
     mtq.quantize(model, {**config, "algorithm": None})
     before = deepcopy(model.state_dict())
@@ -504,8 +796,8 @@ def test_gsq_rolls_back_mutating_initializer_failure(method):
     def forward(m):
         nonlocal calls
         calls += 1
-        # Interrupt GPTQ after promotion, or AWQ clipping after Lite has changed weights.
-        if calls > (1 if method == "gptq" else 3):
+        # Interrupt GPTQ after promotion.
+        if calls > 1:
             raise RuntimeError("calibration interrupted")
         m(torch.arange(1, 65, device="cuda", dtype=torch.float32).expand(4, -1))
 
@@ -517,12 +809,11 @@ def test_gsq_rolls_back_mutating_initializer_failure(method):
     for name, value in before.items():
         torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
     assert all(p.requires_grad for p in model.parameters())
-    assert all(not hasattr(m, "awq_lite") and not hasattr(m, "awq_clip") for m in model.modules())
     mtq.calibrate(model, "max")
     model(torch.ones(4, 64, device="cuda"))
 
 
-@pytest.mark.parametrize("method", ["gptq", "awq_lite"])
+@pytest.mark.parametrize("method", ["gptq", "max", "mse"])
 @pytest.mark.parametrize("reconstruction", ["linear", "staged"])
 def test_layerwise_gsq_hf_export_preserves_hard_codes(method, reconstruction, tmp_path):
     model = (

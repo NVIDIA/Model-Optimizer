@@ -8,7 +8,7 @@ Changelog
 
 *Quantization*
 
-- Add local-shift GSQ for dense NVFP4 weight-only quantization, with configurable initialization and GPTQ, AWQ Lite, and AWQ Full recipes.
+- Add local-shift GSQ for dense NVFP4 weight-only quantization, with GPTQ, max and mse initialization and replicated data parallel staged calibration.
 
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
 - The functional quantized-weight export API now exports the KV cache: ``capture_kv_cache_export_state`` returns an attention module's ``k_scale`` / ``v_scale``, and ``build_hf_quantization_config`` takes the KV-cache formats from ``get_kv_cache_export_spec``.

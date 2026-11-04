@@ -19,7 +19,7 @@ imports:
   nvfp4_gsq: configs/ptq/nvfp4_gsq
 
 metadata:
-  description: NVFP4 weight-only local-shift GSQ initialized with awq_full; activations and KV cache remain unquantized.
+  description: NVFP4 weight-only local-shift GSQ initialized with mse; activations and KV cache remain unquantized.
 quantize:
   $import: nvfp4_gsq
   algorithm:
@@ -29,4 +29,4 @@ quantize:
       enable: true
       activation_cache_device: cpu
     initializer:
-      method: awq_full
+      method: mse

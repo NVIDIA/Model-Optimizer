@@ -448,14 +448,11 @@ Load a weight-only recipe, then provide a replayable calibration loop:
     config = recipe.quantize.model_dump(exclude_unset=True)
     mtq.quantize(model, config, forward_loop=forward_loop)
 
-Use ``nvfp4_gsq-awq_lite`` or ``nvfp4_gsq-awq_full`` for AWQ initialization.
-The nested ``algorithm.initializer`` accepts an existing calibration method or
-its complete configuration, so GPTQ damping and AWQ search options are preserved.
-Other compatible NVFP4 initializers, such as ``max``, ``mse``, and
-``local_hessian``, can be selected through this field. Set layerwise options on
-GSQ itself, rather than its initializer.
-Staged calibration requires original unscaled inputs; apply AWQ through
-``initializer`` rather than passing a previously AWQ-calibrated model.
+Use ``nvfp4_gsq-max`` or ``nvfp4_gsq-mse`` for max or mse initialization.
+Only ``gptq``, ``max`` and ``mse`` are supported as GSQ initializers. The nested
+``algorithm.initializer`` accepts their complete configurations, preserving
+options such as GPTQ damping. Set layerwise options on GSQ itself.
+Staged calibration requires original unscaled inputs.
 
 The default recipes use dense Llama staged reconstruction. Supply exactly
 ``initializer_samples`` sequences (default 512), followed by ``train_samples``
@@ -509,16 +506,49 @@ linear layouts, while staged mode requires all seven Llama decoder projections.
 There is no separate end-to-end scale-training phase. The paper's results on
 other grids do not establish NVFP4 quality gains.
 
-The implementation supports single-process dense ``nn.Linear`` modules with
-static NVFP4 block size 16. Activations and KV cache remain unquantized. Fused
-MoE experts, tied quantized weights, distributed/sharded calibration, structural
-initializers such as SVDQuant/LSQ, and AutoQuant candidate switching are unsupported.
-Resident weights must be on one device; layerwise calibration can limit residency.
+The implementation supports dense ``nn.Linear`` modules with static NVFP4
+block size 16. Activations and KV cache remain unquantized. Fused MoE experts,
+tied quantized weights, sharded model weights and AutoQuant candidate switching
+are unsupported. Resident weights must be on one device per rank.
+
+Distributed staged calibration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Staged GSQ supports replicated data parallel execution on one or multiple nodes.
+Initialize the default WORLD process group and bind each process to its local GPU
+before quantization. Every rank must load the same model and use the same resolved
+configuration. Record a replicated ``DistributionPlan`` using
+``set_distribution_plan``. Custom data parallel subgroups, tensor or expert
+parallelism and FSDP are rejected. Linear reconstruction remains single process.
+
+The caller owns data selection and sharding. Create separate globally ordered
+initializer and training lists, and independently take ``items[rank::world_size]``
+from each. Emit the local initializer sequences first, followed by local training
+sequences. ``initializer_samples``, ``train_samples`` and ``batch_size`` are global;
+``microbatch_size`` limits each rank's device work. All ranks follow the same
+global logical batches and optimizer schedule. Uneven shards, partial batches and
+empty local contributions retain every global sample without padding or dropping.
+Do not use a sampler that changes this ordering or duplicates tail samples.
+
+See ``examples/hf_ptq/gsq_distributed.py`` for a ``torchrun`` launcher example.
+Use the same rendezvous settings and a shared checkpoint path on multiple nodes.
+Bulk activations stay rank local on CPU or mapped storage. Model weights, logits
+and optimizer state remain replicated; this does not reduce their memory floor.
+Seeds are repeatable at a fixed topology. Reduction order and stochastic sampling
+can change numerical results across GPU counts.
+
+Distributed layer checkpoints save one common layer state and separate activation
+and output metadata files per rank. The shared manifest advances after every rank
+successfully saves the checkpoint boundary. An interrupted layer is retrained.
+Resume requires the same GPU count, resolved quantization and GSQ settings, and
+round robin shard mapping. The manifest validates these automatically. The caller
+must keep source model, tokenizer, datasets and exact ordering unchanged; the
+``forward_loop`` API does not identify these. Legacy single process checkpoints
+remain usable on one process and cannot be resumed as distributed checkpoints.
 
 Every stage retains its final hard state, including when it has higher loss
 than the initializer; validation does not select earlier epochs. GSQ discards
 its logits after calibration, storing
 hard weights and native scales in the ordinary ModelOpt checkpoint. Save/restore
-and Hugging Face export use the existing APIs. AWQ input scaling is preserved;
-AWQ-initialized checkpoints follow the existing NVFP4 AWQ export path and its
-runtime requirements, including the existing Megatron-export restriction.
+and Hugging Face export use the existing APIs. Write shared output files from
+rank zero only after calibration completes.

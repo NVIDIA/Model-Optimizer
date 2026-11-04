@@ -27,7 +27,7 @@ from modelopt.torch.quantization.config import GSQCalibConfig
 from modelopt.torch.quantization.gsq import gsq
 
 
-@pytest.mark.parametrize("recipe", ["gptq", "awq_lite", "awq_full"])
+@pytest.mark.parametrize("recipe", ["gptq", "max", "mse"])
 def test_weight_only_gsq_recipes(recipe):
     config = load_recipe(f"general/ptq/nvfp4_gsq-{recipe}").quantize
     algorithm = GSQCalibConfig(**config.algorithm)
@@ -70,6 +70,12 @@ def test_gsq_rejects_incompatible_quantizers_without_mutation(config):
 def test_gsq_invalid_optimization_options(field, value):
     with pytest.raises(ValueError):
         GSQCalibConfig(**{field: value})
+
+
+@pytest.mark.parametrize("initializer", ["awq_lite", "awq_full", "local_hessian", "gsq", "lsq"])
+def test_gsq_rejects_unsupported_initializers(initializer):
+    with pytest.raises(ValueError):
+        GSQCalibConfig(initializer={"method": initializer})
 
 
 def test_gsq_rejects_weight_shared_with_unquantized_linear():

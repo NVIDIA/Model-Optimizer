@@ -15,7 +15,6 @@
 
 """Sequence reconstruction stages for dense Llama NVFP4 GSQ calibration."""
 
-from contextlib import ExitStack
 from math import ceil, cos, pi
 
 import torch
@@ -27,9 +26,9 @@ from torch.utils._pytree import tree_map
 from modelopt.torch.utils import print_rank_0
 
 from .conversion import set_quantizer_by_cfg_context
-from .nn import TensorQuantizer
 from .qtensor import NVFP4QTensor
 from .utils.calib_utils import update_hessian
+from .utils.gsq_distributed import DistributedGSQ
 
 __all__ = []
 
@@ -57,9 +56,10 @@ class StagedReplay:
         if {name for name, _ in modules} != expected:
             raise ValueError("Staged GSQ requires all seven dense Llama projections")
         if any(m.input_quantizer.pre_quant_scale is not None for _, m in modules):
-            raise ValueError("Staged GSQ requires unscaled inputs; select AWQ through initializer")
+            raise ValueError("Staged GSQ requires unscaled inputs")
 
     def __init__(self, model, forward_loop, config, originals=None):
+        self.distributed = DistributedGSQ()
         self.device = next(model.parameters()).device
         self.originals = {
             n: originals[id(p)] if originals is not None else p.detach().to("cpu", copy=True)
@@ -101,13 +101,14 @@ class StagedReplay:
                     forward_loop(model)
             finally:
                 handle.remove()
-        required = config.initializer_samples + config.train_samples
+        initializer_count = self.distributed.local_count(config.initializer_samples)
+        required = initializer_count + self.distributed.local_count(config.train_samples)
         if len(self.samples) != required:
             raise ValueError(
                 f"Staged GSQ needs exactly {required} sequences, initializer first, then training"
             )
-        self.initializer_samples = self.samples[: config.initializer_samples]
-        self.training_samples = self.samples[config.initializer_samples :]
+        self.initializer_samples = self.samples[:initializer_count]
+        self.training_samples = self.samples[initializer_count:]
 
     def batch(self, samples):
         # Batches may have different masks or positions; concatenate only matching metadata.
@@ -126,9 +127,10 @@ class StagedReplay:
         return tree_map(merge, *samples)
 
     def initialize(self, model):
-        for sample in self.initializer_samples:
-            args, kwargs = self.batch([sample])
-            model(*args, **kwargs)
+        with self.distributed.check():
+            for sample in self.initializer_samples:
+                args, kwargs = self.batch([sample])
+                model(*args, **kwargs)
 
 
 class _AttentionRegion(nn.Module):
@@ -146,37 +148,41 @@ def refine_staged(model, modules, replay, config):
     from .gsq import _lion_step, _LocalShift
 
     named = dict(modules)
+    distributed = replay.distributed
     for _, m in modules:
         m.weight_quantizer.disable_quant()
 
     def assignments_for(names):
-        globals = {}
-        members = [named[n] for n in names]
-        for m in members:
-            q = m.weight_quantizer
-            key = id(q.global_amax)
-            if key not in globals:
-                scale = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(q)
-                # A shared global scale cannot move while a sibling is fixed.
-                trainable = all(
-                    other in members
-                    for _, other in modules
-                    if id(other.weight_quantizer.global_amax) == key
-                )
-                globals[key] = nn.Parameter(scale.log(), requires_grad=trainable)
-        # Initialization needs the quantizer's hard NVFP4 rounding once.
-        for m in members:
-            m.weight_quantizer.enable_quant()
-        try:
-            assignments = nn.ModuleList(
-                [
-                    _LocalShift(m, globals[id(m.weight_quantizer.global_amax)], config)
-                    for m in members
-                ]
-            )
-        finally:
+        with distributed.check():
+            globals = {}
+            members = [named[n] for n in names]
             for m in members:
-                m.weight_quantizer.disable_quant()
+                q = m.weight_quantizer
+                key = id(q.global_amax)
+                if key not in globals:
+                    scale = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(q)
+                    # A shared global scale cannot move while a sibling is fixed.
+                    trainable = all(
+                        other in members
+                        for _, other in modules
+                        if id(other.weight_quantizer.global_amax) == key
+                    )
+                    globals[key] = nn.Parameter(scale.log(), requires_grad=trainable)
+            # Initialization needs the quantizer's hard NVFP4 rounding once.
+            for m in members:
+                m.weight_quantizer.enable_quant()
+            try:
+                assignments = nn.ModuleList(
+                    [
+                        _LocalShift(m, globals[id(m.weight_quantizer.global_amax)], config)
+                        for m in members
+                    ]
+                )
+            finally:
+                for m in members:
+                    m.weight_quantizer.disable_quant()
+        for parameter in assignments.parameters():
+            distributed.broadcast(parameter.data)
         return assignments
 
     def groups_for(assignments):
@@ -195,22 +201,32 @@ def refine_staged(model, modules, replay, config):
 
     @torch.no_grad()
     def install(names, assignments):
-        for name, a in zip(names, assignments):
-            weight, amax, global_amax = a.snapshot()
-            m = named[name]
-            if not torch.isfinite(weight).all():
-                raise FloatingPointError("Nonfinite GSQ hard weights")
-            m.weight.copy_(weight)
-            m.weight_quantizer.amax = amax.to(replay.device).reshape_as(m.weight_quantizer.amax)
-            m.weight_quantizer.global_amax = global_amax.to(replay.device).reshape_as(
-                m.weight_quantizer.global_amax
-            )
+        with distributed.check():
+            for name, a in zip(names, assignments):
+                weight, amax, global_amax = a.snapshot()
+                m = named[name]
+                if not torch.isfinite(weight).all():
+                    raise FloatingPointError("Nonfinite GSQ hard weights")
+                m.weight.copy_(weight)
+                m.weight_quantizer.amax = amax.to(replay.device).reshape_as(m.weight_quantizer.amax)
+                m.weight_quantizer.global_amax = global_amax.to(replay.device).reshape_as(
+                    m.weight_quantizer.global_amax
+                )
 
-    def step(assignments, groups, momentum, multiplier):
-        if any(
-            not torch.isfinite(p.grad).all() for p in assignments.parameters() if p.grad is not None
-        ):
-            raise FloatingPointError("Nonfinite GSQ gradients")
+    def step(assignments, groups, momentum, multiplier, divisor=1):
+        for parameter in assignments.parameters():
+            if not parameter.requires_grad:
+                continue
+            if parameter.grad is None:
+                parameter.grad = torch.zeros_like(parameter)
+            distributed.sum(parameter.grad).div_(divisor)
+        with distributed.check():
+            if any(
+                not torch.isfinite(p.grad).all()
+                for p in assignments.parameters()
+                if p.grad is not None
+            ):
+                raise FloatingPointError("Nonfinite GSQ gradients")
         _lion_step(groups, momentum, multiplier)
 
     def schedule(index, total):
@@ -227,23 +243,21 @@ def refine_staged(model, modules, replay, config):
             hessian = torch.zeros(module.in_features, module.in_features, device=replay.device)
             count = 0
             with torch.no_grad():
-                for sample in replay.initializer_samples:
-                    args, kwargs = replay.batch([sample])
-                    x = model.input_layernorm(args[0] if args else kwargs["hidden_states"])
-                    # Disabled AWQ input quantizers still apply pre_quant_scale.
-                    x = module.input_quantizer(x)
-                    hessian, count = update_hessian(x, hessian, count)
-                # IST normalizes by sequences rather than tokens.
-                hessian.mul_(count / len(replay.initializer_samples))
-                dead = hessian.diagonal() == 0
-                hessian.diagonal()[dead] = 1
-                hessian.diagonal().add_(config.hessian_damping * hessian.diagonal().mean())
-                factor = torch.linalg.cholesky(hessian).to(module.weight.dtype).float()
-                target = replay.originals[name + ".weight"].to(replay.device, copy=True)
-                pre = module.input_quantizer.pre_quant_scale
-                if pre is not None:
-                    target = (target.float() / pre.float()).to(target.dtype)
-                target[:, dead] = 0
+                with distributed.check():
+                    for sample in replay.initializer_samples:
+                        args, kwargs = replay.batch([sample])
+                        x = model.input_layernorm(args[0] if args else kwargs["hidden_states"])
+                        hessian, count = update_hessian(x, hessian, count)
+                    # IST normalizes by sequences rather than tokens.
+                    hessian.mul_(count)
+                distributed.sum(hessian).div_(config.initializer_samples)
+                with distributed.check():
+                    dead = hessian.diagonal() == 0
+                    hessian.diagonal()[dead] = 1
+                    hessian.diagonal().add_(config.hessian_damping * hessian.diagonal().mean())
+                    factor = torch.linalg.cholesky(hessian).to(module.weight.dtype).float()
+                    target = replay.originals[name + ".weight"].to(replay.device, copy=True)
+                    target[:, dead] = 0
             del hessian
             assignments = assignments_for([name])
             groups, momentum = groups_for(assignments), {}
@@ -253,10 +267,11 @@ def refine_staged(model, modules, replay, config):
                 loss = (
                     ((target.float() - assignments[0](tau, kappa).float()) @ factor).square().sum()
                 )
-                if not torch.isfinite(loss):
-                    raise FloatingPointError("Nonfinite GSQ Hessian reconstruction")
-                loss.backward()
-                step(assignments, groups, momentum, 1.0)
+                with distributed.check():
+                    if not torch.isfinite(loss):
+                        raise FloatingPointError("Nonfinite GSQ Hessian reconstruction")
+                    loss.backward()
+                step(assignments, groups, momentum, 1.0, distributed.world_size)
                 if (index + 1) % 250 == 0 or index + 1 == config.qk_steps:
                     print_rank_0(
                         f"GSQ {name}: step {index + 1}/{config.qk_steps}, loss {loss.detach().item():.6g}"
@@ -284,31 +299,35 @@ def refine_staged(model, modules, replay, config):
                 batches = torch.randperm(ceil(config.train_samples / config.batch_size)).tolist()
                 for block in batches:
                     start = block * config.batch_size
-                    samples = replay.training_samples[start : start + config.batch_size]
+                    end = min(start + config.batch_size, config.train_samples)
+                    rank, world = distributed.rank, distributed.world_size
+                    first = max(0, (start - rank + world - 1) // world)
+                    last = max(0, (end - rank + world - 1) // world)
+                    samples = replay.training_samples[first:last]
                     assignments.zero_grad(set_to_none=True)
                     tau, kappa, progress = schedule(index, total)
-                    for micro in range(0, len(samples), config.microbatch_size):
-                        subset = samples[micro : micro + config.microbatch_size]
-                        args, kwargs = replay.batch(subset)
-                        with torch.no_grad(), ExitStack() as stack:
-                            stack.enter_context(
+                    with distributed.check():
+                        for micro in range(0, len(samples), config.microbatch_size):
+                            subset = samples[micro : micro + config.microbatch_size]
+                            args, kwargs = replay.batch(subset)
+                            with (
+                                torch.no_grad(),
                                 set_quantizer_by_cfg_context(
                                     region, [{"quantizer_name": "*", "enable": False}]
-                                )
-                            )
-                            for q in region.modules():
-                                if isinstance(q, TensorQuantizer):
-                                    stack.enter_context(q.disable_pre_quant_scale())
-                            teacher = functional_call(region, originals, args, kwargs)
-                            teacher = teacher[0] if isinstance(teacher, tuple) else teacher
-                        weights = {n + ".weight": a(tau, kappa) for n, a in zip(names, assignments)}
-                        student = functional_call(region, weights, args, kwargs)
-                        student = student[0] if isinstance(student, tuple) else student
-                        loss = F.mse_loss(student.float(), teacher.float())
-                        if not torch.isfinite(loss):
-                            raise FloatingPointError("Nonfinite GSQ sequence reconstruction")
-                        (loss * len(subset) / len(samples)).backward()
-                        epoch_loss += loss.detach() * len(subset) / config.train_samples
+                                ),
+                            ):
+                                teacher = functional_call(region, originals, args, kwargs)
+                                teacher = teacher[0] if isinstance(teacher, tuple) else teacher
+                            weights = {
+                                n + ".weight": a(tau, kappa) for n, a in zip(names, assignments)
+                            }
+                            student = functional_call(region, weights, args, kwargs)
+                            student = student[0] if isinstance(student, tuple) else student
+                            loss = F.mse_loss(student.float(), teacher.float())
+                            if not torch.isfinite(loss):
+                                raise FloatingPointError("Nonfinite GSQ sequence reconstruction")
+                            (loss * len(subset) / (end - start)).backward()
+                            epoch_loss += loss.detach() * len(subset) / config.train_samples
                     step(
                         assignments,
                         groups,
@@ -316,6 +335,7 @@ def refine_staged(model, modules, replay, config):
                         0.1 + 0.45 * (1 + cos(pi * (progress if total > 1 else 1))),
                     )
                     index += 1
+                distributed.sum(epoch_loss)
                 print_rank_0(
                     f"GSQ {names}: epoch {_epoch + 1}/{config.epochs}, loss {epoch_loss.item():.6g}"
                 )

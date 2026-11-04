@@ -1508,14 +1508,6 @@ def fuse_prequant_to_linear(
                 if hasattr(linear_pqs_from, "input_quantizer") and hasattr(
                     linear_pqs_from.input_quantizer, "_pre_quant_scale"
                 ):
-                    weight_quantizer = getattr(linear_fuse_into, "weight_quantizer", None)
-                    if (
-                        isinstance(weight_quantizer, NVFP4StaticQuantizer)
-                        and weight_quantizer.is_nvfp4_static
-                        and not weight_quantizer._if_quant
-                    ):
-                        # Finalized native codes (e.g. GSQ) must retain their learned grid.
-                        continue
                     pre_quant_scale = linear_pqs_from.input_quantizer._pre_quant_scale
 
                     # for GQA/MQA models, we can apply averaging to the pre_quant_scale for shared head groups

@@ -15,6 +15,8 @@
 
 """This module contains the mode descriptor for the quantization mode."""
 
+import hashlib
+import json
 from abc import abstractmethod
 from collections.abc import Callable
 
@@ -48,6 +50,7 @@ from .config import (
     QuantizeAlgoCfgType,
     QuantizeAlgorithmConfig,
     QuantizeConfig,
+    QuantizerAttributeConfig,
     SmoothQuantCalibConfig,
     SVDQuantConfig,
     _QuantizeExportConfig,
@@ -61,7 +64,7 @@ from .conversion import (
     restore_svdquant_model,
     update_quantize_metadata,
 )
-from .gsq import gsq
+from .gsq import _validate_model, gsq
 from .model_calib import (
     awq,
     gptq,
@@ -75,7 +78,9 @@ from .model_calib import (
     smoothquant,
     svdquant,
 )
+from .nn import TensorQuantizer
 from .utils.calib_utils import reset_calib_forward_memory
+from .utils.gsq_distributed import DistributedGSQ
 
 __all__ = ["BaseCalibrateModeDescriptor"]
 
@@ -239,6 +244,41 @@ def wrapped_calib_func(
     qdq_from_prev = layerwise_cfg.get("get_qdq_activations_from_prev_layer", True)
     save_every = layerwise_cfg.get("save_every", 1)
     calib_mutates_weights = layerwise_cfg.get("calib_mutates_weights", True)
+    gsq_metadata = None
+    if method == "gsq":
+        distributed = DistributedGSQ()
+        if distributed.active:
+            with distributed.check():
+                _validate_model(model, config)
+            distributed.consistent(config.model_dump(mode="json"))
+            with distributed.check():
+                quantizers = {
+                    name: json.loads(
+                        QuantizerAttributeConfig(
+                            **q.attribute_config_from_modelopt_state(
+                                q.get_modelopt_state(properties_only=True)
+                            )
+                        ).model_dump_json()
+                    )
+                    for name, q in model.named_modules()
+                    if isinstance(q, TensorQuantizer)
+                }
+                resolved = {
+                    "algorithm": json.loads(config.model_dump_json(exclude={"layerwise"})),
+                    "quantizers": quantizers,
+                    "layout": [
+                        (n, list(p.shape), str(p.dtype)) for n, p in model.named_parameters()
+                    ],
+                }
+                gsq_metadata = {
+                    "format_version": 1,
+                    "world_size": distributed.world_size,
+                    "sharding": "round_robin_splits_v1",
+                    "config_hash": hashlib.sha256(
+                        json.dumps(resolved, sort_keys=True).encode()
+                    ).hexdigest(),
+                }
+            distributed.consistent(gsq_metadata)
     if method is not None and "awq" in method:
         # For backward compatibility
         kwargs["algorithm"] = method
@@ -278,6 +318,7 @@ def wrapped_calib_func(
                 calib_mutates_weights=calib_mutates_weights,
                 activation_cache_device=layerwise_cfg.get("activation_cache_device", "device"),
                 activation_cache_dir=layerwise_cfg.get("activation_cache_dir"),
+                _gsq_metadata=gsq_metadata,
                 **kwargs,
             )
         else:
