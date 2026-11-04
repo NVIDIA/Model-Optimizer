@@ -192,7 +192,7 @@ python3 aiperf/compare_harnesses.py \
 Running both on one node (MiniMax-M2.7 + DFlash K=3, MT-Bench, greedy, 4096-token generations,
 identical prompts, 4xH100):
 
-```
+```text
 harness                   per-request AL   pooled AL       steps
 ----------------------------------------------------------------
 specdec_bench                     1.9798      1.7506      193329
