@@ -315,6 +315,10 @@ class PTQSpec(SpecSection):
     own code or size, never in the flow, which is why it is stated here and not there.
     """
 
+    no_auto_device_map: str | None = None
+    """Why ``device_map="auto"`` cannot be used for the model, so the flow loads it whole and moves
+    it to the target device, unless the run itself asks for a sequential map."""
+
     no_device_map: str | None = None
     """Why no device map can be used for the model: the flow loads it whole and moves it to the
     target device, whatever the run asks for."""
@@ -328,6 +332,11 @@ class PTQSpec(SpecSection):
 
     A single GPU keeps ``"auto"``: it cannot split what is tied, and a sequential map would only
     cap its memory."""
+
+    vlm_wrapper: bool = False
+    """Whether the flow treats the model as a VLM wrapper: it calibrates with image-text data by
+    default, previews through the wrapper's own chat path rather than ``generate`` on token ids,
+    and puts the quantized language model back into the wrapper."""
 
     preview_unsupported: str | None = None
     """Why the flow skips the generation preview, the sample before and after quantization.

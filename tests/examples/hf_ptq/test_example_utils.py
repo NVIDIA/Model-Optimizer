@@ -456,7 +456,6 @@ def test_get_model_uses_expected_dtype_kwarg(
         monkeypatch.delattr(example_utils.transformers, architecture, raising=False)
     else:
         monkeypatch.setattr(example_utils.transformers, model_class_name, FakeLlamaForCausalLM)
-    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
@@ -486,6 +485,9 @@ def test_get_model_uses_expected_dtype_kwarg(
         ("t5", "T5ForConditionalGeneration", 2, False, None),
         ("t5", "T5ForConditionalGeneration", 2, True, None),
         ("bart", "BartForConditionalGeneration", 2, False, None),
+        # A wrapper that cannot take "auto" loads on one device, unless the run asks for sequential.
+        ("NemotronH_Nano_VL_V2", "NemotronH_Nano_VL_V2", 2, False, None),
+        ("NemotronH_Nano_VL_V2", "NemotronH_Nano_VL_V2", 2, True, "sequential"),
     ],
 )
 def test_get_model_device_map(
@@ -530,7 +532,6 @@ def test_get_model_device_map(
     # (e.g. Gemma3ForCausalLM) reappears on the next ``hasattr`` and the real one loads.
     # raising=False: DiffusionGemma may not exist in the installed transformers.
     monkeypatch.setattr(example_utils.transformers, architecture, FakeArchitecture, raising=False)
-    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
@@ -626,7 +627,6 @@ def test_get_model_selects_bundled_or_builtin_class(
     monkeypatch.setattr(example_utils, "AutoModelForCausalLM", _record("bundled"))
     monkeypatch.setattr(example_utils.transformers, architecture, _record("builtin"), raising=False)
     monkeypatch.setattr(example_utils, "prepare_model_for_loading", lambda *a, **k: nullcontext())
-    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
@@ -966,3 +966,57 @@ def test_without_a_plan_the_load_decides_and_refuses_sharding_knobs_it_cannot_ho
 
     with pytest.raises(RuntimeError, match="MODELOPT_FSDP_SIZE=world ask to shard"):
         example_utils.get_model(str(tmp_path), device="cuda:0")
+
+
+# ---------- create_vlm_calibration_loop --------------------------------------
+
+
+class _Wrapper(torch.nn.Module):
+    """Records the kwargs its forward gets; no ``extract_feature``, like an omni wrapper."""
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.calls: list[dict] = []
+
+    def forward(self, **kwargs):
+        self.calls.append(kwargs)
+        return torch.zeros(1)
+
+
+def _vlm_batch():
+    return {
+        "input_ids": torch.ones(1, 4, dtype=torch.long),
+        "pixel_values": torch.zeros(2, 3, 8, 8),
+        "attention_mask": torch.ones(1, 4, dtype=torch.long),
+        "position_ids": None,
+    }
+
+
+def test_the_calibration_loop_lets_the_models_plugin_run_the_batch():
+    """An omni wrapper's own calibration forward carries the dtype cast and ``use_cache=False``,
+    which the loop's plain forward would bypass."""
+    model = _Wrapper(SimpleNamespace(model_type="nemotron_h_omni", is_encoder_decoder=False))
+    model.vision_model = SimpleNamespace(config=SimpleNamespace(torch_dtype=torch.bfloat16))
+
+    example_utils.create_vlm_calibration_loop(model, [_vlm_batch()])(model)
+
+    assert len(model.calls) == 1
+    passed = model.calls[0]
+    assert passed["use_cache"] is False
+    assert passed["pixel_values"].dtype is torch.bfloat16
+    assert "position_ids" not in passed
+
+
+def test_the_calibration_loop_keeps_the_plain_forward_for_encoder_decoder_vlms():
+    """An encoder-decoder VLM batch is renamed to ``decoder_input_ids``, which a calibration
+    forward looking for ``input_ids`` would not recognise, silently skipping calibration."""
+    model = _Wrapper(SimpleNamespace(model_type="NemotronH_Nano_VL_V2", is_encoder_decoder=True))
+
+    example_utils.create_vlm_calibration_loop(model, [_vlm_batch()])(model)
+
+    assert len(model.calls) == 1
+    passed = model.calls[0]
+    assert "decoder_input_ids" in passed, "the encoder-decoder rename reached the model"
+    assert "input_ids" not in passed
+    assert passed["pixel_values"].dtype is torch.float32, "no calibration forward touched it"
