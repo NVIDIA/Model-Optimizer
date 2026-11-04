@@ -115,6 +115,25 @@ if [[ "${TRUST_REMOTE_CODE}" == "1" ]]; then
     echo "note: --trust-remote-code enabled; ${MODEL} may execute its own code"
 fi
 
+# Fail before reserving anything rather than quietly degrading a cell. Raising
+# the budget per cell to meet the client count would make the highest
+# concurrencies run roughly one request per client, which is not a steady-state
+# throughput measurement: the batch axis would stop being comparable across
+# cells while still publishing as though it were.
+MAX_CONC=0
+for conc in ${CONCURRENCIES}; do
+    [[ "${conc}" =~ ^[0-9]+$ && "${conc}" -gt 0 ]] || {
+        echo "FAIL: CONCURRENCIES must be positive integers; got '${conc}'"; exit 1; }
+    (( conc > MAX_CONC )) && MAX_CONC=${conc}
+done
+if (( REQUEST_COUNT < MAX_CONC )); then
+    echo "FAIL: REQUEST_COUNT=${REQUEST_COUNT} is below the largest concurrency (${MAX_CONC})."
+    echo "      Every client would serve fewer than one request and the sweep's"
+    echo "      batch axis would not be comparable. Raise REQUEST_COUNT, or drop"
+    echo "      the high concurrencies from CONCURRENCIES."
+    exit 1
+fi
+
 mkdir -p "${ARTIFACT_ROOT}"
 
 # Build the serving command as an argv array, not a string. The publisher
@@ -125,6 +144,24 @@ mkdir -p "${ARTIFACT_ROOT}"
 # the JSON quoting intact, and keeps the executed and recorded commands from
 # drifting apart.
 SERVE_ARGS=(vllm serve "${MODEL}" --served-model-name "${SERVED_NAME}")
+# A revision is only a fact if the server was told to honour it. vLLM's
+# --revision selects a Hugging Face Hub commit; for a local directory there is
+# nothing to select and the flag is ignored, so passing it would not make the
+# recorded revision true. Record which case applies instead of publishing an
+# unenforceable claim: for a local checkpoint the revision is asserted by
+# whoever staged it, and the artifact should say so.
+REVISION_ENFORCED=false
+if [[ -n "${MODEL_REVISION}" ]]; then
+    if [[ -d "${MODEL}" ]]; then
+        echo "note: ${MODEL} is a local directory; MODEL_REVISION is recorded as asserted by staging, not enforced by the server"
+    else
+        SERVE_ARGS+=(--revision "${MODEL_REVISION}" --tokenizer-revision "${MODEL_REVISION}")
+        REVISION_ENFORCED=true
+    fi
+fi
+if [[ -n "${DRAFT_REVISION}" && -d "${DRAFT_MODEL}" ]]; then
+    echo "note: ${DRAFT_MODEL} is a local directory; DRAFT_REVISION is likewise asserted, not enforced"
+fi
 if [[ "${SPEC_METHOD}" != "none" ]]; then
     SERVE_ARGS+=(--speculative-config "{\"method\":\"${SPEC_METHOD}\",\"model\":\"${DRAFT_MODEL}\",\"num_speculative_tokens\":${NUM_SPEC_TOKENS}}")
 fi
@@ -175,18 +212,39 @@ curl -sf "http://localhost:${PORT}/health" > /dev/null 2>&1 || {
 # means speculation did not actually run. Either way the sweep would otherwise
 # complete and report AL ~1.0 as a real measurement of a useless draft.
 if [[ "${SPEC_METHOD}" != "none" ]]; then
-    echo "=== probing metrics.speculative_decoding ==="
-    curl -sf "http://localhost:${PORT}/v1/chat/completions" \
+    echo "=== probing metrics.speculative_decoding (streaming, as the sweep runs) ==="
+    # Probe the transport the sweep actually uses. AIPerf runs --streaming, and
+    # acceptance metrics ride on the final SSE chunk; a unary probe can succeed
+    # on a build that never attaches them to a stream, which is precisely the
+    # failure this gate exists to catch.
+    curl -sf -N "http://localhost:${PORT}/v1/chat/completions" \
         -H 'Content-Type: application/json' \
-        -d "{\"model\":\"${SERVED_NAME}\",\"messages\":[{\"role\":\"user\",\"content\":\"Count to five.\"}],\"max_tokens\":64,\"temperature\":${TEMPERATURE}}" \
-        > "${ARTIFACT_ROOT}/probe.json"
+        -d "{\"model\":\"${SERVED_NAME}\",\"messages\":[{\"role\":\"user\",\"content\":\"Count to five.\"}],\"max_tokens\":64,\"temperature\":${TEMPERATURE},\"stream\":true,\"stream_options\":{\"include_usage\":true}}" \
+        > "${ARTIFACT_ROOT}/probe.sse"
     python3 - <<PY || exit 1
 import json, sys
-d = json.load(open("${ARTIFACT_ROOT}/probe.json"))
-sd = (d.get("metrics") or {}).get("speculative_decoding")
+# Walk the SSE stream and keep the last chunk that carries the metrics block;
+# vLLM attaches it to a trailing chunk, not to every delta.
+sd = None
+for line in open("${ARTIFACT_ROOT}/probe.sse"):
+    line = line.strip()
+    if not line.startswith("data:"):
+        continue
+    payload = line[5:].strip()
+    if payload == "[DONE]":
+        break
+    try:
+        chunk = json.loads(payload)
+    except json.JSONDecodeError:
+        continue
+    found = (chunk.get("metrics") or {}).get("speculative_decoding")
+    if found:
+        sd = found
+json.dump(sd or {}, open("${ARTIFACT_ROOT}/probe.json", "w"), indent=2)
 if not sd:
-    print("FAIL: no metrics.speculative_decoding in the response.")
-    print("This build does not expose per-request acceptance.")
+    print("FAIL: no metrics.speculative_decoding on any streamed chunk.")
+    print("This build does not expose per-request acceptance over streaming,")
+    print("which is the transport the sweep uses.")
     sys.exit(1)
 steps = sd.get("num_spec_steps") or 0
 drafted = sd.get("num_draft_tokens") or 0
@@ -203,7 +261,22 @@ fi
 # agrees. btk_results.py rejects a sweep whose cells disagree on these.
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
 GPU_NAME=${GPU_NAME:-unknown}
-VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "unknown")
+# Read the version off the serving process itself rather than importing vllm
+# here. `python3` on PATH is not necessarily the interpreter vLLM runs under --
+# a client installed into its own venv earlier in PATH shadows it, and the
+# import then fails and silently records "unknown". The engine banner is
+# authoritative because it comes from the process actually serving the sweep.
+VLLM_VERSION=$(grep -m1 -oE "V1 LLM engine \(v[^)]+\)" "${ARTIFACT_ROOT}/vllm_server.log" 2>/dev/null \
+    | sed -E 's/.*\(v?//; s/\)//')
+if [[ -z "${VLLM_VERSION}" ]]; then
+    VLLM_VERSION=$(vllm --version 2>/dev/null | tr -d '\r' | tail -1)
+fi
+VLLM_VERSION=${VLLM_VERSION:-unknown}
+if [[ "${VLLM_VERSION}" == "unknown" ]]; then
+    # Not fatal, but say so loudly: the runtime version is the first thing
+    # asked when two measurements of the same checkpoint disagree.
+    echo "WARNING: could not determine the vLLM version; published provenance will be incomplete"
+fi
 echo "hardware: ${GPU_NAME} x${GPU_COUNT} | vllm ${VLLM_VERSION}"
 
 failed=""
@@ -211,39 +284,47 @@ for dataset in ${DATASETS}; do
     sweep_dir="${ARTIFACT_ROOT}/${dataset}"
     mkdir -p "${sweep_dir}"
     for conc in ${CONCURRENCIES}; do
-        # The publisher rejects a profiling budget smaller than the client
-        # count ("Completed request count does not match requested profiling
-        # budget"), and a run with fewer requests than clients cannot reach
-        # steady state anyway.
         requests=${REQUEST_COUNT}
-        if (( requests < conc )); then
-            requests=${conc}
-            echo "note: raising request count to ${requests} to cover concurrency ${conc}"
-        fi
         cell="${sweep_dir}/c${conc}"
         results="${cell}/${CLIENT_INSTANCE}_aiperf_results"
+        # Start each cell empty. A re-run, or an arm pointed at the same root
+        # with a different configuration, would otherwise leave a stale export
+        # sitting beside freshly written metadata -- a published cell claiming
+        # to describe a measurement it did not come from.
+        rm -rf "${cell}"
         mkdir -p "${results}"
+        # Snapshot the serving argv into the cell rather than referencing one
+        # shared file, for the same reason: the cell must be self-describing.
+        cp "${ARGV_FILE}" "${cell}/.serve_argv"
 
         echo
         echo "=== ${dataset} @ concurrency ${conc} (${requests} requests) ==="
         # ignore_eos:false is explicit. Several client paths set it true
         # whenever an output length is given, which turns natural-EOS
         # generation into fixed-length generation and changes acceptance.
-        if aiperf profile \
-            --model "${SERVED_NAME}" \
-            --tokenizer "${MODEL}" \
-            --url "http://localhost:${PORT}" \
-            --endpoint-type chat \
-            --streaming \
-            --public-dataset "${dataset}" \
-            --export-level "${EXPORT_LEVEL}" \
-            --concurrency "${conc}" \
-            --request-count "${requests}" \
-            --warmup-request-count "${WARMUP_COUNT}" \
-            --osl "${OUTPUT_LENGTH}" \
-            --extra-inputs ignore_eos:false \
-            --extra-inputs "temperature:${TEMPERATURE}" \
-            --artifact-dir "${results}"; then
+        # Built as an argv array so the exact client invocation can be
+        # recorded alongside the export. Without it a published cell -- a
+        # SPEC_METHOD=none control especially -- cannot be audited from the
+        # artifact alone: the concurrency and budget that produced it would
+        # only exist in a job log that is not published with the result.
+        CLIENT_ARGS=(aiperf profile
+            --model "${SERVED_NAME}"
+            --tokenizer "${MODEL}"
+            --url "http://localhost:${PORT}"
+            --endpoint-type chat
+            --streaming
+            --public-dataset "${dataset}"
+            --export-level "${EXPORT_LEVEL}"
+            --concurrency "${conc}"
+            --request-count "${requests}"
+            --warmup-request-count "${WARMUP_COUNT}"
+            --osl "${OUTPUT_LENGTH}"
+            --extra-inputs ignore_eos:false
+            --extra-inputs "temperature:${TEMPERATURE}"
+            --artifact-dir "${results}")
+        printf '%s\n' "${CLIENT_ARGS[@]}" > "${cell}/.client_argv"
+
+        if "${CLIENT_ARGS[@]}"; then
             :
         else
             echo "FAIL: ${dataset} @ concurrency ${conc}"
@@ -258,6 +339,7 @@ for dataset in ${DATASETS}; do
         MD_MODEL_REVISION="${MODEL_REVISION}" MD_DRAFT="${DRAFT_MODEL}" \
         MD_DRAFT_REVISION="${DRAFT_REVISION}" MD_ALGO="${SPEC_METHOD}" \
         MD_K="${NUM_SPEC_TOKENS}" MD_GPU_COUNT="${GPU_COUNT}" MD_STUDY="${STUDY_ID}" \
+        MD_REVISION_ENFORCED="${REVISION_ENFORCED}" \
         python3 - <<'PY'
 import json, os, shlex
 from pathlib import Path
@@ -291,6 +373,11 @@ recipe = {
     "draft_length": None if disabled else int(os.environ["MD_K"]),
     "gpu_count_used": int(os.environ["MD_GPU_COUNT"]),
     "disaggregated": False,
+    # Whether the server was actually told to honour the recorded revisions, or
+    # whether they are an assertion about what was staged. A consumer comparing
+    # two runs needs to know which, because an unenforced revision cannot rule
+    # out that the weights differed.
+    "revision_enforced": os.environ["MD_REVISION_ENFORCED"] == "true",
 }
 if os.environ["MD_STUDY"]:
     recipe["study_id"] = os.environ["MD_STUDY"]
