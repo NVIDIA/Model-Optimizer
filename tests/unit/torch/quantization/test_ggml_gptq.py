@@ -638,19 +638,36 @@ def test_auto_quantize_snapshots_only_the_weights_calibration_rewrites(moe, monk
         assert torch.equal(weights[weight_name], weight), weight_name
 
 
-@pytest.mark.parametrize("case", ["non_ggml", "tied"])
-def test_auto_quantize_refusal_hands_back_the_unconverted_model(case):
+@pytest.mark.parametrize("case", ["non_ggml", "tied", "aliased", "fused_moe_configs"])
+def test_auto_quantize_refusal_hands_back_the_unconverted_model(case, request):
     inputs = _inputs()
     source = _two_layers()
-    if case == "non_ggml":
-        # An INT4 weight quantizer cannot hold the codes GPTQ would choose.
-        formats = [(_int4_config(GPTQ), "INT4_GPTQ")]
-    else:
+    # An INT4 weight quantizer cannot hold the codes GPTQ would choose.
+    formats = [(_int4_config(GPTQ), "INT4_GPTQ")]
+    if case == "tied":
         # GPTQ would rewrite the weight under both layers.
         source[1] = torch.nn.Linear(512, 512, bias=False)
         source[1].weight = source[0].weight
         formats = [_recipe(GPTQ, "iq2_xxs")]
+    elif case == "fused_moe_configs":
+        # Conversion moves these fused experts onto a backend their quantizers intercept, on the
+        # root, a nested and the experts' own config.
+        source = request.getfixturevalue("moe")
+        inputs = inputs[:96, :TOY_MOE_HIDDEN]
+        text_config = SimpleNamespace(_experts_implementation="batched_mm")
+        source.config = SimpleNamespace(_experts_implementation="kernels", text_config=text_config)
+        source.mlp.experts.config = SimpleNamespace(_experts_implementation="batched_mm")
     model = copy.deepcopy(source)
+    if case == "aliased":
+        # Distinct Parameters over one storage, which deepcopy would split: GPTQ on the first layer
+        # would rewrite the second's weight, also when the second selects BF16.
+        for layers in (source, model):
+            layers[1].weight = torch.nn.Parameter(layers[0].weight[:256])
+        formats = [_recipe(GPTQ, "iq2_xxs")]
+    configs = []
+    if case == "fused_moe_configs":
+        configs = [model.config, model.config.text_config, model.mlp.experts.config]
+    held = [dict(vars(config)) for config in configs]
 
     with pytest.raises((ValueError, NotImplementedError)):
         _search(model, inputs, formats, 16.0)
@@ -659,8 +676,15 @@ def test_auto_quantize_refusal_hands_back_the_unconverted_model(case):
     assert [type(m) for m in model.modules()] == [type(m) for m in source.modules()]
     for weight, original in zip(model.parameters(), source.parameters()):
         assert torch.equal(weight, original)
+    if configs:
+        restored = [model.config, model.config.text_config, model.mlp.experts.config]
+        assert list(map(id, restored)) == list(map(id, configs))
+        assert [vars(config) for config in configs] == held
     # The same model can search again: here Q8_0, which imatrix leaves alone even when tied.
     _search(model, inputs, [_recipe({"method": "imatrix"}, "q8_0")], 16.0)
+    if configs:
+        # A search that converts moves them, so the refusal did hand them back.
+        assert [vars(config) for config in configs] != held
 
 
 @pytest.mark.parametrize("case", ["rewrite_then_fail", "algorithm_list_fails_midway"])

@@ -776,7 +776,9 @@ def _save_module_attributes(model: nn.Module) -> Callable[[], None]:
 
     Conversion and the AutoQuantize search change module classes and add quantizers, hparams,
     hooks and ModelOpt state through module attributes; restoring each module's class and
-    attributes undoes them. Parameter values are not covered.
+    attributes undoes them. Conversion also sets attributes of the configs modules hold, e.g. the
+    HF plugin moves fused experts' ``_experts_implementation`` on the root, nested and experts'
+    own configs, so those configs' attributes are restored too. Parameter values are not covered.
     """
     saved = [
         (
@@ -787,6 +789,19 @@ def _save_module_attributes(model: nn.Module) -> Callable[[], None]:
         )
         for module in model.modules()
     ]
+    configs: dict[int, tuple[Any, dict]] = {}
+    pending = [getattr(module, "config", None) for module in model.modules()]
+    while pending:
+        config = pending.pop()
+        if (
+            isinstance(config, nn.Module)
+            or not hasattr(config, "__dict__")
+            or id(config) in configs
+        ):
+            continue
+        configs[id(config)] = (config, dict(vars(config)))
+        # An HF composite config holds its sub-configs, e.g. ``text_config``.
+        pending.extend(v for k, v in vars(config).items() if k.endswith("_config"))
 
     def restore():
         for module, cls, attrs, contents in saved:
@@ -800,6 +815,9 @@ def _save_module_attributes(model: nn.Module) -> Callable[[], None]:
                     container.extend(content)
                 else:
                     container.update(content)
+        for config, attrs in configs.values():
+            vars(config).clear()
+            vars(config).update(attrs)
 
     return restore
 

@@ -151,6 +151,16 @@ def _rewrites_weights(recipe: "QuantRecipe") -> bool:
     return bool(_algorithm_methods(recipe.config.algorithm) & _WEIGHT_REWRITING_METHODS)
 
 
+def _storage_span(tensor: torch.Tensor):
+    """``tensor``'s storage and the bytes of it ``tensor`` spans; None if it holds no data here."""
+    if tensor.is_meta or isinstance(tensor, DTensor) or tensor.numel() == 0:
+        return None
+    start = tensor.storage_offset() * tensor.element_size()
+    last = sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride()))
+    storage = (tensor.device, tensor.untyped_storage().data_ptr())
+    return storage, start, start + (last + 1) * tensor.element_size()
+
+
 def _iter_tensor_quantizers(module: nn.Module):
     if isinstance(module, TensorQuantizer):
         yield module
@@ -1169,7 +1179,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         GPTQ rewrites every weight its candidate quantizes, imatrix alone only those its encoder
         takes (not Q8_0). Refuses, before any calibration, a candidate whose result its quantizers
         cannot hold (only a single GGML quantizer pins the codes GPTQ chose) and a rewritten weight
-        shared with another module, which the rewrite would change under that module too.
+        whose storage another parameter also holds (tied weights, or a view of them), which the
+        rewrite would change too.
         """
         params = {}
         for recipe in search_recipes:
@@ -1214,19 +1225,30 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         if not params:
             return None
         uses = defaultdict(int)
+        spans = defaultdict(list)  # storage -> (parameter, first byte, end byte) of each parameter
         for _, param in self.model.named_parameters(remove_duplicate=False):
             uses[param] += 1
+            if uses[param] == 1 and (span := _storage_span(param)) is not None:
+                spans[span[0]].append((param, *span[1:]))
         for param, name in params.items():
             if param.is_meta or isinstance(param, DTensor):
                 raise NotImplementedError(
                     f"Weight-rewriting AutoQuantize candidates need materialized, unsharded "
                     f"weights; {name}'s are on the meta device (offloaded) or a DTensor (FSDP2)."
                 )
-            if uses[param] > 1:
+            span = _storage_span(param)
+            if uses[param] > 1 or (
+                span is not None
+                and any(
+                    other is not param and first < span[2] and span[1] < end
+                    for other, first, end in spans[span[0]]
+                )
+            ):
                 raise NotImplementedError(
-                    f"{name}'s weight is shared with another module (tied weights), which a "
-                    "weight-rewriting AutoQuantize candidate would change too. Exclude it from the "
-                    "search or search it with a calibration that leaves weights unchanged."
+                    f"{name}'s weight shares its storage with another parameter (tied weights, or "
+                    "a view of them), which a weight-rewriting AutoQuantize candidate would change "
+                    "too. Exclude it from the search or search it with a calibration that leaves "
+                    "weights unchanged."
                 )
         return {param: param.detach().to("cpu", copy=True) for param in params}
 
