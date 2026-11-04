@@ -133,6 +133,10 @@ def _make_fresh_quantizer_for_attr(module: nn.Module, attr_name: str) -> nn.Modu
 # candidate from the same source weights, so such a candidate must keep its result in quantizer
 # state (a GGML pinned payload) and the source is restored before the next candidate.
 _WEIGHT_REWRITING_METHODS = frozenset({"gptq", "imatrix"})
+# All a weight-rewriting candidate may also run: GPTQ and imatrix pin codes for the weight itself,
+# so a method that transforms it first (AWQ or SmoothQuant scales, SVDQuant) would leave the
+# selected model holding a different weight than scoring measured.
+_REWRITE_COMPATIBLE_METHODS = _WEIGHT_REWRITING_METHODS | {None, "max"}
 
 
 def _algorithm_methods(algorithm) -> set:
@@ -1178,15 +1182,24 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
         GPTQ rewrites every weight its candidate quantizes, imatrix alone only those its encoder
         takes (not Q8_0). Refuses, before any calibration, a candidate whose result its quantizers
-        cannot hold (only a single GGML quantizer pins the codes GPTQ chose, and only for an
-        unrotated weight) and a rewritten weight whose storage another parameter also holds (tied
-        weights, or a view of them), which the rewrite would change too.
+        cannot hold (only a single GGML quantizer pins the codes GPTQ chose, and only for the
+        weight itself: not rotated, nor transformed by another method in its algorithm list) and
+        a rewritten weight whose storage another parameter also holds (tied weights, or a view of
+        them), which the rewrite would change too.
         """
         params = {}
         for recipe in search_recipes:
-            if not _rewrites_weights(recipe):
+            methods = _algorithm_methods(recipe.config.algorithm)
+            if not methods & _WEIGHT_REWRITING_METHODS:
                 continue
-            imatrix_only = "gptq" not in _algorithm_methods(recipe.config.algorithm)
+            if unsupported := methods - _REWRITE_COMPATIBLE_METHODS:
+                raise NotImplementedError(
+                    f"AutoQuantize candidate {recipe} rewrites weights with "
+                    f"{sorted(methods & _WEIGHT_REWRITING_METHODS)}, whose codes are for the "
+                    f"weight itself, but also calibrates with {sorted(unsupported)}, which would "
+                    "quantize a transformed weight. Combine GPTQ or imatrix only with max."
+                )
+            imatrix_only = "gptq" not in methods
             for hparam in quant_recipe_hparams:
                 for module, quantizers in hparam._all_quantizer_choices.get(recipe, {}).items():
                     for attr, quantizer in quantizers.items():

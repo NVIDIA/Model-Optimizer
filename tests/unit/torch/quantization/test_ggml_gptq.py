@@ -639,7 +639,16 @@ def test_auto_quantize_snapshots_only_the_weights_calibration_rewrites(moe, monk
 
 
 @pytest.mark.parametrize(
-    "case", ["non_ggml", "tied", "aliased", "fused_moe_configs", "rotated_gptq", "rotated_imatrix"]
+    "case",
+    [
+        "non_ggml",
+        "tied",
+        "aliased",
+        "fused_moe_configs",
+        "rotated_gptq",
+        "rotated_imatrix",
+        "awq_gptq",
+    ],
 )
 def test_auto_quantize_refusal_hands_back_the_unconverted_model(case, request):
     inputs = _inputs()
@@ -665,6 +674,10 @@ def test_auto_quantize_refusal_hands_back_the_unconverted_model(case, request):
         config, name = _recipe(GPTQ if case == "rotated_gptq" else {"method": "imatrix"}, "iq2_xxs")
         config["quant_cfg"][1]["cfg"]["rotate"] = True
         formats = [(config, name)]
+    elif case == "awq_gptq":
+        # AWQ leaves its scale on the weight quantizer, which GPTQ's codes do not account for, and
+        # the selected model would fold the scale into the codes scoring measured.
+        formats = [_recipe([{"method": "awq_lite"}, GPTQ], "iq2_xxs")]
     model = copy.deepcopy(source)
     if case == "aliased":
         # Distinct Parameters over one storage, which deepcopy would split: GPTQ on the first layer
