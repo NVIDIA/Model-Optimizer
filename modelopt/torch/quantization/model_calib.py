@@ -2641,6 +2641,7 @@ def gptq(
     fused: bool = False,
     importance_weighted: bool = False,
     hessian_input_dtype: str = "float32",
+    local_hessian_scales: bool = False,
 ):
     """GPTQ quantization.
 
@@ -2681,6 +2682,8 @@ def gptq(
             importance weight it by the square root of the Hessian diagonal.
         hessian_input_dtype: ``"float32"`` or ``"bfloat16"``, the dtype the Hessian GEMM reads
             the activations in; see :class:`GPTQCalibConfig <modelopt.torch.quantization.config.GPTQCalibConfig>`.
+        local_hessian_scales: If True, formats with per-group choices pick them by the
+            GPTQ-compensated block Hessian; see ``GPTQCalibConfig``.
     """
     total_start = time.time()
 
@@ -2731,6 +2734,7 @@ def gptq(
             offload_to_cpu=True,
             fused=fused,
             importance_weighted=importance_weighted,
+            local_hessian_scales=local_hessian_scales,
             hessian_input_dtype=hessian_input_dtype,
             weight_quantizer=weight_quantizer,
             weight=weight,

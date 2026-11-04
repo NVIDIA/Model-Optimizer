@@ -366,6 +366,7 @@ class GPTQHelper:
         weight=None,
         log_mse=True,
         hessian_input_dtype="float32",
+        local_hessian_scales=False,
     ):
         """Initialize GPTQHelper with module state and Hessian storage.
 
@@ -379,6 +380,7 @@ class GPTQHelper:
         self.name = name
         self.fused = fused
         self.importance_weighted = importance_weighted
+        self.local_hessian_scales = local_hessian_scales
         self.hessian_input_dtype = getattr(torch, hessian_input_dtype)
         self._weight_quantizer = weight_quantizer
         self.log_mse = log_mse

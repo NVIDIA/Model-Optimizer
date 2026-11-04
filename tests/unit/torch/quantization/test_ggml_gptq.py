@@ -208,6 +208,23 @@ def test_gptq_weights_the_search_by_the_root_of_the_hessian_diagonal(
     torch.testing.assert_close(importance / importance.mean(), root / root.mean())
 
 
+def test_local_hessian_scales_lower_the_output_error_of_correlated_inputs():
+    torch.manual_seed(0)
+    plain = torch.nn.Linear(512, 16, bias=False)
+    original = plain.weight.detach().clone()
+    searched = copy.deepcopy(plain)
+    inputs = _inputs()
+    algorithm = {**GPTQ, "importance_weighted": True}
+    for model, local_hessian_scales in ((plain, False), (searched, True)):
+        config = _iq_config({**algorithm, "local_hessian_scales": local_hessian_scales}, "iq2_xxs")
+        mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+
+    def output_error(model):
+        return ((model.weight_quantizer(model.weight) - original) @ inputs.T).square().sum()
+
+    assert output_error(searched) < 0.95 * output_error(plain)
+
+
 def test_a_module_calibration_never_reached_gets_the_plain_search():
     # An MoE expert that no calibration token reaches keeps a zero Hessian. Weighting by its
     # diagonal would make every code score zero error, so GPTQ must fall back to the plain search.
