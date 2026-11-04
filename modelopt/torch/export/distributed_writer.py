@@ -898,6 +898,8 @@ def _distributed_save_hf_checkpoint_impl(
         return numbers
 
     expected = total_experts if plan.is_expert_parallel else 0
+    # Every rank joins, one that writes no experts included, which contributes {}: a rank that
+    # skipped the call would leave the writing ranks waiting in its gather.
     all_reduce(
         "expert split",
         partial(split_experts, sharded_sd, local_sd),
