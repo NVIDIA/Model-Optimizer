@@ -99,9 +99,10 @@ Two editing rules for these blocks:
 
 - **Avoid bash `${VAR}`** — OmegaConf parses `${...}`. `$(...)`, `$$` and `$VAR` are
   fine.
-- **`set +x` around any param that carries a secret.** `set -x` traces *after*
-  expansion, so an `$HF_TOKEN` in `data_prep_params` otherwise lands in the log —
-  and in MLflow via `log_logs`.
+- **Never pass a secret as a Gym param.** Params become argv, readable by any user
+  on the node via `/proc/<pid>/cmdline`, and `set -x` traces them into the log (and
+  MLflow via `log_logs`). Deliver secrets through `env_vars`; HF clients read
+  `HF_TOKEN` from the environment.
 
 ## Env vars
 

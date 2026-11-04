@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import contextlib
 import os
 import random
 import time
@@ -99,6 +100,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
+from modelopt.torch.utils.fsdp2_utils import fsdp2_root_unsharded
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.mlflow import add_mlflow_args, resolve_mlflow_args
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
@@ -157,6 +159,15 @@ def extract_and_prepare_language_model_from_vl(
         return language_model
 
     return None
+
+
+def fsdp2_call_context(full_model: torch.nn.Module, model: torch.nn.Module):
+    """Context for calling ``model``, the quantization target, of a possibly FSDP2 ``full_model``.
+
+    Plain PTQ calibrates the extracted language model directly, which skips the FSDP2 root's
+    pre-forward; the root's own parameters (e.g. the embeddings) are gathered around the call.
+    """
+    return contextlib.nullcontext() if model is full_model else fsdp2_root_unsharded(full_model)
 
 
 class _DeviceDataLoader:
@@ -404,10 +415,12 @@ def load_model(args: argparse.Namespace):
 
     # Default to image-text calibration for VLM models. Skip for the AutoQuantize recipe path, whose
     # text-only path does not support image-text calibration yet (auto_quantize() would raise);
-    # auto-enabling it here would make Nemotron-VL AutoQuantize fail unconditionally.
+    # auto-enabling it here would make Nemotron-VL AutoQuantize fail unconditionally. Nor for FSDP2,
+    # which calibrates on text only.
     if (
         is_nemotron_vl_model
         and not args.calib_with_images
+        and not args.use_fsdp2
         and not _recipe_is_auto_quantize(args.recipe)
     ):
         print("Nemotron VL model detected. Enabling image-text calibration by default.")
@@ -589,6 +602,12 @@ def mono_quantize(
                     if args.specdec_offline_dataset is not None
                     else None,
                 )
+                if args.use_fsdp2:
+                    text_loop = calibrate_loop
+
+                    def calibrate_loop(model):
+                        with fsdp2_call_context(full_model, model):
+                            text_loop(model)
 
         if args.layerwise_export:
             LayerwiseExporter(full_model, args.export_path)
@@ -1079,17 +1098,20 @@ def quantize_main(
 
             run_auto_quant = aq_config is not None
 
-            args.batch_size = get_max_batch_size(
-                language_model,
-                max_sample_length=args.calib_seq,
-                sample_memory_usage_ratio=sample_memory_usage_ratio if not run_auto_quant else 1.0,
-                sample_input_single_batch=sample_input_single_batch,
-                enable_grad=(
-                    aq_config is not None
-                    and aq_config.auto_quantize_method in ("gradient", "aumann_shapley")
-                ),
-                forward_step=(_get_autoquant_memory_probe(recipe) if run_auto_quant else None),
-            )
+            with fsdp2_call_context(full_model, language_model):
+                args.batch_size = get_max_batch_size(
+                    language_model,
+                    max_sample_length=args.calib_seq,
+                    sample_memory_usage_ratio=sample_memory_usage_ratio
+                    if not run_auto_quant
+                    else 1.0,
+                    sample_input_single_batch=sample_input_single_batch,
+                    enable_grad=(
+                        aq_config is not None
+                        and aq_config.auto_quantize_method in ("gradient", "aumann_shapley")
+                    ),
+                    forward_step=(_get_autoquant_memory_probe(recipe) if run_auto_quant else None),
+                )
             args.batch_size = min(args.batch_size, sum(args.calib_size))
 
     print(f"Use calib batch_size {args.batch_size}")
@@ -1348,7 +1370,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Run calibration under PyTorch FSDP2 (requires torchrun); takes precedence over "
             "--use_seq_device_map. Includes experimental weight and KV-cache AutoQuantize. "
-            "v1: standard causal-LM only (no VILA / pack-quantized / speculative / sparsity / VLM / MTP)."
+            "Supports causal LMs and VLMs with text-only calibration (no VILA / encoder-decoder / "
+            "image-text calibration / models whose forward requires images / pack-quantized / "
+            "speculative / sparsity / MTP)."
         ),
     )
     parser.add_argument(
