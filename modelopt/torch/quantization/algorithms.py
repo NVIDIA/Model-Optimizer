@@ -1178,9 +1178,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
         GPTQ rewrites every weight its candidate quantizes, imatrix alone only those its encoder
         takes (not Q8_0). Refuses, before any calibration, a candidate whose result its quantizers
-        cannot hold (only a single GGML quantizer pins the codes GPTQ chose) and a rewritten weight
-        whose storage another parameter also holds (tied weights, or a view of them), which the
-        rewrite would change too.
+        cannot hold (only a single GGML quantizer pins the codes GPTQ chose, and only for an
+        unrotated weight) and a rewritten weight whose storage another parameter also holds (tied
+        weights, or a view of them), which the rewrite would change too.
         """
         params = {}
         for recipe in search_recipes:
@@ -1207,6 +1207,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                         # every expert it encodes, even when other experts use another format.
                         if imatrix_only and not any(map(model_calib._imatrix_encodes, enabled)):
                             continue
+                        # GPTQ and the imatrix encoder pin codes for the weight itself, which a
+                        # rotating quantizer would replace with its rotation's.
+                        if any(q.rotate_is_enabled for q in enabled):
+                            raise NotImplementedError(
+                                f"AutoQuantize candidate {recipe} rewrites {hparam.name}'s weights, "
+                                f"but its {attr} rotates them before quantizing, which the codes "
+                                "its calibration pins do not account for. Search this format "
+                                "without rotation or with a calibration that leaves weights unchanged."
+                            )
                         # Only the weight this quantizer covers: "weight_quantizer" -> "weight",
                         # a fused module's "gate_up_proj_weight_quantizers" -> "gate_up_proj".
                         weight_name = (

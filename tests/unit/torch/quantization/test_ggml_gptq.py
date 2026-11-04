@@ -638,7 +638,9 @@ def test_auto_quantize_snapshots_only_the_weights_calibration_rewrites(moe, monk
         assert torch.equal(weights[weight_name], weight), weight_name
 
 
-@pytest.mark.parametrize("case", ["non_ggml", "tied", "aliased", "fused_moe_configs"])
+@pytest.mark.parametrize(
+    "case", ["non_ggml", "tied", "aliased", "fused_moe_configs", "rotated_gptq", "rotated_imatrix"]
+)
 def test_auto_quantize_refusal_hands_back_the_unconverted_model(case, request):
     inputs = _inputs()
     source = _two_layers()
@@ -657,6 +659,12 @@ def test_auto_quantize_refusal_hands_back_the_unconverted_model(case, request):
         text_config = SimpleNamespace(_experts_implementation="batched_mm")
         source.config = SimpleNamespace(_experts_implementation="kernels", text_config=text_config)
         source.mlp.experts.config = SimpleNamespace(_experts_implementation="batched_mm")
+    elif case.startswith("rotated"):
+        # The quantizer would quantize the rotated weight, but the codes GPTQ or the imatrix
+        # encoder pins are the weight's own, so the selection would not be what scoring measured.
+        config, name = _recipe(GPTQ if case == "rotated_gptq" else {"method": "imatrix"}, "iq2_xxs")
+        config["quant_cfg"][1]["cfg"]["rotate"] = True
+        formats = [(config, name)]
     model = copy.deepcopy(source)
     if case == "aliased":
         # Distinct Parameters over one storage, which deepcopy would split: GPTQ on the first layer
