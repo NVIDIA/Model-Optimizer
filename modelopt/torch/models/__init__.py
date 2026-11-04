@@ -91,6 +91,8 @@ from . import (  # isort: skip
     nemotron_h,
     minimax_m3_vl,
     llama4_text,
+    kimi_vl,
+    kimi_k25,
     nemotron_h_omni,
     qwen2_moe,
     qwen3,
