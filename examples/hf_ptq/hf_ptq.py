@@ -100,6 +100,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.fsdp2_utils import fsdp2_root_unsharded
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.mlflow import add_mlflow_args, resolve_mlflow_args
@@ -351,6 +352,10 @@ def load_model(args: argparse.Namespace):
             cpu_offload=args.cpu_offload,
             attn_implementation=args.attn_implementation,
             hf_config=hf_config,
+        )
+        # Calibration sizes its batch, and the export writes, by how the model is distributed.
+        set_distribution_plan(
+            full_model, DistributionPlan(args.dist_state.world_size, dense="fsdp")
         )
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
