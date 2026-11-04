@@ -46,7 +46,7 @@ from transformers import AutoConfig, DeepseekV3Config, LlamaConfig
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.models import get_spec
 from modelopt.torch.utils.distributed import DistributionPlan, ParallelState, set_distribution_plan
-from modelopt.torch.utils.moe import _EP_MIN_TRANSFORMERS
+from modelopt.torch.utils.moe import _EP_MIN_TRANSFORMERS, register_torch_a2a
 from modelopt.torch.utils.plugins import model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
@@ -798,11 +798,10 @@ def test_a_vlm_calibrated_on_text_gets_its_experts_all_to_all_forwards_back(
     drops (transformers 5.16 and later) stayed dropped, and the first batch raised for the missing
     EP process group."""
     pytest.importorskip("transformers", minversion="5.16")
+    # Imported here: transformers.distributed exists from 5.16 only, which the line above requires.
     from transformers import Qwen3VLMoeConfig, Qwen3VLMoeForConditionalGeneration
     from transformers.distributed.configuration_utils import DistributedConfig
     from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_parameter_tp_plan
-
-    from modelopt.torch.utils.moe import register_torch_a2a
 
     register_torch_a2a()
     config = Qwen3VLMoeConfig(
