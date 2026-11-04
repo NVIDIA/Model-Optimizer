@@ -29,7 +29,7 @@ The module is pure Pydantic schema with no runtime dependencies on ``transformer
 
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 __all__ = ["DataArguments", "ModelArguments", "TrainingArguments"]
 
@@ -135,3 +135,31 @@ class TrainingArguments(BaseModel):
     answer_only_loss: bool = False
     cp_size: int = 1
     dp_shard_size: int | None = None
+
+    # Data echoing: train on each fetched example for ``data_echo_uses`` steps instead of one, for
+    # when fetching is the bottleneck (e.g. hidden states streamed from a serving engine). 1 is off.
+    data_echo_uses: int = Field(1, ge=1)
+    # Steps between two uses of an example: each slot of the per-rank batch replays its examples at
+    # its own fixed gap from [min_gap, min_gap + gap_spread). 1 repeats each fresh batch in a row.
+    data_echo_min_gap: int = Field(128, ge=1)
+    # Width of that window; None is min_gap // 4. Wider mixes examples more but holds more of them.
+    data_echo_gap_spread: int | None = Field(None, ge=0)
+    # Where examples wait between uses: host memory frees the accelerator for long gaps.
+    data_echo_store: Literal["device", "cpu"] = "device"
+    # DFlash-family drafts: the uses of an example take disjoint slices of one random order of its
+    # anchor positions, instead of independent draws. None turns it on for DFlash-family recipes.
+    data_echo_disjoint_anchors: bool | None = None
+
+    @model_validator(mode="after")
+    def _check_data_echo(self) -> Self:
+        if self.data_echo_uses == 1:
+            return self
+        # The plan numbers examples by whole batches, so a short last batch would derail it.
+        if not (self.model_extra or {}).get("dataloader_drop_last"):
+            raise ValueError(
+                "training.data_echo_uses > 1 needs training.dataloader_drop_last=true."
+            )
+        # Each rank picks its own examples and anchors, but a context-parallel group must share them.
+        if self.cp_size > 1:
+            raise ValueError("training.data_echo_uses > 1 does not support training.cp_size > 1.")
+        return self

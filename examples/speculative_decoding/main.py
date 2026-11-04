@@ -335,6 +335,14 @@ def train():
 
     if not dry_run and recipe.data.mode in ("online", "streaming") and not recipe.data.data_path:
         raise ValueError(f"data.mode={recipe.data.mode!r} requires data.data_path.")
+    is_dflash_family = isinstance(recipe, ModelOptDFlashRecipe)
+    if training_args.data_echo_disjoint_anchors is None:
+        training_args.data_echo_disjoint_anchors = is_dflash_family
+    if training_args.data_echo_disjoint_anchors and not is_dflash_family:
+        raise ValueError(
+            "training.data_echo_disjoint_anchors needs a DFlash-family recipe, whose drafts "
+            f"sample anchor positions; got {type(recipe).__name__}."
+        )
     if training_args.cp_size > 1:
         patch_ring_attention_for_ttt()
         # accelerate requires an fsdp_plugin when cp_size > 1; the --fsdp launcher flags that
@@ -356,6 +364,13 @@ def train():
         print_rank_0(f"Last checkpoint detected: {last_checkpoint}")
 
     checkpoint = training_args.resume_from_checkpoint or last_checkpoint
+    if checkpoint and training_args.data_echo_uses > 1:
+        # The echo loader keeps no state in checkpoints, and the trainer's batch skipping on
+        # resume would rebuild the loader around it, replaying or skipping data silently.
+        raise ValueError(
+            f"Cannot resume from {checkpoint} with training.data_echo_uses > 1; "
+            "start in a fresh training.output_dir."
+        )
 
     use_offline_training = recipe.data.mode != "online"
     if isinstance(recipe, ModelOptExternalDraftRecipe):
