@@ -485,12 +485,9 @@ def _get_config_dtype(config):
     return config_dtype
 
 
-def _apply_dtype_to_config(model_kwargs, config_dtype, dtype_kwarg, apply_config_dtype=False):
+def _apply_dtype_to_config(model_kwargs, config_dtype, apply_config_dtype=False):
     model_kwargs = model_kwargs.copy()
-    if dtype_kwarg == "torch_dtype":
-        model_kwargs["torch_dtype"] = config_dtype
-        model_kwargs.pop("dtype", None)
-    elif apply_config_dtype:
+    if apply_config_dtype:
         model_kwargs["dtype"] = config_dtype
     return model_kwargs
 
@@ -705,7 +702,7 @@ def get_model(
             # unless specified by the hf_config.
             config_dtype = _get_config_dtype(config_for_init)
             model_kwargs2 = _apply_dtype_to_config(
-                model_kwargs, config_dtype, ptq.dtype_kwarg, apply_config_dtype=True
+                model_kwargs, config_dtype, apply_config_dtype=True
             )
             if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                 model_kwargs2.pop("trust_remote_code", None)
@@ -745,7 +742,7 @@ def get_model(
                 )
                 model_kwargs["max_memory"] = max_memory
 
-        model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, ptq.dtype_kwarg)
+        model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype)
         if _disk_offload:
             model_kwargs2["offload_folder"] = offload_folder
         model = load_pretrained(

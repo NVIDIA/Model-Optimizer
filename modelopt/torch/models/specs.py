@@ -329,10 +329,6 @@ class PTQSpec(SpecSection):
     A single GPU keeps ``"auto"``: it cannot split what is tied, and a sequential map would only
     cap its memory."""
 
-    dtype_kwarg: Literal["dtype", "torch_dtype"] = "dtype"
-    """The keyword the model's loading code takes its precision by: ``dtype`` for transformers'
-    own classes, ``torch_dtype`` for a checkpoint whose own code was written for the old name."""
-
     vlm_wrapper: bool = False
     """Whether the flow treats the model as a VLM wrapper: it calibrates with image-text data by
     default, previews through the wrapper's own chat path rather than ``generate`` on token ids,

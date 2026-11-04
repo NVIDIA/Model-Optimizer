@@ -25,18 +25,12 @@ from modelopt.torch.models import PTQSpec, get_ptq_spec, get_specs
 # registry entry, so adding one fails here until the table names it.
 EXPECTED_PTQ_FIELDS = {
     "NemotronH_Nano_VL_V2": {"vlm_wrapper", "no_auto_device_map"},
-    "Llama_Nemotron_Nano_VL": {"vlm_wrapper", "no_auto_device_map"},
-    "nemotron_parse": {"vlm_wrapper", "no_auto_device_map"},  # encoder-decoder
     "nemotron_h_omni": {"vlm_wrapper", "no_auto_device_map"},
     "diffusion_gemma": {"sequential_device_map", "generate_includes_prompt"},
-    "diffusion_gemma_text": {"sequential_device_map", "generate_includes_prompt"},
     "llava_llama": {"fsdp2_unsupported"},  # VILA, NVILA and NVILA-Lite
     "bart": {"no_device_map"},
     "t5": {"no_device_map"},
-    "deci": {"dtype_kwarg"},
-    "nemotron-nas": {"dtype_kwarg"},  # the DeciLM architecture under another model type
     "deepseek": {"preview_unsupported"},
-    "deepseek_v2": {"preview_unsupported"},
     "deepseek_v3": {"preview_unsupported"},
     "deepseek_v32": {"preview_unsupported"},
     "deepseek_v4": {"preview_unsupported"},

@@ -325,22 +325,18 @@ def test_resolve_init_config_falls_back_when_rederive_raises():
 @pytest.mark.parametrize(
     (
         "architecture",
-        "model_type",
         "model_class_name",
         "expected_config_dtype_kwarg",
         "unexpected_config_dtype_kwarg",
     ),
     [
-        ("DeciLMForCausalLM", "nemotron-nas", "AutoModelForCausalLM", "torch_dtype", "dtype"),
-        ("DeciLMForCausalLM", "deci", "AutoModelForCausalLM", "torch_dtype", "dtype"),
-        ("LlamaForCausalLM", "llama", "LlamaForCausalLM", "dtype", "torch_dtype"),
+        ("LlamaForCausalLM", "LlamaForCausalLM", "dtype", "torch_dtype"),
     ],
 )
 def test_get_model_uses_expected_dtype_kwarg(
     monkeypatch,
     tmp_path,
     architecture,
-    model_type,
     model_class_name,
     expected_config_dtype_kwarg,
     unexpected_config_dtype_kwarg,
@@ -349,7 +345,7 @@ def test_get_model_uses_expected_dtype_kwarg(
     hf_config = SimpleNamespace(
         architectures=[architecture],
         dtype=torch.float16,
-        model_type=model_type,
+        model_type="llama",
         torch_dtype=torch.bfloat16,
     )
 
@@ -604,7 +600,6 @@ def test_nemotron_h_prefers_bundled_code_for_unsupported_block_type(monkeypatch)
     ("model_type", "expected"),
     [
         ("deepseek", True),
-        ("deepseek_v2", True),
         ("deepseek_v3", True),
         ("deepseek_v32", True),
         ("deepseek_v4", True),
@@ -820,7 +815,7 @@ def test_the_calibration_loop_lets_the_models_plugin_run_the_batch():
 def test_the_calibration_loop_keeps_the_plain_forward_for_encoder_decoder_vlms():
     """An encoder-decoder VLM batch is renamed to ``decoder_input_ids``, which a calibration
     forward looking for ``input_ids`` would not recognise, silently skipping calibration."""
-    model = _Wrapper(SimpleNamespace(model_type="nemotron_parse", is_encoder_decoder=True))
+    model = _Wrapper(SimpleNamespace(model_type="NemotronH_Nano_VL_V2", is_encoder_decoder=True))
 
     example_utils.create_vlm_calibration_loop(model, [_vlm_batch()])(model)
 

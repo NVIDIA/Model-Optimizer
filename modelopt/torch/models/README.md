@@ -41,9 +41,9 @@ them:
 `test_specs_vs_transformers.py` needs no edit: it reads which models to check, and
 which to skip, from the registry.
 
-A model type that is not a lowercase module name (`nemotron-nas`, `NemotronH_Nano_VL_V2`) gets a
-package named for it, lowercased with hyphens as underscores (`nemotron_nas`,
-`nemotron_h_nano_vl_v2`); the spec's `model_type` stays the HF one.
+A model type that is not a lowercase module name (`NemotronH_Nano_VL_V2`) gets a package named
+for it, lowercased with hyphens as underscores (`nemotron_h_nano_vl_v2`); the spec's `model_type`
+stays the HF one.
 
 The file is named for what it holds, not for who reads it: a model's spec is general
 model data, and export is only its first consumer.
@@ -80,7 +80,7 @@ A `ModelSpec` holds one attribute per section, each `None` unless the model fill
 | `moe_spec` (`MoESpec`) | MoE architecture facts only — block classes, expert projection naming, which layout that naming describes | the model is dense |
 | `export_spec` (`ExportSpec`) | Per-model data *and policy* of the unified HF export path, e.g. whether grouped expert export is validated for this model | export needs nothing model-specific |
 | `ep_spec` (`EPSpec`) | Per-model data of the expert-parallel PTQ path: the `base_model_ep_plan` to attach and the config it goes on, the transformers release it needs, or why the model cannot be expert-parallel yet | the model is dense, or stock transformers already ships all of it |
-| `ptq_spec` (`PTQSpec`) | Per-model facts of the Hugging Face PTQ flow (`examples/hf_ptq`): how it loads (device map, precision keyword), whether it is a VLM wrapper, why its generation preview is skipped or decoded as it is, why `--use_fsdp2` refuses it. Each field replaces a check on the model's name in the example; read it through `get_ptq_spec` | the flow's generic behavior fits the model |
+| `ptq_spec` (`PTQSpec`) | Per-model facts of the Hugging Face PTQ flow (`examples/hf_ptq`): how it loads (device map), whether it is a VLM wrapper, why its generation preview is skipped or decoded as it is, why `--use_fsdp2` refuses it. Each field replaces a check on the model's name in the example; read it through `get_ptq_spec` | the flow's generic behavior fits the model |
 
 `None` means "the model has nothing to say about this", which stays distinct from a
 filled-in-but-empty section.

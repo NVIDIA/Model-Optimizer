@@ -22,7 +22,6 @@ Two layers are covered: the forward itself, with its fallback for wrappers witho
 
 from types import SimpleNamespace
 
-import pytest
 import torch
 
 from modelopt.torch.models.hf import forward_calibration_batch
@@ -210,11 +209,9 @@ class _LanguageModel(torch.nn.Module):
 class _ShardedInternVL(torch.nn.Module):
     """InternVL-style wrapper with vision tower, embedding table and batch on three devices."""
 
-    def __init__(
-        self, vision_device, embed_device, tokens_per_image=1, hidden=4, model_type="internvl_chat"
-    ):
+    def __init__(self, vision_device, embed_device, tokens_per_image=1, hidden=4):
         super().__init__()
-        self.config = _config(model_type)
+        self.config = _config("NemotronH_Nano_VL_V2")
         self.vision_model = SimpleNamespace(config=SimpleNamespace(torch_dtype=torch.float32))
         self.language_model = _LanguageModel(embed_device, hidden)
         self.img_context_token_id = 7
@@ -301,11 +298,8 @@ def test_sharded_internvl_aligns_the_token_mask_when_only_the_embedding_moves():
     assert model.language_model.calls[0]["inputs_embeds"].device == torch.device("cuda:2")
 
 
-@pytest.mark.parametrize(
-    "model_type", ["NemotronH_Nano_VL_V2", "Llama_Nemotron_Nano_VL", "internvl_chat"]
-)
-def test_the_hook_runs_an_internvl_style_wrapper_through_the_safe_forward(model_type):
-    model = _ShardedInternVL("cuda:0", "cuda:0", model_type=model_type)
+def test_the_hook_runs_an_internvl_style_wrapper_through_the_safe_forward():
+    model = _ShardedInternVL("cuda:0", "cuda:0")
 
     assert forward_calibration_batch(model, _sharded_batch("cuda:0")) is True
     assert len(model.language_model.calls) == 1
