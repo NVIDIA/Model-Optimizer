@@ -62,6 +62,16 @@ SERVED_NAME=${SERVED_NAME:-specdec-target}
 PORT=${PORT:-8000}
 ARTIFACT_DIR=${ARTIFACT_DIR:-./aiperf_acceptance}
 EXPORT_LEVEL=${EXPORT_LEVEL:-records}
+# Off by default. --trust-remote-code lets a checkpoint's own Python run in this
+# process, which is fine for a local checkpoint you produced and not fine as an
+# unconditional default when MODEL may name a remote repo. Opt in per run.
+TRUST_REMOTE_CODE=${TRUST_REMOTE_CODE:-0}
+
+TRUST_FLAG=""
+if [[ "${TRUST_REMOTE_CODE}" == "1" ]]; then
+    TRUST_FLAG="--trust-remote-code"
+    echo "note: --trust-remote-code enabled; ${MODEL} may execute its own code"
+fi
 
 mkdir -p "${ARTIFACT_DIR}"
 
@@ -72,11 +82,32 @@ vllm serve "${MODEL}" \
     --tensor-parallel-size "${TP_SIZE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
     --per-request-spec-decode-metrics detailed \
-    --trust-remote-code \
+    ${TRUST_FLAG} \
     --port "${PORT}" ${EXTRA_SERVE_ARGS} \
     > "${ARTIFACT_DIR}/vllm_server.log" 2>&1 &
 SERVER_PID=$!
-trap 'kill ${SERVER_PID} 2>/dev/null || true' EXIT
+
+# Reap the server before returning, and *wait* for it. Without the wait the
+# script exits while vLLM still holds the GPUs, so a caller that immediately
+# starts a second measurement -- exactly what the README's run-both-on-one-node
+# recipe does -- races it for memory and fails in a way that looks like an OOM
+# in the second run rather than a teardown problem in the first.
+reap_server() {
+    [[ -n "${SERVER_PID:-}" ]] || return 0
+    kill -0 "${SERVER_PID}" 2>/dev/null || return 0
+    kill "${SERVER_PID}" 2>/dev/null || true
+    for _ in $(seq 1 "${SERVER_SHUTDOWN_WAIT:-60}"); do
+        kill -0 "${SERVER_PID}" 2>/dev/null || break
+        sleep 1
+    done
+    # vLLM's engine does not always unwind on SIGTERM; do not leave GPUs pinned.
+    if kill -0 "${SERVER_PID}" 2>/dev/null; then
+        echo "server ${SERVER_PID} ignored SIGTERM; sending SIGKILL"
+        kill -9 "${SERVER_PID}" 2>/dev/null || true
+    fi
+    wait "${SERVER_PID}" 2>/dev/null || true
+}
+trap reap_server EXIT
 
 echo "waiting for the server to become healthy..."
 for _ in $(seq 1 180); do
@@ -104,7 +135,18 @@ if not sd:
     print("FAIL: no metrics.speculative_decoding in the response.")
     print("This build does not expose per-request acceptance.")
     sys.exit(1)
-print("probe OK:", json.dumps(sd)[:300])
+# Presence is not enough. A block that is present but zeroed means speculation
+# did not actually run -- a mis-specified draft, or a method the build accepted
+# and then ignored. The sweep would still complete and report AL ~1.0, which
+# reads as a real measurement of a useless draft rather than as a broken setup.
+steps = sd.get("num_spec_steps") or 0
+drafted = sd.get("num_draft_tokens") or 0
+if steps <= 0 or drafted <= 0:
+    print(f"FAIL: speculative_decoding present but inert (num_spec_steps={steps}, "
+          f"num_draft_tokens={drafted}).")
+    print("Speculation is not running; the sweep would report AL ~1.0 as if measured.")
+    sys.exit(1)
+print("probe OK:", json.dumps({k: v for k, v in sd.items() if not isinstance(v, list)}))
 PY
 
 echo "=== AIPerf: ${DATASET}, ${REQUEST_COUNT} requests, concurrency 1 ==="

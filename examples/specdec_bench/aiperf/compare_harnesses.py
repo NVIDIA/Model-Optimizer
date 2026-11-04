@@ -47,17 +47,40 @@ import sys
 from pathlib import Path
 
 
-def _load_specdec(directory: Path) -> dict:
+def _load_specdec(directory: Path, run_index: int = -1) -> dict:
     """Read specdec_bench's acceptance_rate.json.
 
-    The metric writer wraps its output in a single-element list, so accept both
-    shapes rather than depending on which writer version produced the file.
+    The metric writer wraps its output in a list, and `Metric.write()` *appends*
+    when the file already exists (``metrics/base.py``), so a results directory
+    reused across runs accumulates one element per run. Default to the last
+    element -- the most recent run -- because taking the first would silently
+    compare today's AIPerf numbers against a stale specdec_bench run and
+    attribute the difference to the harness. ``--specdec-run-index`` selects a
+    different one.
     """
     path = directory / "acceptance_rate.json"
     if not path.is_file():
         raise SystemExit(f"no acceptance_rate.json in {directory}")
     raw = json.loads(path.read_text())
-    data = raw[0] if isinstance(raw, list) else raw
+
+    if isinstance(raw, list):
+        if not raw:
+            raise SystemExit(f"{path} contains no runs")
+        try:
+            data = raw[run_index]
+        except IndexError:
+            raise SystemExit(
+                f"{path} holds {len(raw)} run(s); --specdec-run-index {run_index} is out of range"
+            ) from None
+        if len(raw) > 1:
+            chosen = run_index if run_index >= 0 else len(raw) + run_index
+            print(
+                f"note: {path.name} holds {len(raw)} appended runs; using index {chosen}. "
+                "Pass --specdec-run-index to choose another.",
+                file=sys.stderr,
+            )
+    else:
+        data = raw
 
     hist = {int(k): int(v) for k, v in (data.get("Acceptance_Length_Histogram") or {}).items()}
     steps = sum(hist.values())
@@ -65,9 +88,9 @@ def _load_specdec(directory: Path) -> dict:
         raise SystemExit(f"empty acceptance histogram in {path}")
     return {
         "per_request_al": data.get("Average_AL"),
+        # Already in emitted-length terms, so this is total emitted / total steps.
         "pooled_al": sum(k * v for k, v in hist.items()) / steps,
         "steps": steps,
-        # Already in emitted-length terms.
         "emitted_hist": hist,
     }
 
@@ -96,12 +119,35 @@ def _load_aiperf(directory: Path) -> dict:
     # accepted drafts -> tokens emitted that step (accepted + the bonus token).
     emitted_hist = {k + 1: v for k, v in accepted_hist.items()}
     steps = sum(emitted_hist.values())
+    if not steps:
+        raise SystemExit(f"empty acceptance histogram in {path}")
+
+    # Derive the pooled mean from the histogram rather than trusting the
+    # reported field. Both sides of the comparison are then the same estimator
+    # computed the same way -- total emitted tokens / total verification steps
+    # -- so a disagreement means the harnesses disagree, not that two different
+    # statistics were placed side by side. The reported field is still read and
+    # cross-checked below, because if it is absent or inconsistent this export
+    # is not what we think it is.
+    pooled_from_hist = sum(k * v for k, v in emitted_hist.items()) / steps
+    reported = avg("spec_decode_token_weighted_acceptance_length")
+    if reported is None:
+        raise SystemExit(
+            f"{path} carries no spec_decode_token_weighted_acceptance_length. "
+            "This export is not the shape this script understands -- the field "
+            "may have been renamed in a newer AIPerf. Refusing to report a "
+            "comparison that would otherwise look like agreement."
+        )
+    if abs(reported - pooled_from_hist) > 1e-3:
+        raise SystemExit(
+            f"{path} is internally inconsistent: reported pooled AL {reported:.6f} vs "
+            f"{pooled_from_hist:.6f} implied by its own histogram. Refusing to compare."
+        )
+
     return {
         "per_request_al": avg("spec_decode_acceptance_length"),
-        # AIPerf's token-weighted AL is the pooled mean; recompute from the
-        # histogram too and let the caller see both agree.
-        "pooled_al": avg("spec_decode_token_weighted_acceptance_length"),
-        "pooled_al_from_hist": sum(k * v for k, v in emitted_hist.items()) / steps,
+        "pooled_al": pooled_from_hist,
+        "pooled_al_reported": reported,
         "steps": steps,
         "emitted_hist": emitted_hist,
         "draft_acceptance_rate": avg("spec_decode_overall_draft_acceptance_rate"),
@@ -124,9 +170,18 @@ def main() -> int:
         default=0.05,
         help="fractional disagreement in pooled AL to treat as agreement (default 0.05)",
     )
+    parser.add_argument(
+        "--specdec-run-index",
+        type=int,
+        default=-1,
+        help=(
+            "which appended run to read from acceptance_rate.json; the metric writer appends "
+            "one element per run to the same file. Default -1 (most recent)."
+        ),
+    )
     args = parser.parse_args()
 
-    spec = _load_specdec(args.specdec_dir)
+    spec = _load_specdec(args.specdec_dir, run_index=args.specdec_run_index)
     ap = _load_aiperf(args.aiperf_dir)
 
     print(f"{'harness':<24}{'per-request AL':>16}{'pooled AL':>12}{'steps':>12}")
@@ -147,34 +202,31 @@ def main() -> int:
         row = "".join(f"{payload['emitted_hist'].get(n, 0) / total:>8.1%} " for n in lengths)
         print(f"{name:<24}{row}")
 
-    # AIPerf reports the pooled mean directly and we also recompute it from the
-    # histogram; if those two disagree the export is internally inconsistent and
-    # no cross-harness conclusion should be drawn from it.
-    if ap["pooled_al"] is not None:
-        drift = abs(ap["pooled_al"] - ap["pooled_al_from_hist"])
-        if drift > 1e-3:
-            print(
-                f"\nWARNING: AIPerf's reported pooled AL ({ap['pooled_al']:.4f}) and the value "
-                f"implied by its own histogram ({ap['pooled_al_from_hist']:.4f}) differ by "
-                f"{drift:.4f}. Treat this export as unreliable."
-            )
-
-    if spec["pooled_al"] and ap["pooled_al"]:
-        delta = ap["pooled_al"] - spec["pooled_al"]
-        rel = abs(delta) / spec["pooled_al"]
-        print(f"\npooled AL delta: {delta:+.4f} ({rel:.1%} of specdec_bench)")
-        if rel <= args.tolerance:
-            print(
-                f"AGREE within {args.tolerance:.0%}: the two harnesses measure the same quantity."
-            )
-            return 0
+    # Both pooled values are histogram-derived and both loaders refuse to return
+    # without one, so reaching here with either missing means a loader changed.
+    # Fail rather than fall through to a success exit -- a comparison that
+    # reports nothing must not be indistinguishable from a comparison that
+    # found agreement.
+    if not spec["pooled_al"] or not ap["pooled_al"]:
         print(
-            f"DISAGREE beyond {args.tolerance:.0%}. Before blaming either harness, confirm both "
-            "ran the same prompts, draft length, sampling and output cap -- those explain most "
-            "gaps. A real disagreement at matched settings is a bug worth filing."
+            "\nERROR: a pooled AL is missing after loading, so no comparison was made. "
+            "This is a bug in this script, not a measurement result.",
+            file=sys.stderr,
         )
-        return 1
-    return 0
+        return 2
+
+    delta = ap["pooled_al"] - spec["pooled_al"]
+    rel = abs(delta) / spec["pooled_al"]
+    print(f"\npooled AL delta: {delta:+.4f} ({rel:.1%} of specdec_bench)")
+    if rel <= args.tolerance:
+        print(f"AGREE within {args.tolerance:.0%}: the two harnesses measure the same quantity.")
+        return 0
+    print(
+        f"DISAGREE beyond {args.tolerance:.0%}. Before blaming either harness, confirm both "
+        "ran the same prompts, draft length, sampling and output cap -- those explain most "
+        "gaps. A real disagreement at matched settings is a bug worth filing."
+    )
+    return 1
 
 
 if __name__ == "__main__":

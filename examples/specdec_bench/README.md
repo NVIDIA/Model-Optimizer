@@ -175,9 +175,15 @@ ARTIFACT_DIR=./aiperf_acceptance \
     bash aiperf/run_aiperf_acceptance.sh
 ```
 
-The script probes `metrics.speculative_decoding` on a single request before starting the sweep.
-A build without that support otherwise produces a full run of records with no acceptance field,
-and the problem only surfaces at analysis time.
+Checkpoints that ship custom modelling code (MiniMax, many MoE variants) additionally need
+`TRUST_REMOTE_CODE=1`. It is off by default because it lets the checkpoint's own Python execute,
+which is not a safe unconditional default when `MODEL` may name a remote repo.
+
+The script probes `metrics.speculative_decoding` on a single request before starting the sweep,
+and requires that block to be non-empty *and* non-zero. A build without the flag produces a full
+run of records with no acceptance field; a build that accepts the speculative config and then
+silently ignores it produces records reporting AL ~1.0, which reads as a real measurement of a
+useless draft rather than as a broken setup. Both now fail before any GPU time is spent.
 
 ### Cross-validating against the in-process harness
 
