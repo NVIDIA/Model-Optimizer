@@ -54,8 +54,8 @@ from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 from modelopt.torch.utils.distributed import DistributionPlan, ParallelState, set_distribution_plan
 from modelopt.torch.utils.plugins.model_load_utils import _fsdp2_shard_dense, _seed_parallel_states
 
-# Each expert's weight scale, so that no two experts share one and an expert taking another's shows.
-# The down projections take the gains in reverse: their scales are separate from gate and up's.
+# Per-expert gains on the weights, so that no two experts share a weight scale and an expert taking
+# another's shows. The down projections take them in reverse: their scale is separate from gate and up's.
 _GAINS = (3.0, 1.0, 0.5, 2.0)
 
 _NVFP4_WEIGHTS_ONLY_CFG = {
@@ -145,7 +145,6 @@ def _quantize_and_export_job(rank, size, distribution, export_dir):
     faulthandler.dump_traceback_later(45, exit=True)
     try:
         _quantize_and_export(distribution, export_dir)
-        dist.barrier()
     finally:
         faulthandler.cancel_dump_traceback_later()
 
@@ -162,4 +161,4 @@ def test_exported_expert_scales_come_from_each_experts_own_weights(tmp_path, req
     source = fused_experts_source_weights(_tiny_moe())
     # Three projections per expert: every expert of every layer is exported, whichever rank held it.
     checked = assert_expert_scales_match_source(load_safetensors_dir(tmp_path), source)
-    assert checked == len(source) // 3
+    assert checked == len(source) // 3 > 0
