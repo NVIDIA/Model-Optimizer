@@ -79,7 +79,7 @@ _NVFP4_EXPORT_FORMATS = {
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 }
-_MXFP4_EXPORT_FORMATS = {QUANTIZATION_MXFP4, QUANTIZATION_W4A8_MXFP4_FP8}
+_MXFP4_EXPORT_FORMATS = {QUANTIZATION_MXFP4, QUANTIZATION_W4A16_MXFP4, QUANTIZATION_W4A8_MXFP4_FP8}
 _FUNCTIONAL_WEIGHT_EXPORT_FORMATS = (
     _NVFP4_EXPORT_FORMATS
     | _MXFP4_EXPORT_FORMATS
@@ -359,10 +359,6 @@ def _resolve_quantized_weight_export_inputs(
     if isinstance(weight_quantizer, SequentialQuantizer):
         raise _UnsupportedQuantizedWeightExportFormatError(
             f"Functional export does not support {quantization_format!r}"
-        )
-    if quantization_format == QUANTIZATION_W4A16_MXFP4:
-        raise _UnsupportedQuantizedWeightExportFormatError(
-            "Functional export does not support weight-only MXFP4"
         )
     if quantization_format == QUANTIZATION_FP8_PB_WO and weight_quantizer.block_sizes != {
         -2: 128,
@@ -934,6 +930,7 @@ def build_hf_quantization_config(
         if state is not None:
             requires_input = state.quantization_format not in {
                 QUANTIZATION_FP8_PB_WO,
+                QUANTIZATION_W4A16_MXFP4,
                 QUANTIZATION_W4A16_NVFP4,
             }
             if state.input_quantizer_enabled != requires_input:
