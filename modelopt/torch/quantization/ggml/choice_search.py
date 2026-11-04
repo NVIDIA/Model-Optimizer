@@ -17,6 +17,7 @@
 
 import torch
 
+from ..extensions import get_cuda_ext_ggml
 from .common import GGML_BLOCK_SIZE, GGMLFormat
 
 __all__ = ["search_choices", "search_scratch"]
@@ -42,7 +43,8 @@ def search_choices(
     for every group, its codebook entries searched as the encoder does (weighted by ``importance``).
     In each block, each group first takes the choice with the least error under its own diagonal
     block of the Hessian; groups are then revisited in turn, each taking the choice that most lowers
-    the block's error with the others held.
+    the block's error with the others held. On CUDA the search after the encode runs as one kernel
+    per block; each block's Hessian must be symmetric.
     """
     rows = weight.reshape(-1, weight.shape[-1])
     blocks, groups = weight.shape[-1] // GGML_BLOCK_SIZE, ggml_format.choice_groups
@@ -97,6 +99,8 @@ def _search_block(ggml_format, block, hessian, importance, chunk_args, decode_ar
         **decode_args,
     ).reshape(ggml_format.num_choices, rows, GGML_BLOCK_SIZE)
     errors -= reference
+    if block.is_cuda and (extension := get_cuda_ext_ggml()) is not None:
+        return extension.search_choices(errors, hessian, groups, _REFINE_SWEEPS)
     errors = errors.reshape(ggml_format.num_choices, rows, groups, group_size)
 
     group_rows = hessian.reshape(groups, group_size, GGML_BLOCK_SIZE)
