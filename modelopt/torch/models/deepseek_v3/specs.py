@@ -19,9 +19,20 @@ Covers the transformers-native V3 family (V3, R1, V3.1). The remote-code
 ``DeepseekMoE`` block of DeepSeek-MoE is a separate spec under ``deepseek``.
 """
 
-from ..specs import ExportSpec, ModelSpec, MoESpec, register
+from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, register
 
 __all__: list[str] = []
+
+# The plan for transformers releases that ship none for deepseek_v3 (before 5.13). From 5.13 its own
+# plan wins (an existing plan always does, see apply_distributed_support): the same experts, plus an
+# ep_router entry for the gate, which the load swaps for torch_a2a_router (global ids, unmasked). No
+# gate entry here on purpose: the router is logits-only and the MoE block computes GLOBAL top-k ids,
+# so the experts already receive unmasked global ids -- what the all-to-all dispatch wants.
+BASE_MODEL_EP_PLAN = {
+    "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+    "layers.*.mlp.experts.down_proj": "grouped_gemm",
+    "layers.*.mlp.experts": "moe_tp_experts",
+}
 
 # DeepseekV3MoE is invisible to the generic MoE detection: its class name does not end
 # in "SparseMoeBlock" and it calls its router ``gate``, so neither the name test nor the
@@ -37,6 +48,7 @@ register(
         model_type="deepseek_v3",
         min_transformers_version="5.5",
         export_spec=ExportSpec(grouped_expert_export=True),
+        ep_spec=EPSpec(base_model_ep_plan=BASE_MODEL_EP_PLAN),
         moe_spec=MoESpec(
             block_names=("DeepseekV3MoE",),
             expert_linear_names=("gate_proj", "down_proj", "up_proj"),

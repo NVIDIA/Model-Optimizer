@@ -44,6 +44,8 @@ from transformers import (
     ProcessorMixin,
 )
 
+from modelopt.recipe import load_recipe
+from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
 from modelopt.torch.models import hf_model_type
@@ -52,9 +54,10 @@ from modelopt.torch.models.hf import (
     prefers_bundled_code,
     prepare_model_for_loading,
 )
+from modelopt.torch.quantization.mode import get_modelike_from_algo_cfg
 from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
-from modelopt.torch.utils.plugins.model_load_utils import is_fsdp2_text_only_vlm, load_pretrained
+from modelopt.torch.utils.plugins.model_load_utils import load_pretrained, resolve_model_class
 
 logger = logging.getLogger(__name__)
 
@@ -94,16 +97,45 @@ def cleanup_distributed(args):
         dist_utils.cleanup()
 
 
+def _awq_calibrations(args) -> set[str]:
+    """The AWQ calibrations (``awq_lite``, ``awq_full``) the run's --recipe or --qformat uses."""
+    if getattr(args, "recipe", None) is not None:
+        recipe = load_recipe(args.recipe)
+        configs = [getattr(recipe, "quantize", None)]
+        search = getattr(recipe, "auto_quantize", None)  # the KV-cache search allows only max
+        if search is not None:
+            configs += search.candidate_formats
+            configs += [c for space in search.module_search_spaces for c in space.candidate_formats]
+        algorithms = [config.algorithm for config in configs if config is not None]
+    else:
+        preset = QUANT_CFG_CHOICES.get(getattr(args, "qformat", None) or "")
+        algorithms = [preset.get("algorithm")] if preset is not None else []
+    methods = {
+        mode.removesuffix("_calibrate")
+        for algorithm in algorithms
+        for mode, _ in get_modelike_from_algo_cfg(algorithm)
+    }
+    return methods & {"awq_lite", "awq_full"}
+
+
 def validate_fsdp2_supported(args, config):
     """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
     issues = []
     if "vila" in args.local_checkpoint_path.lower():
         issues.append("VILA (custom builder + non-standard layer layout)")
-    if is_fsdp2_text_only_vlm(config):
-        if getattr(args, "calib_with_images", False):
-            issues.append("image-text calibration (Qwen FSDP2 currently supports text-only inputs)")
-    elif is_nemotron_vl(config) or _is_multimodal_config(config):
-        issues.append("multimodal / VL models (decoder layers not auto-detectable)")
+    # A VLM is calibrated on text (see forward_requires_images); a layout whose decoder layers
+    # cannot be found fails in fsdp2_wrap. Encoder-decoder models have no single decoder stack.
+    if getattr(config, "is_encoder_decoder", False):
+        issues.append("encoder-decoder models")
+    elif _is_multimodal_config(config) and getattr(args, "calib_with_images", False):
+        issues.append("image-text calibration (FSDP2 currently supports text-only inputs)")
+    elif _is_multimodal_config(config):
+        model_class = resolve_model_class(config, getattr(args, "trust_remote_code", False))
+        if model_class is not None and forward_requires_images(model_class):
+            issues.append(
+                f"{model_class.__name__}, whose forward requires image inputs "
+                "(FSDP2 calibrates on text only)"
+            )
     if any(
         getattr(cfg, "quantization_config", None) is not None
         for cfg in (config, getattr(config, "text_config", None))
@@ -113,6 +145,12 @@ def validate_fsdp2_supported(args, config):
         issues.append("speculative decoding (--specdec_offline_dataset)")
     if getattr(args, "low_memory_mode", False):
         issues.append("--low_memory_mode (redundant with FSDP2)")
+    if dist_utils.size() > 1 and (awq := _awq_calibrations(args)):
+        issues.append(
+            f"AWQ calibration ({', '.join(sorted(awq))}) on more than one rank: each rank would fold "
+            "its own smoothing scale into its weight shard (drop --use_fsdp2, run on one rank, or "
+            "use a non-AWQ format)"
+        )
     if not issues and checkpoint_has_mtp(config.model_type, args.local_checkpoint_path):
         issues.append("Nemotron-H MTP (auxiliary modules are not constructed by the FSDP2 loader)")
 
@@ -209,6 +247,12 @@ def is_nemotron_vl(model_or_config):
 
     architectures = getattr(config, "architectures", [])
     return any("nemotron" in arch.lower() for arch in architectures)
+
+
+def forward_requires_images(model: "torch.nn.Module | type[torch.nn.Module]") -> bool:
+    """Whether ``model.forward`` cannot run without images (``pixel_values`` has no default)."""
+    param = inspect.signature(model.forward).parameters.get("pixel_values")
+    return param is not None and param.default is inspect.Parameter.empty
 
 
 def create_vlm_calibration_loop(full_model, calib_dataloader):
@@ -570,6 +614,7 @@ def get_model(
     trust_remote_code=False,
     use_seq_device_map=False,
     attn_implementation=None,
+    experts_implementation=None,
     offload_folder=None,
     max_cpu_memory_gb=None,
     max_gpu_memory_gb=None,
@@ -611,6 +656,11 @@ def get_model(
     # Note: Forcibly converting the model precision between bf16 and fp16 may introduce accuracy drop
     model_kwargs = config_kwargs.copy()
     model_kwargs.setdefault("dtype", "auto")
+    # Only when asked, on every load below: an explicit None is a value transformers stores.
+    experts_kwargs = (
+        {} if experts_implementation is None else {"experts_implementation": experts_implementation}
+    )
+    model_kwargs.update(experts_kwargs)
 
     # DiffusionGemma ties encoder/decoder weights. device_map "auto" (balanced) can split
     # a tied pair across GPUs, leaving one side on the meta device and breaking generation.
@@ -690,6 +740,7 @@ def get_model(
                 device_map="auto",
                 trust_remote_code=trust_remote_code,
                 dtype="auto",
+                **experts_kwargs,
             )
     elif get_original_hf_quant_method(hf_config) == "mxfp4":
         # Native MXFP4 checkpoints (e.g. openai/gpt-oss-*) must be dequantized to

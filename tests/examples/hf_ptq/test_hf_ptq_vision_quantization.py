@@ -56,6 +56,7 @@ def test_image_calibration_model_target_follows_recipe(
         trust_remote_code=False,
         use_seq_device_map=False,
         attn_implementation=None,
+        experts_implementation=None,
         offload_folder=None,
         max_cpu_memory_gb=None,
         max_gpu_memory_gb=None,
@@ -109,6 +110,7 @@ def test_image_calibration_uses_full_vlm_forward(hf_ptq, monkeypatch):
     args = SimpleNamespace(
         qformat="fp8",
         calib_with_images=True,
+        use_fsdp2=False,
         specdec_offline_dataset=None,
         layerwise_export=False,
     )

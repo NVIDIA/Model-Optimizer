@@ -96,6 +96,7 @@ from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import is_fsdp2_model
+from modelopt.torch.utils.fsdp2_utils import fsdp2_root_unsharded
 from modelopt.torch.utils.perf import maybe_clear_cuda_cache
 
 try:
@@ -104,7 +105,7 @@ except ImportError:
     export_sparse_attention_config = None
 
 # Importing the built-in handlers installs their entries in the two registries.
-from . import hf_export_handlers as _hf_export_handlers  # noqa: F401
+from . import hf_export_handlers as _hf_export_handlers
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import get_experts_list, is_layernorm, is_quantlinear, sync_moe_gate_up_amax
 from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
@@ -523,8 +524,10 @@ def _llm_dummy_forward(model: torch.nn.Module) -> None:
             print(
                 f"Running optimization on language model with fake_input shape: {fake_input.shape}"
             )
-            # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
-            language_model(fake_input, use_cache=False)
+            # Calling the submodule skips the FSDP2 root's pre-forward; gather the root's params.
+            with fsdp2_root_unsharded(model):
+                # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
+                language_model(fake_input, use_cache=False)
         else:
             raise ValueError(
                 f"Cannot extract language_model from Nemotron VL model ({type(model).__name__}). "
@@ -635,6 +638,12 @@ def _export_quantized_weight(
 
     The export includes converting weight tensor to correct quantized values and quantized dtype,
     and registering scaling factors.
+
+    An export handler packs through ``hf_export_handlers._export_weight`` rather than calling this
+    directly: on the keep-fused export an FSDP2-owned weight must be packed inside its unit's
+    weight-update window, which that helper (or the fused-experts handler, around its fold) opens.
+    Packed outside it, the unit's next reshard puts FSDP2's unquantized shard back, and the
+    checkpoint is written unquantized.
 
     Tied-weight dedup is not handled here: both sides of a tie are packed independently
     (identically, once ``sync_tied_input_amax`` has equalized their scales), and the
@@ -996,8 +1005,12 @@ def _process_quantized_modules(
         model_type=hf_model_type(model),
     )
 
-    for name, sub_module in model.named_modules():
-        _dispatch_export_handler(name, sub_module, ctx)
+    # For the no-gather export, which is to set keep_fused_experts on this context and let a sharded
+    # model past the assert above: each FSDP2 unit's modules are then packed in one weight window,
+    # held across them. Until then no window opens here.
+    with _hf_export_handlers.held_fsdp2_weight_windows(ctx):
+        for name, sub_module in model.named_modules():
+            _dispatch_export_handler(name, sub_module, ctx)
 
 
 def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
@@ -1693,10 +1706,12 @@ def _revert_quant_config_names_best_effort(
     try:
         name_mapper = build_reverse_name_mapper(model)
         if name_mapper is not None and hf_quant_config:
+            # Parameter owners only, as the resident export passes: a container or quantizer whose
+            # name a rename moves into a wildcard would expand that wildcard into every module.
             return _revert_hf_quant_config_names(
                 hf_quant_config,
                 name_mapper,
-                module_names=(name for name, _ in model.named_modules()),
+                module_names={name.rpartition(".")[0] for name, _ in model.named_parameters()},
             )
     except Exception as exc:
         warnings.warn(

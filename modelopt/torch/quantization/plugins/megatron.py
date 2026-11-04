@@ -853,7 +853,15 @@ class _QuantTEMCoreColumnParallelLinear(_QuantTELinear, _MegatronColumnParallelL
 
 @QuantModuleRegistry.register({TELinear: "te_mcore_Linear"})
 class _QuantTEMCoreLinear(_QuantTELinear):
-    pass
+    def _setup(self):
+        # Sync ranges over the replicas of this layer: its pipeline stage's tensor-, data- and
+        # context-parallel ranks (which may see different sequence shards). The default group
+        # spans all ranks, which hangs or mixes layers across pipeline stages.
+        if self.parallel_state is None and mcore_parallel.model_parallel_is_initialized():
+            self.parallel_state = ParallelState(
+                mcore_parallel.get_tensor_and_data_parallel_group(with_context_parallel=True)
+            )
+        super()._setup()
 
 
 @QuantModuleRegistry.register(
@@ -1141,6 +1149,21 @@ if HAS_GDN:
                 data_parallel_group,
                 mcore_parallel.get_tensor_model_parallel_group(),
             )
+            # The fused in_proj ends with the beta / alpha gates, which recipes and every export
+            # keep in BF16 (vLLM's in_proj_ba is too narrow for FP4 kernels), so leave them
+            # unquantized here too.
+            names = list(getattr(self, "in_proj_split_names", ()))
+            if not isinstance(self.in_proj, TELayerNormColumnParallelLinear):
+                warn_rank_0(
+                    f"GatedDeltaNet in_proj is a {type(self.in_proj).__name__}, so fake quantization"
+                    " also quantizes its beta / alpha gates, which exports keep in BF16."
+                )
+            elif names[-2:] == ["beta", "alpha"]:
+                local_rows = sum(self.in_proj_split_sections)
+                gate_rows = sum(self.in_proj_split_sections[-2:])
+                self.in_proj._modelopt_unquantized_output_rows = slice(
+                    local_rows - gate_rows, local_rows
+                )
 
         @contextmanager
         def _quantized_gdn_kernel(self):

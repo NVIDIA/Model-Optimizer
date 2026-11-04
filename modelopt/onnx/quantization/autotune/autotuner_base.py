@@ -30,6 +30,7 @@ import os
 import random
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import overload
 
 import onnx
 import onnx_graphsurgeon as gs
@@ -53,6 +54,7 @@ from modelopt.onnx.quantization.autotune.insertion_points import (
 )
 from modelopt.onnx.quantization.autotune.region_pattern import RegionPattern
 from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
+from modelopt.onnx.utils import export_onnx, save_onnx
 
 _MUTATION_SPECS = [
     ("node_inputs", "node input points", lambda p: (p.node_index, p.input_index)),
@@ -104,7 +106,7 @@ class QDQAutotunerBase:
         if isinstance(model, onnx.ModelProto):
             self.onnx_model = model
         elif isinstance(model, gs.Graph):
-            self.onnx_model = gs.export_onnx(model)
+            self.onnx_model = export_onnx(model)
         else:
             raise TypeError(f"Expected onnx.ModelProto or gs.Graph, got {type(model)}")
 
@@ -560,6 +562,24 @@ class QDQAutotunerBase:
             list(op_types_needing_output_quant),
         )
 
+    @overload
+    def export_onnx(
+        self,
+        output_path: str,
+        insert_qdq: bool = True,
+        best: bool = False,
+        model_transform: Callable[[onnx.ModelProto], onnx.ModelProto] | None = None,
+    ) -> None: ...
+
+    @overload
+    def export_onnx(
+        self,
+        output_path: None = None,
+        insert_qdq: bool = True,
+        best: bool = False,
+        model_transform: Callable[[onnx.ModelProto], onnx.ModelProto] | None = None,
+    ) -> bytes: ...
+
     @_requires_init
     def export_onnx(
         self,
@@ -567,7 +587,7 @@ class QDQAutotunerBase:
         insert_qdq: bool = True,
         best: bool = False,
         model_transform: Callable[[onnx.ModelProto], onnx.ModelProto] | None = None,
-    ) -> bytes:
+    ) -> bytes | None:
         """Export ONNX model with Q/DQ nodes inserted according to tested schemes.
 
         This method creates a modified version of the model by:
@@ -585,7 +605,8 @@ class QDQAutotunerBase:
                        (useful for baseline measurements)
 
         Returns:
-            bytes: Serialized ONNX model as bytes
+            Serialized bytes when output_path is None; otherwise None.
+            The bytes-only profiling route remains subject to protobuf size limits.
 
         Raises:
             AutotunerNotInitializedError: If initialize() hasn't been called
@@ -617,7 +638,7 @@ class QDQAutotunerBase:
             model_transform=model_transform,
         )
 
-        model_bytes = model.SerializeToString()
+        model_bytes = None
         quant_type_str = "baseline"
         output_dest = ""
 
@@ -625,8 +646,10 @@ class QDQAutotunerBase:
             quant_type_str = f"{original_quant_type.upper()}" if needs_fp8_conversion else "INT8"
 
         if output_path is not None:
-            onnx.save(model, output_path)
+            save_onnx(model, output_path, save_as_external_data=True)
             output_dest = f" → {output_path}"
+        else:
+            model_bytes = model.SerializeToString()
 
         logger.info(
             f"Exported {quant_type_str} model with {unique_tensors} Q/DQ pairs {output_dest}"
