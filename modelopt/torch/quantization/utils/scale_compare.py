@@ -85,8 +85,10 @@ class ScaleDiff:
         for t in self.tensors:
             by_kind.setdefault(t.kind, []).append(t)
         lines = [
-            f"{'kind':<16}{'tensors':>9}{'differing':>11}{'diff elems':>12}"
-            f"{'median rel':>12}{'max rel':>10}"
+            (
+                f"{'kind':<16}{'tensors':>9}{'differing':>11}{'diff elems':>12}"
+                f"{'median rel':>12}{'max rel':>10}"
+            )
         ]
         for kind, ts in sorted(by_kind.items()):
             differing = [t.max_rel for t in ts if t.outside_tolerance]
@@ -163,7 +165,7 @@ class _CheckpointScales(Mapping[str, torch.Tensor]):
             handle = safe_open(file, framework="pt")
             names = list(filter(_SCALE_NAME.search, handle.keys()))
             if duplicates := self._handles.keys() & set(names):
-                raise ValueError(f"{sorted(duplicates)[0]} is in more than one file of {path}")
+                raise ValueError(f"{min(duplicates)} is in more than one file of {path}")
             self._handles.update(dict.fromkeys(names, handle))
         if not self._handles:
             raise ValueError(f"No quantization scale tensors in {path}")
