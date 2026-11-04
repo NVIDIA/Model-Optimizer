@@ -19,9 +19,12 @@ Matches the remote-code ``DeepseekMoE`` block, not the HF-native ``deepseek_v3``
 classes.
 """
 
-from ..specs import ModelSpec, MoESpec, register
+from ..specs import ModelSpec, MoESpec, PTQSpec, register
 
 __all__: list[str] = []
+
+# Shared by every DeepSeek-V3-architecture type: the V2, V3, V3.2 and V4 types and Kimi-K2.
+PREVIEW_UNSUPPORTED = "DeepSeek generation may go OOM"
 
 # No ExportSpec.grouped_expert_export here: the grouped export path is not validated on
 # this model.
@@ -29,6 +32,7 @@ register(
     ModelSpec(
         model_type="deepseek",
         modeling_source="remote_code",
+        ptq_spec=PTQSpec(preview_unsupported=PREVIEW_UNSUPPORTED),
         moe_spec=MoESpec(
             block_names=("DeepseekMoE",),
             expert_linear_names=("gate_proj", "down_proj", "up_proj"),

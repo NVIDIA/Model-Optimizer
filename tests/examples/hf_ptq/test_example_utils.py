@@ -317,19 +317,22 @@ def test_resolve_init_config_falls_back_when_rederive_raises():
 @pytest.mark.parametrize(
     (
         "architecture",
+        "model_type",
         "model_class_name",
         "expected_config_dtype_kwarg",
         "unexpected_config_dtype_kwarg",
     ),
     [
-        ("DeciLMForCausalLM", "AutoModelForCausalLM", "torch_dtype", "dtype"),
-        ("LlamaForCausalLM", "LlamaForCausalLM", "dtype", "torch_dtype"),
+        ("DeciLMForCausalLM", "nemotron-nas", "AutoModelForCausalLM", "torch_dtype", "dtype"),
+        ("DeciLMForCausalLM", "deci", "AutoModelForCausalLM", "torch_dtype", "dtype"),
+        ("LlamaForCausalLM", "llama", "LlamaForCausalLM", "dtype", "torch_dtype"),
     ],
 )
 def test_get_model_uses_expected_dtype_kwarg(
     monkeypatch,
     tmp_path,
     architecture,
+    model_type,
     model_class_name,
     expected_config_dtype_kwarg,
     unexpected_config_dtype_kwarg,
@@ -338,7 +341,7 @@ def test_get_model_uses_expected_dtype_kwarg(
     hf_config = SimpleNamespace(
         architectures=[architecture],
         dtype=torch.float16,
-        model_type="llama",
+        model_type=model_type,
         torch_dtype=torch.bfloat16,
     )
 
@@ -414,9 +417,12 @@ def test_get_model_uses_expected_dtype_kwarg(
         ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 1, "auto"),
         # "gemma" is a substring of "diffusiongemma"; other Gemmas must not match.
         ("gemma3", "Gemma3ForCausalLM", 2, "auto"),
+        # T5 and BART cannot take a device map at all.
+        ("t5", "T5ForConditionalGeneration", 2, None),
+        ("bart", "BartForConditionalGeneration", 2, None),
     ],
 )
-def test_get_model_device_map_for_diffusion_gemma(
+def test_get_model_device_map(
     monkeypatch, tmp_path, model_type, architecture, device_count, expected_device_map
 ):
     calls = {}
@@ -614,6 +620,23 @@ def test_nemotron_h_prefers_bundled_code_for_unsupported_block_type(monkeypatch)
     assert example_utils.prefers_bundled_code("nemotron_h", hf_config, "ckpt", {})
     monkeypatch.setattr(modeling, "MIXER_TYPES", {"mamba": object, "mlp": object})
     assert not example_utils.prefers_bundled_code("nemotron_h", hf_config, "ckpt", {})
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expected"),
+    [
+        ("deepseek", True),
+        ("deepseek_v2", True),
+        ("deepseek_v3", True),
+        ("deepseek_v32", True),
+        ("deepseek_v4", True),
+        ("kimi_k2", True),  # the DeepseekV3ForCausalLM architecture under its own model type
+        ("kimi_k25", False),  # its own architecture, KimiK25ForConditionalGeneration
+        ("llama", False),
+    ],
+)
+def test_deepseek_architectures_prefer_bundled_code(model_type, expected):
+    assert example_utils.prefers_bundled_code(model_type, SimpleNamespace(), "ckpt", {}) is expected
 
 
 # ---------- get_tokenizer ----------------------------------------------------

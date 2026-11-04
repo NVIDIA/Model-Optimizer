@@ -48,7 +48,7 @@ from modelopt.recipe import load_recipe
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
-from modelopt.torch.models import hf_model_type
+from modelopt.torch.models import get_ptq_spec, hf_model_type
 from modelopt.torch.models.hf import (
     checkpoint_has_mtp,
     prefers_bundled_code,
@@ -587,9 +587,9 @@ def _get_config_dtype(config):
     return config_dtype
 
 
-def _apply_dtype_to_config(model_kwargs, config_dtype, architecture, apply_config_dtype=False):
+def _apply_dtype_to_config(model_kwargs, config_dtype, dtype_kwarg, apply_config_dtype=False):
     model_kwargs = model_kwargs.copy()
-    if "DeciLM" in architecture:
+    if dtype_kwarg == "torch_dtype":
         model_kwargs["torch_dtype"] = config_dtype
         model_kwargs.pop("dtype", None)
     elif apply_config_dtype:
@@ -651,6 +651,7 @@ def get_model(
     except Exception as e:
         print(f"Error: Could not load config from {ckpt_path}: {e}")
         raise RuntimeError(f"Failed to load model configuration from {ckpt_path}") from e
+    ptq = get_ptq_spec(hf_model_type(hf_config))
     if attn_implementation is not None:
         config_kwargs["attn_implementation"] = attn_implementation
 
@@ -683,14 +684,8 @@ def get_model(
         max_memory = {key: value * gpu_mem_percentage for key, value in max_memory.items()}
         model_kwargs["max_memory"] = max_memory
 
-    if hf_config.model_type == "bart":
-        # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors
-        device_map = None
-
-    if hf_config.model_type == "t5":
-        # device_map "auto" can naively shard T5's tied encoder/decoder embeddings and
-        # position-bias buffers across GPUs, which non-deterministically produces NaN
-        # activations during calibration on multi-GPU machines (see HF transformers #21093).
+    if ptq.no_device_map is not None:
+        print(f"Loading without a device map: {ptq.no_device_map}.")
         device_map = None
 
     # Helper function to check if model has pack-quantized config. Checks both the top-level
@@ -773,16 +768,13 @@ def get_model(
             raise ValueError(f"Model config at {ckpt_path} has no architectures defined")
         architecture = hf_config.architectures[0]
 
-        # DeepSeek ships bundled modeling code, but the built-in class is what the
-        # disk-offload and streaming-export paths are validated against.
-        # Also use it when the model plugin says the built-in class can't represent the checkpoint
-        # (dense Nemotron-H on Transformers 5.5, whose built-in class is MoE-only).
-        use_bundled_code = trust_remote_code and (
-            "Deepseek" in architecture
-            or (
-                hasattr(transformers, architecture)
-                and prefers_bundled_code(hf_config.model_type, hf_config, ckpt_path, config_kwargs)
-            )
+        # Use the checkpoint's bundled code when the model plugin says the built-in class can't
+        # represent it (dense Nemotron-H on Transformers 5.5, whose built-in class is MoE-only) or
+        # is the wrong one for it (a DeepSeek architecture).
+        use_bundled_code = (
+            trust_remote_code
+            and hasattr(transformers, architecture)
+            and prefers_bundled_code(hf_config.model_type, hf_config, ckpt_path, config_kwargs)
         )
 
         if not hasattr(transformers, architecture) or use_bundled_code:
@@ -826,7 +818,7 @@ def get_model(
             # unless specified by the hf_config.
             config_dtype = _get_config_dtype(config_for_init)
             model_kwargs2 = _apply_dtype_to_config(
-                model_kwargs, config_dtype, architecture, apply_config_dtype=True
+                model_kwargs, config_dtype, ptq.dtype_kwarg, apply_config_dtype=True
             )
             if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                 model_kwargs2.pop("trust_remote_code", None)
@@ -866,7 +858,7 @@ def get_model(
                 )
                 model_kwargs["max_memory"] = max_memory
 
-        model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, architecture)
+        model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, ptq.dtype_kwarg)
         if _disk_offload:
             model_kwargs2["offload_folder"] = offload_folder
         model = load_pretrained(

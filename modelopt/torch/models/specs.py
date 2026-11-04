@@ -54,7 +54,9 @@ __all__ = [
     "ExportSpec",
     "MoESpec",
     "ModelSpec",
+    "PTQSpec",
     "SpecSection",
+    "get_ptq_spec",
     "get_spec",
     "get_specs",
     "hf_model_type",
@@ -304,6 +306,36 @@ class ExportSpec(SpecSection):
 
 
 @dataclass(kw_only=True)
+class PTQSpec(SpecSection):
+    """Subsystem section: per-model facts the Hugging Face PTQ flow needs to load and preview a model.
+
+    Each field stands in for a check on the model's name that the flow would otherwise carry.
+    A reason string says why the model is special and turns the behavior on, and the flow reports
+    it when it acts: ``None`` is the flow's generic behavior. The cause is always in the model's
+    own code or size, never in the flow, which is why it is stated here and not there.
+    """
+
+    no_device_map: str | None = None
+    """Why the model cannot be loaded with a device map, so the flow loads it whole and moves it to
+    the target device."""
+
+    dtype_kwarg: Literal["dtype", "torch_dtype"] = "dtype"
+    """The keyword the model's loading code takes its precision by. A checkpoint's own code that
+    predates transformers renaming ``torch_dtype`` to ``dtype`` knows only the old one, and would
+    load at its default precision if given the new."""
+
+    preview_unsupported: str | None = None
+    """Why the flow skips the generation preview, the sample before and after quantization.
+
+    The preview is a sanity check on top of calibration, so a model that cannot run it still
+    quantizes and exports."""
+
+    post_ptq_generation_unsupported: str | None = None
+    """Why the quantized model cannot generate the after-quantization sample though the original
+    could, so the flow keeps the first sample and skips the second."""
+
+
+@dataclass(kw_only=True)
 class ModelSpec:
     """The one global per-model descriptor, holding each section as an attribute.
 
@@ -346,6 +378,10 @@ class ModelSpec:
     """Per-model data of the expert-parallel PTQ path, or ``None`` when the model is dense
     or needs nothing beyond what stock transformers already ships."""
 
+    ptq_spec: PTQSpec | None = None
+    """Per-model facts of the Hugging Face PTQ flow, or ``None`` when the flow's generic
+    behavior fits the model. Read it through :func:`get_ptq_spec`."""
+
 
 _SPECS: dict[str, ModelSpec] = {}
 
@@ -366,6 +402,16 @@ def get_spec(model_type: str) -> ModelSpec | None:
 def get_specs() -> list[ModelSpec]:
     """Return all registered specs, in registration order."""
     return list(_SPECS.values())
+
+
+def get_ptq_spec(model_type: str | None) -> PTQSpec:
+    """Return ``model_type``'s PTQ section, or an all-default one when it has none.
+
+    The default section is the flow's generic behavior, so the flow reads one answer for every
+    model, registered or not, instead of handling an absent spec and an absent section apart.
+    """
+    spec = get_spec(model_type) if model_type else None
+    return spec.ptq_spec if spec is not None and spec.ptq_spec is not None else PTQSpec()
 
 
 @functools.cache
