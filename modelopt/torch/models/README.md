@@ -123,6 +123,9 @@ misspelled or doubled hook fails instead of being skipped.
 | `prefers_bundled_code(hf_config, checkpoint_path, config_kwargs)` | `prefers_bundled_code` | `False` |
 | `prepare_for_calibration(model)` | `prepare_model_for_calibration` | nothing |
 | `forward_calibration_batch(model, batch)` | `forward_calibration_batch` | the caller's plain forward (returns `False`) |
+| `load_calibration_processor(checkpoint_path, trust_remote_code)` | `load_calibration_processor` | `None`: the model brings no calibration data |
+| `make_calibration_dataloader(model, processor, dataset_names, calib_size, batch_size, device)` | `make_calibration_dataloader` | `None`: the caller's text or image-text data |
+| `calibration_sample_input(model)` | `calibration_sample_input` | `None`: the caller builds a token-id sample |
 
 Do not import runtime helpers from a model package's `__init__.py`: registering
 specs must remain independent of optional Transformers and calibration imports.

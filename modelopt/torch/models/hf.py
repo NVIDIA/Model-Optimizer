@@ -21,8 +21,11 @@ from contextlib import nullcontext
 from .specs import hf_model_type
 
 __all__ = [
+    "calibration_sample_input",
     "checkpoint_has_mtp",
     "forward_calibration_batch",
+    "load_calibration_processor",
+    "make_calibration_dataloader",
     "prefers_bundled_code",
     "prepare_model_for_calibration",
     "prepare_model_for_loading",
@@ -37,6 +40,9 @@ _HOOKS = frozenset(
         "prefers_bundled_code",
         "prepare_for_calibration",
         "forward_calibration_batch",
+        "load_calibration_processor",
+        "make_calibration_dataloader",
+        "calibration_sample_input",
     }
 )
 # A model type's plugins are one module or several; no two of them may define the same hook.
@@ -55,6 +61,7 @@ _PLUGINS: dict[str, str | tuple[str, ...]] = {
     "internvl_chat": "nemotron_h_nano_vl_v2.calibration",
     "qwen4_exp": "qwen4_exp.qsa_indexer",
     "qwen4_exp_text": "qwen4_exp.qsa_indexer",
+    "whisper": "whisper.calibration",
 }
 
 
@@ -118,3 +125,29 @@ def forward_calibration_batch(model, batch: dict) -> bool:
     """
     hook = _get_hook(hf_model_type(model), "forward_calibration_batch")
     return hook is not None and hook(model, batch)
+
+
+def load_calibration_processor(model_type, checkpoint_path: str, trust_remote_code: bool):
+    """Load the processor of a model type that brings its own calibration data, else None."""
+    hook = _get_hook(model_type, "load_calibration_processor")
+    return None if hook is None else hook(checkpoint_path, trust_remote_code)
+
+
+def make_calibration_dataloader(
+    model_type, model, processor, dataset_names, calib_size, batch_size: int, device
+):
+    """Build the calibration data a model type brings with it, else None.
+
+    The result is ``(dataloader, preview_input_text)``: the text the preview of its first sample
+    shows as the input, which is not a decoded batch when the input is audio.
+    """
+    hook = _get_hook(model_type, "make_calibration_dataloader")
+    if hook is None:
+        return None
+    return hook(model, processor, dataset_names, calib_size, batch_size, device)
+
+
+def calibration_sample_input(model_type, model):
+    """A single-sample input of the shape a model type takes, to probe the largest batch, else None."""
+    hook = _get_hook(model_type, "calibration_sample_input")
+    return None if hook is None else hook(model)

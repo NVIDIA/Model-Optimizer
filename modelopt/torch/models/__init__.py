@@ -117,4 +117,5 @@ from . import (  # isort: skip
     step3p5,
     step3p7,
     t5,
+    whisper,
 )

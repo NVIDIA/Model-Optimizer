@@ -38,10 +38,8 @@ from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
-    AutoProcessor,
     AutoTokenizer,
     PreTrainedTokenizerBase,
-    ProcessorMixin,
 )
 
 from modelopt.recipe import load_recipe
@@ -358,41 +356,6 @@ def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTok
     assert tokenizer.pad_token is not None, f"Pad token for {ckpt_path} cannot be set!"
 
     return tokenizer
-
-
-def get_processor(
-    ckpt_path,
-    model_type,
-    trust_remote_code=False,
-    attn_implementation=None,
-) -> ProcessorMixin | None:
-    """Load a processor appropriate for the given model type."""
-    model_kwargs = {"trust_remote_code": trust_remote_code}
-    if attn_implementation is not None:
-        model_kwargs["attn_implementation"] = attn_implementation
-
-    if model_type == "whisper":
-        processor = AutoProcessor.from_pretrained(
-            ckpt_path,
-            padding_side="left",
-            **model_kwargs,
-        )
-        if processor.tokenizer.pad_token is None:
-            processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        assert processor.tokenizer.pad_token is not None, (
-            f"Pad token for {ckpt_path} cannot be set!"
-        )
-
-        return processor
-    else:
-        # Try to load AutoProcessor for other VL models (e.g., Nemotron-Parse)
-        try:
-            processor = AutoProcessor.from_pretrained(ckpt_path, **model_kwargs)
-            print(f"Loaded AutoProcessor for model type: {model_type}")
-            return processor
-        except Exception as e:
-            print(f"Could not load processor for {model_type}: {e}")
-            return None
 
 
 def get_dtype(dtype):

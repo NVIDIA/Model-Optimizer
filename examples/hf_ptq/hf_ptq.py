@@ -40,7 +40,6 @@ from example_utils import (
     create_vlm_calibration_loop,
     generate_excludes_prompt,
     get_model,
-    get_processor,
     get_tokenizer,
     is_trtllm_enc_dec_export,
     mlflow_run,
@@ -59,7 +58,6 @@ from transformers import (
     PreTrainedTokenizerBase,
     PreTrainedTokenizerFast,
     ProcessorMixin,
-    WhisperProcessor,
 )
 
 import modelopt.torch.opt as mto
@@ -83,7 +81,12 @@ from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
 from modelopt.torch.models import get_ptq_spec, hf_model_type
-from modelopt.torch.models.hf import prepare_model_for_calibration
+from modelopt.torch.models.hf import (
+    calibration_sample_input,
+    load_calibration_processor,
+    make_calibration_dataloader,
+    prepare_model_for_calibration,
+)
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
@@ -111,7 +114,6 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     load_pretrained,
     parallel_load_and_prepare_fsdp2,
 )
-from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
@@ -208,7 +210,7 @@ def make_calib_dataloader(
     autoquant_gradient_recipe: bool = False,
 ) -> tuple[DataLoader | _DeviceDataLoader, str | None]:
     calib_dataloader = None
-    first_text_speech_dataset = None
+    preview_input_text = None
     if args.specdec_offline_dataset is not None:
         offline_data_path = Path(args.specdec_offline_dataset)
         dumped_files = sorted(str(p) for p in offline_data_path.glob("*.pt"))
@@ -251,21 +253,19 @@ def make_calib_dataloader(
             dp_size=args.dist_state.world_size if args.use_fsdp2 else 1,
             dp_rank=args.dist_state.rank if args.use_fsdp2 else 0,
         )
-    elif model_type == "whisper":
-        assert processor is not None and isinstance(processor, WhisperProcessor), (
-            "The AutoProcessor must be set."
+    elif (
+        provided := make_calibration_dataloader(
+            model_type,
+            language_model,
+            processor,
+            args.dataset,
+            args.calib_size,
+            args.batch_size,
+            device,
         )
-        assert len(args.calib_size) == 1, (
-            "whisper only supports one dataset for calibration, can extend this in the future"
-        )
-        calib_dataloader, first_text_speech_dataset = get_speech_dataset_dataloader(
-            dataset_name=args.dataset[0] if args.dataset else "peoples_speech",
-            processor=processor,
-            batch_size=args.batch_size,
-            num_samples=args.calib_size[0],
-            device=device,
-            dtype=language_model.dtype,
-        )
+    ) is not None:
+        # The model type brings its own calibration data (speech features, not token ids).
+        calib_dataloader, preview_input_text = provided
     else:
         assert tokenizer is not None and isinstance(
             tokenizer, PreTrainedTokenizer | PreTrainedTokenizerFast
@@ -288,7 +288,7 @@ def make_calib_dataloader(
                 else None
             ),
         )
-    return calib_dataloader, first_text_speech_dataset
+    return calib_dataloader, preview_input_text
 
 
 def _resolve_kv_auto_quantize_checkpoint(args: argparse.Namespace) -> str | None:
@@ -432,12 +432,12 @@ def load_model(args: argparse.Namespace):
         print("VLM wrapper detected. Enabling image-text calibration by default.")
         args.calib_with_images = True
 
-    if model_type == "whisper":
-        processor = get_processor(
-            args.local_checkpoint_path,
-            model_type,
-            trust_remote_code=args.trust_remote_code,
-        )
+    processor = load_calibration_processor(
+        model_type, args.local_checkpoint_path, args.trust_remote_code
+    )
+    if processor is not None:
+        # The model type brings its own calibration data, which needs only its processor.
+        pass
     elif args.calib_with_images:
         # For VLM image calibration, we need an AutoProcessor to build multimodal inputs.
         processor = AutoProcessor.from_pretrained(
@@ -798,7 +798,7 @@ def pre_quantize(
     # Only run single sample for preview
     assert calib_dataloader is not None, "calib_dataloader is required for pre-quantize preview"
     batch = next(iter(calib_dataloader))
-    input_key = "input_features" if model_type == "whisper" else "input_ids"
+    input_key = "input_features" if "input_features" in batch else "input_ids"
     preview_input_ids = batch[input_key][0:1]
     # Pass attention_mask to generate(): HF cannot infer it when pad_token == eos_token.
     preview_attention_mask = batch["attention_mask"][0:1] if "attention_mask" in batch else None
@@ -843,7 +843,7 @@ def post_quantize(
     preview_attention_mask: torch.Tensor | None,
     generated_ids_before_ptq: Any,
     vlm_wrapper: bool,
-    first_text_speech_dataset: str | None,
+    preview_input_text: str | None,
     calib_dataloader: DataLoader,
 ):
     """
@@ -905,8 +905,8 @@ def post_quantize(
         )
 
     def input_decode(input_ids):
-        if processor is not None and isinstance(processor, WhisperProcessor):
-            return first_text_speech_dataset
+        if preview_input_text is not None:
+            return preview_input_text
         elif tokenizer is not None:
             return tokenizer.batch_decode(input_ids)
         else:
@@ -919,7 +919,7 @@ def post_quantize(
             generated_ids = generated_ids.sequences
 
         if generate_excludes_prompt(full_model):
-            if processor is not None and isinstance(processor, WhisperProcessor):
+            if tokenizer is None and processor is not None:
                 return processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
             elif tokenizer is not None:
                 return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
@@ -1047,21 +1047,9 @@ def quantize_main(
             sample_memory_usage_ratio = (
                 2 if "awq" in args.qformat or "smoothquant" in args.qformat else 1.1
             )
-            # Whisper model expects mel-spectrogram input features of length 3000
-            # Whisper model needs input of shape (batch_size, num_mel_bins, 3000)
-            # As the encoder of Whisper doesn't have embedding layer, input dtype has to be float
-            # For non-Whisper models (language models), sample_input will be set up inside get_max_batch_size()
-            if model_type == "whisper":
-                max_sample_length = 3000
-                num_mel_bins = language_model.config.num_mel_bins
-                sample_input_single_batch = (
-                    torch.ones([1, num_mel_bins, max_sample_length], dtype=language_model.dtype).to(
-                        language_model.device
-                    )
-                    * 100
-                )
-            else:
-                sample_input_single_batch = None
+            # A model type that takes something other than token ids supplies its own sample; for
+            # the rest the sample input is set up inside get_max_batch_size().
+            sample_input_single_batch = calibration_sample_input(model_type, language_model)
 
             run_auto_quant = aq_config is not None
 
@@ -1083,7 +1071,7 @@ def quantize_main(
 
     print(f"Use calib batch_size {args.batch_size}")
 
-    calib_dataloader, first_text_speech_dataset = make_calib_dataloader(
+    calib_dataloader, preview_input_text = make_calib_dataloader(
         args,
         language_model,
         processor,
@@ -1183,7 +1171,7 @@ def quantize_main(
         preview_attention_mask,
         generated_ids_before_ptq,
         vlm_wrapper,
-        first_text_speech_dataset,
+        preview_input_text,
         calib_dataloader,
     )
 
