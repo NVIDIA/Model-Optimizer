@@ -29,7 +29,8 @@ every step those lookups gate leaves a fused container as it is.
 """
 
 from ..nemotron_h.specs import BASE_MODEL_EP_PLAN
-from ..specs import EPSpec, ModelSpec, register
+from ..nemotron_h_nano_vl_v2.specs import NO_AUTO_DEVICE_MAP
+from ..specs import EPSpec, ModelSpec, PTQSpec, register
 
 __all__: list[str] = []
 
@@ -47,5 +48,6 @@ register(
             base_model_ep_plan=dict(BASE_MODEL_EP_PLAN),
             plan_config_attr=("text_config", "llm_config"),
         ),
+        ptq_spec=PTQSpec(vlm_wrapper=True, no_auto_device_map=NO_AUTO_DEVICE_MAP),
     )
 )

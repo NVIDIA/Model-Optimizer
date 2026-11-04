@@ -1019,8 +1019,8 @@ def test_post_quantize_export_survives_a_failed_sanity_generate(monkeypatch):
             preview_input_ids=torch.zeros(1, 4, dtype=torch.long),
             preview_attention_mask=None,
             generated_ids_before_ptq=torch.zeros(1, 4, dtype=torch.long),
-            is_nemotron_vl_model=False,
-            first_text_speech_dataset=None,
+            vlm_wrapper=False,
+            preview_input_text=None,
             calib_dataloader=None,
         )
 

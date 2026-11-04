@@ -13,18 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The Nemotron VL calibration fallback for wrappers without ``extract_feature``.
+"""The Nemotron VL calibration forward, and the hook that decides which wrappers use it.
 
-Two layers are covered: the helper itself, and the dispatch in
-``create_vlm_calibration_loop()`` that decides which wrappers reach it. The dispatch half is
-the one that matters in production -- a wrapper can only benefit from the fallback if the
-calibration loop routes it there.
+Two layers are covered: the forward itself, with its fallback for wrappers without
+``extract_feature``, and the hook through which a calibration loop reaches it by model type.
+``tests/examples/hf_ptq/test_example_utils.py`` covers the loop that calls the hook.
 """
 
 from types import SimpleNamespace
 
 import torch
-from _test_utils.examples.hf_ptq_example_utils import example_utils, nemotron_vl_calib
+
+from modelopt.torch.models.hf import forward_calibration_batch
+from modelopt.torch.models.nemotron_h_nano_vl_v2 import calibration
 
 
 class _OmniWrapper(torch.nn.Module):
@@ -44,13 +45,8 @@ class _OmniWrapper(torch.nn.Module):
         return torch.zeros(1)
 
 
-def _omni_config():
-    """A config that ``is_nemotron_vl()`` recognises: multimodal, Nemotron architecture."""
-    return SimpleNamespace(
-        architectures=["NemotronH_Omni_ForConditionalGeneration"],
-        vision_config=SimpleNamespace(torch_dtype=torch.bfloat16),
-        is_encoder_decoder=False,
-    )
+def _config(model_type, is_encoder_decoder=False):
+    return SimpleNamespace(model_type=model_type, is_encoder_decoder=is_encoder_decoder)
 
 
 def _batch():
@@ -64,7 +60,7 @@ def _batch():
 
 def test_fallback_forwards_batch_when_extract_feature_is_absent():
     model = _OmniWrapper()
-    nemotron_vl_calib.safe_nemotron_vl_forward(model, _batch())
+    calibration.safe_nemotron_vl_forward(model, _batch())
 
     assert len(model.calls) == 1, "the wrapper's own forward should be called exactly once"
     passed = model.calls[0]
@@ -87,7 +83,7 @@ def test_fallback_forwards_image_flags_the_batch_already_carried():
     model = _OmniWrapper()
     batch = _batch()
     batch["image_flags"] = torch.ones(2, 1, dtype=torch.long)
-    nemotron_vl_calib.safe_nemotron_vl_forward(model, batch)
+    calibration.safe_nemotron_vl_forward(model, batch)
 
     assert model.calls[0]["image_flags"].shape == (2, 1)
 
@@ -105,7 +101,7 @@ def test_fallback_drops_kwargs_a_narrow_forward_cannot_accept():
             return torch.zeros(1)
 
     model = _Narrow()
-    nemotron_vl_calib.safe_nemotron_vl_forward(model, _batch())  # must not raise
+    calibration.safe_nemotron_vl_forward(model, _batch())  # must not raise
 
     assert len(model.calls) == 1
     assert model.calls[0]["pixel_values"].shape == (2, 3, 8, 8)
@@ -116,56 +112,14 @@ def test_accepted_kwargs_passes_everything_to_a_var_keyword_callable():
         pass
 
     payload = {"a": 1, "b": 2}
-    assert nemotron_vl_calib._accepted_kwargs(takes_anything, payload) == payload
+    assert calibration._accepted_kwargs(takes_anything, payload) == payload
 
 
 def test_accepted_kwargs_filters_a_fixed_signature():
     def takes_only_a(a=None):
         pass
 
-    assert nemotron_vl_calib._accepted_kwargs(takes_only_a, {"a": 1, "b": 2}) == {"a": 1}
-
-
-def test_calibration_loop_routes_an_omni_wrapper_through_the_fallback():
-    """The production dispatch, not the helper directly.
-
-    An omni wrapper has no ``img_context_token_id``, so the loop used to call its forward with
-    the raw batch -- bypassing the dtype cast and the ``use_cache=False`` the fallback supplies.
-    """
-    model = _OmniWrapper(config=_omni_config())
-    model.vision_model = torch.nn.Module()
-    model.vision_model.config = SimpleNamespace(torch_dtype=torch.bfloat16)
-
-    example_utils.create_vlm_calibration_loop(model, [_batch()])(model)
-
-    assert len(model.calls) == 1
-    passed = model.calls[0]
-    assert passed["use_cache"] is False
-    assert passed["pixel_values"].dtype is torch.bfloat16, "the fallback carries the dtype cast"
-    assert "position_ids" not in passed
-
-
-def test_calibration_loop_keeps_the_plain_forward_for_encoder_decoder_vlms():
-    """Nemotron-Parse is a Nemotron VL model too, but must not be rerouted.
-
-    Its batch is renamed to ``decoder_input_ids``; the helper looks for ``input_ids`` and would
-    return without a forward pass, silently skipping calibration.
-    """
-    model = _OmniWrapper(
-        config=SimpleNamespace(
-            architectures=["NemotronParseForConditionalGeneration"],
-            is_encoder_decoder=True,
-        )
-    )
-
-    example_utils.create_vlm_calibration_loop(model, [_batch()])(model)
-
-    assert len(model.calls) == 1
-    passed = model.calls[0]
-    assert "decoder_input_ids" in passed, "the encoder-decoder rename reached the model"
-    assert "input_ids" not in passed
-    # the helper's fallback was not applied
-    assert passed["pixel_values"].dtype is torch.float32
+    assert calibration._accepted_kwargs(takes_only_a, {"a": 1, "b": 2}) == {"a": 1}
 
 
 # --- sharded InternVL path -----------------------------------------------------------------
@@ -257,9 +211,7 @@ class _ShardedInternVL(torch.nn.Module):
 
     def __init__(self, vision_device, embed_device, tokens_per_image=1, hidden=4):
         super().__init__()
-        self.config = SimpleNamespace(
-            architectures=["NemotronVLForConditionalGeneration"], is_encoder_decoder=False
-        )
+        self.config = _config("NemotronH_Nano_VL_V2")
         self.vision_model = SimpleNamespace(config=SimpleNamespace(torch_dtype=torch.float32))
         self.language_model = _LanguageModel(embed_device, hidden)
         self.img_context_token_id = 7
@@ -298,7 +250,7 @@ def test_sharded_internvl_aligns_both_index_masks():
     """
     model = _ShardedInternVL(vision_device="cuda:1", embed_device="cuda:2")
 
-    nemotron_vl_calib.safe_nemotron_vl_forward(model, _sharded_batch("cuda:0"))
+    calibration.safe_nemotron_vl_forward(model, _sharded_batch("cuda:0"))
 
     assert len(model.language_model.calls) == 1, "the LLM forward drives the activation stats"
     passed = model.language_model.calls[0]
@@ -315,7 +267,7 @@ def test_sharded_internvl_retry_path_also_uses_aligned_masks():
     """
     model = _ShardedInternVL(vision_device="cuda:1", embed_device="cuda:2", tokens_per_image=2)
 
-    nemotron_vl_calib.safe_nemotron_vl_forward(model, _sharded_batch("cuda:0"))
+    calibration.safe_nemotron_vl_forward(model, _sharded_batch("cuda:0"))
 
     assert len(model.language_model.calls) == 1, "the retry still reaches the LLM forward"
 
@@ -324,7 +276,7 @@ def test_unsharded_internvl_is_unaffected():
     """Everything on one device: no mask is moved and the merge still happens."""
     model = _ShardedInternVL(vision_device="cuda:0", embed_device="cuda:0")
 
-    nemotron_vl_calib.safe_nemotron_vl_forward(model, _sharded_batch("cuda:0"))
+    calibration.safe_nemotron_vl_forward(model, _sharded_batch("cuda:0"))
 
     assert len(model.language_model.calls) == 1
     assert model.language_model.calls[0]["inputs_embeds"].device == torch.device("cuda:0")
@@ -340,7 +292,41 @@ def test_sharded_internvl_aligns_the_token_mask_when_only_the_embedding_moves():
     """
     model = _ShardedInternVL(vision_device="cuda:0", embed_device="cuda:2")
 
-    nemotron_vl_calib.safe_nemotron_vl_forward(model, _sharded_batch("cuda:0"))
+    calibration.safe_nemotron_vl_forward(model, _sharded_batch("cuda:0"))
 
     assert len(model.language_model.calls) == 1
     assert model.language_model.calls[0]["inputs_embeds"].device == torch.device("cuda:2")
+
+
+def test_the_hook_runs_an_internvl_style_wrapper_through_the_safe_forward():
+    model = _ShardedInternVL("cuda:0", "cuda:0")
+
+    assert forward_calibration_batch(model, _sharded_batch("cuda:0")) is True
+    assert len(model.language_model.calls) == 1
+
+
+def test_the_hook_runs_an_omni_wrapper_through_the_fallback():
+    """An omni wrapper has no ``img_context_token_id``: calling its forward with the raw batch
+    would bypass the dtype cast and the ``use_cache=False`` the fallback supplies."""
+    model = _OmniWrapper(config=_config("NemotronH_Nano_VL_V2"))
+    model.vision_model = SimpleNamespace(config=SimpleNamespace(torch_dtype=torch.bfloat16))
+
+    assert forward_calibration_batch(model, _batch()) is True
+    assert model.calls[0]["use_cache"] is False
+    assert model.calls[0]["pixel_values"].dtype is torch.bfloat16
+
+
+def test_the_hook_declines_an_encoder_decoder_model():
+    """Its batch carries ``decoder_input_ids``, which the forward does not recognise: running it
+    would return without a forward pass and silently skip calibration."""
+    model = _OmniWrapper(config=_config("NemotronH_Nano_VL_V2", is_encoder_decoder=True))
+
+    assert forward_calibration_batch(model, _batch()) is False
+    assert not model.calls
+
+
+def test_a_model_without_the_hook_is_declined():
+    model = _OmniWrapper(config=_config("llama"))
+
+    assert forward_calibration_batch(model, _batch()) is False
+    assert not model.calls

@@ -24,6 +24,8 @@ from modelopt.torch.models import PTQSpec, get_ptq_spec, get_specs
 # Model type -> the PTQSpec fields it turns on. A model's special-casing in the PTQ flow is a
 # registry entry, so adding one fails here until the table names it.
 EXPECTED_PTQ_FIELDS = {
+    "NemotronH_Nano_VL_V2": {"vlm_wrapper", "no_auto_device_map"},
+    "nemotron_h_omni": {"vlm_wrapper", "no_auto_device_map"},
     "diffusion_gemma": {"sequential_device_map", "generate_includes_prompt"},
     "llava_llama": {"fsdp2_unsupported"},  # VILA, NVILA and NVILA-Lite
     "bart": {"no_device_map"},

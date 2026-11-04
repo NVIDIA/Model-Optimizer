@@ -99,6 +99,7 @@ from . import (  # isort: skip
     phimoe,
     nemotron,
     nemotron_h,
+    nemotron_h_nano_vl_v2,
     nemotron_nas,
     minimax_m3_vl,
     llama4_text,
@@ -115,4 +116,5 @@ from . import (  # isort: skip
     step3p5,
     step3p7,
     t5,
+    whisper,
 )
