@@ -33,6 +33,7 @@ from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import (
     _row_keys,
+    pin_packed_weight,
     pinned_importance,
     pinned_packed_weight,
 )
@@ -379,6 +380,22 @@ def test_casting_the_model_keeps_the_importance_its_weight_encodes_to_the_pin_wi
     assert torch.equal(
         GGML_FORMAT_REGISTRY[num_bits].pack(model.weight, model.weight_quantizer), pinned
     )
+
+
+@pytest.mark.parametrize("num_bits", ["iq1_s", "iq1_m", "iq2_xxs", "iq2_xs", "iq2_s"])
+def test_a_checkpoint_from_before_kept_scales_still_encodes_to_its_pin(num_bits):
+    # Earlier GPTQ left the weight as its decoding, rounded to the model's dtype, and no importance.
+    ggml_format = GGML_FORMAT_REGISTRY[num_bits]
+    model, _ = _gptq_model(rows=128, num_bits=num_bits, dtype=torch.bfloat16)
+    quantizer = model.weight_quantizer
+    pinned = pinned_packed_weight(quantizer, num_bits)
+    pin_packed_weight(quantizer, num_bits, pinned)
+    shape = torch.tensor(model.weight.shape)
+    with torch.no_grad():
+        model.weight.copy_(ggml_format.dequantize(pinned, shape, dtype=torch.bfloat16))
+
+    assert pinned_importance(quantizer, num_bits) is None
+    assert torch.equal(ggml_format.pack(model.weight, quantizer), pinned)
 
 
 def test_pin_outlives_the_weight_tensor():

@@ -1055,6 +1055,8 @@ _BASE_SKIP_KEYS: tuple[str, ...] = (
     "weight_shape",
     # The GGML payload GPTQ pins to a weight quantizer; the exported weight already holds it.
     "_ggml_pinned_",
+    # The importance that payload's search used, which only re-encoding during QAD needs.
+    "_ggml_importance_",
 )
 
 

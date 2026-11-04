@@ -1557,6 +1557,7 @@ class TensorQuantizer(nn.Module):
         a model, as ``model.bfloat16()`` or Megatron's ``Float16Module`` do, moves it but keeps it
         float32.
         """
+        # Imported here: ggml/__init__ imports its backend, which imports this module.
         from ...ggml.common import PINNED_IMPORTANCE_PREFIX
 
         importance = {
