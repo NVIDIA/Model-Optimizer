@@ -1,0 +1,71 @@
+# SPEED-bench MTP speculative-decoding run for NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 via TRT-LLM.
+#
+# Nemotron-3-Super-120B-A12B is a 120B-total-parameter MoE model, so use
+# tensor parallel size 4 even though only 12B parameters are active per token.
+# TRT-LLM MTP is run with the TensorRT-LLM 1.3.0 release candidate container.
+# TensorRT-LLM jobs must use trtllm-llmapi-launch so MPI-spawned workers inherit
+# the Slurm/container context.
+#
+# Slurm run:
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Nemotron-h/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/specdec_bench_mtp_trtllm.yaml --yes
+
+job_name: NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4_specdec_bench_mtp_trtllm
+
+pipeline:
+  global_vars:
+    hf_model: /hf-local/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+
+  # task_0: SPEED qualitative split
+  task_0:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/qualitative
+      - --engine TRTLLM
+      - --speculative_algorithm MTP
+      - --draft_length 3
+      - --tp_size 4
+      - --ep_size 1
+      - --concurrency 32
+      - --output_length 4096
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/{sweep_name_default}/qualitative
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+      - TRTLLM_LAUNCH_SCRIPT: trtllm-llmapi-launch
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+
+  # task_1: SPEED throughput_32k split
+  task_1:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k
+      - --engine TRTLLM
+      - --speculative_algorithm MTP
+      - --draft_length 3
+      - --tp_size 4
+      - --ep_size 1
+      - --concurrency 8
+      - --num_requests 80
+      - --output_length 4096
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/{sweep_name_default}/throughput_32k
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+      - TRTLLM_LAUNCH_SCRIPT: trtllm-llmapi-launch
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
