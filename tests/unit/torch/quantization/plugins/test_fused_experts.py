@@ -57,6 +57,7 @@ from modelopt.torch.models import is_moe
 from modelopt.torch.opt.conversion import ApplyModeError
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
+from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.model_calib import (
     _expert_slices,
     _register_weight_input_hooks,
@@ -2655,8 +2656,7 @@ def test_native_fp8_experts_unpacked_temporary_fold(has_gate, exception, snapsho
     ("cfg", "algorithm"),
     [
         ({"num_bits": 4, "block_sizes": {-1: 128}}, {"method": "gptq", "block_size": 128}),
-        # IQ1_S, since IQ formats that keep their scales leave the weight unrounded and pin codes.
-        ({"num_bits": "iq1_s", "block_sizes": {-1: 256}, "backend": "ggml"}, "imatrix"),
+        ({"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"}, "imatrix"),
     ],
     ids=["gptq", "imatrix"],
 )
@@ -2698,6 +2698,14 @@ def test_native_fp8_experts_reject_packed_weight_updates(cfg, algorithm):
         name: getattr(experts, name).detach().clone() for name in ("gate_up_proj", "down_proj")
     }
     mtq.calibrate(experts, algorithm, forward_loop=lambda m: m(inputs, indices, routing))
+    if algorithm == "imatrix":
+        # IQ formats keep the weight unrounded and pin the codes imatrix chose instead.
+        quantizers = [
+            q for q in experts.modules() if getattr(q, "num_bits", None) == cfg["num_bits"]
+        ]
+        assert quantizers
+        assert all(pinned_packed_weight(q, cfg["num_bits"]) is not None for q in quantizers)
+        return
     for name, weight in unpacked.items():
         assert not torch.equal(getattr(experts, name), weight)
 
