@@ -1,0 +1,50 @@
+# MMLU-Pro recipe for NeMo Gym `gym eval submit`.
+defaults:
+  - gym_configs/slurm_execution@_global_
+  - gym_configs/qwen3_8b_vllm_deployment@_global_
+  - _self_
+
+driver:
+  container: ${oc.env:GYM_DRIVER_IMAGE,nvcr.io/nvidia/nemo-gym:v0.5.1}
+  gym_install:
+    repo: https://github.com/NVIDIA-NeMo/Gym
+    # TODO: Check why README.md uses a different Gym revision (06f5f8966).
+    ref: 6bbc05ed9d1664dc695faaf2b0e71fc9863e08ca
+  policy_model: policy
+  policy_model_type: vllm_model
+  mounts:
+    - ${oc.env:GYM_CACHE_DIR}:/cache
+  env:
+    HF_HOME: lit:/cache/huggingface
+    HF_TOKEN: runtime:HF_TOKEN
+    UV_CACHE_DIR: lit:/cache/uv
+  benchmarks:
+    mmlu_pro:
+      prepare:
+        config_paths:
+          - benchmarks/mmlu_pro/config.yaml
+        use_cached_prepared_benchmarks: true
+      run:
+        config_paths:
+          - benchmarks/mmlu_pro/config.yaml
+        split: benchmark
+        # Added after the standalone run failed on MMLU-Pro metadata recording
+        # a different prompt and 8 repeats, while the loaded config uses 1 repeat.
+        # Recompute metadata from the prepared data and current config.
+        overwrite_metrics_conflicts: true
+        num_repeats: 1
+        num_samples_in_parallel: 1024
+        # Qwen3-8B thinking-mode sampling; no explicit output-token cap.
+        policy_model.responses_api_models.vllm_model.sampling_overrides.temperature: 0.6
+        policy_model.responses_api_models.vllm_model.sampling_overrides.top_p: 0.95
+        policy_model.responses_api_models.vllm_model.sampling_overrides.top_k: 20
+        policy_model.responses_api_models.vllm_model.sampling_overrides.min_p: 0.0
+        responses_create_params.max_output_tokens: 'null'
+        port_range_low: 63000
+        port_range_high: 64000
+        resume_from_cache: true
+        upload_rollouts: false
+      resumable: false
+
+otel:
+  enabled: false
