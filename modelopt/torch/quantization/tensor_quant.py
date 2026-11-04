@@ -195,7 +195,7 @@ def _dynamic_block_quantize_impl(
             and _nvfp4_triton_kernel_enabled()
             and amax is not None
         ):
-            return triton_kernel.fp4_fake_quant_block(inputs, amax)
+            return triton_kernel.fp4_fake_quant_block(inputs, amax, block_size=block_size)
         cuda_ext_mx = get_cuda_ext_mx(raise_if_failed=True)
         return cuda_ext_mx.fused_amax_convert(
             inputs,
