@@ -1080,7 +1080,9 @@ def test_an_unrecorded_model_derives_its_unplaced_keys_once(tmp_path, monkeypatc
     )
     derived_from = []
     monkeypatch.setattr(
-        model_load_utils, "unplaced_source_keys", lambda m, c: derived_from.append(c) or [mtp]
+        model_load_utils,
+        "unplaced_source_keys",
+        lambda m, c, tensor_files=None: derived_from.append(c) or [mtp],
     )
     model = _ProvenanceModel(name_or_path=tmp_path)
 

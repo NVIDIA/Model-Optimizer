@@ -15,7 +15,6 @@
 """End-to-end test for Quantization Aware Distillation (QAD): quantize + distill + export."""
 
 import json
-import warnings
 from pathlib import Path
 
 import pytest
@@ -36,15 +35,6 @@ from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_dir,
 )
 from torch.distributed.checkpoint import FileSystemReader
-
-# The fix ships in the nemo:26.10 container.
-# TODO(Megatron-Bridge#6243): drop this probe once the minimum Megatron-Bridge carries it.
-try:
-    from megatron.bridge.training.gpt_step import _keep_full_position_ids_for_cp  # noqa: F401
-
-    HAS_MROPE_CP_FIX = True
-except ImportError:  # Megatron-Bridge that still CP-shards mrope position ids
-    HAS_MROPE_CP_FIX = False
 
 
 def _load_checkpoint_tensors(checkpoint_path: Path) -> dict[str, torch.Tensor]:
@@ -97,15 +87,8 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
     is_vlm = "vision_config" in (hf_model_path / "config.json").read_text()
     # mrope rotary embeddings CP-shard themselves, so the VLM exercises the path where the batch's
     # position ids must stay full-length. The LLM case stays on tensor parallelism.
-    cp_size = num_gpus if is_vlm and HAS_MROPE_CP_FIX else 1
+    cp_size = num_gpus if is_vlm else 1
     tp_size = 1 if cp_size > 1 else num_gpus
-    # Warn only where CP coverage is actually lost: on a single GPU there is none to lose.
-    if is_vlm and num_gpus > 1 and not HAS_MROPE_CP_FIX:
-        warnings.warn(
-            "Megatron-Bridge lacks the mrope context-parallel fix (NVIDIA-NeMo/Megatron-Bridge#6243, "
-            "shipping in nemo:26.10), so this case runs at cp_size=1 and does not cover context "
-            "parallelism. If the installed Megatron-Bridge should carry the fix, this probe is stale."
-        )
     quantized_megatron_path = tmp_path / "quantized_megatron"
     distill_output_dir = tmp_path / "qad_output"
     train_iters = 3

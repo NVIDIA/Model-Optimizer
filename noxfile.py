@@ -66,7 +66,11 @@ _CPU_ONLY_ENV = {"CUDA_VISIBLE_DEVICES": ""}
 @nox.parametrize("torch_ver", [nox.param(k, id=k) for k in TORCH_VERSIONS])
 def unit(session, torch_ver, tf_ver):
     """Unit tests — parametrized over torch and transformers versions."""
-    session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]")
+    # compressed-tensors runs the real-library tests of on-the-fly expert decompression; it goes in
+    # with the torchvision pin so the resolver keeps the leg's torch. Not in dev-test: the
+    # transformers-free partial_unit(torch) lane installs that extra, and compressed-tensors pulls in
+    # transformers.
+    session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]", "compressed-tensors")
     tf_pins = TRANSFORMERS_VERSIONS[tf_ver]
     if tf_pins:
         session.install(*tf_pins)
@@ -223,14 +227,14 @@ def gpu(session):
     session.run("python", "-m", "pytest", "tests/gpu", *_cov_args())
 
 
-# Container: nvcr.io/nvidia/nemo:26.08 or later
+# Container: nvcr.io/nvidia/nemo:26.10 or later
 @nox.session(venv_backend="none")
 def gpu_megatron(session):
     # NeMo containers have transformers 5.x but a system-wide installed trtllm which does not support it causing import errors
     session.run("pip", "uninstall", "-y", "tensorrt_llm")
     # Pre-installed nvidia-modelopt shadows the editable install
     session.run("pip", "uninstall", "-y", "nvidia-modelopt")
-    session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test,dev-fla]")
+    session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test]")
     session.run("python", "-m", "pytest", "tests/gpu_megatron", *_cov_args())
 
 

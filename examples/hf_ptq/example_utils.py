@@ -57,7 +57,7 @@ from modelopt.torch.models.hf import (
 from modelopt.torch.quantization.mode import get_modelike_from_algo_cfg
 from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
-from modelopt.torch.utils.plugins.model_load_utils import is_fsdp2_text_only_vlm, load_pretrained
+from modelopt.torch.utils.plugins.model_load_utils import load_pretrained, resolve_model_class
 
 logger = logging.getLogger(__name__)
 
@@ -123,11 +123,19 @@ def validate_fsdp2_supported(args, config):
     issues = []
     if "vila" in args.local_checkpoint_path.lower():
         issues.append("VILA (custom builder + non-standard layer layout)")
-    if is_fsdp2_text_only_vlm(config):
-        if getattr(args, "calib_with_images", False):
-            issues.append("image-text calibration (Qwen FSDP2 currently supports text-only inputs)")
-    elif is_nemotron_vl(config) or _is_multimodal_config(config):
-        issues.append("multimodal / VL models (decoder layers not auto-detectable)")
+    # A VLM is calibrated on text (see forward_requires_images); a layout whose decoder layers
+    # cannot be found fails in fsdp2_wrap. Encoder-decoder models have no single decoder stack.
+    if getattr(config, "is_encoder_decoder", False):
+        issues.append("encoder-decoder models")
+    elif _is_multimodal_config(config) and getattr(args, "calib_with_images", False):
+        issues.append("image-text calibration (FSDP2 currently supports text-only inputs)")
+    elif _is_multimodal_config(config):
+        model_class = resolve_model_class(config, getattr(args, "trust_remote_code", False))
+        if model_class is not None and forward_requires_images(model_class):
+            issues.append(
+                f"{model_class.__name__}, whose forward requires image inputs "
+                "(FSDP2 calibrates on text only)"
+            )
     if any(
         getattr(cfg, "quantization_config", None) is not None
         for cfg in (config, getattr(config, "text_config", None))
@@ -239,6 +247,12 @@ def is_nemotron_vl(model_or_config):
 
     architectures = getattr(config, "architectures", [])
     return any("nemotron" in arch.lower() for arch in architectures)
+
+
+def forward_requires_images(model: "torch.nn.Module | type[torch.nn.Module]") -> bool:
+    """Whether ``model.forward`` cannot run without images (``pixel_values`` has no default)."""
+    param = inspect.signature(model.forward).parameters.get("pixel_values")
+    return param is not None and param.default is inspect.Parameter.empty
 
 
 def create_vlm_calibration_loop(full_model, calib_dataloader):

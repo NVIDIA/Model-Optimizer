@@ -18,6 +18,7 @@ import os
 import shutil
 
 import pytest
+import torch
 import transformers
 import yaml
 from _test_utils.examples.megatron_example_runner import (
@@ -41,6 +42,12 @@ def _fast_example_runner():
         yield
     finally:
         set_in_process_runner(None)
+
+
+@pytest.fixture(scope="session")
+def num_gpus():
+    """GPUs the example tests use: the tiny models (2 layers, 2 key heads, 2 Mamba groups) do not shard past 2."""
+    return min(torch.cuda.device_count(), 2)
 
 
 @pytest.fixture(autouse=True)
