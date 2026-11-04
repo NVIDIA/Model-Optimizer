@@ -116,9 +116,8 @@ def _is_calibrated_nvfp4_static(q) -> bool:
 def _collect_grouped_linears(model: nn.Module) -> list[list[nn.Module]]:
     """Collect name-based sibling groups (Q/K/V, MLA down, gate/up, w1/w3) of calibrated NVFP4-static linears."""
     patterns: tuple[tuple[str, ...], ...] = (
-        ("q_proj", "k_proj", "v_proj"),
+        *_FUSED_HF_NAMED_PROJECTIONS,
         *_FUSED_MCORE_PROJECTIONS,
-        ("q_a_proj", "kv_a_proj_with_mqa"),
         *list_all_possible("gate_up_pairs"),
     )
     groups: list[list[nn.Module]] = []
@@ -174,6 +173,7 @@ _FUSED_HF_NAMED_PROJECTIONS = (("q_a_proj", "kv_a_proj_with_mqa"), ("q_proj", "k
 
 
 def _fused_projection_groups(module: nn.Module) -> list[list[nn.Module]]:
+    # Without Megatron imported no module can be a MegatronModule, so HF-only runs don't import it.
     megatron_module = getattr(
         sys.modules.get("megatron.core.transformer.module"), "MegatronModule", None
     )
