@@ -571,8 +571,12 @@ class DynamicBlockQuantizationFunction(Function):
         pass_through_bwd=True,
     ):
         """Forward method."""
+        if bias is not None:
+            inputs = inputs - bias
+
         _save_for_backward_if_needed(ctx, pass_through_bwd, inputs, amax)
-        return _dynamic_block_quantize_forward(
+
+        outputs = _dynamic_block_quantize_forward(
             inputs,
             block_size,
             amax,
@@ -581,6 +585,11 @@ class DynamicBlockQuantizationFunction(Function):
             trt_high_precision_dtype,
             onnx_quantizer_type,
         )
+
+        if bias is not None:
+            outputs = outputs + bias
+
+        return outputs
 
     @staticmethod
     def backward(ctx, grad_outputs):

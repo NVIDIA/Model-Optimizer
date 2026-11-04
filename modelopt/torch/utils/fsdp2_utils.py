@@ -20,16 +20,18 @@ export it; it lives here so that a model whose decoder layers are registered wit
 ``LayerActivationCollector`` can be wrapped without ``transformers`` or ``huggingface_hub``.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import torch
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
+from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor
 
 from modelopt.torch.utils.distributed import _recorded_plan
 from modelopt.torch.utils.logging import warn_rank_0
 
-__all__ = ["fsdp2_wrap"]
+__all__ = ["fsdp2_root_unsharded", "fsdp2_wrap"]
 
 
 def _off_dtype_params(model) -> set[torch.nn.Parameter]:
@@ -88,13 +90,78 @@ def _move_to_fsdp_device(model, params: set[torch.nn.Parameter]) -> None:
             param.data = param.data.to(device)
 
 
+def _auxiliary_modules(model, decoder_layers) -> list[torch.nn.Module]:
+    """Submodules beside the decoder stack that carry a weight matrix.
+
+    E.g. a vision or audio tower, a multimodal projector, an MTP head. Left in the root's shard
+    group they would be all-gathered on every forward, although text-only calibration never runs
+    them; in their own group each is gathered only when it runs. Input and
+    output embeddings stay with the root, as the two are often tied, and so do modules holding only
+    1-D parameters (norms), which are too small to be worth a group of their own.
+    """
+    layer_ids = {id(layer) for layer in decoder_layers}
+    # Modules on the path from the root to a decoder layer: their other children are the candidates.
+    ancestor_ids = {id(model)}
+    for name, module in model.named_modules():
+        if id(module) in layer_ids:
+            parts = name.split(".")
+            for i in range(1, len(parts)):
+                ancestor_ids.add(id(model.get_submodule(".".join(parts[:i]))))
+    embedding_ids = set()
+    for getter in ("get_input_embeddings", "get_output_embeddings"):
+        try:
+            embedding = getattr(model, getter)()
+        except (AttributeError, NotImplementedError):
+            embedding = None
+        if embedding is not None:
+            embedding_ids.add(id(embedding))
+
+    aux = []
+    for module in model.modules():
+        if id(module) not in ancestor_ids:
+            continue
+        for child in module.children():
+            if id(child) in ancestor_ids or id(child) in layer_ids or id(child) in embedding_ids:
+                continue
+            if any(id(m) in embedding_ids for m in child.modules()):
+                continue
+            if any(p.dim() >= 2 for p in child.parameters()):
+                aux.append(child)
+    return aux
+
+
+@contextmanager
+def fsdp2_root_unsharded(model: torch.nn.Module) -> Iterator[None]:
+    """Gather the FSDP2 root's own parameters while a submodule of ``model`` is called directly.
+
+    Calling a submodule skips the root's pre-forward, which makes ``model`` the FSDP2 root and
+    unshards the parameters it holds outside its own units (e.g. the embeddings). No-op for a model
+    that is not an FSDP2 root.
+    """
+    if not isinstance(model, FSDPModule):
+        yield
+        return
+    fully_shard.state(model)._lazy_init()  # else the first unit called would claim the root
+    model.unshard()
+    try:
+        yield
+    finally:
+        model.reshard()
+
+
 def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):
     """Auto-detect a HF causal-LM's decoder layers and FSDP2 ``fully_shard`` each one.
 
+    Its callers load causal LMs and text-only VLMs; the expert-parallel dense load, which also takes
+    VLMs, picks its blocks through
+    :func:`~modelopt.torch.utils.plugins.model_load_utils._fsdp2_wrap_modules`, keeping a vision
+    tower replicated.
+
     By default (``shard_root=True``) the root module is wrapped too, so embed/lm_head/norm are
     sharded instead of replicated per rank; pass ``shard_root=False`` to leave the root replicated
-    (only decoder layers sharded). Returns the detected decoder layers so callers can reuse the
-    detection result.
+    (only decoder layers sharded). With the root sharded, auxiliary modules beside the decoder stack
+    (a vision tower, a projector, an MTP head; see :func:`_auxiliary_modules`) get groups of their
+    own. Returns the detected decoder layers so callers can reuse the detection result.
 
     Parameters whose dtype differs from the model's dominant one are excluded from the wrap (see
     :func:`_off_dtype_params`), since FSDP2 rejects a shard group that mixes dtypes. They stay
@@ -138,6 +205,8 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     for layer in decoder_layers:
         fully_shard(layer, **fsdp_kwargs)
     if shard_root:
+        for module in _auxiliary_modules(model, decoder_layers):
+            fully_shard(module, **fsdp_kwargs)
         fully_shard(model, **fsdp_kwargs)
     if ignored_params:
         _move_to_fsdp_device(model, ignored_params)

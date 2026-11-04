@@ -713,12 +713,14 @@ class TensorRTPyBenchmark(Benchmark):
             if isinstance(path_or_bytes, bytes):
                 self.logger.debug(f"Parsing ONNX model from bytes (size: {len(path_or_bytes)})")
                 model_data = path_or_bytes
+                model_path = None
             else:
                 self.logger.debug(f"Parsing ONNX model: {path_or_bytes}")
                 with open(path_or_bytes, "rb") as f:
                     model_data = f.read()
+                model_path = path_or_bytes
 
-            if not parser.parse(model_data):
+            if not parser.parse(model_data, path=model_path):
                 self.logger.error("Failed to parse ONNX model")
                 for error_idx in range(parser.num_errors):
                     self.logger.error(f"  {parser.get_error(error_idx)}")
