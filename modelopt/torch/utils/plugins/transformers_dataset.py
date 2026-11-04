@@ -320,6 +320,11 @@ class LanguageDataCollator:
 class VisionLanguageDataCollator(LanguageDataCollator):
     """VisionLanguageDataCollator is a subclass of LanguageDataCollator that is used to collate vision-language data."""
 
+    # Defaults so _processor_apply holds on an instance built without __init__ (the
+    # helper-method tests do that); __init__ overrides both from the environment.
+    _media_retries = 4
+    _media_retry_sleep = 0.5
+
     def __init__(
         self,
         processor: str,
@@ -668,9 +673,9 @@ class VisionLanguageDataCollator(LanguageDataCollator):
                         self.answer_only_loss and not derive_masks_from_markers
                     ),
                 )
-            except (ValueError, TypeError, OSError) as exc:  # noqa: PERF203
-                # PERF203: the try/except IS the retry; the cost is irrelevant next to
-                # a processor call that decodes images and video.
+            except (ValueError, TypeError, OSError) as exc:
+                # The try/except IS the retry; its cost is irrelevant next to a
+                # processor call that decodes images and video.
                 text = str(exc).lower()
                 if not any(m in text for m in self._TRANSIENT_MEDIA_ERRORS):
                     raise
