@@ -415,6 +415,27 @@ def test_export_spec_rejects_unsupported_quantization(features, quantizer_cfg, e
         get_quantized_weight_export_spec(module)
 
 
+@pytest.mark.parametrize(
+    ("quantization_format", "quantizer_name"),
+    [
+        ("w4a16_mxfp4", "weight_quantizer"),
+        ("mxfp4", "weight_quantizer"),
+        ("mxfp4", "input_quantizer"),
+    ],
+)
+@pytest.mark.parametrize("mode", ["rotate", "rotate_back"])
+def test_export_rejects_rotated_quantizers(quantization_format, quantizer_name, mode):
+    module = _capture_linear(quantization_format)
+    getattr(module, quantizer_name).set_from_attribute_config(
+        {"rotate": {"enable": True, "mode": mode}}
+    )
+
+    with pytest.raises(NotImplementedError, match="rotated quantizers"):
+        get_quantized_weight_export_spec(module)
+    with pytest.raises(NotImplementedError, match="rotated quantizers"):
+        capture_quantized_weight_export_state(module)
+
+
 @pytest.mark.parametrize("input_enabled", [True, False])
 def test_export_state_split_restore_preserves_output(input_enabled):
     module = _fp8_linear()

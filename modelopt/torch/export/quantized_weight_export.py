@@ -360,6 +360,16 @@ def _resolve_quantized_weight_export_inputs(
         raise _UnsupportedQuantizedWeightExportFormatError(
             f"Functional export does not support {quantization_format!r}"
         )
+    # A packed weight cannot carry a rotation of the weight or its input.
+    if any(
+        quantizer is not None
+        and quantizer.is_enabled
+        and getattr(quantizer, "rotate_is_enabled", False)
+        for quantizer in (weight_quantizer, input_quantizer)
+    ):
+        raise _UnsupportedQuantizedWeightExportFormatError(
+            f"Functional export does not support rotated quantizers for {weight_name!r}"
+        )
     if quantization_format == QUANTIZATION_FP8_PB_WO and weight_quantizer.block_sizes != {
         -2: 128,
         -1: 128,
