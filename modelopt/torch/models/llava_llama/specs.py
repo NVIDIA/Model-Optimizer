@@ -15,7 +15,8 @@
 
 """VILA specs (trust-remote-code model type ``llava_llama``).
 
-The model type of VILA, NVILA and NVILA-Lite, which VILA's own builder loads.
+The model type of VILA, NVILA and NVILA-Lite, which VILA's own builder loads. LLaVA-repo fine-tunes
+share it and are covered too: the registry holds one spec per model type, not one per variant.
 """
 
 from ..specs import ModelSpec, PTQSpec, register
