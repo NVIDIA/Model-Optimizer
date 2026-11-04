@@ -1021,7 +1021,7 @@ class TestFP4FakeQuantVsModelopt:
         torch.manual_seed(42)
         block_size = 16
         # Simulate a large tensor: 256 blocks of 16 elements
-        # (tile_rows must be power-of-2 for Triton block_ptr)
+        # (tile_rows must be a power of 2 for tl.arange)
         num_blocks = 256
         x = torch.randn(num_blocks, block_size, device="cuda", dtype=torch.float32) * 5
         global_amax = x.abs().max()

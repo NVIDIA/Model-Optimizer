@@ -228,6 +228,18 @@ class Testfp4:
 
         assert torch.equal(output[-4096:], tail)
 
+    @pytest.mark.skipif(
+        not hasattr(triton_kernel, "fp4_fake_quant_block"),
+        reason="fp4_fake_quant_block requires compute >= 8.9",
+    )
+    def test_fp4_fake_quant_block_over_int32_numel(self):
+        x = torch.randn(2**17 + 64, 2**14, device="cuda", dtype=torch.bfloat16)
+        amax = x.abs().amax().float()
+        output = triton_kernel.fp4_fake_quant_block(x, amax)
+        tail = triton_kernel.fp4_fake_quant_block(x[-64:], amax)
+
+        assert torch.equal(output[-64:], tail)
+
     @pytest.mark.skipif(get_cuda_ext_mx() is None, reason="cuda_ext_mx is not available")
     @pytest.mark.parametrize(
         "set_torch_dtype", [torch.float, torch.float16, torch.bfloat16], indirect=True
