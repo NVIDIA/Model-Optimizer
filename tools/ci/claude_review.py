@@ -15,10 +15,11 @@
 
 """Build the prompt for, and post the verdict of, the ``/claude review`` workflow.
 
-``prepare`` turns the PR data that .github/workflows/claude_review.yml fetched into one prompt (harness
-notes, shared review prompt, ModelOpt guidelines, untrusted PR context) and one patch file per changed
-file. ``post`` applies the PR size budget and the test-plan requirement to the model's structured
-verdict and writes the review payloads the workflow posts with ``gh api``.
+``prepare`` turns the PR data that .github/workflows/claude_review.yml fetched into one prompt: the
+harness notes, the review baseline and the ModelOpt rubric (read at the PR's base commit) and the
+untrusted PR context, with the patches that do not fit in the prompt written to files. ``post`` turns
+the model's structured verdict into the review payloads the workflow posts with ``gh api``; only a
+complete ``approve`` against an existing baseline becomes an approval.
 
 Neither step touches the network or a token, because the PR text they handle is attacker-controlled.
 Standard library only: it runs on the runner's stock Python.
@@ -36,10 +37,11 @@ from collections import defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-LOGIC_LINE_BUDGET = 500
+CORE_LINE_GUIDELINE = 500
 DECISIONS = ("approve", "lgtm", "nudge", "comment")
 CLAUDE_LOGINS = frozenset({"github-actions[bot]", "claude[bot]"})
-SPLIT_MARKER = ":scissors:"
+BASELINE = "code-review.md"
+RUBRIC = "modelopt.md"
 
 # Byte budgets. The action passes the prompt (twice) through environment variables, and Linux
 # caps one variable at 128 KB, so the prompt must stay well under that.
@@ -50,16 +52,14 @@ _PREVIOUS_COMMENTS_BYTES = 10_000
 _CHANGES_BYTES = 36_000  # the changed-file list and the patches inlined in it
 _INLINE_PATCH_BYTES = 26_000
 _MAX_REVIEW_BODY = 60_000  # GitHub caps a review body at 65,536 characters
-_REVIEW_FIRST = {
-    "modelopt": 0,
-    "examples": 1,
-}  # these directories get the inline patch budget first
+_REVIEW_FIRST = {"modelopt": 0, "examples": 1}  # these get the inline patch budget first
 
 VERDICT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "decision": {"type": "string", "enum": list(DECISIONS)},
         "summary": {"type": "string"},
+        "complete": {"type": "boolean"},
         "comments": {
             "type": "array",
             "items": {
@@ -76,46 +76,28 @@ VERDICT_SCHEMA: dict[str, Any] = {
         "nudge_reason": {"type": "string"},
         "size_exception": {"type": "string"},
     },
-    "required": ["decision", "summary"],
+    "required": ["decision", "summary", "complete"],
 }
 
-_LOGIC_SUFFIXES = frozenset(
-    {".py", ".pyi", ".cu", ".cuh", ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
-    | {".sh", ".bash", ".js", ".jsx", ".ts", ".tsx"}
-)
-# Tests and docs never count toward the budget, whatever their suffix.
-_NOT_LOGIC = re.compile(
-    r"(^|/)(tests?|__tests__|docs?|documentation)/|(^|/)(test_[^/]+\.py|[^/]+_test\.py|conftest\.py)$",
-    re.IGNORECASE,
+# AGENTS.md's rule for the size guideline: tests, docs, config and blank lines do not count.
+_NOT_CORE = re.compile(
+    r"(^|/)(tests|docs)/|(^|/)test_[^/]*\.py$|_test\.go$|\.spec\.[^/]+$"
+    r"|\.(ya?ml|json|toml|ini|xml|lock|md|rst|txt|ipynb)$"
 )
 _DOMINANCE = 0.7  # a grouping where one slice holds more than this share is not a split
-_SPLIT_EXCEPTION = re.compile(
-    r"renam|mechanical move|moved verbatim|generated|codegen|self.contained|new example|new model"
-    r"|new backend|no working intermediate",
-    re.IGNORECASE,
-)
-_FLAGS = re.IGNORECASE | re.MULTILINE
-_SPLIT_ASK = re.compile(
-    r"^\s*[-*]\s*\[[ xX]\].*\b(splits?|splitting|break(?:ing)?\s+(?:up|out|it|this|the)|carve)\b",
-    _FLAGS,
-)
-_NEEDS_ACTION = re.compile(r"^\s*needs action:\s*$", _FLAGS)
-_NO_ACTION = re.compile(r"^\s*no action needed\.?\s*$", _FLAGS)
 # Every real summary has one of these; one with none is the model narrating, not reviewing.
 _REVIEW_SHAPE = re.compile(r"^\s*(?:Needs action:|No action needed|- \[[ xX]\])", re.MULTILINE)
-
-_NO_CODE_SUFFIXES = (".md", ".rst", ".txt", ".yaml", ".yml")
-_TEST_HEADING = re.compile(r"^\s{0,3}#+\s*(test|testing|tests|how.*tested|verif)", _FLAGS)
-_TEST_LABEL = re.compile(r"^\s*\*{0,2}\s*(test\s*plan|testing|tests)\s*\*{0,2}\s*:", _FLAGS)
-_UNCHECKED = re.compile(r"^\s*[-*]\s*\[\s\]", re.MULTILINE)
-_CHECKED = re.compile(r"^\s*[-*]\s*\[[xX]\]", re.MULTILINE)
-
 _CLOSE_TAG = re.compile(r"</(untrusted_[a-z0-9_]+)>", re.IGNORECASE)
 _SPECIAL_TOKEN = re.compile(r"<\|([^|>\n]{1,60})\|>")
 _UNSAFE_LABEL = re.compile(r"[^\w./+@=-]")
+_NO_BASELINE = (
+    "No review baseline exists at the PR's base commit. Review with your own judgement and the "
+    "rubric below, if there is one, say in the summary that no baseline was available, and use "
+    "`nudge` or `comment`: a review without a baseline is never published as an approval."
+)
 _PREVIOUS_COMMENTS_PREFACE = (
     "This is a re-review. Classify each comment below as critical or minor, then check whether the "
-    "current diff addresses it, as the re-review guidelines of the review prompt describe.\n"
+    "current diff addresses it, as the re-review guidelines of the baseline describe.\n"
 )
 
 
@@ -140,6 +122,16 @@ def _flatten(pages: list[Any]) -> list[Any]:
     return [item for page in pages for item in page]
 
 
+def _core_lines(f: dict[str, Any]) -> int:
+    """Added non-blank lines of one file, 0 if it is a test, doc or config file."""
+    if _NOT_CORE.search(f["filename"]):
+        return 0
+    patch = f.get("patch")
+    if patch is None:  # GitHub omits very large patches; the plain count is an upper bound
+        return int(f["additions"])
+    return sum(1 for line in patch.split("\n") if line.startswith("+") and line[1:].strip())
+
+
 def _group(entries: list[tuple[str, int]], depth: int) -> dict[str, list[int]]:
     groups: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     for path, lines in entries:
@@ -151,14 +143,8 @@ def _group(entries: list[tuple[str, int]], depth: int) -> dict[str, list[int]]:
 
 
 def assess_size(files: list[dict[str, Any]]) -> dict[str, Any]:
-    """Count the PR's added lines of core logic, grouped by the shallowest directory that splits it."""
-    entries = [
-        (f["filename"], f["additions"])
-        for f in files
-        if f["additions"]
-        and PurePosixPath(f["filename"]).suffix.lower() in _LOGIC_SUFFIXES
-        and not _NOT_LOGIC.search(f["filename"])
-    ]
+    """Count the PR's added core-logic lines, grouped by the shallowest directory that splits it."""
+    entries = [(f["filename"], n) for f in files if (n := _core_lines(f))]
     total = sum(lines for _, lines in entries)
     for depth in range(1, 9):  # the shallowest depth that divides the diff, else the deepest
         groups = _group(entries, depth)
@@ -168,81 +154,23 @@ def assess_size(files: list[dict[str, Any]]) -> dict[str, Any]:
         ((_UNSAFE_LABEL.sub("?", label)[:120], g[0], g[1]) for label, g in groups.items()),
         key=lambda s: (-s[1], s[0]),
     )
-    return {"logic_lines": total, "is_oversized": total > LOGIC_LINE_BUDGET, "slices": slices}
+    return {"core_lines": total, "is_over": total > CORE_LINE_GUIDELINE, "slices": slices}
 
 
 def size_notice(size: dict[str, Any]) -> str:
-    """Render the ``## PR size`` block that tells the model the PR is over the budget."""
+    """Render the ``## PR size`` block: a trusted upper bound, shown only above the guideline."""
     by_dir = "\n".join(
         f"- `{label}`: {n} lines in {f} file(s)" for label, n, f in size["slices"][:6]
     )
-    return f"""## PR size: split required
-This PR adds {size["logic_lines"]} lines of core logic, over the {LOGIC_LINE_BUDGET}-line budget. \
-Long PRs get skimmed, not reviewed, so the author has to be asked to split it, however clean the \
-code is.
+    return f"""## PR size: above the ~{CORE_LINE_GUIDELINE}-line guideline
+This PR adds {size["core_lines"]} lines of core logic by the AGENTS.md count: tests, docs, config and \
+blank lines are excluded, comments and docstrings are not, so the count is an upper bound. A PR a \
+little over the guideline needs no split ask, so subtract comments and docstrings by eye when the \
+count is close, then apply the baseline's size rule.
 
 Core logic by directory (the shallowest depth that divides it):
 {by_dir}
-
-Your summary must open its `Needs action:` block with a `- [ ] {SPLIT_MARKER} Split ...` item that \
-names what goes in each stacked `[x/N]` PR, cutting by module, then directory, then file, and by \
-feature only where none of those divides the change. The marker is required and the item applies to \
-every decision. Do not choose `approve` or `lgtm`: use `nudge`, or `comment` if you also found real \
-problems. See focus area 3 of the review prompt.
-
-Only a mechanical rename, generated files or a self-contained drop (a new example, or a new \
-model/backend with no working intermediate state) is exempt: set `size_exception` in your verdict, \
-naming it and the evidence in this diff. Cohesive, readable and urgent are not exceptions.
 """
-
-
-def _ensure_split_item(summary: str, size: dict[str, Any]) -> str:
-    """Make sure the summary carries the split ask, leading its ``Needs action:`` block."""
-    if _SPLIT_ASK.search(summary):
-        return summary
-    areas = ", ".join(f"`{label}` ({n})" for label, n, _ in size["slices"][:3])
-    item = (
-        f"- [ ] {SPLIT_MARKER} Split this PR into stacked `[x/N]` PRs: {size['logic_lines']} added "
-        f"lines of core logic is over the {LOGIC_LINE_BUDGET}-line budget. Largest areas: {areas}."
-    )
-    summary = _NO_ACTION.sub("", summary)
-    summary, found = _NEEDS_ACTION.subn(lambda m: f"{m.group(0)}\n{item}", summary, count=1)
-    return summary if found else f"{summary}\n\nNeeds action:\n{item}"
-
-
-def check_test_plan(body: str) -> str:
-    """Return why the PR description lacks a finished test plan, or an empty string if it has one."""
-    if not (_TEST_HEADING.search(body) or _TEST_LABEL.search(body)):
-        return "No test plan or testing section found in the PR description."
-    unchecked = len(_UNCHECKED.findall(body))
-    if unchecked:
-        total = unchecked + len(_CHECKED.findall(body))
-        return f"Test plan has {unchecked} unchecked item(s) out of {total}. Finish or remove them."
-    return ""
-
-
-def _is_no_code_change(files: list[dict[str, Any]]) -> bool:
-    def prose(f: dict[str, Any]) -> bool:
-        renamed = f["status"] == "renamed" and not f["additions"] and not f["deletions"]
-        return renamed or f["filename"].lower().endswith(_NO_CODE_SUFFIXES)
-
-    return bool(files) and all(prose(f) for f in files)
-
-
-def apply_gates(
-    verdict: dict[str, Any], files: list[dict[str, Any]], pr_body: str
-) -> tuple[str, str]:
-    """Apply the size budget and the test-plan requirement; return the final decision and summary."""
-    decision, summary = verdict["decision"], verdict["summary"]
-    size = assess_size(files)
-    if size["is_oversized"] and not _SPLIT_EXCEPTION.search(verdict["size_exception"]):
-        decision = "nudge" if decision in ("approve", "lgtm") else decision
-        summary = _ensure_split_item(summary, size)
-    if decision in ("approve", "lgtm") and not _is_no_code_change(files):
-        missing = check_test_plan(pr_body)
-        if missing:
-            decision, summary = "nudge", f"{summary}\n\nTesting: {missing}"
-    return decision, summary
 
 
 def _right_lines(patch: str) -> set[int]:
@@ -265,7 +193,7 @@ def _fold(summary: str, comments: list[dict[str, Any]], heading: str) -> str:
 
 
 def build_review(
-    decision: str,
+    approve: bool,
     summary: str,
     comments: list[dict[str, Any]],
     files: list[dict[str, Any]],
@@ -282,7 +210,7 @@ def build_review(
         (inline if comment["line"] in valid.get(comment["file"], ()) else outside).append(comment)
     payload: dict[str, Any] = {
         "commit_id": head_sha,
-        "event": "APPROVE" if decision == "approve" else "COMMENT",
+        "event": "APPROVE" if approve else "COMMENT",
         "body": _fold(summary, outside, "Additional comments (outside the PR diff):")[
             :_MAX_REVIEW_BODY
         ],
@@ -342,13 +270,14 @@ def build_prompt(
     files: list[dict[str, Any]],
     discussion: dict[str, list[dict[str, Any]]],
     reviewer_comment: str,
-    harness: str,
-    review: str,
-    guidelines: str,
+    texts: dict[str, str | None],
     patch_dir: Path,
 ) -> str:
-    """Compose the review prompt. Patches past the inline budget go to files under ``patch_dir``."""
-    size = assess_size(files)
+    """Compose the review prompt. Patches past the inline budget go to files under ``patch_dir``.
+
+    ``texts`` holds the trusted ``harness`` and, when they exist at the base commit, the ``baseline``
+    and the ``rubric``.
+    """
     patch_dir.mkdir(parents=True, exist_ok=True)
     entries, room = [], _INLINE_PATCH_BYTES
     ranked = sorted(
@@ -364,15 +293,19 @@ def build_prompt(
             (patch_dir / f"{i}.patch").write_text(patch, encoding="utf-8")
             entry += f"\n(patch not inlined, Read {patch_dir / f'{i}.patch'})"
         entries.append(entry)
-    base = pr["base"]["ref"]
+    size = assess_size(files)
     context = [
-        size_notice(size) if size["is_oversized"] else "",
+        size_notice(size) if size["is_over"] else "",
         "## Pull Request",
         f"**Title**: {_wrap('pr_title', pr['title'], 500)}",
         "**Provider**: github",
         f"**Author**: {_wrap('pr_author', pr['user']['login'], 100)}",
-        f"**Branch**: {_wrap('pr_head_branch', pr['head']['ref'], 300)} → "
-        f"{_wrap('pr_base_branch', base, 300)}",
+        (
+            f"**Branch**: {_wrap('pr_head_branch', pr['head']['ref'], 300)} → "
+            f"{_wrap('pr_base_branch', pr['base']['ref'], 300)}"
+        ),
+        f"**Head SHA**: {os.environ['HEAD_SHA']}",
+        f"**Base SHA**: {os.environ['BASE_SHA']}",
         f"**Stats**: {pr['changed_files']} files, +{pr['additions']} -{pr['deletions']}",
         f"**URL**: {pr['html_url']}",
         "",
@@ -386,18 +319,19 @@ def build_prompt(
         "## Changed Files",
         _wrap("changed_files", "\n".join(entries), _CHANGES_BYTES),
         "",
-        "Review this pull request now. Batch independent tool calls into one response, use about 25 "
-        "tool calls in total, and finish with the structured verdict.",
+        (
+            "Review this pull request now. Batch independent tool calls into one response, use about "
+            "25 tool calls in total, and finish with the structured verdict."
+        ),
     ]
     parts = [
-        ("harness notes", _strip_title(harness)),
-        ("review prompt", review),
-        ("ModelOpt review guidelines", _strip_title(guidelines)),
+        ("Harness notes", _strip_title(texts["harness"] or "")),
+        ("Review baseline", _strip_title(texts["baseline"]) if texts["baseline"] else _NO_BASELINE),
     ]
-    sections = [
-        f"# Part {n}: {name} (trusted)\n\n{text}" for n, (name, text) in enumerate(parts, 1)
-    ]
-    sections.append("# Part 4: the pull request (untrusted data)\n\n" + "\n".join(context))
+    if texts["rubric"]:
+        parts.append(("ModelOpt review rubric", _strip_title(texts["rubric"])))
+    sections = [f"# {name} (trusted)\n\n{text}" for name, text in parts]
+    sections.append("# The pull request (untrusted data)\n\n" + "\n".join(context))
     prompt = "\n\n---\n\n".join(sections)
     if len(prompt.encode()) > MAX_PROMPT_BYTES:
         sys.exit(f"The review prompt is over {MAX_PROMPT_BYTES} bytes; shrink the prompt files.")
@@ -415,6 +349,10 @@ def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _read_text(path: Path) -> str | None:
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
 def _parse_verdict(raw: str) -> dict[str, Any]:
     try:
         verdict = json.loads(raw)
@@ -424,17 +362,18 @@ def _parse_verdict(raw: str) -> dict[str, Any]:
         not isinstance(verdict, dict)
         or verdict.get("decision") not in DECISIONS
         or not isinstance(verdict.get("summary"), str)
+        or not _REVIEW_SHAPE.search(verdict["summary"])
     ):
-        sys.exit("The verdict lacks a valid decision and summary.")
+        sys.exit("The verdict lacks a decision and a summary with Needs action / No action needed.")
     return {
         "decision": verdict["decision"],
         "summary": verdict["summary"],
+        "complete": verdict.get("complete") is True,
         "comments": verdict.get("comments") or [],
-        "size_exception": verdict.get("size_exception") or "",
     }
 
 
-def prepare(data_dir: Path, prompt_dir: Path, guidelines: Path) -> None:
+def prepare(data_dir: Path, harness: Path, guidance_dir: Path) -> None:
     """Write the ``prompt`` and ``schema`` step outputs from the fetched PR data."""
     discussion = {
         name: _flatten(_read_json(data_dir / f"{name}.json"))
@@ -445,43 +384,59 @@ def prepare(data_dir: Path, prompt_dir: Path, guidelines: Path) -> None:
         _flatten(_read_json(data_dir / "files.json")),
         discussion,
         os.environ.get("COMMENT_BODY", ""),
-        harness=(prompt_dir / "harness.md").read_text(encoding="utf-8"),
-        review=(prompt_dir / "review.md").read_text(encoding="utf-8"),
-        guidelines=guidelines.read_text(encoding="utf-8"),
+        {
+            "harness": harness.read_text(encoding="utf-8"),
+            "baseline": _read_text(guidance_dir / BASELINE),
+            "rubric": _read_text(guidance_dir / RUBRIC),
+        },
         patch_dir=data_dir.resolve() / "patches",
     )
     _set_output("prompt", prompt)
     _set_output("schema", json.dumps(VERDICT_SCHEMA, separators=(",", ":")))
 
 
-def post(data_dir: Path, raw_verdict: str) -> None:
-    """Gate the verdict and write ``review.json`` and ``fallback.json`` for the workflow to post."""
-    pr = _read_json(data_dir / "pr.json")
+def post(data_dir: Path, raw_verdict: str, guidance_dir: Path) -> None:
+    """Write ``review.json`` and ``fallback.json`` for the workflow to post.
+
+    Only a complete ``approve`` against an existing baseline is published as an approval; ``lgtm``,
+    ``nudge`` and ``comment`` are comment reviews. The footer names the reviewed head and baseline.
+    """
     files = _flatten(_read_json(data_dir / "files.json"))
     verdict = _parse_verdict(raw_verdict)
-    decision, summary = apply_gates(verdict, files, pr["body"] or "")
-    if not _REVIEW_SHAPE.search(summary):
-        sys.exit("The verdict summary has no Needs action / No action needed structure.")
+    head, base = os.environ["HEAD_SHA"], os.environ["BASE_SHA"]
+    baseline = (guidance_dir / BASELINE).exists()
+    footer = (
+        f"Baseline: .agents/review-guidelines/{BASELINE} at {base[:12]}."
+        if baseline
+        else f"No review baseline at {base[:12]}, so this is a comment review."
+    )
+    approve = verdict["decision"] == "approve" and verdict["complete"] and baseline
     payload, fallback = build_review(
-        decision, summary, verdict["comments"], files, pr["head"]["sha"]
+        approve,
+        f"{verdict['summary']}\n\n<sub>Reviewed {head[:12]}. {footer}</sub>",
+        verdict["comments"],
+        files,
+        head,
     )
     (data_dir / "review.json").write_text(json.dumps(payload), encoding="utf-8")
     (data_dir / "fallback.json").write_text(json.dumps(fallback), encoding="utf-8")
-    print(f"decision={decision} inline_comments={len(payload.get('comments', []))}")
+    print(f"event={payload['event']} inline_comments={len(payload.get('comments', []))}")
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Run the ``prepare`` or ``post`` step."""
+    """Run one step. ``HEAD_SHA`` and ``BASE_SHA`` come from the environment."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["prepare", "post"])
     parser.add_argument("--data-dir", type=Path, required=True)
-    parser.add_argument("--prompt-dir", type=Path, help="prepare: harness.md and review.md")
-    parser.add_argument("--guidelines", type=Path, help="prepare: the ModelOpt guidelines file")
+    parser.add_argument(
+        "--guidance-dir", type=Path, required=True, help="baseline and rubric files"
+    )
+    parser.add_argument("--harness", type=Path, help="prepare: harness.md")
     args = parser.parse_args(argv)
     if args.command == "prepare":
-        prepare(args.data_dir, args.prompt_dir, args.guidelines)
+        prepare(args.data_dir, args.harness, args.guidance_dir)
     else:
-        post(args.data_dir, os.environ.get("VERDICT", ""))
+        post(args.data_dir, os.environ.get("VERDICT", ""), args.guidance_dir)
 
 
 if __name__ == "__main__":

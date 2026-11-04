@@ -1,7 +1,8 @@
 # ModelOpt code review guidelines
 
-ModelOpt-specific criteria for reviewing pull requests in this repository. They apply on top of the
-general review prompt and the conventions in `AGENTS.md` and `CONTRIBUTING.md`.
+ModelOpt-specific criteria for reviewing pull requests in this repository. They supplement the
+[code review baseline](code-review.md) and the conventions in `AGENTS.md` and `CONTRIBUTING.md`; the
+baseline takes precedence if they conflict.
 
 ModelOpt is NVIDIA's open-source library for model optimization (quantization, pruning, distillation,
 sparsity, speculative decoding, NAS, PEFT) targeting PyTorch / ONNX / HuggingFace / Megatron, with
@@ -12,17 +13,14 @@ These guidelines cover the ModelOpt-specific structural concerns the diff alone 
 
 ## Division of labor with CodeRabbit
 
-CodeRabbit (`.coderabbit.yaml`) already reviews every PR and gates the security anti-patterns. Do
-not duplicate it. Skip:
+Use prior CodeRabbit and Claude findings to avoid duplicate comments, while verifying them against the
+current diff. Do not skip baseline checks, including licensing, security, test coverage and design,
+because another bot may have checked them. Skip style, formatting and typo nits, and generic test
+suggestions without a material risk.
 
-- Style, formatting and naming nits (ruff and CodeRabbit cover them), and simple typos.
-- The security anti-patterns listed in `.coderabbit.yaml`: `torch.load(weights_only=False)` or
-  `numpy.load(allow_pickle=True)` without justification, hardcoded `trust_remote_code=True`,
-  `eval`/`exec` on external input, `# nosec` bypasses, non-permissive new PIP dependencies.
-- Generic "consider adding a test" suggestions for trivial changes.
-
-Your value is what pattern matching cannot do: tracing dataflow across files, reasoning about
-mode/state composition, judging export compatibility, and catching algorithm-level bugs.
+Your value is what CodeRabbit's pattern matching cannot do well: tracing dataflow across files,
+reasoning about mode/state composition, judging export compatibility, and catching algorithm-level
+correctness bugs.
 
 ## Investigation budget
 
@@ -100,7 +98,8 @@ calls: a review that runs out of time posts nothing.
 
 ## Suggestions (nice to have)
 
-Suggestions are non-blocking. Raise them when genuinely useful and skip nits that are not.
+Suggestions document non-blocking improvements. The baseline's criteria still determine the
+recommendation; severity counts alone do not determine approval. Skip nits.
 
 - Stale, imprecise or misleading comments and docstrings. A wrong docstring is worse than none.
 - Missing shape or dtype assertions at module or parallelism boundaries where they would catch real
@@ -120,4 +119,4 @@ inline `suggestion` block only for simple, self-contained line replacements (typ
 single-line fixes). For structural changes that add, remove or reorganize blocks of code, describe the
 change in the summary or the comment body with a code block instead.
 
-Any CRITICAL or IMPORTANT finding makes the decision `comment`. SUGGESTIONs alone never block `approve`.
+The tags describe findings. The baseline, not the tag counts, decides the recommendation.
