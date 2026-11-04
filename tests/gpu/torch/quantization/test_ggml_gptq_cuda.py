@@ -12,13 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""GPTQ on a GGML format through ``mtq.quantize``, with the CUDA encoders."""
+"""GGML GPTQ with the CUDA encoders, through ``mtq.quantize`` and ``mtq.auto_quantize``."""
 
 import copy
 
 import pytest
 import torch
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
@@ -86,3 +87,48 @@ def test_gptq_on_a_ggml_format_rejects_blocks_smaller_than_a_ggml_block():
             _iq1_s_config({"method": "gptq", "block_size": 128}),
             forward_loop=lambda m: m(inputs),
         )
+
+
+def test_auto_quantize_refuses_gptq_on_native_fp8_weights_and_hands_back_the_model():
+    # An FP8 checkpoint's forward dequantizes the stored weight with its block scales, but GPTQ
+    # would encode the stored FP8 values, and the selected codes cannot decode into FP8.
+    fp8_linear = pytest.importorskip("transformers.integrations.finegrained_fp8").FP8Linear
+    torch.manual_seed(0)
+    layers = []
+    for _ in range(2):
+        layer = fp8_linear(256, 256, block_size=(128, 128))
+        blocks = (torch.randn(256, 256) * 0.05).reshape(2, 128, 2, 128)
+        scale = blocks.abs().amax(dim=(1, 3)) / 448.0
+        with torch.no_grad():
+            layer.weight.copy_(
+                (blocks / scale[:, None, :, None]).reshape(256, 256).to(torch.float8_e4m3fn)
+            )
+            layer.weight_scale_inv.copy_(scale)
+        layers.append(layer)
+    source = torch.nn.Sequential(*layers).cuda()
+    model = copy.deepcopy(source)
+    inputs = torch.randn(64, 256, dtype=torch.bfloat16, device="cuda")
+    bits = GGML_FORMAT_REGISTRY["iq1_s"].effective_bits
+
+    def search(algorithm):
+        config = _iq1_s_config(algorithm)
+        config["quant_cfg"][1]["cfg"]["effective_bits"] = bits
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 2.0},
+            quantization_formats=[(config, "IQ1_S")],
+            data_loader=[inputs],
+            forward_step=lambda m, x: m(x),
+            num_calib_steps=1,
+            num_score_steps=1,
+            method="kl_div",
+        )
+
+    with pytest.raises(NotImplementedError):
+        search({"method": "gptq", "block_size": 256})
+
+    assert not mto.ModeloptStateManager.is_converted(model)
+    for param, original in zip(model.parameters(), source.parameters()):
+        assert torch.equal(param, original)
+    # The same model searches again with a calibration that leaves its weights alone.
+    search("max")

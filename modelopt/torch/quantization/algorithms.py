@@ -1183,9 +1183,10 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         GPTQ rewrites every weight its candidate quantizes, imatrix alone only those its encoder
         takes (not Q8_0). Refuses, before any calibration, a candidate whose result its quantizers
         cannot hold (only a single GGML quantizer pins the codes GPTQ chose, and only for the
-        weight itself: not rotated, nor transformed by another method in its algorithm list) and
-        a rewritten weight whose storage another parameter also holds (tied weights, or a view of
-        them), which the rewrite would change too.
+        weight itself: not rotated, nor transformed by another method in its algorithm list), a
+        rewritten weight stored packed or scaled (a native FP8 checkpoint's), and one whose storage
+        another parameter also holds (tied weights, or a view of them), which the rewrite would
+        change too.
         """
         params = {}
         for recipe in search_recipes:
@@ -1257,6 +1258,14 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 raise NotImplementedError(
                     f"Weight-rewriting AutoQuantize candidates need materialized, unsharded "
                     f"weights; {name}'s are on the meta device (offloaded) or a DTensor (FSDP2)."
+                )
+            # GPTQ and imatrix encode the stored values and the selected codes decode into their
+            # dtype, so a packed or scaled weight (a native FP8 checkpoint's) is refused.
+            if param.dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+                raise NotImplementedError(
+                    f"Weight-rewriting AutoQuantize candidates need weights stored unscaled in a "
+                    f"16-bit or wider float; {name}'s are {param.dtype}. Dequantize the model "
+                    "first, or search it with a calibration that leaves weights unchanged."
                 )
             span = _storage_span(param)
             if uses[param] > 1 or (
