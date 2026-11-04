@@ -65,6 +65,22 @@ def cutlass_fp4_scale_to_modelopt_fp4_scale(
     return padded[:m, :n].contiguous().view(torch.float8_e4m3fn)
 
 
+def modelopt_fp4_scale_to_cutlass_fp4_scale(scale: torch.Tensor) -> torch.Tensor:
+    """Pack logical E4M3 block scales into the native 128-by-4 tiled byte layout."""
+    rows, columns = scale.shape
+    row_blocks, column_blocks = -(-rows // 128), -(-columns // 4)
+    padded = torch.zeros(
+        (row_blocks * 128, column_blocks * 4), dtype=torch.uint8, device=scale.device
+    )
+    padded[:rows, :columns] = scale.contiguous().view(torch.uint8)
+    return (
+        padded.reshape(row_blocks, 4, 32, column_blocks, 4)
+        .permute(0, 3, 2, 1, 4)
+        .contiguous()
+        .reshape(-1)
+    )
+
+
 class NVFP4QTensor(BaseQuantizedTensor):
     """Implements the NVFP4 quantization on tensors for more efficient storage or computation.
 

@@ -516,7 +516,7 @@ class LocalHessianModeDescriptor(BaseCalibrateModeDescriptor):
         return LocalHessianCalibConfig
 
     _calib_func = local_hessian_calibrate
-    _distributed_calibration = False  # its distributed_sync syncs only the max amax it starts from
+    _distributed_calibration = True  # Input statistics and counts are reduced before fitting.
 
 
 @CalibrateModeRegistry.register_mode
@@ -542,7 +542,7 @@ class AWQLiteModeDescriptor(BaseCalibrateModeDescriptor):
         return AWQLiteCalibConfig
 
     _calib_func = awq
-    _distributed_calibration = False
+    _distributed_calibration = True
 
 
 @CalibrateModeRegistry.register_mode
@@ -568,7 +568,7 @@ class AWQFullModeDescriptor(BaseCalibrateModeDescriptor):
         return AWQFullCalibConfig
 
     _calib_func = awq
-    _distributed_calibration = False
+    _distributed_calibration = True
 
 
 @CalibrateModeRegistry.register_mode
@@ -615,7 +615,7 @@ class ImatrixModeDescriptor(BaseCalibrateModeDescriptor):
         return ImatrixCalibConfig
 
     _calib_func = imatrix_calibrate
-    _distributed_calibration = False
+    _distributed_calibration = True  # Expert-local statistics reduce over their replica group.
 
 
 @CalibrateModeRegistry.register_mode

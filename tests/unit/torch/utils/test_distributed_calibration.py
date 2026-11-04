@@ -638,12 +638,15 @@ def test_an_undeclared_calibration_is_refused_on_several_ranks():
 @pytest.mark.parametrize(
     ("entry", "algorithm", "refused"),
     [
-        ("quantize", {"method": "awq_lite"}, "awq_lite"),
-        ("calibrate", "awq_lite", "awq_lite"),
+        ("quantize", {"method": "svdquant"}, "svdquant"),
+        ("calibrate", "svdquant", "svdquant"),
         (
             "calibrate",
-            {"method": "nvfp4_act_headroom", "weight_scale_algorithm": {"method": "local_hessian"}},
-            "local_hessian",
+            {
+                "method": "nvfp4_act_headroom",
+                "weight_scale_algorithm": {"method": "local_hessian", "distributed_sync": False},
+            },
+            "local_hessian with distributed_sync=False",
         ),
         (
             "calibrate",
@@ -658,7 +661,11 @@ def test_an_undeclared_calibration_is_refused_on_several_ranks():
             },
             "mse with distributed_sync=None",
         ),
-        ("auto_quantize", {"method": "awq_lite"}, "awq_lite"),
+        (
+            "auto_quantize",
+            {"method": "max", "distributed_sync": False},
+            "max with distributed_sync=False",
+        ),
     ],
     ids=[
         "quantize",
@@ -672,11 +679,7 @@ def test_an_undeclared_calibration_is_refused_on_several_ranks():
 def test_rank_local_calibration_is_refused_before_it_changes_a_distributed_model(
     entry, algorithm, refused
 ):
-    """Each rank calibrates on its own data, and AWQ keeps what its search gathers on the rank: the
-    ranks' copies of a weight would come out different. So would local_hessian, run by another
-    algorithm for its weight scales, and max or MSE told not to sync, by False in any spelling its
-    schema reads as False, or by None, which skips the sync too. The refusal comes before any
-    change."""
+    """Refuse rank-local SVDQuant or explicitly disabled statistic reductions before mutation."""
     model = nn.Sequential(nn.Linear(16, 16))
     set_distribution_plan(model, DistributionPlan(world_size=2))
     if entry == "calibrate":

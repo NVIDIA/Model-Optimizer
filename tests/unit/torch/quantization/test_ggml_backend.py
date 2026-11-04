@@ -41,6 +41,87 @@ FORMAT_MODULES = [
 ]
 
 
+@pytest.mark.parametrize(
+    ("num_bits", "transform"), [(name, None) for name in FORMAT_NAMES] + [("iq2_s", "awq")]
+)
+def test_native_ggml_scale_repair_keeps_codes_and_reload(
+    num_bits, transform, tmp_path, monkeypatch
+):
+    import gc
+    import weakref
+
+    import modelopt.torch.opt as mto
+    from modelopt.torch.distill import LocalDistillationConfig
+    from modelopt.torch.quantization.ggml.common import pinned_packed_weight
+    from modelopt.torch.quantization.repair import QuantizationRepairPolicy
+
+    torch.manual_seed(12)
+    layer = torch.nn.Linear(256, 2, bias=False)
+    cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": num_bits, "backend": "ggml"},
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(layer, cfg)
+    if transform == "awq":
+        layer.weight_quantizer.pre_quant_scale = torch.linspace(0.5, 1.5, 256)
+    inputs = torch.randn(3, 256)
+    original = layer(inputs).detach()
+    fmt = GGML_FORMAT_REGISTRY[num_bits]
+    packed = layer.weight_quantizer._quantizer_cache.packed_weights.clone()
+    original_levels, _ = fmt.unpack_int8(packed.reshape(-1, fmt.block_bytes))
+    decoded = []
+    if num_bits == "iq2_s" and transform is None:
+        original_decode = type(fmt).decode_int8
+
+        def track_decode(self, *args, **kwargs):
+            levels, steps = original_decode(self, *args, **kwargs)
+            storage_owner = levels
+            while storage_owner._base is not None:
+                storage_owner = storage_owner._base
+            decoded.append(weakref.ref(storage_owner))
+            return levels, steps
+
+        monkeypatch.setattr(type(fmt), "decode_int8", track_decode)
+    policy = QuantizationRepairPolicy()
+    groups = policy.prepare(layer, LocalDistillationConfig(updates=1))
+    torch.testing.assert_close(layer(inputs), original, rtol=0, atol=0)
+    optimizer = torch.optim.Adagrad([{"params": g.params, "lr": g.lr} for g in groups])
+    layer(inputs).square().mean().backward()
+    assert layer.weight.grad is None
+    optimizer.step()
+    policy.project_()
+    changed = layer(inputs).detach()
+    assert not torch.equal(changed, original)
+    if num_bits == "iq2_s" and transform is None:
+        gc.collect()
+        assert decoded and all(reference() is None for reference in decoded), (
+            "Expanded expert codes must be released after replay; keep only native packed codes."
+        )
+    if num_bits == "q8_0":
+        # A provider can persist its native fields without policy type dispatch.
+        layer.weight_quantizer._local_repair_state.finalize_(layer.weight_quantizer, layer.weight)
+        policy.close()
+    else:
+        policy.finalize_()
+    if transform:
+        assert layer.weight_quantizer.pre_quant_scale is None
+    native = pinned_packed_weight(layer.weight_quantizer, num_bits)
+    assert native is not None
+    levels, _ = fmt.unpack_int8(native.reshape(-1, fmt.block_bytes))
+    assert torch.equal(levels, original_levels)
+    torch.testing.assert_close(layer(inputs), changed, rtol=0, atol=0)
+    mto.save(layer, tmp_path / "repaired.pt")
+    restored = mto.restore(torch.nn.Linear(256, 2, bias=False), tmp_path / "repaired.pt")
+    torch.testing.assert_close(restored(inputs), changed, rtol=0, atol=0)
+    assert torch.equal(pinned_packed_weight(restored.weight_quantizer, num_bits), native)
+
+
 def _substitute(monkeypatch, name, **changes):
     """Replace parts of one registered format for the duration of a test.
 

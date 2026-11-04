@@ -167,12 +167,13 @@ class NF4QTensor(BaseQuantizedTensor):
         double_scale = kwarg["double_scale"]
         scale_zeros = kwarg["scale_zeros"]
 
-        # unpadd the scales if needed
-        scales = scales.view(-1)[: (self._quantized_data.numel() * 2) // block_sizes[-1]]
+        # Decode complete double-scale rows before removing their padding.
+        scales = scales.reshape(-1, block_sizes["scale_block_sizes"][-1])
+        scales = _dequantize_scalers(scales, double_scale, scale_zeros, dtype).flatten()
+        scales = scales[: (self._quantized_data.numel() * 2) // block_sizes[-1]]
 
         if cuda_ext and self._quantized_data.is_cuda:
             # with a custom cuda kernel
-            scales = _dequantize_scalers(scales, double_scale, scale_zeros, dtype).flatten()
             output = cuda_ext.NF4_dequantize(self._quantized_data, scales, block_sizes[-1])
             return (
                 output.view(-1)[: np.prod(self.metadata["shape"])]  # handle padding
@@ -181,7 +182,6 @@ class NF4QTensor(BaseQuantizedTensor):
             )
         else:
             # de-qauntize scales
-            scales = _dequantize_scalers(scales, double_scale, scale_zeros, dtype).flatten()
             # indexing in torch required long dtype, we may need to optimize this with customized kernels
             first_half_idx = (self._quantized_data >> 4).to(torch.long)
             second_half_idx = (self._quantized_data & 0x0F).to(torch.long)

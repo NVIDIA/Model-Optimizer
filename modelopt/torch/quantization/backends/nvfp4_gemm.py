@@ -15,6 +15,8 @@
 
 """This module provides a GEMM function for nvfp4 quantization."""
 
+import weakref
+
 import torch
 from torch.autograd import Function
 
@@ -23,6 +25,9 @@ from modelopt.torch.quantization.backends.gemm_registry import gemm_registry
 from modelopt.torch.quantization.backends.utils import fp4_compatible
 from modelopt.torch.quantization.qtensor import NVFP4QTensor, QTensorWrapper
 from modelopt.torch.quantization.utils import reduce_amax
+from modelopt.torch.quantization.utils.weight_source import _input_cache_key
+
+_SCALE_SOURCES = weakref.WeakKeyDictionary()
 
 
 def nvfp4_gemm(quant_module, input_tensor, bias=None):
@@ -67,15 +72,24 @@ def nvfp4_gemm(quant_module, input_tensor, bias=None):
     if input_tensor.dtype == torch.float32:
         input_tensor = input_tensor.to(torch.float16)
 
+    input_amax = quant_module.input_quantizer.amax
+    input_key = _input_cache_key(input_amax) if input_amax is not None else None
+    sources = _SCALE_SOURCES.setdefault(quant_module, {})
+    input_source = sources.get("input")
     cached_input_global_scale = (
         hasattr(quant_module, "_input_global_scale")
-        and quant_module.input_quantizer.amax is not None
+        and input_key is not None
+        and input_source is not None
+        and input_source[0]() is input_amax
+        and input_source[1] == input_key
     )
 
     if not cached_input_global_scale:
         input_amax = quant_module.input_quantizer.amax or reduce_amax(input_tensor)
         assert input_amax != 0
         quant_module._input_global_scale = 448.0 * 6.0 / input_amax.float()
+        if quant_module.input_quantizer.amax is not None:
+            sources["input"] = (weakref.ref(quant_module.input_quantizer.amax), input_key)
 
     weight = quant_module.weight
 
@@ -85,9 +99,20 @@ def nvfp4_gemm(quant_module, input_tensor, bias=None):
         assert isinstance(weight, NVFP4QTensor)
         weight_fp4 = weight._quantized_data
         weight_scale = quant_module.weight_quantizer._scale
+        double_scale = quant_module.weight_quantizer._double_scale
+        scale_key = _input_cache_key(double_scale)
+        weight_source = sources.get("weight")
+        cached_weight_global_scale = (
+            cached_weight_global_scale
+            and scale_key is not None
+            and weight_source is not None
+            and weight_source[0]() is double_scale
+            and weight_source[1] == scale_key
+        )
 
         if not cached_weight_global_scale:
             quant_module._weight_global_scale = 1.0 / quant_module.weight_quantizer._double_scale
+            sources["weight"] = (weakref.ref(double_scale), scale_key)
     else:
         if isinstance(weight, torch.nn.Parameter):
             weight = weight.data

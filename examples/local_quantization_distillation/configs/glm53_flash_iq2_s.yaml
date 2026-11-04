@@ -1,0 +1,55 @@
+# Original teacher/HF source is required: set source here, or use --model.
+model:
+  source:
+  force_hf: false
+  trust_remote_code: false
+  use_liger_kernel: false
+  backend:
+    attn: sdpa
+    linear: torch
+    rms_norm: torch_fp32
+    experts: torch_mm
+    dispatcher: torch
+    enable_hf_state_dict_adapter: true
+parallelism:
+  cp_size: 1
+  ep_size: 1
+  tp_size: 1
+  pp_size: 1
+calibration_sequence_length: 4096
+calibration_micro_batch_size: 1
+quantization:
+  quant_cfg:
+    - quantizer_name: '*'
+      enable: false
+    - quantizer_name: '*mlp.experts.gate_and_up_projs_weight_quantizers.*'
+      cfg: {num_bits: iq2_s, backend: ggml}
+    - quantizer_name: '*mlp.experts.down_projs_weight_quantizers.*'
+      cfg: {num_bits: iq2_s, backend: ggml}
+  algorithm:
+    method: gptq
+    perc_damp: 0.01
+    block_size: 256
+    fused: false
+    importance_weighted: true
+    layerwise:
+      enable: true
+repair:
+  unit_types: [mlp, moe]
+  mode: scale_only
+  requantize: false
+  tune_activations: false
+  optimizer: adagrad
+  scale_lr: 0.01
+  weight_lr: 0.00001
+  scheduler: cosine
+  warmup_fraction: 0.05
+  updates: 512
+  global_batch_size: 8
+  micro_batch_size: 1
+  sequence_length: 32768
+  gradient_clip_norm: 1.0
+  loss: mse
+  selection: final
+  checkpoint_interval: 128
+  seed: 42

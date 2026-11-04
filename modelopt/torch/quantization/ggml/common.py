@@ -20,25 +20,18 @@ import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import NamedTuple
 
 import torch
 
+from ..utils.weight_source import (
+    _cache_base,
+    _CacheKey,
+    _input_cache_key,
+    _row_keys,
+    _same_elements,
+)
+
 GGML_BLOCK_SIZE = 256
-_SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
-# Columns hashed at a time, bounding _row_keys' int64 temporaries to this slice of the weight.
-_ROW_KEY_CHUNK = 256
-
-
-class _CacheKey(NamedTuple):
-    """What a cached payload was packed from; any change means it must be packed again."""
-
-    data_ptr: int
-    shape: tuple[int, ...]
-    stride: tuple[int, ...]
-    dtype: torch.dtype
-    device: torch.device
-    version: int
 
 
 @dataclass
@@ -61,52 +54,6 @@ class _PackedWeightCache:
     block_chunk_size: int
     packed_weights: torch.Tensor
     weight_shape: torch.Tensor
-
-
-def _cache_base(inputs: torch.Tensor) -> torch.Tensor:
-    """The tensor whose lifetime the cached payload should follow.
-
-    ``inputs`` is a per-forward view; ``inputs._base`` is the parameter behind it, which lives
-    as long as the module does.
-    """
-    base = inputs._base
-    return inputs if base is None else base
-
-
-def _input_cache_key(inputs: torch.Tensor) -> _CacheKey | None:
-    try:
-        version = inputs._version
-    except RuntimeError:
-        # Inference tensors can omit version counters, so changes cannot be detected safely.
-        return None
-    return _CacheKey(
-        inputs.data_ptr(),
-        tuple(inputs.shape),
-        tuple(inputs.stride()),
-        inputs.dtype,
-        inputs.device,
-        version,
-    )
-
-
-def _is_contiguous(shape: tuple[int, ...], stride: tuple[int, ...]) -> bool:
-    expected = 1
-    for size, step in zip(reversed(shape), reversed(stride)):
-        if size != 1 and step != expected:
-            return False
-        expected *= size
-    return True
-
-
-def _same_elements(key: _CacheKey, other: _CacheKey) -> bool:
-    """Whether two cache keys are contiguous views of the same values in the same order."""
-    return (
-        (key.data_ptr, key.dtype, key.device, key.version)
-        == (other.data_ptr, other.dtype, other.device, other.version)
-        and math.prod(key.shape) == math.prod(other.shape)
-        and _is_contiguous(key.shape, key.stride)
-        and _is_contiguous(other.shape, other.stride)
-    )
 
 
 def _matching_cache(
@@ -168,24 +115,6 @@ def _matching_rows(table: torch.Tensor, rows: torch.Tensor) -> torch.Tensor | No
     order = table_keys.argsort()
     found = order[torch.searchsorted(table_keys[order], row_keys).clamp_max(len(order) - 1)]
     return found if torch.equal(table[found], rows) else None
-
-
-def _row_keys(x: torch.Tensor) -> torch.Tensor:
-    """A 64-bit hash of each row's bits; equal rows always get equal keys.
-
-    Integer sums wrap and are associative, so unlike a floating-point projection the key does not
-    depend on how the reduction is ordered, which differs between differently shaped products. That
-    is also what lets the columns be summed a chunk at a time.
-    """
-    multipliers = torch.randint(
-        -(2**62), 2**62, (x.shape[-1],), generator=torch.Generator().manual_seed(0)
-    ).to(x.device)
-    bits = x.contiguous().view(_SIGNED_INT_OF_SIZE[x.element_size()])
-    keys = torch.zeros(x.shape[:-1], dtype=torch.int64, device=x.device)
-    for start in range(0, x.shape[-1], _ROW_KEY_CHUNK):
-        columns = slice(start, start + _ROW_KEY_CHUNK)
-        keys += (bits[..., columns].to(torch.int64) * multipliers[columns]).sum(-1)
-    return keys
 
 
 def fake_quantize_with_cache(

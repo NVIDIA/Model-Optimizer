@@ -16,7 +16,7 @@
 """Configurations for distillation modes."""
 
 import warnings
-from typing import Any, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 import pydantic
 from torch.nn.modules.loss import _Loss as Loss
@@ -26,7 +26,51 @@ from modelopt.torch.utils.network import ModelLike
 
 from .loss_balancers import DistillationLossBalancer
 
-__all__ = ["ExportStudentConfig", "KDLossConfig", "LayerwiseKDConfig"]
+__all__ = ["ExportStudentConfig", "KDLossConfig", "LayerwiseKDConfig", "LocalDistillationConfig"]
+
+
+class LocalDistillationConfig(ModeloptBaseConfig):
+    """Configuration for independent local repair of an existing quantized model.
+
+    Learning rates for scales refer to positive log-scale parameters. Context
+    length and global batch are explicit: microbatching must not change them.
+    """
+
+    model_config = pydantic.ConfigDict(extra="forbid")
+
+    units: list[str] | None = None
+    unit_types: tuple[str, ...] = ("mlp", "moe")
+    mode: Literal["scale_only", "weight_only", "joint"] = "scale_only"
+    requantize: bool = False
+    tune_activations: bool = False
+    optimizer: Literal["adagrad", "adamw"] = "adagrad"
+    scale_lr: float = pydantic.Field(default=0.01, gt=0)
+    weight_lr: float = pydantic.Field(default=0.00001, gt=0)
+    activation_lr: float | None = pydantic.Field(default=None, gt=0)
+    scheduler: Literal["constant", "cosine", "linear"] = "cosine"
+    warmup_fraction: float = pydantic.Field(default=0.05, ge=0, lt=1)
+    updates: int = pydantic.Field(default=512, ge=0)
+    global_batch_size: int = pydantic.Field(default=8, gt=0)
+    micro_batch_size: int | None = pydantic.Field(default=None, gt=0)
+    sequence_length: int = pydantic.Field(default=4096, gt=0)
+    gradient_clip_norm: float = pydantic.Field(default=1.0, gt=0)
+    loss: Literal["mse", "normalized_mse"] = "mse"
+    validation_interval: int | None = pydantic.Field(default=None, gt=0)
+    selection: Literal["final", "best_validation_per_unit"] = "final"
+    checkpoint_interval: int = pydantic.Field(default=128, gt=0)
+    checkpoint_dir: str | None = None
+    resume_from: str | None = None
+    output_dir: str | None = None
+    seed: int = 42
+
+    @pydantic.model_validator(mode="after")
+    def _validate_repair_settings(self):
+        if self.tune_activations and self.activation_lr is None:
+            raise ValueError("Activation tuning requires an explicit activation_lr.")
+        if self.units is not None and len(self.units) != len(set(self.units)):
+            raise ValueError("Repair units must be unique.")
+        return self
+
 
 Criterion: TypeAlias = Loss | dict[tuple[str, str], Loss]
 

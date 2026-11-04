@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import weakref
-from unittest import mock
 
 import pytest
 import torch
@@ -26,15 +24,11 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import (
     convert_quantization_axis_to_reduce_axis,
-    core_utils,
     reduce_amax,
     reduce_block_amax,
 )
 from modelopt.torch.quantization.utils.core_utils import (
     _disable_fsdp_unshard_reshard,
-    _fsdp2_owned_params,
-    _fsdp2_owns,
-    _fsdp2_param_groups,
     enable_fake_quant,
     fsdp2_weight_access_and_writeback_context,
     persistent_materialization,
@@ -414,40 +408,28 @@ def test_disable_fsdp_unshard_reshard_shared_group_and_nesting(cpu_dist_workers)
     cpu_dist_workers.run(_shared_group_override_restores_prior_attributes)
 
 
-def _fsdp2_owns_its_params_in_every_state_job(rank, size):
+def _mixed_precision_weight_window_job(rank, size):
+    from torch.distributed.fsdp import MixedPrecisionPolicy
+
     mesh = init_device_mesh("cpu", (size,))
     model = torch.nn.Module()
     model.dense = torch.nn.Linear(8, 8)
     model.layer = torch.nn.Linear(8, 8)
-    fully_shard(model.layer, mesh=mesh)  # a unit of its own, inside the model's
-    fully_shard(model, mesh=mesh)
-    layer = model.layer
-    sharded = layer.weight
-    owned = _fsdp2_owned_params(model)
-    assert _fsdp2_owns(owned, model.dense.weight) and _fsdp2_owns(owned, sharded)
-    # An id kept for a parameter does not make another object at that address FSDP2's.
-    assert not _fsdp2_owns({id(sharded): weakref.ref(model.dense.weight)}, sharded)
-    layer.unshard()
-    unsharded = layer.weight
-    try:
-        assert unsharded is not sharded, "FSDP2 registered the same parameter when unsharded"
-        assert _fsdp2_owns(_fsdp2_owned_params(model, refresh=True), unsharded)
-    finally:
-        layer.reshard()
-    # The set is kept for the unit: opening the window again costs the module's parameters only.
-    with mock.patch.object(core_utils, "_fsdp2_param_groups", wraps=_fsdp2_param_groups) as scans:
-        for _ in range(3):
-            with fsdp2_weight_access_and_writeback_context(model.dense, model):
-                pass
-    assert scans.call_count == 0
+    fully_shard(model.layer, mesh=mesh)
+    fully_shard(model, mesh=mesh, mp_policy=MixedPrecisionPolicy(param_dtype=torch.bfloat16))
+    frozen_before = model.dense.weight.to_local().detach().clone()
+    for _ in range(3):
+        with fsdp2_weight_access_and_writeback_context(model.dense, model):
+            pass
+    torch.testing.assert_close(model.dense.weight.to_local(), frozen_before, rtol=0, atol=0)
+    with torch.no_grad(), fsdp2_weight_access_and_writeback_context(model.dense, model):
+        model.dense.weight.data.add_(0.25)
+        changed = model.dense.weight.detach().clone().chunk(size, dim=0)[rank].float()
+    torch.testing.assert_close(model.dense.weight.to_local(), changed, rtol=0, atol=0)
 
 
-def test_fsdp2_owns_its_parameters_in_every_shard_state(cpu_dist_workers):
-    """FSDP2 registers another parameter object once a unit is unsharded (or resharded after the
-    forward, under HSDP), and the weight-access window gathers by ownership: each counts as FSDP2's,
-    or a weight it does own would be left sharded in the window. So do the parameters of a unit
-    nested in it. The window keeps the set per unit rather than scanning it on every entry."""
-    cpu_dist_workers.run(_fsdp2_owns_its_params_in_every_state_job)
+def test_fsdp2_weight_window_preserves_storage_precision_and_updates(cpu_dist_workers):
+    cpu_dist_workers.run(_mixed_precision_weight_window_job)
 
 
 def _window_leaves_what_fsdp2_does_not_own_job(rank, size):
@@ -465,19 +447,34 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size):
         for weight in layer.experts.parameters():
             assert isinstance(weight, DTensor)
             assert weight.to_local().shape[0] == 2
-    # Every expert weight misses the kept set, and one scan of the unit answers them all.
-    with (
-        mock.patch.object(core_utils, "_fsdp2_param_groups", wraps=_fsdp2_param_groups) as scans,
-        fsdp2_weight_access_and_writeback_context(layer, layer),
-    ):
-        pass
-    assert scans.call_count == 1
+    with fsdp2_weight_access_and_writeback_context(layer, layer):
+        assert not isinstance(layer.dense.weight, DTensor)
     assert all(weight.to_local().shape[0] == 2 for weight in layer.experts.parameters())
 
 
 def test_fsdp2_weight_access_leaves_parameters_fsdp2_does_not_own(cpu_dist_workers):
     """An expert-parallel weight is a DTensor sharded over the experts that fully_shard was told to
     ignore. The weight-access window gathers FSDP2's parameters only, so it stays sharded: gathering
-    it would hand every rank every expert. Each such weight misses the window's kept set, which it
-    scans again once, not once per weight."""
+    it would hand every rank every expert."""
     cpu_dist_workers.run(_window_leaves_what_fsdp2_does_not_own_job)
+
+
+def _writeback_already_unsharded_job(rank, size):
+    mesh = init_device_mesh("cpu", (size,))
+    model = torch.nn.Linear(8, 8)
+    fully_shard(model, mesh=mesh)
+    model.unshard()
+    expected = model.weight.detach().clone() + 0.25
+    with fsdp2_weight_access_and_writeback_context(model, model):
+        model.weight.data.add_(0.25)
+    assert not isinstance(model.weight, DTensor)  # preserve the caller's entry state
+    model.reshard()
+    for _ in range(2):
+        model(torch.ones(2, 8))
+    with fsdp2_weight_access_and_writeback_context(model, model):
+        torch.testing.assert_close(model.weight, expected, rtol=0, atol=0)
+
+
+def test_weight_updates_survive_resharding_an_already_unsharded_unit(cpu_dist_workers):
+    """Layerwise GPTQ edits must survive the first and subsequent model forwards."""
+    cpu_dist_workers.run(_writeback_already_unsharded_job)

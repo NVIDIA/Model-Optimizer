@@ -733,6 +733,82 @@ class _FakePackTokenizer:
         return [50] * int(s)
 
 
+@pytest.mark.parametrize("calibration_length", [None, 8])
+def test_local_repair_packing_has_unique_cursor_and_disjoint_conversations(
+    tmp_path, calibration_length
+):
+    pytest.importorskip("nemo_automodel.components.datasets.llm.neat_packing")
+    import json
+
+    import numpy as np
+
+    from examples.local_quantization_distillation.prepare_data import (
+        PackedBatchSequence,
+        prepare_packed_corpus,
+    )
+
+    def conversations():
+        for index in range(256):
+            item = (f"conversation-{index}", list(range(1 + index * 23, 21 + index * 23)))
+            yield item
+            if index % 50 == 0:
+                yield item
+
+    sizes = {"train": 32, "validation": 4, "diagnostic": 4, "calibration": 4}
+    prepare_packed_corpus(
+        conversations(),
+        tmp_path / "data",
+        sequence_length=16,
+        pack_counts=sizes,
+        calibration_sequence_length=calibration_length,
+    )
+    owners, intervals = {}, {}
+    for partition in sizes:
+        directory = tmp_path / "data" / partition
+        for row in map(json.loads, (directory / "provenance.jsonl").read_text().splitlines()):
+            for fragment in row["fragments"]:
+                identity = fragment["conversation_id"]
+                assert owners.setdefault(identity, partition) == partition
+                assert fragment["start"] == intervals.get(identity, 0)
+                assert fragment["stop"] > fragment["start"]
+                intervals[identity] = fragment["stop"]
+        ids = torch.from_numpy(np.load(directory / "input_ids.npy").copy())
+        docs = torch.from_numpy(np.load(directory / "document_ids.npy").copy())
+        positions = torch.from_numpy(np.load(directory / "position_ids.npy").copy())
+        labels = torch.from_numpy(np.load(directory / "labels.npy").copy())
+        assert (
+            ids.shape[1] == (calibration_length or 16)
+            if partition == "calibration"
+            else ids.shape[1] == 16
+        )
+        same = docs[:, 1:] == docs[:, :-1]
+        torch.testing.assert_close(labels[:, :-1][same], ids[:, 1:][same])
+        assert torch.all(labels[:, :-1][~same] == -100)
+        starts = torch.cat((torch.ones_like(docs[:, :1], dtype=torch.bool), ~same), dim=1)
+        assert torch.all(positions[starts] == 0)
+        assert torch.any((docs > 0) & (labels == -100))  # MSE retains document-final tokens.
+    lanes = [
+        PackedBatchSequence(
+            tmp_path / "data", "train", global_batch_size=8, dp_rank=rank, dp_size=2
+        )
+        for rank in range(2)
+    ]
+    seen = [int(value) for step in range(4) for lane in lanes for value in lane[step]["sample_ids"]]
+    assert seen == list(range(32))
+    batch = lanes[0][0]
+    torch.testing.assert_close(batch["valid_mask"], batch["attention_mask"] > 0)
+    with pytest.raises(IndexError):
+        lanes[0][4]
+    smaller = {**sizes, "train": 8}
+    prepare_packed_corpus(
+        conversations(), tmp_path / "prefix", sequence_length=16, pack_counts=smaller
+    )
+    np.testing.assert_array_equal(
+        np.load(tmp_path / "prefix/train/input_ids.npy"),
+        np.load(tmp_path / "data/train/input_ids.npy")[:8],
+    )
+
+
 def test_pack_documents_into_rows():
     """Global-stream packing: all docs concatenated with EOS separators into one
     token stream, then sliced into uniform-length rows. Non-final rows are fully

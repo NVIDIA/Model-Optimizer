@@ -189,6 +189,25 @@ class TensorQuantizer(nn.Module):
             )
         return super().__setattr__(name, value)
 
+    def _apply(self, fn, recurse=True):
+        # Packed formats prescribe scale dtypes independently of compute dtype.
+        fields = {}
+        if not self.fake_quant or getattr(self, "_native_weight_meta", None):
+            for name in ("_scale", "_double_scale", "_scale_zeros"):
+                if self._buffers.get(name) is not None:
+                    fields[name] = self._buffers.pop(name)
+        try:
+            result = super()._apply(fn, recurse=recurse)
+        finally:
+            for name, value in fields.items():
+                if value.is_meta:
+                    transformed = fn(value).to(value.dtype)
+                else:
+                    device = fn(torch.empty(0, dtype=torch.uint8, device=value.device)).device
+                    transformed = value.to(device=device)
+                self._buffers[name] = transformed
+        return result
+
     def __init__(
         self,
         quant_attribute_cfg=None,

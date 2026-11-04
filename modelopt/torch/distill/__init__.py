@@ -20,6 +20,7 @@ from .config import *
 from .distillation import *
 from .distillation_model import *
 from .layerwise_distillation_model import *
+from .local_distillation import *
 from .loss_balancers import *
 from .losses import *
 from .registry import *

@@ -35,6 +35,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt.torch.models import hf_model_type, is_moe
+from modelopt.torch.quantization.utils.native_weight import get_pinned_native_weight
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     copy_off_index_safetensors,
@@ -44,6 +45,10 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
 )
 
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
+from .quantized_weight_export import (
+    capture_quantized_weight_export_state,
+    export_quantized_weight_tensors,
+)
 
 try:
     import diffusers
@@ -685,6 +690,18 @@ def _export_quantized_weight(
     output_quantizer: TensorQuantizer | SequentialQuantizer | None = getattr(
         sub_module, quantizer_attrs.output_quantizer, None
     )
+
+    if get_pinned_native_weight(weight_quantizer, weight) is not None:
+        state = capture_quantized_weight_export_state(sub_module, weight_name, cpu=False)
+        assert state is not None
+        tensors = export_quantized_weight_tensors(weight, state, dtype, weight_name)
+        for name, value in tensors.items():
+            if name == weight_name:
+                setattr(sub_module, name, nn.Parameter(value, requires_grad=False))
+            else:
+                sub_module.register_buffer(name, value)
+        maybe_clear_cuda_cache()
+        return
 
     # Already real-quantized weights (``mtq.compress`` / ``hf_ptq --low_memory_mode``) hold packed
     # nibbles -- half the logical last dim -- so per-block scales cannot be recomputed from them.

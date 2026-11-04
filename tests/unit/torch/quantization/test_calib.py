@@ -333,6 +333,37 @@ def test_awq_clip_picks_the_same_clips_on_every_rank(cpu_dist_workers):
     cpu_dist_workers.run(_awq_clip_on_every_rank_job)
 
 
+def _awq_lite_global_objective_job(rank, size):
+    group = dist.new_group(timeout=timedelta(seconds=20))
+    model = _Experts(group)
+    set_distribution_plan(model, DistributionPlan(size))
+    config = get_awq_config("awq_lite")
+    x = _rank_input(rank)
+    calls = [[(0, x), (1, x)]] if rank == 0 else [[(0, x), (1, x[:0])], [(0, x[:3])]]
+    try:
+        mtq.quantize(model, config, lambda m: [m(batch) for batch in calls])
+        actual = [expert.awq_lite.best_scale for expert in model.experts]
+        gathered = [None] * size
+        dist.all_gather_object(gathered, actual, group=group)
+    finally:
+        dist.destroy_process_group(group)
+    reference = _Experts(data_parallel_group=-1)
+    x0, x1 = _rank_input(0), _rank_input(1)
+    mtq.quantize(
+        reference,
+        config,
+        lambda m: [m(batch) for batch in ([(0, x0), (1, x0)], [(0, x1)], [(0, x1[:3])])],
+    )
+    for replica in gathered:
+        for scale, expert in zip(replica, reference.experts, strict=True):
+            torch.testing.assert_close(scale, expert.awq_lite.best_scale)
+
+
+def test_awq_lite_uses_global_dp_objective(cpu_dist_workers):
+    """Different replica data must select the same scale as their pooled objective."""
+    cpu_dist_workers.run(_awq_lite_global_objective_job)
+
+
 @pytest.mark.parametrize("use_weight_scale", [None, False])
 def test_awq_full(use_weight_scale):
     """Test awq."""

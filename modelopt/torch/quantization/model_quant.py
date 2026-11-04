@@ -158,8 +158,9 @@ def _refuse_awq_on_a_sharded_fsdp2_model(
 ) -> None:
     """Refuse AWQ calibration of an FSDP2 model sharded over several ranks, before it starts.
 
-    Each rank calibrates on its own data and folds the AWQ scale it picks into its own weight
-    shard, so the shards would not match. Every rank decides alike, from the run and the model.
+    AWQ now reduces activation statistics and search losses over DP. Sharded
+    execution still requires an explicitly configured replica group covering
+    the FSDP mesh; otherwise each shard could fold a different smoothing scale.
     """
     if dist.size() == 1 or not dist.is_fsdp2_model(model):
         return
@@ -167,7 +168,34 @@ def _refuse_awq_on_a_sharded_fsdp2_model(
     awq = [method for method in methods if method in ("awq_lite", "awq_full")]
     if awq:
         # For the message only: the FSDP2 shard mesh can be narrower than the run (HSDP, 2D).
-        mesh = _get_fsdp2_mesh(next(m for m in model.modules() if isinstance(m, FSDPModule)))
+        meshes = [
+            mesh
+            for module in model.modules()
+            if isinstance(module, FSDPModule) and (mesh := _get_fsdp2_mesh(module)) is not None
+        ]
+        mesh = meshes[0] if meshes else None
+        projections = [
+            module
+            for module in model.modules()
+            if isinstance(getattr(module, "weight_quantizer", None), TensorQuantizer)
+            and module.weight_quantizer.is_enabled
+        ]
+        required = {rank for mesh in meshes for rank in mesh.mesh.flatten().tolist()}
+        if (
+            required
+            and projections
+            and all(
+                (state := getattr(module, "parallel_state", None)) is not None
+                and state.data_parallel_group.is_initialized()
+                and required.issubset(_group_ranks(state.data_parallel_group))
+                and set(_group_ranks(state.data_parallel_group)).intersection(
+                    _group_ranks(state.tensor_parallel_group)
+                )
+                == {dist.rank()}
+                for module in projections
+            )
+        ):
+            return
         ranks = mesh.size(-1) if mesh is not None else dist.size()
         what = f"AutoQuantize candidate {candidate!r} calibrates" if candidate else "Calibrating"
         raise NotImplementedError(

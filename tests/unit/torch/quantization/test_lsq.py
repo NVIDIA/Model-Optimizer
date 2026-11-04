@@ -45,6 +45,228 @@ from modelopt.torch.quantization.utils.shared_input import SharedWeightGlobalAma
 from modelopt.torch.utils import to_empty_if_meta_device
 
 
+def test_local_scale_repair_respects_shared_amax():
+    import modelopt.torch.quantization as mtq
+    from modelopt.torch.distill import LocalDistillationConfig
+    from modelopt.torch.quantization.repair import QuantizationRepairPolicy
+
+    torch.manual_seed(12)
+    model = mtq.quantize(
+        nn.ModuleList([nn.Linear(16, 8, bias=False) for _ in range(2)]),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            ],
+            "algorithm": "max",
+        },
+    )
+    model[1].weight_quantizer._amax = model[0].weight_quantizer._amax
+    inputs = torch.randn(3, 16)
+    target = 2 * model[1](inputs).detach()
+    policy = QuantizationRepairPolicy()
+    groups = policy.prepare(model, LocalDistillationConfig(updates=1))
+    optimizer = torch.optim.Adagrad([{"params": g.params, "lr": g.lr} for g in groups])
+    loss = model[0](inputs).square().mean() + (model[1](inputs) - target).square().mean()
+    loss.backward()
+    optimizer.step()
+    policy.project_()
+    expected = [module(inputs).detach() for module in model]
+    policy.finalize_()
+    assert model[0].weight_quantizer._amax is model[1].weight_quantizer._amax
+    for module, value in zip(model, expected):
+        torch.testing.assert_close(module(inputs), value, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("mode", "bits"),
+    [
+        ("scale_only", 4),
+        ("weight_only", 4),
+        ("joint", 4),
+        ("weight_only", (4, 3)),
+        ("scale_only", "w4a8"),
+    ],
+)
+def test_local_repair_modes_keep_activation_quantization(mode, bits):
+    import modelopt.torch.quantization as mtq
+    from modelopt.torch.distill import LocalDistillationConfig
+    from modelopt.torch.quantization.repair import QuantizationRepairPolicy
+
+    torch.manual_seed(4)
+    inputs = torch.randn(4, 16)
+    weight_config = (
+        {"num_bits": bits, "axis": 0}
+        if bits != "w4a8"
+        else [{"num_bits": 4, "axis": 0}, {"num_bits": (4, 3), "axis": None}]
+    )
+    layer = mtq.quantize(
+        nn.Linear(16, 8, bias=False),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": weight_config},
+                {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 4, "axis": None}},
+            ],
+            "algorithm": "max",
+        },
+        lambda model: model(inputs),
+    )
+    activation_amax = layer.input_quantizer.amax.clone()
+    weight = layer.weight.detach().clone()
+    original = layer(inputs).detach()
+    policy = QuantizationRepairPolicy()
+    groups = policy.prepare(layer, LocalDistillationConfig(mode=mode, weight_lr=0.1))
+    torch.testing.assert_close(layer(inputs), original, rtol=0, atol=0)
+    layer.input_quantizer.disable()
+    unquantized_inputs = layer(inputs).detach()
+    layer.input_quantizer.enable()
+    assert not torch.equal(layer(inputs), unquantized_inputs)
+    optimizer = torch.optim.Adagrad([{"params": group.params, "lr": group.lr} for group in groups])
+    (layer(inputs) - original * 2).square().mean().backward()
+    assert all(parameter.grad is not None for group in groups for parameter in group.params)
+    optimizer.step()
+    policy.project_()
+    expected = layer(inputs).detach()
+    policy.finalize_()
+    torch.testing.assert_close(layer(inputs), expected, rtol=0, atol=0)
+    torch.testing.assert_close(layer.input_quantizer.amax, activation_amax, rtol=0, atol=0)
+    assert not torch.equal(layer.weight, weight)
+
+
+@pytest.mark.parametrize("activation", ["tuned", "dynamic", "tuned_shared"])
+def test_local_repair_activation_policy(activation):
+    import modelopt.torch.quantization as mtq
+    from modelopt.torch.distill import LocalDistillationConfig
+    from modelopt.torch.quantization.repair import QuantizationRepairPolicy
+
+    inputs = torch.randn(4, 16)
+    layer = mtq.quantize(
+        nn.Sequential(nn.Linear(16, 16, bias=False), nn.Linear(16, 8, bias=False))
+        if activation == "tuned_shared"
+        else nn.Linear(16, 8, bias=False),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+                {
+                    "quantizer_name": "*input_quantizer",
+                    "cfg": {
+                        "num_bits": 4,
+                        "axis": None,
+                        "type": "dynamic" if activation == "dynamic" else "static",
+                    },
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda model: model(inputs),
+    )
+    quantizer = layer[0].input_quantizer if activation == "tuned_shared" else layer.input_quantizer
+    if activation == "tuned_shared":
+        layer[1].input_quantizer._amax = quantizer._amax
+    before = {key: value.clone() for key, value in quantizer.state_dict().items()}
+    policy = QuantizationRepairPolicy()
+    groups = policy.prepare(
+        layer,
+        LocalDistillationConfig(
+            tune_activations=activation.startswith("tuned"),
+            activation_lr=0.1,
+        ),
+    )
+    if activation == "tuned_shared":
+        assert (
+            layer[1].input_quantizer._local_repair_state.delta
+            is quantizer._local_repair_state.delta
+        )
+    if activation == "dynamic":
+        torch.testing.assert_close(quantizer(inputs * 3), quantizer(inputs) * 3)
+    optimizer = torch.optim.Adagrad([{"params": group.params, "lr": group.lr} for group in groups])
+    layer(inputs).square().mean().backward()
+    optimizer.step()
+    policy.project_()
+    expected = layer(inputs).detach()
+    policy.finalize_()
+    torch.testing.assert_close(layer(inputs), expected, rtol=0, atol=0)
+    if activation.startswith("tuned"):
+        assert not torch.equal(quantizer.amax, before["_amax"])
+    else:
+        for key, value in quantizer.state_dict().items():
+            torch.testing.assert_close(value, before[key], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("bits", "unsigned", "dtype", "affine", "dynamic"),
+    [
+        (8, False, torch.float32, False, False),
+        (8, False, torch.float16, False, False),
+        (8, False, torch.bfloat16, False, False),
+        (16, True, torch.float32, False, False),
+        (8, False, torch.float32, True, False),
+        (8, False, torch.float32, False, True),
+    ],
+)
+def test_native_scale_repair_preserves_int_codes_and_roundtrip(
+    tmp_path, bits, unsigned, dtype, affine, dynamic
+):
+    import modelopt.torch.opt as mto
+    import modelopt.torch.quantization as mtq
+    from modelopt.torch.distill import LocalDistillationConfig
+    from modelopt.torch.quantization.repair import QuantizationRepairPolicy
+
+    torch.manual_seed(12)
+    layer = nn.Linear(16, 8, bias=False, dtype=dtype)
+    if affine:
+        layer.weight.data.add_(0.5)
+    if unsigned:
+        layer.weight.data.abs_()
+    layer = mtq.quantize(
+        layer,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {
+                        "num_bits": bits,
+                        "unsigned": unsigned,
+                        "axis": 0,
+                        "type": "dynamic" if dynamic else "static",
+                        **({"bias": {-1: None, "type": "static"}} if affine else {}),
+                    },
+                },
+            ],
+            "algorithm": "max",
+        },
+    )
+    inputs = torch.randn(3, 16, dtype=dtype)
+    quantizer = layer.weight_quantizer
+    original = layer(inputs).detach()
+    amax = quantizer._get_amax(layer.weight).float().clone()
+    bound = amax.new_tensor(quantizer.maxbound)
+    bias = quantizer._get_bias(layer.weight)
+    bias = bias.detach().clone() if bias is not None else 0
+    original_codes = torch.round((layer.weight.detach() - bias).float() * (bound / amax))
+    policy = QuantizationRepairPolicy()
+    groups = policy.prepare(layer, LocalDistillationConfig(updates=1))
+    torch.testing.assert_close(layer(inputs), original, rtol=0, atol=0)
+    optimizer = torch.optim.Adagrad([{"params": g.params, "lr": g.lr} for g in groups])
+    layer(inputs).square().mean().backward()
+    assert layer.weight.grad is None
+    assert all(p.grad is not None for g in groups for p in g.params)
+    optimizer.step()
+    policy.project_()
+    changed = layer(inputs).detach()
+    assert not torch.equal(changed, original)
+    policy.finalize_()
+    torch.testing.assert_close(layer(inputs), changed, rtol=0, atol=0)
+    codes = torch.round((layer.weight.detach() - bias).float() * (bound / quantizer.amax.float()))
+    assert torch.equal(codes, original_codes)
+    mto.save(layer, tmp_path / "repaired.pt")
+    restored = mto.restore(nn.Linear(16, 8, bias=False, dtype=dtype), tmp_path / "repaired.pt")
+    torch.testing.assert_close(restored(inputs), changed, rtol=0, atol=0)
+
+
 def _make_int4_static_quantizer():
     tq = TensorQuantizer()
     tq._num_bits = 4

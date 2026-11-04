@@ -241,7 +241,7 @@ __global__ void amax_and_convert_kernel(const T *x, T_y *y, const int64_t n, con
                                         const int actual_cols, const int padded_cols, Types format,
                                         Types scale_format, const float *global_amax = nullptr,
                                         const bool per_channel_scaling = false,
-                                        const int ncols = -1) {
+                                        const int ncols = -1, float *block_scales = nullptr) {
   // map thread -> element
   const uint64_t block_idx = blockIdx.x * blockDim.y + threadIdx.y;
   const int thread_id = threadIdx.x;
@@ -286,6 +286,12 @@ __global__ void amax_and_convert_kernel(const T *x, T_y *y, const int64_t n, con
     cuda::std::tie(scale, unscale) = compute_scale(block_amax, format, scale_format);
   }
 
+  if (block_scales != nullptr && thread_id == 0 && !in_padding) {
+    // Report real blocks, excluding any whole padding block in the launch.
+    const int output_blocks_per_row = (actual_cols + blocksize - 1) / blocksize;
+    block_scales[row * output_blocks_per_row + block_in_row] = unscale;
+  }
+
   // if thread isn't handling a real value, nothing to output.
   if (in_padding)
     return;
@@ -316,7 +322,7 @@ using output_t = std::tuple<at::Tensor, std::optional<at::Tensor>>;
   amax_and_convert_kernel<scalar_t, T, TX, TY>                                                     \
       <<<blocks, block, 0, c10::cuda::getCurrentCUDAStream()>>>(                                   \
           x.data_ptr<scalar_t>(), y.data_ptr<T>(), n, blocksize, actual_cols, padded_cols, format, \
-          scale_format, global_amax_ptr, per_channel_scaling, x.size(-1))
+          scale_format, global_amax_ptr, per_channel_scaling, x.size(-1), block_scales_ptr)
 
 #define DISPATCH_SINGLE_TYPE(T)                                                                    \
   if (blocksize == 8) {                                                                            \
@@ -353,7 +359,8 @@ using output_t = std::tuple<at::Tensor, std::optional<at::Tensor>>;
 int pad_dim_to_blocksize(const int dim, const int bs) { return dim + (bs - (dim % bs)); }
 
 at::Tensor fused_amax_convert(at::Tensor x, const int blocksize, Types format, Types scale_format,
-                              std::optional<at::Tensor> global_amax) {
+                              std::optional<at::Tensor> global_amax,
+                              std::optional<at::Tensor> block_scales = std::nullopt) {
   std::optional<at::Tensor> global_amax_float = std::nullopt;
 
   if (global_amax.has_value()) {
@@ -372,6 +379,16 @@ at::Tensor fused_amax_convert(at::Tensor x, const int blocksize, Types format, T
   const int padded_cols = pad_dim_to_blocksize(actual_cols, blocksize);
   // pad the total size, replace the final dimension with padded one
   n = n / actual_cols * padded_cols;
+
+  float *block_scales_ptr = nullptr;
+  if (block_scales.has_value()) {
+    const auto &scales = *block_scales;
+    TORCH_CHECK(scales.is_cuda() && scales.device() == x.device() &&
+                    scales.scalar_type() == at::kFloat && scales.is_contiguous() &&
+                    scales.numel() == (x.numel() / actual_cols) * ceil_div(actual_cols, blocksize),
+                "block_scales must be contiguous CUDA float32 with one value per block");
+    block_scales_ptr = scales.data_ptr<float>();
+  }
 
   const int blocks_per_cta = 4;
 
@@ -394,7 +411,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_amax_convert", &fused_amax_convert,
         "Compute block amax and quantize the tensor to mx formats", py::arg("inputs"),
         py::arg("block_size"), py::arg("format"), py::arg("scale_format"),
-        py::arg("global_amax") = py::none());
+        py::arg("global_amax") = py::none(), py::arg("block_scales") = py::none());
   m.def("convert_to_exmy", &convert_to_types, "Convert value to exmy format.", py::arg("x"),
         py::arg("format"));
   py::enum_<Types>(m, "Types")

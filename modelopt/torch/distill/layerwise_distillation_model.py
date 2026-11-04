@@ -16,6 +16,8 @@
 """Meta-model wrapper to support layerwise-enabled knowledge-distillation learning."""
 
 import warnings
+from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any
 
 import torch.nn as nn
@@ -117,3 +119,43 @@ def teacher_input_output_capture_fwd_hook(module: nn.Module, input: Any, output:
 
     module._intermediate_input = input
     module._intermediate_output = output
+
+
+@contextmanager
+def local_replay_boundaries(teacher, units, adapter, batch, consume):
+    """Capture exact teacher boundaries and consume each local replay immediately."""
+    handles, pending = [], {}
+
+    def before(unit, module, args, kwargs):
+        saved = adapter.snapshot_inputs(args, kwargs)
+        state = adapter.snapshot_unit_state(unit, module, batch)
+        pending.setdefault(unit.name, []).append((*saved, state))
+
+    def after(unit, module, args, kwargs, output):
+        saved_args, saved_kwargs, state = pending[unit.name].pop()
+        record = adapter.capture(unit, saved_args, saved_kwargs, output, batch)
+        record = replace(record, replay_state=state)
+        consume(unit, record)
+
+    try:
+        for unit in units:
+            module = teacher.get_submodule(unit.teacher_path)
+            handles.append(
+                module.register_forward_pre_hook(
+                    lambda module, args, kwargs, unit=unit: before(unit, module, args, kwargs),
+                    with_kwargs=True,
+                )
+            )
+            handles.append(
+                module.register_forward_hook(
+                    lambda module, args, kwargs, output, unit=unit: after(
+                        unit, module, args, kwargs, output
+                    ),
+                    with_kwargs=True,
+                )
+            )
+        yield
+    finally:
+        for handle in handles:
+            handle.remove()
+        pending.clear()

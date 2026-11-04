@@ -2,6 +2,17 @@
 Distillation
 ============
 
+Local quantization repair
+=========================
+
+For independent output-MSE repair of an existing PTQ model, see
+:ref:`local-quantization-distillation`.
+
+.. toctree::
+   :maxdepth: 1
+
+   local_quantization_distillation
+
 Introduction
 ============
 

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import warnings
 
 import pytest
@@ -21,6 +22,248 @@ from _test_utils.torch.vision_models import get_tiny_mobilenet_and_input
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
+
+
+def test_local_diagnostics_full_vocabulary_and_document_targets():
+    from examples.local_quantization_distillation.evaluate import diagnostic_statistics
+
+    torch.manual_seed(5)
+    teacher = torch.randn(2, 7, 13)
+    candidate = teacher + torch.randn_like(teacher) * 0.3
+    tokens = torch.randint(0, 13, (2, 7))
+    documents = torch.tensor([[1, 1, 1, 2, 2, 2, 0], [1, 1, 2, 2, 2, 0, 0]])
+    labels = tokens.roll(-1, dims=1)
+    labels[:, -1] = -100
+    labels[:, :-1][documents[:, 1:] != documents[:, :-1]] = -100
+    labels[documents == 0] = -100
+    stats = diagnostic_statistics(
+        teacher, candidate, labels, documents > 0, token_chunk=3, vocabulary_chunk=5
+    )
+    valid = documents > 0
+    expected_kl = (
+        torch.nn.functional.kl_div(candidate.log_softmax(-1), teacher.softmax(-1), reduction="none")
+        .sum(-1)[valid]
+        .double()
+        .sum()
+    )
+    expected_nll = torch.nn.functional.cross_entropy(
+        candidate.reshape(-1, 13), labels.reshape(-1), reduction="sum"
+    )
+    torch.testing.assert_close(stats[0], expected_nll.double(), rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(stats[2], expected_kl, rtol=1e-5, atol=1e-6)
+    assert int(stats[3]) == int(valid.sum()) > int(stats[1])
+    identical = diagnostic_statistics(teacher, teacher, labels, valid, token_chunk=3)
+    torch.testing.assert_close(identical[2], torch.zeros_like(identical[2]), atol=1e-6, rtol=0)
+
+    from examples.local_quantization_distillation.evaluate import evaluate_pair
+
+    class SharpModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.scores = torch.nn.Parameter(torch.tensor([-1000.0, 0.0]))
+
+        def forward(self, input_ids):
+            return self.scores.expand(*input_ids.shape, 2)
+
+    sharp = SharpModel()
+    batch = {
+        "input_ids": torch.zeros(1, 3, dtype=torch.long),
+        "labels": torch.zeros(1, 3, dtype=torch.long),
+        "valid_mask": torch.ones(1, 3, dtype=torch.bool),
+    }
+    report = evaluate_pair(sharp, sharp, [batch])
+    assert report["kld_teacher_candidate"] == 0
+    assert report["ppl"] is None and report["teacher_ppl"] is None
+    assert report["mean_cross_entropy"] == 1000
+
+
+def test_local_quantization_zero_updates_preserves_ptq():
+    import modelopt.torch.quantization as mtq
+
+    teacher = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8)).eval()
+    student = mtq.quantize(copy.deepcopy(teacher), mtq.INT8_WEIGHT_ONLY_CFG)
+    example = torch.randn(2, 8)
+    expected = student(example).detach()
+    flags = [parameter.requires_grad for parameter in student.parameters()]
+
+    result = mtd.local_distill(student, teacher, [], {"units": ["0", "1"], "updates": 0})
+
+    assert result.student is student
+    torch.testing.assert_close(result.student(example), expected, rtol=0, atol=0)
+    assert flags == [parameter.requires_grad for parameter in student.parameters()]
+
+
+@pytest.mark.parametrize(
+    "invalid_selection",
+    ["overlap", "shared", "unsupported_backend", "transformed", "missing_teacher"],
+)
+def test_local_quantization_preflight_is_transactional(invalid_selection, monkeypatch):
+    """Invalid repair ownership must leave an existing PTQ model untouched."""
+    import modelopt.torch.quantization as mtq
+
+    teacher = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8)).eval()
+    student = mtq.quantize(copy.deepcopy(teacher), mtq.INT8_WEIGHT_ONLY_CFG)
+    if invalid_selection == "shared":
+        student[1].weight = student[0].weight
+        units = ["0", "1"]
+    elif invalid_selection == "overlap":
+        units = ["", "0"]
+    elif invalid_selection == "transformed":
+        from modelopt.torch.quantization.config import RotateConfig
+
+        student[0].weight_quantizer._rotate = RotateConfig(enable=True, mode="rotate_back")
+        units = ["0", "1"]
+    elif invalid_selection == "missing_teacher":
+        del teacher[1]
+        units = ["0", "1"]
+    else:
+        from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
+            _QUANT_FUNCTIONAL_BACKENDS,
+        )
+
+        monkeypatch.setitem(
+            _QUANT_FUNCTIONAL_BACKENDS, "no_repair_adapter", lambda inputs, _: inputs.square()
+        )
+        student[0].weight_quantizer.backend = "no_repair_adapter"
+        units = ["0", "1"]
+    before = {name: tensor.clone() for name, tensor in student.state_dict().items()}
+    flags = [parameter.requires_grad for parameter in student.parameters()]
+    hooks = [
+        (len(module._forward_hooks), len(module._forward_pre_hooks)) for module in student.modules()
+    ]
+
+    with pytest.raises(ValueError):
+        mtd.local_distill(student, teacher, [torch.randn(8, 8)], {"units": units, "updates": 1})
+
+    assert before.keys() == student.state_dict().keys()
+    for name, tensor in student.state_dict().items():
+        torch.testing.assert_close(tensor, before[name], rtol=0, atol=0)
+    assert flags == [parameter.requires_grad for parameter in student.parameters()]
+    assert hooks == [
+        (len(module._forward_hooks), len(module._forward_pre_hooks)) for module in student.modules()
+    ]
+
+
+@pytest.mark.parametrize("batch_kind", ["dict", "tensor"])
+def test_local_streaming_update_matches_independent_reference(batch_kind):
+    import modelopt.torch.quantization as mtq
+    from modelopt.torch.quantization.repair import QuantizationRepairPolicy
+
+    class TinyHeadModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList([torch.nn.Linear(8, 8), torch.nn.Linear(8, 8)])
+            self.lm_head = torch.nn.Linear(8, 32)
+            self.head_lengths = []
+
+        def forward(self, input, logits_to_keep=0):
+            for layer in self.layers:
+                input = layer(input)
+            hidden = input[:, -logits_to_keep:]
+            self.head_lengths.append(hidden.shape[1])
+            return self.lm_head(hidden)
+
+    torch.manual_seed(8)
+    teacher = TinyHeadModel().eval()
+    student = copy.deepcopy(teacher)
+    with torch.no_grad():
+        for parameter in student.parameters():
+            parameter.mul_(0.9)
+    student = mtq.quantize(student, mtq.INT8_WEIGHT_ONLY_CFG)
+    reference = copy.deepcopy(student)
+    inputs = torch.randn(8, 3, 8)
+    valid = torch.tensor([[True, True, index % 2 == 0] for index in range(8)])
+    if batch_kind == "tensor":
+        valid = torch.ones_like(valid)
+        batch = inputs
+    else:
+        batch = {"input": inputs, "valid_mask": valid, "labels": torch.full((8, 3), -100)}
+    config = mtd.LocalDistillationConfig(
+        units=["layers.0", "layers.1"],
+        updates=1,
+        scheduler="constant",
+        warmup_fraction=0,
+        micro_batch_size=1,
+    )
+    current = inputs
+    for module, target_module in zip(reference.layers, teacher.layers):
+        with torch.no_grad():
+            target = target_module(current)
+        policy = QuantizationRepairPolicy()
+        groups = policy.prepare(module, config)
+        optimizer = torch.optim.Adagrad(
+            [{"params": group.params, "lr": group.lr} for group in groups]
+        )
+        prediction = module(current.detach())
+        (prediction.float() - target.float()).square()[valid].mean().backward()
+        torch.nn.utils.clip_grad_norm_([p for group in groups for p in group.params], 1.0)
+        optimizer.step()
+        policy.project_()
+        policy.finalize_()
+        current = target
+    result = mtd.local_distill(student, teacher, [batch], config, validation_dataloader=[batch])
+    assert teacher.head_lengths and set(teacher.head_lengths) == {1}
+    assert result.student is student
+    torch.testing.assert_close(student(inputs), reference(inputs), rtol=1e-6, atol=1e-7)
+    assert result.metrics["updates"] == 1
+    row = result.metrics["history"][0]["units"]["layers.0"]
+    assert row["valid_tokens"] == int(valid.sum())
+    assert result.metrics["units"]["layers.0"]["validation_mse"] >= 0
+    assert all(parameter.grad is None for parameter in teacher.parameters())
+    assert not any(
+        module._forward_hooks or module._forward_pre_hooks for module in teacher.modules()
+    )
+    assert not any("_local_repair" in name for name, _ in student.named_modules())
+
+
+def test_local_repair_transactional_resume_matches_uninterrupted(tmp_path):
+    import json
+
+    import modelopt.torch.quantization as mtq
+
+    torch.manual_seed(19)
+    teacher = torch.nn.Sequential(torch.nn.Linear(8, 8)).eval()
+    student = mtq.quantize(copy.deepcopy(teacher), mtq.INT8_WEIGHT_ONLY_CFG)
+    reference = copy.deepcopy(student)
+    batches = [torch.randn(8, 8) for _ in range(2)]
+    config = {"units": ["0"], "updates": 2, "scheduler": "constant", "warmup_fraction": 0}
+    expected = mtd.local_distill(reference, teacher, batches, config)
+    directory = tmp_path / "resume"
+    checkpoint_config = {**config, "checkpoint_dir": str(directory), "checkpoint_interval": 1}
+    with pytest.raises(ValueError, match="Repair data exhausted"):
+        mtd.local_distill(student, teacher, batches[:1], checkpoint_config)
+    first = (directory / "latest").read_text().strip()
+    manifest = json.loads((directory / first / "COMMITTED.json").read_text())
+    assert manifest["step"] == 1
+    with pytest.raises(ValueError, match="sample order"):
+        mtd.local_distill(
+            student,
+            teacher,
+            [batches[0] + 1, *batches[1:]],
+            {
+                **checkpoint_config,
+                "resume_from": str(directory),
+            },
+        )
+    result = mtd.local_distill(
+        student,
+        teacher,
+        batches,
+        {
+            **checkpoint_config,
+            "resume_from": str(directory),
+            "output_dir": str(tmp_path / "final"),
+        },
+    )
+    example = torch.randn(2, 8)
+    torch.testing.assert_close(result.student(example), expected.student(example), rtol=0, atol=0)
+    assert result.metrics["updates"] == 2
+    assert not (directory / first).exists()
+    assert len(list(directory.glob("*/COMMITTED.json"))) == 1
+    restored = mto.restore(
+        torch.nn.Sequential(torch.nn.Linear(8, 8)), result.report_paths["checkpoint"]
+    )
+    torch.testing.assert_close(restored(example), result.student(example), rtol=0, atol=0)
 
 
 def get_input_tensor():

@@ -504,31 +504,26 @@ def _get_enclosing_fsdp_module(
         return root_model
 
 
-def _set_parameter(module: nn.Module, name: str, value: nn.Parameter):
-    """Set a parameter on a module by dotted name (e.g. ``self_attn.q_proj.weight``)."""
-    parts = name.rsplit(".", 1)
-    if len(parts) == 2:
-        parent = module.get_submodule(parts[0])
-        attr = parts[1]
-    else:
-        parent = module
-        attr = name
-    parent._parameters[attr] = value
-
-
 @contextmanager
 def _fsdp2_unshard_context(fsdp_module: FSDPModule):
     """Unshard an FSDP2 module without replacing individual DTensor parameters."""
-    fsdp_param_group = fully_shard.state(fsdp_module)._fsdp_param_group
-    was_sharded = fsdp_param_group.is_sharded
-    if was_sharded:
-        fsdp_module.unshard()
+    materialized, seen = [], set()
     try:
+        for unit in fsdp_module.modules():
+            if not isinstance(unit, FSDPModule):
+                continue
+            group = fully_shard.state(unit)._fsdp_param_group
+            if group is None or id(group) in seen:
+                continue
+            seen.add(id(group))
+            if not group.is_unsharded:
+                unit.unshard()
+                materialized.append(unit)
         with _disable_fsdp_unshard_reshard(fsdp_module):
             yield
     finally:
-        if was_sharded:
-            fsdp_module.reshard()
+        for unit in reversed(materialized):
+            unit.reshard()
 
 
 def _fsdp2_param_groups(module: nn.Module):
@@ -541,44 +536,90 @@ def _fsdp2_param_groups(module: nn.Module):
     }.values()
 
 
-# Per FSDP2 unit, the parameters _fsdp2_owned_params found: the weight-access window opens once per
-# quantized module, and a scan walks the unit's whole parameter group.
-_FSDP2_OWNED_PARAMS: "weakref.WeakKeyDictionary[nn.Module, dict[int, weakref.ref]]" = (
-    weakref.WeakKeyDictionary()
-)
+_FSDP2_GROUP_REFS = weakref.WeakKeyDictionary()
 
 
-def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> dict[int, weakref.ref]:
-    """The parameters FSDP2 manages in ``fsdp_module``'s unit and in the units inside it, by id.
-
-    FSDP2 registers a different parameter object in each shard state -- sharded, resharded after the
-    forward, unsharded -- so all of them count, whichever the unit is in. A DTensor parameter outside
-    them is not FSDP2's to gather, whatever its mesh is named: an expert-parallel weight
-    ``fully_shard`` was told to ignore, say. They are kept per unit; ``refresh`` scans again, for a
-    state's parameter FSDP2 has made since. Weak references, checked by :func:`_fsdp2_owns`, keep no
-    parameter alive and let an id a freed parameter left behind match nothing.
-    """
-    owned = None if refresh else _FSDP2_OWNED_PARAMS.get(fsdp_module)
-    if owned is None:
-        owned = {}
-        for group in _fsdp2_param_groups(fsdp_module):
-            for fsdp_param in group.fsdp_params:
-                # The last two exist once their state is first entered.
-                for state_param in (
-                    fsdp_param.sharded_param,
-                    getattr(fsdp_param, "_sharded_post_forward_param", None),
-                    getattr(fsdp_param, "_unsharded_param", None),
-                ):
-                    if state_param is not None:
-                        owned[id(state_param)] = weakref.ref(state_param)
-        _FSDP2_OWNED_PARAMS[fsdp_module] = owned
-    return owned
+def _cached_fsdp2_param_groups(module, refresh=False):
+    """Keep group discovery per owner without retaining groups or gathered weights."""
+    references = _FSDP2_GROUP_REFS.get(module)
+    groups = None if references is None else tuple(reference() for reference in references)
+    if refresh or groups is None or any(group is None for group in groups):
+        groups = tuple(_fsdp2_param_groups(module))
+        _FSDP2_GROUP_REFS[module] = tuple(weakref.ref(group) for group in groups)
+    return groups
 
 
-def _fsdp2_owns(owned: dict[int, weakref.ref], param: nn.Parameter) -> bool:
-    """Whether ``param`` itself, not just an object at its address, is among ``owned``."""
-    ref = owned.get(id(param))
-    return ref is not None and ref() is param
+_NATIVE_FSDP_WEIGHT_WINDOWS = weakref.WeakKeyDictionary()
+
+
+def _parameter_versions(value):
+    local = value._local_tensor if isinstance(value, DTensor) else value
+    return value._version, local._version
+
+
+@contextmanager
+def _native_fsdp_weight_window(module, owner):
+    # Mixed-dtype/EP decoder units have nested groups whose native unsharded
+    # Parameters must exist before their forward hooks can run. Keep those
+    # objects and EP metadata, and write modified local values back to each
+    # group's actual shard before native reshard frees the unsharded storage.
+    groups = _cached_fsdp2_param_groups(owner)
+    with _fsdp2_unshard_context(owner):
+        parameters = {
+            id(parameter.unsharded_param): (
+                parameter.sharded_param,
+                group.mesh_info.mesh,
+                _parameter_versions(parameter.unsharded_param),
+            )
+            for group in groups
+            for parameter in group.fsdp_params
+        }
+        for group in groups:
+            _NATIVE_FSDP_WEIGHT_WINDOWS[group] = True
+        try:
+            yield
+        finally:
+            try:
+                with torch.no_grad():
+                    for value in module.parameters():
+                        record = parameters.get(id(value))
+                        if record is None:
+                            continue
+                        shard, fsdp_mesh, versions = record
+                        local = value.to_local() if isinstance(value, DTensor) else value
+                        axes = shard.device_mesh.mesh_dim_names
+                        placements = list(shard.placements)
+                        dimensions = (
+                            [axes.index(axis) for axis in fsdp_mesh.mesh_dim_names]
+                            if axes is not None and fsdp_mesh.mesh_dim_names is not None
+                            else range(fsdp_mesh.ndim)
+                        )
+                        for dimension in dimensions:
+                            placements[dimension] = Replicate()
+                        full = DTensor.from_local(
+                            local,
+                            shard.device_mesh,
+                            placements,
+                            run_check=False,
+                            shape=shard.shape,
+                            stride=shard.stride(),
+                        )
+                        candidate = full.redistribute(placements=shard.placements).to_local()
+                        storage = shard.to_local()
+                        if (
+                            candidate.dtype != storage.dtype
+                            and _parameter_versions(value) == versions
+                            and torch.equal(candidate, storage.to(candidate.dtype))
+                        ):
+                            # Native unsharding may cast frozen FP32 storage for
+                            # compute. A read-only window must not bake that cast
+                            # into storage. In-place updates retain writeback;
+                            # .data updates are detected by actual shard values.
+                            continue
+                        storage.copy_(candidate)
+            finally:
+                for group in groups:
+                    _NATIVE_FSDP_WEIGHT_WINDOWS.pop(group, None)
 
 
 @contextmanager
@@ -602,78 +643,24 @@ def fsdp2_weight_access_and_writeback_context(
     assert not hasattr(module, "_hf_hook"), "We dont support FSDP2 with HF accelerate hooks"
     fsdp_module = _get_enclosing_fsdp_module(module, root_model, names)
     assert fsdp_module is not None, "Module is not wrapped by FSDP"
+    groups = _cached_fsdp2_param_groups(fsdp_module)
+    if groups and all(group in _NATIVE_FSDP_WEIGHT_WINDOWS for group in groups):
+        yield
+        return
     if not writeback:
         with _fsdp2_unshard_context(fsdp_module):
             yield
         return
+    if groups:
+        # A calibration capture can leave even a single group unsharded. Its
+        # plain Parameters must still write back to the real shard; gathering
+        # only DTensor attributes below would silently lose those updates after
+        # the next reshard (e.g. GPTQ codes would no longer match their source).
+        with _native_fsdp_weight_window(module, fsdp_module):
+            yield
+        return
 
-    fsdp_device_mesh = _get_fsdp2_mesh(fsdp_module)
-    fsdp_dim = fsdp_device_mesh.ndim
-
-    # Collect all DTensor parameters, replacing them with local replicated copies.
-    originals: dict[str, tuple] = {}
-    owned = _fsdp2_owned_params(fsdp_module)
-    refreshed = False
-    for name, param in module.named_parameters():
-        if not isinstance(param, torch.distributed.tensor.DTensor):
-            continue
-        if not _fsdp2_owns(owned, param) and not refreshed:
-            # Once per window: nothing here changes a unit's state, and a DTensor FSDP2 does not own
-            # (every expert-parallel weight) misses each time.
-            owned, refreshed = _fsdp2_owned_params(fsdp_module, refresh=True), True
-        if not _fsdp2_owns(owned, param):
-            # Not FSDP's shard: a DTensor FSDP2 does not manage, such as an expert-parallel weight
-            # that fully_shard was told to ignore. Gathering it would hand every rank every expert,
-            # which its module indexes by local expert.
-            continue
-        original_placements = param.placements
-        original_device_mesh = param.device_mesh
-        if fsdp_dim != original_device_mesh.ndim:
-            assert (
-                fsdp_device_mesh.mesh_dim_names == original_device_mesh.mesh_dim_names[:fsdp_dim]
-            ), "FSDP2 mesh should be a slice of DTensor's device mesh."
-        unsharded_dtensor = param.redistribute(
-            placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
-            device_mesh=original_device_mesh,
-        )
-        unsharded_tensor = unsharded_dtensor.to_local()
-        # cpu_offload: gathered shard is on CPU; mirror to GPU for forward.
-        needs_gpu_copy = unsharded_tensor.device.type == "cpu" and torch.cuda.is_available()
-        gpu_tensor = (
-            unsharded_tensor.to(torch.cuda.current_device()) if needs_gpu_copy else unsharded_tensor
-        )
-        cpu_writeback_tensor = unsharded_tensor if needs_gpu_copy else None
-        originals[name] = (
-            param,
-            unsharded_dtensor,
-            original_placements,
-            original_device_mesh,
-            cpu_writeback_tensor,
-            gpu_tensor,
-        )
-        _set_parameter(module, name, nn.Parameter(gpu_tensor))
-
-    try:
-        yield
-    finally:
-        # Write back and restore original DTensor parameters. Runs on both success
-        # and exception so the module never lingers with the temporary local params.
-        for name, (
-            original_param,
-            unsharded_dtensor,
-            original_placements,
-            original_device_mesh,
-            cpu_writeback_tensor,
-            gpu_tensor,
-        ) in originals.items():
-            if cpu_writeback_tensor is not None:
-                cpu_writeback_tensor.data.copy_(gpu_tensor.data.to(cpu_writeback_tensor.device))
-            original_param.to_local().data.copy_(
-                unsharded_dtensor.redistribute(
-                    placements=original_placements, device_mesh=original_device_mesh
-                ).to_local()
-            )
-            _set_parameter(module, name, original_param)
+    yield
 
 
 @contextmanager
@@ -899,7 +886,7 @@ def _disable_fsdp_unshard_reshard(layer):
     if not isinstance(layer, FSDPModule):  # nothing was gathered for its FSDP submodules
         yield
         return
-    groups = _fsdp2_param_groups(layer)
+    groups = _cached_fsdp2_param_groups(layer)
     # Contexts nest (``persistent_materialization(writeback=False)`` enters this twice), so restore
     # whatever instance attributes were there before instead of deleting them.
     saved = [

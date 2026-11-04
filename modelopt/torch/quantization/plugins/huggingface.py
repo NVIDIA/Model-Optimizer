@@ -437,7 +437,6 @@ def register_hf_attentions_on_the_fly(model):
         return
 
     attention_cls = set()
-    registered_attn_module = False
 
     for name, module in model.named_modules():
         # Only register attention classes that are from Huggingface transformers
@@ -453,13 +452,11 @@ def register_hf_attentions_on_the_fly(model):
                 if _QuantAttention.is_compatible_attention(attention_type):
                     # Lets register the attention class for KV Cache quantization
                     register(attention_type, _QuantAttention)
-                    registered_attn_module = True
                     print(
                         f"Registered {attention_type} to {_QuantAttention.__name__} for KV Cache quantization"
                     )
                 elif _T5QuantAttention.is_compatible_attention(attention_type):
                     register(attention_type, _T5QuantAttention)
-                    registered_attn_module = True
                     print(
                         f"Registered {attention_type} to {_T5QuantAttention.__name__} for KV Cache quantization"
                     )
@@ -469,16 +466,16 @@ def register_hf_attentions_on_the_fly(model):
                         f"Registered {attention_type} to AST based quantized class for KV Cache quantization"
                     )
 
-    # Check if the attention class has been registered
-    # For T5Attention, we want to avoid registering T5LayerCrossAttention and T5LayerSelfAttention.
-    # Hence we check if the attention class has been registered.
-    if registered_attn_module or not attention_cls:
+    if not attention_cls:
         return
 
-    # this is the case for models that do not use the attention interface
-    # Register the attention class for KV Cache quantization
-    success = any(register_attention_for_kv_quant(cls) for cls in attention_cls)
-    if not success:
+    # Register every candidate before reducing the results. Short-circuiting on
+    # one tower can add the other tower only during restore, changing its state.
+    registrations = [
+        register_attention_for_kv_quant(cls)
+        for cls in sorted(attention_cls, key=lambda cls: (cls.__module__, cls.__qualname__))
+    ]
+    if not any(registrations):
         warnings.warn(
             f"Could not create a quantized attention class for  {attention_cls} from this model. "
             "To enable KV Cache quantization, please create a custom quantized attention class for this model and "

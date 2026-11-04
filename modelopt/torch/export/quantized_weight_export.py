@@ -33,6 +33,7 @@ from modelopt.torch.quantization.qtensor import (
     QTensorWrapper,
 )
 from modelopt.torch.quantization.utils import quantizer_attr_names, representative_weight_quantizer
+from modelopt.torch.quantization.utils.native_weight import get_pinned_native_weight
 
 from ..quantization.nn import SequentialQuantizer, TensorQuantizer
 from .convert_hf_config import convert_hf_quant_config_format
@@ -47,6 +48,8 @@ from .quant_format import (
     QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
+    QUANTIZATION_NVFP4_AWQ,
+    QUANTIZATION_NVFP4_SVDQUANT,
     QUANTIZATION_W4A8_MXFP4_FP8,
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_MXFP4,
@@ -76,10 +79,16 @@ __all__ = [
 
 _NVFP4_EXPORT_FORMATS = {
     QUANTIZATION_NVFP4,
+    QUANTIZATION_NVFP4_AWQ,
+    QUANTIZATION_NVFP4_SVDQUANT,
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 }
-_MXFP4_EXPORT_FORMATS = {QUANTIZATION_MXFP4, QUANTIZATION_W4A8_MXFP4_FP8}
+_MXFP4_EXPORT_FORMATS = {
+    QUANTIZATION_MXFP4,
+    QUANTIZATION_W4A8_MXFP4_FP8,
+    QUANTIZATION_W4A16_MXFP4,
+}
 _FUNCTIONAL_WEIGHT_EXPORT_FORMATS = (
     _NVFP4_EXPORT_FORMATS
     | _MXFP4_EXPORT_FORMATS
@@ -360,10 +369,6 @@ def _resolve_quantized_weight_export_inputs(
         raise _UnsupportedQuantizedWeightExportFormatError(
             f"Functional export does not support {quantization_format!r}"
         )
-    if quantization_format == QUANTIZATION_W4A16_MXFP4:
-        raise _UnsupportedQuantizedWeightExportFormatError(
-            "Functional export does not support weight-only MXFP4"
-        )
     if quantization_format == QUANTIZATION_FP8_PB_WO and weight_quantizer.block_sizes != {
         -2: 128,
         -1: 128,
@@ -483,6 +488,43 @@ def capture_quantized_weight_export_state(
                 else get_scaling_factor(input_quantizer)
             )
             tensors.append(_state_tensor("input_scale", input_scale, cpu=cpu))
+
+    native = get_pinned_native_weight(weight_quantizer, weight)
+    if native is not None:
+        if type(native).__name__ == "MXQTensor":
+            raise NotImplementedError(
+                "This deployment exporter has no packed scalar-MX encoding; "
+                "save the native ModelOpt checkpoint for this format."
+            )
+        # Carry authoritative native fields through the existing transport/split
+        # metadata; reconstructing scales from decoded weights can change codes.
+        tensors = [record for record in tensors if record.name == "input_scale"]
+        packing = 2 if type(native).__name__ in ("NVFP4QTensor", "MXFP4QTensor") else 1
+        code_shape = (*packed_shape[:-1], packed_shape[-1] // packing)
+        tensors.append(
+            _state_tensor(
+                "native_weight",
+                native._quantized_data.reshape(code_shape),
+                axes=tuple(range(len(packed_shape))),
+                block_sizes=(1,) * (len(packed_shape) - 1) + (packing,),
+                cpu=cpu,
+            )
+        )
+        scale = weight_quantizer._scale
+        if quantization_format in (QUANTIZATION_FP8, QUANTIZATION_FP8_PC_PT):
+            tensors.append(
+                _state_tensor("weight_scale", scale, cpu=cpu)
+                if scale.numel() == 1
+                else _axis_scale_state(
+                    "weight_scale", scale, packed_shape, weight_quantizer.axis, cpu=cpu
+                )
+            )
+        else:
+            tensors.append(
+                _block_scale_state("weight_scale", scale, packed_shape, block_config, cpu=cpu)
+            )
+        if getattr(weight_quantizer, "_double_scale", None) is not None:
+            tensors.append(_state_tensor("weight_scale_2", weight_quantizer._double_scale, cpu=cpu))
 
     return _QuantizedWeightExportState(
         quantization_format=quantization_format,
@@ -805,7 +847,12 @@ def export_quantized_weight_tensors(
     records = {record.name: record for record in state.tensors}
 
     weight_scale_2 = None
-    if state.static_nvfp4:
+    if "native_weight" in records:
+        quantized_weight = records["native_weight"].value.to(packed_weight.device)
+        weight_scale = records["weight_scale"].value
+        if "weight_scale_2" in records:
+            weight_scale_2 = records["weight_scale_2"].value
+    elif state.static_nvfp4:
         block_amax = records["weight_block_amax"].value
         global_amax = records["weight_global_amax"].value
         quantizer = SimpleNamespace(
@@ -847,7 +894,7 @@ def export_quantized_weight_tensors(
     if weight_scale_2 is not None:
         weight_scale_2 = weight_scale_2.to(packed_weight.device)
 
-    if state.quantization_format not in _MXFP4_EXPORT_FORMATS:
+    if "native_weight" not in records and state.quantization_format not in _MXFP4_EXPORT_FORMATS:
         quantized_weight = to_quantized_weight(
             packed_weight.to(dtype),
             weight_scale,

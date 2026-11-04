@@ -956,6 +956,28 @@ def _mse_calibrate_weights(
     _sync_mla_fused_down_proj_amax(model)
 
 
+def _sync_weight_input_statistic(module, statistic, count, shape):
+    """Sum raw input statistics only among replicas of the same physical weight."""
+    state = getattr(module, "parallel_state", None)
+    group = state.data_parallel_group if state is not None else None
+    if group is None or not group.is_initialized() or group.world_size() == 1:
+        return statistic, count
+    device = (
+        torch.device("cuda", torch.cuda.current_device())
+        if "nccl" in dist.get_backend(group.group)
+        else torch.device("cpu")
+    )
+    value = (
+        torch.zeros(shape, device=device, dtype=torch.float32)
+        if statistic is None
+        else statistic.to(device)
+    )
+    samples = torch.tensor(count, device=device, dtype=torch.int64)
+    dist.all_reduce(value, group=group.group)
+    dist.all_reduce(samples, group=group.group)
+    return value, int(samples.item())
+
+
 class _LocalHessianAccumulator:
     """Per-block local Hessian ``H = ΣXᵀX`` for one weight quantizer.
 
@@ -1065,6 +1087,8 @@ def _warn_local_hessian_fallback(name, weight, weight_quantizer, block_size, war
 
 def _is_quant_fused_experts(module: nn.Module) -> bool:
     """Whether ``module`` is a converted HF fused-MoE-experts wrapper with per-expert quantizers."""
+    if callable(getattr(module, "iter_expert_projections", None)):
+        return True
     first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     return hasattr(module, "_current_expert_idx") and hasattr(
         module, f"{first_proj_attr}_weight_quantizers"
@@ -1079,6 +1103,9 @@ def _fused_expert_projections(module: nn.Module):
     per expert forward with ``module._current_expert_idx`` set to that expert; under grouped_mm
     and torch_a2a once per projection, on a batch sorted by expert (``module._grouped_offs``).
     """
+    if callable(getattr(module, "iter_expert_projections", None)):
+        yield from module.iter_expert_projections()
+        return
     first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     for weight_name, quantizers_name, input_q_name in (
         (
@@ -1162,8 +1189,8 @@ class _WeightInputHook:
     def __init__(self, hook: Callable):
         self.hook = hook
 
-    def __call__(self, module, args):
-        self.hook(module, args)
+    def __call__(self, *args):
+        return self.hook(*args)
 
 
 def _register_weight_input_hooks(model, names, capture, on_weight=None):
@@ -1311,6 +1338,25 @@ def local_hessian_calibrate(
 
     # Hessians keyed by id(weight_quantizer); modules pair weights<->activations via the hook.
     accumulators: dict[int, _LocalHessianAccumulator] = {}
+    statistic_owners = {}
+    for module in names.name_to_module.values():
+        if not isinstance(module, QuantModule):
+            continue
+        with enable_weight_access_and_writeback(module, model, names):
+            for weight, quantizer in module.iter_weights_for_calibration():
+                if (
+                    not isinstance(quantizer, TensorQuantizer)
+                    or not quantizer.is_enabled
+                    or weight.ndim != 2
+                ):
+                    continue
+                accumulators[id(quantizer)] = _LocalHessianAccumulator(
+                    weight.shape[0],
+                    weight.shape[1],
+                    block_size,
+                    getattr(torch, hessian_input_dtype),
+                )
+                statistic_owners[id(quantizer)] = module
 
     def capture(weight_quantizer, weight, input_tensor):
         input_local = input_tensor.to_local() if hasattr(input_tensor, "to_local") else input_tensor
@@ -1343,13 +1389,15 @@ def local_hessian_calibrate(
         for handle in handles:
             handle.remove()
 
-    # TODO(fridah-nv): the per-block Hessian is not synced across TP/DP ranks (max_calibrate's
-    # amax sync runs before this), so refined amaxes can diverge. All-reduce Hessian / re-sync.
-    if dist_is_initialized() and dist_size() > 1:
-        warn_rank_0(
-            "local_hessian: Hessian is not synced across ranks; refined weight amaxes may "
-            "diverge under tensor/data parallelism. Treat local_hessian as single-rank for now."
-        )
+    if distributed_sync:
+        for qid, acc in accumulators.items():
+            if acc.is_enabled:
+                acc.hessian_per_block, acc.num_samples = _sync_weight_input_statistic(
+                    statistic_owners[qid],
+                    acc.hessian_per_block,
+                    acc.num_samples,
+                    (acc.num_blocks_per_cin, block_size, block_size),
+                )
 
     # Phase 3: weight search. Build error_funcs first so build_error_func caches the normalized
     # Hessian (freeing the raw buffer) before normalized_hessian() reuses it; the fast path
@@ -1686,7 +1734,9 @@ def awq_lite(
 
         def __init__(self, module, name):
             self.name = name
-            self.act_scale = 0.0
+            self.act_scale = torch.zeros(
+                module.weight.shape[-1], device=module.weight.device, dtype=torch.float32
+            )
             self.num_cache_steps = 0
             self.num_search_steps = 0
             self.block_size = _get_awq_quantizer_block_size(module.weight, module.weight_quantizer)
@@ -1739,7 +1789,7 @@ def awq_lite(
         return scale
 
     def get_act_scale(x):
-        return x.abs().contiguous().view(-1, x.shape[-1]).mean(0).to(torch.float32)
+        return x.abs().contiguous().view(-1, x.shape[-1]).float().sum(0)
 
     def get_scale(x_max, w_max, alpha, tensor_parallel_group=None):
         scales = x_max.pow(alpha)
@@ -1759,13 +1809,20 @@ def awq_lite(
         out = out[0] if isinstance(out, tuple) else out
         out = out.to_local() if hasattr(out, "to_local") else out
         out_actual = out_actual.to_local() if hasattr(out_actual, "to_local") else out_actual
-        loss = (out - out_actual).float().pow(2).mean()
+        loss = (out - out_actual).float().pow(2).sum()
         self.awq_lite.loss[alpha] += loss.to(self.awq_lite.loss[alpha].device)
 
     def update_best_params(self):
         if not self.awq_lite.is_enabled:
             return
-        self.awq_lite.loss.update({k: float(v) for k, v in self.awq_lite.loss.items()})
+        # Activation statistics are shared over DP above. Select the smoothing
+        # exponent from the shared objective too, before mutating sharded weights.
+        # A per-replica argmin would apply incompatible transforms to one model.
+        losses = torch.stack(list(self.awq_lite.loss.values()))
+        group = self.parallel_state.data_parallel_group
+        if group.is_initialized():
+            dist.all_reduce(losses, op=dist.ReduceOp.SUM, group=group.group)
+        self.awq_lite.loss.update(zip(self.awq_lite.loss, losses.tolist(), strict=True))
         self.awq_lite.best_alpha = min(self.awq_lite.loss, key=self.awq_lite.loss.get)
         self.awq_lite.best_scale = get_scale(
             self.awq_lite.act_scale,
@@ -1798,7 +1855,7 @@ def awq_lite(
 
             self.awq_lite.act_scale += get_act_scale(self.input_quantizer(input))
             self.awq_lite.num_cache_steps += 1
-            self.awq_lite.num_tokens += input.numel() / input.shape[-1]
+            self.awq_lite.num_tokens += input.numel() // input.shape[-1]
             if self.awq_lite.is_input_quantized:
                 with set_quantizer_by_cfg_context(
                     self.input_quantizer, [{"quantizer_name": "*", "enable": True}]
@@ -1853,22 +1910,18 @@ def awq_lite(
         max_calibrate(model, lambda model: None, distributed_sync=True)
     finish_stats_collection(model)
 
-    def sync_act_scale_across_dp(module, data_parallel_group):
-        """Sync activation scale across Data Parallel (DP)."""
-        if data_parallel_group.is_initialized():
-            dist.all_reduce(
-                module.awq_lite.act_scale, op=dist.ReduceOp.AVG, group=data_parallel_group.group
-            )
-
     for name, module in model.named_modules():
-        if (
-            is_quantized_linear(module)
-            and hasattr(module, "awq_lite")
-            and module.awq_lite.num_cache_steps > 0
-        ):
+        if is_quantized_linear(module) and hasattr(module, "awq_lite"):
             # Hack: MoEs forward all tokens through all experts if _if_calib is True
             module._if_calib = True
-            module.awq_lite.act_scale = module.awq_lite.act_scale / module.awq_lite.num_cache_steps
+            helper = module.awq_lite
+            helper.act_scale, helper.num_tokens = _sync_weight_input_statistic(
+                module, helper.act_scale, helper.num_tokens, tuple(helper.act_scale.shape)
+            )
+            if helper.num_tokens == 0:
+                helper.is_enabled = False
+                continue
+            helper.act_scale.div_(helper.num_tokens)
 
             has_nan_local = torch.any(torch.isnan(module.awq_lite.act_scale))
             if use_weight_scale:
@@ -1881,20 +1934,14 @@ def awq_lite(
 
             if has_nan:
                 module.awq_lite.is_enabled = False
-            else:
-                sync_act_scale_across_dp(
-                    module,
-                    module.parallel_state.data_parallel_group,
-                )
 
-    # Disable AWQ search for uncalibrated experts (num_cache_steps == 0) to
-    # prevent get_scale() crash on float act_scale. Max calibration and neutral
-    # pre_quant_scale are applied in the postprocessing loop below.
+    # Experts unobserved across all replicas use max calibration and neutral
+    # pre_quant_scale in the postprocessing loop below.
     for name, module in model.named_modules():
         if (
             is_quantized_linear(module)
             and hasattr(module, "awq_lite")
-            and module.awq_lite.num_cache_steps == 0
+            and module.awq_lite.num_tokens == 0
         ):
             module.awq_lite.is_enabled = False
 
@@ -1932,7 +1979,13 @@ def awq_lite(
         if hasattr(module, "awq_lite"):
             # Flag modules whose search pass missed them despite cache hits, so
             # they fall through to the neutral-scale path below.
-            if module.awq_lite.num_cache_steps > 0 and module.awq_lite.num_search_steps == 0:
+            missed_search = (
+                module.awq_lite.num_cache_steps > 0 and module.awq_lite.num_search_steps == 0
+            )
+            missed_search = DistributedProcessGroup.get_dist_syncd_obj(
+                missed_search, module.parallel_state.data_parallel_group, lambda objs: any(objs)
+            )
+            if missed_search:
                 module.awq_lite.is_enabled = False
                 warnings.warn(
                     "awq_lite: Calling `forward_loop(model)` the second time did not forward"
@@ -2679,7 +2732,9 @@ def gptq(
                     module._weight_input_capture = True
                     expert_handles.update((id(quantizers[i]), h) for i, h in per_expert.items())
                     hooks.append(
-                        input_quantizer.register_forward_hook(_make_expert_hook(module, per_expert))
+                        input_quantizer.register_forward_hook(
+                            _WeightInputHook(_make_expert_hook(module, per_expert))
+                        )
                     )
 
     placement = Counter(
@@ -2792,6 +2847,7 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
         return encoder is not None and encoder.accepts(quantizer)
 
     targets: dict[int, list] = {}  # id(weight quantizer) -> [sum of x^2 per column, token count]
+    statistic_owners = {}
     target_modules = []
     for name, module in names.name_to_module.items():
         if not isinstance(module, QuantModule):
@@ -2800,6 +2856,7 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
         if accepted:
             target_modules.append((name, module))
             targets.update((id(q), [None, 0]) for q in accepted)
+            statistic_owners.update((id(q), module) for q in accepted)
 
     # Refuse a weight the encoder cannot take before any forward or calibration state changes;
     # otherwise it would fail only after calibration, with the earlier weights already encoded.
@@ -2813,14 +2870,30 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
                 except (ValueError, TypeError) as e:
                     raise type(e)(f"imatrix cannot encode a weight of {name}: {e}") from e
 
-    # TODO: sum the statistics across data-parallel ranks, as max_calibrate syncs amax.
-    if targets and dist_is_initialized() and dist_size() > 1:
-        warn_rank_0(
-            "imatrix: statistics are not synced across ranks, so ranks that calibrate on "
-            "different data may encode different codes. Treat imatrix as single-rank for now."
-        )
-
     # The forward below collects what imatrix needs; max only runs one if activations need it.
+    if (
+        targets
+        and dist_is_initialized()
+        and dist_size() > 1
+        and any(
+            not any(
+                group is not None and group.is_initialized()
+                for group in (
+                    getattr(getattr(module, "parallel_state", None), axis, None)
+                    for axis in (
+                        "data_parallel_group",
+                        "tensor_parallel_group",
+                        "expert_model_parallel_group",
+                    )
+                )
+            )
+            for module in statistic_owners.values()
+        )
+    ):
+        warn_rank_0(
+            "imatrix: statistics are not synced across ranks without configured weight-replica "
+            "groups. Configure the model's ParallelState before distributed calibration."
+        )
     max_calibrate(model, forward_loop, skip_forward_without_activation_calib=True)
     if not targets:
         print_rank_0("imatrix: no weight quantizer has an imatrix encoder, skipping")
@@ -2850,6 +2923,9 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
 
     def encode(weight, quantizer):
         sum_sq, count = targets[id(quantizer)]
+        sum_sq, count = _sync_weight_input_statistic(
+            statistic_owners[id(quantizer)], sum_sq, count, (weight.shape[-1],)
+        )
         second_moments = None if count == 0 else sum_sq.to(weight.device) / count
         encoder = _IMATRIX_ENCODER_REGISTRY[quantizer.backend]
         weight.copy_(encoder.encode(weight, quantizer, second_moments))

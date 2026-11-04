@@ -17,9 +17,11 @@ import torch
 from _test_utils.torch.quantization.models import OneLayerLinear
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.distill import LocalDistillationConfig
 from modelopt.torch.quantization.backends.utils import fp4_compatible
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import cutlass_fp4_scale_to_modelopt_fp4_scale
+from modelopt.torch.quantization.repair import QuantizationRepairPolicy
 
 
 @pytest.mark.skipif(not fp4_compatible(), reason="FP4 is not supported on this GPU")
@@ -98,3 +100,13 @@ def test_forward(model, config):
         "Difference between real and compressed real quantization: "
         f"{diff.amax()}, {diff.mean()}, {diff.std()}"
     )
+    policy = QuantizationRepairPolicy()
+    policy.prepare(model, LocalDistillationConfig())
+    for quantizer in model.modules():
+        state = getattr(quantizer, "_local_repair_state", None)
+        if state is not None:
+            with torch.no_grad():
+                state.deltas["double_scale"].fill_(0.6931471805599453)
+    expected_repaired = model(input_tensor).detach()
+    policy.finalize_()
+    torch.testing.assert_close(model(input_tensor), expected_repaired, atol=0.2, rtol=0.05)

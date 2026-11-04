@@ -231,6 +231,15 @@ def cached_fake_quantize(quantizer, inputs: torch.Tensor, source: torch.Tensor) 
     ``source`` is the tensor the quantizer received, from which ``inputs`` was derived (e.g. by
     padding). It keys the entry, so that a derived tensor made afresh on each call still hits.
     """
+    if getattr(quantizer, "_local_repair_active", False):
+        return quantizer._fake_quantize(inputs)
+    if getattr(quantizer, "_native_weight_meta", None):
+        from .native_weight import dequantize_pinned_native, get_pinned_native_weight
+
+        native = get_pinned_native_weight(quantizer, source)
+        if native is not None:
+            value = dequantize_pinned_native(quantizer, native, inputs.dtype).reshape(inputs.shape)
+            return _CachedIdentity.apply(inputs, value)
     session = _ACTIVE.get(quantizer) if _num_open_scopes else None
     if session is None:
         return quantizer._fake_quantize(inputs)
