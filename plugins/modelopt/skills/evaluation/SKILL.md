@@ -14,8 +14,20 @@ Guide the user through creating NEL YAML configs, running evaluations, and monit
 
 For completed runs, skip launch/config; use launching-evals for artifacts/analysis
 and apply [run-validation.md](references/run-validation.md) before scores. Its policy
-overrides blanket uncapping and fixed token/context limits. If validation fails,
-use [recovery.md](references/recovery.md) for bounded recovery and revalidation within the user's authorization.
+overrides blanket uncapping and fixed token/context limits. For Terminal-Bench
+2.1, also apply the [run health screen](recipes/tasks/aa_next/terminal_bench_2_1.md#run-health-screen)
+before `pass@1`. Harvest scores and stderr from the matching task recipe's
+**Score Extraction** section, not ad hoc `results.yml` greps.
+
+## Recovery after failed validation
+
+If validation fails, use [recovery.md](references/recovery.md) to diagnose, repair,
+canary, rerun, and revalidate autonomously without prompting the user. Preserve
+benchmark rules and explicit resource/retry limits; report blockers when recovery
+cannot proceed. For token/context changes, load the task recipe and
+[model-card guidance](references/model-card-research.md#max_new_tokens--mandatory-model-card-lookup);
+for repetitive reasoning, load [doom-loop guidance](references/doom_loops.md).
+Reapply run validation to replacements before scores or comparisons.
 
 ## Workspace integration
 
@@ -143,7 +155,8 @@ Read [Step 8](references/launcher-workflow.md#step-8--run-evaluation-gated-dry-r
 ## Step 9 — Verify completed run
 
 Apply [run-validation.md](references/run-validation.md)'s **Bounded Evaluation-Failure
-Policy** and **Timeout and Output-Limit Accounting** before reporting scores. For
+Policy** and **Timeout and Output-Limit Accounting** before reporting scores.
+If validation fails, follow **Recovery after failed validation** above. For
 comparisons, also apply its **External Baseline Sanity Check**, then use
 `compare-results`.
 
