@@ -36,15 +36,18 @@ single-model run:
 Report the run-validation summary before any score: log scan status, coverage,
 reasoning/answer parsing status, and any errors or warnings found. If an
 independent validation item fails, label the result incomplete or invalid and
-record findings and a recommendation. Validation failure alone is not a retry
-strategy; preserve evidence and identify the cause before resubmission.
+return findings and a recommendation to the parent (or user); do not
+automatically resubmit a completed run.
 
-### Bounded Evaluation-Failure Policy
+For Terminal-Bench 2.1, also complete the [run health screen](../recipes/tasks/aa_next/terminal_bench_2_1.md#run-health-screen)
+and include its evidence and verdict before reporting `pass@1`.
+
+### Bounded Evaluation-Failure Policy (Parent and Evaluator)
 
 Accept complete runs with **<2% failures in each applicable gate**, measured
 before rounding. Warn for nonzero rates; do not abort, invalidate, or retry solely
-for bounded failures. At or above 2%, record findings and withhold a success
-verdict.
+for bounded failures. At or above 2%, return findings to the parent/user without
+automatic retry or a success verdict.
 
 Skip the 2% cutoff in both gates for a canary
 that will be followed by a full evaluation.
@@ -74,8 +77,8 @@ benchmark rules remain blockers. Never select passing repeats or silently regrad
 
 Keep protocol limits fixed, verify prompt/history plus output fits deployed
 context, and report mismatches or unknown reference settings; proposed changes
-must preserve benchmark rules and explicit user constraints. Tolerance does not
-prove negligible score impact or leaderboard comparability.
+need parent/user approval. Tolerance does not prove negligible score impact or
+leaderboard comparability.
 
 Keep score, validation, and MLflow delivery separate. Carry counts, rates, and
 warnings into handoffs. In day0 summaries, accepted diagnostics go in `warnings`;
@@ -92,7 +95,7 @@ percentages, explicit denominators, and artifact paths before the score:
 |---|---|
 | Coverage | Expected trials including repeats; completed/scored, failed/skipped/missing; score denominator and whether failures receive zero or are excluded. |
 | Timeouts | Timed-out / all request attempts; affected unique trials / expected trials; terminal-timeout trials / expected trials. Separate recovered retries and terminal failures by layer: client/proxy, agent/task, judge, sandbox/verifier. |
-| Output limits | Limit-stopped / observed responses; affected unique trials / expected trials. Use termination metadata such as `finish_reason: length` (and `repetition` stops, counted separately); distinguish output caps, context exhaustion, and agent step/total-token limits where possible. |
+| Output limits | Limit-stopped / observed responses; affected unique trials / expected trials. Use termination metadata such as `finish_reason: length` (and [doom-loop](doom_loops.md) `repetition` stops, counted separately); distinguish output caps, context exhaustion, and agent step/total-token limits where possible. |
 | Limits | Effective request/proxy, agent/task, judge/verifier, output-token and context limits, timeout strategy, overrides, concurrency, sharding, and serving setup. |
 
 Deduplicate resumed records by sample/trial/repeat ID; keep request attempts
@@ -169,6 +172,10 @@ reasoning/thinking, reasoning parser or adapter handling, prompt/chat-template
 differences, sampling or token-budget differences, benchmark version or metric,
 incomplete samples, and serving failures. Rerun a corrected baseline, validate
 it, and repeat this check before comparing the candidate.
+
+For score harvesting, use the `Score Extraction` section from the matching task
+reference in `recipes/tasks/<task>.md`. Do not rely on ad hoc `results.yml`
+greps when a task reference defines the canonical score and stderr fields.
 
 For baseline-vs-candidate deltas, use the `compare-results` skill after each run
 passes validation.
