@@ -75,6 +75,11 @@ def _test_speculative_gpt_model(
                 eagle_ttt_steps=3,
             )
 
+        if sequence_parallel and mix_hidden_states_mode == "sparse_replace":
+            with pytest.raises(ValueError):
+                mtsp.convert(model, mtsp_config)
+            return
+
         model = mtsp.convert(model, mtsp_config)
         # The duplicated FC leaves initialization to the training/checkpoint loader.
         torch.nn.init.normal_(
@@ -161,6 +166,8 @@ def _test_speculative_gpt_model(
         ("eagle3", 1, "swiglu", "RMSNorm", None, False),  # GQA
         ("eagle3", 2, "swiglu", "RMSNorm", None, False),  # GQA
         ("eagle3", 1, "swiglu", "RMSNorm", "sparse_replace", False),
+        ("eagle3", 1, "swiglu", "RMSNorm", "sparse_replace", True),
+        ("eagle3", 1, "swiglu", "RMSNorm", None, True),
         ("eagle3", 1, "swiglu", "RMSNorm", "uniform_layer_sample", False),
         ("eagle3", 1, "swiglu", "RMSNorm", "uniform_layer_sample", True),
     ],

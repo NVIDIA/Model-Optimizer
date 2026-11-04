@@ -675,6 +675,18 @@ class _DynamicEagleGPTModel(EagleModel):
         self,
         config,
     ):
+        if (
+            self.config.sequence_parallel
+            and not config.eagle_offline
+            and config.eagle_mix_hidden_states
+            and config.eagle_mix_hidden_states_mode == "sparse_replace"
+        ):
+            raise ValueError(
+                "sparse_replace hidden state mixing does not support sequence parallelism. "
+                "Build the model with sequence_parallel=False or set "
+                "eagle_mix_hidden_states_mode='uniform_layer_sample'."
+            )
+
         if self.config.pipeline_model_parallel_size > 1:
             warnings.warn(
                 "Pipeline parallelism detected! _DynamicEagleGPTModel only supports "
