@@ -770,7 +770,7 @@ print(llm_fp8.generate(["What's the age of the earth? "]))
 vLLM cannot load the GGML checkpoints ModelOpt exports, which are Hugging Face checkpoints holding packed GGML blocks. To serve one on vLLM's integer kernels, expand it into an INT8 weight-only compressed-tensors checkpoint with [convert_ggml_to_int8.py](./convert_ggml_to_int8.py):
 
 ```bash
-python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --recipe general/ptq/iq1_s --export_path <ggml_ckpt_path>
+python hf_ptq.py --model_name_or_path <huggingface_model_card> --recipe general/ptq/iq1_s --export_path <ggml_ckpt_path>
 python convert_ggml_to_int8.py <ggml_ckpt_path> <int8_ckpt_path>
 vllm serve <int8_ckpt_path>
 ```
