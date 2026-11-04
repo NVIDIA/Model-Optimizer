@@ -688,6 +688,7 @@ def test_only_an_expert_parallel_run_calibrates_through_the_distributed_forward_
         dist_state=_dist_state(world_size=2),
         layerwise_export=False,
         specdec_offline_dataset=None,
+        use_fsdp2=not plan.is_expert_parallel,  # only --use_fsdp2 shards the whole model
     )
 
     hf_ptq.mono_quantize(
@@ -751,6 +752,7 @@ def test_an_expert_parallel_run_replants_the_all_to_all_forwards_after_quantizin
         dist_state=_dist_state(world_size=2),
         layerwise_export=False,
         specdec_offline_dataset=None,
+        use_fsdp2=not plan.is_expert_parallel,  # only --use_fsdp2 shards the whole model
     )
 
     hf_ptq.mono_quantize(
