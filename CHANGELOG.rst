@@ -13,7 +13,7 @@ Changelog
 - Add ``use_weight_scale=False`` to ``awq_lite`` and ``awq_full`` calibration for activation-only AWQ scale search. Existing weight-and-activation scaling remains the default.
 - Support text-only Qwen conditional-generation checkpoints in the experimental FSDP2 weight
   AutoQuantize path and preserve their linear-attention fusion groups during mixed-format export.
-- ``--use_fsdp2`` PTQ in ``examples/hf_ptq`` now supports vision-language models with text-only calibration, not only Qwen3.5. Image-text calibration (``--calib_with_images``), models whose forward requires images (such as Nemotron Nano VL) and encoder-decoder models are still rejected.
+- ``--use_fsdp2`` PTQ in ``examples/hf_ptq`` now supports vision-language models, not only Qwen3.5, calibrated on text or, with ``--calib_with_images``, on image-text samples; the vision tower is quantized only if the recipe enables it. A model whose forward requires images needs ``--calib_with_images``, and encoder-decoder models and Nemotron Nano VL are not supported yet.
 - Add experimental data-parallel/FSDP2 KV-cache AutoQuantize, including composed weight-then-KV searches in ``examples/hf_ptq`` with synchronized calibration, scoring, selection, and resumable per-rank checkpoints. FSDP2 recipe scoring uses a global sample budget and defaults to a calibration batch size of 1 per rank.
 - Add imatrix calibration (``algorithm: {method: imatrix}``) for the GGML formats with a weighted search: each weight is encoded once, its search weighted by the square root of its inputs' per-column ``E[x^2]`` (llama.cpp's imatrix statistic), and HF fused-MoE experts get one statistic per expert. A weight that already holds final codes is left alone, so ``[{method: gptq}, {method: imatrix}]`` runs GPTQ where it applies and imatrix on the rest; the built-in IQ1 and IQ2 recipes now do this, and new ``<format>_experts_only`` recipes apply imatrix to the routed MoE experts alone.
 - GPTQ now also quantizes HuggingFace fused MoE experts, each with its own Hessian from the tokens routed to it; they were previously skipped. The built-in IQ1 and IQ2 recipes therefore run GPTQ on the experts too, and large MoEs need layerwise calibration to hold one layer's expert Hessians at a time.
@@ -25,6 +25,8 @@ Changelog
 - Speed up NVFP4 QAT and QAD of Hugging Face fused MoE experts: all experts of a projection are now fake-quantized in one kernel launch instead of one per expert, about 2x faster per MoE layer on Qwen3-30B-A3B with FSDP2.
 - ``hf_ptq.py`` calibrates Qwen3.8 (``qwen4_exp``) without running its QSA indexer's per-query Python loop when every visible key fits the indexer's token budget, with bit-identical results. On Qwen3.8-Flash-Next this saves about two hours of layerwise calibration.
 - Speed up Hugging Face QAT and QAD with ``QATTrainer``, ``QADTrainer`` or ``--manual_gc``: the ``gc.collect()`` run before each training step now skips the model and optimizer state, saving about 1 s per step (30%) on Qwen3-30B-A3B.
+- Add an opt-in no-gather HuggingFace export for FSDP2-sharded models: with ``MODELOPT_FSDP2_EXPORT=nogather``, ``export_hf_checkpoint`` moves each tensor once, to the one rank that writes it, instead of all-gathering each FSDP2 unit on every rank as the default export does. Fused MoE experts stay sharded, each rank writing its own, and a conversion mapping that splits or merges tensors, which the default export refuses, is reversed as a single-process export reverses it.
+- Add expert-parallel PTQ for HuggingFace MoE models to ``examples/hf_ptq/hf_ptq.py``: under ``torchrun``, each rank holds only its share of the routed experts, tokens reach them by all-to-all, and every rank calibrates on its own slice of the data. ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE`` override the automatic choice of expert-parallel degree and of FSDP2-sharding the dense layers, and the quantized checkpoint is written by every rank in parallel without gathering the model.
 
 *Speculative Decoding*
 
@@ -53,6 +55,8 @@ Changelog
 **Backward Breaking Changes**
 
 - ``QDQAutotunerBase.export_onnx(output_path=...)`` now returns ``None`` instead of serialized bytes. Omit ``output_path`` to keep the bytes-returning behavior, which remains subject to protobuf size limits.
+- ``examples/hf_ptq/hf_ptq.py`` launched by ``torchrun`` on more than one rank without ``--use_fsdp2`` now runs one distributed job instead of one independent run per process: an MoE that can shard its experts runs expert-parallel, any other model is replicated with each rank calibrating its own share of the data, and only rank 0 exports a replicated model. Such a launch refuses ``--low_memory_mode``, ``--use_seq_device_map``, ``--offload_folder``, AutoQuantize recipes and, under expert parallelism, ``--vllm_fakequant_export`` and ``--experts_implementation``, and any multi-rank launch now refuses layerwise-export recipes, the TensorRT-LLM checkpoint export and a ``--device`` other than ``cuda``: launch without ``torchrun`` for them.
+- ``examples/hf_ptq/hf_ptq.py --use_fsdp2`` on more than one GPU now refuses calibration that keeps its statistics on each rank, which calibrated the ranks' shards of a weight differently: AWQ-Lite, AWQ-Full, SVDQuant, local Hessian and imatrix, also as an AutoQuantize candidate (run them without ``--use_fsdp2``). It also raises when a calibration batch runs out of GPU memory, instead of retrying it in smaller pieces: set ``--batch_size`` to one that fits.
 - ``export_mcore_gpt_to_hf`` given a Hugging Face Hub model ID no longer writes the tokenizer, processor, generation config or remote-code files. Pass a local directory instead, e.g. from ``modelopt.torch.export.ensure_local_checkpoint``.
 - Drop support for Python 3.10, which has reached end-of-life. ModelOpt now requires Python 3.11 or later.
 - Bump minimum required PyTorch version to 2.10.
@@ -70,6 +74,7 @@ Changelog
 - ``mtq.calibrate`` now raises an error, naming the modules, when a Hugging Face fused-experts forward reaches neither quantizer hook (a hand-written ``bmm`` forward that transformers cannot redirect, say), instead of exporting weight-derived input scales with a warning.
 
 - Layerwise-calibration resume (``checkpoint_dir``) now loads checkpoint files with ``weights_only=True``. A checkpoint directory written by an earlier release whose layer inputs hold objects other than tensors, plain containers or Hugging Face dynamic caches can no longer be resumed; recalibrate in a fresh directory, or disable checkpointing.
+- ``export_hf_checkpoint`` now reads how a model is distributed from the plan recorded on it, and raises for an FSDP2-sharded model, or one in a multi-rank run, that carries none. ``load_pretrained`` and ``examples/hf_ptq/hf_ptq.py --use_fsdp2`` record it; for a model you distribute yourself (``fsdp2_wrap`` and ``parallel_load_and_prepare_fsdp2`` record none), or export from several ranks as a DDP script does, record one with ``modelopt.torch.utils.distributed.set_distribution_plan`` before calibrating or exporting it, e.g. ``DistributionPlan(world_size)`` when every rank holds the whole model.
 
 **Deprecations**
 
@@ -78,6 +83,7 @@ Changelog
 
 **Bug Fixes**
 
+- QAT and QAD of the GGML formats (IQ, ``q8_0``) now re-encode trainable weights after every optimizer step, including under optimizers that write weights through a shared buffer or ``.data`` such as Megatron's distributed optimizer. With those optimizers the GGML codes used to stay those of each job's first forward, so re-run earlier Megatron QAD of these formats.
 - Fix ONNX loading and quantization graph exports failing on individual initializers larger than 2 GiB, while preserving nested scopes and sequence/optional value types.
 - Saving ONNX external weights to another directory no longer removes a same-named weight file from the working directory. Existing external weights remain intact when saving a model loaded without weight data.
 - ONNX autotuner file exports now save external weight data without serializing the full model to bytes first.
