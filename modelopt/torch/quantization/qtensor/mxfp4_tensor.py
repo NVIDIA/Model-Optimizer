@@ -17,7 +17,7 @@
 
 import torch
 
-from ..qtensor.base_qtensor import BaseQuantizedTensor
+from ..qtensor.base_qtensor import BaseQuantizedTensor, _refuse_dtensor
 
 __all__ = ["MXFP4QTensor"]
 
@@ -57,10 +57,12 @@ class MXFP4QTensor(BaseQuantizedTensor):
             # If this behavior is not desired, please modify the code accordingly
             left_side = x[..., 0::2]  # Even indices (0, 2, 4...)
             right_side = x[..., 1::2]  # Odd indices (1, 3, 5...)
-            new_data = right_side.clone() << 4  # Put odd indices (higher addresses) in high bits
+            # Put odd indices (higher addresses) in high bits
+            new_data = torch.bitwise_left_shift(right_side, 4)
             new_data[..., : left_side.shape[-1]] += left_side  # Put even indices in low bits
             return new_data
 
+        _refuse_dtensor(input, cls.__name__)
         if block_size is None:
             block_size = 32
 

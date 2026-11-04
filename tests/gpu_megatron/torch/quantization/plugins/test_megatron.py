@@ -119,15 +119,6 @@ except ImportError:
 
 SEED = 1234
 
-# TODO: re-enable the marked tests once fixed. Blackwell (sm_120, e.g. RTX PRO 6000) with the
-# nemo:26.06 / TE 2.16 / CUDA 13 stack hits a flaky, intermittent CUDA "illegal memory access" in
-# several tests: When fails, it poisons the process CUDA context and cascades hang across subsequent tests.
-# Passes locally on different GPUs. Likely an upstream TE/CUDA-13 kernel bug, not modelopt logic.
-skip_flaky_on_blackwell = pytest.mark.skipif(
-    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12,
-    reason="Flaky CUDA illegal memory access on Blackwell (nemo:26.06 / TE 2.16 / CUDA 13)",
-)
-
 
 def test_convert_megatron_parallel_linear(distributed_setup_size_1):
     initialize_for_megatron(seed=SEED)
@@ -353,6 +344,8 @@ def _gpt_model_provider(
                 use_cpu_initialization=meta_device,
                 num_moe_experts=num_moe_experts,
                 moe_grouped_gemm=moe_grouped_gemm,
+                # MoE with TP requires sequence parallelism
+                sequence_parallel=tp_size > 1 and num_moe_experts is not None,
             )
 
     if not meta_device:
@@ -497,7 +490,6 @@ FP8_GEMM_KV_CFG["quant_cfg"].extend(mtq.FP8_KV_CFG["quant_cfg"])
 )
 @pytest.mark.parametrize("meta_device", [False, True])
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
-@skip_flaky_on_blackwell
 def test_homogeneous_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -523,9 +515,6 @@ def test_homogeneous_sharded_state_dict(
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
 @pytest.mark.timeout(240)
 # Compressed state dict takes longer due to real quant conversion & saving/loading
-# Its real mtq.compress() path exercises the same TE/CUDA-13 kernels that trip the flaky
-# Blackwell (sm_120) illegal-memory-access; #1901 skipped the fake-quant sibling but missed this one.
-@skip_flaky_on_blackwell
 def test_homogeneous_compressed_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -607,20 +596,13 @@ def test_homogeneous_sharded_state_dict_hybrid(dist_workers, tmp_path, config):
         mixed_block_size_config,
     ],
 )
-@skip_flaky_on_blackwell
 def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     dist_workers.run(
         partial(_test_sharded_state_dict, tmp_path, config, 256, None, False, False, {}),
     )
 
 
-@pytest.mark.parametrize(
-    "hidden_size",
-    [
-        256,
-        pytest.param(320, marks=skip_flaky_on_blackwell),
-    ],
-)
+@pytest.mark.parametrize("hidden_size", [256, 320])
 def test_regular_state_dict(distributed_setup_size_1, hidden_size):
     initialize_for_megatron(tensor_model_parallel_size=1, pipeline_model_parallel_size=1, seed=SEED)
 
@@ -2646,3 +2628,92 @@ class TestKeepGptOutputLayerExtraState:
     )
     def test_extra_state_has_data(self, entry, expected):
         assert _output_layer_extra_state_has_data(entry) is expected
+
+
+@pytest.mark.parametrize(
+    "quant_cfg", ["FP8_DEFAULT_CFG", "NVFP4_DEFAULT_CFG", "NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG"]
+)
+def test_mla_fused_down_projections_share_ranges(distributed_setup_size_1, quant_cfg):
+    """vLLM and TRT-LLM fuse MLA's q_down and kv_down into one GEMM with one scale per tensor."""
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    try:
+        model = get_mcore_gpt_model(
+            hidden_size=128,
+            num_attention_heads=2,
+            vocab_size=128,
+            max_sequence_length=32,
+            transformer_impl="transformer_engine",
+            multi_latent_attention=True,
+        ).cuda()
+        attentions = [layer.self_attention for layer in model.decoder.layers]
+        with torch.no_grad():  # give the two weights different ranges
+            for attention in attentions:
+                attention.linear_kv_down_proj.weight.mul_(4)
+
+        model = mtq.quantize(model, copy.deepcopy(getattr(mtq, quant_cfg)), get_forward(model))
+
+        for attention in attentions:
+            q_down, kv_down = attention.linear_q_down_proj, attention.linear_kv_down_proj
+            assert torch.equal(q_down.input_quantizer.amax, kv_down.input_quantizer.amax)
+            if q_down.weight_quantizer.is_nvfp4_static:
+                assert torch.equal(
+                    q_down.weight_quantizer.global_amax, kv_down.weight_quantizer.global_amax
+                )
+            else:
+                assert torch.equal(q_down.weight_quantizer.amax, kv_down.weight_quantizer.amax)
+    finally:
+        destroy_model_parallel()  # not a spawned process
+
+
+def _test_te_linear_range_sync_helper(tensor_model_parallel_size, rank, size):
+    from megatron.core.extensions.transformer_engine import TELinear
+
+    pipeline_model_parallel_size = size // tensor_model_parallel_size
+    initialize_for_megatron(
+        tensor_model_parallel_size=tensor_model_parallel_size,
+        pipeline_model_parallel_size=pipeline_model_parallel_size,
+        seed=SEED,
+    )
+    config = TransformerConfig(
+        num_layers=pipeline_model_parallel_size,
+        hidden_size=64,
+        num_attention_heads=4,
+        use_cpu_initialization=True,
+    )
+    # A duplicated TELinear, like MLA's down-projections, on every rank; each rank's weight and
+    # input (e.g. a sequence-parallel shard) has its own range.
+    model = torch.nn.ModuleDict(
+        {
+            "linear": TELinear(
+                64,
+                64,
+                parallel_mode="duplicated",
+                config=config,
+                init_method=torch.nn.init.normal_,
+                bias=False,
+                skip_bias_add=False,
+                skip_weight_param_allocation=False,
+            )
+        }
+    ).cuda()
+    with torch.no_grad():
+        model["linear"].weight.mul_(rank + 1)
+    x = torch.randn(8, 2, 64, device="cuda") * (rank + 1)
+    expected = torch.stack([x.abs().amax(), model["linear"].weight.abs().amax()]).float()
+
+    mtq.quantize(model, copy.deepcopy(mtq.FP8_DEFAULT_CFG), lambda m: m["linear"](x))
+
+    # Replicas share their ranges over tensor parallelism; pipeline stages keep their own.
+    if tensor_model_parallel_size > 1:
+        torch.distributed.all_reduce(expected, op=torch.distributed.ReduceOp.MAX)
+    linear = model["linear"]
+    assert torch.equal(linear.input_quantizer.amax.float(), expected[0])
+    assert torch.equal(linear.weight_quantizer.amax.float(), expected[1])
+
+
+@pytest.mark.parametrize("tensor_model_parallel_size", [1, 2])
+def test_te_linear_ranges_sync_within_pipeline_stage(
+    dist_workers_size_2, tensor_model_parallel_size
+):
+    """Megatron-Core TELinear syncs ranges over its TP / DP replicas, not across pipeline stages."""
+    dist_workers_size_2.run(partial(_test_te_linear_range_sync_helper, tensor_model_parallel_size))

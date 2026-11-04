@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/ubuntu-setup
       - name: Build docs
         run: pip install nox uv && nox -s docs
@@ -73,7 +73,7 @@ jobs:
     concurrency:
       group: pr-preview-${{ github.event.pull_request.number }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Download docs artifact
         if: github.event.action != 'closed'
         uses: actions/download-artifact@v8
@@ -92,7 +92,7 @@ jobs:
     permissions:
       contents: write # push to gh-pages branch
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Download docs artifact
         uses: actions/download-artifact@v8
         with:

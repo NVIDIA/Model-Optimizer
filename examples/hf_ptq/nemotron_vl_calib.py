@@ -25,8 +25,6 @@ Instead, we run a "safe multimodal forward" that exercises:
 - Language model forward pass (to trigger quantizer calibration)
 """
 
-from __future__ import annotations
-
 import contextlib
 import inspect
 from typing import Any

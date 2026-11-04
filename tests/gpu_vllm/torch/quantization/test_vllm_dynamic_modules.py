@@ -26,8 +26,6 @@ Architectures: TinyLlama (Linear + Attention), TinyQwen3MoE (+ FusedMoE),
 TinyDeepseekV3 (+ MLAAttention).
 """
 
-from __future__ import annotations
-
 import copy
 import functools
 import gc

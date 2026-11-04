@@ -115,7 +115,7 @@ Note: Model Optimizer currently exports quantized checkpoints in formats other t
 <details>
 <summary><strong>Deployment on TensorRT-LLM</strong></summary>
 
-To setup TensorRT-LLM, follow the official guide: [Deploying GPT-OSS on TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/blogs/tech_blog/blog9_Deploying_GPT_OSS_on_TRTLLM.md)
+To setup TensorRT-LLM, follow the official guide: [Deploying GPT-OSS on TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/blogs/tech_blog/blog09_Deploying_GPT_OSS_on_TRTLLM.md)
 Once installed, launch an OpenAI-compatible endpoint using:
 
 ```bash

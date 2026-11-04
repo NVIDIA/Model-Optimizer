@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import fnmatch
 import json
+import os
+import re
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
@@ -26,11 +29,13 @@ import transformers
 from _test_utils.torch.export.unified_checkpoint import (
     assert_exported_checkpoint_matches,
     assert_per_expert_experts_complete,
+    load_safetensors_dir,
 )
 from _test_utils.torch.megatron.models import get_mcore_gpt_model, get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import get_forward
 from _test_utils.torch.transformers_models import (
     create_tiny_deepseek_v3_dir,
+    create_tiny_glm5_next_dir,
     create_tiny_llama_dir,
     create_tiny_nemotron_dir,
     create_tiny_nemotron_h_dir,
@@ -46,15 +51,27 @@ import modelopt.torch.export.unified_export_megatron as uem
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.ggml as ggml
 import modelopt.torch.speculative as mtsp
+from modelopt.recipe import load_recipe
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
 from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
 from modelopt.torch.export.quant_format import GGML_FORMATS
+from modelopt.torch.export.quantized_weight_export import (
+    build_hf_quantization_config,
+    capture_kv_cache_export_state,
+    get_kv_cache_export_spec,
+)
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config
 from modelopt.torch.speculative.plugins.megatron_eagle import _DynamicEagleGPTModel
 from modelopt.torch.speculative.plugins.megatron_medusa import _DynamicMedusaGPTModel
+from modelopt.torch.utils.plugins.mbridge import (
+    get_language_model,
+    load_mbridge_model_from_hf,
+    use_moe_grouped_gemm,
+)
+from modelopt.torch.utils.plugins.megatron_generate import megatron_prefill
 
 
 def _verify_model_quant_config(
@@ -501,6 +518,27 @@ def _verify_exported_metadata(export_dir: Path, model_type, quant_config, extra_
         assert generation_config["top_p"] == 0.5
 
 
+def _verify_functional_kv_cache_export(model, export_dir: Path):
+    """The functional KV-cache export writes the same scales and config as this exporter."""
+    attentions = [m for m in model.modules() if hasattr(m, "k_bmm_quantizer")]
+    states = [capture_kv_cache_export_state(attention) for attention in attentions]
+    assert states and None not in states
+    exported = load_safetensors_dir(export_dir)
+    for kind in ("k_scale", "v_scale"):
+        names = sorted(
+            (name for name in exported if name.endswith(kind)),
+            key=lambda name: int(re.search(r"layers\.(\d+)\.", name).group(1)),
+        )
+        assert len(names) == len(states)
+        for name, state in zip(names, states):
+            torch.testing.assert_close(exported[name], getattr(state, kind).to(exported[name]))
+    config = build_hf_quantization_config({}, [get_kv_cache_export_spec(a) for a in attentions])
+    quantization_config = json.loads((export_dir / "config.json").read_text())[
+        "quantization_config"
+    ]
+    assert config["kv_cache_scheme"] == quantization_config["kv_cache_scheme"]
+
+
 def _test_unified_export_megatron(
     tmp_path,
     model_type,
@@ -661,6 +699,8 @@ def _test_unified_export_megatron(
 
     if quant_config:
         _verify_model_quant_config(tmp_export_dir, quant_config, kv_cache_quant_cfg)
+    if kv_cache_quant_cfg and rank == 0:
+        _verify_functional_kv_cache_export(model, tmp_export_dir)
 
     if rank == 0:
         _verify_exported_metadata(tmp_export_dir, model_type, quant_config, extra_module)
@@ -1143,28 +1183,76 @@ def test_mtp_state_dict_index_file(tmp_path):
     assert "mtp*" in exporter.exclude_modules
 
 
-def _test_live_decoder_mtp_export_rejected(model_dir, rank, size):
-    model = get_mcore_gpt_model(
-        tensor_model_parallel_size=size,
-        pipeline_model_parallel_size=1,
-        initialize_megatron=True,
-        num_layers=2,
-        hidden_size=64,
-        num_attention_heads=4,
-        vocab_size=128,
-        max_sequence_length=32,
-        mtp_num_layers=1,
-    ).cuda()
-    with pytest.raises(NotImplementedError, match="Megatron-built MTP"):
-        GPTModelExporter(model, str(model_dir))
+def _test_glm5_next_export(source, export_dir, rank, size):
+    # Models in a reused worker pick their attention backend through process-wide variables,
+    # so start without them and don't leak this model's choice to later tests.
+    with patch.dict(os.environ):
+        for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+            os.environ.pop(name, None)
+        _, _, _, unwrapped, _ = load_mbridge_model_from_hf(
+            hf_model_name_or_path=str(source),
+            provider_overrides={
+                "expert_model_parallel_size": size,
+                "pipeline_dtype": torch.bfloat16,
+            },
+            moe_grouped_gemm=use_moe_grouped_gemm(str(source)),
+        )
+        language_model, _ = get_language_model(unwrapped)
+        config = load_recipe(
+            "models/zai-org/GLM-5.3-Flash-BF16/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast"
+        ).quantize.model_dump()
+        input_ids = torch.randint(0, language_model.vocab_size, (2, 16), device="cuda")
+        mtq.quantize(unwrapped, config, lambda m: megatron_prefill(language_model, input_ids))
+        export_mcore_gpt_to_hf(
+            unwrapped, str(source), dtype=torch.bfloat16, export_dir=str(export_dir)
+        )
+
+        # A quantized split e_proj / h_proj can't be folded into a BF16 eh_proj, even input-only.
+        language_model.mtp.layers[0].e_proj.input_quantizer.enable()
+        refused_dir = export_dir.with_name("refused")
+        with pytest.raises(NotImplementedError, match="quantized MTP e_proj / h_proj"):
+            export_mcore_gpt_to_hf(
+                unwrapped, str(source), dtype=torch.bfloat16, export_dir=str(refused_dir)
+            )
+        assert not list(refused_dir.glob("*.safetensors"))
 
 
-def test_live_decoder_mtp_export_rejected(dist_workers_size_1, tmp_path):
-    """GLM-5 MTP is only copied from the source; a Megatron-built one must not export misnamed."""
-    transformers.GlmMoeDsaConfig(
-        num_hidden_layers=2, architectures=["GlmMoeDsaForCausalLM"]
-    ).save_pretrained(tmp_path)
-    dist_workers_size_1.run(partial(_test_live_decoder_mtp_export_rejected, tmp_path))
+def test_glm5_next_export_matches_source(dist_workers, tmp_path):
+    """GLM-5.3-Flash (mHC, KDA, KPool DSA indexer, MTP, VLM) exports to its source's names and values."""
+    pytest.importorskip("transformers.models.glm5_next", reason="needs transformers>=5.16.1")
+    source = create_tiny_glm5_next_dir(tmp_path, with_tokenizer=True)
+    dist_workers.run(partial(_test_glm5_next_export, source, tmp_path / "export"))
+    assert_exported_checkpoint_matches(tmp_path / "export", source)
+    exported = load_safetensors_dir(tmp_path / "export")
+
+    # NVFP4 on the dense MLP (HF layer 0) and routed experts; shared experts and MTP stay BF16.
+    quantized = {
+        re.sub(r"\.experts\.\d+\.", ".experts.N.", name.removesuffix(".weight_scale"))
+        for name in exported
+        if name.endswith(".weight_scale")
+    }
+    assert quantized == {
+        f"model.language_model.layers.{mlp}{proj}"
+        for mlp in ("0.mlp.", "1.mlp.experts.N.")
+        for proj in ("gate_proj", "up_proj", "down_proj")
+    }
+    # The quantization config must exclude every BF16 linear of the MTP layer, eh_proj included.
+    # Like vLLM, an entry also covers the modules under it (a fused MLP's gate_proj / up_proj).
+    ignore = json.loads((tmp_path / "export" / "config.json").read_text())["quantization_config"]
+    ignore = ignore["ignore"]
+    mtp_linears = {
+        name.removesuffix(".weight")
+        for name, tensor in exported.items()
+        if name.startswith("model.language_model.layers.2.")
+        and name.endswith(".weight")
+        and tensor.dim() == 2
+    }
+    assert "model.language_model.layers.2.eh_proj" in mtp_linears
+    assert {
+        n
+        for n in mtp_linears
+        if not any(n.startswith(p + ".") or fnmatch.fnmatch(n, p) for p in ignore)
+    } == set()
 
 
 def test_mtp_state_dict_copies_decoder_mtp_layers(tmp_path):
@@ -1188,6 +1276,8 @@ def test_mtp_state_dict_copies_decoder_mtp_layers(tmp_path):
     exporter._src_num_hidden_layers = 2
     exporter._hf_text_config = SimpleNamespace(num_hidden_layers=1, num_nextn_predict_layers=1)
 
+    # Non-writer ranks skip the copy.
+    assert exporter._get_mtp_state_dict(copy_from_pretrained=False) == {}
     mtp_state_dict = exporter._get_mtp_state_dict()
 
     assert sorted(mtp_state_dict) == [

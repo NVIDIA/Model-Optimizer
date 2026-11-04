@@ -15,14 +15,12 @@
 
 """Shared primitives for streaming checkpoint casts and export."""
 
-from __future__ import annotations
-
 import errno
 import os
 import shutil
 from collections import defaultdict
+from collections.abc import Callable, Collection
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import torch
 
@@ -37,9 +35,6 @@ from modelopt.torch.quantization.utils.numeric_utils import (
     mxfp4_to_nvfp4_per_block_amax,
 )
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import resolve_checkpoint_file
-
-if TYPE_CHECKING:
-    from collections.abc import Callable, Collection
 
 __all__ = [
     "build_w13_amax_overrides",

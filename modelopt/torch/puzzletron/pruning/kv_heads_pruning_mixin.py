@@ -23,13 +23,9 @@ from modelopt.torch.prune.importance_hooks.base_hooks import (
     IndependentKvHeadContributionHook,
 )
 
+from ..utils.misc import get_attention_head_dim
 from .pruning_mixin import LayerDescriptor, PruningMixIn
-from .pruning_utils import (
-    GQAInitMode,
-    _init_attention_biases,
-    _init_attention_weights,
-    _lm_head_dim,
-)
+from .pruning_utils import GQAInitMode, _init_attention_biases, _init_attention_weights
 
 __all__ = [
     "KVHeadsLayerDescriptor",
@@ -80,7 +76,7 @@ class KVHeadsPruningMixIn(PruningMixIn):
             f"{attn_prefix}.{proj_name}" for proj_name in self.layer_descriptor.qkvo_weight_names
         ]
 
-        head_size = _lm_head_dim(new_config, descriptor)
+        head_size = get_attention_head_dim(descriptor.get_language_model_config(new_config))
         for part in ["weight", "bias"]:
             attn_keys = [f"{name}.{part}" for name in [q_name, k_name, v_name, o_name]]
             q_key, k_key, v_key, o_key = attn_keys

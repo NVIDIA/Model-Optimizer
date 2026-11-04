@@ -31,11 +31,23 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+     <article class="announcement-card" data-date="2026-10-28" data-title="GLM-5.3-Flash at 2-3 Bits per Expert Weight: IQ2_S PTQ Recipes and QAD" data-summary="IQ2_S routed experts with layerwise GPTQ on GLM-5.3-Flash: NVFP4 down projections reach FP8 accuracy without training, and QAD recovers AA-LCR and cuts runaway generations." data-tags="quantization ggml nvfp4 qad megatron-bridge">
+       <div class="announcement-card-meta">October 28, 2026 &middot; Model Optimizer Team</div>
+       <h2><a href="announcements/20261028-glm53-flash-iq2.html">GLM-5.3-Flash at 2-3 Bits per Expert Weight: IQ2_S PTQ Recipes and QAD</a></h2>
+       <p>IQ2_S experts with NVFP4 down projections match the FP8 checkpoint without training; QAD on the all-IQ2_S model recovers AA-LCR and cuts runaway generations.</p>
+       <div class="announcement-card-tags"><span>quantization</span><span>ggml</span><span>nvfp4</span><span>qad</span><span>megatron-bridge</span></div>
+     </article>
      <article class="announcement-card" data-date="2026-10-08" data-title="AutoQuant KV: Automatic Mixed-Precision KV Cache Quantization" data-summary="Learn how AutoQuant selects per-layer KV formats under a storage budget and combines with GEMM quantization, with Qwen3-8B as a case study." data-tags="autoquantize kv-cache quantization mixed-precision modelopt">
        <div class="announcement-card-meta">October 8, 2026 &middot; Model Optimizer Team</div>
        <h2><a href="announcements/20261008-autoquant-kv.html">AutoQuant KV: Automatic Mixed-Precision KV Cache Quantization</a></h2>
        <p>Learn how AutoQuant selects per-layer KV formats under a storage budget and combines with GEMM quantization, with Qwen3-8B as a case study.</p>
        <div class="announcement-card-tags"><span>autoquantize</span><span>kv-cache</span><span>quantization</span><span>mixed-precision</span><span>modelopt</span></div>
+     </article>
+     <article class="announcement-card" data-date="2026-09-28" data-title="Saturation-Aware AutoQuantize: Pricing Mixed-Precision Configurations with Aumann–Shapley Attributions" data-summary="A coverage model of quantization damage, fitted from Aumann–Shapley path gradients, prices mixed-precision configurations with saturation and cuts KL by up to 37% at matched effective bits." data-tags="autoquantize quantization mixed-precision modelopt">
+       <div class="announcement-card-meta">September 28, 2026 &middot; Joshua Hill (Baseten Labs, Inc.)</div>
+       <h2><a href="announcements/20260928-saturation-aware-autoquantize.html">Saturation-Aware AutoQuantize: Pricing Mixed-Precision Configurations with Aumann–Shapley Attributions</a></h2>
+       <p>Summing per-layer sensitivities overprices aggressive configurations because quantization damage saturates. A coverage model fitted from Aumann–Shapley path gradients prices them correctly and cuts KL by up to 37% at matched effective bits.</p>
+       <div class="announcement-card-tags"><span>autoquantize</span><span>quantization</span><span>mixed-precision</span><span>modelopt</span></div>
      </article>
      <article class="announcement-card" data-date="2026-09-28" data-title="Quantizing a 4.9 TB Qwen3.8 Model on a Single GPU" data-summary="Layerwise calibration and per-layer shard export drop the memory floor for PTQ from one model to one layer: a 4.9 TB Qwen3.8 checkpoint quantized on a single GB300." data-tags="quantization nvfp4 layerwise moe single-gpu modelopt">
        <div class="announcement-card-meta">September 28, 2026 &middot; Model Optimizer Team</div>

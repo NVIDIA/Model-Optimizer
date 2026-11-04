@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import contextlib
 import os
 import random
 import time
@@ -25,10 +26,9 @@ import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
 from autoquant_utils import (
-    _FSDP2_KV_AUTOQUANT_ERROR,
+    _get_autoquant_memory_probe,
     _quantize_config_explicitly_enables_kv,
     _recipe_is_auto_quantize,
-    _recipe_is_kv_auto_quantize,
     auto_quantize,
 )
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
@@ -88,6 +88,7 @@ from modelopt.torch.models.hf import prepare_model_for_calibration
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
+from modelopt.torch.quantization.utils.layerwise_calib import get_max_layerwise_batch_size
 from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
@@ -99,6 +100,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
+from modelopt.torch.utils.fsdp2_utils import fsdp2_root_unsharded
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.mlflow import add_mlflow_args, resolve_mlflow_args
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
@@ -113,6 +115,14 @@ from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloa
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
+# Most tokens per calibration batch when layerwise calibration picks the batch size (64 x 512).
+LAYERWISE_CALIB_TOKENS = 32768
+
+
+def _layerwise_calib_batch_size(calib_seq: int, num_samples: int) -> int:
+    """Largest default layerwise batch: LAYERWISE_CALIB_TOKENS tokens, but 1 to all of the samples."""
+    return max(1, min(LAYERWISE_CALIB_TOKENS // calib_seq, num_samples))
+
 
 mto.enable_huggingface_checkpointing()
 
@@ -149,6 +159,15 @@ def extract_and_prepare_language_model_from_vl(
         return language_model
 
     return None
+
+
+def fsdp2_call_context(full_model: torch.nn.Module, model: torch.nn.Module):
+    """Context for calling ``model``, the quantization target, of a possibly FSDP2 ``full_model``.
+
+    Plain PTQ calibrates the extracted language model directly, which skips the FSDP2 root's
+    pre-forward; the root's own parameters (e.g. the embeddings) are gathered around the call.
+    """
+    return contextlib.nullcontext() if model is full_model else fsdp2_root_unsharded(full_model)
 
 
 class _DeviceDataLoader:
@@ -311,12 +330,15 @@ def _validate_recipe_calibration(args: argparse.Namespace, recipe) -> None:
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
-    if args.use_fsdp2 and _recipe_is_kv_auto_quantize(args.recipe):
-        raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
     if args.use_fsdp2:
         hf_config = AutoConfig.from_pretrained(
             args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
         )
+        if args.experts_implementation is not None:
+            # Set on the config, as build_meta_causal_lm sets a pre-fetched config's
+            # attn_implementation: the meta model is built from it, with no kwarg of its own. The
+            # setter carries it to the sub-configs, such as the text config a VLM's experts read.
+            hf_config._experts_implementation = args.experts_implementation
         validate_fsdp2_supported(args, hf_config)
         full_model = parallel_load_and_prepare_fsdp2(
             args.local_checkpoint_path,
@@ -336,6 +358,7 @@ def load_model(args: argparse.Namespace):
             trust_remote_code=args.trust_remote_code,
             use_seq_device_map=args.use_seq_device_map,
             attn_implementation=args.attn_implementation,
+            experts_implementation=args.experts_implementation,
             offload_folder=args.offload_folder,
             max_cpu_memory_gb=args.max_cpu_memory_gb,
             max_gpu_memory_gb=args.max_gpu_memory_gb,
@@ -361,6 +384,8 @@ def load_model(args: argparse.Namespace):
             model_kwargs = {"trust_remote_code": args.trust_remote_code}
             if args.attn_implementation is not None:
                 model_kwargs["attn_implementation"] = args.attn_implementation
+            if args.experts_implementation is not None:
+                model_kwargs["experts_implementation"] = args.experts_implementation
             full_model = load_pretrained(
                 args.local_checkpoint_path,
                 AutoModelForCausalLM,
@@ -390,10 +415,12 @@ def load_model(args: argparse.Namespace):
 
     # Default to image-text calibration for VLM models. Skip for the AutoQuantize recipe path, whose
     # text-only path does not support image-text calibration yet (auto_quantize() would raise);
-    # auto-enabling it here would make Nemotron-VL AutoQuantize fail unconditionally.
+    # auto-enabling it here would make Nemotron-VL AutoQuantize fail unconditionally. Nor for FSDP2,
+    # which calibrates on text only.
     if (
         is_nemotron_vl_model
         and not args.calib_with_images
+        and not args.use_fsdp2
         and not _recipe_is_auto_quantize(args.recipe)
     ):
         print("Nemotron VL model detected. Enabling image-text calibration by default.")
@@ -552,6 +579,12 @@ def mono_quantize(
                     if args.specdec_offline_dataset is not None
                     else None,
                 )
+                if args.use_fsdp2:
+                    text_loop = calibrate_loop
+
+                    def calibrate_loop(model):
+                        with fsdp2_call_context(full_model, model):
+                            text_loop(model)
 
         if args.layerwise_export:
             LayerwiseExporter(full_model, args.export_path)
@@ -977,7 +1010,12 @@ def quantize_main(
     if args.batch_size == 0:
         # For VL models with image-text calibration, skip automatic batch size detection
         # since get_max_batch_size can't handle multimodal inputs
-        if args.calib_with_images:
+        if args.use_fsdp2 and aq_config is not None:
+            print_rank_0(
+                "FSDP2 AutoQuant uses batch_size=1 by default; set --batch_size to override."
+            )
+            args.batch_size = 1
+        elif args.calib_with_images:
             print("Image-text calibration enabled. Using default batch_size=1 for calibration.")
             args.batch_size = 1
         # Speculative decoding offline model dost not support get_max_batch_size() because of
@@ -988,10 +1026,19 @@ def quantize_main(
             )
             args.batch_size = 1
         # Layerwise calibration processes one layer at a time; auto batch-size probing runs a
-        # full-model forward which defeats the point and can OOM on very large models.
+        # full-model forward which defeats the point and can OOM on very large models. A batch
+        # then only holds one layer's activations, so probe one decoder layer of each kind, up
+        # to a token budget: batch 1 makes an MoE layer run its per-expert loop once per sample.
         elif is_layerwise:
-            print("Layerwise calibration enabled. Using default batch_size=1 for calibration.")
-            args.batch_size = 1
+            max_batch_size = _layerwise_calib_batch_size(args.calib_seq, sum(args.calib_size))
+            args.batch_size = get_max_layerwise_batch_size(
+                language_model, args.calib_seq, max_batch_size, sum(args.calib_size), device=device
+            )
+            print(
+                f"Layerwise calibration enabled. Using batch_size={args.batch_size}, the most "
+                f"that fits a decoder layer's forward, up to {max_batch_size} "
+                f"({LAYERWISE_CALIB_TOKENS} tokens)."
+            )
         else:
             # Calibration/sparsification will actually take much more memory than regular inference
             # due to intermediate tensors for fake quantization. Setting sample_memory_usage_ratio
@@ -1017,13 +1064,20 @@ def quantize_main(
 
             run_auto_quant = aq_config is not None
 
-            args.batch_size = get_max_batch_size(
-                language_model,
-                max_sample_length=args.calib_seq,
-                sample_memory_usage_ratio=sample_memory_usage_ratio if not run_auto_quant else 1.0,
-                sample_input_single_batch=sample_input_single_batch,
-                enable_grad=run_auto_quant,
-            )
+            with fsdp2_call_context(full_model, language_model):
+                args.batch_size = get_max_batch_size(
+                    language_model,
+                    max_sample_length=args.calib_seq,
+                    sample_memory_usage_ratio=sample_memory_usage_ratio
+                    if not run_auto_quant
+                    else 1.0,
+                    sample_input_single_batch=sample_input_single_batch,
+                    enable_grad=(
+                        aq_config is not None
+                        and aq_config.auto_quantize_method in ("gradient", "aumann_shapley")
+                    ),
+                    forward_step=(_get_autoquant_memory_probe(recipe) if run_auto_quant else None),
+                )
             args.batch_size = min(args.batch_size, sum(args.calib_size))
 
     print(f"Use calib batch_size {args.batch_size}")
@@ -1279,8 +1333,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Run calibration under PyTorch FSDP2 (requires torchrun); takes precedence over "
-            "--use_seq_device_map. v1: standard causal-LM only (no VILA / pack-quantized / "
-            "speculative / auto-quantize / sparsity / VLM / MTP)."
+            "--use_seq_device_map. Includes experimental weight and KV-cache AutoQuantize. "
+            "Supports causal LMs and VLMs with text-only calibration (no VILA / encoder-decoder / "
+            "image-text calibration / models whose forward requires images / pack-quantized / "
+            "speculative / sparsity / MTP)."
         ),
     )
     parser.add_argument(
@@ -1321,6 +1377,17 @@ def parse_args() -> argparse.Namespace:
         ),
         default=None,
         type=str,
+    )
+    parser.add_argument(
+        "--experts_implementation",
+        help=(
+            "Fused MoE experts backend to load the model with, passed to the HF model loading as "
+            "experts_implementation. By default transformers picks grouped_mm where the model "
+            "supports it; eager calibrates exactly as earlier releases did. Quantization redirects "
+            "every other backend to one of these two."
+        ),
+        default=None,
+        choices=["eager", "grouped_mm"],
     )
     parser.add_argument(
         "--auto_quantize_checkpoint",
@@ -1414,6 +1481,9 @@ def parse_args() -> argparse.Namespace:
 
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
+
+    if args.calib_seq <= 0:
+        parser.error("--calib_seq must be positive.")
 
     if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
         parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")

@@ -15,8 +15,6 @@
 
 """Focused tests for the PDD loss seam used by AutoModel's diffusion recipe."""
 
-from __future__ import annotations
-
 import pathlib
 import sys
 from types import SimpleNamespace

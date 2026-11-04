@@ -232,8 +232,9 @@ def test_wan22_calibrated_export(tiny_wan22_path, tmp_path):
         # threshold_scale_factor lives inside the skip_softmax group.
         tsf = group_0["threshold_scale_factor"]
         assert tsf["formula"] == "a * exp(b * target_sparsity)"
-        assert tsf["prefill"]["a"] == pytest.approx(math.exp(test_log_a))
-        assert tsf["prefill"]["b"] == pytest.approx(test_b)
+        assert tsf["coefficients"]["a"] == pytest.approx(math.exp(test_log_a))
+        assert tsf["coefficients"]["b"] == pytest.approx(test_b)
+        assert isinstance(group_0["target_sparsity"], float)  # scalar, as VisualGen expects
 
         # Calibrated mode — no raw_threshold.
         assert "raw_threshold" not in group_0

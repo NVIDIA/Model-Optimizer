@@ -15,8 +15,6 @@
 
 """Tests for framework-neutral PDD configuration, math, projection, loss, and sampling."""
 
-from __future__ import annotations
-
 from typing import Any
 
 import pytest

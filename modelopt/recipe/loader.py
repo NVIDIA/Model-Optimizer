@@ -16,11 +16,7 @@
 """Recipe loading utilities."""
 
 import warnings
-
-try:
-    from importlib.resources.abc import Traversable
-except ImportError:  # Python < 3.11
-    from importlib.abc import Traversable
+from importlib.resources.abc import Traversable
 from pathlib import Path
 
 from omegaconf import OmegaConf

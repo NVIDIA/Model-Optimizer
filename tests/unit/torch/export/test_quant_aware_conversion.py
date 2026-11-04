@@ -638,13 +638,6 @@ def test_build_reverse_rules_from_mixtral_conversion_mapping_cpu():
     pytest.importorskip("transformers")
     from _test_utils.torch.transformers_models import get_tiny_mixtral
 
-    try:
-        from transformers.conversion_mapping import get_checkpoint_conversion_mapping
-    except ImportError:
-        pytest.skip("transformers build has no conversion_mapping API")
-    if not get_checkpoint_conversion_mapping("mixtral"):
-        pytest.skip("transformers build has no mixtral conversion_mapping")
-
     model = get_tiny_mixtral(**_MIXTRAL_KWARGS)
 
     p = "model.layers.0"
@@ -987,6 +980,30 @@ def test_radio_merge_that_matches_no_keys_raises():
         revert_weight_conversion_quant_aware(model, state_dict)
 
 
+def test_radio_merge_that_matches_no_keys_is_recorded_for_one_ranks_share():
+    """Given ``unmatched_merges``, as for one rank's share of a model, whose other ranks may hold
+    the rule's keys, the refusal is recorded there instead of raised, and the rest still applies."""
+    unmatched_rule = _radio_qkv_conversion()
+    _set_scope_attr(unmatched_rule, "scope_prefix", "unused_model")
+    model = types.SimpleNamespace(_weight_conversions=[unmatched_rule, _radio_qkv_conversion()])
+    parts = [torch.full((2, 2), float(i)) for i in range(3)]
+    state_dict = {
+        "language_model.layers.0.weight": torch.randn(2, 2),
+        **{
+            f"vision_model.encoder.layer.0.attention.{part}_proj.weight": tensor
+            for part, tensor in zip("qkv", parts)
+        },
+    }
+    unmatched: list = []
+
+    out = revert_weight_conversion_quant_aware(model, state_dict, unmatched_merges=unmatched)
+
+    assert len(unmatched) == 1 and "matched no state-dict key" in unmatched[0]
+    fused = "vision_model.encoder.layer.0.attn.qkv.weight"
+    assert out.keys() == {"language_model.layers.0.weight", fused}
+    assert torch.equal(out[fused], torch.cat(parts))
+
+
 @pytest.mark.parametrize(
     ("leaf", "tensors", "message"),
     [
@@ -1222,6 +1239,35 @@ def test_stacked_experts_guard():
 
     # No expert converters in the mapping -> guard is a no-op even for 3-D tensors.
     _assert_experts_pre_expanded(bad, [])
+
+
+def test_sharded_export_keeps_a_renamed_vlm_part_wildcard():
+    """A wildcard over a renamed VLM part stays one entry, not every module beneath it."""
+    pytest.importorskip("transformers.core_model_loading")
+    from transformers.core_model_loading import WeightRenaming
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.visual = torch.nn.Module()
+    model.model.visual.patch_embed = torch.nn.Linear(2, 2, bias=False)
+    model.model.language_model = torch.nn.Module()
+    model.model.language_model.layers = torch.nn.ModuleList([torch.nn.Linear(2, 2, bias=False)])
+    model.lm_head = torch.nn.Linear(2, 2, bias=False)
+    # Qwen2.5-VL's renames: the hub checkpoint has ``model.layers`` and ``visual``.
+    model._weight_conversions = [
+        WeightRenaming(r"^visual", "model.visual"),
+        WeightRenaming(r"^model(?!\.(language_model|visual))", "model.language_model"),
+    ]
+    config = {
+        "quantization": {
+            "quant_algo": "FP8",
+            "exclude_modules": ["lm_head", "model.language_model*", "model.visual.patch_embed*"],
+        }
+    }
+
+    config = _revert_quant_config_names_best_effort(model, config)
+
+    assert config["quantization"]["exclude_modules"] == ["lm_head", "model*", "visual.patch_embed*"]
 
 
 def test_revert_quant_config_names_mapper():

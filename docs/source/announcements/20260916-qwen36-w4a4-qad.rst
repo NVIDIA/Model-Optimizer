@@ -7,6 +7,12 @@ Recovering W4A4 NVFP4 Accuracy with Quantization-Aware Distillation
 :Date: September 16, 2026
 :Tags: quantization, nvfp4, w4a4, qad, distillation, megatron-bridge
 
+.. note::
+
+   **Updated October 21, 2026:** added `output length and calibration`_ results (QAD lengthens
+   SciCode answers and makes the model abstain less on knowledge questions) and links to the
+   `ablations <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/ABLATIONS.md>`__.
+
 Weight-only NVFP4 does not make this model faster. On Blackwell, a BF16 activation forces vLLM onto
 the Marlin dequant-to-BF16 fallback, which never reaches the FP4 tensor cores: W4A16 measured
 *slower* than BF16 in 10 of 12 shapes. Quantizing activations as well (W4A4) unlocks those kernels
@@ -32,6 +38,8 @@ Highlights
   text-only, and MMMU-Pro is multimodal.
 * **Repeat counts matter more than expected.** At 3 repeats one benchmark showed a 3 pp swing that
   vanished at 8, and IFBench's real gain was invisible until 8.
+* **Accuracy is not the whole picture.** QAD lengthens SciCode answers, and on knowledge questions the
+  model guesses wrong more often instead of abstaining; see `output length and calibration`_.
 
 Results
 *******
@@ -102,6 +110,54 @@ W4A4 is effectively lossless and QAD neither helps nor hurts.
      - −0.7 pp
      - ~40% recovered, gap remains
 
+Output Length and Calibration
+*****************************
+
+**SciCode answers get longer.** QAD 500 raises SciCode's mean completion length by 91% over BF16 at an
+unchanged score. It is not verbosity: 3.6% of sub-steps never stop thinking and hit the 131K-token
+cap (BF16: 0.7%). Qwen's recommended ``presence_penalty: 1.5`` removes nearly all of them at decode
+time (96 to 2 of 2,704) with no accuracy change, but apply it only where outputs run away: on GPQA
+Diamond it cuts generation throughput 4.8x (5,109 to 1,067 tokens/s) for no accuracy change.
+
+**Knowledge is kept, but the model guesses more instead of abstaining.** On AA-Omniscience, where a
+wrong answer costs as much as a right one earns, every model answers ~21% of questions correctly. What
+changes is how often it abstains instead of guessing:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 14 14 14 14 14
+
+   * - Model
+     - Correct
+     - Incorrect
+     - Abstained
+     - Omniscience index
+     - Hallucination rate
+   * - BF16 (teacher)
+     - 21.0
+     - 32.3
+     - 46.0
+     - −11.3
+     - 41%
+   * - W4A4 NVFP4 PTQ
+     - 20.2
+     - 39.3
+     - 39.8
+     - −19.1
+     - 49%
+   * - **+ QAD 500 iters**
+     - **21.0**
+     - **48.5**
+     - **29.8**
+     - **−27.5**
+     - **61%**
+
+The ~0.7% of answers graded partially correct are not shown, so each row sums to about 99.3.
+
+QAD does most of this early (index −31.4 at iteration 50), the same shape as SciCode's runaway
+sub-steps. None of the six benchmarks above measures it, so evaluate abstention directly if your
+application needs a model that says "I don't know".
+
 Throughput
 **********
 
@@ -154,4 +210,7 @@ Learn More
 The `tutorial <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B>`__
 has the full reproduction path — data blend, PTQ recipe, QAD command, export, and one NeMo Evaluator
 config per benchmark — plus the parallelism constraints QAD imposes on this model and what we would
-try next to close the remaining MMMU-Pro gap.
+try next to close the remaining MMMU-Pro gap. Its
+`ablations <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/ABLATIONS.md>`__
+cover what did not become the recipe: chat-format data with assistant-only loss, self-distilled
+data, and the SciCode non-termination diagnosis.
