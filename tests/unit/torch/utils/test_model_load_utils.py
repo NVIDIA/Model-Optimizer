@@ -71,6 +71,7 @@ from transformers import (
     CLIPVisionConfig,
     DeepseekV3Config,
     FineGrainedFP8Config,
+    GenerationConfig,
     GptOssConfig,
     LlamaConfig,
     LlamaForCausalLM,
@@ -1637,6 +1638,17 @@ def test_a_meta_build_leaves_the_auto_class_as_it_found_it(monkeypatch):
     model_load_utils.build_meta_causal_lm(None, False, None, LlamaConfig(**_TINY))
 
     assert ProbeConfig not in mapping
+
+
+def test_a_built_model_keeps_the_checkpoints_generation_config(tmp_path):
+    """from_pretrained reads generation_config.json; a build from the config must too, or the
+    export writes defaults in place of the checkpoint's stop and pad tokens."""
+    GenerationConfig(eos_token_id=[2, 11], pad_token_id=3).save_pretrained(tmp_path)
+
+    model = model_load_utils.build_meta_causal_lm(str(tmp_path), False, None, LlamaConfig(**_TINY))
+
+    assert model.generation_config.eos_token_id == [2, 11]
+    assert model.generation_config.pad_token_id == 3
 
 
 def test_the_config_returned_with_the_plan_is_as_every_rank_read_it(run_as, serve, tmp_path):

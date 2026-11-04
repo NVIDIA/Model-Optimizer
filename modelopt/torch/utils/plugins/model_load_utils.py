@@ -56,6 +56,7 @@ from transformers import (
     AutoModelForSeq2SeqLM,
     AutoModelForSpeechSeq2Seq,
     FineGrainedFP8Config,
+    GenerationConfig,
     PretrainedConfig,
 )
 from transformers.conversion_mapping import get_model_conversion_mapping
@@ -354,6 +355,14 @@ def build_meta_causal_lm(
         for name, tensor in chain(model.named_parameters(), model.named_buffers()):
             if match := pattern.search(name):
                 tensor.data = tensor.data.to(dtype_plan[group_to_glob[match.lastgroup]])
+    # from_pretrained reads the checkpoint's generation_config.json; a build from the config gets
+    # defaults without its stop/pad tokens, which an export would then write in its place.
+    if (
+        ckpt_path
+        and os.path.isfile(os.path.join(ckpt_path, "generation_config.json"))
+        and model.can_generate()
+    ):
+        model.generation_config = GenerationConfig.from_pretrained(ckpt_path)
     model.eval()
     return model
 
