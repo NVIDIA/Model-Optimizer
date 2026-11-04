@@ -24,6 +24,10 @@ from modelopt.torch.models import PTQSpec, get_ptq_spec, get_specs
 # Model type -> the PTQSpec fields it turns on. A model's special-casing in the PTQ flow is a
 # registry entry, so adding one fails here until the table names it.
 EXPECTED_PTQ_FIELDS = {
+    "NemotronH_Nano_VL_V2": {"vlm_wrapper", "no_auto_device_map"},
+    "Llama_Nemotron_Nano_VL": {"vlm_wrapper", "no_auto_device_map"},
+    "nemotron_parse": {"vlm_wrapper", "no_auto_device_map"},  # encoder-decoder
+    "nemotron_h_omni": {"vlm_wrapper", "no_auto_device_map"},
     "bart": {"no_device_map"},
     "t5": {"no_device_map"},
     "deci": {"dtype_kwarg"},

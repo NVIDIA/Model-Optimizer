@@ -315,14 +315,23 @@ class PTQSpec(SpecSection):
     own code or size, never in the flow, which is why it is stated here and not there.
     """
 
+    no_auto_device_map: str | None = None
+    """Why ``device_map="auto"`` cannot be used for the model, so the flow loads it whole and moves
+    it to the target device, unless the run itself asks for a sequential map."""
+
     no_device_map: str | None = None
-    """Why the model cannot be loaded with a device map, so the flow loads it whole and moves it to
-    the target device."""
+    """Why no device map can be used for the model: the flow loads it whole and moves it to the
+    target device, whatever the run asks for."""
 
     dtype_kwarg: Literal["dtype", "torch_dtype"] = "dtype"
     """The keyword the model's loading code takes its precision by. A checkpoint's own code that
     predates transformers renaming ``torch_dtype`` to ``dtype`` knows only the old one, and would
     load at its default precision if given the new."""
+
+    vlm_wrapper: bool = False
+    """Whether the flow treats the model as a VLM wrapper: it calibrates with image-text data by
+    default, previews through the wrapper's own chat path rather than ``generate`` on token ids,
+    and puts the quantized language model back into the wrapper."""
 
     preview_unsupported: str | None = None
     """Why the flow skips the generation preview, the sample before and after quantization.

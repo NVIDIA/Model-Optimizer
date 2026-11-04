@@ -42,11 +42,10 @@ from example_utils import (
     get_model,
     get_processor,
     get_tokenizer,
-    is_nemotron_vl,
     is_trtllm_enc_dec_export,
     mlflow_run,
     recipe_layerwise_blocks,
-    run_nemotron_vl_preview,
+    run_vlm_preview,
     save_source_config,
     setup_distributed_args,
     validate_fsdp2_supported,
@@ -418,19 +417,19 @@ def load_model(args: argparse.Namespace):
     tokenizer = None
     language_model = full_model
 
-    is_nemotron_vl_model = is_nemotron_vl(full_model)
+    vlm_wrapper = get_ptq_spec(model_type).vlm_wrapper
 
-    # Default to image-text calibration for VLM models. Skip for the AutoQuantize recipe path, whose
+    # Default to image-text calibration for VLM wrappers. Skip for the AutoQuantize recipe path, whose
     # text-only path does not support image-text calibration yet (auto_quantize() would raise);
-    # auto-enabling it here would make Nemotron-VL AutoQuantize fail unconditionally. Nor for FSDP2,
-    # where image-text calibration is opt-in via --calib_with_images.
+    # auto-enabling it here would make a VLM wrapper's AutoQuantize fail unconditionally. Nor for
+    # FSDP2, where image-text calibration is opt-in via --calib_with_images.
     if (
-        is_nemotron_vl_model
+        vlm_wrapper
         and not args.calib_with_images
         and not args.use_fsdp2
         and not _recipe_is_auto_quantize(args.recipe)
     ):
-        print("Nemotron VL model detected. Enabling image-text calibration by default.")
+        print("VLM wrapper detected. Enabling image-text calibration by default.")
         args.calib_with_images = True
 
     if model_type == "whisper":
@@ -454,7 +453,7 @@ def load_model(args: argparse.Namespace):
                 args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
             )
 
-        # Some Nemotron tokenizers may not define pad_token by default; but we use padding=True during calibration.
+        # Some tokenizers may not define pad_token by default; but we use padding=True during calibration.
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         assert tokenizer.pad_token is not None, (
@@ -553,7 +552,7 @@ def mono_quantize(
     model_type: str | None,
     calibration_only: bool,
     calib_dataloader: DataLoader,
-    is_nemotron_vl_model: bool,
+    vlm_wrapper: bool,
 ):
     """Plain quantization of the selected model target to one quantization configuration."""
 
@@ -604,7 +603,7 @@ def mono_quantize(
             language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
 
         # For VL models, update full_model to use the quantized language model
-        if is_nemotron_vl_model and language_model is not full_model:
+        if vlm_wrapper and language_model is not full_model:
             language_model_lineage = get_language_model_from_vl(full_model)
             if language_model_lineage is not None:
                 print("Updating full_model with quantized language_model...")
@@ -622,7 +621,7 @@ def _run_auto_quantize_recipe(
     model_type: str | None,
     calibration_only: bool,
     calib_dataloader: DataLoader,
-    is_nemotron_vl_model: bool,
+    vlm_wrapper: bool,
 ) -> None:
     """Run the recipe's fixed PTQ, weight search, and KV search in order."""
     primary = recipe.auto_quantize
@@ -647,7 +646,7 @@ def _run_auto_quantize_recipe(
             model_type,
             calibration_only,
             calib_dataloader,
-            is_nemotron_vl_model,
+            vlm_wrapper,
         )
         fixed_quantize_config = None
 
@@ -783,7 +782,7 @@ def pre_quantize(
     model_type: str | None,
     tokenizer: PreTrainedTokenizerBase | None,
     calib_dataloader: DataLoader | None,
-    is_nemotron_vl_model: bool,
+    vlm_wrapper: bool,
 ):
     """
     Processing before the quantization.
@@ -813,8 +812,8 @@ def pre_quantize(
     elif (reason := get_ptq_spec(model_type).preview_unsupported) is not None:
         print(f"Skipping the generation preview: {reason}")
         generated_ids_before_ptq = None
-    elif is_nemotron_vl_model and tokenizer is not None:
-        generated_ids_before_ptq = run_nemotron_vl_preview(
+    elif vlm_wrapper and tokenizer is not None:
+        generated_ids_before_ptq = run_vlm_preview(
             full_model,
             tokenizer,
             preview_input_ids,
@@ -843,7 +842,7 @@ def post_quantize(
     preview_input_ids: torch.Tensor | None,
     preview_attention_mask: torch.Tensor | None,
     generated_ids_before_ptq: Any,
-    is_nemotron_vl_model: bool,
+    vlm_wrapper: bool,
     first_text_speech_dataset: str | None,
     calib_dataloader: DataLoader,
 ):
@@ -876,7 +875,7 @@ def post_quantize(
     post_ptq_unsupported = get_ptq_spec(model_type).post_ptq_generation_unsupported
     if generated_ids_before_ptq is None:
         pass
-    elif post_ptq_unsupported is None and not is_nemotron_vl_model:
+    elif post_ptq_unsupported is None and not vlm_wrapper:
         # Our fake quantizer may not be fully compatible with torch.compile.
         # This is a best-effort sanity check: e.g. a `device_map="auto"` load that offloads
         # part of the model to CPU (seen on unified-memory single-GPU hosts) can make a
@@ -890,8 +889,8 @@ def post_quantize(
             )
         except Exception as e:
             warnings.warn(f"Post-quantization generation sanity check failed, skipping it: {e}")
-    elif is_nemotron_vl_model and tokenizer is not None:
-        generated_ids_after_ptq = run_nemotron_vl_preview(
+    elif vlm_wrapper and tokenizer is not None:
+        generated_ids_after_ptq = run_vlm_preview(
             full_model,
             tokenizer,
             preview_input_ids,
@@ -931,9 +930,9 @@ def post_quantize(
 
     if generated_ids_after_ptq is not None:
         print("--------")
-        if is_nemotron_vl_model:
-            # For Nemotron VL models, generated_ids are text strings from model.chat()
-            print("Nemotron VL model text-only generation results:")
+        if vlm_wrapper:
+            # For VLM wrappers, generated_ids are text strings from model.chat()
+            print("VLM wrapper text-only generation results:")
             print(f"Text response before quantization: {generated_ids_before_ptq}")
             print("--------")
             print(f"Text response after quantization: {generated_ids_after_ptq}")
@@ -1096,11 +1095,10 @@ def quantize_main(
         ),
     )
 
-    # Detect if this is a Nemotron VL model using architecture-based detection
-    is_nemotron_vl_model = is_nemotron_vl(full_model)
+    vlm_wrapper = get_ptq_spec(model_type).vlm_wrapper
 
     preview_input_ids, preview_attention_mask, generated_ids_before_ptq = pre_quantize(
-        args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
+        args, full_model, model_type, tokenizer, calib_dataloader, vlm_wrapper
     )
 
     if aq_config is not None:
@@ -1113,7 +1111,7 @@ def quantize_main(
             model_type,
             calibration_only,
             calib_dataloader,
-            is_nemotron_vl_model,
+            vlm_wrapper,
         )
 
     else:
@@ -1159,7 +1157,7 @@ def quantize_main(
                 model_type,
                 calibration_only,
                 calib_dataloader,
-                is_nemotron_vl_model,
+                vlm_wrapper,
             )
         else:
             print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
@@ -1184,7 +1182,7 @@ def quantize_main(
         preview_input_ids,
         preview_attention_mask,
         generated_ids_before_ptq,
-        is_nemotron_vl_model,
+        vlm_wrapper,
         first_text_speech_dataset,
         calib_dataloader,
     )
