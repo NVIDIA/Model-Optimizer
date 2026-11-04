@@ -703,9 +703,12 @@ class QuantRecipeHparam(Hparam):
     @property
     def scored_choices(self) -> list[QuantRecipe]:
         """Choices whose sensitivity this process scores."""
-        if self._scored_recipes is None:
-            return self.choices
-        return [recipe for recipe in self.choices if recipe in self._scored_recipes]
+        recipes: list[QuantRecipe] = []
+        for recipe in self.choices:
+            assert isinstance(recipe, QuantRecipe)
+            if self._scored_recipes is None or recipe in self._scored_recipes:
+                recipes.append(recipe)
+        return recipes
 
     @property
     def solver_choices(self) -> list[QuantRecipe]:
