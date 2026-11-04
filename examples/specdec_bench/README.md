@@ -147,6 +147,75 @@ python3 run.py \
     --runtime_params runtime_args_long_context.yaml
 ```
 
+## Measuring acceptance with AIPerf
+
+`run.py` drives an in-process engine and derives acceptance from its own token bookkeeping.
+That is accurate, but it makes a number comparable only to other `specdec_bench` numbers.
+`aiperf/run_aiperf_acceptance.sh` measures the same quantity through a served vLLM endpoint and
+[AIPerf](https://github.com/ai-dynamo/aiperf), so acceptance is comparable to anything else
+measured with the standard client.
+
+Both paths are supported; neither replaces the other. Use `run.py` when you want a single
+self-contained process and no server; use the AIPerf path when the number has to line up with
+other AIPerf measurements, or when you want to measure the serving stack as deployed.
+
+Requires a vLLM build exposing `--per-request-spec-decode-metrics` and `aiperf` built from main
+(the `spec_al_*` public datasets are not in a released tag yet).
+
+```bash
+MODEL=/path/to/target \
+DRAFT_MODEL=/path/to/draft \
+SPEC_METHOD=eagle3 \
+NUM_SPEC_TOKENS=3 \
+TP_SIZE=1 \
+OUTPUT_LENGTH=4096 \
+REQUEST_COUNT=160 \
+TEMPERATURE=0 \
+ARTIFACT_DIR=./aiperf_acceptance \
+    bash aiperf/run_aiperf_acceptance.sh
+```
+
+The script probes `metrics.speculative_decoding` on a single request before starting the sweep.
+A build without that support otherwise produces a full run of records with no acceptance field,
+and the problem only surfaces at analysis time.
+
+### Cross-validating against the in-process harness
+
+`aiperf/compare_harnesses.py` reports both AL conventions from the two harnesses side by side:
+
+```bash
+python3 aiperf/compare_harnesses.py \
+    --specdec-dir /path/to/run_py_save_dir \
+    --aiperf-dir  /path/to/aiperf_artifact_dir
+```
+
+Running both on one node (MiniMax-M2.7 + DFlash K=3, MT-Bench, greedy, 4096-token generations,
+identical prompts, 4xH100):
+
+```
+harness                   per-request AL   pooled AL       steps
+----------------------------------------------------------------
+specdec_bench                     1.9798      1.7506      193329
+aiperf                            2.0413      1.7865      174514
+
+emitted tokens per step (share of steps):
+  length                        1        2        3        4
+  specdec_bench            56.3%    22.3%    11.5%     9.9%
+  aiperf                   54.4%    23.1%    12.1%    10.5%
+
+pooled AL delta: +0.0359 (2.0% of specdec_bench)
+```
+
+Two means are reported because they answer different questions and are easy to confuse.
+**Per-request AL** averages over requests, counting each equally; **pooled AL** divides total
+emitted tokens by total verification steps, so long requests dominate. They diverge whenever
+acceptance correlates with response length, which it usually does — quoting one against the
+other is a common way to manufacture a discrepancy that isn't there.
+
+The harnesses also bin differently: `specdec_bench` histograms tokens *emitted* per step
+(1..K+1, bonus token included), AIPerf histograms drafts *accepted* per step (0..K). The script
+normalises AIPerf's to the emitted-length convention so the rows line up.
+
 ## Uploading results to S3
 
 Each `run.py` invocation writes a result directory containing `configuration.json`,
