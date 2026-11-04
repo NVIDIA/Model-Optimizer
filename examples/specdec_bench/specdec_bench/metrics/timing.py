@@ -35,7 +35,7 @@ class Timing(Metric):
     def process_final(self, text_outputs):
         e2e_time = []
         ttft_time = []
-        tpot_time = []
+        itl_time = []
         gen_tp_time = []
         start_time = min([t[0] for t in self.timing])
         end_time = max([t[-1] for t in self.timing])
@@ -53,13 +53,34 @@ class Timing(Metric):
             if len(times) > 1:
                 e2e_time.append(times[-1] - times[0])
                 ttft_time.append(times[1] - times[0])
-            if len(times) > 2:
-                gen_tp_time.append((tokens - 1) / (times[-1] - times[1]))
-                tpot_time.extend([a - b for a, b in zip(times[1:], times[:-1])])
+            # times[1] is the first token's arrival, so times[-1] - times[1] is the
+            # generation phase with prefill excluded. `tokens > 1` guards the
+            # single-token response, which has no inter-token interval at all and
+            # would divide by zero below.
+            if len(times) > 2 and tokens > 1:
+                generation_time = times[-1] - times[1]
+                if generation_time > 0:
+                    gen_tp_time.append((tokens - 1) / generation_time)
+                # AIPerf defines inter-token latency as the reciprocal of per-user
+                # output token throughput: one value per request, prefill excluded,
+                # divided by tokens rather than by engine steps. Computing it any
+                # other way publishes two metrics side by side that claim to be
+                # reciprocals and are not.
+                #
+                # The previous implementation pooled raw per-step gaps, which was
+                # wrong twice over. The first gap is times[1] - times[0] -- TTFT
+                # itself -- so prefill landed in the p95/p99 buckets this metric
+                # exists to expose. And token_times holds one timestamp per engine
+                # stream chunk, while a speculative-decoding chunk carries every
+                # accepted draft token: each gap therefore spanned roughly
+                # accept_length tokens, so reported ITL *rose as the draft model
+                # improved*, inverting the quantity specdec_bench exists to measure.
+                itl_time.append(generation_time / (tokens - 1))
         self.out["Request Latency (ms)"] = compute_statistics(e2e_time, scale=_S_TO_MS)
         self.out["Time to First Token (ms)"] = compute_statistics(ttft_time, scale=_S_TO_MS)
-        if tpot_time:
-            self.out["Inter Token Latency (ms)"] = compute_statistics(tpot_time, scale=_S_TO_MS)
+        if itl_time:
+            self.out["Inter Token Latency (ms)"] = compute_statistics(itl_time, scale=_S_TO_MS)
+        if gen_tp_time:
             self.out["Output Token Throughput Per User (tokens/sec/user)"] = compute_statistics(
                 gen_tp_time
             )
