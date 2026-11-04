@@ -16,7 +16,9 @@
 """Calibration utilities."""
 
 import fnmatch
+import itertools
 import math
+import sys
 import time
 import warnings
 from collections import Counter, defaultdict
@@ -115,7 +117,8 @@ def _collect_grouped_linears(model: nn.Module) -> list[list[nn.Module]]:
     """Collect name-based sibling groups (Q/K/V, MLA down, gate/up, w1/w3) of calibrated NVFP4-static linears."""
     patterns: tuple[tuple[str, ...], ...] = (
         ("q_proj", "k_proj", "v_proj"),
-        ("linear_q_down_proj", "linear_kv_down_proj"),
+        *_FUSED_MCORE_PROJECTIONS,
+        ("q_a_proj", "kv_a_proj_with_mqa"),
         *list_all_possible("gate_up_pairs"),
     )
     groups: list[list[nn.Module]] = []
@@ -159,20 +162,39 @@ def _check_grouped_weight_global_amax_synced(model: nn.Module) -> None:
         )
 
 
-@torch.no_grad()
-def _sync_mla_fused_down_proj_amax(model: torch.nn.Module) -> None:
-    """Give Megatron-Core MLA's q_down / kv_down projections one per-tensor input and weight range each.
+# Megatron-Core projections vLLM and TRT-LLM fuse into one GEMM with one scale per tensor: MLA's
+# down-projections (``fused_qkv_a_proj``) and DeepSeek-V4's (``fused_wqa_wkv``).
+_FUSED_MCORE_PROJECTIONS = (
+    ("linear_q_down_proj", "linear_kv_down_proj"),
+    ("linear_q_down_proj", "linear_kv_proj"),
+)
+# HF-named projections deployments fuse, for Megatron-Core modules that keep HF names (e.g. Kimi K3's
+# MLA and KDA). HF models get the same ranges at export, which fuses every group sharing an input.
+_FUSED_HF_NAMED_PROJECTIONS = (("q_a_proj", "kv_a_proj_with_mqa"), ("q_proj", "k_proj", "v_proj"))
 
-    vLLM and TRT-LLM fuse them into one GEMM (``fused_qkv_a_proj``) with one scale per tensor.
+
+def _fused_projection_groups(module: nn.Module) -> list[list[nn.Module]]:
+    megatron_module = getattr(
+        sys.modules.get("megatron.core.transformer.module"), "MegatronModule", None
+    )
+    is_megatron = megatron_module is not None and isinstance(module, megatron_module)
+    groups = [
+        [getattr(module, name, None) for name in names]
+        for names in _FUSED_MCORE_PROJECTIONS + (_FUSED_HF_NAMED_PROJECTIONS if is_megatron else ())
+    ]
+    return [members for members in groups if all(member is not None for member in members)]
+
+
+@torch.no_grad()
+def _sync_fused_projection_amax(model: torch.nn.Module) -> None:
+    """Give Megatron-Core projections deployments fuse one per-tensor input and weight range each.
+
     Static NVFP4 weights share their global range through ``SHARED_PATTERNS`` instead.
     """
     for module in model.modules():
-        members = [
-            getattr(module, name, None) for name in ("linear_q_down_proj", "linear_kv_down_proj")
-        ]
-        if any(member is None for member in members):
-            continue
-        for quantizer_name in ("input_quantizer", "weight_quantizer"):
+        for members, quantizer_name in itertools.product(
+            _fused_projection_groups(module), ("input_quantizer", "weight_quantizer")
+        ):
             quantizers = []
             for member in members:
                 quantizer = getattr(member, quantizer_name, None)
@@ -203,7 +225,7 @@ def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) ->
     the default patterns, verifies the name groups were actually synced. Call once ``_amax``
     is final: single-process, or after the distributed amax sync.
     """
-    _sync_mla_fused_down_proj_amax(model)
+    _sync_fused_projection_amax(model)
     SharedWeightGlobalAmaxState.populate(model)
     promote_static_block_weight_quantizers(model)
     # Under the default patterns, verify the fusible name groups were actually synced.
@@ -952,8 +974,8 @@ def _mse_calibrate_weights(
 
                 pbar.update(1)
     pbar.close()
-    # The search refines each weight's range on its own; share the fused MLA pair's again.
-    _sync_mla_fused_down_proj_amax(model)
+    # The search refines each weight's range on its own; share the fused projections' again.
+    _sync_fused_projection_amax(model)
 
 
 class _LocalHessianAccumulator:
