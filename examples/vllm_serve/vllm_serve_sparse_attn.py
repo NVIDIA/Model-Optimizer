@@ -36,10 +36,14 @@ import uvloop
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-try:  # vLLM 0.29 moved the serve argument parser out of ``vllm.entrypoints.openai``
-    from vllm.entrypoints.launchers.cli_args import make_arg_parser
-except ImportError:
+try:
     from vllm.entrypoints.openai.cli_args import make_arg_parser
+except ModuleNotFoundError as error:
+    # vLLM 0.29 moved the serve parser out of ``vllm.entrypoints.openai`` and 0.33 moved it
+    # again; ``vllm.entrypoints.cli.serve`` re-exports it in every layout.
+    if error.name not in ("vllm.entrypoints.openai", "vllm.entrypoints.openai.cli_args"):
+        raise
+    from vllm.entrypoints.cli.serve import make_arg_parser
 
 
 def main():
