@@ -156,9 +156,9 @@ def _check_grouped_weight_global_amax_synced(model: nn.Module) -> None:
             continue
         ref = amaxes[0]
         assert all(torch.equal(a, ref) for a in amaxes), (
-            "A fusible sibling group (q/k/v or gate/up) was not unified to a shared weight "
-            "global_amax; SharedWeightGlobalAmaxState failed to sync it, so the per-block "
-            "MSE scales would be inconsistent across the group."
+            "A fusible sibling group (e.g. q/k/v, gate/up or MLA down-projections) was not "
+            "unified to a shared weight global_amax; SharedWeightGlobalAmaxState failed to sync "
+            "it, so the per-block MSE scales would be inconsistent across the group."
         )
 
 

@@ -546,7 +546,7 @@ class _DummyMLA(nn.Module):
         return getattr(self, self.kv_name)
 
     def forward(self, x):
-        return self.q_down(x) + self.kv_down(x)
+        return self.q_down(x) + self.kv_down(2 * x)  # and different input ranges
 
 
 _PER_TENSOR_INT8 = {"num_bits": 8, "axis": None}
@@ -580,6 +580,18 @@ def test_mla_down_projections_share_per_tensor_ranges(algorithm, names):
     assert torch.equal(q_down.input_quantizer.amax, kv_down.input_quantizer.amax)
     assert torch.equal(q_down.weight_quantizer.amax, kv_down.weight_quantizer.amax)
     assert kv_down.weight_quantizer.amax > q_down.weight.abs().max()
+
+
+@pytest.mark.parametrize("algorithm", ["max", {"method": "mse"}])
+def test_hf_mla_down_projections_keep_own_per_tensor_ranges(algorithm):
+    """Outside Megatron-Core, the HF export gives the fused pair one range instead."""
+    mla = _quantize_mla(
+        _PER_TENSOR_INT8, algorithm, input_cfg=_PER_TENSOR_INT8, names=_MLA_DOWN_PROJECTIONS[2]
+    )
+    q_down, kv_down = mla.q_down, mla.kv_down
+
+    assert kv_down.input_quantizer.amax > q_down.input_quantizer.amax
+    assert kv_down.weight_quantizer.amax > q_down.weight_quantizer.amax
 
 
 def test_mla_down_projections_share_the_fp8_stage_of_sequential_weight_quantizers():
