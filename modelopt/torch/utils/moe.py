@@ -254,12 +254,18 @@ def check_not_patched_by_prepare(model_type: str) -> None:
     expert-parallel load builds from: once it ran in this process, a whole-model or FSDP2-sharded
     load of the model is refused before it builds or loads one. The plan decision's throwaway meta
     build runs earlier, so under torchrun an EP degree of 1 meets the decision's own refusal first.
+    A new process builds the checkpoint's own code as it ships: Kimi-K3's needs the fixes in
+    ``kimi_k3._remote_fixes`` to import, build, load and run on current transformers and fla-core,
+    which only its ``prepare`` applies, so there it loads expert-parallel only. A text-only
+    kimi_linear checkpoint that transformers' own class builds loads whole there.
     """
     if model_type in _PATCHED_EVERY_LOAD:
         raise NotImplementedError(
             f"An expert-parallel load in this process, of {model_type} or of a model built on it, "
             "patched its modeling code for every later load of it, which a whole-model or "
-            "FSDP2-sharded load cannot build from. Load it in a new process."
+            "FSDP2-sharded load cannot build from. Load it in a new process. There the checkpoint's "
+            "own code is built as it ships, so remote code that needs its spec's fixes to run on this "
+            "transformers, as Kimi-K3's does, loads only expert-parallel."
         )
 
 
