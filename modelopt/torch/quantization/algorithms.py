@@ -1192,7 +1192,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                                 "is not a single GGML quantizer that keeps the rewritten codes. "
                                 "Search this format with a calibration that leaves weights unchanged."
                             )
-                        if imatrix_only and not all(map(model_calib._imatrix_encodes, enabled)):
+                        # A fused projection is one parameter, and imatrix rewrites the slice of
+                        # every expert it encodes, even when other experts use another format.
+                        if imatrix_only and not any(map(model_calib._imatrix_encodes, enabled)):
                             continue
                         # Only the weight this quantizer covers: "weight_quantizer" -> "weight",
                         # a fused module's "gate_up_proj_weight_quantizers" -> "gate_up_proj".
@@ -1249,7 +1251,10 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     if not quantizer.is_enabled or not isinstance(num_bits, str):
                         continue
                     ggml_format = GGML_FORMAT_REGISTRY.get(num_bits)
-                    if ggml_format is not None and ggml_format.has_full_pin(quantizer, weight):
+                    if (
+                        ggml_format is not None
+                        and ggml_format.full_pin(quantizer, weight) is not None
+                    ):
                         setattr(quantizer, PIN_OVERRIDES_WEIGHT, True)
 
     def _write_selected_codes_to_weights(self):
@@ -1280,18 +1285,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                         for q in _iter_tensor_quantizers(quantizer):
                             if replays(q):
                                 setattr(q, PIN_OVERRIDES_WEIGHT, False)
-
-    def search(self, *args, **kwargs):
-        """Run the search, handing back the pre-quant-scale folding policy it found on every exit.
-
-        Calibration runs with folding off, and the policy is process-wide: a search that failed
-        while scoring would otherwise leave it off for later calibrations.
-        """
-        folding_pqs_to_weights = model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS
-        try:
-            return super().search(*args, **kwargs)
-        finally:
-            model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = folding_pqs_to_weights
 
     def before_search(self):
         """Prepare the model for search by calibrating the quantizers  and collecting ``AutoQuantize`` score."""

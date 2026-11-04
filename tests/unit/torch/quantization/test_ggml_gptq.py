@@ -606,9 +606,14 @@ def _quant_recipe_hparams(model):
     return [h for _, h in named_hparams(model, unique=True) if isinstance(h, QuantRecipeHparam)]
 
 
-@pytest.mark.parametrize("down_proj", ["disabled", "q8_0"])
-def test_auto_quantize_snapshots_only_the_weights_calibration_rewrites(moe, monkeypatch, down_proj):
-    # imatrix rewrites the IQ2_XXS gate_up_proj and leaves down_proj, disabled or Q8_0, alone.
+@pytest.mark.parametrize(
+    "q8_0",
+    [None, "*down_proj_weight_quantizer", "*gate_up_proj_weight_quantizers.0"],
+    ids=["down_proj_disabled", "down_proj_q8_0", "one_gate_up_expert_q8_0"],
+)
+def test_auto_quantize_snapshots_only_the_weights_calibration_rewrites(moe, monkeypatch, q8_0):
+    # imatrix rewrites the IQ2_XXS gate_up_proj experts and leaves Q8_0 or disabled ones alone;
+    # gate_up_proj is one parameter, so any IQ2_XXS expert puts all of it in the snapshot.
     snapshots = []
     snapshot = _AutoQuantizeBaseSearcher._snapshot_source_weights
 
@@ -617,15 +622,20 @@ def test_auto_quantize_snapshots_only_the_weights_calibration_rewrites(moe, monk
         return snapshots[-1]
 
     monkeypatch.setattr(_AutoQuantizeBaseSearcher, "_snapshot_source_weights", record)
+    source = {n: weight.detach().clone() for n, weight in moe.named_parameters()}
     config, name = _recipe({"method": "imatrix"}, "iq2_xxs")
     config["quant_cfg"][1]["quantizer_name"] = "*gate_up_proj_weight_quantizer"
-    if down_proj == "q8_0":
-        q8_0 = _recipe({"method": "imatrix"}, "q8_0")[0]["quant_cfg"][1]
-        config["quant_cfg"].append({**q8_0, "quantizer_name": "*down_proj_weight_quantizer"})
+    if q8_0 is not None:
+        q8_0_entry = _recipe({"method": "imatrix"}, "q8_0")[0]["quant_cfg"][1]
+        config["quant_cfg"].append({**q8_0_entry, "quantizer_name": q8_0})
     _search(moe, _inputs()[:96, :TOY_MOE_HIDDEN], [(config, name)], 16.0)
 
     [source_weights] = snapshots
-    assert [id(p) for p in source_weights] == [id(moe.mlp.experts.gate_up_proj)]
+    assert [id(p) for p in source_weights or ()] == [id(moe.mlp.experts.gate_up_proj)]
+    # BF16 wins at 16 bits, so the search hands back the source weights.
+    weights = dict(moe.named_parameters())
+    for weight_name, weight in source.items():
+        assert torch.equal(weights[weight_name], weight), weight_name
 
 
 @pytest.mark.parametrize("case", ["non_ggml", "tied"])

@@ -44,6 +44,7 @@ from modelopt.torch.quantization.conversion import (
 )
 from modelopt.torch.utils import atomic_print
 
+from . import model_calib
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
 from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe, _algorithm_methods
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
@@ -1239,6 +1240,9 @@ def auto_quantize(
     # failure before any candidate calibrates hands back the unconverted modules, so the caller can
     # retry on the same model, which a converted model would refuse.
     restore_modules = _save_module_attributes(model)
+    # Calibration turns pre-quant-scale folding off for the whole process. Hand back the policy
+    # found here on every exit, also after a failure while scoring, so later calibrations fold.
+    folding_pqs_to_weights = model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS
     try:
         model = apply_mode(
             model,
@@ -1256,6 +1260,8 @@ def auto_quantize(
         if not searcher.calibration_started:
             restore_modules()
         raise
+    finally:
+        model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = folding_pqs_to_weights
 
     return model, searcher.state_dict()
 
