@@ -650,7 +650,7 @@ See [Recipe-based Quantization](#recipe-based-quantization) for the recipe forma
 
 [AutoQuantize recipes](#autoquantize) use the same `torchrun` launch. With FSDP2, `--batch_size` is per rank and defaults to 1; recipe `score_size` is global. Use shared checkpoint directories and restore all `rank<N>.pth` files together, with the same world size, model, recipe, and data.
 
-Qwen checkpoints with `model_type` `qwen3_5` or `qwen3_5_moe` support this path for **text-only calibration**. The loader retains the conditional-generation architecture and vision tower, but `--calib_with_images` remains unsupported with FSDP2. During mixed-format export, linear-attention QKV/Z and B/A projections retain their separate runtime-fusion groups. Weight AutoQuantize with FSDP2 remains experimental.
+Vision-language checkpoints keep their conditional-generation architecture and vision tower on this path. They calibrate on text by default; `--calib_with_images` calibrates the full model on image-text samples split across ranks, and is required for a model whose forward needs images. The vision tower is quantized only if the recipe enables it. For Qwen3.5 (`qwen3_5`, `qwen3_5_moe`) mixed-format export, linear-attention QKV/Z and B/A projections retain their separate runtime-fusion groups. Weight AutoQuantize with FSDP2 remains experimental.
 
 > *Performance Note: FSDP2 is designed for training workloads and may result in longer calibration and export times. For faster calibration, maximize the batch size based on available GPU memory and choose the right number of GPUs to avoid unnecessary communication.*
 

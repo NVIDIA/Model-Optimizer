@@ -1128,6 +1128,30 @@ class TestVLMShardedIterable:
         counts = self._counts(total=64, world=4, delivered=57)
         assert counts == [16, 16, 16, 16], counts
 
+    def test_accept_drops_rejected_items_and_pads_like_a_short_stream(self):
+        """With the stream capped at ``per_rank * world`` (as the loaders do), a rejected item is
+        never yielded and its rank pads instead, so every rank still yields ``per_rank`` items."""
+        from modelopt.torch.utils.vlm_dataset_utils import (
+            _HFDatasetsIterableWrapper,
+            _ShardedIterable,
+        )
+
+        base = _HFDatasetsIterableWrapper(list(range(20)), num_samples=20)
+        rejected = {5, 9}  # both on rank 1's stride (1, 5, 9, 13, 17)
+        shards = []
+        for r in range(4):
+            shard = _ShardedIterable(
+                base, rank=r, world=4, per_rank=5, accept=lambda x: None if x in rejected else x
+            )
+            if r == 1:
+                with pytest.warns(UserWarning, match="3 of 5 usable samples for rank 1"):
+                    shards.append(list(shard))
+            else:
+                shards.append(list(shard))
+        assert [len(s) for s in shards] == [5, 5, 5, 5]
+        assert not rejected & {x for s in shards for x in s}
+        assert shards[1] == [1, 13, 17, 17, 17]
+
     def test_stream_shorter_than_world_is_rejected(self):
         """Fewer samples than ranks would leave some ranks with nothing to forward."""
         from modelopt.torch.utils.vlm_dataset_utils import (
@@ -1138,3 +1162,38 @@ class TestVLMShardedIterable:
         base = _HFDatasetsIterableWrapper([], num_samples=0)
         with pytest.raises(RuntimeError, match="no calibration samples"):
             list(_ShardedIterable(base, rank=0, world=2, per_rank=1))
+
+
+def test_vlm_collate_inserts_image_token_a_text_only_template_drops(monkeypatch):
+    """A chat template that cannot render image parts must still leave one image placeholder."""
+    from PIL import Image
+
+    from modelopt.torch.utils import vlm_dataset_utils
+
+    example = {
+        "messages": [
+            {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "What?"}]}
+        ],
+        "image": Image.new("RGB", (8, 8)),
+    }
+    monkeypatch.setattr(vlm_dataset_utils, "_get_vlm_dataset", lambda *a, **k: [example])
+
+    class _Tokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            return messages[0]["content"] + "\n"  # str + list: what a text-only template does
+
+    seen = {}
+
+    class _Processor:
+        image_token = "<image>"
+        tokenizer = _Tokenizer()
+
+        def __call__(self, text, images, **kwargs):
+            seen["text"] = text
+            return {"input_ids": torch.zeros(1, 1, dtype=torch.long)}
+
+    loader = vlm_dataset_utils.get_vlm_dataset_dataloader(
+        dataset_name="scienceqa", processor=_Processor(), num_samples=1
+    )
+    next(iter(loader))
+    assert seen["text"] == ["<image>\nWhat?"]

@@ -248,6 +248,8 @@ def make_calib_dataloader(
             seed=42,
             use_media_shards=True,
             max_shards=1,
+            dp_size=args.dist_state.world_size if args.use_fsdp2 else 1,
+            dp_rank=args.dist_state.rank if args.use_fsdp2 else 0,
         )
     elif model_type == "whisper":
         assert processor is not None and isinstance(processor, WhisperProcessor), (
@@ -416,7 +418,7 @@ def load_model(args: argparse.Namespace):
     # Default to image-text calibration for VLM models. Skip for the AutoQuantize recipe path, whose
     # text-only path does not support image-text calibration yet (auto_quantize() would raise);
     # auto-enabling it here would make Nemotron-VL AutoQuantize fail unconditionally. Nor for FSDP2,
-    # which calibrates on text only.
+    # where image-text calibration is opt-in via --calib_with_images.
     if (
         is_nemotron_vl_model
         and not args.calib_with_images
@@ -1334,9 +1336,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Run calibration under PyTorch FSDP2 (requires torchrun); takes precedence over "
             "--use_seq_device_map. Includes experimental weight and KV-cache AutoQuantize. "
-            "Supports causal LMs and VLMs with text-only calibration (no VILA / encoder-decoder / "
-            "image-text calibration / models whose forward requires images / pack-quantized / "
-            "speculative / sparsity / MTP)."
+            "Supports causal LMs and VLMs, calibrated on text or, with --calib_with_images, on "
+            "image-text samples (required for a VLM whose forward needs images). Not supported: "
+            "VILA / encoder-decoder / pack-quantized / speculative / sparsity / MTP."
         ),
     )
     parser.add_argument(
