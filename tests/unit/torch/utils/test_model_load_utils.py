@@ -100,7 +100,7 @@ from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCol
 from modelopt.torch.utils import plugins
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.fsdp2_utils import fsdp2_root_unsharded
-from modelopt.torch.utils.moe import _EP_MIN_TRANSFORMERS
+from modelopt.torch.utils.moe import _EP_MIN_TRANSFORMERS, _ep_floor
 from modelopt.torch.utils.plugins import hf_checkpoint_utils, model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import (
     _auto_class,
@@ -999,6 +999,201 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
         return
     with pytest.warns(UserWarning, match=f"loads without expert parallelism.*{why}"):
         assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
+
+
+def _prepares_as_its_spec_states(model_type):
+    """A stand-in for ``model_type``'s spec ``prepare`` that patches nothing: it puts the plan the spec
+    states on the text config, where the real ``prepare`` attaches it, and returns the config, as the
+    expert-parallel load requires of a ``prepare``."""
+    plan = get_spec(model_type).ep_spec.prepared_ep_plan
+
+    def prepare(hf_config, **kwargs):
+        hf_config.text_config.base_model_ep_plan = dict(plan)
+        return hf_config
+
+    return prepare
+
+
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version(_ep_floor("kimi_k25")),
+    reason="Kimi-K2.5's expert parallelism needs a later transformers",
+)
+@pytest.mark.parametrize(
+    ("model_type", "expert_parallel"), [("kimi_k25", True), ("kimi_vl", False)]
+)
+def test_a_checkpoint_its_spec_decompresses_is_decided_expert_parallel(
+    run_as, serve, monkeypatch, tmp_path, model_type, expert_parallel
+):
+    """The decision runs before ``prepare``, which installs the decompressor. A compressed-tensors
+    checkpoint whose spec decompresses its experts as they load (Kimi-K2.5's) is planned
+    expert-parallel all the same; one whose spec does not (Kimi-VL's) is planned without it, as the
+    expert-parallel load would refuse it."""
+    spec = get_spec(model_type).ep_spec
+    monkeypatch.setattr(spec, "prepare", _prepares_as_its_spec_states(model_type))
+    monkeypatch.setattr(spec, "make_buildable", lambda *args, **kwargs: None)
+    # What prepare itself would refuse is the next test's.
+    monkeypatch.setattr(spec, "prepare_refusal", None)
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi())
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+    run_as(4)
+    scheme = {"quant_method": "compressed-tensors"}
+    text = SimpleNamespace(n_routed_experts=4, quantization_config=scheme)
+    serve(SimpleNamespace(model_type=model_type, quantization_config=scheme, text_config=text))
+
+    assert resolve_distribution_plan(str(tmp_path))[0].is_expert_parallel == expert_parallel
+
+
+# transformers' own Kimi-K2.5 port (from 5.13), which a load without trust_remote_code builds; the
+# checkpoint below is compressed, which only the checkpoint's own code decompresses here.
+_KimiK25PortConfig = type(
+    "KimiK25Config", (SimpleNamespace,), {"__module__": "transformers.models.kimi_k25.config"}
+)
+
+
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version(_ep_floor("kimi_k25")),
+    reason="Kimi-K2.5's expert parallelism needs a later transformers",
+)
+@pytest.mark.parametrize(
+    ("config_class", "trust_remote_code", "dtype", "why"),
+    [
+        (_KimiK25PortConfig, False, None, "transformers' own port"),
+        (SimpleNamespace, False, None, "trust_remote_code=True"),
+        (SimpleNamespace, True, "float16", "decompress to bfloat16"),
+    ],
+    ids=["transformers-port", "untrusted", "not-bf16"],
+)
+def test_a_checkpoint_its_spec_s_prepare_refuses_is_planned_without_expert_parallelism(
+    run_as, serve, monkeypatch, tmp_path, config_class, trust_remote_code, dtype, why
+):
+    """``prepare`` runs only once the plan is decided expert-parallel, and refuses some checkpoints
+    its spec's formats count as ones the expert-parallel load takes: transformers' own Kimi-K2.5
+    port, code the load may not run, or experts the decompressor cannot take. The decision asks the
+    spec first, so an EP degree left to auto plans the model without expert parallelism, with the
+    warning naming why, rather than decide expert parallelism that ``prepare`` refuses on every rank."""
+    spec = get_spec("kimi_k25").ep_spec
+    monkeypatch.setattr(spec, "prepare", lambda *a, **k: pytest.fail("ran prepare"))
+    monkeypatch.setattr(spec, "make_buildable", lambda *args, **kwargs: None)
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi())
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+    run_as(4)
+    scheme = {"quant_method": "compressed-tensors"}
+    text = SimpleNamespace(n_routed_experts=4, quantization_config=scheme, dtype=dtype)
+    serve(config_class(model_type="kimi_k25", quantization_config=scheme, text_config=text))
+
+    with pytest.warns(UserWarning, match=f"loads without expert parallelism.*{why}"):
+        plan, _ = resolve_distribution_plan(str(tmp_path), trust_remote_code=trust_remote_code)
+
+    assert not plan.is_expert_parallel
+
+
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.13"),
+    reason="transformers ships Kimi-K2.5 itself from 5.13",
+)
+def test_transformers_own_kimi_k25_port_of_an_unquantized_checkpoint_is_planned_expert_parallel(
+    run_as, serve, gpu_memory, monkeypatch, tmp_path
+):
+    """transformers' port, which a load without trust_remote_code builds, carries deepseek_v3's plan
+    on its text config, so an unquantized checkpoint read that way loads expert-parallel on it, as
+    it is. On a GPU the whole model overfills but a rank's share of it with the experts sharded
+    fits, the decision shards the experts rather than FSDP2-shard the whole model."""
+    # Local: this module exists only from transformers 5.13, so a module-level import would break
+    # collection on older releases.
+    from transformers.models.kimi_k25.configuration_kimi_k25 import Kimi_K25Config
+
+    monkeypatch.setattr(
+        "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+        lambda *args, **kwargs: pytest.fail("the checkpoint's code was imported"),
+    )
+    text = {
+        "model_type": "deepseek_v3",
+        "hidden_size": 32,
+        "intermediate_size": 64,
+        "moe_intermediate_size": 128,
+        "n_routed_experts": 8,
+        "num_experts_per_tok": 2,
+        "num_hidden_layers": 2,
+        "first_k_dense_replace": 0,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2,
+        "vocab_size": 64,
+        "kv_lora_rank": 8,
+        "q_lora_rank": None,
+        "qk_rope_head_dim": 8,
+        "qk_nope_head_dim": 8,
+        "v_head_dim": 8,
+        "n_group": 1,
+        "topk_group": 1,
+        "tie_word_embeddings": False,
+    }
+    vision = {"hidden_size": 16, "intermediate_size": 32, "num_hidden_layers": 1}
+    config = serve(
+        Kimi_K25Config(
+            text_config=text,
+            vision_config=vision,
+            projection_hidden_size=16,
+            tie_word_embeddings=False,
+        )
+    )
+    model = model_load_utils.build_meta_causal_lm(
+        str(tmp_path), False, None, copy.deepcopy(config), auto_class=AutoModelForImageTextToText
+    )
+    whole = sum(p.numel() * p.element_size() for p in model.parameters())
+    experts = sum(
+        p.numel() * p.element_size() for n, p in model.named_parameters() if ".mlp.experts." in n
+    )
+    # Below the whole model, above a rank's share with the 8 experts in quarters.
+    gpu_memory(int((whole - experts // 2) / model_load_utils._REPLICATED_SHARE))
+    run_as(4)
+
+    plan, prepared = resolve_distribution_plan(str(tmp_path))
+
+    assert plan == DistributionPlan(4, 4, "replicate")
+    assert type(prepared) is Kimi_K25Config
+    assert prepared.text_config.base_model_ep_plan == config.text_config.base_model_ep_plan
+
+
+def _remote_kimi():
+    """A remote-code Kimi VLM as the checkpoint's own code builds it, unpatched by its spec's
+    ``prepare``: each MoE layer of its language model holds its routed experts as per-expert
+    modules in an ``nn.ModuleList``, at ``language_model.model.layers.<i>.mlp.experts``."""
+
+    def layer():
+        block = nn.Module()
+        block.gate = nn.Linear(2, 4, bias=False)
+        block.experts = nn.ModuleList(nn.Linear(2, 2, bias=False) for _ in range(4))
+        return nn.ModuleDict({"mlp": block})
+
+    model = nn.Module()
+    model.language_model = nn.Module()
+    model.language_model.model = nn.Module()
+    model.language_model.model.layers = nn.ModuleList(layer() for _ in range(2))
+    model.tie_weights = lambda: None  # a PreTrainedModel's; nothing here is tied
+    return model
+
+
+@pytest.mark.parametrize("model_type", ["kimi_vl", "kimi_k25"])
+def test_a_remote_moe_whose_prepare_attaches_its_plan_left_whole_is_an_error(
+    run_as, serve, monkeypatch, tmp_path, model_type
+):
+    """Remote-code Kimi checkpoints get their plan from their spec's ``prepare``, which an EP degree
+    of 1 skips: it patches their code. The plan their spec states still finds the experts their own
+    code builds, so whole on every rank they are refused like Qwen3-MoE. Below the release their
+    spec needs none could be expert-parallel, and they load as a dense model does, with a warning."""
+    if Version(transformers.__version__) < Version(_ep_floor(model_type)):
+        pytest.skip(f"{model_type} cannot be expert-parallel on this transformers")
+    monkeypatch.setenv("MODELOPT_EP_DEGREE", "1")
+    spec = get_spec(model_type).ep_spec
+    monkeypatch.setattr(spec, "prepare", lambda *a, **k: pytest.fail("ran prepare"))
+    # The build step's own work is tested with each checkpoint's code.
+    monkeypatch.setattr(spec, "make_buildable", lambda *args, **kwargs: None)
+    monkeypatch.setattr(model_load_utils, "build_meta_causal_lm", lambda *a, **k: _remote_kimi())
+    run_as(4)
+    serve(SimpleNamespace(model_type=model_type, text_config=SimpleNamespace(n_routed_experts=8)))
+
+    with pytest.raises(ValueError, match="can be expert-parallel, but the plan resolved"):
+        resolve_distribution_plan(str(tmp_path), trust_remote_code=True)
 
 
 @pytest.mark.parametrize(
@@ -1976,8 +2171,9 @@ def test_a_load_prepares_its_config_once(
     )
     prepared = []
 
-    def apply_distributed_support(model_type, hf_config, **kwargs):
-        prepared.append(model_type)
+    def apply_distributed_support(model_type, hf_config, prepare=True, **kwargs):
+        if prepare:  # the plan alone, which deciding reads, prepares nothing
+            prepared.append(model_type)
         hf_config.base_model_ep_plan = get_spec("deepseek_v3").ep_spec.base_model_ep_plan
         return hf_config
 
@@ -2238,9 +2434,12 @@ def test_a_placement_warning_raised_on_one_rank_fails_every_rank(cpu_dist_worker
 
 def _one_rank_cannot_apply_the_spec_job(rank, size, ckpt, step):
     apply = model_load_utils.apply_distributed_support
+    prepares = []
 
     def apply_on_rank0_only(*args, **kwargs):
-        if rank == 1:
+        prepares.append(kwargs.get("prepare", True))
+        # "prepared": rank 1 states the spec as rank 0 does, and fails only where prepare runs.
+        if rank == 1 and (step != "prepared" or prepares[-1]):
             raise OSError("this rank cannot import the checkpoint's code")
         return apply(*args, **kwargs)
 
@@ -2260,7 +2459,7 @@ def _one_rank_cannot_apply_the_spec_job(rank, size, ckpt, step):
                 mock.patch.object(model_load_utils, "load_and_prepare_ep", _loaded_in_step)
             )
         try:
-            if step == "decision":
+            if step in ("decision", "prepared"):
                 resolve_distribution_plan(ckpt)
             else:
                 load_pretrained(ckpt, distribution=DistributionPlan(2, ep_size=2))
@@ -2269,14 +2468,17 @@ def _one_rank_cannot_apply_the_spec_job(rank, size, ckpt, step):
         else:
             raised = "no error"
     assert "cannot import the checkpoint's code" in raised, raised
+    # Deciding an expert-parallel plan, every rank reached the step that prepares it.
+    assert (True in prepares) == (step != "decision"), prepares
 
 
 @needs_ep_transformers
-@pytest.mark.parametrize("step", ["decision", "load"])
+@pytest.mark.parametrize("step", ["decision", "prepared", "load"])
 def test_a_rank_that_cannot_apply_the_spec_fails_every_rank(cpu_dist_workers, tmp_path, step):
     """A spec's preparation reads the checkpoint and imports its code on each rank, which can fail
-    on one alone; the others must not wait for it, in the plan's broadcast when deciding, nor in the
-    load a handed expert-parallel plan starts."""
+    on one alone; the others must not wait for it, in the plan's broadcast when deciding, in the
+    step that prepares the expert-parallel plan decided, nor in the load a handed expert-parallel
+    plan starts."""
     _deepseek_v3(n_routed_experts=8).save_pretrained(tmp_path)
     cpu_dist_workers.run(_one_rank_cannot_apply_the_spec_job, ckpt=str(tmp_path), step=step)
 

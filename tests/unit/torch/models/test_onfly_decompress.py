@@ -42,6 +42,7 @@ from packaging.version import Version
 if Version(transformers.__version__) < Version("5.8"):
     pytest.skip("the on-the-fly decompression needs transformers >= 5.8", allow_module_level=True)
 
+import transformers
 import transformers.core_model_loading as cml
 import transformers.modeling_utils as mu
 from transformers import (
@@ -420,6 +421,60 @@ def test_installing_twice_wraps_the_loader_once(monkeypatch):
 
 
 @pytest.mark.usefixtures("restore_loader_hooks")
+@pytest.mark.parametrize(
+    "refused",
+    [
+        "raw-dict",
+        "not-bf16",
+        "transformers-before-5.8",
+        "unreadable-scheme",
+        "nothing-to-decompress",
+        "compressed-differently",
+        None,
+    ],
+)
+def test_decompression_refusal_finds_what_the_install_refuses(monkeypatch, refused):
+    """A model spec asks before the plan is decided what the install would refuse, installing
+    nothing: a raw dict, the dtype at every config level, the transformers release, the scheme, a
+    config with nothing to decompress, and a process already decompressing a checkpoint compressed
+    differently. It finds a refusal exactly where the install raises one."""
+    first = (_ScaledCompressor, None, PACKED, "stub-format")
+    other = (_ScaledCompressor, None, ("weight", "weight_scale"), "other-format")
+
+    def read(cfg):
+        if refused == "unreadable-scheme":
+            raise NotImplementedError("the checkpoint has 2 compressed-tensors config groups")
+        if refused == "nothing-to-decompress":
+            return None
+        return getattr(cfg, "compression", first)
+
+    monkeypatch.setattr(onfly, "_read_compression", read)
+    monkeypatch.setattr(mu, "get_model_conversion_mapping", lambda model, **kw: [])
+    if refused == "compressed-differently":
+        onfly.install_onfly_decompress(SimpleNamespace())
+    config = SimpleNamespace(text_config=SimpleNamespace())
+    if refused == "not-bf16":
+        config.text_config.dtype = torch.float16
+    if refused == "transformers-before-5.8":
+        monkeypatch.setattr(transformers, "__version__", "5.7.0")
+    if refused == "compressed-differently":
+        config.compression = other
+    asked = {"text_config": {}} if refused == "raw-dict" else config
+    hooks = (mu.get_model_conversion_mapping, cml.spawn_materialize)
+
+    why = onfly.decompression_refusal(asked)
+
+    assert (mu.get_model_conversion_mapping, cml.spawn_materialize) == hooks
+    if refused is None:
+        assert why is None
+        onfly.install_onfly_decompress(asked)
+    else:
+        assert why
+        with pytest.raises((NotImplementedError, ValueError, RuntimeError, TypeError)):
+            onfly.install_onfly_decompress(asked)
+
+
+@pytest.mark.usefixtures("restore_loader_hooks")
 def test_a_checkpoint_compressed_differently_needs_a_process_of_its_own(monkeypatch):
     """The hooks are process-wide: decompressing a second checkpoint with the first one's scheme and
     stored params would load it wrong without a word, so its install is refused and the hooks stay as
@@ -510,9 +565,13 @@ def test_only_the_compressed_checkpoint_loads_through_the_rewritten_converters(m
 
 @pytest.mark.usefixtures("restore_loader_hooks")
 @pytest.mark.parametrize("marked", ["vlm", "text-config"])
-def test_a_vlm_marked_at_either_level_loads_through_the_rewritten_converters(monkeypatch, marked):
+@pytest.mark.parametrize("loaded", ["vlm", "backbone"])
+def test_a_vlm_marked_at_either_level_loads_through_the_rewritten_converters(
+    monkeypatch, marked, loaded
+):
     """A VLM carries its compressed-tensors config at the top level or on its text config, and the
-    install marks the config it is handed. Either way the VLM's expert converters are rewritten, and
+    install marks the config it is handed. Whether the load builds the VLM, its text config replaced
+    by the native backbone's, or that backbone on its own, its expert converters are rewritten, and
     neither level keeps the mark for a later save."""
     monkeypatch.setattr(
         mu, "get_model_conversion_mapping", lambda model, **kw: list(_stock_expert_converters())
@@ -522,7 +581,8 @@ def test_a_vlm_marked_at_either_level_loads_through_the_rewritten_converters(mon
     text = _RemoteTextConfig(hidden_size=64, quantization_config={"format": "stub-format"})
     vlm = SimpleNamespace(text_config=text)
     onfly.install_onfly_decompress(vlm if marked == "vlm" else text)
-    model = SimpleNamespace(config=copy.deepcopy(vlm))
+    vlm.text_config = onfly.to_native_backbone_config(vlm)
+    model = SimpleNamespace(config=copy.deepcopy(vlm if loaded == "vlm" else vlm.text_config))
 
     out = mu.get_model_conversion_mapping(model)
 
@@ -759,6 +819,43 @@ class _RemoteTextConfig(PretrainedConfig):
     """Stands in for the remote-code DeepSeek-V3 config a VLM bundles as its ``text_config``."""
 
     model_type = "remote_deepseek_v3"
+
+
+@pytest.mark.parametrize("as_dict", [False, True], ids=["config-object", "raw-dict"])
+def test_the_native_backbone_config_is_a_clean_stock_deepseek_v3(as_dict):
+    """The bundled text config becomes transformers' own ``DeepseekV3Config`` with the same
+    architecture, minus ``auto_map`` (which routes back to the remote code) and the stale
+    ``quantization_config`` (which would build a competing quantizer). ``architectures`` names the
+    native class: hf_ptq's VLM detection iterates it."""
+    fields = {
+        "hidden_size": 64,
+        "num_hidden_layers": 3,
+        "n_routed_experts": 8,
+        "moe_intermediate_size": 16,
+        "auto_map": {"AutoConfig": "configuration_deepseek.DeepseekV3Config"},
+        "quantization_config": {"quant_method": "compressed-tensors"},
+    }
+    if as_dict:
+        text = {**fields, "model_type": "remote_deepseek_v3"}
+    else:
+        text = _RemoteTextConfig(**fields)
+
+    native = onfly.to_native_backbone_config(SimpleNamespace(text_config=text))
+
+    assert type(native) is DeepseekV3Config
+    assert native.model_type == "deepseek_v3"
+    assert native.architectures == ["DeepseekV3ForCausalLM"]
+    assert (native.hidden_size, native.num_hidden_layers) == (64, 3)
+    assert (native.n_routed_experts, native.moe_intermediate_size) == (8, 16)
+    assert getattr(native, "auto_map", None) is None
+    assert getattr(native, "quantization_config", None) is None
+
+
+def test_the_native_backbone_config_needs_a_text_config_and_a_known_model_type():
+    with pytest.raises(ValueError, match="text_config"):
+        onfly.to_native_backbone_config(SimpleNamespace())
+    with pytest.raises(ValueError, match="unknown native model_type"):
+        onfly.to_native_backbone_config(SimpleNamespace(text_config={}), model_type="not_a_model")
 
 
 # -------------------------------------------------------- with the real compressed_tensors library
