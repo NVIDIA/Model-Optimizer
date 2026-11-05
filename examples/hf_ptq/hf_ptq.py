@@ -1640,13 +1640,14 @@ def main(args: argparse.Namespace):
     # The run owns a distributed launch's process group, and ends it even if loading raises.
     with distributed_run(timeout=timedelta(hours=3), device=args.device) as dist_state:
         args.dist_state = dist_state
-        if args.deterministic:
-            # With the group up, so only rank 0 reports it; still before the first CUDA matmul.
-            enable_determinism(RAND_SEED)
         _main_inner(args)
 
 
 def _main_inner(args: argparse.Namespace):
+    if args.deterministic:
+        # Once the group is up, so only rank 0 reports it; still before the first CUDA matmul.
+        enable_determinism(RAND_SEED)
+
     with mlflow_run(args):
         # --pyt_ckpt_path stays as given. Every later step reads the local copy of the whole
         # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local
