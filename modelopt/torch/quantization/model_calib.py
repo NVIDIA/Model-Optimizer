@@ -16,7 +16,9 @@
 """Calibration utilities."""
 
 import fnmatch
+import itertools
 import math
+import sys
 import time
 import warnings
 from collections import Counter, defaultdict
@@ -114,16 +116,17 @@ def _is_calibrated_nvfp4_static(q) -> bool:
 def _collect_grouped_linears(model: nn.Module) -> list[list[nn.Module]]:
     """Collect name-based sibling groups (Q/K/V, MLA down, gate/up, w1/w3) of calibrated NVFP4-static linears."""
     patterns: tuple[tuple[str, ...], ...] = (
-        ("q_proj", "k_proj", "v_proj"),
-        ("linear_q_down_proj", "linear_kv_down_proj"),
+        *_FUSED_HF_NAMED_PROJECTIONS,
+        *_FUSED_MCORE_PROJECTIONS,
         *list_all_possible("gate_up_pairs"),
     )
     groups: list[list[nn.Module]] = []
     for parent in model.modules():
-        for sibling_names in patterns:
+        candidates = [[getattr(parent, n, None) for n in names] for names in patterns]
+        for children in candidates + _fused_projection_groups(parent):
             members = [
                 child
-                for child in (getattr(parent, n, None) for n in sibling_names)
+                for child in children
                 if child is not None
                 and _is_calibrated_nvfp4_static(getattr(child, "weight_quantizer", None))
             ]
@@ -153,26 +156,51 @@ def _check_grouped_weight_global_amax_synced(model: nn.Module) -> None:
             continue
         ref = amaxes[0]
         assert all(torch.equal(a, ref) for a in amaxes), (
-            "A fusible sibling group (q/k/v or gate/up) was not unified to a shared weight "
-            "global_amax; SharedWeightGlobalAmaxState failed to sync it, so the per-block "
-            "MSE scales would be inconsistent across the group."
+            "A fusible sibling group (e.g. q/k/v, gate/up or MLA down-projections) was not "
+            "unified to a shared weight global_amax; SharedWeightGlobalAmaxState failed to sync "
+            "it, so the per-block MSE scales would be inconsistent across the group."
         )
 
 
-@torch.no_grad()
-def _sync_mla_fused_down_proj_amax(model: torch.nn.Module) -> None:
-    """Give Megatron-Core MLA's q_down / kv_down projections one per-tensor input and weight range each.
+# Megatron-Core projections vLLM and TRT-LLM fuse into one GEMM with one scale per tensor: MLA's
+# down-projections (``fused_qkv_a_proj``) and DeepSeek-V4's (``fused_wqa_wkv``).
+_FUSED_MCORE_PROJECTIONS = (
+    ("linear_q_down_proj", "linear_kv_down_proj"),
+    ("linear_q_down_proj", "linear_kv_proj"),
+)
+# HF-named projections deployments fuse, for Megatron-Core modules that keep HF names (e.g. Kimi K3's
+# MLA and KDA). HF models get the same ranges at export, which fuses every group sharing an input.
+_FUSED_HF_NAMED_PROJECTIONS = (("q_a_proj", "kv_a_proj_with_mqa"), ("q_proj", "k_proj", "v_proj"))
+# Kimi K3 also fuses its gates with them (vLLM's ``fused_qkv_a_g_proj`` and ``in_proj_qkvgfab``).
+_FUSED_HF_NAMED_GATED_PROJECTIONS = (
+    ("q_a_proj", "kv_a_proj_with_mqa", "g_proj"),
+    ("q_proj", "k_proj", "v_proj", "g_proj", "f_a_proj", "b_proj"),
+)
 
-    vLLM and TRT-LLM fuse them into one GEMM (``fused_qkv_a_proj``) with one scale per tensor.
-    Static NVFP4 weights share their global range through ``SHARED_PATTERNS`` instead.
+
+def _fused_projection_groups(module: nn.Module) -> list[list[nn.Module]]:
+    # Without Megatron imported no module can be a MegatronModule, so HF-only runs don't import it.
+    megatron_module = getattr(
+        sys.modules.get("megatron.core.transformer.module"), "MegatronModule", None
+    )
+    is_megatron = megatron_module is not None and isinstance(module, megatron_module)
+    fused_names = _FUSED_MCORE_PROJECTIONS
+    if is_megatron:
+        fused_names += _FUSED_HF_NAMED_PROJECTIONS + _FUSED_HF_NAMED_GATED_PROJECTIONS
+    groups = [[getattr(module, name, None) for name in names] for names in fused_names]
+    return [members for members in groups if all(member is not None for member in members)]
+
+
+@torch.no_grad()
+def _sync_fused_projection_amax(model: torch.nn.Module) -> None:
+    """Give Megatron-Core projections deployments fuse one per-tensor input and weight range each.
+
+    Static NVFP4 weights share their global range in :func:`_sync_fused_projection_global_amax`.
     """
     for module in model.modules():
-        members = [
-            getattr(module, name, None) for name in ("linear_q_down_proj", "linear_kv_down_proj")
-        ]
-        if any(member is None for member in members):
-            continue
-        for quantizer_name in ("input_quantizer", "weight_quantizer"):
+        for members, quantizer_name in itertools.product(
+            _fused_projection_groups(module), ("input_quantizer", "weight_quantizer")
+        ):
             quantizers = []
             for member in members:
                 quantizer = getattr(member, quantizer_name, None)
@@ -194,6 +222,30 @@ def _sync_mla_fused_down_proj_amax(model: torch.nn.Module) -> None:
                     quantizer.amax = shared.to(amax).reshape(amax.shape)
 
 
+@torch.no_grad()
+def _sync_fused_projection_global_amax(model: nn.Module) -> None:
+    """Give the static NVFP4 weights of each Megatron-Core fused group one global range.
+
+    ``SHARED_PATTERNS`` already ties the q/k/v and MLA down-projection groups. Name patterns can't
+    add Kimi K3's ``g_proj``, which KDA fuses with q/k/v and MLA with q_a/kv_a, so this widens those
+    groups in place, keeping the existing ties.
+    """
+    for module in model.modules():
+        for members in _fused_projection_groups(module):
+            quantizers = [
+                member.weight_quantizer
+                for member in members
+                if _is_calibrated_nvfp4_static(getattr(member, "weight_quantizer", None))
+                and member.weight_quantizer.global_amax is not None
+                and not member.weight_quantizer.global_amax.is_meta
+            ]
+            if len(quantizers) < 2:
+                continue
+            shared = torch.stack([q.global_amax.float().reshape(()) for q in quantizers]).max()
+            for quantizer in quantizers:
+                quantizer.global_amax = shared
+
+
 def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) -> None:
     """Finalize calibrated static quantizers and attached shared state.
 
@@ -203,11 +255,12 @@ def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) ->
     the default patterns, verifies the name groups were actually synced. Call once ``_amax``
     is final: single-process, or after the distributed amax sync.
     """
-    _sync_mla_fused_down_proj_amax(model)
+    _sync_fused_projection_amax(model)
     SharedWeightGlobalAmaxState.populate(model)
     promote_static_block_weight_quantizers(model)
-    # Under the default patterns, verify the fusible name groups were actually synced.
+    # Under the default patterns, add the groups they miss and verify the fusible groups were synced.
     if weight_patterns == list(SHARED_PATTERNS):
+        _sync_fused_projection_global_amax(model)
         _check_grouped_weight_global_amax_synced(model)
 
 
@@ -952,8 +1005,8 @@ def _mse_calibrate_weights(
 
                 pbar.update(1)
     pbar.close()
-    # The search refines each weight's range on its own; share the fused MLA pair's again.
-    _sync_mla_fused_down_proj_amax(model)
+    # The search refines each weight's range on its own; share the fused projections' again.
+    _sync_fused_projection_amax(model)
 
 
 class _LocalHessianAccumulator:
@@ -2029,16 +2082,10 @@ def awq_clip(
             clip_ratios = [
                 round(float(k), 2) for k in torch.arange(min_clip_ratio, 1.0, shrink_step)
             ] + [1.0]
-            if self.is_per_tensor_clip(module):
-                self.loss = {k: torch.tensor(0.0, device=module.weight.device) for k in clip_ratios}
-            else:
-                self.loss = {
-                    k: torch.zeros(
-                        (co, math.ceil(ci / self.block_size)),
-                        device=module.weight.device,
-                    )
-                    for k in clip_ratios
-                }
+            shape = () if self.is_per_tensor_clip(module) else (co, math.ceil(ci / self.block_size))
+            # One buffer for every candidate's loss, which the data-parallel sync reduces in place.
+            self.loss_buffer = torch.zeros(len(clip_ratios), *shape, device=module.weight.device)
+            self.loss = dict(zip(clip_ratios, self.loss_buffer))
             self.best_clip_val = None
             self.best_loss = None
 
@@ -2067,7 +2114,24 @@ def awq_clip(
                 indices, self.awq_clip.w_amax * shrink, self.awq_clip.best_clip_val
             )
 
+    def sync_across_dp(module):
+        """Average the clip search over the data-parallel ranks, so every replica picks one clip.
+
+        Once, after the forwards: a module's forward count, as an MoE expert's, can differ by rank.
+        """
+        group = module.parallel_state.data_parallel_group
+        if not group.is_initialized():
+            return
+        losses = module.awq_clip.loss_buffer
+        dist.all_reduce(losses, op=dist.ReduceOp.SUM, group=group.group)
+        losses /= group.world_size()
+        tokens = torch.tensor(module.awq_clip.num_tokens, device=losses.device)
+        dist.all_reduce(tokens, op=dist.ReduceOp.SUM, group=group.group)
+        module.awq_clip.num_tokens = int(tokens.item())
+
     def _clip_search(self, inputs, co_bsz=256, max_tokens=16):
+        if inputs.numel() == 0:  # no tokens to search with; their loss, a mean over none, is NaN
+            return
         weight = self.weight
         self.weight_quantizer.enable()
 
@@ -2125,11 +2189,6 @@ def awq_clip(
 
                     # co_bsz, n_block
                     loss = (cur_out - org_out).float().pow(2).mean(dim=1)
-
-                    parallel_group = self.parallel_state.data_parallel_group
-                    if parallel_group.is_initialized():
-                        dist.all_reduce(loss, op=dist.ReduceOp.SUM, group=parallel_group.group)
-                        loss /= parallel_group.world_size()
 
                     del cur_out, cur_w
                     self.awq_clip.loss[shrink][
@@ -2197,6 +2256,11 @@ def awq_clip(
         module.weight_quantizer.enable()
         if module.awq_clip.is_input_quantized:
             module.input_quantizer.enable()
+
+    # Every module's reduction before any weight gather, which an FSDP2 model's postprocess runs.
+    for module in model.modules():
+        if is_quantized_linear(module) and hasattr(module, "awq_clip"):
+            sync_across_dp(module)
 
     for name, module in model.named_modules():
         if is_quantized_linear(module) and hasattr(module, "awq_clip"):
@@ -2698,7 +2762,33 @@ def gptq(
         handle.sync_hessian_across_dp()
 
     print_rank_0("Updating weights using GPTQ algorithm...")
-    for handle in gptq_handles.values():
+    # Linears whose weights are readable as they are, such as a layerwise run's materialized
+    # layer, whose sequential-MoE experts are each a linear, update spread over the GPUs as fused
+    # experts do below; the rest, tensor-parallel shards included, each open their weight window.
+    readable = {
+        name: handle
+        for name, handle in gptq_handles.items()
+        if not requires_weight_materialization(handle.module, model, names)
+        and not is_quantized_parallel_linear(handle.module)
+    }
+    # A weight left to its window may also be a later linear's, which the batch would update
+    # first, and before the window opens its storage cannot be compared: all then update in turn.
+    if len(readable) < len(gptq_handles):
+        readable = {}
+    # Weights in one storage, tied ones or views that may overlap, update in turn, each reading the
+    # last one's result; a sequential MoE's experts each have their own storage and stay spread.
+    storage = {
+        name: (handle.module.weight.device, handle.module.weight.untyped_storage().data_ptr())
+        for name, handle in readable.items()
+    }
+    shared = Counter(storage.values())
+    readable = {n: h for n, h in readable.items() if shared[storage[n]] == 1}
+    update_expert_weights(
+        [(handle, handle.module.weight) for handle in readable.values()], block_size, perc_damp
+    )
+    for name, handle in gptq_handles.items():
+        if name in readable:
+            continue
         with enable_weight_access_and_writeback(handle.module, model, names):
             handle.update_weights(block_size, perc_damp)
         handle.free()
