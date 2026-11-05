@@ -20,6 +20,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from transformers import WhisperProcessor
+
+from modelopt.torch.models.whisper import calibration as whisper_calibration
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
 
@@ -239,13 +242,10 @@ def test_post_quantize_decodes_through_the_processor_when_there_is_no_tokenizer(
 def test_make_calib_dataloader_takes_a_model_types_own_calibration_data(
     hf_ptq, monkeypatch: pytest.MonkeyPatch
 ):
-    pytest.importorskip("transformers")
-    from transformers import WhisperProcessor
-
-    from modelopt.torch.models.whisper import calibration
-
     monkeypatch.setattr(
-        calibration, "get_speech_dataset_dataloader", lambda **kwargs: ("loader", "transcript")
+        whisper_calibration,
+        "get_speech_dataset_dataloader",
+        lambda **kwargs: ("loader", "transcript"),
     )
     args = SimpleNamespace(
         specdec_offline_dataset=None,
