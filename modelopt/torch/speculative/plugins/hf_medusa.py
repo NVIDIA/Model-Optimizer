@@ -52,6 +52,8 @@ IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 class HFMedusaModel(MedusaModel):
     """Medusa Model Class for huggingface models."""
 
+    accepts_loss_kwargs = False
+
     def modify(self, medusa_num_heads=0, medusa_num_layers=0):
         """Constructor.
 

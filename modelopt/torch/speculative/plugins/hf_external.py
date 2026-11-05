@@ -64,6 +64,8 @@ def _train_acc(acc):
 class HFExternalDraftModel(ExternalDraftModel):
     """An external draft model for HuggingFace models."""
 
+    accepts_loss_kwargs = False
+
     def modify(self, config):
         """Configure the draft and validate that it can score against this base."""
         super().modify(config)

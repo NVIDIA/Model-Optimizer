@@ -639,13 +639,18 @@ def test_get_dummy_inputs_offline(eagle_model):
 
 
 @pytest.mark.parametrize("accumulation_steps", [2, 3])
-def test_eagle_trainer_accumulated_gradients(tmp_path, accumulation_steps):
-    """Trainer averages native EAGLE losses for full and partial accumulation groups."""
+@pytest.mark.parametrize("mode", ["eagle", "medusa", "external"])
+def test_speculative_trainer_accumulated_gradients(tmp_path, accumulation_steps, mode):
+    """Trainer averages native losses for full and partial accumulation groups."""
     model = get_tiny_llama(num_hidden_layers=4, dtype=torch.float32)
-    mtsp.convert(
-        model,
-        mode=[("eagle", {**TINY_EAGLE_MODE_CFG, "eagle_use_torch_compile": False})],
-    )
+    configs = {
+        "eagle": {**TINY_EAGLE_MODE_CFG, "eagle_use_torch_compile": False},
+        "medusa": {"medusa_num_heads": 2, "medusa_num_layers": 1},
+        "external": {"external_loss": "soft_ce"},
+    }
+    mtsp.convert(model, mode=[(mode, configs[mode])])
+    if mode == "external":
+        model.attach_base_lm_head(model.get_output_embeddings())
     trainer = _eagle_utils.EagleTrainerWithAccLog(
         model=model,
         args=TrainingArguments(
@@ -655,23 +660,37 @@ def test_eagle_trainer_accumulated_gradients(tmp_path, accumulation_steps):
             gradient_accumulation_steps=accumulation_steps,
         ),
     )
+    # Hyperparameter search recreates the accelerator between trials.
+    trainer.create_accelerator_and_postprocess()
     batches = [
         {"input_ids": torch.randint(0, 32, (1, 8)), "labels": torch.zeros(1, 8, dtype=torch.long)}
         for _ in range(2)
     ]
+    if mode == "external":
+        for batch in batches:
+            batch.pop("labels")
+            batch["base_model_outputs"] = {
+                "base_model_hidden_states": torch.randn(1, 8, model.config.hidden_size)
+            }
     trainer.current_gradient_accumulation_steps = len(batches)
     model.train()
+    expected_loss = torch.tensor(0.0)
     for batch in batches:
-        (model(**batch).loss / len(batches)).backward()
+        loss = model(**batch).loss / len(batches)
+        expected_loss += loss.detach()
+        loss.backward()
     expected = {
-        name: parameter.grad.clone()
+        name: None if parameter.grad is None else parameter.grad.clone()
         for name, parameter in model.named_parameters()
         if parameter.requires_grad
     }
     model.zero_grad(set_to_none=True)
 
-    for batch in batches:
+    reported_loss = sum(
         trainer.training_step(model, batch, num_items_in_batch=torch.tensor(16))
+        for batch in batches
+    )
+    torch.testing.assert_close(reported_loss, expected_loss)
 
     for name, parameter in model.named_parameters():
         if parameter.requires_grad:

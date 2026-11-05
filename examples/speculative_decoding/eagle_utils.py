@@ -329,6 +329,9 @@ class EagleTrainerWithAccLog(Trainer):
         if not hasattr(self.state, "component_losses"):
             self.state.component_losses = {"eagle": [], "preservation": []}
         kwargs.pop("num_items_in_batch", None)
+        if not self.model_accepts_loss_kwargs and self.compute_loss_func is None:
+            # Trainer averages these mean losses before backward; Accelerate must not divide again.
+            self.accelerator.gradient_accumulation_steps = 1
         loss, outputs = super().compute_loss(return_outputs=True, *args, **kwargs)
         if hasattr(outputs, "train_acc") and any(outputs.train_acc):
             self.state.training_accs.append(outputs.train_acc)
