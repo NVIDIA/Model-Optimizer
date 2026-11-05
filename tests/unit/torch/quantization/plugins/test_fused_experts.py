@@ -2711,9 +2711,10 @@ def test_native_fp8_experts_reject_packed_weight_updates(cfg, algorithm):
         assert not torch.equal(getattr(experts, name), weight)
 
 
-def test_native_fp8_experts_unpack_in_the_dtype_their_forward_runs_in():
-    # A BF16 forward encodes each expert cast to BF16; calibration must encode those same weights,
-    # or the codes imatrix pins are not the ones the forward uses.
+@pytest.mark.parametrize("algorithm", ["imatrix", {"method": "gptq", "block_size": 256}])
+def test_native_fp8_experts_calibrate_in_the_dtype_their_forward_runs_in(algorithm):
+    # A BF16 forward encodes each expert cast to BF16; calibration must see those same weights, or
+    # the ranges max records and the codes GPTQ or imatrix pin are not the ones the forward uses.
     torch.manual_seed(42)
     config = PretrainedConfig(
         hidden_size=256,
@@ -2734,11 +2735,17 @@ def test_native_fp8_experts_unpack_in_the_dtype_their_forward_runs_in():
         {"quantizer_name": "*weight_quantizer", "cfg": cfg},
     ]
     mtq.quantize(experts, {"quant_cfg": quant_cfg, "algorithm": "max"}, forward_loop=None)
+    for name in ("gate_up_proj", "down_proj"):
+        for idx, quantizer in enumerate(getattr(experts, f"{name}_weight_quantizers")):
+            blocks = experts.get_expert_weight(name, idx, torch.bfloat16).float().reshape(-1, 256)
+            torch.testing.assert_close(
+                quantizer.amax.flatten().float(), blocks.abs().amax(dim=1), rtol=0, atol=0
+            )
     experts.unpack_weight()
     inputs = torch.randn(64, 256, dtype=torch.bfloat16)
     indices = (torch.arange(64) % 2).unsqueeze(1)
     routing = torch.ones(64, 1, dtype=torch.bfloat16)
-    mtq.calibrate(experts, "imatrix", forward_loop=lambda m: m(inputs, indices, routing))
+    mtq.calibrate(experts, algorithm, forward_loop=lambda m: m(inputs, indices, routing))
 
     iq2_xxs = GGML_FORMAT_REGISTRY["iq2_xxs"]
     for name in ("gate_up_proj", "down_proj"):
