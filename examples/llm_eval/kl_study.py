@@ -329,10 +329,10 @@ def main():
         if not all((args.model, args.quantized_model, args.work_dir, args.runner_sha256)):
             parser.error("Scoring requires local checkpoints, --work_dir and --runner_sha256.")
         if args.audit and any(
-            len(r["prompt_ids"]) + len(r["generated_ids"]) > min(64, args.context_limit)
+            len(r["prompt_ids"]) + len(r["generated_ids"]) > min(256, args.context_limit)
             for r in report["examples"]
         ):
-            parser.error("Dense audits require short sequences of at most 64 tokens.")
+            parser.error("Dense audits require short sequences of at most 256 tokens.")
         args.work_dir.mkdir(parents=True, exist_ok=True)
         with (args.work_dir / "lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -40,6 +40,7 @@ def test_bounded_capture_matches_dense_scores_and_resumes(tmp_path):
             for row in [
                 {"id": "eos", "prompt_ids": [1, 2, 3], "generated_ids": [eos]},
                 {"id": "chunked", "prompt_ids": [1] * 19, "generated_ids": [4] * 8 + [eos]},
+                {"id": "tile-boundary", "prompt_ids": [1] * 19, "generated_ids": [4] * 120 + [eos]},
             ]
         )
     )
@@ -57,11 +58,11 @@ def test_bounded_capture_matches_dense_scores_and_resumes(tmp_path):
         "--quantized_model",
         os.environ["KL_STUDY_MODEL"],
         "--context_limit",
-        "64",
+        "256",
         "--max_new_tokens",
-        "16",
+        "128",
         "--prefill_chunk_size",
-        "8",
+        "80",
         "--work_dir",
         str(tmp_path / "work"),
         "--top_ks",
@@ -80,6 +81,7 @@ def test_bounded_capture_matches_dense_scores_and_resumes(tmp_path):
     assert report["examples"][0]["dense_max_error"] < 1e-5
     assert report["examples"][0]["stop_reason"] == "eos"
     assert report["examples"][1]["metrics"]["full_vocab_kl"] == pytest.approx([0] * 9, abs=1e-6)
+    assert report["examples"][2]["metrics"]["full_vocab_kl"] == pytest.approx([0] * 121, abs=1e-6)
     original = output.read_text()
     subprocess.run(command, check=True)
     assert output.read_text() == original
