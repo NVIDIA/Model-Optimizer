@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
+from packaging.version import Version
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -44,7 +45,7 @@ from modelopt.torch.quantization.algorithms import (
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
 from modelopt.torch.utils import safe_load, safe_save
-from modelopt.torch.utils.distributed import DistributedProcessGroup
+from modelopt.torch.utils.distributed import DistributedProcessGroup, DistributionPlan
 
 
 class _AttentionLayer(torch.nn.Module):
@@ -1050,6 +1051,127 @@ def _test_data_parallel_moe_score_module(rank, size):
 
 def test_data_parallel_moe_score_module(cpu_dist_workers):
     cpu_dist_workers.run(_test_data_parallel_moe_score_module)
+
+
+def _tiny_qwen3_moe(experts_implementation):
+    from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+
+    config = Qwen3MoeConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        moe_intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+        num_experts=4,
+        num_experts_per_tok=2,
+    )
+    torch.manual_seed(0)
+    model = Qwen3MoeForCausalLM(config)
+    model.config._experts_implementation = experts_implementation
+    return model.eval()
+
+
+def _sharded_like_the_expert_parallel_load(model, size):
+    """Shard the experts over every rank as transformers' expert-parallel load does from 5.16, with
+    the torch_a2a styles the load swaps in, and seed each module's groups as the load does."""
+    from torch.distributed.device_mesh import init_device_mesh
+    from transformers.distributed.tensor_parallel import apply_tensor_parallelism
+
+    from modelopt.torch.utils.distributed import ParallelState, set_distribution_plan
+    from modelopt.torch.utils.plugins.model_load_utils import _seed_parallel_states
+
+    mesh = init_device_mesh("cpu", (size,))
+    model.tp_plan = {
+        "model.layers.*.mlp.gate": "torch_a2a_router",
+        "model.layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+        "model.layers.*.mlp.experts.down_proj": "grouped_gemm",
+        "model.layers.*.mlp.experts": "torch_a2a_experts",
+    }
+    apply_tensor_parallelism(model, mesh)
+    model._device_mesh = mesh
+    _seed_parallel_states(
+        model,
+        [f"model.layers.{i}.mlp.experts" for i in range(len(model.model.layers))],
+        dense_state=ParallelState(),
+        expert_state=ParallelState(-1, expert_model_parallel_group=mesh.get_group()),
+    )
+    set_distribution_plan(model, DistributionPlan(size, ep_size=size))
+    return model
+
+
+def _test_expert_parallel_auto_quantize(rank, size, method):
+    from modelopt.torch.utils.distributed import ParallelState
+    from modelopt.torch.utils.moe import register_torch_a2a
+    from modelopt.torch.utils.plugins.model_load_utils import _seed_parallel_states
+
+    register_torch_a2a()
+    gen = torch.Generator().manual_seed(1)
+    batches = []
+    for _ in range(size):
+        input_ids = torch.randint(0, 64, (2, 8), generator=gen)
+        batches.append({"input_ids": input_ids, "labels": input_ids})
+    formats = [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG]
+    if method == "gradient":
+        search = {"quantization_formats": formats, "loss_func": lambda output, _: output.loss}
+        forward_step = lambda model, batch: model(**batch)  # noqa: E731
+        bits = 6.0
+    else:  # the experts alone, beside a fixed format
+        search = {
+            "fixed_quantization_config": mtq.INT8_DEFAULT_CFG,
+            "module_search_spaces": [
+                {"module_name_patterns": ["*mlp.experts"], "quantization_formats": formats}
+            ],
+        }
+        forward_step = lambda model, batch: model(**batch).logits  # noqa: E731
+        bits = 7.0
+
+    def auto_quantize(model, data_loader):
+        return mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": bits},
+            data_loader=data_loader,
+            forward_step=forward_step,
+            num_calib_steps=len(data_loader),
+            num_score_steps=len(data_loader),
+            method=method,
+            **search,
+        )[1]
+
+    # One process scoring every rank's batches, one per step as the ranks do: its groups unset.
+    reference = _tiny_qwen3_moe("grouped_mm")
+    _seed_parallel_states(reference, [], ParallelState(-1), None)
+    reference_state = auto_quantize(reference, batches)
+
+    model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
+    state = auto_quantize(model, batches[rank::size])
+
+    assert state["best"]["recipe"] == reference_state["best"]["recipe"]
+    for name, stat in reference_state["candidate_stats"].items():
+        assert state["candidate_stats"][name]["formats"] == stat["formats"], name
+        assert state["candidate_stats"][name]["costs"] == stat["costs"], name
+        # Summed in another order; the damage fit of aumann_shapley amplifies that to ~1e-3.
+        torch.testing.assert_close(
+            torch.tensor(state["candidate_stats"][name]["scores"]),
+            torch.tensor(stat["scores"]),
+            rtol=1e-2,
+            atol=0,
+        )
+
+
+@pytest.mark.parametrize("method", ["gradient", "aumann_shapley"])
+def test_expert_parallel_auto_quantize_picks_one_processes_formats(cpu_dist_workers, method):
+    """Each rank scores its own batches through the experts it holds, sharded as transformers'
+    expert-parallel load leaves them: DTensors over every rank, behind the all-to-all forwards that
+    quantizer insertion drops. The search gives the costs, scores and formats of one process scoring
+    every rank's batches -- with aumann_shapley over the experts alone, whose groups hold no rank's
+    whole data."""
+    transformers = pytest.importorskip("transformers")
+    if Version(transformers.__version__) < Version("5.16"):
+        pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
+    cpu_dist_workers.run(_test_expert_parallel_auto_quantize, method=method)
 
 
 def test_score_hparam_registration_preserves_order():

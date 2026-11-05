@@ -784,14 +784,17 @@ class QuantRecipeHparam(Hparam):
                 cost += weight_size * recipe.compression
                 continue
 
-            weight_size = DistributedProcessGroup.get_dist_syncd_obj(
-                weight_size,
-                [
-                    parallel_state.tensor_parallel_group,
-                    parallel_state.expert_model_parallel_group,
-                ],
-                sum,
-            )
+            # A plain tensor is this rank's shard over the TP and EP groups. A DTensor's size is the
+            # whole tensor's already, as for the routed experts transformers shards expert-parallel.
+            if not any(isinstance(p, DTensor) for p in quant_module.parameters(recurse=False)):
+                weight_size = DistributedProcessGroup.get_dist_syncd_obj(
+                    weight_size,
+                    [
+                        parallel_state.tensor_parallel_group,
+                        parallel_state.expert_model_parallel_group,
+                    ],
+                    sum,
+                )
 
             # Across data parallel groups, the weight size is the same for all the ranks.
             weight_size = DistributedProcessGroup.get_dist_syncd_obj(

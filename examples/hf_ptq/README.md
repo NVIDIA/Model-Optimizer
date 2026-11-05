@@ -692,6 +692,8 @@ Two environment variables override the automatic distribution plan:
 
 On more than one rank, `max` and `mse` calibration have run on GPUs; `gptq`, `smoothquant`, `awq_clip` and `nvfp4_act_headroom` are supported but not yet run on GPUs; `awq_lite`, `awq_full`, `svdquant`, `local_hessian` and `imatrix`, and `max` or `mse` with `distributed_sync` off, are refused before quantizing; and an LSQ recipe runs with a warning, since nothing has checked its learnable scales across ranks yet.
 
+[AutoQuantize recipes](#autoquantize) run expert-parallel too, and on a model replicated on every rank: each rank scores its own share of the calibration data, the scores are summed over the ranks, and every rank picks the same format per layer. A recipe with a KV-cache search is refused under expert parallelism; run it with `--use_fsdp2` or in a single process. With `--auto_quantize_checkpoint`, each rank saves and restores a `rank<N>` file of its own: resume with the same world size and `MODELOPT_EP_DEGREE`.
+
 A run that cannot shard the model the way the plan asks fails before loading, rather than loading the whole model on every rank. `--use_fsdp2` skips expert parallelism and uses the [FSDP2 path](#multi-node-post-training-quantization-with-fsdp2) instead. Expert parallelism refuses GPT-OSS and Llama-4: their experts are stored transposed, which the expert-parallel export cannot write yet. `--use_fsdp2` refuses their released checkpoints too (GPT-OSS's carry an MXFP4 `quantization_config`, and Llama-4's are multimodal), so quantize those in a single process (without `torchrun`), which spreads the model over the node's GPUs.
 
 ## Evaluate Accuracy
