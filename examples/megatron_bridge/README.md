@@ -424,21 +424,13 @@ DeepSeek-V4-Flash with SequentialMLP experts, append:
   '*.local_experts.*.linear_fc2.weight'
 ```
 
-Names are relative to the student root. All other student parameters are frozen;
-this does not remove adapters from an existing checkpoint. Every pattern must
-match on each local model chunk, so pipeline stages without routed experts need
-a different selection. The option leaves quantizers enabled and enables activation
-gradients for frozen embeddings and TransformerBlock/HybridStack recomputation.
-The teacher remains frozen through the standard distillation provider.
+Patterns are relative to the student root and must match each local model chunk.
+Only selected student parameters train; the teacher stays frozen. Quantizers and
+activation gradients remain enabled.
 
-Use the same selection when resuming a native training checkpoint. The native
-Megatron-Bridge optimizer and checkpoint loader own FP32 master weights, Adam
-state, and training counters; this option does not change their save/restore path.
-An initial `--student_megatron_path` loads student weights and ModelOpt state;
-it is not a substitute for native training resume. Keep the existing Bridge/Core
-installation requirements above, and use versions that provide the model's
-HybridModel provider. This option does not add DeepSeek checkpoint conversion,
-decoded-weight initialization, HF export, or a serving recipe.
+Reuse the selection on native resume. Native checkpointing restores FP32 masters,
+Adam state, and training counters; `--student_megatron_path` only loads initial
+weights and ModelOpt state. Use Bridge/Core versions with HybridModel support.
 
 ### LoRA QAD
 
