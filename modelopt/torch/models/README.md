@@ -41,9 +41,10 @@ them:
 `test_specs_vs_transformers.py` needs no edit: it reads which models to check, and
 which to skip, from the registry.
 
-A model type that is not a lowercase module name (`NemotronH_Nano_VL_V2`) gets a package named
-for it, lowercased with hyphens as underscores (`nemotron_h_nano_vl_v2`); the spec's `model_type`
-stays the HF one.
+A model type that is not a lowercase module name (`NemotronH_Nano_VL_V2`) gets a snake_case
+package name (`nemotron_h_nano_vl_v2`), as transformers puts `EvollaModel` in `evolla`. No code
+derives a package from a model type: the spec's `model_type` stays the exact HF string, and every
+reference names the package explicitly.
 
 The file is named for what it holds, not for who reads it: a model's spec is general
 model data, and export is only its first consumer.
