@@ -10,5 +10,4 @@
 | Preemption or interrupted infrastructure work | Prefer supported same-config resume when cache identity and complete accounting can be proved. |
 | Endpoint overload, rate limits, transient transport errors | Check health, back off, and reduce offending concurrency. Retry after recovery, not repeatedly into the same outage. |
 | Sandbox provisioning/executor failure | Repair image/dependencies/capacity; canary code execution before full. Distinguish infrastructure faults from protocol-valid failed trials. |
-| Missing scores/coverage, parser errors, wrong identity/configuration | Repair accounting or configuration; never invent missing outcomes or retry only wrong answers. |
 | Authentication, permission, secret exposure, unsupported protocol | Stop affected work and report the blocker; retries cannot bypass access controls or waive benchmark rules. |
