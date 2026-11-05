@@ -129,8 +129,9 @@ def init_distributed_env(training_args: transformers.TrainingArguments) -> None:
     """
     if training_args.cp_size < 1:
         raise ValueError(f"cp_size must be >= 1, got {training_args.cp_size}.")
-    if training_args.cp_size > 1:
-        # Every rank of a CP group loads the same batches, so all must take them in sampler order.
+    if training_args.cp_size > 1 or training_args.full_determinism:
+        # Every rank of a CP group loads the same batches, so all must take them in sampler
+        # order; a fully deterministic run must not depend on which worker finishes first.
         training_args.dataloader_in_order = True
     world_size = int(os.environ.get("WORLD_SIZE", torch.cuda.device_count() or 1))
     if training_args.dp_shard_size is None:
