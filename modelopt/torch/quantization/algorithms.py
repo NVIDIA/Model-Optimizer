@@ -753,6 +753,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     def validate_search_input(self, constraints, config) -> None:
         """Validate method-specific inputs before quantizing the model."""
 
+    def validate_model_input(self, model: nn.Module, config) -> None:
+        """Validate method-specific model layouts before conversion."""
+
     def load_search_checkpoint(self) -> bool:
         return super().load_search_checkpoint(strict=False)
 
@@ -2295,6 +2298,7 @@ def _match_quantizer_cfg(quant_cfg, quantizer_attr):
     return matched, matched_enable
 
 
-# Late import avoids a circular dependency: the Aumann-Shapley searcher builds on the
-# AutoQuantize classes above and registers itself in AUTO_QUANTIZE_SEARCHERS on import.
+# Late imports avoid cycles: optional searchers build on the AutoQuantize classes above
+# and register themselves in AUTO_QUANTIZE_SEARCHERS on import.
+from . import _auto_quantize_rco as _auto_quantize_rco  # noqa: E402
 from . import _auto_quantize_shapley as _auto_quantize_shapley  # noqa: E402

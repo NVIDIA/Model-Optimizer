@@ -185,6 +185,51 @@ Here is how to perform ``auto_quantize``:
     mto.save(model, "auto_quantize_model.pt")
 
 
+Riemannian precision selection
+-----------------------------
+
+Select ``method="rco"`` to optimize the joint model loss with
+`Riemannian Constrained Optimization <https://github.com/IST-DASLab/RCO>`_.
+Candidate calibration, runtime grouping, effective-bit accounting, and export remain
+the same as ordinary AutoQuantize. Only allocation logits are optimized; candidate
+weights and quantizer scales are frozen.
+
+The following search uses exactly NVFP4, FP8, and BF16 weight candidates. BF16 is
+the implicit no-quantization choice. Activations retain their original precision.
+
+.. code-block:: python
+
+    import copy
+
+    formats = [copy.deepcopy(mtq.NVFP4_DEFAULT_CFG), copy.deepcopy(mtq.FP8_DEFAULT_CFG)]
+    for config in formats:
+        config["quant_cfg"].append({"quantizer_name": "*input_quantizer", "enable": False})
+
+    model, search_state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.5},
+        quantization_formats=formats,
+        data_loader=calib_dataloader,
+        forward_step=lambda model, batch: model(**batch),
+        method={"method": "rco", "steps": 200, "num_samples": 4, "seed": 42},
+    )
+    mto.save(model, "rco_model.pt")
+
+The default objective is full-vocabulary teacher KL over next-token predictions,
+respecting target-position attention masks, loss masks, and ignored labels.
+``loss_func`` can supply a task objective instead. RCO performs repeated model
+forward/backward passes during selection, whereas gradient AutoQuantize solves
+an additive sensitivity model. Compare their complete search costs and held-out
+quality at the achieved effective bits.
+
+RCO currently requires materialized dense linear parameters and weight-only
+candidates without pre-quantization scales or enabled class-scoped quantizer settings.
+Distributed process groups and meta weights used by offload are unsupported.
+A search checkpoint reuses calibration
+and initialization, not the allocation optimizer state. Searching a new budget
+requires the model and calibration data; cached-score-only re-solving is unsupported.
+
+
 Advanced Topics
 ===============
 

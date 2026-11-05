@@ -861,6 +861,124 @@ def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method)
     assert torch.allclose(output_ref, output_test)
 
 
+@pytest.mark.parametrize("effective_bits", [8.0, 12.0, 16.0])
+@torch.no_grad()
+def test_auto_quantize_rco_preserves_weights_and_selected_precisions(effective_bits):
+    model = TransformerBlock().eval()
+    weights = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+    fp8 = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    fp8["quant_cfg"].append({"quantizer_name": "*input_quantizer", "enable": False})
+    batches = [model.get_input() for _ in range(2)]
+    searched, state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": effective_bits},
+        quantization_formats=[fp8],
+        data_loader=batches,
+        forward_step=lambda model, batch: model(batch),
+        num_calib_steps=2,
+        num_score_steps=2,
+        method={"method": "rco", "steps": 2, "num_samples": 1, "seed": 42},
+        verbose=False,
+    )
+    assert state["best"]["is_satisfied"]
+    assert state["best"]["constraints"]["effective_bits"] <= effective_bits
+    for name, parameter in searched.named_parameters():
+        assert torch.equal(parameter, weights[name])
+        assert parameter.requires_grad
+    assert not searched.training
+    assert searched.attn.q_proj.get_hparam("quant_recipe") is searched.attn.k_proj.get_hparam(
+        "quant_recipe"
+    )
+
+    saved = io.BytesIO()
+    mto.save(searched, saved)
+    saved.seek(0)
+    restored = mto.restore(TransformerBlock().eval(), saved)
+    torch.testing.assert_close(restored(batches[0]), searched(batches[0]))
+
+    config = mtq.get_auto_quantize_config(state)
+    assert config["quant_cfg"]
+    with pytest.raises(ValueError):
+        mtq.get_auto_quantize_config(state, {"effective_bits": 10.0})
+
+
+@pytest.mark.parametrize(
+    "unsupported_input", ["activation", "class_scoped_activation", "convolution"]
+)
+def test_auto_quantize_rco_rejects_unsupported_inputs_before_conversion(unsupported_input):
+    model = TransformerBlock()
+    fp8 = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    if unsupported_input == "convolution":
+        model.visual = torch.nn.Conv2d(1, 1, 1)
+        fp8["quant_cfg"].append({"quantizer_name": "*input_quantizer", "enable": False})
+    if unsupported_input == "class_scoped_activation":
+        fp8["quant_cfg"].extend(
+            [
+                {"quantizer_name": "*input_quantizer", "enable": False},
+                {"quantizer_name": "*input_quantizer", "parent_class": "nn.Linear", "enable": True},
+            ]
+        )
+    with pytest.raises(ValueError):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 12.0},
+            quantization_formats=[fp8],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            num_calib_steps=1,
+            num_score_steps=1,
+            method={"method": "rco", "steps": 1, "num_samples": 1},
+        )
+    assert not mtq.utils.is_quantized(model)
+
+
+def test_auto_quantize_rco_measures_fixed_precision_against_unquantized_teacher():
+    torch.manual_seed(42)
+    model = torch.nn.Sequential(torch.nn.Linear(32, 32), torch.nn.Linear(32, 32)).eval()
+    reference = copy.deepcopy(model)
+    batch = torch.randn(1, 4, 32)
+    fp8 = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    fp8["quant_cfg"].append({"quantizer_name": "*input_quantizer", "enable": False})
+    model, state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 16.0},
+        fixed_quantization_config=fp8,
+        module_search_spaces=[{"module_name_patterns": ["1"], "quantization_formats": [fp8]}],
+        data_loader=[batch],
+        forward_step=lambda model, batch: model(batch),
+        num_calib_steps=1,
+        num_score_steps=1,
+        method={"method": "rco", "steps": 1, "num_samples": 1},
+    )
+    expected_kl = torch.distributions.kl_divergence(
+        torch.distributions.Categorical(logits=reference(batch)[:, :-1].double()),
+        torch.distributions.Categorical(logits=model(batch)[:, :-1].double()),
+    ).mean()
+    assert expected_kl > 1e-7
+    assert state["rco"]["final_loss"] == pytest.approx(float(expected_kl.detach()), abs=3e-7)
+    assert model[0].weight_quantizer.is_enabled
+
+
+def test_auto_quantize_rco_keeps_protected_convolution_unquantized():
+    model = TransformerBlock()
+    model.visual = torch.nn.Conv2d(1, 1, 1)
+    fp8 = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    fp8["quant_cfg"].append({"quantizer_name": "*input_quantizer", "enable": False})
+    model, state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 12.0},
+        quantization_formats=[fp8],
+        disabled_layers=["*visual*"],
+        data_loader=[model.get_input()],
+        forward_step=lambda model, batch: model(batch),
+        num_calib_steps=1,
+        num_score_steps=1,
+        method={"method": "rco", "steps": 1, "num_samples": 1},
+    )
+    assert state["best"]["is_satisfied"]
+    assert not model.visual.weight_quantizer.is_enabled
+
+
 def test_auto_quantize_disable_layers():
     model = TransformerBlock()
 
