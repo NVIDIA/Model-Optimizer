@@ -391,6 +391,8 @@ class AutoQuantizeRCOSearcher(_AutoQuantizeBaseSearcher):
                     if len(hparam.solver_choices) == 1
                     else QuantRecipe(None)
                 )
+                if len(hparam.solver_choices) == 1 and hparam.active == QuantRecipe(None):
+                    continue
                 for module in hparam.quant_modules:
                     had_forward = "forward" in module.__dict__
                     original = module.__dict__.get("forward")

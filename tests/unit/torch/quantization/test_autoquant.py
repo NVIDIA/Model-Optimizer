@@ -960,8 +960,17 @@ def test_auto_quantize_rco_measures_fixed_precision_against_unquantized_teacher(
 
 
 def test_auto_quantize_rco_keeps_protected_convolution_unquantized():
-    model = TransformerBlock()
-    model.visual = torch.nn.Conv2d(1, 1, 1)
+    class ConvTransformerBlock(TransformerBlock):
+        def __init__(self):
+            super().__init__()
+            self.visual = torch.nn.Conv1d(32, 32, 1, groups=32)
+
+        def forward(self, x):
+            x = self.attn(x)
+            x = self.visual(x.transpose(1, 2)).transpose(1, 2)
+            return self.mlp(x)
+
+    model = ConvTransformerBlock()
     fp8 = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
     fp8["quant_cfg"].append({"quantizer_name": "*input_quantizer", "enable": False})
     model, state = mtq.auto_quantize(
