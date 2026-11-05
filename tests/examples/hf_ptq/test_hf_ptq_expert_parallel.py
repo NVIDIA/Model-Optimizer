@@ -216,15 +216,28 @@ def test_use_fsdp2_refuses_a_checkpoint_before_building_it_to_decide(hf_ptq, mon
         hf_ptq.resolve_distribution(_args(torchrun(world_size=2), use_fsdp2=True))
 
 
-def test_dense_sharding_without_expert_parallelism_needs_use_fsdp2(hf_ptq, monkeypatch, torchrun):
-    """Without expert parallelism a plan that shards the dense part is an FSDP2 run, which this
-    script runs only under --use_fsdp2, the flag its FSDP2 checks hang off; so it must fail and point
-    there rather than load the model whole on every rank."""
+@pytest.mark.parametrize("quantized", [False, True], ids=["takes_it", "refuses_a_checkpoint"])
+def test_a_plan_that_fsdp2_shards_the_whole_model_takes_the_use_fsdp2_path(
+    hf_ptq, monkeypatch, torchrun, quantized
+):
+    """Without expert parallelism a plan that shards the dense part FSDP2-shards the whole model, the
+    --use_fsdp2 path: the script takes it as if the flag were passed, its checks included, and a
+    checkpoint they refuse is refused for what the path cannot take."""
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
-    _serve(monkeypatch, hf_ptq, LlamaConfig(**_TINY))
+    quantization = {"quantization_config": {"quant_method": "fp8"}} if quantized else {}
+    _serve(
+        monkeypatch,
+        hf_ptq,
+        LlamaConfig(architectures=["LlamaForCausalLM"], **quantization, **_TINY),
+    )
+    args = _args(torchrun(world_size=2))
 
-    with pytest.raises(RuntimeError, match="--use_fsdp2"):
-        hf_ptq.resolve_distribution(_args(torchrun(world_size=2)))
+    if quantized:
+        with pytest.raises(NotImplementedError, match=r"(?s)whole model.*pack-quantized"):
+            hf_ptq.resolve_distribution(args)
+    else:
+        assert hf_ptq.resolve_distribution(args)[0] == DistributionPlan(2, dense="fsdp")
+        assert args.use_fsdp2
 
 
 @needs_ep_transformers

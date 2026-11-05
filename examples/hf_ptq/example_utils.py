@@ -94,8 +94,12 @@ def _awq_calibrations(args) -> set[str]:
     return _calibration_methods(args) & {"awq_lite", "awq_full"}
 
 
-def validate_fsdp2_supported(args, config):
-    """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
+def validate_fsdp2_supported(args, config, plan=None):
+    """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet.
+
+    ``plan`` is the plan that chose the FSDP2 path when ``--use_fsdp2`` did not, for the refusal to
+    say so.
+    """
     issues = []
     if "vila" in args.local_checkpoint_path.lower():
         issues.append("VILA (custom builder + non-standard layer layout)")
@@ -130,10 +134,12 @@ def validate_fsdp2_supported(args, config):
         issues.append("Nemotron-H MTP (auxiliary modules are not constructed by the FSDP2 loader)")
 
     if issues:
+        asked, way_out = "--use_fsdp2", "Remove --use_fsdp2 or use a standard causal-LM checkpoint."
+        if plan is not None:
+            asked = f"{plan!r} FSDP2-shards the whole model, as --use_fsdp2 does, and that path"
+            way_out = "Launch hf_ptq without torchrun, or MODELOPT_FSDP_SIZE=1 if it fits one GPU."
         raise NotImplementedError(
-            "--use_fsdp2 does not support:\n  - "
-            + "\n  - ".join(issues)
-            + "\nRemove --use_fsdp2 or use a standard causal-LM checkpoint."
+            f"{asked} does not support:\n  - " + "\n  - ".join(issues) + f"\n{way_out}"
         )
 
 
@@ -150,7 +156,7 @@ def resolve_distribution(args) -> tuple[DistributionPlan, Any]:
     """Decide how hf_ptq distributes the model, refusing what that run cannot do: ``(plan, config)``.
 
     :func:`resolve_distribution_plan` decides; ``--use_fsdp2`` asks it for FSDP2 without expert
-    parallelism.
+    parallelism. A plan that FSDP2-shards the whole model takes that path as if the flag were set.
     """
     if args.use_fsdp2:
         # Before the decision, which builds the model on the meta device: some checkpoints these
@@ -168,11 +174,13 @@ def resolve_distribution(args) -> tuple[DistributionPlan, Any]:
         dense="fsdp" if args.use_fsdp2 else None,
     )
     if plan.is_fsdp_dense and not plan.is_expert_parallel and not args.use_fsdp2:
-        raise RuntimeError(
-            f"{plan!r} FSDP2-shards the model, which this script does under --use_fsdp2. Pass it, "
-            "or set MODELOPT_FSDP_SIZE=1 if the model does fit one GPU; an MoE can instead shard its "
-            "experts (MODELOPT_EP_DEGREE above 1)."
-        )
+        # The plan chose the --use_fsdp2 path: run its checks, then take it as if the flag were
+        # passed. Everything that reads the flag runs after this.
+        validate_fsdp2_supported(args, hf_config, plan)
+        args.use_fsdp2 = True
+        if args.use_seq_device_map:
+            warnings.warn("--use_seq_device_map is ignored when the model is FSDP2-sharded.")
+            args.use_seq_device_map = False
     if plan.world_size > 1 and exports_tensorrt_llm_checkpoint(args, hf_model_type(hf_config)):
         # That exporter takes the process count for tensor parallelism.
         raise NotImplementedError(
