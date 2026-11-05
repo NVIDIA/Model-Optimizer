@@ -313,6 +313,19 @@ def test_forward_signature_replacement(distillation_model):
     )
 
 
+def test_sequential_student_forward():
+    student = nn.Sequential(nn.Linear(2, 2), nn.ReLU(), nn.Linear(2, 2))
+    teacher = nn.Sequential(nn.Linear(2, 2), nn.ReLU(), nn.Linear(2, 2))
+    inputs = torch.randn(4, 2)
+    expected = student(inputs)
+    config = {"teacher_model": teacher, "criterion": mtd.LogitsDistillationLoss()}
+    model = mtd.convert(student, mode=[("kd_loss", config)])
+
+    assert torch.equal(model(inputs), expected)
+    assert model.compute_kd_loss().ndim == 0
+    assert model.teacher_model is teacher
+
+
 def test_duplicate_fwd_hook_call(distillation_model):
     distillation_model.train()
 
