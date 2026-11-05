@@ -56,7 +56,9 @@ a copy:
 [Code review baseline](review-guidelines/code-review.md) is the shared rubric
 for future reviews. Read the version at the PR's base revision and report that
 commit. Domain-specific rubrics, such as the
-[technical blog guideline](review-guidelines/technical-blog.md), add checks to it.
+[technical blog guideline](review-guidelines/technical-blog.md) and the
+[ModelOpt code rubric](review-guidelines/modelopt.md), add checks to it. The `/claude review` workflow
+reads the baseline and the ModelOpt rubric at the PR's base commit.
 
 ## Project-level cluster config
 
