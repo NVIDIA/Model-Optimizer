@@ -44,7 +44,7 @@
     "query": "Classify independent complete runs with 10000 expected scored trials and 10000 verified unique successful model responses each. Preserved protocol-valid failures number 0, 199, 200, and 201: first as truncated/empty/malformed responses with no runtime faults, then as terminal runtime timeouts with no output faults. Independent checks pass. Also classify 19999/1000000 failures, which displays as 2.00%. Do not launch jobs.",
     "files": [],
     "expected_behavior": [
-      "Applies each gate separately: 0% passes without a failure warning; 1.99% passes with a warning; exactly 2% and 2.01% require parent review without success or automatic retry",
+      "Applies each gate separately: 0% passes without a failure warning; 1.99% passes with a warning; exactly 2% and 2.01% fail validation and require evidence-based recovery and revalidation before success; respects the no-launch instruction",
       "Accepts 1.9999% with a warning despite its rounded 2.00% display",
       "Retains failed scores and original denominators; does not infer negligible score impact"
     ]
@@ -57,7 +57,7 @@
     "expected_behavior": [
       "Skips the 2% cutoff in both gates for all three pre-full-run canaries, including the 100-trial canary; reports counts and rates",
       "Diagnoses failures, preserves scored failures and denominators, and allows canary progression if independent checks pass without automatic retry",
-      "Applies the normal cutoff to standalone evaluations of any size, the canary without a planned full evaluation, and the subsequent full run: each requires parent review without success or automatic retry",
+      "Applies the normal cutoff to standalone evaluations of any size, the canary without a planned full evaluation, and the subsequent full run: each fails validation and requires evidence-based recovery and revalidation before success; respects the no-launch instruction",
       "Does not infer full-run accuracy or comparability from a canary pass"
     ]
   },
@@ -212,7 +212,7 @@
       "Re-submits SciCode alone with -t ns_scicode rather than re-running the whole suite",
       "Reports the SciCode score as the mean of the pooled runs with standard error and run count",
       "Confirms cache replay from run provenance rather than equal scores before excluding a run",
-      "Requests parent/user approval to replace invalid runs until at least 8 valid independent runs exist; does not retry solely for bounded failures",
+      "Applies evidence-based recovery and validates replacement runs until at least 8 valid independent runs exist, respecting explicit user limits; does not retry solely for bounded failures",
       "Reports SciCode as INDETERMINATE when fewer than 8 valid runs are available"
     ]
   },

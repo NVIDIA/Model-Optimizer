@@ -45,7 +45,8 @@ when you have them, never fewer.
   denominator) over `sqrt(n)` as the standard error, and n itself.
   Validate each run (`references/run-validation.md`) before averaging it in;
   bounded protocol-valid sandbox/verifier failures may pass with warnings. Do not
-  pool incomplete/unscored runs; return blockers for parent review before reruns.
+  pool incomplete/unscored runs; apply [recovery](../../../references/recovery.md)
+  and validate replacement runs before pooling.
 - **Expect an export to time out.** The exports land on the CPU partition
   together and each reinstalls the launcher against a fixed 30 min sbatch
   limit. The score survives in the run artifacts — re-submit that run's

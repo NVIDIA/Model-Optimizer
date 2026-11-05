@@ -15,8 +15,8 @@ Guide the user through creating NEL YAML configs, running evaluations, and monit
 For completed runs, skip launch/config; use launching-evals for artifacts/analysis
 and apply [run-validation.md](references/run-validation.md) before scores. Its policy
 overrides blanket uncapping and fixed token/context limits. If validation fails,
-use [recovery.md](references/recovery.md) for autonomous repairs/reruns instead of
-escalation-only handling; keep validation gates and explicit user limits fixed.
+apply [recovery.md](references/recovery.md); keep validation gates and explicit
+user limits fixed.
 
 ## Workspace integration
 
