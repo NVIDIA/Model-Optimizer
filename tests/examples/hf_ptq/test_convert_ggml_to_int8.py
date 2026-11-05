@@ -15,12 +15,11 @@
 
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 import torch
-from _test_utils.examples.ggml_export import IQ1_S, quantize_tiny_llama
+from _test_utils.examples.ggml_export import FP8_ATTENTION, IQ1_S, quantize_tiny_llama
 from _test_utils.examples.hf_ptq_example_utils import convert_ggml_to_int8
 from _test_utils.examples.run_command import run_example_command
 from safetensors.torch import load_file, save_file
@@ -30,6 +29,9 @@ from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 
 # quantize_tiny_llama's layer 0 is IQ1_S (group 32) and layer 1 IQ2_XS (group 16).
 LAYER_FORMATS = {0: "iq1_s", 1: "iq2_xs"}
+FP8_LAYERS = [
+    f"model.layers.0.self_attn.{proj}" for proj in ("k_proj", "o_proj", "q_proj", "v_proj")
+]
 
 
 def _convert(ggml_dir, int8_dir, *args):
@@ -45,7 +47,7 @@ def _files(directory):
 @pytest.fixture(scope="module")
 def ggml_export(tmp_path_factory):
     tmp_path = tmp_path_factory.mktemp("ggml")
-    model, _ = quantize_tiny_llama(tmp_path)
+    model, _ = quantize_tiny_llama(tmp_path, extra_quant_cfg=FP8_ATTENTION)
     export_dir = tmp_path / "export"
     export_hf_checkpoint(model, export_dir=export_dir)
     # Files a checkpoint can ship beside its indexed weights: a nested sidecar and an off-index
@@ -65,19 +67,28 @@ def test_ggml_export_converts_to_int8_levels_and_steps(ggml_export, tmp_path):
     _convert(ggml_export, int8_dir, "--max_shard_size_gb", "0.0002")
 
     assert _files(ggml_export) == ggml_files
-    assert not (int8_dir / "hf_quant_config.json").exists()
     for sidecar in (Path("chat_templates/tool_use.jinja"), Path("mtp.safetensors")):
         assert (int8_dir / sidecar).read_bytes() == ggml_files[sidecar]
-    config = json.loads((int8_dir / "config.json").read_text())["quantization_config"]
-    assert config["quant_method"] == "compressed-tensors"
     layers = {
         i: [f"model.layers.{i}.mlp.{proj}" for proj in ("down_proj", "gate_proj", "up_proj")]
         for i in LAYER_FORMATS
     }
-    assert {
-        group["weights"]["group_size"]: group["targets"]
-        for group in config["config_groups"].values()
-    } == {32: layers[0], 16: layers[1]}
+    # Only the GGML layers' entries change; the FP8 attention's are kept as they are.
+    original = json.loads(ggml_files[Path("hf_quant_config.json")])["quantization"]
+    int8 = {
+        layer: {
+            "quant_algo": "INT8_PB_WO",
+            "group_size": GGML_FORMAT_REGISTRY[name].int8_group_size,
+        }
+        for i, name in LAYER_FORMATS.items()
+        for layer in layers[i]
+    }
+    expected = {**original, "quantized_layers": {**original["quantized_layers"], **int8}}
+    assert {expected["quantized_layers"][layer]["quant_algo"] for layer in FP8_LAYERS} == {"FP8"}
+    assert json.loads((int8_dir / "hf_quant_config.json").read_text())["quantization"] == expected
+    config = json.loads((int8_dir / "config.json").read_text())["quantization_config"]
+    assert config["quant_method"] == "modelopt"
+    assert config["quantized_layers"] == expected["quantized_layers"]
 
     weight_map = json.loads((int8_dir / "model.safetensors.index.json").read_text())["weight_map"]
     assert len(set(weight_map.values())) > 1
@@ -88,14 +99,12 @@ def test_ggml_export_converts_to_int8_levels_and_steps(ggml_export, tmp_path):
     for i, name in LAYER_FORMATS.items():
         for layer in layers[i]:
             payload = before.pop(f"{layer}.weight")
-            shape = after.pop(f"{layer}.weight_shape")
-            levels, steps = GGML_FORMAT_REGISTRY[name].decode_int8(payload, shape)
-            # compressed-tensors' layout: offset by 128, four values per int32, lowest byte first.
-            packed = after.pop(f"{layer}.weight_packed")
-            unpacked = torch.stack([(packed >> (8 * k)) & 0xFF for k in range(4)], -1).flatten(1)
-            assert torch.equal(unpacked - 128, levels.long())
+            weight = after.pop(f"{layer}.weight")
+            levels, steps = GGML_FORMAT_REGISTRY[name].decode_int8(
+                payload, torch.tensor(weight.shape)
+            )
+            assert torch.equal(weight, levels)
             assert torch.equal(after.pop(f"{layer}.weight_scale"), steps.to(torch.bfloat16))
-            assert shape.tolist() == list(levels.shape)
     assert after.keys() == before.keys()
     for name, tensor in before.items():
         assert torch.equal(after[name], tensor)
@@ -132,11 +141,24 @@ def test_a_failed_conversion_leaves_the_output_directory_empty(ggml_export, tmp_
     assert not any((tmp_path / "int8").iterdir())
 
 
-def test_export_with_a_non_ggml_layer_is_refused_before_writing(tmp_path):
-    model, _ = quantize_tiny_llama(tmp_path, (IQ1_S, {"num_bits": (4, 3), "axis": None}))
+def test_nvfp4_layers_are_carried_over_as_they_are(tmp_path):
+    # NVFP4 weights are uint8 like GGML payloads; only the config tells the two apart.
+    nvfp4 = {"num_bits": (2, 1), "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)}}
+    model, _ = quantize_tiny_llama(tmp_path, (IQ1_S, nvfp4))
     export_hf_checkpoint(model, export_dir=tmp_path / "ggml")
+    before = load_file(tmp_path / "ggml" / "model.safetensors")
 
-    with pytest.raises(subprocess.CalledProcessError):
-        _convert(tmp_path / "ggml", tmp_path / "int8")
+    convert_ggml_to_int8.convert_ggml_export_to_int8(tmp_path / "ggml", tmp_path / "int8")
 
-    assert not (tmp_path / "int8").exists()
+    layers = json.loads((tmp_path / "int8" / "hf_quant_config.json").read_text())["quantization"]
+    nvfp4_layers = [f"model.layers.1.mlp.{proj}" for proj in ("down_proj", "gate_proj", "up_proj")]
+    assert {layers["quantized_layers"][layer]["quant_algo"] for layer in nvfp4_layers} == {
+        "W4A16_NVFP4"
+    }
+    weight_map = json.loads((tmp_path / "int8" / "model.safetensors.index.json").read_text())
+    after = {}
+    for shard in set(weight_map["weight_map"].values()):
+        after.update(load_file(tmp_path / "int8" / shard))
+    for name, tensor in before.items():
+        if name.startswith("model.layers.1.mlp."):
+            assert torch.equal(after[name], tensor)

@@ -111,6 +111,13 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
         return {
             "weights": {"dynamic": False, "num_bits": 8, "type": "int"},
         }
+    elif quant_algo == "INT8_PB_WO":
+        # INT8 weight-only with one scale per group of input columns.
+        if group_size is None:
+            raise ValueError("INT8_PB_WO requires a group size.")
+        return {
+            "weights": {"dynamic": False, "num_bits": 8, "type": "int", "group_size": group_size},
+        }
     elif quant_algo == "W8A8_SQ_PER_CHANNEL":
         return {
             "input_activations": {"dynamic": False, "num_bits": 8, "type": "int"},
@@ -306,6 +313,7 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
     elif quant_algo_value in {
         "FP8_PER_CHANNEL_PER_TOKEN",
         "FP8_PB_WO",
+        "INT8_PB_WO",
         "MXFP4",
         "W4A16_MXFP4",
         "MXFP8",

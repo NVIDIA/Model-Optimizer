@@ -18,21 +18,28 @@ import sys
 
 import pytest
 import torch
-from _test_utils.examples.ggml_export import quantize_tiny_llama
+from _test_utils.examples.ggml_export import FP8_ATTENTION, quantize_tiny_llama
 from _test_utils.examples.run_command import run_example_command
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.inputs import TokensPrompt
+from vllm.model_executor.layers.quantization import modelopt as vllm_modelopt
 
 from modelopt.torch.export import export_hf_checkpoint
+
+pytestmark = pytest.mark.skipif(
+    "INT8_PB_WO" not in getattr(vllm_modelopt, "QUANT_ALGOS", ()),
+    reason="vLLM's ModelOpt loader serves INT8_PB_WO layers from vllm-project/vllm#65272 on",
+)
 
 
 @pytest.fixture(scope="module")
 def int8_export_in_vllm(tmp_path_factory):
     """vLLM serving the INT8 conversion of a GGML export, the model's own logprobs and its tokens."""
     tmp_path = tmp_path_factory.mktemp("ggml_int8")
-    # Group 32 (IQ1_S) and group 16 (IQ2_XS) layers take different vLLM kernels.
-    model, token_ids = quantize_tiny_llama(tmp_path)
+    # Group 32 (IQ1_S) and group 16 (IQ2_XS) layers take different vLLM kernels; the FP8 attention
+    # layers are carried over as they are.
+    model, token_ids = quantize_tiny_llama(tmp_path, extra_quant_cfg=FP8_ATTENTION)
     with torch.no_grad():
         logits = model(token_ids).logits[0, :-1].float()
     expected = logits.log_softmax(-1).gather(-1, token_ids[0, 1:, None])[:, 0]
@@ -69,6 +76,7 @@ def test_vllm_serves_the_int8_export_like_the_fake_quantized_model(int8_export_i
         [lp[t].logprob for t, lp in zip(token_ids[1:].tolist(), output.prompt_logprobs[1:])]
     )
 
-    # vLLM's kernels round differently from the fake-quant reference by up to ~0.02; giving each
-    # group its neighbour's scale moves these logprobs by over 1.
-    torch.testing.assert_close(served, expected, atol=0.05, rtol=0)
+    # vLLM's INT8 kernels round differently from the fake-quant reference by up to ~0.02, and its FP8
+    # W8A8 kernels by up to ~0.09, exactly as when it serves ModelOpt's own FP8 export of the same
+    # layers; giving each INT8 group its neighbour's scale moves these logprobs by over 1.
+    torch.testing.assert_close(served, expected, atol=0.15, rtol=0)
