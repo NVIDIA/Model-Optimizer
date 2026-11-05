@@ -37,8 +37,7 @@ at::Tensor INT4_quantize(torch::Tensor quantized_data, torch::Tensor scales, int
 void fake_tensor_quant_(at::Tensor inputs, at::Tensor amax, int num_bits = 8,
                         bool is_unsigned = false, bool narrow_range = true) {
   TORCH_CHECK(inputs.is_cuda());
-  TORCH_CHECK(inputs.is_contiguous()) // in-place on non-contiguous tensor is
-                                      // more difficult
+  TORCH_CHECK(inputs.is_contiguous(inputs.suggest_memory_format()));
   TORCH_CHECK(amax.numel(), 1);
   fake_tensor_quant_cuda_inplace(inputs, amax, num_bits, is_unsigned, narrow_range);
 }
@@ -47,8 +46,8 @@ at::Tensor fake_tensor_quant(at::Tensor inputs, at::Tensor amax, int num_bits = 
                              bool is_unsigned = false, bool narrow_range = true) {
   TORCH_CHECK(inputs.is_cuda());
   TORCH_CHECK(amax.numel(), 1);
-  return fake_tensor_quant_cuda(inputs.contiguous(), amax.contiguous(), num_bits, is_unsigned,
-                                narrow_range);
+  return fake_tensor_quant_cuda(inputs.contiguous(inputs.suggest_memory_format()),
+                                amax.contiguous(), num_bits, is_unsigned, narrow_range);
 }
 
 at::Tensor fake_tensor_quant_with_axis(at::Tensor inputs, at::Tensor amax, int axis,
@@ -56,8 +55,10 @@ at::Tensor fake_tensor_quant_with_axis(at::Tensor inputs, at::Tensor amax, int a
                                        bool narrow_range = true) {
   TORCH_CHECK(inputs.is_cuda());
   TORCH_CHECK(amax.numel(), inputs.size(axis));
-  return fake_tensor_quant_with_axis_cuda(inputs.contiguous(), amax.contiguous(), axis, num_bits,
-                                          is_unsigned, narrow_range);
+  // The kernel selects amax using the axis stride in the input's physical layout.
+  return fake_tensor_quant_with_axis_cuda(inputs.contiguous(inputs.suggest_memory_format()),
+                                          amax.contiguous(), axis, num_bits, is_unsigned,
+                                          narrow_range);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

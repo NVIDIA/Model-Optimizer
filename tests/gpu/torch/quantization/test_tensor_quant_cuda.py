@@ -52,6 +52,73 @@ class TestFakeTensorQuantCuda(FakeTensorQuantTester):
 
 
 class TestCudaExt:
+    @pytest.fixture(
+        params=[
+            ((2, 3, 5, 7), torch.contiguous_format),
+            ((2, 3, 5, 7), torch.channels_last),
+            ((2, 3, 4, 5, 7), torch.channels_last_3d),
+        ],
+        ids=["contiguous", "channels_last", "channels_last_3d"],
+    )
+    def memory_format_input(self, request, dtype):
+        shape, memory_format = request.param
+        return torch.randn(shape, device="cuda", dtype=dtype).contiguous(
+            memory_format=memory_format
+        )
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    def test_cuda_ext_memory_format(self, memory_format_input):
+        x = memory_format_input
+        for axis in [None, *range(x.ndim)]:
+            if axis is None:
+                amax = torch.tensor(1.25, device=x.device)
+                output = get_cuda_ext().fake_tensor_quant(x, amax)
+                contiguous_output = get_cuda_ext().fake_tensor_quant(x.contiguous(), amax)
+            else:
+                amax = torch.linspace(0.5, 1.5, x.shape[axis], device=x.device)
+                output = get_cuda_ext().fake_tensor_quant_with_axis(x, amax, axis)
+                contiguous_output = get_cuda_ext().fake_tensor_quant_with_axis(
+                    x.contiguous(), amax, axis
+                )
+                amax_shape = [1] * x.ndim
+                amax_shape[axis] = -1
+                amax = amax.view(amax_shape)
+
+            assert output.stride() == x.stride()
+            assert torch.equal(output, contiguous_output)
+            reference = quant(x.float(), amax, fake=True).to(x.dtype)
+            torch.testing.assert_close(output, reference)
+            public_output = tensor_quant.fake_tensor_quant(x, amax)
+            assert public_output.stride() == x.stride()
+            assert torch.equal(public_output, output)
+
+    @pytest.mark.parametrize("layout", ["transpose", "slice", "expand"])
+    @pytest.mark.parametrize("axis", [None, 1])
+    def test_cuda_ext_noncontiguous(self, layout, axis):
+        x = torch.randn(2, 3, 5, 7, device="cuda").contiguous(memory_format=torch.channels_last)
+        if layout == "transpose":
+            x = x.transpose(2, 3)
+        elif layout == "slice":
+            x = x[:, :, ::2, :]
+        else:
+            x = x[:1].expand(2, -1, -1, -1)
+
+        assert not x.is_contiguous()
+        assert not x.is_contiguous(memory_format=torch.channels_last)
+        if axis is None:
+            amax = torch.tensor(1.25, device=x.device)
+            output = get_cuda_ext().fake_tensor_quant(x, amax)
+            original = x.clone()
+            with pytest.raises(RuntimeError):
+                get_cuda_ext().fake_tensor_quant_(x, amax)
+            assert torch.equal(x, original)
+        else:
+            amax = torch.tensor([0.5, 1.0, 1.5], device=x.device)
+            output = get_cuda_ext().fake_tensor_quant_with_axis(x, amax, axis)
+            amax = amax.view(1, -1, 1, 1)
+
+        torch.testing.assert_close(output, quant(x, amax, fake=True))
+
     @pytest.mark.parametrize("num_bits", [3, 4, 5, 7, 8, 11])
     @pytest.mark.parametrize("unsigned", [True, False])
     def test_cuda_ext_num_bits(self, num_bits, unsigned):
@@ -100,17 +167,14 @@ class TestCudaExt:
         assert torch.allclose(cuda_ext_out, pytorch_out, rtol=0, atol=0)
 
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-    def test_cuda_ext_inplace(self, dtype):
-        torch.manual_seed(1234)
-        x = torch.randn(31).cuda().to(dtype)
-        quant_x_ref = quant(x, torch.max(x.abs()), fake=True)
+    def test_cuda_ext_inplace(self, dtype, memory_format_input):
+        x = memory_format_input
+        stride, data_ptr = x.stride(), x.data_ptr()
+        quant_x_ref = quant(x.float(), torch.max(x.abs()).float(), fake=True).to(dtype)
         get_cuda_ext().fake_tensor_quant_(x, torch.max(torch.abs(x)))
-        if dtype == torch.bfloat16:
-            assert torch.allclose(x, quant_x_ref, atol=1e-1)
-        elif dtype == torch.float16:
-            assert torch.allclose(x, quant_x_ref, atol=1e-3)
-        else:
-            assert torch.allclose(x, quant_x_ref)
+        assert x.stride() == stride
+        assert x.data_ptr() == data_ptr
+        torch.testing.assert_close(x, quant_x_ref)
 
     def test_cuda_ext_tiny_amax(self):
         x = torch.rand(2, 3, 4).cuda()
