@@ -1278,9 +1278,14 @@ class _QuantFP8Experts(_QuantFusedExperts):
                 f"{type(self).__name__} cannot unpack native FP8 expert weights sharded over the "
                 "experts. Quantize the model without expert parallelism."
             )
+        # In the dtype the checkpoint's other weights load in, which the forward casts each expert
+        # to: calibration then encodes the weights the fake-quantized forward runs on.
+        dtype = getattr(self.config, "dtype", None)
+        if not (isinstance(dtype, torch.dtype) and dtype.is_floating_point and dtype.itemsize > 1):
+            dtype = torch.get_default_dtype()
         for name in names:
             weight = getattr(self, name)
-            unpacked = torch.empty_like(weight, dtype=torch.get_default_dtype())
+            unpacked = torch.empty_like(weight, dtype=dtype)
             for idx in range(self.num_experts):
                 unpacked[idx].copy_(self.get_expert_weight(name, idx))
             setattr(self, name, nn.Parameter(unpacked, requires_grad=False))
