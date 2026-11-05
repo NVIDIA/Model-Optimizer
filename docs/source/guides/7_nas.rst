@@ -326,7 +326,7 @@ The conversion process
 ----------------------
 
 ModelOpt will automatically generate a search space for you from your custom PyTorch model.
-This is a one time process process performed during pruning and NAS. Once a model is converted, you
+This is a one time process performed during pruning and NAS. Once a model is converted, you
 can save and restore it for downstream tasks like training, inference, and fine-tuning.
 
 To help you better understand how the search space is derived from your model, we go through the

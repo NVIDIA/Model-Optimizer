@@ -19,8 +19,8 @@ When applying a model optimization algorithm, we usually need to modify the mode
 (mode) of the algorithm. This module provides the state manager, which is a standardized interface
 (class) to record and store state information in the model.
 
-Op top of the state manager, this module provides utilities to save a history of these modifications
-("modelopt state dict") and restoring a unmodified model to the state indicated in the state dict.
+On top of the state manager, this module provides utilities to save a history of these modifications
+("modelopt state dict") and restoring an unmodified model to the state indicated in the state dict.
 """
 
 import copy

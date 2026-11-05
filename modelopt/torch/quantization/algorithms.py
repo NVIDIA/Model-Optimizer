@@ -688,7 +688,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         r"^(.*?\.mlp\.experts\.local_experts)\.\d+\.(linear_fc1|linear_fc2)$",
         r"^(.*?)\.(gate_proj|up_proj)$",  # gate_proj, up_proj for llama like models
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
-        r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
         # Qwen3.5/3.6 hybrid linear_attn: vLLM fuses (in_proj_qkv, in_proj_z)
         # into ``in_proj_qkvz`` and (in_proj_a, in_proj_b) into ``in_proj_ba`` and
         # requires fused shards to share quant_algo. Two callables (not one
@@ -1723,7 +1722,6 @@ class _AutoQuantizeBackwardScoringSearcher(_AutoQuantizeBaseSearcher):
         r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
         r"^(.*?\.mixer)\.experts\.\d+\.(up_proj|down_proj)$",
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",
-        r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",
     ]
 
     _custom_support: list[tuple[Callable, Callable, Callable]] = []

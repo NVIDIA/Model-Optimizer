@@ -26,6 +26,7 @@ from modelopt.onnx.quantization.graph_rewrites import (
     insert_fp8_mha_casts,
     remove_output_initializers,
 )
+from modelopt.onnx.utils import export_onnx
 
 
 def _upgrade_opset_21(model: onnx.ModelProto) -> onnx.ModelProto:
@@ -41,7 +42,7 @@ def _upgrade_opset_21(model: onnx.ModelProto) -> onnx.ModelProto:
             )
             node.inputs.append(axes)
 
-    model = gs.export_onnx(graph)
+    model = export_onnx(graph)
     for opset_import in model.opset_import:
         if opset_import.domain == "":
             opset_import.version = 21
@@ -69,7 +70,7 @@ def _convert_to_runtime_precision(
         graph = gs.import_onnx(model)
         remove_output_initializers(graph, model.graph.initializer)
         convert_fp16_io(graph)
-        model = gs.export_onnx(graph)
+        model = export_onnx(graph)
 
     model = convert_to_f16(
         model,

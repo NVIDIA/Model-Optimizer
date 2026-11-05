@@ -32,8 +32,6 @@ Usage as standalone CLI (pre-tokenize and cache):
 Schema reference: See configs/dataset/README.md
 """
 
-from __future__ import annotations
-
 import concurrent.futures
 import hashlib
 import os
@@ -42,10 +40,10 @@ import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 import datasets
 import yaml
+from transformers import PreTrainedTokenizerBase
 from transformers.trainer_pt_utils import LabelSmoother
 
 from modelopt.torch.utils import print_rank_0, warn_rank_0
@@ -53,9 +51,6 @@ from modelopt.torch.utils.distributed import DistributedProcessGroup
 from modelopt.torch.utils.distributed import barrier as dist_barrier
 from modelopt.torch.utils.distributed import rank as dist_rank
 from modelopt.torch.utils.distributed import size as dist_size
-
-if TYPE_CHECKING:
-    from transformers import PreTrainedTokenizerBase
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 

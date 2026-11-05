@@ -36,7 +36,11 @@ from ..extensions import get_cuda_ext_ggml
 from .codebooks import iq2_xs_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
-    IQFormat,
+    GGMLFormat,
+    chunk_importance,
+    dequantize_blocks,
+    importance_blocks,
+    iq2_tile_terms,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -56,6 +60,7 @@ __all__ = [
 IQ2_XS_BLOCK_SIZE = GGML_BLOCK_SIZE
 IQ2_XS_BLOCK_BYTES = 74
 IQ2_XS_EFFECTIVE_BITS = IQ2_XS_BLOCK_BYTES * 8 / IQ2_XS_BLOCK_SIZE
+_IQ2_XS_INT8_GROUP_SIZE = 16
 _IQ2_XS_NATIVE_MAX = 43 * 31 / 8
 _IQ2_XS_SCALE_ANCHOR_MIN = 0.65
 _IQ2_XS_SCALE_ANCHOR_MAX = 0.92
@@ -103,9 +108,12 @@ def _predict_iq2_xs_scales(blocks: torch.Tensor) -> torch.Tensor:
 
 
 def _encode_blocks(
-    blocks: torch.Tensor, grid: torch.Tensor, scales: torch.Tensor | None = None
+    blocks: torch.Tensor,
+    grid: torch.Tensor,
+    scales: torch.Tensor | None = None,
+    weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Encode a moderate-size batch of flattened 256-value blocks."""
+    """Encode a moderate-size batch of flattened 256-value blocks, optionally error-weighted."""
     x = narrow_to_float32(blocks)
     block_count = x.shape[0]
     vectors = x.reshape(block_count, 32, 8)
@@ -116,7 +124,7 @@ def _encode_blocks(
     d = _predict_iq2_xs_scales(x) if scales is None else scales
     d_float = d.float()
 
-    xnorm = vectors.square().sum(dim=-1)
+    xnorm = (vectors.square() if weights is None else weights * vectors.square()).sum(dim=-1)
     qnorm = grid.square().sum(dim=-1)
     best_error = torch.full((block_count, 32, 16), torch.inf, dtype=torch.float32, device=x.device)
     best_entry = torch.zeros((block_count, 32, 16), dtype=torch.int64, device=x.device)
@@ -124,10 +132,9 @@ def _encode_blocks(
     # preserves the lowest grid index on equal error, matching the CUDA key.
     for entry_start in range(0, 512, 64):
         grid_tile = grid[entry_start : entry_start + 64]
-        products = magnitudes.unsqueeze(2) * grid_tile.reshape(1, 1, -1, 8)
-        dot = products.sum(dim=-1)
-        dot = torch.where(odd_parity.unsqueeze(-1), dot - 2.0 * products.amin(dim=-1), dot)
-        tile_qnorm = qnorm[entry_start : entry_start + 64].reshape(1, 1, -1)
+        dot, tile_qnorm = iq2_tile_terms(
+            magnitudes, grid_tile, qnorm[entry_start : entry_start + 64], weights, odd_parity
+        )
 
         for local in range(16):
             scale = d_float.reshape(-1, 1, 1) * ((2 * local + 1) / 8.0)
@@ -147,7 +154,8 @@ def _encode_blocks(
     selected_entry = best_entry.gather(2, vector_local.unsqueeze(-1)).squeeze(-1)
 
     selected_grid = grid[selected_entry]
-    weakest_index = (magnitudes * selected_grid).argmin(dim=-1)
+    contribution = magnitudes * selected_grid
+    weakest_index = (contribution if weights is None else contribution * weights).argmin(dim=-1)
     flip = torch.nn.functional.one_hot(weakest_index, num_classes=8).bool()
     encoded_negative = negative ^ (flip & odd_parity.unsqueeze(-1))
     sign_bits = torch.arange(8, dtype=torch.int64, device=x.device)
@@ -164,17 +172,22 @@ def _encode_blocks(
 
 @torch.no_grad()
 def quantize_iq2_xs(
-    weight: torch.Tensor, *, block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE
+    weight: torch.Tensor,
+    *,
+    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
+    importance: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ2_XS blocks.
 
     Returned shapes are ``[*weight.shape[:-1], weight.shape[-1] // 256, 74]``
     and ``[weight.ndim]``. The packed payload remains on the weight's device;
     the logical-shape metadata is kept on CPU. Non-finite input elements are
-    treated as zero during packing.
+    treated as zero during packing. ``importance``, a non-negative per-input-column vector,
+    weights each value's squared error in the search, as llama.cpp's imatrix does.
     """
     validate_weight(weight, "IQ2_XS")
     validate_block_chunk_size(block_chunk_size)
+    block_importance = importance_blocks(importance, weight, "IQ2_XS")
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ2_XS_BLOCK_SIZE)
@@ -186,7 +199,7 @@ def quantize_iq2_xs(
                 _predict_iq2_xs_scales(blocks[start : start + _SCALE_BLOCK_CHUNK_SIZE])
                 for start in range(0, blocks.shape[0], _SCALE_BLOCK_CHUNK_SIZE)
             ]
-            packed = extension.iq2_xs_pack(blocks, grid, torch.cat(scale_chunks))
+            packed = extension.iq2_xs_pack(blocks, grid, torch.cat(scale_chunks), block_importance)
             packed_shape = (
                 *weight.shape[:-1],
                 weight.shape[-1] // IQ2_XS_BLOCK_SIZE,
@@ -198,7 +211,8 @@ def quantize_iq2_xs(
     for start in range(0, blocks.shape[0], block_chunk_size):
         block_chunk = blocks[start : start + block_chunk_size]
         scales = _predict_iq2_xs_scales(block_chunk)
-        chunks.append(_encode_blocks(block_chunk, grid, scales))
+        weights = chunk_importance(block_importance, start, start + block_chunk.shape[0])
+        chunks.append(_encode_blocks(block_chunk, grid, scales, weights))
     packed_shape = (
         *weight.shape[:-1],
         weight.shape[-1] // IQ2_XS_BLOCK_SIZE,
@@ -227,40 +241,43 @@ def dequantize_iq2_xs(
         if extension is not None:
             grid = iq2_xs_grid(blocks.device)
             return extension.iq2_xs_unpack(blocks, grid, dtype).reshape(shape)
+    return dequantize_blocks(
+        blocks,
+        _unpack_int8,
+        block_size=IQ2_XS_BLOCK_SIZE,
+        group_size=_IQ2_XS_INT8_GROUP_SIZE,
+        dtype=dtype,
+        block_chunk_size=block_chunk_size,
+    ).reshape(shape)
+
+
+def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Signed grid levels (±8, ±25, ±43) and the step of each 16-value half sub-block."""
     bit_positions = torch.arange(8, dtype=torch.int64, device=blocks.device)
-    grid = iq2_xs_grid(blocks.device)
-    decoded = torch.empty((blocks.shape[0], IQ2_XS_BLOCK_SIZE), dtype=dtype, device=blocks.device)
-    for start in range(0, blocks.shape[0], block_chunk_size):
-        stop = min(start + block_chunk_size, blocks.shape[0])
-        block_chunk = blocks[start:stop]
-        d = block_chunk[:, :2].contiguous().view(torch.float16).reshape(-1).float()
-        codes = block_chunk[:, 2:66:2].to(torch.int64) | (
-            block_chunk[:, 3:66:2].to(torch.int64) << 8
-        )
-        entries = codes & 0x1FF
-        sign_index = codes >> 9
-        # XOR-fold the seven payload bits down to bit 0 to recover the eighth sign bit.
-        # The loop this replaces cost seven elementwise passes per chunk, and unlike packing
-        # the decode is not cached -- it runs again on every forward.
-        folded = sign_index ^ (sign_index >> 4)
-        folded ^= folded >> 2
-        folded ^= folded >> 1
-        sign_mask = sign_index | ((folded & 1) << 7)
-        signs = 1.0 - 2.0 * ((sign_mask.unsqueeze(-1) >> bit_positions) & 1).float()
+    d = blocks[:, :2].contiguous().view(torch.float16).reshape(-1).float()
+    codes = blocks[:, 2:66:2].to(torch.int64) | (blocks[:, 3:66:2].to(torch.int64) << 8)
+    entries = codes & 0x1FF
+    sign_index = codes >> 9
+    # XOR-fold the seven payload bits down to bit 0 to recover the eighth sign bit.
+    # The loop this replaces cost seven elementwise passes per chunk, and unlike packing
+    # the decode is not cached -- it runs again on every forward.
+    folded = sign_index ^ (sign_index >> 4)
+    folded ^= folded >> 2
+    folded ^= folded >> 1
+    sign_mask = sign_index | ((folded & 1) << 7)
+    signs = 1.0 - 2.0 * ((sign_mask.unsqueeze(-1) >> bit_positions) & 1).float()
 
-        scale_bytes = block_chunk[:, 66:].to(torch.int64)
-        local = torch.empty((block_chunk.shape[0], 16), dtype=torch.int64, device=blocks.device)
-        local[:, 0::2] = scale_bytes & 0x0F
-        local[:, 1::2] = scale_bytes >> 4
-        # Pinned format rule: d * (0.5 + local) * 0.25 == d * (2 * local + 1) / 8.
-        scales = d.unsqueeze(-1) * (2 * local + 1).float() / 8.0
-        values = grid[entries] * signs
-        chunk_decoded = values * scales.repeat_interleave(2, dim=1).unsqueeze(-1)
-        decoded[start:stop] = chunk_decoded.reshape(-1, IQ2_XS_BLOCK_SIZE)
-    return decoded.reshape(shape)
+    scale_bytes = blocks[:, 66:].to(torch.int64)
+    local = torch.empty((blocks.shape[0], 16), dtype=torch.int64, device=blocks.device)
+    local[:, 0::2] = scale_bytes & 0x0F
+    local[:, 1::2] = scale_bytes >> 4
+    # Pinned format rule: d * (0.5 + local) * 0.25 == d * (2 * local + 1) / 8.
+    steps = d.unsqueeze(-1) * (2 * local + 1).float() / 8.0
+    levels = iq2_xs_grid(blocks.device)[entries] * signs
+    return levels.reshape(-1, IQ2_XS_BLOCK_SIZE), steps
 
 
-IQ2_XS_FORMAT = IQFormat(
+IQ2_XS_FORMAT = GGMLFormat(
     name="iq2_xs",
     block_size=IQ2_XS_BLOCK_SIZE,
     block_bytes=IQ2_XS_BLOCK_BYTES,
@@ -268,6 +285,9 @@ IQ2_XS_FORMAT = IQFormat(
     dequantize=dequantize_iq2_xs,
     block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
     decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+    int8_group_size=_IQ2_XS_INT8_GROUP_SIZE,
+    unpack_int8=_unpack_int8,
+    weighted=True,
 )
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq2_xs and

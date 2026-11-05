@@ -3,144 +3,72 @@ Guides to quantize a customized model from Hugging Face for TensorRT-LLM deploym
 ===================================================================================
 
 ModelOpt can usually quantize PyTorch models from the Hugging Face directly. By default, ModelOpt searches the PyTorch model and replaces the torch ``nn.Linear`` module with a quantized linear module.
+Fused MoE experts that store their weights as 3-D ``gate_up_proj`` / ``down_proj`` parameters and call ``F.linear`` (e.g. Mixtral, Qwen3-MoE, DeepSeek-V3 in transformers 5.x) are also detected and quantized automatically.
 
-If the model happens not using the ``nn.Linear`` for the linear layers, a customized Hugging Face plugin needs to be implemented to convert the model to use ``nn.Linear`` instead.
+If a model computes its linear ops some other way, a customized Hugging Face plugin is needed to insert the quantizers.
 
-The following is an example about how a customized Hugging Face model can be supported using modelopt:
+The following example shows how ModelOpt supports the `Llama 4 <https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct>`_ MoE.
+Its `Llama4TextExperts <https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama4/modeling_llama4.py>`_ module stores all experts in two ``nn.Parameter`` tensors, ``gate_up_proj`` of shape ``(num_experts, hidden_size, 2 * expert_dim)`` and ``down_proj`` of shape ``(num_experts, expert_dim, hidden_size)``, and applies them with ``torch.bmm``, so there is no ``nn.Linear`` for ModelOpt to replace.
 
-The `DBRX model <https://huggingface.co/databricks/dbrx-instruct>`_ is an MoE model with customized MoE linear implementation. The MoE layer in DBRX is implemented as a `DbrxExperts <https://github.com/databricks/dbrx/blob/main/model/modeling_dbrx.py>`_ module, where the three linear ops (w1, v1 and v2) are represented as ``nn.Parameter``. The linear op is forwarded as a pure ``matmul`` op.
+The plugin works as follows:
 
-As ModelOpt cannot detect these linear ops out-of-the-box, a HugggingFace plugin is implemented as the following:
+#. Define a ``_QuantLlama4TextExperts`` subclass of ``QuantModule`` and create the input and weight ``TensorQuantizer`` modules in ``_setup``.
+#. Re-implement ``forward`` with the same signature, quantizing the inputs and the weights of both ``bmm`` calls.
+   ModelOpt's per-channel and per-block quantization expect the input dimension last, but these weights are ``(num_experts, in_dim, out_dim)``, so they are quantized transposed.
+#. Register ``_QuantLlama4TextExperts`` to replace ``Llama4TextExperts`` from the ``transformers`` library.
+#. Quantize the model after the plugin is registered, for example with the `hf_ptq example <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq>`_.
+#. Export the quantized model with :meth:`export_hf_checkpoint <modelopt.torch.export.unified_export_hf.export_hf_checkpoint>`. A new module type may also need an export handler; see ``modelopt/torch/export/hf_export_handlers.py``.
+   If the customized model is not supported by TensorRT-LLM, add support in its PyTorch backend. See the :doc:`unified HF export guide <../deployment/3_unified_hf>` or :doc:`contact us <../support/1_contact>` for help.
 
-#. Define a customized ``_QuantDbrxExpertGLU`` as a ``DynamicModule`` with the same ``forward`` signature.
-#. Rewrite the linear ops (w1, v1 and v2) as a standard ``nn.Linear`` op, and re-implement the ``forward`` method.
-#. Register the new dynamic ``_QuantDbrxExperts`` to replace the ``DbrxExperts`` from the modeling_dbrx.py in the ``transformers`` library
-#. Try quantize the DBRX model after the plugin is implemented, feel free to follow the `hf_ptq example <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq>`_.
-#. Export the quantized model with :meth:`export_hf_checkpoint <modelopt.torch.export.unified_export_hf.export_hf_checkpoint>`. If the customized model is not supported by TensorRT-LLM, add support in its PyTorch backend and adapt the HF exporter if needed. See the :doc:`unified HF export guide <../deployment/3_unified_hf>` or :doc:`contact us <../support/1_contact>` for help.
-
-The following code snippet is excerpted from ``modelopt/torch/quantization/plugins/huggingface.py``
+The following code snippet is simplified from the plugin in ``modelopt/torch/quantization/plugins/huggingface.py``, which also handles weight-only calibration.
+For your own model, write a plugin like it in your own code and run it before quantizing.
 
 .. code-block:: python
 
-    from modelopt.torch.opt.dynamic import DynamicModule
-    from modelopt.torch.quantization.nn import QuantModuleRegistry
+    import torch
+    from transformers.models.llama4.modeling_llama4 import Llama4TextExperts
 
-    # For more information on DbrxExpert, see https://github.com/huggingface/transformers/blob/dcdda532/src/transformers/models/dbrx/modeling_dbrx.py#L756
-    class _QuantDbrxExperts(DynamicModule):
+    from modelopt.torch.quantization.nn import QuantModule, QuantModuleRegistry, TensorQuantizer
+
+
+    class _TransposedQuantization(torch.autograd.Function):
+        """Quantize a (num_experts, in_dim, out_dim) weight with in_dim last, using a straight-through gradient."""
+
+        @staticmethod
+        def forward(ctx, inputs, quantizer):
+            return quantizer(inputs.transpose(-1, -2).contiguous()).transpose(-1, -2)
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            return grad_output, None
+
+
+    _transposed_quantize = _TransposedQuantization.apply
+
+
+    class _QuantLlama4TextExperts(QuantModule):
         def _setup(self):
-            """Modify the DbrxExpert."""
-            # No setup is needed for DbrxExpert, we only need to update DbrxExpertGLU
-            pass
+            self.gate_up_proj_input_quantizer = TensorQuantizer()
+            self.gate_up_proj_weight_quantizer = TensorQuantizer()
+            self.down_proj_input_quantizer = TensorQuantizer()
+            self.down_proj_weight_quantizer = TensorQuantizer()
 
-        # forward method copied from the original dbrx repo - https://github.com/databricks/dbrx/blob/a3200393/model/modeling_dbrx.py#L795
-        def forward(
-            self,
-            x: torch.Tensor,
-            weights: torch.Tensor,
-            top_weights: torch.Tensor,
-            top_experts: torch.LongTensor,
-        ) -> torch.Tensor:
-            bsz, q_len, hidden_size = x.shape
-            x = x.view(-1, hidden_size)
-            out = torch.zeros_like(x)
-
-            expert_mask = nn.functional.one_hot(top_experts, num_classes=self.moe_num_experts).permute(
-                2, 1, 0
+        # Same as Llama4TextExperts.forward, with quantizers on both bmm inputs and weights
+        def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+            hidden_states = hidden_states.view(self.num_experts, -1, self.hidden_size)
+            gate_up = torch.bmm(
+                self.gate_up_proj_input_quantizer(hidden_states),
+                _transposed_quantize(self.gate_up_proj, self.gate_up_proj_weight_quantizer),
             )
-            for expert_idx in range(0, self.moe_num_experts):
-                topk_idx, token_idx = torch.where(expert_mask[expert_idx])
-                if token_idx.shape[0] == 0:
-                    continue
-
-                token_list = token_idx.tolist()
-                topk_list = topk_idx.tolist()
-
-                expert_tokens = x[None, token_list].reshape(-1, hidden_size)
-                expert_out = (
-                    self.mlp(expert_tokens, expert_idx) * top_weights[token_list, topk_list, None]
-                )
-
-                out.index_add_(0, token_idx, expert_out)
-
-            out = out.reshape(bsz, q_len, hidden_size)
-            return out
-
-
-    class _QuantDbrxExpertGLU(DynamicModule):
-        def _setup(self):
-            """Modify the DbrxExpertGLU by using nn.Linear layers."""
-            dtype, device = self.w1.dtype, self.w1.device
-
-            def _copy_weights(modules, weights):
-                modules.to(dtype=dtype, device=device)
-                for expert_idx, module in enumerate(modules):
-                    with torch.no_grad():
-                        module.weight.copy_(weights[expert_idx].detach())
-
-            self.w1_linear = nn.ModuleList(
-                [
-                    nn.Linear(self.hidden_size, self.ffn_hidden_size, bias=False)
-                    for _ in range(self.moe_num_experts)
-                ]
+            gate, up = gate_up.chunk(2, dim=-1)
+            next_states = torch.bmm(
+                self.down_proj_input_quantizer(up * self.act_fn(gate)),
+                _transposed_quantize(self.down_proj, self.down_proj_weight_quantizer),
             )
-            _copy_weights(
-                self.w1_linear,
-                self.w1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size),
-            )
-            delattr(self, "w1")
-
-            self.v1_linear = nn.ModuleList(
-                [
-                    nn.Linear(self.hidden_size, self.ffn_hidden_size, bias=False)
-                    for _ in range(self.moe_num_experts)
-                ]
-            )
-            _copy_weights(
-                self.v1_linear,
-                self.v1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size),
-            )
-            delattr(self, "v1")
-
-            self.w2_linear = nn.ModuleList(
-                [
-                    nn.Linear(self.ffn_hidden_size, self.hidden_size, bias=False)
-                    for _ in range(self.moe_num_experts)
-                ]
-            )
-            _copy_weights(
-                self.w2_linear,
-                self.w2.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
-                    1, 2
-                ),
-            )
-            delattr(self, "w2")
-
-        def forward(self, x: torch.Tensor, expert_idx: int) -> torch.Tensor:
-            x1 = self.w1_linear[expert_idx](x)
-            x2 = self.v1_linear[expert_idx](x)
-            x1 = self.activation_fn(x1)
-            x1 = x1 * x2
-            return self.w2_linear[expert_idx](x1)
+            return next_states.view(-1, self.hidden_size)
 
 
-    if transformers.models.dbrx.modeling_dbrx.DbrxExperts not in QuantModuleRegistry:
-        QuantModuleRegistry.register(
-            {transformers.models.dbrx.modeling_dbrx.DbrxExperts: "hf.DbrxExperts"}
-        )(_QuantDbrxExperts)
-
-    if transformers.models.dbrx.modeling_dbrx.DbrxExpertGLU not in QuantModuleRegistry:
-        QuantModuleRegistry.register(
-            {transformers.models.dbrx.modeling_dbrx.DbrxExpertGLU: "hf.DbrxExpertGLU"}
-        )(_QuantDbrxExpertGLU)
-
-
-    def register_dbrx_moe_on_the_fly(model):
-        """Register DBRX MoE modules as QUANT_MODULE.
-
-        The MoE class in DBRX is `transformers_modules.modeling_dbrx.DbrxExpertGLU`, which loads dynamically.
-        """
-        if type(model).__name__ in ["DbrxForCausalLM"]:
-            moe_type = type(model.transformer.blocks[0].ffn.experts.mlp)
-            # Create a QuantDbrxExpertGLU class on the fly
-            if QuantModuleRegistry.get(moe_type) is None:
-                QuantModuleRegistry.register({moe_type: moe_type.__name__})(_QuantDbrxExpertGLU)
+    if Llama4TextExperts not in QuantModuleRegistry:
+        QuantModuleRegistry.register({Llama4TextExperts: "hf.Llama4TextExperts"})(
+            _QuantLlama4TextExperts
+        )

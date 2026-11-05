@@ -23,14 +23,16 @@ across platforms) — only shapes and the scalar-vs-blocked distinction matter.
 """
 
 import json
+import sys
 import types
 import warnings
 from fnmatch import fnmatchcase
 
 import pytest
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
+import modelopt.torch.export.quant_aware_conversion as quant_aware_conversion
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.quant_aware_conversion import (
@@ -38,6 +40,10 @@ from modelopt.torch.export.quant_aware_conversion import (
     RenameRule,
     SplitRule,
     _assert_experts_pre_expanded,
+    _build_reverse_rules,
+    _dense_split_rule,
+    _source_checkpoint_keys,
+    _SourceAwareRenamer,
     apply_reverse_rules,
     build_reverse_name_mapper,
     revert_quant_config_names,
@@ -156,6 +162,326 @@ def _fp8_llama(*quantizer_names):
             "algorithm": None,
         },
     )
+
+
+def test_reverse_rename_is_idempotent_when_repl_contains_pattern():
+    """A rule whose replacement keeps the pattern must not re-apply to its own output."""
+    rules = [RenameRule("input_conditioner", "radio_model.input_conditioner", ("vision_model.",))]
+    key = "vision_model.input_conditioner.norm_mean"
+    expected = "vision_model.radio_model.input_conditioner.norm_mean"
+
+    once = apply_reverse_rules({key: torch.zeros(3)}, [], rules)
+    assert list(once) == [expected]
+
+    twice = apply_reverse_rules(once, [], rules)
+    assert list(twice) == [expected], "reverse rename must be idempotent"
+
+
+def test_reverse_rename_idempotent_for_already_hub_named_key():
+    """An input already carrying the reverted prefix is left untouched."""
+    rules = [RenameRule("summary_idxs", "radio_model.summary_idxs", ("vision_model.",))]
+    already = "vision_model.radio_model.summary_idxs"
+    out = apply_reverse_rules({already: torch.zeros(1)}, [], rules)
+    assert list(out) == [already]
+
+
+def test_idempotency_guard_leaves_disjoint_rules_alone():
+    """A replacement that cannot re-match keeps its original behaviour."""
+    rules = [RenameRule("encoder.layer", "radio_model.model.blocks", ("vision_model.",))]
+    key = "vision_model.encoder.layer.0.attn.weight"
+    out = apply_reverse_rules({key: torch.zeros(2)}, [], rules)
+    assert list(out) == ["vision_model.radio_model.model.blocks.0.attn.weight"]
+
+
+# A NemotronH-shaped source checkpoint: the canonical embedding name is plural, and the
+# projector weights sit at the top level under their fused ``mlp1.<i>`` names.
+_SOURCE_KEYS = {
+    "backbone.embeddings.weight",
+    "backbone.layers.0.mixer.in_proj.weight",
+    "mlp1.0.weight",
+    "mlp1.1.weight",
+    "vision_projector.vision_final_layernorm.weight",
+}
+
+
+# A MiniMax-M3-shaped source checkpoint: the sparse text layers are stored under
+# ``block_sparse_moe``, while the dense text layers and the vision tower are already
+# stored under the in-memory ``mlp`` name. One rename rule serves both namespaces.
+_MIXED_SOURCE_KEYS = {
+    "language_model.model.layers.0.mlp.down_proj.weight",
+    "language_model.model.layers.1.block_sparse_moe.gate.weight",
+    "language_model.model.layers.1.block_sparse_moe.experts.0.w1.weight",
+    "vision_tower.encoder.layers.0.mlp.fc1.weight",
+}
+
+# The NemotronH reverse chain, in the order ``_build_reverse_rules`` emits it: the
+# backwards-compatibility leaf rename first, then the ``model.`` -> ``backbone.`` prefix.
+_NEMOTRON_H_REVERSE = [
+    RenameRule(r"embeddings\.weight", "embedding.weight"),
+    RenameRule(r"^model\.", "backbone."),
+]
+
+
+def test_rename_inventing_a_name_absent_from_source_is_suppressed():
+    """A BC *load* rename declared reversible would rewrite the canonical name.
+
+    Reversing ``embedding.weight -> embeddings.weight`` turns the published
+    ``backbone.embeddings.weight`` into a legacy spelling the checkpoint never used,
+    which a deployment loader keyed on the canonical name cannot find. The prefix rule
+    in the same chain is still needed, so resolution has to span the whole chain.
+    """
+    rename = _SourceAwareRenamer(_NEMOTRON_H_REVERSE, _SOURCE_KEYS)
+    assert rename("model.embeddings.weight") == "backbone.embeddings.weight"
+
+
+def test_rename_restoring_a_source_name_is_applied():
+    """A rename whose output is a real source name is left alone."""
+    rule = RenameRule(r"^vision_projector\.mlp1\.norm\.", "mlp1.0.")
+    rename = _SourceAwareRenamer([rule], _SOURCE_KEYS)
+    assert rename("vision_projector.mlp1.norm.weight") == "mlp1.0.weight"
+
+
+def test_rename_matching_no_source_key_is_applied():
+    """No evidence means no suppression: a rule that never fires on source names runs."""
+    rule = RenameRule(r"^sound_projector\.sound_encoder\.", "sound_encoder.")
+    rename = _SourceAwareRenamer([rule], _SOURCE_KEYS)
+    assert rename("sound_projector.sound_encoder.0.weight") == "sound_encoder.0.weight"
+
+
+@pytest.mark.parametrize("source_keys", [None, set()])
+def test_guard_is_inert_when_source_is_unknown(source_keys):
+    """An unreadable or absent source checkpoint keeps the previous behaviour."""
+    rename = _SourceAwareRenamer(_NEMOTRON_H_REVERSE, source_keys)
+    assert rename("model.embeddings.weight") == "backbone.embedding.weight"
+
+
+# The same container rename shows up in two shapes depending on how the model declares it:
+# one bare container rule, or a rule per anchored leaf. The per-key resolution must give
+# the same answer either way, so every mixed-namespace assertion runs against both.
+_MIXED_RULE_SHAPES = {
+    "bare-container": [RenameRule(r"\.mlp\.", ".block_sparse_moe.")],
+    "anchored-leaves": [
+        RenameRule(r"\.mlp\.experts\.", ".block_sparse_moe.experts."),
+        RenameRule(r"\.mlp\.gate\.", ".block_sparse_moe.gate."),
+    ],
+}
+
+
+@pytest.mark.parametrize("shape", list(_MIXED_RULE_SHAPES))
+def test_mixed_namespace_rename_applies_only_where_the_source_needs_it(shape):
+    """One rule, two namespaces: suppression is per key, never per rule.
+
+    A rule that rewrites only already-canonical source keys would be discarded by a
+    rule-level guard, taking the sparse-layer renames it is actually needed for with it.
+    """
+    rename = _SourceAwareRenamer(_MIXED_RULE_SHAPES[shape], _MIXED_SOURCE_KEYS)
+
+    # Sparse text layers: the rename is what restores their source names.
+    assert (
+        rename("language_model.model.layers.1.mlp.experts.0.w1.weight")
+        == "language_model.model.layers.1.block_sparse_moe.experts.0.w1.weight"
+    )
+    assert (
+        rename("language_model.model.layers.1.mlp.gate.weight")
+        == "language_model.model.layers.1.block_sparse_moe.gate.weight"
+    )
+    # Dense text layer and vision tower are already canonical: left untouched.
+    assert (
+        rename("language_model.model.layers.0.mlp.down_proj.weight")
+        == "language_model.model.layers.0.mlp.down_proj.weight"
+    )
+    assert (
+        rename("vision_tower.encoder.layers.0.mlp.fc1.weight")
+        == "vision_tower.encoder.layers.0.mlp.fc1.weight"
+    )
+
+
+@pytest.mark.parametrize("shape", list(_MIXED_RULE_SHAPES))
+@pytest.mark.parametrize("suffix", [".weight", ".weight_scale", ".input_scale"])
+def test_mixed_namespace_scales_follow_their_weight(suffix, shape):
+    """A module's scale tensors must not be split across the two namespaces.
+
+    Scale names never appear in the source checkpoint, so they are resolved by the
+    weight they belong to rather than judged absent on their own.
+    """
+    rename = _SourceAwareRenamer(_MIXED_RULE_SHAPES[shape], _MIXED_SOURCE_KEYS)
+    sparse = "language_model.model.layers.1.mlp.experts.0.w1"
+    dense = "language_model.model.layers.0.mlp.down_proj"
+    assert (
+        rename(sparse + suffix)
+        == "language_model.model.layers.1.block_sparse_moe.experts.0.w1" + suffix
+    )
+    assert rename(dense + suffix) == dense + suffix
+
+
+def test_mixed_namespace_config_names_track_the_weights(tmp_path):
+    """``exclude_modules`` / ``quantized_layers`` follow the same per-key decision."""
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: transformers is an optional dependency for ModelOpt.
+    from transformers.core_model_loading import WeightRenaming
+
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {"weight_map": dict.fromkeys(_MIXED_SOURCE_KEYS, "model-00001-of-00001.safetensors")}
+        )
+    )
+    model = types.SimpleNamespace(
+        name_or_path=str(tmp_path),
+        config=None,
+        _weight_conversions=[WeightRenaming(".block_sparse_moe.", ".mlp.")],
+    )
+    mapper = build_reverse_name_mapper(model)
+    assert (
+        mapper("language_model.model.layers.1.mlp.experts.0.w1")
+        == "language_model.model.layers.1.block_sparse_moe.experts.0.w1"
+    )
+    assert (
+        mapper("language_model.model.layers.0.mlp.down_proj")
+        == "language_model.model.layers.0.mlp.down_proj"
+    )
+
+
+def test_model_without_a_conversion_mapping_is_a_no_op():
+    """The empty-mapping early return must stay shape-compatible with its callers.
+
+    ``build_reverse_name_mapper`` unpacks the result, so a short tuple here would raise
+    ``ValueError`` for every model that declares no conversion mapping at all.
+    """
+    model = types.SimpleNamespace(name_or_path=None, config=None, _weight_conversions=[])
+    split_rules, merge_rules, rename_rules, expert_leaves, source_keys = _build_reverse_rules(model)
+    assert (split_rules, merge_rules, rename_rules, expert_leaves, source_keys) == (
+        [],
+        [],
+        [],
+        [],
+        None,
+    )
+    assert build_reverse_name_mapper(model) is None
+    state = {"model.embeddings.weight": torch.ones(2, 2)}
+    assert revert_weight_conversion_quant_aware(model, state) is state
+
+
+def test_source_checkpoint_keys_reads_sharded_index(tmp_path):
+    """The guard's input comes from the checkpoint the model was loaded from."""
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": dict.fromkeys(_SOURCE_KEYS, "model-00001-of-00001.safetensors")})
+    )
+    model = types.SimpleNamespace(name_or_path=str(tmp_path), config=None)
+    assert _source_checkpoint_keys(model) == _SOURCE_KEYS
+    assert _source_checkpoint_keys(types.SimpleNamespace(name_or_path="", config=None)) is None
+
+
+def test_source_checkpoint_keys_reads_single_file(tmp_path):
+    """The single-file ``model.safetensors`` layout is read through ``safe_open``."""
+    # A fresh tensor per key: ``save_file`` rejects names that share storage.
+    save_file({key: torch.ones(1) for key in _SOURCE_KEYS}, tmp_path / "model.safetensors")
+    model = types.SimpleNamespace(name_or_path=str(tmp_path), config=None)
+    assert _source_checkpoint_keys(model) == _SOURCE_KEYS
+
+
+def test_source_checkpoint_keys_tolerates_a_malformed_index(tmp_path):
+    """An unreadable checkpoint is "unknown", not an export failure."""
+    (tmp_path / "model.safetensors.index.json").write_text("{ not json")
+    model = types.SimpleNamespace(name_or_path=str(tmp_path), config=None)
+    assert _source_checkpoint_keys(model) is None
+
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"metadata": {}}))
+    assert _source_checkpoint_keys(model) is None
+
+
+def test_source_checkpoint_keys_resolves_a_cached_hub_id(tmp_path, monkeypatch):
+    """A hub-id ``name_or_path`` resolves through the local HF cache, offline.
+
+    ``from_pretrained("nvidia/...")`` leaves ``name_or_path`` as the repo id, which is
+    not a directory. Without cache resolution the guard would silently do nothing for
+    the most common way ``hf_ptq.py`` is invoked.
+    """
+    snapshot = tmp_path / "snapshots" / "abc123"
+    snapshot.mkdir(parents=True)
+    index = snapshot / "model.safetensors.index.json"
+    index.write_text(
+        json.dumps({"weight_map": dict.fromkeys(_SOURCE_KEYS, "model-00001-of-00001.safetensors")})
+    )
+    seen = {}
+
+    def _fake_cache(repo_id, filename, revision=None):
+        seen["revision"] = revision
+        return str(index) if filename == "model.safetensors.index.json" else None
+
+    monkeypatch.setattr(quant_aware_conversion, "try_to_load_from_cache", _fake_cache)
+    model = types.SimpleNamespace(name_or_path="nvidia/Some-Model", config=None)
+    assert _source_checkpoint_keys(model) == _SOURCE_KEYS
+    assert seen["revision"] is None
+
+
+def test_cached_hub_id_lookup_uses_the_loaded_revision(tmp_path, monkeypatch):
+    """A model pinned to a revision must not read ``main``'s snapshot.
+
+    ``try_to_load_from_cache`` defaults to ``main``. For a model loaded from a pinned
+    commit that would read a different cached checkpoint and filter the wrong rules,
+    so the commit ``transformers`` recorded on the config is passed through.
+    """
+    index = tmp_path / "model.safetensors.index.json"
+    index.write_text(
+        json.dumps({"weight_map": dict.fromkeys(_SOURCE_KEYS, "model-00001-of-00001.safetensors")})
+    )
+    seen = {}
+
+    def _fake_cache(repo_id, filename, revision=None):
+        seen["revision"] = revision
+        return str(index) if filename == "model.safetensors.index.json" else None
+
+    monkeypatch.setattr(quant_aware_conversion, "try_to_load_from_cache", _fake_cache)
+    model = types.SimpleNamespace(
+        name_or_path="nvidia/Some-Model",
+        config=types.SimpleNamespace(_commit_hash="deadbeef", _name_or_path=None),
+    )
+    assert _source_checkpoint_keys(model) == _SOURCE_KEYS
+    assert seen["revision"] == "deadbeef"
+
+
+def test_source_aware_guard_applies_through_the_export_paths(tmp_path):
+    """The guard reaches both the tensor rename and the quant-config name mapping.
+
+    Reproduces the NemotronH conversion mapping: a ``backbone.`` -> ``model.`` prefix
+    rename that genuinely restores source names, plus a backwards-compatibility
+    ``embedding.weight`` -> ``embeddings.weight`` load rename whose reverse invents a
+    name the published checkpoint never carried. Only the second must be suppressed.
+    """
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: transformers is an optional dependency for ModelOpt.
+    from transformers.core_model_loading import WeightRenaming
+
+    source_keys = {"backbone.embeddings.weight", "backbone.layers.0.mixer.in_proj.weight"}
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": dict.fromkeys(source_keys, "model-00001-of-00001.safetensors")})
+    )
+    model = types.SimpleNamespace(
+        name_or_path=str(tmp_path),
+        config=None,
+        _weight_conversions=[
+            WeightRenaming("backbone.", "model."),
+            WeightRenaming("embedding.weight", "embeddings.weight"),
+        ],
+    )
+    state = _nvfp4_linear("model.layers.0.mixer.in_proj", 8, 16)
+    state["model.embeddings.weight"] = torch.ones(8, 16)
+
+    written = revert_weight_conversion_quant_aware(model, state)
+    # The ``backbone.`` prefix reverse still applies; the embedding name stays canonical.
+    assert "backbone.embeddings.weight" in written
+    assert "backbone.embedding.weight" not in written
+    assert "backbone.layers.0.mixer.in_proj.weight" in written
+
+    config = {
+        "quantized_layers": {"model.layers.0.mixer.in_proj": {"quant_algo": "NVFP4"}},
+        "exclude_modules": ["model.embeddings"],
+    }
+    revert_quant_config_names(config, build_reverse_name_mapper(model))
+    assert config["quantized_layers"] == {
+        "backbone.layers.0.mixer.in_proj": {"quant_algo": "NVFP4"}
+    }
+    assert config["exclude_modules"] == ["backbone.embeddings"]
 
 
 def test_rename_carries_scale_siblings():
@@ -313,13 +639,6 @@ def test_build_reverse_rules_from_mixtral_conversion_mapping_cpu():
     # Imports stay function-local: unit tests must import without transformers installed.
     pytest.importorskip("transformers")
     from _test_utils.torch.transformers_models import get_tiny_mixtral
-
-    try:
-        from transformers.conversion_mapping import get_checkpoint_conversion_mapping
-    except ImportError:
-        pytest.skip("transformers build has no conversion_mapping API")
-    if not get_checkpoint_conversion_mapping("mixtral"):
-        pytest.skip("transformers build has no mixtral conversion_mapping")
 
     model = get_tiny_mixtral(**_MIXTRAL_KWARGS)
 
@@ -663,6 +982,30 @@ def test_radio_merge_that_matches_no_keys_raises():
         revert_weight_conversion_quant_aware(model, state_dict)
 
 
+def test_radio_merge_that_matches_no_keys_is_recorded_for_one_ranks_share():
+    """Given ``unmatched_merges``, as for one rank's share of a model, whose other ranks may hold
+    the rule's keys, the refusal is recorded there instead of raised, and the rest still applies."""
+    unmatched_rule = _radio_qkv_conversion()
+    _set_scope_attr(unmatched_rule, "scope_prefix", "unused_model")
+    model = types.SimpleNamespace(_weight_conversions=[unmatched_rule, _radio_qkv_conversion()])
+    parts = [torch.full((2, 2), float(i)) for i in range(3)]
+    state_dict = {
+        "language_model.layers.0.weight": torch.randn(2, 2),
+        **{
+            f"vision_model.encoder.layer.0.attention.{part}_proj.weight": tensor
+            for part, tensor in zip("qkv", parts)
+        },
+    }
+    unmatched: list = []
+
+    out = revert_weight_conversion_quant_aware(model, state_dict, unmatched_merges=unmatched)
+
+    assert len(unmatched) == 1 and "matched no state-dict key" in unmatched[0]
+    fused = "vision_model.encoder.layer.0.attn.qkv.weight"
+    assert out.keys() == {"language_model.layers.0.weight", fused}
+    assert torch.equal(out[fused], torch.cat(parts))
+
+
 @pytest.mark.parametrize(
     ("leaf", "tensors", "message"),
     [
@@ -900,6 +1243,35 @@ def test_stacked_experts_guard():
     _assert_experts_pre_expanded(bad, [])
 
 
+def test_sharded_export_keeps_a_renamed_vlm_part_wildcard():
+    """A wildcard over a renamed VLM part stays one entry, not every module beneath it."""
+    pytest.importorskip("transformers.core_model_loading")
+    from transformers.core_model_loading import WeightRenaming
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.visual = torch.nn.Module()
+    model.model.visual.patch_embed = torch.nn.Linear(2, 2, bias=False)
+    model.model.language_model = torch.nn.Module()
+    model.model.language_model.layers = torch.nn.ModuleList([torch.nn.Linear(2, 2, bias=False)])
+    model.lm_head = torch.nn.Linear(2, 2, bias=False)
+    # Qwen2.5-VL's renames: the hub checkpoint has ``model.layers`` and ``visual``.
+    model._weight_conversions = [
+        WeightRenaming(r"^visual", "model.visual"),
+        WeightRenaming(r"^model(?!\.(language_model|visual))", "model.language_model"),
+    ]
+    config = {
+        "quantization": {
+            "quant_algo": "FP8",
+            "exclude_modules": ["lm_head", "model.language_model*", "model.visual.patch_embed*"],
+        }
+    }
+
+    config = _revert_quant_config_names_best_effort(model, config)
+
+    assert config["quantization"]["exclude_modules"] == ["lm_head", "model*", "visual.patch_embed*"]
+
+
 def test_revert_quant_config_names_mapper():
     """exclude_modules / quantized_layers keys revert to hub names, preserving wildcards.
 
@@ -940,3 +1312,145 @@ def test_revert_quant_config_names_mapper():
     q2 = {"exclude_modules": ["x*"]}
     revert_quant_config_names(q2, None)
     assert q2["exclude_modules"] == ["x*"]
+
+
+def _as_loading_rewrote(conversions, siblings):
+    """``conversions`` with every expert converter's ``.weight`` sources expanded the way a
+    load-time rewrite expands them: one anchored source per checkpoint tensor it consumes."""
+    # Local import: optional dependency; every caller importorskips transformers first.
+    from transformers.core_model_loading import WeightConverter
+
+    rewritten = []
+    for conv in conversions:
+        sources = conv.source_patterns if isinstance(conv.source_patterns, list) else []
+        if not isinstance(conv, WeightConverter) or not any(".experts." in s for s in sources):
+            rewritten.append(conv)
+            continue
+        stems = [s.removesuffix("$").removesuffix(".weight") for s in sources]
+        rewritten.append(
+            WeightConverter(
+                source_patterns=[f"{stem}.{leaf}$" for leaf in siblings for stem in stems],
+                target_patterns=getattr(conv, "_original_target_patterns", conv.target_patterns),
+                operations=list(conv.operations),
+            )
+        )
+    return rewritten
+
+
+@pytest.mark.parametrize(
+    "siblings",
+    [("weight", "weight_scale_inv"), ("weight_packed", "weight_scale", "weight_global_scale")],
+    ids=["fp8-dequantize", "compressed-tensors-decompress"],
+)
+def test_experts_revert_through_converters_loading_rewrote(siblings):
+    """The export replays the conversions ``from_pretrained`` recorded. After a dequantizing or
+    decompressing load, each expert converter lists every checkpoint tensor it consumed, so the
+    same leaf repeats; the expert reverse used to bail on that and leave every name in-memory.
+
+    A FineGrainedFP8 ``dequantize=True`` load also adds a converter that only decodes each weight
+    in place. It renames nothing, so it must neither abort the reverse of the model's real
+    conversions (MiniMax-M2.7 kept its in-memory expert names) nor re-encode a weight.
+    """
+    pytest.importorskip("transformers")
+    # Local import: optional dependency, guarded by the importorskip above.
+    from _test_utils.torch.transformers_models import get_tiny_mixtral
+
+    try:
+        from transformers.conversion_mapping import get_model_conversion_mapping
+    except ImportError:
+        pytest.skip("transformers build has no conversion_mapping API")
+    model = get_tiny_mixtral(**_MIXTRAL_KWARGS)
+    stock = get_model_conversion_mapping(model, add_legacy=False)
+    if not any(".experts." in str(c.source_patterns) for c in stock):
+        pytest.skip("transformers build has no mixtral expert conversion")
+    model._weight_conversions = _as_loading_rewrote(stock, siblings)
+    if "weight_scale_inv" in siblings:
+        fp8 = pytest.importorskip("transformers.integrations.finegrained_fp8")
+        from transformers.core_model_loading import WeightConverter
+
+        model._weight_conversions.append(
+            WeightConverter(
+                source_patterns=["weight$", "weight_scale_inv", "activation_scale"],
+                target_patterns="weight",
+                operations=[fp8.Fp8Dequantize(None)],
+            )
+        )
+
+    p = "model.layers.0"
+    sd = {
+        f"{p}.mlp.gate.weight": torch.randn(2, 32),
+        f"{p}.self_attn.q_proj.weight": torch.randn(8, 16, dtype=torch.bfloat16),
+    }
+    for e in range(2):
+        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.gate_proj", 64, 32))
+        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.up_proj", 64, 32))
+        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.down_proj", 32, 64))
+
+    out = revert_weight_conversion_quant_aware(model, sd)
+
+    for e in range(2):
+        base = f"{p}.block_sparse_moe.experts.{e}"
+        assert f"{base}.w1.weight" in out
+        assert f"{base}.w3.weight" in out
+        assert f"{base}.w2.weight" in out
+        assert f"{base}.w1.weight_scale_2" in out
+    assert out[f"{p}.self_attn.q_proj.weight"].dtype == torch.bfloat16
+    assert not any(".mlp.experts." in k or k.endswith("weight_scale_inv") for k in out)
+
+
+def test_the_identity_decode_is_known_without_the_fp8_integration(monkeypatch):
+    """transformers 5.5 imports triton atop its FP8 integration, so without triton that import
+    fails. The identity op 5.5 and 5.6 reverse ``Fp8Dequantize`` into is ``core_model_loading``'s,
+    and must still read as a decode in place, or the whole reverse of a dequantizing load aborts."""
+    core = pytest.importorskip("transformers.core_model_loading")
+    if not hasattr(core, "_IdentityOp"):
+        pytest.skip("transformers build has no _IdentityOp")
+    integrations = pytest.importorskip("transformers.integrations")
+    monkeypatch.delattr(integrations, "finegrained_fp8", raising=False)
+    monkeypatch.setitem(sys.modules, "transformers.integrations.finegrained_fp8", None)
+    quant_aware_conversion._quantization_codec_ops.cache_clear()
+    try:
+        rev = types.SimpleNamespace(source_patterns=["weight$"], target_patterns="weight")
+        assert quant_aware_conversion._decodes_in_place(rev, [core._IdentityOp()])
+    finally:
+        quant_aware_conversion._quantization_codec_ops.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("sources", "targets", "in_place"),
+    [
+        # A dequantizing FP8 load, reversed: the weight and the scales folded into it.
+        (["weight$"], ["weight$", "weight_scale_inv", "activation_scale"], True),
+        (["mlp.up_proj.weight$"], ["mlp.up_proj.weight$", "mlp.up_proj.weight_scale_inv"], True),
+        # A later target names another module, so the converter renames it.
+        (["mlp.up_proj.weight$"], ["mlp.up_proj.weight$", "mlp.gate_proj.weight"], False),
+    ],
+    ids=["bare-siblings", "module-siblings", "another-module"],
+)
+def test_a_codec_converter_decodes_in_place_only_if_it_names_one_module(sources, targets, in_place):
+    """A converter skipped as a decode in place gives up its reverse rules, so it must rename
+    nothing: a target naming another module is kept, to be reversed or refused."""
+    core = pytest.importorskip("transformers.core_model_loading")
+    if not hasattr(core, "_IdentityOp"):
+        pytest.skip("transformers build has no _IdentityOp")
+    rev = types.SimpleNamespace(source_patterns=sources, target_patterns=targets)
+    assert quant_aware_conversion._decodes_in_place(rev, [core._IdentityOp()]) is in_place
+
+
+def test_dense_split_names_each_part_once_through_load_siblings():
+    """A dense fused converter that a dequantizing load rewrote still un-fuses into one part per
+    module, not one per checkpoint tensor the load consumed."""
+    pytest.importorskip("transformers")
+    # Local import: optional dependency, guarded by the importorskip above.
+    from transformers.core_model_loading import Concatenate, WeightConverter
+
+    modules = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")
+    leaves = ("weight", "weight_scale_inv")
+    conv = WeightConverter(
+        source_patterns=[f"{m}.{leaf}$" for leaf in leaves for m in modules],
+        target_patterns="self_attn.qkv_proj",
+        operations=[Concatenate(dim=0)],
+    )
+    rev = conv.reverse_transform()
+    rule = _dense_split_rule(rev, list(rev.operations))
+    assert rule.part_suffixes == (".q_proj", ".k_proj", ".v_proj")

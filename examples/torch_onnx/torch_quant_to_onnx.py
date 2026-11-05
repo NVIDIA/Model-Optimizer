@@ -27,7 +27,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "onnx_ptq"))
 
 import timm
 import torch
-import torch.multiprocessing as mp
 import torch.nn.functional as F
 from datasets import load_dataset
 from download_example_onnx import export_to_onnx
@@ -54,9 +53,6 @@ The script will:
 3. Export the quantized model to ONNX with FP16 weights.
 4. Optionally evaluate accuracy on ImageNet-1k before and after quantization.
 """
-
-
-mp.set_start_method("spawn", force=True)  # Needed for data loader with multiple workers
 
 
 _FP8_CONV_OVERRIDE: list = [
@@ -311,16 +307,17 @@ def load_calibration_data(model, data_size, batch_size, device, with_labels=Fals
     calib_tensor = [transforms(img) for img in images]
     calib_tensor = [t.to(device) for t in calib_tensor]
 
+    # The samples already sit on ``device``; worker processes would only add spawn and import cost.
     if with_labels:
         labels = dataset["train"][:data_size]["label"]
         labels = torch.tensor(labels, device=device)
         calib_dataset = [{"image": img, "label": lbl} for img, lbl in zip(calib_tensor, labels)]
         return torch.utils.data.DataLoader(
-            calib_dataset, batch_size=batch_size, shuffle=True, num_workers=4
+            calib_dataset, batch_size=batch_size, shuffle=True, num_workers=0
         )
     else:
         return torch.utils.data.DataLoader(
-            calib_tensor, batch_size=batch_size, shuffle=True, num_workers=4
+            calib_tensor, batch_size=batch_size, shuffle=True, num_workers=0
         )
 
 
@@ -397,6 +394,12 @@ def _disable_inplace_relu(model):
 def _mtq_inputs_from_auto_quantize_config(auto_config, fixed_quantize_config=None):
     """Map a resolved AutoQuantizeConfig to mtq.auto_quantize inputs."""
     constraints = auto_config.constraints.model_dump(exclude_none=True)
+    method_options = auto_config.method_options or {}
+    if auto_config.uses_predicted_damage_target:
+        constraints.pop("effective_bits", None)
+    method = auto_config.auto_quantize_method
+    if method_options:
+        method = {"method": method, **method_options}
     if auto_config.cost_excluded_layers:
         constraints.setdefault("cost", {})["excluded_module_name_patterns"] = (
             auto_config.cost_excluded_layers
@@ -423,7 +426,7 @@ def _mtq_inputs_from_auto_quantize_config(auto_config, fixed_quantize_config=Non
             for search_space in auto_config.module_search_spaces
         ],
         "disabled_layers": auto_config.disabled_layers,
-        "method": auto_config.auto_quantize_method,
+        "method": method,
         "num_score_steps": auto_config.score_size,
     }
 
@@ -472,7 +475,7 @@ def auto_quantize_model(
         for search_space in inputs["module_search_spaces"] or []
     )
     print(f"Starting auto-quantization search with {format_count} formats...")
-    print(f"Effective bits constraint: {inputs['constraints']['effective_bits']}")
+    print(f"Search constraints: {inputs['constraints']}")
     print(f"Calibration steps: {num_calib_steps}, Scoring steps: {inputs['num_score_steps']}")
 
     quantized_model, search_state = mtq.auto_quantize(
@@ -755,6 +758,10 @@ def build_trt_engine(onnx_path, optimization_level=4):
         f"--onnx={onnx_path}",
         "--stronglyTyped",
         f"--builderOptimizationLevel={optimization_level}",
+        # One inference iteration shows the engine runs; the default 3 s timed benchmark is not shown.
+        "--warmUp=0",
+        "--duration=0",
+        "--iterations=1",
     ]
     print(f"\nBuilding TensorRT engine: {' '.join(cmd)}")
     try:

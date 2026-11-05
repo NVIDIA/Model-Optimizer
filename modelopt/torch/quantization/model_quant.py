@@ -18,6 +18,7 @@
 import fnmatch
 import inspect
 import os
+import sys
 import warnings
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
@@ -25,6 +26,7 @@ from typing import Any, cast
 
 import torch
 import torch.nn as nn
+from torch.distributed.fsdp import FSDPModule
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
@@ -47,12 +49,14 @@ from .config import QuantizeAlgoCfgType
 from .kv_cache_auto_quant import (
     _KV_QUANTIZER_ATTRS,
     AutoQuantizeKVSearcher,
+    _validate_parallel_state,
     get_kv_cache_auto_quantize_config,
 )
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
-from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
-from .nn import QuantModule, SequentialQuantizer, TensorQuantizer
+from .mode import QuantizeModeRegistry, _rank_local_calibrations, get_modelike_from_algo_cfg
+from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized
+from .utils.core_utils import _get_fsdp2_mesh
 
 __all__ = [
     "auto_quantize",
@@ -67,6 +71,111 @@ __all__ = [
     "quantize",
     "temporarily_fold_weights",
 ]
+
+
+def _group_ranks(group: dist.DistributedProcessGroup) -> list[int]:
+    """The ranks ``group`` spans, in its rank order; just this rank for a group not set."""
+    if not group.is_initialized():
+        return [dist.rank()]
+    return torch.distributed.get_process_group_ranks(group.group or torch.distributed.group.WORLD)
+
+
+def _names_the_experts_groups(
+    state: "dist.ParallelState | None", plan: dist.DistributionPlan
+) -> bool:
+    """Whether ``state`` names the groups a routed expert of ``plan`` syncs its scales over.
+
+    Those of the ``(edp, ep)`` mesh the expert-parallel load lays the ranks out in: as its
+    expert-parallel group, this rank's row, whose ranks hold the experts' shards in row order, and
+    as its data-parallel group, its column, the ranks holding the same shard.
+    """
+    if state is None or not state.expert_model_parallel_group.is_initialized():
+        return False
+    row, column = divmod(dist.rank(), plan.ep_size)
+    expert_parallel = range(row * plan.ep_size, (row + 1) * plan.ep_size)
+    data_parallel = range(column, plan.world_size, plan.ep_size)
+    return _group_ranks(state.expert_model_parallel_group) == list(expert_parallel) and sorted(
+        _group_ranks(state.data_parallel_group)
+    ) == list(data_parallel)
+
+
+def _refuse_unsupported_distributed_calibration(
+    model: nn.Module, algorithm: QuantizeAlgoCfgType
+) -> None:
+    """Refuse a calibration that would come out wrong on a model distributed over several ranks.
+
+    Each rank calibrates on its own data: an algorithm that keeps its statistics on the rank would
+    calibrate the ranks' copies or shards of a weight differently, and a module holding routed
+    experts must name the experts' expert-parallel group and, for data parallelism, only the ranks
+    holding the same experts, or calibration would merge different experts' scales. Called before
+    anything changes, so the caller seeds the experts' ``ParallelState`` before quantizing, as the
+    expert-parallel load does; their quantized modules are checked again before they calibrate.
+    """
+    plan = dist.recorded_distribution_plan(model)
+    if plan is None or plan.world_size == 1:
+        return
+    refused = _rank_local_calibrations(algorithm)
+    if refused:
+        raise NotImplementedError(
+            f"Calibrating with {', '.join(refused)} is not supported on a model distributed over "
+            f"{plan.world_size} ranks. Each rank calibrates on its own data and this calibration "
+            "keeps what it gathers on the rank, or does not declare that it syncs it, so the "
+            "ranks could calibrate their copies, or their shards, of a weight differently. "
+            "Calibrate with max or MSE with distributed_sync on, GPTQ, SmoothQuant or awq_clip, "
+            "or in a single process."
+        )
+    if algorithm is None or not plan.is_expert_parallel:
+        return
+    # Routed experts: the modules carrying an expert-parallel group, and the quantized modules under
+    # a container named ``experts``, as every expert-parallel plan in transformers names it.
+    holders = {}
+    for name, module in model.named_modules():
+        state = getattr(module, "_parallel_state", None)
+        if (state is not None and state.expert_model_parallel_group.is_initialized()) or (
+            isinstance(module, QuantModule) and "experts" in name.split(".")
+        ):
+            holders[name] = state
+    if not holders and not any("experts" in name.split(".") for name, _ in model.named_modules()):
+        return  # no routed experts here, as in a VLM's vision tower: no experts' scales to merge
+    wrong = [name for name, state in holders.items() if not _names_the_experts_groups(state, plan)]
+    if not holders or wrong:
+        raise NotImplementedError(
+            f"Calibrating a model whose experts are sharded over {plan.ep_size} ranks needs each "
+            "routed expert's ParallelState to name, as its expert-parallel group, this rank's row "
+            f"of the ({plan.edp}, {plan.ep_size}) expert-parallel mesh and, as its data-parallel "
+            f"group, its column, the {plan.edp} rank(s) holding the same experts, or calibration "
+            "would sync their scales over the wrong ranks. "
+            + (
+                f"These modules do not: {wrong[:3]}."
+                if wrong
+                else "None of the model's modules carries an expert-parallel group."
+            )
+        )
+
+
+def _refuse_awq_on_a_sharded_fsdp2_model(
+    model: nn.Module, algorithm: QuantizeAlgoCfgType, candidate: str | None = None
+) -> None:
+    """Refuse AWQ calibration of an FSDP2 model sharded over several ranks, before it starts.
+
+    Each rank calibrates on its own data and folds the AWQ scale it picks into its own weight
+    shard, so the shards would not match. Every rank decides alike, from the run and the model.
+    """
+    if dist.size() == 1 or not dist.is_fsdp2_model(model):
+        return
+    methods = [mode.removesuffix("_calibrate") for mode, _ in get_modelike_from_algo_cfg(algorithm)]
+    awq = [method for method in methods if method in ("awq_lite", "awq_full")]
+    if awq:
+        # For the message only: the FSDP2 shard mesh can be narrower than the run (HSDP, 2D).
+        mesh = _get_fsdp2_mesh(next(m for m in model.modules() if isinstance(m, FSDPModule)))
+        ranks = mesh.size(-1) if mesh is not None else dist.size()
+        what = f"AutoQuantize candidate {candidate!r} calibrates" if candidate else "Calibrating"
+        raise NotImplementedError(
+            f"{what} with {', '.join(awq)}, which is not supported yet on an FSDP2 model sharded "
+            f"over {ranks} ranks: each rank calibrates on its own data and folds the AWQ scale it "
+            "picks into its own weight shard, so the shards would not match. Calibrate in a single "
+            "process, or with an algorithm other than AWQ."
+        )
 
 
 # TODO: Descriptors for the supported algorithms
@@ -98,6 +207,8 @@ def calibrate(
 
     Returns: The calibrated pytorch model.
     """
+    _refuse_awq_on_a_sharded_fsdp2_model(model, algorithm)
+    _refuse_unsupported_distributed_calibration(model, algorithm)
     if forward_loop is not None:
         # get the number of arguments of forward_loop
         num_args = len(inspect.signature(forward_loop).parameters)
@@ -114,8 +225,32 @@ def calibrate(
             def forward_loop(model):
                 return original_forward_loop()  # type: ignore[call-arg]
 
-    # move the model to eval mode
-    is_training = model.training
+    # Whether the algorithm actually invoked the loop. `max_calibrate` may skip it
+    # (`skip_forward_without_activation_calib`) when no enabled quantizer needs activation
+    # statistics, and a post-calibration check that assumed it ran would fire on every
+    # weight-only calibration.
+    forward_loop_ran = False
+    if forward_loop is not None:
+        _requested_forward_loop = forward_loop
+
+        def forward_loop(model):
+            nonlocal forward_loop_ran
+            forward_loop_ran = True
+            return _requested_forward_loop(model)
+
+        # The fused-experts interception check below judges this calibration's forwards alone.
+        for module in model.modules():
+            if hasattr(module, "_intercept_count"):
+                module._intercept_count = module._forward_count = 0
+                module._weight_input_capture = False
+
+    # move the model to eval mode, remembering each module's mode; quantizers, and plain containers of them,
+    # follow the module they quantize instead
+    training_modes = {
+        module: module.training
+        for module in model.modules()
+        if module is model or not _holds_only_quantizers(module)
+    }
     model.eval()
 
     with forward_with_reshard(model):
@@ -133,9 +268,51 @@ def calibrate(
     # TODO: Re-enable when the CUDA error: unspecified launch failure is fixed.
     # clear_cuda_cache()
 
-    model.train(is_training)
+    _restore_training_modes(model, training_modes)
+
+    if forward_loop_ran:
+        # A fused-experts module whose forward ran past both interception hooks collected
+        # nothing. Surface it here rather than let the export emit weight-derived fallback scales
+        # under a warning that blames the size of the calibration set. Raised once the model is
+        # back in its mode, for a caller that catches it to calibrate again. Only a loaded HF plugin
+        # installs fused-experts wrappers; importing it here would rerun one that failed to load,
+        # which import_plugin only warns about, and fail every calibration with its error. Both
+        # conditions must come out the same on every rank: under expert parallelism the check
+        # all-reduces over the experts' group, and a rank that skipped it would leave its peers
+        # waiting there.
+        huggingface = sys.modules.get("modelopt.torch.quantization.plugins.huggingface")
+        if huggingface is not None:
+            huggingface.assert_fused_experts_intercepted(model)
 
     return model
+
+
+def _holds_only_quantizers(module: nn.Module) -> bool:
+    if isinstance(module, AnyQuantizer):
+        return True
+    # A plain container of quantizers, such as the one some plugins create for fused experts.
+    children = list(module.children())
+    return (
+        isinstance(module, (nn.ModuleList, nn.ModuleDict))
+        and bool(children)
+        and all(_holds_only_quantizers(child) for child in children)
+    )
+
+
+def _restore_training_modes(model: nn.Module, training_modes: dict[nn.Module, bool]) -> None:
+    """Give each module back its mode from ``training_modes``; one not in it takes its parent's mode.
+
+    ``model.train()`` runs first, as it always did, so every module's ``train()`` is called; then the modules
+    whose own mode differs get it back, parents first, because ``train()`` also sets every module below.
+    """
+    model.train(training_modes[model])
+    stack = [(child, model.training) for child in model.children()]
+    while stack:
+        module, parent_mode = stack.pop()
+        mode = training_modes.get(module, parent_mode)
+        if module.training != mode:
+            module.train(mode)
+        stack.extend((child, mode) for child in module.children())
 
 
 def postprocess_amax(model: nn.Module, key: str, post_process_fn) -> nn.Module:
@@ -232,20 +409,38 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
     )
 
 
-def _check_indexer_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
-    """Raise when a config enables an indexer quantizer that quantizes no indexer.
+_INDEXER_UNITS = "the configs/ptq/units/indexer_*_nvfp4 recipe units"
+_MOE_COMM_UNITS = "the configs/ptq/units/moe_*_nvfp4 recipe units"
+# Quantizers that only framework plugins add: (class-name patterns of the modules they belong on,
+# what those modules are, where the supported models are listed).
+_PLUGIN_QUANTIZERS = {
+    "indexer_q_quantizer": (("*Indexer",), "sparse-attention indexer", _INDEXER_UNITS),
+    "indexer_k_quantizer": (("*Indexer",), "sparse-attention indexer", _INDEXER_UNITS),
+    "indexer_scorer_kwargs_quantizer": (
+        ("*Indexer",),
+        "sparse-attention indexer",
+        'the "Indexer scorer kernel arguments" section of examples/vllm_serve/README.md',
+    ),
+    "dispatch_quantizer": (("*Experts*", "*FusedMoE"), "MoE experts module", _MOE_COMM_UNITS),
+    "combine_quantizer": (("*Experts*", "*FusedMoE"), "MoE experts module", _MOE_COMM_UNITS),
+}
 
-    ``indexer_q_quantizer`` and ``indexer_k_quantizer`` only exist on indexers that a framework
-    plugin (vLLM, Megatron-Core) converted. When a plugin does not recognize the installed
-    framework's indexer class, or the patterns match none of the indexers, the indexer silently
-    stays unquantized. Intent is read like in :func:`_check_weight_quantization_took_effect`, but
-    only from patterns naming the quantizer, so catch-all patterns do not count. A model without an
-    ``*Indexer`` module (another architecture) is skipped. Under ``torch.distributed`` the check
-    covers the whole model: a pipeline stage may hold none of the indexers a layer-selective recipe
-    selects. All ranks then raise together instead of some waiting in calibration for the others.
+
+def _check_plugin_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
+    """Raise when a config enables a plugin-only quantizer that quantizes nothing.
+
+    The quantizers in ``_PLUGIN_QUANTIZERS`` only exist on modules (sparse-attention indexers, MoE
+    experts) that a framework plugin (vLLM, Megatron-Core) converted. When a plugin does not
+    recognize the installed framework's module class, or the patterns match none of the modules,
+    the tensors silently stay unquantized. Intent is read like in
+    :func:`_check_weight_quantization_took_effect`, but only from patterns naming the quantizer, so
+    catch-all patterns do not count. A model without such a module (another architecture) is
+    skipped. Under ``torch.distributed`` the check covers the whole model: a pipeline stage may hold
+    none of the modules a layer-selective recipe selects. All ranks then raise together instead of
+    some waiting in calibration for the others.
     """
     last_entry_per_pattern = {entry.quantizer_name: entry for entry in config.quant_cfg}
-    for quantizer_name in ("indexer_q_quantizer", "indexer_k_quantizer"):
+    for quantizer_name, (owner_patterns, owner_kind, supported) in _PLUGIN_QUANTIZERS.items():
         if not any(
             entry.enable and quantizer_name in pattern
             for pattern, entry in last_entry_per_pattern.items()
@@ -258,34 +453,34 @@ def _check_indexer_quantization_took_effect(model: nn.Module, config: QuantizeCo
             if isinstance(module, (TensorQuantizer, SequentialQuantizer))
             and name.endswith(quantizer_name)
         ]
-        indexers = {
+        owners = {
             type(module).__name__
             for module in model.modules()
-            if type(module).__name__.endswith("Indexer")
+            if any(fnmatch.fnmatchcase(type(module).__name__, p) for p in owner_patterns)
         }
-        # (unconverted indexer classes, has the quantizer, has an enabled one)
+        # (unconverted owner classes, has the quantizer, has an enabled one)
         local = (
-            [] if quantizers else sorted(indexers),
+            [] if quantizers else sorted(owners),
             bool(quantizers),
             any(quantizer.is_enabled for quantizer in quantizers),
         )
         per_rank: list[Any] = [local]
-        if dist.size() > 1:  # every rank calls quantize() with the same indexer patterns
+        if dist.size() > 1:  # every rank calls quantize() with the same patterns
             per_rank = [None] * dist.size()
             torch.distributed.all_gather_object(per_rank, local)
         unsupported = sorted({name for names, _, _ in per_rank for name in names})
         if unsupported:
             raise RuntimeError(
-                f"The quantization config enables {quantizer_name}, but no sparse-attention "
-                f"indexer of this model ({', '.join(unsupported)}) has one: the ModelOpt indexer "
-                "plugins do not support this model or the installed vLLM / Megatron-Core version "
-                "(supported models: see the configs/ptq/units/indexer_*_nvfp4 recipe units)."
+                f"The quantization config enables {quantizer_name}, but no {owner_kind} of this "
+                f"model ({', '.join(unsupported)}) has one: the ModelOpt plugins do not support "
+                "this model, its runtime backend or the installed vLLM / Megatron-Core version "
+                f"(supported models: see {supported})."
             )
         if any(has for _, has, _ in per_rank) and not any(on for _, _, on in per_rank):
             raise RuntimeError(
-                f"The quantization config enables {quantizer_name}, but no sparse-attention "
-                "indexer has an enabled one: the patterns naming it match none of them, or a "
-                "later config entry disabled it."
+                f"The quantization config enables {quantizer_name}, but no {owner_kind} has an "
+                "enabled one: the patterns naming it match none of them, or a later config entry "
+                "disabled it."
             )
 
 
@@ -387,6 +582,8 @@ def quantize(
     Returns: A pytorch model which has been quantized and calibrated.
     """
     quantize_config = QuantizeConfig(**dict(config))
+    _refuse_awq_on_a_sharded_fsdp2_model(model, config.get("algorithm"))
+    _refuse_unsupported_distributed_calibration(model, config.get("algorithm"))
     if not is_quantized(model):
         model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
     else:
@@ -395,7 +592,7 @@ def quantize(
         _validate_linear_attention_quantizers(model)
     # Fail before calibration rather than after exporting an unquantized checkpoint.
     _check_weight_quantization_took_effect(model, quantize_config)
-    _check_indexer_quantization_took_effect(model, quantize_config)
+    _check_plugin_quantization_took_effect(model, quantize_config)
     return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
 
 
@@ -480,15 +677,9 @@ def _auto_quantize_kv_cache(
     fixed_quantization_config: dict[str, Any] | str | None,
 ):
     """Run the KV-cache-specific AutoQuantize validation and search lifecycle."""
-    if (
-        torch.distributed.is_available()
-        and torch.distributed.is_initialized()
-        and torch.distributed.get_world_size() > 1
-    ):
-        raise RuntimeError(
-            "KV-cache AutoQuantize is single-process only; distributed scoring, selection, "
-            "and checkpoint writes are not synchronized."
-        )
+    if dist.size() > 1 and dist.is_dtensor_sharded(model) and not dist.is_fsdp2_model(model):
+        raise NotImplementedError("Distributed KV-cache AutoQuantize supports DP/FSDP2, not TP.")
+    _validate_parallel_state(model)
     if method not in (None, "kl_div"):
         raise ValueError("cost_model='kv_cache' requires method='kl_div'.")
     if fixed_quantization_config is not None or module_search_spaces:
@@ -609,8 +800,10 @@ def auto_quantize(
             used for the effective-bits constraint and supports ``"weight"`` (default),
             ``"active_moe"``, and ``"kv_cache"``. The KV-cache cost model dispatches to isolated
             forward-KL scoring over paired K/V formats; BF16/no-quant is its scoring reference but
-            is never solver-selectable. Additional cost-model parameters are provided through the
-            nested ``cost`` dict.
+            is never solver-selectable. Distributed KV search supports data parallelism and FSDP2:
+            all ranks must use the same candidates and forward-pass count. KL is reduced over all
+            scored tokens, and rank 0 selects the shared recipe. Additional cost-model parameters
+            are provided through the nested ``cost`` dict.
 
             Here is an example for valid ``effective_bits`` argument:
 
@@ -829,6 +1022,14 @@ def auto_quantize(
         if isinstance(quantization_formats, str) or not isinstance(quantization_formats, Sequence):
             raise TypeError("`quantization_formats` must be a sequence of formats.")
         quantization_formats = list(quantization_formats)
+    plan = dist.recorded_distribution_plan(model)
+    if plan is not None and plan.is_expert_parallel:  # before anything converts the model
+        raise NotImplementedError(
+            f"auto_quantize does not support a model whose experts are sharded over {plan.ep_size} "
+            "ranks yet: its forwards would run the experts without the expert-parallel forwards "
+            "that quantization replaces and distributed_forward_loop restores. Quantize it with "
+            "mtq.quantize through distributed_forward_loop, or AutoQuantize in a single process."
+        )
 
     method_name, method_config = _parse_auto_quantize_method(method)
     is_kv_search = constraints is not None and constraints.get("cost_model") == COST_MODEL_KV_CACHE
@@ -948,6 +1149,9 @@ def auto_quantize(
                 "Please run auto_quantize with 'max' or 'mse' calibration and use "
                 "get_auto_quantize_config() to obtain a config for mtq.quantize()."
             )
+        # Every candidate, before the search calibrates any: calibrate() would refuse mid-search.
+        _refuse_awq_on_a_sharded_fsdp2_model(model, algo, candidate=name)
+        _refuse_unsupported_distributed_calibration(model, algo)
 
     # Select the appropriate searcher based on method
     if method_name not in AUTO_QUANTIZE_SEARCHERS:
@@ -1078,6 +1282,9 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
     Any weight-quantizer rotation is folded into the weights and disabled so subsequent
     forwards do not re-rotate the already-folded weights.
     """
+    for module in model.modules():
+        if isinstance(module, QuantModule):
+            module._validate_fold_weight()
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             module.fold_weight(keep_attrs)

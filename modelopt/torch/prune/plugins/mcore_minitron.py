@@ -115,6 +115,14 @@ SUPPORTED_HPARAMS = {
 # to the surviving layers on depth pruning. Integer/None cadence values are ignored (need no update).
 _PER_LAYER_CONFIG_PATTERNS = ("linear_attention_freq", "moe_layer_freq")
 
+# Per-layer state newer MCore ``HybridStack`` keeps index-aligned with ``decoder.layers``.
+_HYBRID_STACK_LAYER_STATE = (
+    "layer_config_list",
+    "num_layers_per_pipeline_rank",
+    "_execution_layer_indices",
+    "_execution_layer_config_list",
+)
+
 __all__ = [
     "SUPPORTED_HPARAMS",
     "MCoreMinitronConfig",
@@ -167,6 +175,11 @@ def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[i
     assert isinstance(model, supported_model_types), (
         f"Model should have one of {supported_model_types} submodule, got {model}"
     )
+    decoder = model.decoder
+    is_hybrid_stack = hasattr(decoder, "_execution_layer_indices")
+    assert not is_hybrid_stack or decoder._execution_layer_indices == list(
+        range(len(decoder.layers))
+    ), "Dropping grouped hybrid layers (e.g. shortcut MoE blocks) is not supported."
     print_rank_0(f"Dropping decoder layers {layers_to_drop} (1-indexed) from model.")
 
     # get the number of layers remaining in each pp rank
@@ -192,13 +205,19 @@ def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[i
 
     # reindex kept layers, exclude sharded state dict for dropped layers
     layer_number = sum(layers_remaining_per_pp[: get_pipeline_model_parallel_rank()]) + 1
-    kept_layers = []
-    for layer in model.decoder.layers:
-        if layer.layer_number not in layers_to_drop:
-            layer.layer_number = layer_number
-            layer_number += 1
-            kept_layers.append(layer)
-    model.decoder.layers = nn.ModuleList(kept_layers)
+    kept_indices = [
+        i for i, layer in enumerate(decoder.layers) if layer.layer_number not in layers_to_drop
+    ]
+    kept_layers = [decoder.layers[i] for i in kept_indices]
+    for layer in kept_layers:
+        layer.layer_number = layer_number
+        layer_number += 1
+    decoder.layers = nn.ModuleList(kept_layers)
+    if is_hybrid_stack:
+        decoder.layer_config_list = [decoder.layer_config_list[i] for i in kept_indices]
+        decoder.num_layers_per_pipeline_rank = len(kept_layers)
+        decoder._execution_layer_indices = list(range(len(kept_layers)))
+        decoder._execution_layer_config_list = list(decoder.layer_config_list)
 
     model.config.num_layers = new_num_layers
 
@@ -445,6 +464,11 @@ class MCoreMinitronSearcher(BaseSearcher):
             if isinstance(getattr(model.config, attr, None), (list, tuple))
         }
         saved_hybrid = getattr(model, hybrid_key) if hybrid_key else None
+        saved_stack_state = {
+            attr: getattr(model.decoder, attr)
+            for attr in _HYBRID_STACK_LAYER_STATE
+            if hasattr(model.decoder, attr)
+        }
         try:
             self._prune(export_config)
             yield
@@ -456,6 +480,8 @@ class MCoreMinitronSearcher(BaseSearcher):
             for offset, layer in enumerate(all_layers):
                 layer.layer_number = start_layer_number + offset
             model.decoder.layers = all_layers
+            for attr, value in saved_stack_state.items():
+                setattr(model.decoder, attr, value)
             sample(model, sample_func=max)
             for attr, pattern in saved_patterns.items():
                 setattr(model.config, attr, pattern)
@@ -483,24 +509,20 @@ class MCoreMinitronSearcher(BaseSearcher):
             layers_to_drop = self.sorted_layers[num_layers_hp.active :]
             drop_mcore_language_model_layers(self.model, layers_to_drop=layers_to_drop)
 
-        # Update model config with pruned architecture
-        # kv_channels can be None so we need to save from original hidden_size and num_attention_heads
-        if self.model.config.kv_channels is None:
-            self.model.config.kv_channels = (
-                self.model.config.hidden_size // self.model.config.num_attention_heads
-            )
-        # num_query_groups can be None so we need to save from original num_attention_heads
-        if self.model.config.num_query_groups is None:
-            self.model.config.num_query_groups = self.model.config.num_attention_heads
-        # moe_ffn_hidden_size can be None so we need to save from original ffn_hidden_size
-        if (
-            self.model.config.moe_ffn_hidden_size is None
-            and self.model.config.num_moe_experts is not None
-        ):
-            self.model.config.moe_ffn_hidden_size = self.model.config.ffn_hidden_size
-        # Now set hparam active choices
-        for hp_name, hp_value in export_config.items():
-            setattr(self.model.config, hp_name, hp_value)
+        # Update model config (and newer MCore hybrid's per-layer copies) with pruned architecture
+        for config in [self.model.config, *getattr(self.model.decoder, "layer_config_list", [])]:
+            # kv_channels can be None so we need to save from original hidden_size and num_attention_heads
+            if config.kv_channels is None:
+                config.kv_channels = config.hidden_size // config.num_attention_heads
+            # num_query_groups can be None so we need to save from original num_attention_heads
+            if config.num_query_groups is None:
+                config.num_query_groups = config.num_attention_heads
+            # moe_ffn_hidden_size can be None so we need to save from original ffn_hidden_size
+            if config.moe_ffn_hidden_size is None and config.num_moe_experts is not None:
+                config.moe_ffn_hidden_size = config.ffn_hidden_size
+            # Now set hparam active choices
+            for hp_name, hp_value in export_config.items():
+                setattr(config, hp_name, hp_value)
 
         # Reinitialize the MoE token dispatcher after pruning
         for m in self.model.modules():

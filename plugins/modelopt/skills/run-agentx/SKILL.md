@@ -15,23 +15,38 @@ Enable prefix caching, streaming usage, and cached-token reporting. For vLLM, us
 `--enable-prefix-caching --enable-prompt-tokens-details`. Verify the context limit
 fits the traces with the model's tokenizer; never silently truncate requests.
 
-Install the [AgentX fork](https://github.com/SemiAnalysisAI/agentx-harness) in a
-separate client environment. The pinned revision supplies the scenario and dataset
-loader used below; installing the upstream `aiperf` package is insufficient.
+Start each benchmark campaign with the latest harness and compatible serving-stack
+releases unless the user requests specific versions. Record and pin the resolved harness
+and other code revisions, dataset/model/tokenizer revisions, serving framework
+(e.g. vLLM), and client/server dependencies or container digests in the run artifacts.
+Keep them fixed across sweep points, cache formats, and repeats unless they are the
+variable under test. Record local patches; treat upgrades as a new comparison baseline.
+
+Install the latest [AgentX harness](https://github.com/SemiAnalysisAI/agentx-harness)
+in a separate client environment. Set `AGENTX_PYTHON` to a Python executable
+satisfying the latest release's `Requires-Python` metadata on
+[PyPI](https://pypi.org/project/agentx-harness/).
+Installing upstream `aiperf` alone is insufficient.
 
 ```bash
 set -euo pipefail
 export AGENTX_WORKDIR="${AGENTX_WORKDIR:-$PWD/agentx-work}"
-python3.12 -m venv "$AGENTX_WORKDIR/venv"
+"${AGENTX_PYTHON:?}" -m venv "$AGENTX_WORKDIR/venv"
 source "$AGENTX_WORKDIR/venv/bin/activate"
-python -m pip install 'aiperf @ git+https://github.com/SemiAnalysisAI/agentx-harness.git@56a0cf70f4c0359454ee4bd15a17770b541a3e3e'
+python -m pip install --upgrade agentx-harness
 ```
 
-Set `AGENTX_DATASET` to an accepted, date-pinned with-subagents alias from the
-[pinned AgentX tutorial](https://github.com/SemiAnalysisAI/agentx-harness/blob/56a0cf70f4c0359454ee4bd15a17770b541a3e3e/docs/tutorials/agentx-mvp.md).
+Set `AGENTX_DATASET` to an accepted with-subagents alias from the
+[AgentX tutorial](https://github.com/SemiAnalysisAI/agentx-harness/blob/master/docs/tutorials/agentx-mvp.md).
+Check the current tutorial for supported CLI options and scenario defaults.
 The public loader downloads and caches the traces and prompt reconstruction assets.
-Record the resolved dataset revision; dated aliases can move. Prefer the deployed
-checkpoint's local tokenizer. If it requires custom code, add
+An alias, even a dated one, does not select an immutable Hugging Face revision.
+Resolve the alias's repository to a commit SHA and record both with every run.
+Before benchmarking, verify that the loader passes that SHA as `revision` to
+Hugging Face `load_dataset`. Without a revision flag, set the selected Weka loader's
+`hf_revision` to that SHA in the campaign's client installation.
+
+Prefer the deployed checkpoint's local tokenizer. If it requires custom code, add
 `--tokenizer-trust-remote-code` only after the user explicitly trusts its repository.
 
 ## Choose concurrency

@@ -21,7 +21,7 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="qwen3_moe",
-        min_transformers_version="4.57",
+        min_transformers_version="5.5",
         # modelopt policy, not a model fact: this model is validated for grouped export.
         export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=MoESpec(
@@ -50,6 +50,23 @@ star-import. A value shared between two model types is private and imported expl
 (`gemma4_text` reuses `gemma4`'s `_GEMMA4_MOE_SPEC`); sub-model types of one family are
 an intra-family detail, not a package API.
 
+## PTQ modeling
+
+Quantized-module wrappers and registrations that only one model needs (e.g. Llama4's fused
+BMM experts, Step's expert-indexed `MoELinear`) live in `<model_type>/modeling_ptq.py`; generic
+ones (fused/sequential MoE auto-detection, attention, `FP8Linear`) stay in
+`modelopt/torch/quantization/plugins/huggingface.py`. The HF plugin imports every
+`modeling_ptq` from an explicit list at its end, so add the new model type there. Leave the
+model's `__init__.py` importing only `specs`: `modeling_ptq` pulls in quantization and
+transformers, which `import modelopt.torch.models` must not.
+
+A `modeling_ptq.py` registers on import — static classes via `QuantModuleRegistry.register`,
+imported from transformers at module scope; remote-code classes via a callback added to
+`CUSTOM_MODEL_PLUGINS` — and exports nothing (`__all__ = []`). Every package still has
+a `specs.py`, even when its spec only records `model_type` and where the modeling code comes
+from. A family revision that shares another type's PTQ code (`step3p7` uses `step3p5`'s) still
+gets a `modeling_ptq.py` that imports the shared one, so loading it by model type works.
+
 ## Sections
 
 A `ModelSpec` holds one attribute per section, each `None` unless the model fills it:
@@ -58,6 +75,7 @@ A `ModelSpec` holds one attribute per section, each `None` unless the model fill
 |---|---|---|
 | `moe_spec` (`MoESpec`) | MoE architecture facts only — block classes, expert projection naming, which layout that naming describes | the model is dense |
 | `export_spec` (`ExportSpec`) | Per-model data *and policy* of the unified HF export path, e.g. whether grouped expert export is validated for this model | export needs nothing model-specific |
+| `ep_spec` (`EPSpec`) | Per-model data of the expert-parallel PTQ path: the `base_model_ep_plan` to attach and the config it goes on, the transformers release it needs, or why the model cannot be expert-parallel yet | the model is dense, or stock transformers already ships all of it |
 
 `None` means "the model has nothing to say about this", which stays distinct from a
 filled-in-but-empty section.
@@ -71,7 +89,7 @@ come from, and they must agree:
 | `min_transformers_version` | Earliest `transformers` release whose definitions match this spec; `None` for a `remote_code` model |
 
 Clamp `min_transformers_version` at the repo's minimum supported transformers (`tf_min`
-in `noxfile.py`, currently `4.57`) — a model older than the floor records the floor,
+in `noxfile.py`, currently `5.5`) — a model older than the floor records the floor,
 since nothing older is installed or tested. A model added later records its own release.
 The pair is what lets `test_specs_vs_transformers.py` assert rather than skip: it can
 tell a model that is legitimately absent on an older transformers from a spec that no
@@ -82,3 +100,23 @@ longer matches reality.
 See [`specs.py`](specs.py) — each field is documented on its declaration, and those
 docstrings are what the API reference renders. Specs hold data and trivial accessors
 only; subsystem logic stays in the subsystem.
+
+## Model-specific behavior
+
+Keep architecture-specific loading and calibration helpers alongside the model's
+`specs.py` (for example, `nemotron_h/mtp.py`). The `hf.py` dispatcher loads these
+helpers on demand; examples call its loading context and calibration hook.
+
+A helper module registered in `hf.py`'s `_PLUGINS` defines any of these hooks, all
+optional, and lists exactly the ones it defines in `__all__`. The dispatcher rejects any
+other name there, so a misspelled hook fails instead of being skipped.
+
+| Hook | Called by | Default without it |
+|---|---|---|
+| `prepare_for_loading(checkpoint_path, trust_remote_code, *, model_class)` | `prepare_model_for_loading` | no context |
+| `has_mtp_weights(checkpoint_path)` | `checkpoint_has_mtp` | `False` |
+| `prefers_bundled_code(hf_config, checkpoint_path, config_kwargs)` | `prefers_bundled_code` | `False` |
+| `prepare_for_calibration(model)` | `prepare_model_for_calibration` | nothing |
+
+Do not import runtime helpers from a model package's `__init__.py`: registering
+specs must remain independent of optional Transformers and calibration imports.

@@ -19,7 +19,7 @@ This repository provides scripts, popular third-party benchmarks, and instructio
 | **Category** | **Details** |
 |:--------------------------|-------------------------------------------------------------------------------------------------------------|
 | **Operating System** | Windows 10 or later |
-| **Python** | - For ORT-DML GenAI, use Python 3.11. <br> - For TensorRT-LLM, use Python 3.10. <br> - All other backends are compatible with both Python 3.10 and 3.11. |
+| **Python** | - For ORT-DML GenAI, use Python 3.11. <br> - For TensorRT-LLM, use Python 3.10 (required by `tensorrt_llm==0.12.0`; ModelOpt is not used on this path). <br> - All other backends require Python 3.11 or later. |
 | **Package Manager** | pip |
 | **Compatible Hardware and Drivers** | - Ensure necessary hardware (e.g., CUDA-compatible GPU) and drivers are installed, depending on the evaluation method: <br> - DirectML for DirectML-based evaluation <br> - CUDA for TensorRT |
 | **Additional Tools** | - **cmd**: Recommended for running the provided commands. <br> - **Tar Utility**: Included in Windows 10 and later via PowerShell. <br> - **Curl**: Included in Windows 10 and later via PowerShell. |

@@ -1,0 +1,61 @@
+# MMLU and WikiText recipes for nemo-evaluator-launcher==0.2.6.
+defaults:
+  - execution: slurm/default
+  - nel_configs/h100_slurm_execution@_global_
+  - deployment: vllm
+  - nel_configs/qwen3_8b_vllm_deployment@_global_
+  - _self_
+deployment:
+  # Override when launching to identify the checkpoint, e.g., -o deployment.served_model_name=qwen3-8b-ptq
+  served_model_name: qwen3-8b
+  port: 18100
+evaluation:
+  nemo_evaluator_config:
+    target:
+      api_endpoint:
+        api_key_name:
+        adapter_config:
+          use_reasoning: false
+          use_request_logging: true
+          use_response_logging: true
+          max_logged_requests: 2
+          max_logged_responses: 2
+  tasks:
+    - name: lm-evaluation-harness.mmlu
+      endpoint_type: completions
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+      nemo_evaluator_config:
+        config:
+          params:
+            parallelism: 1
+            request_timeout: 300
+            max_retries: 2
+            temperature:
+            top_p:
+            max_new_tokens:
+            task: mmlu
+            extra:
+              num_fewshot: 5
+              tokenizer: ${deployment.tokenizer_path}
+              tokenizer_backend: huggingface
+              tokenized_requests: true
+              args: --seed 42 --model_args "base_url=http://127.0.0.1:${deployment.port}/v1/completions,model=${deployment.served_model_name},tokenized_requests=True,tokenizer=${deployment.tokenizer_path},tokenizer_backend=huggingface,num_concurrent=${..parallelism},timeout=${..request_timeout},max_retries=${..max_retries},stream=False,max_length=32768"
+    - name: lm-evaluation-harness.wikitext
+      endpoint_type: completions
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+      nemo_evaluator_config:
+        config:
+          params:
+            parallelism: 2
+            request_timeout: 300
+            max_retries: 2
+            temperature:
+            top_p:
+            max_new_tokens:
+            task: wikitext
+            extra:
+              num_fewshot: 0
+              tokenizer: ${deployment.tokenizer_path}
+              tokenizer_backend: huggingface
+              tokenized_requests: true
+              args: --seed 42 --model_args "base_url=http://127.0.0.1:${deployment.port}/v1/completions,model=${deployment.served_model_name},tokenized_requests=True,tokenizer=${deployment.tokenizer_path},tokenizer_backend=huggingface,num_concurrent=${..parallelism},timeout=${..request_timeout},max_retries=${..max_retries},stream=False,max_length=2048"

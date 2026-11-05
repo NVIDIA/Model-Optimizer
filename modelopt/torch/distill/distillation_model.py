@@ -166,22 +166,25 @@ class DistillationModel(DynamicModule):
     @contextmanager
     def only_teacher_forward(self, enable=True):
         """Context manager to temporarily disable forward passes on the student model."""
+        # restore the previous mode so nested contexts keep working
+        only_teacher_fwd = self._only_teacher_fwd
         if enable:
             self._only_teacher_fwd = True
         try:
             yield
         finally:
-            self._only_teacher_fwd = False
+            self._only_teacher_fwd = only_teacher_fwd
 
     @contextmanager
     def only_student_forward(self, enable=True):
         """Context manager to temporarily run forward passes only on the student model."""
+        only_student_fwd = self._only_student_fwd
         if enable:
             self._only_student_fwd = True
         try:
             yield
         finally:
-            self._only_student_fwd = False
+            self._only_student_fwd = only_student_fwd
 
     def train(self, mode: bool = True):
         """Override to prevent warnings of stored intermediate outputs in future forwards."""

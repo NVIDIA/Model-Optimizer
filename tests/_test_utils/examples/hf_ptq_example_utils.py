@@ -12,8 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Re-export ``examples/hf_ptq/example_utils`` so tests can import it via
-``from _test_utils.examples.hf_ptq_example_utils import example_utils``
+"""Re-export the ``examples/hf_ptq`` helper modules so tests can import them via
+``from _test_utils.examples.hf_ptq_example_utils import example_utils, nemotron_vl_calib``
 without per-file ``sys.path`` shims.
 """
 
@@ -25,6 +25,8 @@ _HF_PTQ_DIR = MODELOPT_ROOT / "examples" / "hf_ptq"
 if str(_HF_PTQ_DIR) not in sys.path:
     sys.path.insert(0, str(_HF_PTQ_DIR))
 
+import convert_ggml_to_int8
 import example_utils
+import nemotron_vl_calib
 
-__all__ = ["example_utils"]
+__all__ = ["convert_ggml_to_int8", "example_utils", "nemotron_vl_calib"]

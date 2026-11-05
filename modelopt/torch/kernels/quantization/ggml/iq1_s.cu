@@ -71,45 +71,14 @@ struct Format {
 
 static_assert(Format::kPayloadBytes == 50, "IQ1_S blocks are 50 bytes");
 
-// IQ1_S derives its own block scale. The 0.61 anchor matches the reference encoder's empirical
-// predictor: it favors most values instead of forcing the block's largest to be exactly
-// representable.
-constexpr float kMaxLocalScale = 15.0f;                           // 2 * 7 + 1
-constexpr float kNativeMax = kMaxLocalScale * (1.0f + kIq1Delta); // 16.875
-constexpr float kScaleAnchor = 0.61f;
-
-template <typename scalar_t>
-__global__ void find_scale(const scalar_t *input, int64_t num_blocks, __half *scales) {
-  const int64_t block = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (block >= num_blocks)
-    return;
-
-  float amax = 0.0f;
-  const scalar_t *values = input + block * kBlockSize;
-#pragma unroll 1
-  for (int i = 0; i < kBlockSize; ++i)
-    amax = fmaxf(amax, fabsf(load_float(values + i)));
-  scales[block] = __float2half_rn(fminf((amax / kNativeMax) * kScaleAnchor, 65504.0f));
-}
-
 } // namespace
 
-at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid) {
-  check_pack_inputs("IQ1_S", input, grid, Format::kEntries);
-  const auto values = input.contiguous();
-  c10::cuda::CUDAGuard guard(values.device());
-  const int64_t num_blocks = values.numel() / kBlockSize;
-  auto scales = at::empty({num_blocks}, values.options().dtype(at::kHalf));
-  const auto stream = c10::cuda::getCurrentCUDAStream();
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-      at::ScalarType::Half, at::ScalarType::BFloat16, values.scalar_type(), "iq1_s_scale", [&] {
-        find_scale<scalar_t>
-            <<<static_cast<int>((num_blocks + kThreads - 1) / kThreads), kThreads, 0, stream>>>(
-                values.data_ptr<scalar_t>(), num_blocks,
-                reinterpret_cast<__half *>(scales.data_ptr<at::Half>()));
-        C10_CUDA_KERNEL_LAUNCH_CHECK();
-      });
-  return iq1_encode_blocks<Format>(values, grid, scales);
+at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales,
+                           std::optional<at::Tensor> importance) {
+  check_scaled_pack_inputs("IQ1_S", input, grid, Format::kEntries, scales);
+  if (importance.has_value())
+    check_importance("IQ1_S", input, *importance);
+  return iq1_encode_blocks<Format>(input, grid, scales, importance);
 }
 
 at::Tensor iq1_s_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype) {

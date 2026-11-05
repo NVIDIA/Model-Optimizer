@@ -216,7 +216,7 @@ def _torch_to_tensorrt_llm_checkpoint(
         if hasattr(model, "model") and hasattr(model.model, "alibi_mask"):
             model_metadata_config["alibi"] = True
 
-        # For MPT, DBRX
+        # For MPT
         for config_key in ["attn_config", "ffn_config"]:
             config_value = model_metadata_config.get(config_key, None)
             if config_value:

@@ -1,39 +1,56 @@
 ---
 name: qad
 description: >-
-  Run explicitly requested ModelOpt Quantization-Aware Distillation (QAD) on
-  Slurm through Megatron Bridge to recover a measured BF16-to-PTQ accuracy gap.
+  Run explicitly requested ModelOpt Quantization-Aware Distillation (QAD) through
+  Megatron Bridge (recommended) or Hugging Face Transformers to
+  recover a measured BF16-to-PTQ accuracy gap.
   Use only when the user explicitly asks for QAD, including its topology, data
-  preparation, Slurm launch, resume, checkpoint export, or recovery decisions.
+  preparation, launch, resume, checkpoint export, or recovery decisions.
 ---
 
 # ModelOpt Quantization-Aware Distillation
 
 QAD is expensive. Run it only when the user explicitly authorizes QAD for the
-target model or run. A Day-0, PTQ, evaluation, comparison, or recipe-search
-request alone is not authorization to start QAD.
+target model or run, with a loop or GPU-hour budget; ask for the budget when it
+is missing. A Day-0, PTQ, evaluation, comparison, or recipe-search request
+alone is not authorization to start QAD.
+The authorization covers new recipes from a recipe search only when the user
+says so.
+
+## Confirm the gap
+
+For both frameworks, reuse only validated, comparable BF16/PTQ results and
+the exact benchmark configuration from preceding evaluation or recipe
+search; run missing, invalid, or non-comparable baselines. Confirm the target
+benchmarks and their context-length needs. Stop if the PTQ gap to BF16 is
+already below 1%.
 
 ## Follow the supported workflow
 
-Before constructing commands, read:
+Read `docs/source/guides/quantization_aware_training_and_distillation.rst`
+for QAD background and framework selection.
+Recommend Megatron Bridge for scalable training and its model-specific tutorials.
+Choose the applicable tutorial from `examples/megatron_bridge/tutorials/README.md`.
+Honor an explicit HF choice.
+
+Use the common skill's `environment-setup.md` and `workspace-management.md`;
+for Slurm, also read `slurm-setup.md` and, when remote, `remote-execution.md`.
+
+Treat the example README and `--help` output as authoritative for mutable flags,
+commands, containers, and checkpoint formats. Both frameworks can run on local
+GPUs or Slurm; use the user's requested environment.
+
+## Megatron Bridge execution and training policy
+
+For Megatron Bridge, before constructing commands, read:
 
 - `examples/megatron_bridge/README.md`, especially PTQ, data preparation, QAD,
   export, and Slurm usage
 - `examples/megatron_bridge/{quantize.py,distill.py}` via `--help`
-- the common skill's `environment-setup.md`, `workspace-management.md`, and
-  `slurm-setup.md`; also its `remote-execution.md` for remote Slurm
 
-Treat the example README and `--help` output as authoritative for mutable flags,
-commands, containers, and checkpoint formats. This skill supports Slurm only.
+### Execute in this order
 
-## Execute in this order
-
-1. **Confirm the gap.** Reuse only validated, comparable BF16/PTQ results and
-   the exact benchmark configuration from preceding evaluation or recipe
-   search; run missing, invalid, or non-comparable baselines. Confirm the target
-   benchmarks and their context-length needs. Stop if the PTQ gap to BF16 is
-   already below 1%.
-2. **Reproduce PTQ and verify compatibility.** In the target runtime, require
+1. **Reproduce PTQ and verify compatibility.** In the target runtime, require
    `AutoBridge.can_handle()` for the target model and PTQ through `quantize.py`
    to succeed while preserving the exact preceding PTQ config or recipe:
    format, layer selection, calibration data/count, sequence length, and seed.
@@ -42,7 +59,7 @@ commands, containers, and checkpoint formats. This skill supports Slurm only.
    `amax` for enabled static quantizers; accept `dynamic`/format-defined `None`
    only when the recipe intends it. Treat the summary as rank-local under model
    parallelism.
-3. **Choose topology explicitly.** Derive the smallest fitting node count and
+2. **Choose topology explicitly.** Derive the smallest fitting node count and
    TP/PP/CP/EP from student and teacher architecture, the chosen sequence length,
    and available GPU memory. Prefer CP before TP for small long-context models;
    keep EP=1 for dense models and ETP=1 because the current `distill.py`
@@ -53,54 +70,135 @@ commands, containers, and checkpoint formats. This skill supports Slurm only.
    - integral DP/EDP, `num_experts % EP == 0`, and
      `GBS % (MBS * DP) == 0`
 
-4. **Prepare the full capped dataset once.** Use suitable user-provided data, or
+   Static-block NVFP4 recipes require TP=1; use PP for memory. With PP, balance
+   stages with `--num_layers_in_{first,last}_pipeline_stage` (the first and last
+   stages also hold the embedding and output layer) and recompute only where
+   memory needs it (`--recompute_num_layers_per_stage`). In the first job's
+   allocation, time a few iterations of each candidate layout with short
+   launches before the run starts, and keep the fastest. Give each timing
+   launch a scratch `--output_dir`: `distill.py` resumes from
+   `<output_dir>/checkpoints`, so a timing checkpoint there would become the
+   run's starting point.
+
+3. **Prepare the full capped dataset once.** Use suitable user-provided data, or
    copy `examples/megatron_bridge/data/nemotron-cascade-2-blend.yaml` as the
    default. Set the target tokenizer and workspace path, then materialize the
    randomly sampled subset before training. Pack the chosen sequence length;
    Megatron's `99,1,0` split creates the 1% validation holdout from the same
-   data.
-5. **Run and monitor QAD.** Run one QAD training job at a time and fold startup
-   validation into it; do not submit separate GPU preflight jobs or split at
-   recovery iterations. Let training continue while evaluating saved
+   data. Keep every source mixed across training, never ordered as a
+   curriculum, so early stops see the whole blend.
+4. **Run and monitor QAD.** Run one training job at a time per QAD run;
+   separate runs may train in parallel. Fold startup validation into the first
+   job; do not submit separate GPU preflight jobs or split at recovery
+   iterations. Let training continue while evaluating saved
    checkpoints, and cancel it when a stop condition below is met.
 
-## Default training policy
+### Default training policy
 
 | Setting | Default |
 | --- | --- |
 | Sequence length | 32768; adjust for target benchmarks |
 | Peak / minimum LR | `1e-5` / `1e-6` |
 | LR schedule | cosine |
-| Training cap | 1000 iterations |
+| LR horizon (`train_iters`) | 1000 iterations |
 | Global batch size | 512 |
 | Dataset | `nvidia/Nemotron-Cascade-2-SFT-Data` by default |
-| Materialized token budget | 17.3B at 32K; cover the full cap at the chosen length |
+| Materialized token budget | 17.3B at 32K; cover `train_iters` at the chosen length |
 | Training validation | every 25 iterations; deterministic 1% holdout; 2 batches |
 | Checkpoint interval | 50 iterations |
 | Loss logging | every 10 iterations |
-| Recovery benchmark | 150, then every 100 iterations while training runs |
+| Recovery benchmark | from the KD-loss knee, then every checkpoint |
 | Slurm duration exit | 220 minutes for a 4-hour allocation |
 
-## Run policy
+### Run policy
 
-- Keep `train_iters=1000` and leave `exit_interval` unset.
-- From initial step timing, submit only enough sequential jobs to reach
-  checkpoint 150; never submit through iteration 1000 upfront. At each recovery
-  checkpoint, submit to the next only after its targeted evaluation and any
-  triggered full suite, and only if the BF16 gap remains at least 1% and
-  recovery has neither plateaued nor regressed.
-- Give all training jobs the same run-specific job name and
+- `train_iters` sets the cosine LR horizon and is a loop knob: with 1000, the
+  LR stays near its peak through iteration 150. `distill.py` also stops
+  training there, with or without `exit_interval`. Stop runs by the decisions
+  below and leave `exit_interval` unset. A run that reaches `train_iters` while
+  the decision is still to continue ends as a Miss from under-recovery.
+- On Slurm, use initial step timing to submit only enough sequential jobs to reach
+  a few checkpoints past the expected KD-loss knee; never submit through
+  `train_iters` upfront. At each recovery checkpoint, submit to the next only
+  after its targeted evaluation and any triggered full suite, and only while
+  the decision is to continue.
+- On Slurm, give all training jobs the same run-specific job name and
   `--dependency=singleton`; record job IDs and, on any stop, cancel pending jobs
   before the active job.
 - Cancel on non-finite loss, repeated skipped iterations, or a sustained spike.
   At iteration 50, require the loss aggregate to be lower than at iteration 10.
 - At each recovery checkpoint, first evaluate the one to three benchmarks with
-  the largest PTQ drops. Run the remaining original PTQ suite at that checkpoint
-  only after recovery beyond run noise.
-- Cancel when the full-suite gap to BF16 is below 1%, benchmark recovery
-  regresses beyond run noise, or benchmark recovery and loss both plateau.
+  the largest PTQ drops or that failed in earlier loops. Run the remaining
+  original PTQ suite at that checkpoint once the targeted benchmarks are within
+  run noise of 1%, or after recovery beyond run noise.
+- Start benchmark evaluation at the knee of the KD loss curve, where its steep
+  drop ends, rounded to the next checkpoint, then evaluate every checkpoint
+  while the scores still change. Before the knee, use loss only to catch
+  drift; after it, judge and pick checkpoints by benchmarks alone, since KD
+  loss keeps falling after they peak. Between near ties, the benchmark most
+  sensitive to quantization decides.
+- Run noise is 2x the standard error of a benchmark's gap to BF16: paired per
+  question when both sides score the same questions, otherwise from both
+  sides' per-sample standard errors, and pooled across runs once repeats
+  exist. Repeat a benchmark only when its gap is within run noise of 1%, up to
+  8 runs per side; the compare-results run floors still apply before a Pass.
+- Export each checkpoint to evaluate and pass the ptq skill's
+  `references/checkpoint-validation.md` gate on it before evaluation. Run the
+  serving canary on the run's first export only; later exports change only
+  weights, so on those the gate passes without the canary: record its
+  serving-canary row as `skipped; first export <path> passed`.
+- At each evaluated checkpoint, decide:
+  - **Pass:** every benchmark of the full original PTQ suite is within 1% of
+    BF16, each at its compare-results run floor (such as SciCode's 8 runs per
+    side). Keep the checkpoint and stop the run.
+  - **Miss:** two evaluated checkpoints past the knee bring no gain beyond run
+    noise, or two consecutive checkpoints decline beyond it. Stop and change
+    one QAD knob in the [recipe loop](#recipe-loop).
+  - **Otherwise continue** to the next checkpoint.
 - After a duration exit, resume the latest QAD checkpoint in the same output
   directory with unchanged prepared data paths/cache, seed, topology, optimizer,
   scheduler, iteration, and consumed-sample state; do not restart from PTQ.
-- Report the PTQ recipe, data sample, Slurm topology, loss/state, checkpoints,
-  and comparable BF16/PTQ/QAD results.
+- Report, per loop, the PTQ recipe and calibration, data sample, QAD settings,
+  training topology, loss/state, checkpoints, and comparable BF16/PTQ/QAD
+  results.
+
+### Recipe loop
+
+Each run trains one PTQ recipe and differs from that recipe's control in one
+QAD knob. Start from the best PTQ recipe of the preceding PTQ evaluation or
+recipe search; its control uses the default policy. When GPUs allow, start
+one-knob variants as separate runs alongside the control instead of waiting
+for its miss. This loop chooses the QAD settings; the quant-recipe-search
+skill chooses the next recipe from its outcome. Stop when the QAD budget is
+spent and report the best result so far.
+
+1. **On a miss, change one QAD knob.** Read each missed benchmark against PTQ:
+   worse than PTQ is drift (lower the peak LR or add matching data); better
+   than PTQ but short is under-recovery (keep the LR high longer with a larger
+   `train_iters`). Knobs, in order of priority when GPUs are limited: peak LR,
+   `train_iters`, data blend, then teacher-generated data. A changed `train_iters` is a fresh run from PTQ, with
+   data materialized to cover it: resuming would change the decay length the
+   checkpoint's LR scheduler expects.
+2. **Compare a knob with its control at the same checkpoints** past the knee,
+   on benchmark scores pooled over fresh runs. A rejection holds only for that
+   PTQ recipe: rerun the control when the recipe changes.
+3. **End the loop on a recipe** with a pass, or with a clear miss once every
+   knob has missed or as soon as QAD stays flat against PTQ or far from
+   passing. Return the outcome, the best checkpoint, and its scores.
+
+## Hugging Face execution and training policy
+
+Before constructing commands, read `examples/llm_qat/README.md`, its
+`ARGUMENTS.md`, selected training/dataset/Accelerate configs, and
+`{quantize.py,train.py,export.py} --help`.
+Follow its quantize → distill → export flow: the PTQ checkpoint is the student;
+the original unquantized model is the teacher. Adapt the QAD training and
+Accelerate configs to the model and budget.
+Resolve tutorial-relative commands and config paths from `examples/llm_qat/`.
+Use the HF tutorial's evaluation and checkpoint resume guidance.
+
+Reuse the Bridge procedure's PTQ-recipe preservation and one-training-job-at-a-time
+guidance. Apply the [Run policy](#run-policy)'s loss-stability and
+benchmark-recovery stop conditions and report the same fields.
+Use HF evaluation/checkpoint intervals; Bridge-specific topology, data defaults,
+iteration thresholds, and Slurm job chaining are not HF requirements.

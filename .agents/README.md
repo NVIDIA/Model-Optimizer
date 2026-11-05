@@ -51,6 +51,13 @@ a copy:
 - New skills go in `plugins/modelopt/skills/<skill-name>/SKILL.md`.
 - Shared support files go in `plugins/modelopt/skills/common/`.
 
+## Review baseline
+
+[Code review baseline](review-guidelines/code-review.md) is the shared rubric
+for future reviews. Read the version at the PR's base revision and report that
+commit. Domain-specific rubrics, such as the
+[technical blog guideline](review-guidelines/technical-blog.md), add checks to it.
+
 ## Project-level cluster config
 
 The remote-execution skills look for a `clusters.yaml` at, in order:

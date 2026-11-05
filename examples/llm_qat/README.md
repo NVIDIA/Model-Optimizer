@@ -39,7 +39,7 @@ The Qwen3-8B example below requires a minimum of **2 x 80GB GPUs**.
 ## Run End-to-End QAT/QAD Example
 
 All arguments can be set via YAML, CLI, or both (CLI overrides YAML). See
-[ARGUMENTS.md](ARGUMENTS.md), `--help`, and [Configuration](#advanced-configuration).
+[ARGUMENTS.md](ARGUMENTS.md), `--help`, and [Advanced Topics](#advanced-topics).
 
 ### Quantization Recipes
 
@@ -309,7 +309,7 @@ The cached dataset is stored under `.dataset_cache/tokenized/` by default (confi
 
 ## Results
 
-\[Coming Soon\]
+See [Qwen3-8B evaluation results](evaluation/README.md) for the teacher, PTQ, and PTQ → QAD comparison.
 
 ## Native Fake-Quantized Evaluation
 

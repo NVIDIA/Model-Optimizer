@@ -58,6 +58,32 @@ _FINAL_NORM_PATHS = [
     "language_model.backbone.norm",
     "model.language_model.norm",
 ]
+
+
+def find_final_norm_path(model) -> str | None:
+    """Return the attribute path of ``model``'s final norm, or ``None`` if it has none.
+
+    The norm is not always at ``model.norm``: a real causal LM keeps it there while
+    ``FakeBaseModel`` holds it at ``.norm``. Returns the path rather than the module
+    because the speculative plugins store the path and resolve it later, while callers
+    that want the module can ``get_submodule`` it.
+
+    Resolves each path with ``get_submodule`` rather than a ``named_modules()`` dict:
+    ``named_modules`` de-duplicates by default, so a norm instance also registered
+    under an earlier path would be missing from the dict and the lookup would return
+    ``None`` for a model that has one. ``get_submodule`` walks the attribute path and
+    is indifferent to aliasing.
+    """
+    for path in _FINAL_NORM_PATHS:
+        try:
+            module = model.get_submodule(path)
+        except AttributeError:
+            continue
+        if isinstance(module, torch.nn.Module):
+            return path
+    return None
+
+
 _BASE_MODEL_PATHS = [
     "language_model.model",
     "model.language_model",

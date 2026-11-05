@@ -15,7 +15,7 @@
 
 """GGML block formats, listed once for backend dispatch and export."""
 
-from .common import GGMLFormat, IQFormat
+from .common import GGMLFormat
 from .iq1_m import IQ1_M_FORMAT
 from .iq1_s import IQ1_S_FORMAT
 from .iq2_s import IQ2_S_FORMAT
@@ -23,7 +23,7 @@ from .iq2_xs import IQ2_XS_FORMAT
 from .iq2_xxs import IQ2_XXS_FORMAT
 from .q8_0 import Q8_0_FORMAT
 
-__all__ = ["GGML_FORMAT_REGISTRY", "IQ_FORMAT_REGISTRY", "GGMLFormat", "IQFormat"]
+__all__ = ["GGML_FORMAT_REGISTRY", "IQ_FORMAT_REGISTRY", "GGMLFormat"]
 
 # Every GGML block format, keyed by the name a quantizer's num_bits carries, in increasing bits
 # per weight. Backend dispatch reads this mapping, and export will derive its supported formats

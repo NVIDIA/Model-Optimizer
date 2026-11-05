@@ -57,7 +57,7 @@ def _state_qdq_chunk_gated_delta_rule() -> GatedDeltaRuleFn:
         )
     except ImportError as e:
         raise RuntimeError(
-            "GDN fake quantization needs Triton and fla-core==0.5.1 on a CUDA "
+            "GDN fake quantization needs Triton and fla-core 0.5.x on a CUDA "
             f"device; importing the state-quantizing kernel failed with {e!r}."
         ) from e
     return chunk_gated_delta_rule
