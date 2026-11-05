@@ -10,4 +10,4 @@
 | Preemption or interrupted infrastructure work | Prefer supported same-config resume when cache identity and complete accounting can be proved. |
 | Endpoint overload, rate limits, transient transport errors | Check health, back off, and reduce offending concurrency. Retry after recovery, not repeatedly into the same outage. |
 | Sandbox provisioning/executor failure | Repair image/dependencies/capacity; canary code execution before full. Distinguish infrastructure faults from protocol-valid failed trials. |
-| Authentication, permission, secret exposure, unsupported protocol | Stop affected work and report the blocker; retries cannot bypass access controls or waive benchmark rules. |
+| Authentication, permission, unsupported protocol | Verify credential validity, propagation, and endpoint protocol. Use anonymous access only where supported; otherwise report the access/protocol blocker. |
