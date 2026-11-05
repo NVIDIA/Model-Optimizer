@@ -1634,15 +1634,15 @@ def main(args: argparse.Namespace):
     if not torch.cuda.is_available():
         raise OSError("GPU is required for inference.")
 
-    if args.deterministic:
-        enable_determinism(RAND_SEED)
-    else:
-        random.seed(RAND_SEED)
-        np.random.seed(RAND_SEED)
+    random.seed(RAND_SEED)
+    np.random.seed(RAND_SEED)
 
     # The run owns a distributed launch's process group, and ends it even if loading raises.
     with distributed_run(timeout=timedelta(hours=3), device=args.device) as dist_state:
         args.dist_state = dist_state
+        if args.deterministic:
+            # With the group up, so only rank 0 reports it; still before the first CUDA matmul.
+            enable_determinism(RAND_SEED)
         _main_inner(args)
 
 
