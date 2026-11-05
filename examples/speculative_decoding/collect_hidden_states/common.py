@@ -31,6 +31,8 @@ import argparse
 from pathlib import Path
 
 import torch
+from datasets import load_dataset
+from transformers import AutoTokenizer
 
 _DFLASH_DEFAULT_NUM_DRAFT_LAYERS = 5
 
@@ -78,14 +80,28 @@ def resolve_aux_layers(args: argparse.Namespace, num_hidden_layers: int) -> list
     return sorted(set(indices))
 
 
+def add_no_aux_hidden_states_args(parser: argparse.ArgumentParser) -> None:
+    """Register the ``--no-aux-hidden-states`` flag on ``parser``."""
+    parser.add_argument(
+        "--no-aux-hidden-states",
+        action="store_true",
+        help=(
+            "Skip dumping aux_hidden_states. External (standalone) draft training never "
+            "reads them, and they dominate the dump: one plane per selected layer against "
+            "a single plane for the base hidden state."
+        ),
+    )
+
+
 def add_answer_only_loss_args(parser: argparse.ArgumentParser) -> None:
     """Register ``--answer-only-loss`` and ``--chat-template`` flags on ``parser``."""
     parser.add_argument(
         "--answer-only-loss",
         action="store_true",
         help=(
+            # argparse %-interpolates help strings, so the Jinja tags escape their %.
             "If set, compute an assistant-token mask via the tokenizer's "
-            "{% generation %} tags and save it as 'loss_mask' in each .pt file. "
+            "{%% generation %%} tags and save it as 'loss_mask' in each .pt file. "
             "Downstream offline training uses this to apply loss only on "
             "assistant-produced tokens."
         ),
@@ -97,9 +113,45 @@ def add_answer_only_loss_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Path to a Jinja chat template file that overrides tokenizer.chat_template. "
             "Required with --answer-only-loss if the model's default template lacks "
-            "{% generation %} / {% endgeneration %} tags."
+            "{%% generation %%} / {%% endgeneration %%} tags."
         ),
     )
+
+
+REMOVE_THINK_CHAT_TEMPLATE = (
+    "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"
+)
+
+
+def load_conversations(input_data: Path, dp_rank: int = 0, dp_world_size: int = 1):
+    """Conversations from a ``.jsonl`` file or a directory of them, sharded for ``dp_rank``."""
+    input_data = Path(input_data)
+    if input_data.is_file() and input_data.suffix == ".jsonl":
+        data_files = str(input_data)
+    elif input_data.is_dir():
+        data_files = {"train": f"{input_data}/*.jsonl"}
+    else:
+        raise ValueError(f"input_data must be a .jsonl file or directory, got: {input_data}")
+    dataset = load_dataset("json", data_files=data_files, split="train")
+    print(f"Loaded {len(dataset)} conversations from {input_data}")
+    if dp_world_size > 1:
+        dataset = dataset.shard(num_shards=dp_world_size, index=dp_rank)
+    return dataset
+
+
+def load_tokenizer(args: argparse.Namespace):
+    """The base tokenizer, with the same chat-template handling in every dumper."""
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    override_template = load_chat_template(args.chat_template)
+    if override_template is not None:
+        tokenizer.chat_template = override_template
+    if tokenizer.chat_template is not None:
+        tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")
+    if args.answer_only_loss:
+        verify_generation_tags(tokenizer.chat_template)
+    return tokenizer
 
 
 def load_chat_template(path: Path | None) -> str | None:

@@ -58,7 +58,7 @@ If extra deps are needed:
 
 ```bash
 ls modelopt_recipes/models/ 2>/dev/null
-ls modelopt_recipes/huggingface/<model_type>/ptq/ 2>/dev/null  # per-arch; <model_type> from local config.json (Hub ID: AutoConfig.from_pretrained)
+ls modelopt_recipes/model_type/<model_type>/ptq/ 2>/dev/null  # per-arch; <model_type> from local config.json (Hub ID: AutoConfig.from_pretrained)
 ```
 
 If a model-specific recipe exists, prefer `--recipe <path>` — but **inspect its include/exclude patterns** rather than assuming (e.g. for VLMs, confirm the vision tower is actually excluded).
@@ -72,7 +72,7 @@ Use `--qformat <name>` (e.g., `--qformat nvfp4`). Format definitions: `modelopt/
 
 Before running PTQ, sanity-check the selected qformat/recipe against the model structure. Inspect the recipe's include/exclude patterns and summarize which layer groups will be quantized and approximately how many modules/layers match (attention projections, MLP projections, experts, etc.). If the match count is 0, or far smaller than expected for the model, stop and fix the recipe or ask the user before launching calibration.
 
-**VLMs:** generic `*mlp*`/`*experts*` recipes also match the vision tower (`model.visual.*`); quantizing the ViT silently breaks image benchmarks. Use the `huggingface/<model_type>/ptq/` recipe or add `*visual*`/`*vision_tower*` excludes, then verify in Step 5 — see `references/checkpoint-validation.md`.
+**VLMs:** generic `*mlp*`/`*experts*` recipes also match the vision tower (`model.visual.*`); quantizing the ViT silently breaks image benchmarks. Use the `model_type/<model_type>/ptq/` recipe or add `*visual*`/`*vision_tower*` excludes, then verify in Step 5 — see `references/checkpoint-validation.md`.
 
 If the source checkpoint is already quantized and the requested recipe/config reduces quantization coverage, confirm that intent with the user before running. For example, if an FP8 checkpoint is used as input and the recipe excludes some layers so they would fall back to BF16 instead of staying quantized, call out the affected layer groups and ask whether that FP8-to-BF16 fallback is intended.
 
@@ -191,6 +191,7 @@ Report the gate result before moving on. Follow the canonical report format and 
 ## Common Pitfalls
 
 - **Model-specific dependencies**: Models with `trust_remote_code` may import packages not in the container (e.g., `mamba-ssm` for hybrid Mamba models). See Step 2.5. Use `EXTRA_PIP_DEPS` env var with the launcher, or install manually before running `hf_ptq.py`
+- **Linear-attention models** (Qwen3-Next/3.5/3.8, GLM-5.x Flash, Kimi Linear, OLMo Hybrid) fall back to slow, memory-hungry PyTorch kernels without `pip install "fla-core>=0.5.2"`; install it before calibrating on GPU (it breaks CPU runs of these models)
 - **Transformers version**: New models may need a newer version of transformers than what's installed. Check `config.json` for `transformers_version`. In containers, beware of `PIP_CONSTRAINT` blocking upgrades — see `references/slurm-setup-ptq.md` for workarounds
 - **Gated datasets**: Some calibration datasets require HF authentication. Set `HF_TOKEN` in the job environment. Use `--dataset cnn_dailymail` only as the constrained-environment fallback described in Step 4, not as the preferred calibration set
 - **NFS root_squash + Docker**: See the common skill's `slurm-setup.md` section 5

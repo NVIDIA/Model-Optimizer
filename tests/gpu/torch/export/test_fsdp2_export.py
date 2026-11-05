@@ -16,6 +16,7 @@ import copy
 import json
 from functools import partial
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -27,7 +28,7 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 from _test_utils.torch.transformers_models import get_tiny_llama
 from safetensors.torch import load_file
-from torch.distributed._composable.fsdp import fully_shard
+from torch.distributed.fsdp import fully_shard
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -40,6 +41,7 @@ from modelopt.torch.export.unified_export_hf import (
 )
 from modelopt.torch.export.unified_export_hf_streaming import _export_fsdp2_checkpoint_streaming
 from modelopt.torch.quantization.utils import (
+    core_utils,
     enable_weight_access_and_writeback,
     fsdp2_aware_weight_update,
     module_name_maps,
@@ -81,6 +83,35 @@ def _update_weight_test(rank, size):
         model.linears.reshard()
         output = model(torch.randn(4, 4).to(model.linears.weight.device))
         assert torch.allclose(torch.zeros(4, 4).to(output.device).to(output.dtype), output)
+
+
+def _update_weight_error_propagates_test(rank, size):
+    """A setup error must propagate unchanged and leave the FSDP param group intact."""
+    with patch_fsdp_mp_dtypes():
+        model = ToyModel(dims=[4, 4], bias=False).to("cuda")
+        fully_shard(model.linears)
+        fully_shard(model)
+
+        torch.distributed.barrier()
+
+        class _SentinelError(RuntimeError):
+            pass
+
+        def _raise(*args, **kwargs):
+            raise _SentinelError
+
+        param_group = fully_shard.state(model.linears)._fsdp_param_group
+        fsdp_params = list(param_group.fsdp_params)
+
+        # The unshard failure stands in for an OOM.
+        for target, attr in [(model.linears, "unshard"), (core_utils, "create_fsdp_param_mapping")]:
+            with (
+                patch.object(target, attr, _raise),
+                pytest.raises(_SentinelError),
+                fsdp2_aware_weight_update(model, model.linears),
+            ):
+                pass
+            assert param_group.fsdp_params == fsdp_params
 
 
 def _compress_weight_test(rank, size):
@@ -146,13 +177,16 @@ def _fuse_layers(rank, size, quant_config, bias):
         def calib_fn(x):
             return x(calib_data)
 
-        # Shard model
-        fully_shard(model)
-        torch.distributed.barrier()
+        # AWQ calibration of a model sharded over several ranks is refused: there, shard after it.
+        awq_on_ranks = size > 1 and "awq" in str(quant_config.get("algorithm"))
+        if not awq_on_ranks:
+            fully_shard(model)
+            torch.distributed.barrier()
 
-        # Quantize model
         mtq.quantize(model, quant_config, calib_fn)
         mtq.quantize(non_fsdp_model, quant_config, calib_fn)
+        if awq_on_ranks:
+            fully_shard(model)
 
         torch.distributed.barrier()
 
@@ -186,13 +220,16 @@ def _export_quantized_weight_test(rank, size, quant_config, bias):
         def calib_fn(x):
             return x(calib_data)
 
-        # Shard model
-        fully_shard(model)
-        torch.distributed.barrier()
+        # AWQ calibration of a model sharded over several ranks is refused: there, shard after it.
+        awq_on_ranks = size > 1 and "awq" in str(quant_config.get("algorithm"))
+        if not awq_on_ranks:
+            fully_shard(model)
+            torch.distributed.barrier()
 
-        # Quantize model
         mtq.quantize(model, quant_config, calib_fn)
         mtq.quantize(non_fsdp_model, quant_config, calib_fn)
+        if awq_on_ranks:
+            fully_shard(model)
 
         torch.distributed.barrier()
 
@@ -262,6 +299,10 @@ def test_fsdp2_weight_update_context_for_export(dist_workers):
     dist_workers.run(_update_weight_test)
 
 
+def test_fsdp2_weight_update_context_error_propagates(dist_workers):
+    dist_workers.run(_update_weight_error_propagates_test)
+
+
 @pytest.mark.parametrize(
     "quant_config",
     [
@@ -270,7 +311,7 @@ def test_fsdp2_weight_update_context_for_export(dist_workers):
         mtq.FP8_DEFAULT_CFG,
         mtq.NVFP4_DEFAULT_CFG,
         mtq.NVFP4_AWQ_LITE_CFG,
-        # mtq.W4A8_AWQ_BETA_CFG, #TODO: Fix unit test for this case
+        mtq.W4A8_AWQ_BETA_CFG,
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
         # NVFP4_MLP_ONLY_CFG is omitted: SmallQKVModel has no MLP, so that config matched
@@ -292,7 +333,7 @@ def test_fsdp2_weight_update_context_for_fuse_layers(dist_workers, quant_config,
         mtq.FP8_DEFAULT_CFG,
         mtq.NVFP4_DEFAULT_CFG,
         mtq.NVFP4_AWQ_LITE_CFG,
-        # mtq.W4A8_AWQ_BETA_CFG, #TODO: Fix unit test for this case
+        mtq.W4A8_AWQ_BETA_CFG,
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
         # NVFP4_MLP_ONLY_CFG is omitted: SmallQKVModel has no MLP, so that config matched

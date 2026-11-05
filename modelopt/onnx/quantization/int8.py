@@ -19,6 +19,7 @@ import os
 import tempfile
 import time
 from collections.abc import Sequence
+from itertools import chain
 
 import onnx
 import onnx_graphsurgeon as gs
@@ -29,20 +30,13 @@ from onnxruntime.quantization.calibrate import CalibrationDataReader
 
 from modelopt.onnx.logging_config import configure_logging, logger
 from modelopt.onnx.quantization.calib_utils import import_scales_from_calib_cache
-from modelopt.onnx.quantization.graph_utils import (
-    build_non_residual_input_map,
-    classify_partially_quantized_weighted_ops,
-    classify_partition_nodes,
-    expand_node_names_from_patterns,
-    filter_quantizable_kgen_heads,
-    find_conv_to_layernorm_nodes,
+from modelopt.onnx.quantization.graph_indexing import expand_node_names_from_patterns
+from modelopt.onnx.quantization.graph_selection import (
     find_nodes_from_convs_to_exclude,
     find_nodes_from_matmul_to_exclude,
     find_nodes_to_exclude,
-    get_concat_eliminated_tensors,
-    remove_partial_input_qdq,
 )
-from modelopt.onnx.quantization.ort_patching import _quantize_static as quantize_static
+from modelopt.onnx.quantization.ort_quantization import _quantize_static as quantize_static
 from modelopt.onnx.quantization.ort_utils import configure_ort
 from modelopt.onnx.quantization.partitioning import (
     find_fusible_partitions,
@@ -51,7 +45,18 @@ from modelopt.onnx.quantization.partitioning import (
     get_skipped_output_layers,
 )
 from modelopt.onnx.quantization.precision_utils import _convert_to_runtime_precision
+from modelopt.onnx.quantization.qdq_graph import (
+    build_non_residual_input_map,
+    classify_partially_quantized_weighted_ops,
+    classify_partition_nodes,
+    filter_quantizable_kgen_heads,
+    find_conv_to_layernorm_nodes,
+    get_concat_eliminated_tensors,
+    remove_partial_input_qdq,
+    remove_scalar_input_qdq,
+)
 from modelopt.onnx.quantization.qdq_utils import has_qdq_nodes, replace_scale_values
+from modelopt.onnx.utils import export_onnx
 
 
 def _find_nodes_to_quantize(
@@ -70,7 +75,9 @@ def _find_nodes_to_quantize(
 
     # partitioned_nodes keeps track of nodes that are already part of some partition.
     # Certain nodes of those partitions are quantizable. For example, heads.
-    partitioned_nodes = set(sum(non_quantizable_hard_coded_partitions, []) + nodes_to_exclude)  # noqa: RUF017
+    partitioned_nodes = set(chain.from_iterable(non_quantizable_hard_coded_partitions)) | set(
+        nodes_to_exclude or []
+    )
     cask_fusible_partitions, kgen_partitions = find_fusible_partitions(
         graph,
         partitioned_nodes,
@@ -130,7 +137,7 @@ def quantize(
     nodes_to_quantize: list[str] | None = None,
     nodes_to_exclude: list[str] | None = None,
     use_external_data_format: bool = False,
-    intermediate_generated_files: list[str] = [],
+    intermediate_generated_files: list[str] | None = None,
     trt_extra_plugin_lib_paths: list[str] | None = None,
     high_precision_dtype: str = "fp16",
     passes: list[str] = ["concat_elimination"],
@@ -148,6 +155,8 @@ def quantize(
     Quantization of ['Add', 'AveragePool', 'BatchNormalization', 'Clip', 'Conv', 'ConvTranspose',
     'Gemm', 'GlobalAveragePool', 'MatMul', 'MaxPool', 'Mul'] op types are supported.
     """
+    if intermediate_generated_files is None:
+        intermediate_generated_files = []
     configure_logging(level=log_level.upper())
     logger.info(f"Starting INT8 quantization with method: {calibration_method}")
     t_start = time.time()
@@ -297,7 +306,8 @@ def quantize(
         onnx_model = onnx.load(tmp_onnx_path)
         graph = gs.import_onnx(onnx_model)
         remove_partial_input_qdq(graph, no_quantize_inputs)
-        onnx_model = gs.export_onnx(graph)
+        remove_scalar_input_qdq(graph, target_dla=kwargs.get("target_dla", False))
+        onnx_model = export_onnx(graph)
 
         if calibration_cache_path:
             replace_scale_values(onnx_model.graph, act_scales_dict)

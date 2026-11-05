@@ -36,7 +36,7 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.model_utils import TiedWeightMap
+from modelopt.torch.export.model_utils import TiedWeightMap, _release_exported_tensors
 from modelopt.torch.export.quant_format import KV_CACHE_FP8, KV_CACHE_FP8_K_NVFP4_V, KV_CACHE_NVFP4
 from modelopt.torch.export.quant_utils import (
     _get_kv_cache_postprocess_config,
@@ -165,6 +165,34 @@ def test_meta_guard_not_raised_for_real_weight():
     mtq.quantize(linear, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(1, 32)))
     # Should not raise
     _export_quantized_weight(linear, torch.float32)
+
+
+# ---------------------------------------------------------------------------
+# _release_exported_tensors
+# ---------------------------------------------------------------------------
+
+
+def test_release_exported_tensors_drops_what_the_offload_window_leaves():
+    """post_forward runs with offload_buffers=False, so export's scale buffers outlive it."""
+    layer = nn.Module()
+    layer.self_attn = nn.Linear(16, 16, bias=False)
+    layer.register_buffer("rotary_emb_inv_freq", torch.randn(8))
+    mtq.quantize(layer, mtq.FP8_DEFAULT_CFG, lambda m: m.self_attn(torch.randn(1, 16)))
+    _offload_module(layer.self_attn)
+
+    hook = layer.self_attn._hf_hook
+    assert hook.offload_buffers is False
+
+    with _release_exported_tensors(layer):
+        hook.pre_forward(layer.self_attn)
+        _export_quantized_weight(layer.self_attn, torch.float32)
+        assert layer.self_attn.weight_scale.device.type != "meta"
+        hook.post_forward(layer.self_attn, None)
+        assert layer.self_attn.weight.device.type == "meta"
+        assert layer.self_attn.weight_scale.device.type != "meta"  # the leak
+
+    assert layer.self_attn._buffers["weight_scale"] is None
+    assert layer._buffers["rotary_emb_inv_freq"] is not None
 
 
 # ---------------------------------------------------------------------------

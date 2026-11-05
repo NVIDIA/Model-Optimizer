@@ -52,6 +52,54 @@ class SDPAAttention(nn.Module):
         return F.scaled_dot_product_attention(q, k, v), None
 
 
+class FlatMatmulAttention(nn.Module):
+    def forward(self, q, k, v):
+        scores = torch.matmul(q, k.transpose(-2, -1))
+        probs = torch.softmax(scores, dim=-1)
+        return torch.matmul(probs, v)
+
+
+class FlatBMMAttention(nn.Module):
+    def forward(self, q, k, v):
+        scores = torch.bmm(q, k.transpose(-2, -1))
+        probs = torch.softmax(scores, dim=-1)
+        return torch.bmm(probs, v)
+
+
+class FlatBinMatmulAttention(nn.Module):
+    def forward(self, q, k, v):
+        scores = q @ k.transpose(-2, -1)
+        probs = torch.softmax(scores, dim=-1)
+        return probs @ v
+
+
+class NestedMatmulAttention(nn.Module):
+    def forward(self, q, k, v):
+        return torch.matmul(torch.softmax(torch.matmul(q, k.transpose(-2, -1)), dim=-1), v)
+
+
+class NestedBMMAttention(nn.Module):
+    def forward(self, q, k, v):
+        return torch.bmm(torch.softmax(torch.bmm(q, k.transpose(-2, -1)), dim=-1), v)
+
+
+class NestedBinMatmulAttention(nn.Module):
+    def forward(self, q, k, v):
+        return torch.softmax(q @ k.transpose(-2, -1), dim=-1) @ v
+
+
+class BAddBMMAttention(nn.Module):
+    def forward(self, q, k, v, bias):
+        scores = torch.baddbmm(bias, q, k.transpose(-2, -1))
+        return torch.bmm(torch.softmax(scores, dim=-1), v)
+
+
+class BAddBMMKeywordAttention(nn.Module):
+    def forward(self, q, k, v, bias):
+        scores = torch.baddbmm(input=bias, batch1=q, batch2=k.transpose(-2, -1))
+        return torch.bmm(torch.softmax(scores, dim=-1), v)
+
+
 kv_cache_config = {
     "quant_cfg": [
         {"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": 4}, "enable": True},
@@ -85,10 +133,10 @@ def test_kv_quant_hf(model_getter, attn_cls):
 
     original_is_compatible_attention = None
     if attn_cls is not None:
-        # Test case for transformers < 4.48
+        # Test case for attention modules without transformers' attention interface
         # This needs:
         # 1) replace the attention class with the test attention class
-        # 2) set _QuantAttention.is_compatible_attention output to False to fall back to the transformers < 4.48 support
+        # 2) set _QuantAttention.is_compatible_attention output to False to fall back to the AST-based support
         for name, module in model_test.named_modules():
             if name.endswith(attention_module):
                 if original_is_compatible_attention is None:
@@ -113,6 +161,37 @@ def test_kv_quant_hf(model_getter, attn_cls):
     if attn_cls is not None:
         _QuantAttention.is_compatible_attention = original_is_compatible_attention
         mtq.unregister(attn_cls)
+
+
+@pytest.mark.parametrize(
+    "attn_cls",
+    [
+        FlatMatmulAttention,
+        FlatBMMAttention,
+        FlatBinMatmulAttention,
+        NestedMatmulAttention,
+        NestedBMMAttention,
+        NestedBinMatmulAttention,
+    ],
+)
+def test_kv_quant_operand_wiring(attn_cls):
+    """Each q/k/v_bmm_quantizer must calibrate on its own operand, whatever the layout."""
+    q, k, v = torch.randn(1, 4, 8), 10 * torch.randn(1, 4, 8), 100 * torch.randn(1, 4, 8)
+    assert mtq.plugins.register_attention_for_kv_quant(attn_cls)
+    try:
+        model = attn_cls()
+        mtq.quantize(model, kv_cache_config, lambda model: model(q, k, v))
+        for name, operand in zip("qkv", (q, k, v)):
+            quantizer = getattr(model, f"{name}_bmm_quantizer")
+            assert quantizer.amax == operand.abs().max(), f"{name}_bmm_quantizer saw another tensor"
+    finally:
+        mtq.unregister(attn_cls)
+
+
+@pytest.mark.parametrize("attn_cls", [BAddBMMAttention, BAddBMMKeywordAttention])
+def test_kv_quant_rejects_baddbmm(attn_cls):
+    """baddbmm takes the additive input first, so its operands cannot be wired by position."""
+    assert not mtq.plugins.register_attention_for_kv_quant(attn_cls)
 
 
 def test_kv_quant_bert():
@@ -185,3 +264,129 @@ def test_p_qdq_mode_detection():
     sq.block_sizes = None
     sq.disable()
     assert quant_attention._p_qdq_mode() is None
+
+
+@pytest.mark.parametrize("quantization_active", [True, False])
+def test_causal_p_qdq_dispatch_respects_quant_state(monkeypatch, quantization_active):
+    """Causal attention must dispatch according to the P quantizer runtime state."""
+    quant_attention = make_quant_attention()
+    for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
+        getattr(quant_attention, name).disable()
+
+    pq = quant_attention.p_bmm_quantizer
+    pq.num_bits = (4, 3)
+    pq.block_sizes = None
+    if quantization_active:
+        pq.enable_quant()
+    else:
+        pq.disable_quant()
+
+    calls = []
+    expected = object()
+    expected_attention_mask = object()
+
+    def triton_attention(*args, **kwargs):
+        calls.append("triton")
+        assert kwargs["attention_mask"] is expected_attention_mask
+        return expected
+
+    monkeypatch.setattr(
+        quant_attention,
+        "_triton_qdq_attention",
+        triton_attention,
+    )
+    monkeypatch.setattr(
+        quant_attention,
+        "_init_kitchen_attn_fn",
+        lambda: pytest.fail("P quantizer dispatch reached Kitchen initialization"),
+    )
+
+    def original_attention(_self, _query, _key, _value, attention_mask):
+        calls.append("original")
+        assert attention_mask is expected_attention_mask
+        return expected
+
+    states = torch.zeros(1, 4, 2, 32)
+    output = quant_attention._quantized_attention(
+        original_attention,
+        quant_attention,
+        states,
+        states,
+        states,
+        expected_attention_mask,
+    )
+
+    assert output is expected
+    assert calls == ["triton" if quantization_active else "original"]
+
+
+@pytest.mark.parametrize(
+    ("disable_method", "enable_method"),
+    [("disable", "enable"), ("disable_quant", "enable_quant")],
+)
+@pytest.mark.parametrize("preinitialized", [False, True])
+def test_kitchen_dispatch_respects_quantizer_runtime_state(
+    monkeypatch, disable_method, enable_method, preinitialized
+):
+    """Kitchen dispatch must stop while P quantization is inactive and resume afterward."""
+    quant_attention = make_quant_attention()
+    for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
+        getattr(quant_attention, name).disable()
+
+    pq = quant_attention.p_bmm_quantizer
+    pq.num_bits = (4, 3)
+    pq.block_sizes = {-1: 32, "type": "dynamic", "scale_bits": (8, 0)}
+
+    calls = []
+
+    def kitchen_attention(query, _key, _value):
+        calls.append("kitchen")
+        return query.flatten(2)
+
+    def init_kitchen():
+        calls.append("init")
+        quant_attention.use_kitchen = True
+        quant_attention.kitchen_attn_fn = kitchen_attention
+
+    monkeypatch.setattr(
+        "modelopt.torch.quantization.plugins.huggingface.kitchen",
+        object(),
+    )
+    monkeypatch.setattr(quant_attention, "_init_kitchen_attn_fn", init_kitchen)
+
+    if preinitialized:
+        quant_attention.use_kitchen = True
+        quant_attention.kitchen_attn_fn = kitchen_attention
+
+    expected = object()
+
+    def original_attention(_self, _query, _key, _value):
+        calls.append("original")
+        return expected
+
+    states = torch.zeros(1, 4, 2, 32)
+    getattr(pq, disable_method)()
+    output = quant_attention._quantized_attention(
+        original_attention,
+        quant_attention,
+        states,
+        states,
+        states,
+    )
+
+    assert output is expected
+    assert calls == ["original"]
+
+    calls.clear()
+    getattr(pq, enable_method)()
+    output = quant_attention._quantized_attention(
+        original_attention,
+        quant_attention,
+        states,
+        states,
+        states,
+    )
+
+    assert output[0].shape == (1, 2, 4, 32)
+    assert output[1] is None
+    assert calls == (["kitchen"] if preinitialized else ["init", "kitchen"])

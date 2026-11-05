@@ -7,6 +7,13 @@ Pruning
     Checkout `Megatron-Bridge Minitron Pruning & Distillation <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_ and
     `ResNet20 on CIFAR-10 Notebook <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/pruning/cifar_resnet.ipynb>`_
     for an end-to-end example of pruning.
+.. note::
+
+    For Minitron (LLM/VLM pruning via Megatron-Bridge/Megatron-LM) and Puzzletron pruning,
+    the canonical reference is the
+    `Pruning README <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning>`_
+    which contains up-to-date API examples, support matrix, guidelines, and distillation
+    hyperparameters. This guide covers FastNAS pruning for Computer Vision models.
 
 ModelOpt provides three main pruning methods (aka ``mode``) - Minitron, Puzzletron, and FastNAS - via a unified API
 :meth:`mtp.prune <modelopt.torch.prune.pruning.prune>`. Given a model,

@@ -62,8 +62,8 @@ teacher-forced forward and the loss. Three head variants are supported:
 The head uses its OWN embedding table (``markov_w1``), not the base model's, so
 the bias computation is fully self-contained on this module. Submodule names
 (``markov_w1`` / ``markov_w2`` / ``gate_proj`` / ``joint_proj`` /
-``confidence_proj``) match the upstream DeepSpec checkpoint layout so exported
-checkpoints stay portable.
+``confidence_proj``) match the upstream DeepSpec layout; ``DSparkExporter`` adapts
+the serving checkpoint format.
 """
 
 import logging

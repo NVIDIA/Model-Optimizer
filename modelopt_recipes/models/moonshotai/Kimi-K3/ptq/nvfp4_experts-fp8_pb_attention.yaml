@@ -18,6 +18,7 @@
 # applies this layout as a streaming checkpoint conversion rather than loading
 # the complete model through examples/hf_ptq/hf_ptq.py.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -25,7 +26,6 @@ imports:
   nvfp4: configs/numerics/nvfp4
 
 metadata:
-  recipe_type: ptq
   description: >-
     Kimi-K3 checkpoint-mirror recipe with calibration-free MXFP4-to-NVFP4
     routed experts, expert input_scale fixed to 1.0, and 128x128 block-FP8

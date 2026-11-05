@@ -15,15 +15,43 @@
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import DistributedWorkerPool, default_worker_teardown
+from _test_utils.fs_utils import assert_unmodified_tree
+from _test_utils.torch.calib_data import write_calib_jsonl
+from _test_utils.torch.distributed.utils import (
+    DistributedWorkerPool,
+    default_worker_teardown,
+    get_live_pool,
+)
 
 
 @pytest.fixture(scope="session")
-def dist_workers():
-    pool = DistributedWorkerPool(
-        world_size=torch.cuda.device_count(),
-        backend="nccl",
-        teardown_fn=default_worker_teardown,
+def _dist_pools():
+    pools = {}
+    yield pools
+    for pool in pools.values():
+        pool.shutdown()
+
+
+@pytest.fixture
+def dist_workers(_dist_pools):
+    """The session-wide pool; replaced if an earlier test hung and killed it."""
+    world_size = torch.cuda.device_count()
+    return get_live_pool(
+        _dist_pools,
+        world_size,
+        lambda: DistributedWorkerPool(
+            world_size=world_size, backend="nccl", teardown_fn=default_worker_teardown
+        ),
     )
-    yield pool
-    pool.shutdown()
+
+
+@pytest.fixture(scope="session")
+def calib_jsonl(tmp_path_factory):
+    """Local calibration texts for tests that only need some text, not a particular Hub dataset.
+
+    Shared by the whole session: a test that writes into its directory fails at teardown.
+    """
+    calib_dir = tmp_path_factory.mktemp("calib")
+    path = write_calib_jsonl(calib_dir / "calib.jsonl")
+    with assert_unmodified_tree(calib_dir):
+        yield path

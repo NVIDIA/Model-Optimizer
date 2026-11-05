@@ -30,12 +30,12 @@ import sys
 import types
 from unittest.mock import MagicMock
 
-import httpx
 import pytest
 import torch
 
 # hf_streaming_dataset imports LabelSmoother at module scope.
 pytest.importorskip("transformers")
+httpx = pytest.importorskip("httpx")
 
 from modelopt.torch.speculative.plugins import hf_streaming_dataset
 from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
@@ -54,6 +54,17 @@ def _entries(n: int) -> list[dict]:
 def test_empty_corpus_raises():
     with pytest.raises(ValueError, match="entries is empty"):
         StreamingDataset([], tokenizer=MagicMock(), config=StreamingConfig())
+
+
+def test_an_indexable_corpus_is_kept_and_an_iterator_materialized():
+    """An Arrow-backed corpus stays memory-mapped instead of being copied into every rank."""
+    # datasets is an optional dependency; skip only this test without it.
+    datasets = pytest.importorskip("datasets")
+    corpus = datasets.Dataset.from_list(_entries(5))
+    ds = StreamingDataset(corpus, tokenizer=MagicMock(), config=StreamingConfig())
+    assert ds.entries is corpus
+    ds = StreamingDataset(iter(_entries(5)), tokenizer=MagicMock(), config=StreamingConfig())
+    assert ds.entries == _entries(5)
 
 
 def test_len_matches_corpus():

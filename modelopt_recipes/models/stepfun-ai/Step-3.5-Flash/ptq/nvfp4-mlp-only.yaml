@@ -15,12 +15,12 @@
 
 # Model-specific PTQ recipe for Step3.5-Flash NVFP4 MLP/MoE quantization with FP8 KV cache.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   fp8: configs/numerics/fp8
   nvfp4: configs/numerics/nvfp4
 
 metadata:
-  recipe_type: ptq
   description: >-
     Step3.5-Flash PTQ recipe that enables dynamic NVFP4 on MoE/MLP weight and input quantizers,
     enables FP8 KV-cache quantizers, and leaves other quantizers disabled.
@@ -69,6 +69,9 @@ quantize:
       quantizer_name: '*'
       enable: false
     - parent_class: 'nn.BatchNorm3d'
+      quantizer_name: '*'
+      enable: false
+    - parent_class: 'nn.SyncBatchNorm'
       quantizer_name: '*'
       enable: false
     - parent_class: 'nn.LeakyReLU'

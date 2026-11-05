@@ -15,6 +15,7 @@
 
 """Extensible sparse attention module."""
 
+import copy
 from typing import Any
 
 from modelopt.torch.opt.dynamic import DynamicModule, _DMRegistryCls
@@ -22,6 +23,9 @@ from modelopt.torch.opt.dynamic import DynamicModule, _DMRegistryCls
 from .config import SparseAttentionAttributeConfig
 from .methods import get_sparse_method
 from .stats_manager import SparseAttentionStatsManager
+
+# Method-instance attributes set by calibration (see ``SparseAttentionMethod``).
+_CALIBRATION_STATE_KEYS = ("calibration_params", "target_sparse_ratio")
 
 
 class SparseAttentionModule(DynamicModule):
@@ -166,6 +170,37 @@ class SparseAttentionModule(DynamicModule):
         if hasattr(self, "_sparse_method_instance") and self._sparse_method_instance is not None:
             return self._sparse_method_instance.get_threshold_info()
         return {"type": "none", "value": None}
+
+    def get_modelopt_state(self) -> dict[str, Any]:
+        """Get the module state to save in the ModelOpt checkpoint metadata.
+
+        Similar to ``TensorQuantizer.get_modelopt_state``. Calibration results live on the
+        method instance rather than in the state dict, so they are saved here.
+        """
+        method = self._sparse_method_instance
+        modelopt_state = {
+            "method": method.name,
+            "method_config": self._method_config.copy(),
+            "enabled": self.is_enabled,
+        }
+        for key in _CALIBRATION_STATE_KEYS:
+            val = getattr(method, key, None)
+            if val is not None:
+                modelopt_state[key] = copy.deepcopy(val)
+        return modelopt_state
+
+    def set_from_modelopt_state(self, modelopt_state: dict[str, Any]):
+        """Restore the state saved by :meth:`get_modelopt_state`.
+
+        Similar to ``TensorQuantizer.set_from_modelopt_state``. The method and its config are
+        rebuilt from the mode config before this is called; this restores the runtime state on
+        top of them.
+        """
+        if "enabled" in modelopt_state:
+            self._enabled = bool(modelopt_state["enabled"])
+        for key in _CALIBRATION_STATE_KEYS:
+            if key in modelopt_state:
+                setattr(self._sparse_method_instance, key, copy.deepcopy(modelopt_state[key]))
 
     def _setup(self):
         """Setup called by DynamicModule."""

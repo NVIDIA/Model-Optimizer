@@ -121,8 +121,8 @@ def _enabled(module, quantizer="weight_quantizer"):
 @pytest.mark.parametrize(
     "recipe_name",
     [
-        "huggingface/step3p7/ptq/nvfp4_experts_only-kv_fp8_cast",
-        "huggingface/step3p7/ptq/nvfp4_mlp_only-kv_fp8",
+        "model_type/step3p7/ptq/nvfp4_experts_only-kv_fp8_cast",
+        "model_type/step3p7/ptq/nvfp4_mlp_only-kv_fp8",
     ],
 )
 def test_routed_experts_are_quantized(recipe_name):
@@ -144,8 +144,8 @@ def test_routed_experts_are_quantized(recipe_name):
 @pytest.mark.parametrize(
     "recipe_name",
     [
-        "huggingface/step3p7/ptq/nvfp4_experts_only-kv_fp8_cast",
-        "huggingface/step3p7/ptq/nvfp4_mlp_only-kv_fp8",
+        "model_type/step3p7/ptq/nvfp4_experts_only-kv_fp8_cast",
+        "model_type/step3p7/ptq/nvfp4_mlp_only-kv_fp8",
     ],
 )
 def test_router_shared_expert_and_head_stay_bf16(recipe_name):
@@ -160,7 +160,7 @@ def test_router_shared_expert_and_head_stay_bf16(recipe_name):
 
 
 def test_experts_only_leaves_dense_mlp_bf16():
-    model = _quantize_with_recipe("huggingface/step3p7/ptq/nvfp4_experts_only-kv_fp8_cast")
+    model = _quantize_with_recipe("model_type/step3p7/ptq/nvfp4_experts_only-kv_fp8_cast")
     dense_mlp = model.model.language_model.layers[1].mlp
 
     for proj in ("gate_proj", "up_proj", "down_proj"):
@@ -168,7 +168,7 @@ def test_experts_only_leaves_dense_mlp_bf16():
 
 
 def test_mlp_only_also_quantizes_dense_mlp():
-    model = _quantize_with_recipe("huggingface/step3p7/ptq/nvfp4_mlp_only-kv_fp8")
+    model = _quantize_with_recipe("model_type/step3p7/ptq/nvfp4_mlp_only-kv_fp8")
     dense_mlp = model.model.language_model.layers[1].mlp
 
     for proj in ("gate_proj", "up_proj", "down_proj"):

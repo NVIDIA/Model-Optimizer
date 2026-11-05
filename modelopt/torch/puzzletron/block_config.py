@@ -102,7 +102,7 @@ def _is_dataclass_type(tp: Type) -> bool:
     try:
         _get_dataclass_type(tp)
         return True
-    except:
+    except ValueError:
         return False
 
 

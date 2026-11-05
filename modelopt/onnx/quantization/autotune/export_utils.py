@@ -29,7 +29,9 @@ from modelopt.onnx.quantization.autotune.insertion_points import (
     merge_resolved_insertion_points,
 )
 from modelopt.onnx.quantization.fp8 import int8_to_fp8
-from modelopt.onnx.quantization.graph_utils import get_tensor_consumer_node_indices
+from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
+from modelopt.onnx.quantization.qdq_graph import remove_scalar_input_qdq
+from modelopt.onnx.utils import export_onnx
 
 __all__ = [
     "build_tensor_map",
@@ -339,7 +341,7 @@ def export_qdq_onnx(
     if isinstance(source, onnx.ModelProto):
         graph_copy = gs.import_onnx(source)
     else:
-        graph_copy = gs.import_onnx(gs.export_onnx(source))
+        graph_copy = gs.import_onnx(export_onnx(source))
     graph_copy.toposort()
 
     if insert_qdq and resolved_insertion_points:
@@ -349,9 +351,13 @@ def export_qdq_onnx(
             insert_qdq_at_tensors(graph_copy, resolved_insertion_points, config_int8)
         else:
             insert_qdq_at_tensors(graph_copy, resolved_insertion_points, config)
+        # A per-tensor Q/DQ on a rank-0 constant breaks TensorRT's ONNX parser
+        # (convertAxis asserts the axis lies in [0, nbDims] but nbDims == 0), so
+        # strip it from any constant operand before export/benchmarking.
+        remove_scalar_input_qdq(graph_copy)
 
     logger.debug("Serializing to ONNX format")
-    model = gs.export_onnx(graph_copy)
+    model = export_onnx(graph_copy)
 
     if insert_qdq and resolved_insertion_points:
         fix_zero_point_initializers(model)

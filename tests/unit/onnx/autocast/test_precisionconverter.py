@@ -2221,6 +2221,33 @@ def test_convert_to_f16_restores_public_io_metadata_from_entry_boundary():
     onnx.checker.check_model(converted, full_check=True)
 
 
+def test_convert_to_f16_preserves_declared_output_type_after_inference_changes_it():
+    graph_input = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [2, 3])
+    graph_output = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 3])
+    node = helper.make_node("Identity", ["X"], ["Y"], name="Identity_0")
+    graph = helper.make_graph([node], "inferred_output_type", [graph_input], [graph_output])
+    model = helper.make_model(
+        graph,
+        producer_name="inferred_output_type",
+        opset_imports=[helper.make_opsetid("", 19)],
+        ir_version=10,
+    )
+
+    converted = convert_to_f16(
+        model, keep_io_types=True, op_block_list=[], trt_plugins=[], opset=19
+    )
+
+    output = next(vi for vi in converted.graph.output if vi.name == "Y")
+    assert output.type.tensor_type.elem_type == TensorProto.FLOAT
+    output_producers = [node for node in converted.graph.node if "Y" in node.output]
+    assert len(output_producers) == 1
+    assert output_producers[0].op_type == "Cast"
+    assert next(attr.i for attr in output_producers[0].attribute if attr.name == "to") == (
+        TensorProto.FLOAT
+    )
+    onnx.checker.check_model(converted, full_check=True)
+
+
 def test_convert_to_f16_combines_op_and_node_exclusions(simple_model):
     model, *_ = simple_model
     converted = convert_to_f16(
@@ -2819,6 +2846,16 @@ def test_dynamic_rope_shapes_do_not_alias():
         for value in [*converted_model.graph.value_info, *converted_model.graph.output]
         for dim in value.type.tensor_type.shape.dim
     )
+    value_info_map = {value.name: value for value in converted_model.graph.value_info}
+    half_width = value_info_map["upper_half"].type.tensor_type.shape.dim[3]
+    full_width = value_info_map["rotated"].type.tensor_type.shape.dim[3]
+    for width, expected in [(half_width, 32), (full_width, 64)]:
+        if width.HasField("dim_value"):
+            assert width.dim_value == expected
+        else:
+            assert width.dim_param
+    assert half_width != full_width
+
     session = ort.InferenceSession(
         converted_model.SerializeToString(), providers=["CPUExecutionProvider"]
     )
@@ -2827,3 +2864,30 @@ def test_dynamic_rope_shapes_do_not_alias():
     assert output.shape == (1, 2, 5, 64)
     np.testing.assert_array_equal(output[..., :32], -1)
     np.testing.assert_array_equal(output[..., 32:], 1)
+
+
+@pytest.mark.parametrize("kind", ["sanitizer", "converter"])
+def test_default_plugin_lists_are_isolated(simple_model, kind):
+    model, value_info_map, initializer_map, node_to_init_map = simple_model
+
+    def create():
+        if kind == "sanitizer":
+            return GraphSanitizer(model)
+        return PrecisionConverter(model, value_info_map, initializer_map, node_to_init_map)
+
+    first = create()
+    first.trt_plugins.append("custom_plugin.so")
+    assert create().trt_plugins == []
+
+
+def test_tensor_block_dict_does_not_change_default_skip_rules(simple_model):
+    model, value_info_map, initializer_map, node_to_init_map = simple_model
+    PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        tensor_block_dict={"Add": {"inp": [0, 1]}},
+    )
+    converter = PrecisionConverter(model, value_info_map, initializer_map, node_to_init_map)
+    assert "Add" not in converter.skip_inputs_map

@@ -34,17 +34,12 @@ import torch
 from common import (
     add_answer_only_loss_args,
     add_aux_layers_args,
-    load_chat_template,
+    load_conversations,
+    load_tokenizer,
     tokenize_with_loss_mask,
-    verify_generation_tags,
 )
-from datasets import load_dataset
 from tqdm import tqdm
-from transformers import AutoConfig, AutoTokenizer
-
-REMOVE_THINK_CHAT_TEMPLATE = (
-    "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"
-)
+from transformers import AutoConfig
 
 
 def _resolve_aux_layers_standalone(
@@ -55,9 +50,10 @@ def _resolve_aux_layers_standalone(
     This dump runs in a stock vLLM container. ``common.resolve_aux_layers`` resolves the
     'dflash'/'eagle' presets by importing ``modelopt.torch.speculative.plugins`` — which
     pulls in the full ``modelopt.torch`` init chain (omegaconf, etc.) that the vLLM
-    container does not have, so the import fails. Resolve the 'dflash' preset inline
-    (mirroring ``modeling_dflash.build_target_layer_ids`` for ``num_draft`` draft layers)
-    and accept an explicit comma-separated int list. ``num_draft`` MUST match the recipe's
+    container does not have, so the import fails. Resolve both presets inline -- 'eagle'
+    mirrors ``hf_eagle.default_eagle_aux_layer_ids``, 'dflash' mirrors
+    ``modeling_dflash.build_target_layer_ids`` for ``num_draft`` draft layers -- and
+    accept an explicit comma-separated int list. ``num_draft`` MUST match the recipe's
     ``dflash.dflash_architecture_config.num_hidden_layers`` (pass --num-draft-layers) or the
     dumped aux layers silently mis-align with what the draft consumes at training time.
     Keep in sync with modelopt.
@@ -65,15 +61,39 @@ def _resolve_aux_layers_standalone(
     TODO: drop this once ``common.resolve_aux_layers`` is decoupled from the heavy
     ``modelopt.torch`` import chain so it can be reused directly in a vLLM container.
     """
+    # One literal: a future preset means editing this message once, not twice. The bug
+    # this guards against was precisely a copy drifting from its original.
+    unsupported = (
+        f"--aux-layers={aux_layers!r}: in the stock vLLM container (no modelopt) only the "
+        "'eagle' / 'dflash' presets or an explicit comma-separated layer-id list "
+        "are supported."
+    )
     spec = aux_layers.strip().lower()
+    if spec == "eagle":
+        # Mirrors hf_eagle.default_eagle_aux_layer_ids: three layers near the start,
+        # middle, and end of the stack. This is add_aux_layers_args' default, so the
+        # dump must resolve it without modelopt or the documented invocation fails.
+        return sorted({1, max(0, num_hidden_layers // 2 - 1), max(0, num_hidden_layers - 4)})
     if spec == "dflash":
+        # build_target_layer_ids raises here; without the same guard the interpolation
+        # below silently collapses to a short deduplicated list (e.g. [1] for a 4-layer
+        # target), dumping fewer aux layers than the draft consumes.
+        if num_hidden_layers < num_draft:
+            raise ValueError(
+                f"num_target_layers ({num_hidden_layers}) must be >= num_draft_layers ({num_draft})"
+            )
         if num_draft == 1:
             return [num_hidden_layers // 2]
         start = min(1, num_hidden_layers - 1)
         end = max(start, num_hidden_layers - 3)
         span = end - start
         return sorted({round(start + (i * span) / (num_draft - 1)) for i in range(num_draft)})
-    ids = sorted({int(t) for t in aux_layers.split(",") if t.strip()})
+    try:
+        ids = sorted({int(t) for t in aux_layers.split(",") if t.strip()})
+    except ValueError as exc:
+        # An unrecognised preset name would otherwise surface as a bare
+        # "invalid literal for int()", which hides what the caller should pass.
+        raise ValueError(unsupported) from exc
     # Match the shared helper's contract: ids must be valid layer indices.
     out_of_range = [i for i in ids if not 0 <= i < num_hidden_layers]
     if out_of_range:
@@ -82,10 +102,7 @@ def _resolve_aux_layers_standalone(
             f"for a {num_hidden_layers}-layer model."
         )
     if not ids:
-        raise ValueError(
-            f"--aux-layers={aux_layers!r}: in the stock vLLM container (no modelopt) only the "
-            "'dflash' preset or an explicit comma-separated layer-id list are supported."
-        )
+        raise ValueError(unsupported)
     return ids
 
 
@@ -172,19 +189,7 @@ def main(args: argparse.Namespace) -> None:
     from vllm.inputs import TokensPrompt
 
     # Load conversations
-    if args.input_data.is_file() and str(args.input_data).endswith(".jsonl"):
-        dataset = load_dataset("json", data_files=str(args.input_data), split="train")
-    elif args.input_data.is_dir():
-        dataset = load_dataset(
-            "json", data_files={"train": f"{args.input_data}/*.jsonl"}, split="train"
-        )
-    else:
-        raise ValueError(f"input_data must be a .jsonl file or directory, got: {args.input_data}")
-    print(f"Loaded {len(dataset)} conversations from {args.input_data}")
-
-    # Shard data
-    if args.dp_world_size > 1:
-        dataset = dataset.shard(num_shards=args.dp_world_size, index=args.dp_rank)
+    dataset = load_conversations(args.input_data, args.dp_rank, args.dp_world_size)
     print(f"Sharded to {len(dataset)} conversations for DP#{args.dp_rank}/{args.dp_world_size}")
 
     # Remove already dumped conversations
@@ -221,16 +226,7 @@ def main(args: argparse.Namespace) -> None:
     print(f"Extracting hidden states from layers {extract_layer_ids} (last = final output)")
 
     # Tokenize conversations
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    override_template = load_chat_template(args.chat_template)
-    if override_template is not None:
-        tokenizer.chat_template = override_template
-    if tokenizer.chat_template is not None:
-        tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")
-    if args.answer_only_loss:
-        verify_generation_tags(tokenizer.chat_template)
+    tokenizer = load_tokenizer(args)
 
     # Prepare prompts for vLLM
     prompts = []

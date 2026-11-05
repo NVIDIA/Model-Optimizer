@@ -22,7 +22,7 @@ from onnx import numpy_helper
 
 from modelopt.onnx import utils
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.graph_utils import get_tensor_consumer_nodes
+from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_nodes
 from modelopt.onnx.quantization.qdq_utils import onnx_dtype_map
 from modelopt.onnx.quantization.quant_utils import (
     get_weights_scaling_factor,
@@ -429,5 +429,11 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         logger.info(f"Removed {len(initializers_to_delete)} initializers")
 
         utils.topologically_sort_graph_nodes(graph)
+
+        if fp4_qdq_nodes:
+            default_opset = next(
+                opset for opset in onnx_model.opset_import if opset.domain in {"", "ai.onnx"}
+            )
+            default_opset.version = max(default_opset.version, 23)
 
         return onnx_model

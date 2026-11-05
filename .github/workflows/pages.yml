@@ -17,17 +17,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
+# Write access only in the deploy jobs: build-docs runs PR-controlled code (noxfile.py, docs/).
 permissions:
-  contents: write # push to gh-pages branch
-  pull-requests: write # post/update preview URL comment on PRs
+  contents: read
 
 jobs:
   build-docs:
     if: github.event.action != 'closed'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/ubuntu-setup
       - name: Build docs
         run: pip install nox uv && nox -s docs
@@ -40,11 +40,13 @@ jobs:
 
   changes:
     if: github.event_name == 'pull_request' && github.event.action != 'closed'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: read # list the PR's changed files
     outputs:
       docs: ${{ steps.filter.outputs.docs }}
     steps:
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
           filters: |
@@ -55,20 +57,23 @@ jobs:
 
   deploy-preview:
     # Fork PRs get a read-only GITHUB_TOKEN regardless of the `permissions:` block
-    # above, so pushing the preview to gh-pages would fail with a 403. Skip them.
+    # below, so pushing the preview to gh-pages would fail with a 403. Skip them.
     if: |
       always() &&
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       (github.event.action == 'closed' || needs.changes.outputs.docs == 'true')
     needs: [build-docs, changes]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write # push to gh-pages branch
+      pull-requests: write # post/update preview URL comment on PRs
     # Per-PR concurrency without cancel-in-progress so 'closed' cleanup always runs
     concurrency:
       group: pr-preview-${{ github.event.pull_request.number }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Download docs artifact
         if: github.event.action != 'closed'
         uses: actions/download-artifact@v8
@@ -76,23 +81,25 @@ jobs:
           name: docs-html
           path: docs/build/html
       - name: Deploy / remove PR preview
-        uses: rossjrw/pr-preview-action@v1
+        uses: rossjrw/pr-preview-action@ffa7509e91a3ec8dfc2e5536c4d5c1acdf7a6de9 # v1.8.1
         with:
           source-dir: docs/build/html
 
   deploy-gh-pages:
     if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: build-docs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # push to gh-pages branch
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Download docs artifact
         uses: actions/download-artifact@v8
         with:
           name: docs-html
           path: docs/build/html
       - name: Deploy to GitHub Pages
-        uses: JamesIves/github-pages-deploy-action@v4
+        uses: JamesIves/github-pages-deploy-action@fa24774553152dd7873cd16ebd8d959b010c5445 # v4.9.0
         with:
           folder: docs/build/html
           single-commit: true

@@ -14,7 +14,6 @@ imports:
   nvfp4_four_over_six: configs/numerics/nvfp4_four_over_six
 
 metadata:
-  recipe_type: auto_quantize
   description: >-
     Muse Glimmer language-model W4A16 NVFP4 Four-Over-Six, FP8, and BF16
     fallback search at 5.5 weight-effective bits. Use --kv_cache_qformat none.

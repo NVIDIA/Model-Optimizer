@@ -29,21 +29,26 @@ from onnxruntime.quantization.calibrate import CalibrationDataReader
 
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.logging_config import configure_logging, logger
-from modelopt.onnx.quantization.graph_utils import (
+from modelopt.onnx.quantization.graph_indexing import (
     expand_node_names_from_patterns,
+    get_tensor_producer_nodes,
+)
+from modelopt.onnx.quantization.graph_selection import (
     find_nodes_from_convs_to_exclude,
     find_nodes_from_matmul_to_exclude,
     find_nodes_to_exclude,
-    get_concat_eliminated_tensors,
-    get_tensor_producer_nodes,
-    remove_partial_input_qdq,
 )
 from modelopt.onnx.quantization.int8 import _find_nodes_to_quantize
-from modelopt.onnx.quantization.ort_patching import _quantize_static as quantize_static
+from modelopt.onnx.quantization.ort_quantization import _quantize_static as quantize_static
 from modelopt.onnx.quantization.ort_utils import configure_ort
 from modelopt.onnx.quantization.precision_utils import (
     _convert_to_runtime_precision,
     _upgrade_opset_21,
+)
+from modelopt.onnx.quantization.qdq_graph import (
+    get_concat_eliminated_tensors,
+    remove_partial_input_qdq,
+    remove_scalar_input_qdq,
 )
 from modelopt.onnx.quantization.qdq_utils import has_qdq_nodes
 
@@ -146,7 +151,7 @@ def quantize(
     nodes_to_quantize: list[str] | None = None,
     nodes_to_exclude: list[str] | None = None,
     use_external_data_format: bool = False,
-    intermediate_generated_files: list[str] = [],
+    intermediate_generated_files: list[str] | None = None,
     trt_extra_plugin_lib_paths: list[str] | None = None,
     high_precision_dtype: str = "fp16",
     mha_accumulation_dtype: str = "fp16",
@@ -164,6 +169,8 @@ def quantize(
 
     Currently, ['Conv', 'Gemm', 'MatMul', 'Residual-Add'] quantization is supported.
     """
+    if intermediate_generated_files is None:
+        intermediate_generated_files = []
     configure_logging(level=log_level.upper())
     logger.info("Starting FP8 quantization process")
     t_start = time.time()
@@ -296,7 +303,8 @@ def quantize(
         onnx_model = onnx.load(tmp_onnx_path)
         graph = gs.import_onnx(onnx_model)
         remove_partial_input_qdq(graph, no_quantize_inputs)
-        onnx_model = gs.export_onnx(graph)
+        remove_scalar_input_qdq(graph)
+        onnx_model = onnx_utils.export_onnx(graph)
 
     onnx_model = _convert_to_runtime_precision(
         onnx_model,

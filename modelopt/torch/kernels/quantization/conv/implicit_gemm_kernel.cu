@@ -42,8 +42,10 @@
 // 7. L2-friendly block scheduling (swizzled grid)
 // 8. FP8 E4M3 round-trip for scale quantization
 
+#include <cfloat>
 #include <cuda.h>
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include <mma.h>
 #include <torch/extension.h>
@@ -74,39 +76,9 @@ __device__ __forceinline__ float warp_reduce_max(float val) {
   return val;
 }
 
+// Round to nearest even E4M3, saturating at +-448; subnormals are kept, as in the Triton kernels.
 __device__ __forceinline__ float fp8_e4m3_round_trip(float x) {
-  if (x == 0.0f)
-    return 0.0f;
-
-  unsigned int bits = __float_as_uint(x);
-  unsigned int sign = bits >> 31;
-  int exp = ((bits >> 23) & 0xff) - 127;
-  unsigned int mantissa = bits & 0x7fffff;
-
-  if (exp > 8)
-    return sign ? -448.0f : 448.0f;
-  if (exp < -9)
-    return 0.0f;
-
-  unsigned int mantissa_3bit = (mantissa + (1 << 19)) >> 20;
-  if (mantissa_3bit > 7) {
-    mantissa_3bit = 0;
-    exp += 1;
-    if (exp > 8)
-      return sign ? -448.0f : 448.0f;
-  }
-
-  if (exp < -6) {
-    int shift = -6 - exp;
-    mantissa_3bit = (mantissa_3bit | 8) >> shift;
-    exp = -6;
-  }
-
-  int fp32_exp = exp + 127;
-  unsigned int fp32_mantissa = mantissa_3bit << 20;
-  unsigned int fp32_bits = (sign << 31) | (fp32_exp << 23) | fp32_mantissa;
-
-  return __uint_as_float(fp32_bits);
+  return static_cast<float>(__nv_fp8_e4m3(x));
 }
 
 __device__ __forceinline__ float quantize_scale_fp8(float block_max, float global_scale) {
@@ -114,6 +86,20 @@ __device__ __forceinline__ float quantize_scale_fp8(float block_max, float globa
   scaled = fminf(scaled, 448.0f);
   float quantized = fp8_e4m3_round_trip(scaled);
   return quantized * global_scale;
+}
+
+// NVFP4 block scale. Like the modelopt CUDA extension, a zero, inf or NaN global scale gives a
+// unit block scale.
+__device__ __forceinline__ float nvfp4_block_scale(float block_max, float global_scale) {
+  if (!(global_scale > 0.0f && isfinite(global_scale)))
+    return 1.0f;
+  return quantize_scale_fp8(block_max, global_scale);
+}
+
+// Only a zero block scale zeroes the block; small nonzero scales quantize normally. A subnormal
+// scale counts as zero (its reciprocal can overflow), as it already is under flush-to-zero.
+__device__ __forceinline__ float nvfp4_inv_scale(float scale) {
+  return scale >= FLT_MIN ? 1.0f / scale : 0.0f;
 }
 
 // =============================================================================
@@ -312,11 +298,9 @@ __global__ void __launch_bounds__(WARPS_M * WARPS_N * 32, 2)
 
           // Warp reduce — lanes outside this sub-block contribute 0, which is correct
           float block_max = warp_reduce_max(local_max);
-          float scale = quantize_scale_fp8(block_max, global_scale);
-          if (scale < 1e-5f)
-            scale = 1.0f;
+          float scale = nvfp4_block_scale(block_max, global_scale);
           scales[sb] = scale;
-          inv_scales[sb] = 1.0f / scale;
+          inv_scales[sb] = nvfp4_inv_scale(scale);
         }
 
         // Pass 3: Quantize and store to shared memory
@@ -505,10 +489,8 @@ __global__ void fp4_fake_quant_kernel(const float *__restrict__ x, float *__rest
   float block_max = warp_reduce_max(local_max);
 
   // Quantize the scale via FP8 E4M3 round-trip
-  float scale = quantize_scale_fp8(block_max, global_scale);
-  if (scale < 1e-5f)
-    scale = 1.0f;
-  float inv_scale = 1.0f / scale;
+  float scale = nvfp4_block_scale(block_max, global_scale);
+  float inv_scale = nvfp4_inv_scale(scale);
 
   // Pass 2: quantize + dequantize each element
   for (int i = lane_id; i < block_size; i += 32) {

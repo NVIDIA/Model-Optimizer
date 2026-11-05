@@ -41,6 +41,18 @@
     ]
   },
   {
+    "name": "ptq-smoke-test-cleanup",
+    "skills": ["day0-release", "ptq", "deployment"],
+    "query": "Run the day-0 workflow for ./source with NVFP4. The quantizer's temporary serving smoke test starts but generation fails; I did not ask to keep it running.",
+    "files": [],
+    "expected_behavior": [
+      "Keeps the quantizer responsible for smoke-test evidence and cleanup",
+      "Stops the temporary service and verifies shutdown on failure, as on success or interruption",
+      "Reports cleanup failures as blockers and does not proceed to evaluation after a failed smoke test",
+      "Hands off the checkpoint and validated serving configuration, never the smoke-test endpoint"
+    ]
+  },
+  {
     "name": "ptq-gate-blocks-on-coverage-miss",
     "skills": [
       "day0-release"

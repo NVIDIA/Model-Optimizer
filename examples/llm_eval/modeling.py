@@ -435,14 +435,13 @@ def load_quant(
     else:
         model.load_state_dict(torch.load(checkpoint), strict=False)
 
-    if eval:
-        quant.make_quant_attn(model)
-        quant.make_quant_norm(model)
-        if fused_mlp:
-            quant.make_fused_mlp(model)
+    quant.make_quant_attn(model)
+    quant.make_quant_norm(model)
+    if fused_mlp:
+        quant.make_fused_mlp(model)
     if warmup_autotune:
-        quant.autotune_warmup_linear(model, transpose=not (eval))
-        if eval and fused_mlp:
+        quant.autotune_warmup_linear(model, transpose=False)
+        if fused_mlp:
             quant.autotune_warmup_fused(model)
 
     model.seqlen = 2048

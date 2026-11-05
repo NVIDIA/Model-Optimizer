@@ -31,12 +31,7 @@ def convert_to_medusa_model(model: nn.Module, config: MedusaConfig) -> ConvertRe
     # initialize the true module if necessary
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
-    original_cls = type(model)
-    if original_cls not in MedusaDMRegistry:
-        for cls in MedusaDMRegistry._registry:
-            if issubclass(original_cls, cls):
-                MedusaDMRegistry.register({original_cls: "base_model_class"})(MedusaDMRegistry[cls])
-                break
+    MedusaDMRegistry.register_subclass(type(model), "base_model_class")
 
     medusa_model = MedusaDMRegistry.convert(model)
     medusa_model.modify(

@@ -35,3 +35,6 @@ quant_cfg:
   - quantizer_name: '*softmax_quantizer'
     cfg:
       $import: fp8
+  - parent_class: 'nn.LayerNorm'
+    quantizer_name: '*'
+    enable: false

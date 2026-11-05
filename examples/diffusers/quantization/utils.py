@@ -20,12 +20,12 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
+from diffusers.models.attention import AttentionModuleMixin
 from diffusers.models.attention_processor import Attention, AttnProcessor
 from diffusers.models.lora import LoRACompatibleConv, LoRACompatibleLinear
 from diffusers.utils import load_image
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.plugins.diffusion.diffusers import AttentionModuleMixin
 
 USE_PEFT = True
 try:
@@ -64,11 +64,8 @@ def check_conv_and_mha(backbone, if_fp4, quantize_mha):
                 ):
                     if hasattr(module, attr):
                         getattr(module, attr).disable()
-                setattr(module, "_disable_fp8_mha", True)
 
                 print(f"Disabled Attention layer quantization for layer {name}")
-            else:
-                setattr(module, "_disable_fp8_mha", False)
 
 
 def filter_func_ltx_video(name: str) -> bool:

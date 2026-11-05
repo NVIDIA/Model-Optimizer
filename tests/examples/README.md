@@ -18,6 +18,16 @@ pip install -e ".[all,dev-test]"
 pytest tests/examples/$TEST
 ```
 
+### Legacy Diffusers ONNX/TensorRT tests
+
+Automatic example CI excludes `diffusers/test_diffusers_onnx_trt.py` while retaining
+HF export, quantization, and PyTorch inference coverage. The legacy ONNX/TensorRT
+tests remain available for manual validation during the deprecation transition:
+
+```bash
+pytest tests/examples/diffusers/test_diffusers_onnx_trt.py
+```
+
 ## Environment variables
 
 The following environment variables can be set to control the behavior of the tests:

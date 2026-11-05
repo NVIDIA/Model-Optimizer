@@ -426,7 +426,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         ):
             raise ValueError(
                 "Only blockwise dynamic quantization is supported with quantization "
-                "formats E{num_bis[0]}M{num_bits[1]}."
+                f"formats E{num_bits[0]}M{num_bits[1]}."
             )
         return self
 
@@ -723,13 +723,14 @@ class LayerwiseConfig(ModeloptBaseConfig):
     )
 
     get_qdq_activations_from_prev_layer: bool = ModeloptField(
-        default=False,
+        default=True,
         title="Cache next-layer inputs from QDQ outputs of prior layers.",
         description=(
-            "If True (GPTQ default), capture each layer's next-layer inputs "
+            "If True (default), capture each layer's next-layer inputs "
             "after it is calibrated, so QDQ error and in-place weight updates "
-            "propagate forward. If False (max/mse default), capture before, so "
-            "the next layer sees the same FP activations as a non-layerwise pass."
+            "propagate forward. If False, capture before calibration, so "
+            "the next layer sees the same FP activations as a non-layerwise pass. "
+            "We recommend setting this to True for GPTQ and Local-Hessian."
         ),
     )
 
@@ -998,7 +999,26 @@ class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     )
 
 
-class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
+class _HessianInputDtypeConfig(ModeloptBaseConfig):
+    """The ``hessian_input_dtype`` knob, shared by GPTQ and local-Hessian calibration."""
+
+    hessian_input_dtype: Literal["float32", "bfloat16"] = ModeloptField(
+        default="float32",
+        title="Dtype the Hessian GEMM reads the activations in.",
+        description="""The Hessian is accumulated and stored in float32 either way. ``float32``
+        copies each batch of activations to float32 for the GEMM. ``bfloat16`` feeds them to a
+        tensor-core GEMM in bfloat16 that accumulates in float32: for bfloat16 activations it
+        forms the same products and only rounds the sums differently. At 32K tokens per batch
+        that is up to about 3e-5 of the Hessian's diagonal for GPTQ's full Hessian and 1.5e-4
+        for local Hessian's 16-column blocks, and the GEMM is 6-16x faster. It needs CUDA GEMMs
+        that take ``out_dtype``; without them the Hessian falls back to float32 with a
+        warning.""",
+    )
+
+
+class LocalHessianCalibConfig(
+    _SharedStatesConfig, _HessianInputDtypeConfig, QuantizeAlgorithmConfig
+):
     """Configuration for local Hessian-weighted MSE calibration.
 
     This algorithm uses activation information to optimize per-block scales for weight
@@ -1106,6 +1126,15 @@ class AWQLiteCalibConfig(QuantizeAlgorithmConfig):
         description="The alpha will be searched from 0 to 1 with the step size specified.",
     )
 
+    use_weight_scale: bool = ModeloptField(
+        default=True,
+        title="Include weight statistics in AWQ scale search.",
+        description=(
+            "If True, search scales proportional to activation_scale**alpha / "
+            "weight_scale**(1-alpha). If False, use activation_scale**alpha as in the AWQ paper."
+        ),
+    )
+
     debug: bool | None = ModeloptField(
         default=False,
         title="Debug mode.",
@@ -1209,7 +1238,7 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
     )
 
 
-class GPTQCalibConfig(QuantizeAlgorithmConfig):
+class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):
     """The config for GPTQ quantization.
 
     GPTQ minimizes the layer-wise quantization error by using second-order (Hessian) information
@@ -1231,9 +1260,10 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
     )
     block_size: int | None = ModeloptField(
         default=128,
+        gt=0,
         title="Block size for GPTQ weight update.",
-        description="""The block size for GPTQ weight update, which must be a multiple of the
-        group_size used in the quantization.""",
+        description="""The block size for GPTQ weight update, which must be positive and a multiple
+        of the group_size used in the quantization.""",
     )
     fused: bool = ModeloptField(
         default=False,
@@ -1241,21 +1271,29 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         description="""When True, use a fused Triton kernel that combines quantization and
         per-column error propagation into one launch per GPTQ block.""",
     )
+    importance_weighted: bool = ModeloptField(
+        default=False,
+        title="Weight the codebook search by the Hessian diagonal.",
+        description="""When True, formats whose codebook search takes a per-input-column importance
+        (the GGML IQ1 and IQ2 formats) weight it by the square root of the Hessian diagonal,
+        llama.cpp's imatrix statistic. Other formats ignore it.""",
+    )
 
-    @model_validator(mode="after")
-    def _gptq_qdq_default(self):
-        """Inject ``get_qdq_activations_from_prev_layer=True`` unless the user set it.
 
-        GPTQ's Hessian correctness depends on prior-layer QDQ activations, so the
-        default differs from the base class. Uses ``model_fields_set`` to detect
-        whether the user explicitly set the field — covers every input shape
-        (empty constructor, bool, dict) without a per-shape special case.
-        """
-        if "get_qdq_activations_from_prev_layer" not in self.layerwise.model_fields_set:
-            self.layerwise = self.layerwise.model_copy(
-                update={"get_qdq_activations_from_prev_layer": True}
-            )
-        return self
+class ImatrixCalibConfig(QuantizeAlgorithmConfig):
+    """The config for imatrix calibration.
+
+    Encodes each weight once, its codebook search weighted by the square root of its inputs'
+    per-column second moment ``E[x_j^2]`` -- llama.cpp's importance matrix. Covers the GGML formats
+    with a weighted search,
+    on dense linears and on each expert of HF fused-MoE experts. A weight that already holds final
+    codes, such as GPTQ's, is left alone, so ``[{method: gptq}, {method: imatrix}]`` runs GPTQ
+    where it applies and imatrix on any weight it leaves.
+    By default the statistics come from a single forward pass, as llama.cpp collects them; with
+    ``layerwise`` enabled, each layer's are collected after the earlier layers are quantized.
+    """
+
+    method: Literal["imatrix"] = ModeloptField("imatrix")
 
 
 _ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig

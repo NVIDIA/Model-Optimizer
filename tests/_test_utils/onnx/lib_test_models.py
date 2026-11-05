@@ -260,12 +260,12 @@ def find_init(onnx_model: onnx.ModelProto, init_name: str) -> np.ndarray:
 #           conv_4
 #             |
 #
-def build_conv_concat_model():
+def build_conv_concat_model(channels=128, height=240, width=64):
     # Define your model inputs and outputs
     input_names = ["input_0"]
     output_names = ["conv4_conv/Conv2D:0"]
-    input_shapes = [(1, 128, 240, 64)]
-    output_shapes = [(1, 256, 240, 64)]
+    input_shapes = [(1, channels, height, width)]
+    output_shapes = [(1, 2 * channels, height, width)]
 
     inputs = [
         helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, input_shape)
@@ -340,26 +340,26 @@ def build_conv_concat_model():
         helper.make_tensor(
             name="ReadVariableOp:0",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128, 128, 3, 3),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128 * 128 * 3 * 3),
+            dims=(channels, channels, 3, 3),
+            vals=np.random.uniform(low=0.5, high=1.0, size=channels * channels * 3 * 3),
         ),
         helper.make_tensor(
             name="ReadVariableOp:1",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128, 128, 3, 3),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128 * 128 * 3 * 3),
+            dims=(channels, channels, 3, 3),
+            vals=np.random.uniform(low=0.5, high=1.0, size=channels * channels * 3 * 3),
         ),
         helper.make_tensor(
             name="ReadVariableOp:2",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128, 128, 3, 3),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128 * 128 * 3 * 3),
+            dims=(channels, channels, 3, 3),
+            vals=np.random.uniform(low=0.5, high=1.0, size=channels * channels * 3 * 3),
         ),
         helper.make_tensor(
             name="ReadVariableOp:3",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(256, 384, 1, 1),
-            vals=np.random.uniform(low=0.5, high=1.0, size=256 * 384 * 1 * 1),
+            dims=(2 * channels, 3 * channels, 1, 1),
+            vals=np.random.uniform(low=0.5, high=1.0, size=2 * channels * 3 * channels),
         ),
     ]
 
@@ -833,8 +833,9 @@ def build_conv_isinf_model(opset_version=13):
     # Define your model inputs and outputs
     input_names = ["input_0"]
     output_names = ["output_0"]
-    input_shapes = [(6, 32, 900, 256)]
-    output_shapes = [(6, 32, 900, 256)]
+    # Small: the tests check node dtypes, not values, and a large activation costs GBs per worker
+    input_shapes = [(1, 32, 64, 64)]
+    output_shapes = [(1, 32, 64, 64)]
 
     inputs = [
         helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, input_shape)
@@ -1344,3 +1345,35 @@ def build_matmul_1xn_model():
     onnx.checker.check_model(model_inferred)
 
     return model_inferred
+
+
+#   x ----- relu -------------+
+#                             |
+#   cls (initializer, or  --- +--- concat --- matmul --- out
+#        relu(y) if not constant_input)
+#
+# ``cls`` mimics a ViT class token: a constant Concat input that has no producer node.
+def build_concat_with_constant_input_model(constant_input=True):
+    x = helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1, 4, 8])
+    y = helper.make_tensor_value_info("y", onnx.TensorProto.FLOAT, [1, 1, 8])
+    out = helper.make_tensor_value_info("out", onnx.TensorProto.FLOAT, [1, 5, 8])
+    nodes = [helper.make_node("Relu", ["x"], ["relu_out"], name="relu")]
+    inputs = [x]
+    initializers = [
+        helper.make_tensor("weight", onnx.TensorProto.FLOAT, [8, 8], np.ones(64, dtype=np.float32))
+    ]
+    if constant_input:
+        cls = helper.make_tensor(
+            "cls", onnx.TensorProto.FLOAT, [1, 1, 8], np.ones(8, dtype=np.float32)
+        )
+        initializers.append(cls)
+    else:
+        inputs.append(y)
+        nodes.append(helper.make_node("Relu", ["y"], ["cls"], name="relu_cls"))
+    nodes += [
+        helper.make_node("Concat", ["cls", "relu_out"], ["concat_out"], name="concat", axis=1),
+        helper.make_node("MatMul", ["concat_out", "weight"], ["out"], name="matmul"),
+    ]
+    graph = helper.make_graph(nodes, "concat_with_constant_input", inputs, [out], initializers)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    return onnx.shape_inference.infer_shapes(model)
