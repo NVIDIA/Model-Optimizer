@@ -151,23 +151,36 @@ def test_slice_controls_with_distinct_dtypes_are_not_shared():
         np.testing.assert_array_equal(result, reference.reshape(target))
 
 
-def test_five_dimensional_reshape_transpose_uses_original_snapshot():
-    """A later handler retains original shapes after the preceding Reshape is replaced."""
+@pytest.mark.parametrize(
+    ("target", "transpose", "planned_shape"),
+    [
+        ([2, 1, 3, 2, 2], True, (2, 3, 2, 2)),
+        ([2, -1, 3, 2, 2], True, (2, 3, 2, 2)),
+        ([-1, 2, 1, 3, 4], False, (2, 1, 3, 4)),
+        ([2, 1, 3, -1, 2], True, (2, 3, 2, 2)),
+    ],
+)
+def test_five_dimensional_shape_rules_use_original_snapshot(target, transpose, planned_shape):
+    """Singleton collapse follows resolved shapes while later rules retain their snapshot."""
+    nodes = [helper.make_node("Reshape", ["x", "target"], ["reshaped"])]
+    planned = {"reshaped": planned_shape}
+    output = "reshaped"
+    if transpose:
+        nodes.append(helper.make_node("Transpose", ["reshaped"], ["y"], perm=[0, 2, 1, 3, 4]))
+        planned["y"] = planned_shape
+        output = "y"
     model = helper.make_model(
         helper.make_graph(
-            [
-                helper.make_node("Reshape", ["x", "target"], ["reshaped"]),
-                helper.make_node("Transpose", ["reshaped"], ["y"], perm=[0, 2, 1, 3, 4]),
-            ],
+            nodes,
             "collapsed_layout",
             [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 2, 3, 4])],
-            [helper.make_tensor_value_info("y", TensorProto.FLOAT, None)],
-            [numpy_helper.from_array(np.array([2, 1, 3, 2, 2], np.int64), "target")],
+            [helper.make_tensor_value_info(output, TensorProto.FLOAT, None)],
+            [numpy_helper.from_array(np.array(target, np.int64), "target")],
         ),
         opset_imports=[helper.make_opsetid("", 21)],
     )
-    transformed, count = _lower_shapes(model, {"reshaped": (2, 3, 2, 2), "y": (2, 3, 2, 2)})
-    assert count == 2
+    transformed, count = _lower_shapes(model, planned)
+    assert count == len(nodes)
     feeds = {"x": np.arange(24, dtype=np.float32).reshape(1, 2, 3, 4)}
-    expected = ReferenceEvaluator(model).run(None, feeds)[0].reshape(2, 3, 2, 2)
+    expected = ReferenceEvaluator(model).run(None, feeds)[0].reshape(planned_shape)
     np.testing.assert_array_equal(ReferenceEvaluator(transformed).run(None, feeds)[0], expected)
