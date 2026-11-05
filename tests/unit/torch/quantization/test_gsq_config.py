@@ -104,7 +104,7 @@ def test_gsq_rejects_removed_linear_options(field):
         GSQCalibConfig(**{field: 1})
 
 
-@pytest.mark.parametrize("field", ["checkpoint_dir", "export_dir"])
-def test_gsq_rejects_restart_and_streaming_export(field, tmp_path):
+@pytest.mark.parametrize("field", ["export_dir"])
+def test_gsq_rejects_streaming_export(field, tmp_path):
     with pytest.raises(ValueError):
         GSQCalibConfig(layerwise={"enable": True, field: str(tmp_path)})

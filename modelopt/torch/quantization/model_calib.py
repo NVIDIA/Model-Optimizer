@@ -89,6 +89,7 @@ from .utils.calib_utils import (
     track_calib_forward_memory,
     update_expert_weights,
 )
+from .utils.gsq_distributed import DistributedGSQ
 
 __all__ = [
     "CalibratorFactory",
@@ -2348,6 +2349,8 @@ def layerwise_calibrate(
     save_every = calib_kwargs.pop("save_every", 1)
     calib_mutates_weights = calib_kwargs.pop("calib_mutates_weights", True)
     cache_device = calib_kwargs.pop("activation_cache_device", "device")
+    gsq_metadata = calib_kwargs.pop("_gsq_metadata", None)
+    gsq_distributed = DistributedGSQ() if gsq_metadata is not None else None
 
     if forward_loop is None:
         raise ValueError(
@@ -2375,6 +2378,8 @@ def layerwise_calibrate(
             "Layerwise export does not support enabled quantizers outside transformer layers. "
             "Calibrate without export_dir, then export the completed model separately."
         )
+    if gsq_distributed and outside_calibrator.enabled:
+        raise ValueError("Distributed staged GSQ requires weight-only decoder projections")
 
     num_layers = len(transformer_layers)
     print_rank_0(f"Layerwise calibration: Found {num_layers} transformer layers")
@@ -2392,7 +2397,8 @@ def layerwise_calibrate(
                 "shard, the index and the config artifacts; it does not load until then."
             )
         # Before calibration, so unsupported models fail in seconds not hours.
-        exporter.bind(calibrated_layers=list(transformer_layers))
+        with gsq_distributed.check() if gsq_distributed else nullcontext():
+            exporter.bind(calibrated_layers=list(transformer_layers))
 
     ckpt = _CheckpointState.from_folder(
         checkpoint_dir,
@@ -2400,8 +2406,14 @@ def layerwise_calibrate(
         save_every=save_every,
         calib_mutates_weights=calib_mutates_weights,
         save_layer_state=exporter is None,
+        distributed_metadata=gsq_metadata,
     )
     start_layer = ckpt.start_layer if ckpt else 0
+
+    if gsq_distributed and ckpt and start_layer == num_layers and exporter is None:
+        with gsq_distributed.check():
+            ckpt.full_restore(transformer_layers, model)
+        return
 
     if exporter is not None and _reconcile_export_with_resume(
         exporter, checkpoint_dir, start_layer, num_layers
@@ -2428,20 +2440,23 @@ def layerwise_calibrate(
         model,
         status_callback=_set_layer_status,
         activation_cache=activation_cache,
+        allow_empty=gsq_distributed is not None,
     )
 
     try:
         input_getter._patch_all_layers(decoder_layers=transformer_layers)
-        resumed_inputs = (
-            ckpt.setup_resume(transformer_layers, activation_cache)
-            if ckpt and start_layer > 0
-            else None
-        )
+        with gsq_distributed.check() if gsq_distributed else nullcontext():
+            resumed_inputs = (
+                ckpt.setup_resume(transformer_layers, activation_cache)
+                if ckpt and start_layer > 0
+                else None
+            )
 
         # Bootstrap: get first layer's inputs (or use resumed inputs).
-        layer_inputs = input_getter.get_first_layer_inputs(
-            start_layer, resumed_inputs, forward_loop
-        )
+        with gsq_distributed.check() if gsq_distributed else nullcontext():
+            layer_inputs = input_getter.get_first_layer_inputs(
+                start_layer, resumed_inputs, forward_loop
+            )
 
         for layer_idx in range(start_layer, num_layers):
             layer = transformer_layers[layer_idx]
@@ -2494,7 +2509,11 @@ def layerwise_calibrate(
 
                 # Export fusion discovery still needs the original current-layer inputs.
                 export_inputs = layer_inputs
-                if exporter is not None and activation_cache.on_cpu:
+                if (
+                    exporter is not None
+                    and activation_cache.on_cpu
+                    and (gsq_distributed is None or is_master())
+                ):
                     export_inputs = [_move_to_device(layer_inputs[0], get_module_device(layer))]
                     if get_module_device(layer).type == "cpu":
                         export_inputs = deepcopy(export_inputs)
@@ -2502,9 +2521,10 @@ def layerwise_calibrate(
                 # qdq_from_prev=True: capture after calib_func so the next layer
                 # sees QDQ error and any in-place weight updates from this layer.
                 if not is_last and qdq_from_prev:
-                    next_inputs = input_getter.cache_outputs_for_next_layer_calib(
-                        layer, forward_loop, reuse_inputs=True
-                    )
+                    with gsq_distributed.check() if gsq_distributed else nullcontext():
+                        next_inputs = input_getter.cache_outputs_for_next_layer_calib(
+                            layer, forward_loop, reuse_inputs=True
+                        )
                     if exporter is not None:
                         # As above, for the fusion probe. Only when one runs: without an
                         # exporter nothing touches the layer before _set_layer_states does.
@@ -2514,10 +2534,18 @@ def layerwise_calibrate(
 
                 # After the next-layer capture in both orderings: final state.
                 if exporter is not None:
-                    exporter.export_layer(layer_idx, layer, export_inputs)
+                    with gsq_distributed.check() if gsq_distributed else nullcontext():
+                        if gsq_distributed is None or is_master():
+                            exporter.export_layer(layer_idx, layer, export_inputs)
 
                 if ckpt:
-                    ckpt.save(layer_idx, model, transformer_layers, next_inputs)
+                    ckpt.save(
+                        layer_idx,
+                        model,
+                        transformer_layers,
+                        next_inputs,
+                        keep_only_latest_inputs=activation_cache.on_cpu,
+                    )
 
             layer_pbar.update(1)
             del layer_inputs
@@ -2528,7 +2556,8 @@ def layerwise_calibrate(
         layer_pbar.close()
 
     if ckpt:
-        ckpt.full_restore(transformer_layers, model)
+        with gsq_distributed.check() if gsq_distributed else nullcontext():
+            ckpt.full_restore(transformer_layers, model)
 
     outside_calibrator.calibrate()
 

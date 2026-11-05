@@ -51,6 +51,7 @@ from modelopt.torch.utils.network import (
 from modelopt.torch.utils.serialization import safe_load, safe_save
 
 from .core_utils import has_accelerate_offload
+from .gsq_distributed import DistributedGSQ
 
 
 class _EarlyStopForwardError(Exception):
@@ -274,6 +275,7 @@ class LayerActivationCollector:
         model: nn.Module,
         status_callback: Callable[[str], None] | None = None,
         activation_cache=None,
+        allow_empty: bool = False,
     ):
         """Initialize the collector for the given model."""
         self.model = model
@@ -282,6 +284,7 @@ class LayerActivationCollector:
         self._patched = False
         self._status_callback = status_callback
         self.activation_cache = activation_cache or _ActivationCache()
+        self.allow_empty = allow_empty
         self._reuse_cache = False
         self._replayed_inputs = None
 
@@ -520,7 +523,7 @@ class LayerActivationCollector:
 
         if layer_idx > 0:
             prev = self._decoder_layers[layer_idx - 1]._layerwise_calib
-            if not prev.collected_inputs:
+            if not prev.collected_inputs and not self.allow_empty:
                 raise RuntimeError(
                     f"Layer {layer_idx - 1} ({prev.name!r}) has no collected inputs to replay. "
                     "Layers must be calibrated sequentially — ensure get_input_activations() "
@@ -592,7 +595,7 @@ class LayerActivationCollector:
             info.collected_inputs = []
             raise
 
-        if not info.collected_inputs:
+        if not info.collected_inputs and not self.allow_empty:
             info.mode = "original"
             raise RuntimeError(
                 f"Layer {info.name!r} collected no inputs during forward_loop. "
@@ -888,6 +891,7 @@ def _write_manifest(
     save_every: int,
     calib_mutates_weights: bool,
     save_layer_state: bool,
+    distributed_metadata: dict | None = None,
 ) -> None:
     """Atomically write manifest.json. Config keys are persisted so resume can detect drift."""
     path = os.path.join(checkpoint_dir, "manifest.json")
@@ -900,6 +904,7 @@ def _write_manifest(
                 "save_every": save_every,
                 "calib_mutates_weights": calib_mutates_weights,
                 "save_layer_state": save_layer_state,
+                **({"distributed": distributed_metadata} if distributed_metadata else {}),
             },
             f,
         )
@@ -996,10 +1001,8 @@ class _CheckpointState:
     Handles both saving per-layer checkpoints during calibration and
     restoring from a previous partial run.
 
-    .. todo::
-        Support distributed checkpoint save/restore for FSDP2:
-        use ``torch.distributed.checkpoint`` (or save only from rank 0 + barrier)
-        and broadcast restored state to all ranks during resume.
+    Replicated GSQ can supply validated distributed metadata. Sharded model
+    checkpointing (including FSDP2) remains unsupported.
     """
 
     def __init__(
@@ -1010,8 +1013,11 @@ class _CheckpointState:
         save_every: int = 1,
         calib_mutates_weights: bool = True,
         save_layer_state: bool = True,
+        distributed_metadata: dict | None = None,
     ):
-        if dist.is_initialized() and dist.size() > 1:
+        self.distributed = DistributedGSQ()
+        self.distributed_metadata = distributed_metadata
+        if self.distributed.active and distributed_metadata is None:
             raise RuntimeError(
                 "Layerwise calibration checkpointing is not supported in "
                 "multi-process distributed jobs (e.g. FSDP2). "
@@ -1039,12 +1045,27 @@ class _CheckpointState:
         save_every: int = 1,
         calib_mutates_weights: bool = True,
         save_layer_state: bool = True,
+        distributed_metadata: dict | None = None,
     ) -> Self | None:
         """Create from folder. Detects resume point. Returns None if no checkpoint_dir."""
         if not checkpoint_dir:
             return None
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        info = detect_resume_point(checkpoint_dir)
+        distributed = DistributedGSQ()
+        with distributed.check():
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            manifest = _read_manifest(checkpoint_dir)
+            if (
+                distributed_metadata is not None
+                and manifest is None
+                and os.path.exists(os.path.join(checkpoint_dir, "manifest.json"))
+            ):
+                raise ValueError("Distributed checkpoint manifest is corrupt")
+            if manifest is not None and manifest.get("distributed") != distributed_metadata:
+                raise ValueError("Checkpoint distributed topology or GSQ configuration mismatch")
+            info = detect_resume_point(checkpoint_dir)
+            if distributed_metadata is not None and manifest is not None:
+                info = (manifest["last_completed_layer"] + 1, manifest)
+        distributed.consistent(manifest)
         if info is not None:
             manifest = info[1]
             for key, new_value in (
@@ -1073,7 +1094,13 @@ class _CheckpointState:
             save_every=save_every,
             calib_mutates_weights=calib_mutates_weights,
             save_layer_state=save_layer_state,
+            distributed_metadata=distributed_metadata,
         )
+
+    def _rank_file(self, name: str) -> str:
+        if self.distributed.active:
+            return f"{name}_rank_{self.distributed.rank:05d}.pt"
+        return f"{name}.pt"
 
     def setup_resume(self, layers: nn.ModuleList, activation_cache=None) -> list | None:
         """Load output_meta for skip layers 0..K-1, return next_inputs for layer K.
@@ -1089,16 +1116,17 @@ class _CheckpointState:
         for i in range(self.start_layer):
             d = _layer_dir(self.checkpoint_dir, i)
             meta = _load_checkpoint_file(
-                os.path.join(d, "output_meta.pt"), "cpu", allow_caches=True
+                os.path.join(d, self._rank_file("output_meta")), "cpu", allow_caches=True
             )
             layers[i]._layerwise_calib.output_meta = meta
 
         d = _layer_dir(self.checkpoint_dir, last_ckpt)
-        next_inputs_path = os.path.join(d, "next_inputs.pt")
+        next_inputs_path = os.path.join(d, self._rank_file("next_inputs"))
         if not os.path.isfile(next_inputs_path):
             raise FileNotFoundError(f"Cannot resume: next_inputs.pt missing for layer {last_ckpt}")
+        on_cpu = activation_cache is not None and activation_cache.on_cpu
         next_inputs = _load_checkpoint_file(next_inputs_path, "cpu", allow_caches=True)
-        if activation_cache is not None and activation_cache.on_cpu:
+        if on_cpu:
             return [activation_cache.store(batch) for batch in next_inputs]
         resume_device = get_module_device(layers[self.start_layer])
         next_inputs = _move_to_device(next_inputs, resume_device)
@@ -1133,7 +1161,8 @@ class _CheckpointState:
                 buffers_path = os.path.join(d, "quantizer_buffers.pt")
                 if os.path.isfile(weights_path):
                     weights = _load_checkpoint_file(weights_path, layer_device)
-                    layer.load_state_dict(weights, strict=False, assign=True)
+                    # Copy into shared quantizer buffers instead of replacing their aliases.
+                    layer.load_state_dict(weights, strict=False)
                 elif os.path.isfile(buffers_path):
                     # Non-mutating calibration mode: restore just the TensorQuantizer
                     # state_dict (carries _amax). The layer's other weights were not
@@ -1158,7 +1187,9 @@ class _CheckpointState:
         for idx in range(self.num_layers):
             if idx == keep:
                 continue
-            stale = os.path.join(_layer_dir(self.checkpoint_dir, idx), "next_inputs.pt")
+            stale = os.path.join(
+                _layer_dir(self.checkpoint_dir, idx), self._rank_file("next_inputs")
+            )
             if os.path.exists(stale):
                 os.remove(stale)
 
@@ -1168,6 +1199,8 @@ class _CheckpointState:
         model: nn.Module,
         layers: nn.ModuleList,
         next_layer_inputs: list | None = None,
+        *,
+        keep_only_latest_inputs: bool = False,
     ) -> None:
         """Snapshot the just-calibrated layer; commit the window at boundaries.
 
@@ -1186,53 +1219,69 @@ class _CheckpointState:
 
         _cpu = torch.device("cpu")
         layer = layers[layer_idx]
-        qstate = weights = quantizer_buffers = None
-        if self.save_layer_state:
-            with enable_weight_access_and_writeback(layer, model, writeback=False):
-                qstate = _move_to_device(quantizer_state(layer), _cpu)
-                if self.calib_mutates_weights:
-                    weights = _move_to_device(layer.state_dict(), _cpu)
-                else:
-                    quantizer_buffers = _move_to_device(get_quantizer_state_dict(layer), _cpu)
+        with self.distributed.check():
+            qstate = weights = quantizer_buffers = None
+            if self.save_layer_state and self.distributed.rank == 0:
+                with enable_weight_access_and_writeback(layer, model, writeback=False):
+                    qstate = _move_to_device(quantizer_state(layer), _cpu)
+                    if self.calib_mutates_weights:
+                        weights = _move_to_device(layer.state_dict(), _cpu)
+                    else:
+                        quantizer_buffers = _move_to_device(get_quantizer_state_dict(layer), _cpu)
 
-        output_meta = getattr(layer._layerwise_calib, "output_meta", None)
-        if output_meta is None:
-            # Final-layer placeholder: never consumed by skip mode (no successor).
-            output_meta = LayerActivationCollector._extract_output_meta(torch.zeros(1))
+            output_meta = getattr(layer._layerwise_calib, "output_meta", None)
+            if output_meta is None:
+                # Final-layer placeholder: never consumed by skip mode (no successor).
+                output_meta = LayerActivationCollector._extract_output_meta(torch.zeros(1))
 
-        _save_layer_files(
-            self.checkpoint_dir,
-            layer_idx,
-            weights,
-            qstate,
-            quantizer_buffers,
-            _move_to_device(output_meta, _cpu),
-        )
+            if self.distributed.rank == 0:
+                _save_layer_files(
+                    self.checkpoint_dir,
+                    layer_idx,
+                    weights,
+                    qstate,
+                    quantizer_buffers,
+                    _move_to_device(output_meta, _cpu),
+                )
+
+        with self.distributed.check():
+            if self.distributed.active:
+                safe_save(
+                    _move_to_device(output_meta, _cpu),
+                    os.path.join(
+                        _layer_dir(self.checkpoint_dir, layer_idx), self._rank_file("output_meta")
+                    ),
+                )
 
         is_final = layer_idx + 1 == self.num_layers
         is_window_end = (layer_idx + 1) % self.save_every == 0
         if not (is_final or is_window_end):
             return
 
-        # Window boundary: write next_inputs.pt + manifest to commit the window.
-        if next_layer_inputs is not None:
-            safe_save(
-                _move_to_device(next_layer_inputs, _cpu),
-                os.path.join(_layer_dir(self.checkpoint_dir, layer_idx), "next_inputs.pt"),
-            )
-        _write_manifest(
-            self.checkpoint_dir,
-            layer_idx,
-            self.num_layers,
-            save_every=self.save_every,
-            calib_mutates_weights=self.calib_mutates_weights,
-            save_layer_state=self.save_layer_state,
-        )
-        # Per-layer export only: its resume dir is auto-derived, so an activation set per
-        # layer would dwarf a checkpoint the user never opted into. After the manifest, so
-        # a crash mid-write still resumes from the previous boundary.
-        if not self.save_layer_state:
-            self._prune_stale_next_inputs(keep=layer_idx)
+        with self.distributed.check():
+            if next_layer_inputs is not None:
+                safe_save(
+                    _move_to_device(next_layer_inputs, _cpu),
+                    os.path.join(
+                        _layer_dir(self.checkpoint_dir, layer_idx), self._rank_file("next_inputs")
+                    ),
+                )
+        with self.distributed.check():
+            if self.distributed.rank == 0:
+                _write_manifest(
+                    self.checkpoint_dir,
+                    layer_idx,
+                    self.num_layers,
+                    save_every=self.save_every,
+                    calib_mutates_weights=self.calib_mutates_weights,
+                    save_layer_state=self.save_layer_state,
+                    distributed_metadata=self.distributed_metadata,
+                )
+        # Prune only after committing the new boundary, preserving crash recovery.
+        # Device-cache checkpoints retain their existing history policy.
+        with self.distributed.check():
+            if not self.save_layer_state or keep_only_latest_inputs:
+                self._prune_stale_next_inputs(keep=layer_idx)
         window_start = self._last_saved_layer + 1
         self._last_saved_layer = layer_idx
         window_size = layer_idx - window_start + 1
