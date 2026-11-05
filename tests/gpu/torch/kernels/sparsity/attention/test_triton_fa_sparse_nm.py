@@ -30,7 +30,7 @@ if TRITON_KERNEL_AVAILABLE:
     import triton.language as tl
 
     from modelopt.torch.kernels.common.attention import attention
-    from modelopt.torch.kernels.sparsity.attention.skip_softmax_helpers import (
+    from modelopt.torch.kernels.common.attention.skip_softmax_helpers import (
         _apply_sparse_nm_to_qk_tile,
     )
 
