@@ -75,7 +75,8 @@ def int8_to_fp8(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
 
     def _int8_scale_to_fp8_scale(scale: np.ndarray, scale_name: str):
         np_scale = onnx.numpy_helper.to_array(scale)
-        np_fp8_scale = (np_scale * 448.0) / 127.0
+        # Preserve the calibrated range: scale_int8 * 127 == scale_fp8 * 448.
+        np_fp8_scale = np_scale.astype(np.float32) * np.float32(127.0 / 448.0)
         dtype = onnx.helper.tensor_dtype_to_np_dtype(scale.data_type)
         return numpy_helper.from_array(np_fp8_scale.astype(dtype), scale_name)
 
