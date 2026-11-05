@@ -2665,55 +2665,64 @@ def test_mla_fused_down_projections_share_ranges(distributed_setup_size_1, quant
         destroy_model_parallel()  # not a spawned process
 
 
-class _HFNamedFusedProjections(MegatronModule):
-    """Projections deployments fuse, under the HF names Kimi K3's Megatron MLA and KDA keep."""
+# Kimi K3's MLA and KDA projections that deployments fuse: those static NVFP4 also shares, then the gates.
+_KIMI_K3_FUSED_PROJECTIONS = {
+    "mla": (("q_a_proj", "kv_a_proj_with_mqa"), ("g_proj",)),
+    "kda": (("q_proj", "k_proj", "v_proj"), ("g_proj", "f_a_proj", "b_proj")),
+}
 
-    def __init__(self, config):
+
+class _HFNamedFusedProjections(MegatronModule):
+    """Projections deployments fuse, under the HF names Kimi K3's Megatron MLA or KDA keeps."""
+
+    def __init__(self, config, names):
         from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TELinear
 
         super().__init__(config)
         kwargs = {"config": config, "init_method": torch.nn.init.normal_, "bias": False}
         kwargs |= {"skip_bias_add": False, "skip_weight_param_allocation": False}
-        for name in ("q_a_proj", "kv_a_proj_with_mqa"):
-            setattr(self, name, TELinear(64, 64, parallel_mode="duplicated", **kwargs))
-        for name in ("q_proj", "k_proj", "v_proj"):
-            setattr(
-                self,
-                name,
-                TEColumnParallelLinear(64, 64, gather_output=False, is_expert=False, **kwargs),
-            )
+        self.names = names
+        for name in names:
+            if name in ("q_a_proj", "kv_a_proj_with_mqa", "f_a_proj"):
+                linear = TELinear(64, 64, parallel_mode="duplicated", **kwargs)
+            else:
+                linear = TEColumnParallelLinear(
+                    64, 64, gather_output=False, is_expert=False, **kwargs
+                )
+            setattr(self, name, linear)
 
     def forward(self, x):
-        names = ("q_a_proj", "kv_a_proj_with_mqa", "q_proj", "k_proj", "v_proj")
-        return [getattr(self, name)(x)[0] for name in names]
+        return [getattr(self, name)(x)[0] for name in self.names]
 
 
+@pytest.mark.parametrize("attention", ["mla", "kda"])
 @pytest.mark.parametrize(
     "quant_cfg", ["FP8_DEFAULT_CFG", "NVFP4_DEFAULT_CFG", "NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG"]
 )
-def test_hf_named_fused_projections_share_ranges(distributed_setup_size_1, quant_cfg):
+def test_hf_named_fused_projections_share_ranges(distributed_setup_size_1, quant_cfg, attention):
     """Megatron-Core modules with HF names get the ranges deployments fuse, as Megatron-Core MLA does."""
     initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
     try:
+        core, gates = _KIMI_K3_FUSED_PROJECTIONS[attention]
         config = TransformerConfig(num_layers=1, hidden_size=64, num_attention_heads=4)
-        model = _HFNamedFusedProjections(config).cuda()
+        model = _HFNamedFusedProjections(config, core + gates).cuda()
         with torch.no_grad():  # give the weights in each group different ranges
-            model.kv_a_proj_with_mqa.weight.mul_(4)
-            model.v_proj.weight.mul_(4)
+            getattr(model, core[-1]).weight.mul_(4)
+            getattr(model, gates[-1]).weight.mul_(8)
         x = torch.randn(8, 2, 64, device="cuda")
 
         mtq.quantize(model, copy.deepcopy(getattr(mtq, quant_cfg)), lambda m: m(x))
 
-        for names in (("q_a_proj", "kv_a_proj_with_mqa"), ("q_proj", "k_proj", "v_proj")):
-            first, *others = (getattr(model, name) for name in names)
-            for other in others:
-                assert torch.equal(first.input_quantizer.amax, other.input_quantizer.amax)
-                if first.weight_quantizer.is_nvfp4_static:
-                    assert torch.equal(
-                        first.weight_quantizer.global_amax, other.weight_quantizer.global_amax
-                    )
-                else:
-                    assert torch.equal(first.weight_quantizer.amax, other.weight_quantizer.amax)
+        first = getattr(model, core[0])
+        for name in core[1:] + gates:
+            other = getattr(model, name)
+            assert torch.equal(first.input_quantizer.amax, other.input_quantizer.amax)
+            if not first.weight_quantizer.is_nvfp4_static:
+                assert torch.equal(first.weight_quantizer.amax, other.weight_quantizer.amax)
+            elif name in core:
+                assert torch.equal(
+                    first.weight_quantizer.global_amax, other.weight_quantizer.global_amax
+                )
     finally:
         destroy_model_parallel()  # not a spawned process
 

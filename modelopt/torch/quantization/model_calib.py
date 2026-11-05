@@ -170,6 +170,12 @@ _FUSED_MCORE_PROJECTIONS = (
 # HF-named projections deployments fuse, for Megatron-Core modules that keep HF names (e.g. Kimi K3's
 # MLA and KDA). HF models get the same ranges at export, which fuses every group sharing an input.
 _FUSED_HF_NAMED_PROJECTIONS = (("q_a_proj", "kv_a_proj_with_mqa"), ("q_proj", "k_proj", "v_proj"))
+# Kimi K3 also fuses its gates with them (vLLM's ``fused_qkv_a_g_proj`` and ``in_proj_qkvgfab``).
+# Static NVFP4 weights share a global range only within the groups above.
+_FUSED_HF_NAMED_GATED_PROJECTIONS = (
+    ("q_a_proj", "kv_a_proj_with_mqa", "g_proj"),
+    ("q_proj", "k_proj", "v_proj", "g_proj", "f_a_proj", "b_proj"),
+)
 
 
 def _fused_projection_groups(module: nn.Module) -> list[list[nn.Module]]:
@@ -178,10 +184,10 @@ def _fused_projection_groups(module: nn.Module) -> list[list[nn.Module]]:
         sys.modules.get("megatron.core.transformer.module"), "MegatronModule", None
     )
     is_megatron = megatron_module is not None and isinstance(module, megatron_module)
-    groups = [
-        [getattr(module, name, None) for name in names]
-        for names in _FUSED_MCORE_PROJECTIONS + (_FUSED_HF_NAMED_PROJECTIONS if is_megatron else ())
-    ]
+    fused_names = _FUSED_MCORE_PROJECTIONS
+    if is_megatron:
+        fused_names += _FUSED_HF_NAMED_PROJECTIONS + _FUSED_HF_NAMED_GATED_PROJECTIONS
+    groups = [[getattr(module, name, None) for name in names] for names in fused_names]
     return [members for members in groups if all(member is not None for member in members)]
 
 
