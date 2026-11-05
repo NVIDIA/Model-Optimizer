@@ -307,6 +307,7 @@ def test_format_fake_quant_rejects_another_formats_quantizer(num_bits):
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 def test_reconstructed_weight_ste_is_exact(dtype):
+    """Preserve decoded values exactly and pass gradients only to source weights."""
     inputs = torch.tensor([1000.0, -1000.0, 1.0], dtype=dtype, requires_grad=True)
     decoded = torch.tensor([0.125, -0.125, 0.125], dtype=dtype, requires_grad=True)
     output = fake_quantize_with_cache(

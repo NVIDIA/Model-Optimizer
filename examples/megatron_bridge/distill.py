@@ -28,7 +28,7 @@ from pathlib import Path
 
 import torch
 from export_distilled_megatron_to_hf import export_llm_to_hf, save_vlm_to_hf
-from finetuning import _configure_trainable_parameters
+from finetuning import configure_trainable_parameters
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
 from megatron.bridge.recipes.utils.optimizer_utils import (
@@ -182,12 +182,14 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--trainable_params",
         "--trainable_parameter_patterns",
         nargs="+",
         default=None,
-        help="Train only student parameters matching these shell-style patterns. Names are "
-        "relative to the student root. Requires an adapter-free, uncompressed checkpoint; "
-        "every pattern must match on every local model chunk.",
+        help="Train only distilled student parameters matching these shell-style patterns. "
+        "For VLMs, names are relative to language_model; vision/projector settings are untouched. "
+        "Requires an adapter-free, uncompressed checkpoint and a match for every pattern "
+        "on every local model chunk.",
     )
     # Parallelism arguments
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
@@ -637,6 +639,7 @@ class FakeQuantWeightCache(Callback):
 
 
 def main(args: argparse.Namespace, owns_the_run: bool = True):
+    """Build the student and teacher providers, then run Megatron-Bridge distillation."""
     # --student_hf_path stays as given. The student is built and exported from the local copy of
     # the whole checkpoint in student_local_checkpoint_path, since the HF export reads the source's
     # files from local disk only; student_hub_model_id is the Hub ID, or None for a local path.
@@ -761,14 +764,15 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         distill_submodule="language_model" if is_vlm else None,
     )
 
-    if args.trainable_parameter_patterns:
+    if args.trainable_params:
         # Run after checkpoint restore but before KD conversion introduces the teacher.
         def _select_trainable_student_hook(model_chunks):
+            """Select parameters in the distilled student before the teacher is attached."""
             for chunk in model_chunks:
                 student = unwrap_model(chunk)
                 if is_vlm:
                     student = student.language_model
-                _configure_trainable_parameters(student, args.trainable_parameter_patterns)
+                configure_trainable_parameters(student, args.trainable_params)
             return model_chunks
 
         distill_provider.register_pre_wrap_hook(_select_trainable_student_hook, prepend=True)

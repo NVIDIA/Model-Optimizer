@@ -23,16 +23,18 @@ from _test_utils.torch.megatron.models import HAS_MAMBA, get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import get_batch, initialize_for_megatron
 
 import modelopt.torch.quantization as mtq
-from examples.megatron_bridge.finetuning import _configure_trainable_parameters
+from examples.megatron_bridge.finetuning import configure_trainable_parameters
 
 
 @pytest.mark.skipif(not HAS_MAMBA, reason="Hybrid model fixture requires Mamba")
 @pytest.mark.parametrize("recompute", [False, True])
 def test_full_rank_hybrid_routed_experts(dist_workers_size_1, recompute):
+    """Train routed experts through a frozen HybridStack with optional recomputation."""
     dist_workers_size_1.run(partial(_test_full_rank_hybrid_routed_experts, recompute))
 
 
 def _test_full_rank_hybrid_routed_experts(recompute, rank, size):
+    """Check finite expert gradients and updates while preserving frozen weights."""
     initialize_for_megatron(tensor_model_parallel_size=1, seed=42)
     model = get_mcore_hybrid_model(
         num_layers=2,
@@ -49,7 +51,7 @@ def _test_full_rank_hybrid_routed_experts(recompute, rank, size):
         return m(tokens, positions, attention_mask)
 
     mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward)
-    _configure_trainable_parameters(
+    configure_trainable_parameters(
         model, ["*.local_experts.*.linear_fc1.weight", "*.local_experts.*.linear_fc2.weight"]
     )
     before = {n: p.detach().clone() for n, p in model.named_parameters()}

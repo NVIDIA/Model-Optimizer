@@ -24,21 +24,22 @@ from torch.utils.checkpoint import checkpoint
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from examples.megatron_bridge.finetuning import _configure_trainable_parameters
+from examples.megatron_bridge.finetuning import configure_trainable_parameters
 from modelopt.torch.quantization.qtensor import INT4QTensor, QTensorWrapper
 
 
 @pytest.mark.parametrize("recompute", [False, True])
 def test_full_rank_training_and_restore(recompute):
+    """Preserve selective updates and Adam restoration with frozen embeddings."""
     torch.manual_seed(42)
     model = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16), nn.Linear(16, 16))
     inputs = torch.arange(8)
     mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(inputs))
     baseline = model(inputs).detach()
     frozen = {n: p.detach().clone() for n, p in model.named_parameters() if n != "1.weight"}
-    _configure_trainable_parameters(model, ["1.weight"])
+    configure_trainable_parameters(model, ["1.weight"])
     # Reapplying setup must not nest wrappers or alter quantizer state.
-    _configure_trainable_parameters(model, ["1.weight"])
+    configure_trainable_parameters(model, ["1.weight"])
     torch.testing.assert_close(model(inputs), baseline, rtol=0, atol=0)
     initial_weight = model[1].weight.detach().clone()
     optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=0.1)
@@ -58,7 +59,7 @@ def test_full_rank_training_and_restore(recompute):
     restored = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16), nn.Linear(16, 16))
     restored = mto.restore_from_modelopt_state(restored, mto.modelopt_state(model))
     restored.load_state_dict(model.state_dict())
-    _configure_trainable_parameters(restored, ["1.weight"])
+    configure_trainable_parameters(restored, ["1.weight"])
     restored_optimizer = torch.optim.Adam([restored[1].weight], lr=0.1)
     restored_optimizer.load_state_dict(copy.deepcopy(optimizer.state_dict()))
     for candidate, opt in [(model, optimizer), (restored, restored_optimizer)]:
@@ -73,6 +74,7 @@ def test_full_rank_training_and_restore(recompute):
 
 @pytest.mark.parametrize("invalid", ["unmatched", "shared", "packed", "adapters", "empty"])
 def test_full_rank_validation_is_atomic(invalid):
+    """Reject invalid selections without changing parameter trainability."""
     model = nn.Sequential(nn.Linear(16, 16), nn.Linear(16, 16))
     patterns = ["0.weight"]
     if invalid == "unmatched":
@@ -90,5 +92,5 @@ def test_full_rank_validation_is_atomic(invalid):
         patterns = []
     before = {n: p.requires_grad for n, p in model.named_parameters()}
     with pytest.raises(ValueError):
-        _configure_trainable_parameters(model, patterns)
+        configure_trainable_parameters(model, patterns)
     assert before == {n: p.requires_grad for n, p in model.named_parameters()}

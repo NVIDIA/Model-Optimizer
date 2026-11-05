@@ -414,19 +414,20 @@ Weight-only formats leave no quantizer enabled after folding, so no sidecars are
 ### Full-rank routed-expert QAD
 
 Use an adapter-free, fake-quantized student with uncompressed floating weights.
-The standard distillation command accepts `--trainable_parameter_patterns`; for
+The standard distillation command accepts `--trainable_params` (alias `--trainable_parameter_patterns`); for
 DeepSeek-V4-Flash with SequentialMLP experts, append:
 
 ```bash
 --no_moe_grouped_gemm \
---trainable_parameter_patterns \
+--trainable_params \
   '*.local_experts.*.linear_fc1.weight' \
   '*.local_experts.*.linear_fc2.weight'
 ```
 
-Patterns are relative to the student root and must match each local model chunk.
-Only selected student parameters train; the teacher stays frozen. Quantizers and
-activation gradients remain enabled.
+Every pattern must match each local model chunk; stages without matches are unsupported.
+Only selected parameters in the distilled student train; the teacher stays frozen.
+For VLMs, names are relative to `language_model`; vision/projector settings are untouched.
+Quantizers and activation gradients remain enabled.
 
 Reuse the selection on native resume. Native checkpointing restores FP32 masters,
 Adam state, and training counters; `--student_megatron_path` only loads initial

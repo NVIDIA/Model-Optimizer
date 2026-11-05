@@ -22,10 +22,10 @@ from torch import nn
 from modelopt.torch.quantization.lora import _QuantLoRALinear, enable_quant_input_gradients
 from modelopt.torch.quantization.qtensor import QTensorWrapper
 
-__all__ = []
+__all__ = ["configure_trainable_parameters"]
 
 
-def _configure_trainable_parameters(model: nn.Module, target_parameters: list[str]) -> nn.Module:
+def configure_trainable_parameters(model: nn.Module, target_parameters: list[str]) -> nn.Module:
     """Train only parameters matching shell-style patterns, retaining fake quantizers.
 
     Match names relative to the student root, before DDP/optimizer construction.
