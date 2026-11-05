@@ -25,6 +25,7 @@ from modelopt.torch.models import PTQSpec, get_ptq_spec, get_specs
 # registry entry, so adding one fails here until the table names it.
 EXPECTED_PTQ_FIELDS = {
     "NemotronH_Nano_VL_V2": {"vlm_wrapper", "no_auto_device_map"},
+    "Llama_Nemotron_Nano_VL": {"vlm_wrapper", "no_auto_device_map"},
     "nemotron_parse": {"vlm_wrapper", "no_auto_device_map"},  # encoder-decoder
     "nemotron_h_omni": {"vlm_wrapper", "no_auto_device_map"},
     "diffusion_gemma": {"sequential_device_map", "generate_includes_prompt"},
