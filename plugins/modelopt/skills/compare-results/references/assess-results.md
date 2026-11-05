@@ -21,10 +21,7 @@ and infrastructure recovery. Retain every valid planned run.
 
 Report each mean and SE in percent for percentage metrics. Use the t-based 95%
 score interval `mean ± t(0.975, R-1)*SE`, with at least two valid independent
-runs. Use `SE = s / sqrt(R)` for the interval width. These intervals describe
-generation/run variability on the fixed benchmark. Assess generalization to new
-questions separately. For single-run tasks, use a metric-appropriate alternative
-analysis.
+runs.
 
 ## Confidence interval on the delta
 
@@ -40,28 +37,16 @@ df = (vB + vC)² / (vB²/(RB-1) + vC²/(RC-1))
 ```
 
 Label the report `L = Candidate - Baseline` for accuracy: `L = -1 pp` means
-the candidate is 1 percentage point worse. For lower-is-better metrics, reverse
-the delta and interval signs so negative still means worse. Express
-percentage-score differences in percentage points.
+the candidate is 1 percentage point worse.
 
-Calculate with a validated statistical library outside chat. For example,
+Calculate with a validated statistical library. For example,
 [SciPy](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ttest_ind.html)
 `ttest_ind(candidate, baseline, equal_var=False).confidence_interval(0.95)`
-returns the candidate-minus-baseline interval. Welch supports unequal counts and
-variances; it requires at least two independent observations per side and
-compatible run-level means, SDs, and counts (`RB` and `RC`). Use the t quantile
-at the calculated degrees of freedom.
-
-For missing counts/variance, jointly zero variance, or dependent observations,
-mark the Welch interval unavailable and use a reviewed alternative or report
-inconclusive. Establish pairing from the observation design and use a
-paired-difference analysis for paired observations. Preserve clustering and
-match the SD and count to the same observation unit. Flag small-sample
-skew/boundary effects that make the interval unreliable.
+returns the candidate-minus-baseline interval.
 
 ## Assessment
 
-Compare the unrounded signed-loss CI with the user's minimum acceptable signed
+Compare the signed-loss CI with the user's minimum acceptable signed
 loss `M ≤ 0`, in matching units. For example, `M = -1 pp` allows a 1 pp drop:
 
 - **Within margin:** `M < CI_low`. The entire CI meets the target.
@@ -72,16 +57,6 @@ loss `M ≤ 0`, in matching units. For example, `M = -1 pp` allows a 1 pp drop:
   and no degradation remain plausible.
 
 The last two cases, including equality at `M`, leave the target unresolved.
-Separately, `CI_high < 0` indicates a significant degradation at the stated CI
-level. Assess target compliance separately from significance against zero.
-With an unspecified target, report feasibility as inconclusive. Use judgment
-for borderline results, explain it, and retain the statistical status alongside
-the decision. Support confidence-based acceptance with reliable uncertainty.
-
-Choose sample counts, analysis checkpoints, and stopping rules before running.
-Propose bounded extra runs when uncertainty prevents a decision. Label results
-selected across many candidates/tasks or repeated looks as exploratory; use
-independent confirmation or an appropriate sequential/multiple-comparison
-method for confirmatory claims.
-
-Report results using the [report format](../SKILL.md#report-format).
+Use judgment for borderline results, explain it, and retain the statistical
+status alongside the decision. Support confidence-based acceptance with
+reliable uncertainty.
