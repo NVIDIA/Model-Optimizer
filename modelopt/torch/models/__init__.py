@@ -101,6 +101,7 @@ from . import (  # isort: skip
     nemotron_h,
     nemotron_h_nano_vl_v2,
     nemotron_nas,
+    nemotron_parse,
     minimax_m3_vl,
     llama4_text,
     kimi_vl,
