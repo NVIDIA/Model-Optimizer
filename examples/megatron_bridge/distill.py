@@ -180,6 +180,14 @@ def get_args():
             "restored automatically, turning distillation into Quantization Aware Distillation (QAD)."
         ),
     )
+    parser.add_argument(
+        "--trainable_parameter_patterns",
+        nargs="+",
+        default=None,
+        help="Train only student parameters matching these shell-style patterns. Names are "
+        "relative to the student root. Requires an adapter-free, uncompressed checkpoint; "
+        "every pattern must match on every local model chunk.",
+    )
     # Parallelism arguments
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
@@ -751,6 +759,18 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         kd_config,
         distill_submodule="language_model" if is_vlm else None,
     )
+
+    if args.trainable_parameter_patterns:
+        # Run after checkpoint restore but before KD conversion introduces the teacher.
+        def _select_trainable_student_hook(model_chunks):
+            for chunk in model_chunks:
+                student = unwrap_model(chunk)
+                if is_vlm:
+                    student = student.language_model
+                mtq.enable_full_rank_training(student, args.trainable_parameter_patterns)
+            return model_chunks
+
+        distill_provider.register_pre_wrap_hook(_select_trainable_student_hook, prepend=True)
 
     if args.student_megatron_path:
         # QAD: restore the quantized student weights + ModelOpt state before the KD conversion (a no-op

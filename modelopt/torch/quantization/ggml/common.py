@@ -42,6 +42,16 @@ class _CacheKey(NamedTuple):
     version: int
 
 
+class _ReconstructedWeightSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, inputs, reconstructed):
+        return reconstructed
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None
+
+
 @dataclass(eq=False)
 class _PackedWeightCache:
     """One weight's packed payload, reused across forwards.
@@ -278,7 +288,7 @@ def fake_quantize_with_cache(
         dtype=inputs.dtype,
         block_chunk_size=decode_chunk_size,
     )
-    return inputs + (reconstructed - inputs).detach()
+    return _ReconstructedWeightSTE.apply(inputs, reconstructed)
 
 
 @dataclass(frozen=True)

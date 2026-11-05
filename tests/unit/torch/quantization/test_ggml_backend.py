@@ -29,7 +29,7 @@ import modelopt.torch.quantization.ggml.q8_0 as q8_0_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.backend import ggml_fake_quant
-from modelopt.torch.quantization.ggml.common import narrow_to_float32
+from modelopt.torch.quantization.ggml.common import fake_quantize_with_cache, narrow_to_float32
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 # Every registered format, paired with its own module. The module -- not the registry -- supplies
@@ -303,3 +303,23 @@ def test_format_fake_quant_rejects_another_formats_quantizer(num_bits):
         GGML_FORMAT_REGISTRY[num_bits].fake_quant(
             torch.ones(1, block_size), SimpleNamespace(num_bits=other)
         )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_reconstructed_weight_ste_is_exact(dtype):
+    inputs = torch.tensor([1000.0, -1000.0, 1.0], dtype=dtype, requires_grad=True)
+    decoded = torch.tensor([0.125, -0.125, 0.125], dtype=dtype, requires_grad=True)
+    output = fake_quantize_with_cache(
+        inputs,
+        SimpleNamespace(_quantizer_cache=None),
+        format_name="q8_0",
+        block_chunk_size=1,
+        decode_chunk_size=1,
+        quantize=lambda x, **kwargs: (torch.empty(0, dtype=torch.uint8), x.shape),
+        dequantize=lambda *args, **kwargs: decoded,
+    )
+    torch.testing.assert_close(output, decoded, rtol=0, atol=0)
+    gradient = torch.tensor([1.0, 2.0, 3.0], dtype=dtype)
+    output.backward(gradient)
+    torch.testing.assert_close(inputs.grad, gradient, rtol=0, atol=0)
+    assert decoded.grad is None

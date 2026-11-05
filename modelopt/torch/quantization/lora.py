@@ -33,7 +33,12 @@ from .mode import QuantizeModeRegistry
 from .nn import QuantModule, QuantModuleRegistry
 from .qtensor import QTensorWrapper
 
-__all__ = ["QuantLoRAConfig", "enable_quant_lora", "merge_quant_lora"]
+__all__ = [
+    "QuantLoRAConfig",
+    "enable_quant_input_gradients",
+    "enable_quant_lora",
+    "merge_quant_lora",
+]
 
 
 class QuantLoRAConfig(ModeloptBaseConfig):
@@ -122,6 +127,18 @@ def merge_quant_lora(model: nn.Module) -> nn.Module:
     return apply_mode(model, "quant_lora_export", registry=QuantizeModeRegistry)
 
 
+def enable_quant_input_gradients(model: nn.Module) -> nn.Module:
+    """Enable differentiable activation boundaries for training a partially frozen model.
+
+    This does not attach adapters or change parameter trainability. Call before DDP
+    and optimizer construction, including when restoring a native training checkpoint.
+    """
+    for module in list(model.modules()):
+        if not isinstance(module, _QuantLoRAInput) and type(module) in QuantLoRAInputRegistry:
+            QuantLoRAInputRegistry[type(module)].convert(module)
+    return model
+
+
 def _convert_quant_lora(model, config):
     """Validate all targets before freezing the backbone and adding factors."""
     targets = []
@@ -153,9 +170,7 @@ def _convert_quant_lora(model, config):
     model.requires_grad_(False)
     for module in targets:
         QuantLoRARegistry[type(module)].convert(module, config=config)
-    for module in list(model.modules()):
-        if type(module) in QuantLoRAInputRegistry:
-            QuantLoRAInputRegistry[type(module)].convert(module)
+    enable_quant_input_gradients(model)
     metadata = {}
     _update_quant_lora(model, config, metadata)
     return model, metadata

@@ -411,6 +411,35 @@ python ../vllm_serve/vllm_serve_fakequant.py /tmp/Qwen3-8B-NVFP4-QAD-vllm-fq -tp
 
 Weight-only formats leave no quantizer enabled after folding, so no sidecars are written and stock `vllm serve` loads the export as a plain BF16 checkpoint. This mode needs a Megatron-Bridge that writes the quantizer sidecars; see [Pre-Requisites](#pre-requisites).
 
+### Full-rank routed-expert QAD
+
+Use an adapter-free, fake-quantized student with uncompressed floating weights.
+The standard distillation command accepts `--trainable_parameter_patterns`; for
+DeepSeek-V4-Flash with SequentialMLP experts, append:
+
+```bash
+--no_moe_grouped_gemm \
+--trainable_parameter_patterns \
+  '*.local_experts.*.linear_fc1.weight' \
+  '*.local_experts.*.linear_fc2.weight'
+```
+
+Names are relative to the student root. All other student parameters are frozen;
+this does not remove adapters from an existing checkpoint. Every pattern must
+match on each local model chunk, so pipeline stages without routed experts need
+a different selection. The option leaves quantizers enabled and enables activation
+gradients for frozen embeddings and TransformerBlock/HybridStack recomputation.
+The teacher remains frozen through the standard distillation provider.
+
+Use the same selection when resuming a native training checkpoint. The native
+Megatron-Bridge optimizer and checkpoint loader own FP32 master weights, Adam
+state, and training counters; this option does not change their save/restore path.
+An initial `--student_megatron_path` loads student weights and ModelOpt state;
+it is not a substitute for native training resume. Keep the existing Bridge/Core
+installation requirements above, and use versions that provide the model's
+HybridModel provider. This option does not add DeepSeek checkpoint conversion,
+decoded-weight initialization, HF export, or a serving recipe.
+
 ### LoRA QAD
 
 Add `--lora_rank` to PTQ to train low-rank weight updates with the usual QAD flow:

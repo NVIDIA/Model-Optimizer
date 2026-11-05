@@ -29,6 +29,7 @@ from .conversion import *
 from .lora import *
 from .model_quant import *
 from .nn.modules.quant_module import QuantModuleRegistry
+from .qat import *
 from .utils import update_quant_cfg_with_kv_cache_quant
 
 # LoRA modes depend on the quantization mode registry, which framework plugin
