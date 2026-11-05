@@ -1011,7 +1011,7 @@ def test_the_calibration_loop_lets_the_models_plugin_run_the_batch():
 def test_the_calibration_loop_keeps_the_plain_forward_for_encoder_decoder_vlms():
     """An encoder-decoder VLM batch is renamed to ``decoder_input_ids``, which a calibration
     forward looking for ``input_ids`` would not recognise, silently skipping calibration."""
-    model = _Wrapper(SimpleNamespace(model_type="NemotronH_Nano_VL_V2", is_encoder_decoder=True))
+    model = _Wrapper(SimpleNamespace(model_type="nemotron_parse", is_encoder_decoder=True))
 
     example_utils.create_vlm_calibration_loop(model, [_vlm_batch()])(model)
 
