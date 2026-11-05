@@ -32,7 +32,7 @@ from modelopt.torch.export.moe_utils import _export_fused_experts
 from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.choice_search import search_choices
-from modelopt.torch.quantization.ggml.common import pinned_packed_weight
+from modelopt.torch.quantization.ggml.common import pinned_importance, pinned_packed_weight
 
 IQ2_XXS = GGML_FORMAT_REGISTRY["iq2_xxs"]
 IMATRIX = {"method": "imatrix"}
@@ -266,6 +266,32 @@ def test_hf_export_writes_each_fused_expert_s_pinned_rows(moe):
         assert torch.equal(expert.gate_proj.weight, gate)
         assert torch.equal(expert.up_proj.weight, up)
         assert torch.equal(expert.down_proj.weight, down)
+
+
+def test_local_hessian_codes_hold_until_qad_changes_a_block():
+    # Encoding again would re-pick the searched local scales, so the weight they were picked for
+    # keeps its codes; a block QAD changed is re-encoded under the pinned scale, as after GPTQ.
+    torch.manual_seed(0)
+    model = nn.Linear(512, 16, bias=False)
+    original = model.weight.detach().clone()
+    inputs = _inputs() @ torch.randn(512, 512, generator=torch.Generator().manual_seed(1))
+    mtq.quantize(model, _config(LOCAL_HESSIAN), forward_loop=lambda m: m(inputs))
+    quantizer = model.weight_quantizer
+    pinned = pinned_packed_weight(quantizer, "iq2_xxs").clone()
+    assert torch.equal(model.weight, original)
+    assert torch.equal(IQ2_XXS.pack(model.weight.detach().clone(), quantizer), pinned)
+
+    with torch.no_grad():
+        model.weight[3] += 1e-2
+    packed = IQ2_XXS.pack(model.weight.detach().clone(), quantizer)
+    rescanned, _ = IQ2_XXS.quantize(
+        model.weight.detach(),
+        scales=IQ2_XXS.payload_scales(pinned.reshape(-1, IQ2_XXS.block_bytes)),
+        importance=pinned_importance(quantizer, "iq2_xxs"),
+    )
+    others = [row for row in range(16) if row != 3]
+    assert torch.equal(packed[others], pinned[others])
+    assert torch.equal(packed[3], rescanned[3])
 
 
 def test_local_hessian_lowers_the_output_error_of_correlated_inputs():

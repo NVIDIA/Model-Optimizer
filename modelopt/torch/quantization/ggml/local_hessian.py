@@ -90,7 +90,14 @@ class GGMLLocalHessianEncoder(LocalHessianEncoder):
         packed, shape = ggml_format.quantize(
             weight.contiguous(), block_chunk_size=block_chunk_size, **kwargs
         )
-        pin_packed_weight(quantizer, quantizer.num_bits, packed, kwargs.get("importance"))
+        # Pinned with the weight its choices were searched for, so that weight keeps these codes.
+        pin_packed_weight(
+            quantizer,
+            quantizer.num_bits,
+            packed,
+            kwargs.get("importance"),
+            source=weight if "choices" in kwargs else None,
+        )
         if ggml_format.payload_scales is not None:
             return weight
         decoded = ggml_format.dequantize(

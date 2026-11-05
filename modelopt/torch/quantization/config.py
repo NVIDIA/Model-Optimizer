@@ -1033,7 +1033,7 @@ class LocalHessianCalibConfig(
     IQ1_S, deltas) are picked by this loss over the block's 256 x 256 Hessian, while their
     codebook search keeps imatrix's weighting. The weight is replaced by its encoding and the codes
     are pinned, as with imatrix, which this replaces; ``block_size`` and the amax-search options do
-    not apply to them.
+    not apply to them. Until QAD changes a block, it keeps the codes this search picked.
     """
 
     _mutates_weights: ClassVar[bool] = False
