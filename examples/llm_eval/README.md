@@ -35,23 +35,23 @@ The reference uses BF16; the quantized checkpoint's KV-cache configuration is fo
 
 ### Frozen-bank stability studies
 
-`kl_study.py` adds resumable, per-position scoring for user-supplied JSONL banks. Each record needs a unique string `id` and complete `prompt_ids`; `source`, corpus-block identifiers and other provenance can be retained as additional fields. Freeze reference continuations once, then reuse the resulting `generated_ids` for every candidate. Supply the reference's complete EOS token-ID list explicitly.
+`kl_study.py` adds resumable, per-position scoring for user-supplied JSONL banks. Each record needs a unique string `id` and complete `prompt_ids`; `source`, corpus-block identifiers and other provenance can be retained as additional fields. Freeze reference continuations once, then reuse the resulting `generated_ids` for every candidate. EOS IDs are derived from reference checkpoint metadata; an explicit override must include the complete reference EOS set.
 
 ```sh
 python examples/llm_eval/kl_study.py freeze \
     --input prompts.jsonl --output frozen.jsonl --model ./bf16 \
     --work_dir runs/generation --context_limit 16384 --max_new_tokens 8192 \
-    --eos_token_ids 2 --runner_sha256 REVIEWED_RUNNER_SHA256
+    --runner_sha256 REVIEWED_RUNNER_SHA256 --evaluator_commit EVALUATOR_COMMIT_SHA
 
 python examples/llm_eval/kl_study.py score \
     --input frozen.jsonl --output candidate.json \
     --model ./bf16 --quantized_model ./export \
     --work_dir runs/candidate --context_limit 16384 --max_new_tokens 8192 \
-    --eos_token_ids 2 --runner_sha256 REVIEWED_RUNNER_SHA256 \
+    --runner_sha256 REVIEWED_RUNNER_SHA256 --evaluator_commit EVALUATOR_COMMIT_SHA \
     --top_ks 32 64 128 256 512 1024 2048
 ```
 
-Choose a context limit supported by both checkpoints and replace the illustrative EOS ID. Prompts remain complete; generation stops at EOS or the smaller of the token cap and available context, with context-limited examples flagged. Scoring includes the EOS prediction and excludes padding and post-EOS positions.
+Choose a context limit supported by both checkpoints. Prompts remain complete; generation stops at EOS or the smaller of the token cap and available context, with context-limited examples flagged. Scoring includes the EOS prediction and excludes padding and post-EOS positions.
 
 This experimental path intercepts a private vLLM V1 callback. It requires the exact reviewed model-runner source SHA-256 and callback signature, and rejects other runners or pipeline parallelism. Qualify the installed runtime with `--audit` on a bank of at most 64 total tokens per example before a large run. The audit compares against ordinary full-vocabulary prompt and output scores from the same forward pass, including the final prediction; candidate KL also has independent float64 CPU checks at the first, middle and last positions. The offline `validate` phase checks frozen-input structure without loading models; `score --dry_run` additionally checks checkpoint hashes and resume provenance.
 
@@ -59,7 +59,7 @@ Reference and candidate engines remain resident on disjoint GPU groups (`--refer
 
 The report retains each position's full KL, conditional KL for every requested k, and reference head probability mass. For a generation-length sweep, average the first `min(length, generated_tokens)` positions within each prompt, then average prompt means equally. Prompt-count sweeps and source-balanced paired resampling can use these scalars without new inference. Conditional KL discards tail mass and need not approach full KL monotonically; retained mass and candidate-rank reversals should accompany top-k convergence claims.
 
-Checkpoint bytes, evaluator code, inputs and settings bind the work directory. Completed example files are written atomically and reused only with matching identities; changed provenance raises an error. Keep a separate work directory per candidate, input bank or configuration, and preserve the manifest and runtime files alongside results. The existing `kl_eval.py` CLI and `mean_kl` result keys remain available; the exported `token_kl` API supplies the per-position multi-k metrics.
+Checkpoint bytes, evaluator code, inputs and settings bind the work directory. Declare the exact 40-digit evaluator Git commit with `--evaluator_commit` and add `--evaluator_dirty` for edits relative to that commit; source-file hashes are retained independently. Completed example files are written atomically and reused only with matching identities; changed provenance raises an error. Keep a separate work directory per candidate, input bank or configuration, and preserve the manifest and runtime files alongside results. The existing `kl_eval.py` CLI and `mean_kl` result keys remain available; the exported `token_kl` API supplies the per-position multi-k metrics.
 
 ## NeMo Evaluator
 

@@ -22,6 +22,11 @@ Candidate scoring reduces each vocabulary chunk to per-position KL immediately.
 import hashlib
 import inspect
 from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+from kl_eval import token_kl
 
 __all__ = ["KLWorkerExtension"]
 
@@ -29,10 +34,14 @@ __all__ = ["KLWorkerExtension"]
 class KLWorkerExtension:
     """Capture full-vocabulary generated predictions in a source-pinned vLLM V1 runner."""
 
+    # vLLM supplies these attributes when mixing the extension into its worker.
+    model_runner: Any
+    parallel_config: Any
+    model_config: Any
+    rank: int
+
     def full_install(self, expected_runner_sha256):
         """Verify and intercept the reviewed runner's prompt-scoring callback."""
-        import torch
-
         runner = self.model_runner
         if (
             f"{type(runner).__module__}.{type(runner).__name__}"
@@ -52,7 +61,6 @@ class KLWorkerExtension:
         self._full_original = runner._get_prompt_logprobs_dict
         self._full_request = None
         self._full_result = None
-        self._full_torch = torch
         runner._get_prompt_logprobs_dict = self._full_callback
         return {
             "rank": self.rank,
@@ -62,8 +70,6 @@ class KLWorkerExtension:
 
     def full_arm(self, request):
         """Arm one frozen sequence and its reference buffer or output destination."""
-        import numpy as np
-
         if self._full_request is not None:
             raise RuntimeError("Capture already armed")
         prompt, sequence = request["prompt_tokens"], request["sequence"]
@@ -97,10 +103,7 @@ class KLWorkerExtension:
         return self._full_original(hidden_states, scheduled)
 
     def _full_capture(self, hidden_states, scheduled):
-        import numpy as np
-        from kl_eval import token_kl
-
-        torch, runner, request = self._full_torch, self.model_runner, self._full_request
+        runner, request = self.model_runner, self._full_request
         assert request is not None
         if self._full_result is not None or len(scheduled) != 1:
             raise RuntimeError("Ambiguous/repeated capture")
@@ -134,19 +137,37 @@ class KLWorkerExtension:
         if generated_start != generated_stop:
             if generated_start != self._full_next:
                 raise RuntimeError("Missing or duplicate prediction positions")
-            selected = hidden_states[local_start:local_stop]
-            for offset in range(0, len(selected), 64):
-                block = selected[offset : offset + 64]
-                logits = runner.model.compute_logits(block)
+            # Align tiles to the native prompt projection and score the sampled
+            # final row separately: BF16 projection arithmetic depends on batch shape.
+            prompt_stop = min(count, len(request["sequence"]) - computed - 1)
+            slices = [
+                (
+                    offset,
+                    min(offset + 64, prompt_stop),
+                    max(local_start, offset),
+                    min(local_stop, offset + 64, prompt_stop),
+                )
+                for offset in range(local_start // 64 * 64, min(local_stop, prompt_stop), 64)
+                if local_start < prompt_stop
+            ]
+            if computed + count == len(request["sequence"]):
+                slices.append((count - 1, count, count - 1, count))
+            start = generated_start
+            for left, right, keep_left, keep_right in slices:
+                logits = runner.model.compute_logits(hidden_states[left:right])
+                size = keep_right - keep_left
+                stop = start + size
                 # vLLM's TP logits processor may return global logits on every
                 # rank. All ranks must enter its collectives, but only rank zero
                 # owns file output and metric reduction.
                 if logits is None or self.rank != 0:
+                    start = stop
                     continue
-                if logits.shape != (len(block), self._full_shape[1]):
+                if logits.shape != (right - left, self._full_shape[1]):
                     raise RuntimeError(
                         f"Global vocabulary mismatch: {logits.shape} versus {self._full_shape[1]}"
                     )
+                logits = logits[keep_left - left : keep_right - left]
                 logp = torch.log_softmax(logits.float(), dim=-1)
                 if not torch.isfinite(logp).all():
                     raise RuntimeError("Nonfinite full-vocabulary log-probabilities")
@@ -154,8 +175,6 @@ class KLWorkerExtension:
                 self._full_normalization_error = max(self._full_normalization_error, normalization)
                 if normalization > 1e-5:
                     raise RuntimeError("Full-vocabulary probabilities do not normalize")
-                start = generated_start + offset
-                stop = start + len(block)
                 self._full_writer = True
                 if request.get("reference"):
                     assert self._full_mmap is not None
@@ -187,6 +206,7 @@ class KLWorkerExtension:
                         )
                     self._full_mmap[start:stop] = logp.cpu().numpy()
                 del logits, logp
+                start = stop
             self._full_next = generated_stop
         if self._full_computed == len(request["sequence"]):
             self._full_finish()

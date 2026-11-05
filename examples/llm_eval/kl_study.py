@@ -30,8 +30,28 @@ def _digest(value):
 
 
 def _file_hash(path):
+    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _reference_eos(directory):
+    for name in ("generation_config.json", "config.json", "tokenizer_config.json"):
+        path = directory / name
+        if not path.exists():
+            continue
+        config = json.loads(path.read_text())
+        eos = config.get("eos_token_id")
+        if eos is None:
+            eos = config.get("text_config", {}).get("eos_token_id")
+        if eos is not None:
+            ids = eos if isinstance(eos, list) else [eos]
+            if any(type(i) is not int or i < 0 for i in ids):
+                raise ValueError("Invalid reference EOS token IDs.")
+            return sorted(set(ids))
+    raise ValueError("Reference checkpoint metadata must declare its complete EOS token-ID set.")
 
 
 def _checkpoint_hash(directory):
@@ -238,12 +258,20 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--context_limit", type=int, required=True)
     parser.add_argument("--max_new_tokens", type=int, default=8192)
-    parser.add_argument("--eos_token_ids", type=int, nargs="+", default=[])
+    parser.add_argument("--eos_token_ids", type=int, nargs="+")
     parser.add_argument("--model", type=Path)
     parser.add_argument("--quantized_model", type=Path)
     parser.add_argument("--work_dir", type=Path)
     parser.add_argument("--runner_sha256")
     parser.add_argument("--dry_run", action="store_true")
+    parser.add_argument(
+        "--evaluator_commit", help="Exact Git commit of the evaluator source snapshot."
+    )
+    parser.add_argument(
+        "--evaluator_dirty",
+        action="store_true",
+        help="Declare source edits relative to that commit.",
+    )
     parser.add_argument(
         "--top_ks", nargs="+", type=int, default=[32, 64, 128, 256, 512, 1024, 2048]
     )
@@ -270,6 +298,21 @@ def main():
             "Require positive top-k values, prefill chunk size and GPU utilization in (0, 1]."
         )
     args.top_ks = sorted(set(args.top_ks))
+    if args.phase != "validate":
+        if args.model is None:
+            parser.error("Require --model to resolve reference EOS IDs.")
+        expected_eos = _reference_eos(args.model)
+        if args.eos_token_ids is None:
+            args.eos_token_ids = expected_eos
+        elif not set(expected_eos).issubset(args.eos_token_ids):
+            parser.error("--eos_token_ids must include the complete reference EOS set.")
+        if (
+            not args.evaluator_commit
+            or len(args.evaluator_commit) != 40
+            or any(c not in "0123456789abcdef" for c in args.evaluator_commit)
+        ):
+            parser.error("Require the exact 40-digit --evaluator_commit for run provenance.")
+    args.eos_token_ids = sorted(set(args.eos_token_ids or []))
     reference_devices = args.reference_devices.split(",")
     candidate_devices = args.candidate_devices.split(",")
     if (

@@ -69,7 +69,7 @@ def test_score_resume_is_bound_to_inputs_settings_and_model_bytes(tmp_path):
     bank.write_text(json.dumps({"id": "a", "prompt_ids": [1], "generated_ids": [2]}) + "\n")
     model = tmp_path / "model"
     model.mkdir()
-    (model / "config.json").write_text('{"model_type":"gpt2"}')
+    (model / "config.json").write_text('{"model_type":"gpt2","eos_token_id":0}')
     output = tmp_path / "results.json"
     command = [
         sys.executable,
@@ -92,6 +92,8 @@ def test_score_resume_is_bound_to_inputs_settings_and_model_bytes(tmp_path):
         str(model),
         "--runner_sha256",
         "a" * 64,
+        "--evaluator_commit",
+        "b" * 40,
     ]
     subprocess.run(command, check=True, capture_output=True, text=True)
     first = output.read_text()
@@ -116,7 +118,53 @@ def test_score_resume_is_bound_to_inputs_settings_and_model_bytes(tmp_path):
     assert wrong_reference.returncode != 0
     assert "reference checkpoint" in wrong_reference.stderr.lower()
     bank.write_text(json.dumps({"id": "a", "prompt_ids": [1], "generated_ids": [2]}) + "\n")
-    (model / "config.json").write_text('{"model_type":"llama"}')
+    (model / "config.json").write_text('{"model_type":"llama","eos_token_id":0}')
     invalid = subprocess.run(command, capture_output=True, text=True)
     assert invalid.returncode != 0
     assert "incompatible" in invalid.stderr.lower()
+
+
+def test_score_derives_complete_reference_eos_and_records_commit(tmp_path):
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "generation_config.json").write_text('{"eos_token_id":[0,3]}')
+    bank = tmp_path / "bank.jsonl"
+    bank.write_text(json.dumps({"id": "a", "prompt_ids": [1], "generated_ids": [2, 3]}) + "\n")
+    output = tmp_path / "result.json"
+    command = [
+        sys.executable,
+        str(SCRIPT),
+        "score",
+        "--dry_run",
+        "--model",
+        str(model),
+        "--quantized_model",
+        str(model),
+        "--input",
+        str(bank),
+        "--output",
+        str(output),
+        "--work_dir",
+        str(tmp_path / "work"),
+        "--context_limit",
+        "8",
+        "--max_new_tokens",
+        "4",
+        "--runner_sha256",
+        "a" * 64,
+        "--evaluator_commit",
+        "b" * 40,
+    ]
+    subprocess.run(command, check=True, capture_output=True, text=True)
+    report = json.loads(output.read_text())
+    assert report["examples"][0]["stop_reason"] == "eos"
+    assert report["manifest"]["settings"]["eos_token_ids"] == [0, 3]
+    assert report["manifest"]["settings"]["evaluator_commit"] == "b" * 40
+    assert report["manifest"]["settings"]["evaluator_dirty"] is False
+    incomplete = subprocess.run([*command, "--eos_token_ids", "0"], capture_output=True, text=True)
+    assert incomplete.returncode != 0
+    assert "complete" in incomplete.stderr.lower()
+    bank.write_text(json.dumps({"id": "a", "prompt_ids": [1], "generated_ids": [3, 2]}) + "\n")
+    after_eos = subprocess.run(command, capture_output=True, text=True)
+    assert after_eos.returncode != 0
+    assert "after eos" in after_eos.stderr.lower()

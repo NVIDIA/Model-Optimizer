@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Real-runtime control; point KL_STUDY_MODEL at an unquantized local checkpoint."""
+"""Real-runtime control; set KL_STUDY_MODEL, KL_STUDY_RUNNER_SHA256 and KL_STUDY_EVALUATOR_COMMIT."""
 
 import json
 import os
@@ -29,12 +29,17 @@ import pytest
 def test_bounded_capture_matches_dense_scores_and_resumes(tmp_path):
     script = Path(__file__).resolve().parents[2] / "examples/llm_eval/kl_study.py"
     bank = tmp_path / "input.jsonl"
+    generation = json.loads(
+        (Path(os.environ["KL_STUDY_MODEL"]) / "generation_config.json").read_text()
+    )
+    eos = generation["eos_token_id"]
+    eos = eos[0] if isinstance(eos, list) else eos
     bank.write_text(
         "".join(
             json.dumps(row) + "\n"
             for row in [
-                {"id": "eos", "prompt_ids": [1, 2, 3], "generated_ids": [0]},
-                {"id": "chunked", "prompt_ids": [1] * 19, "generated_ids": [4] * 8 + [0]},
+                {"id": "eos", "prompt_ids": [1, 2, 3], "generated_ids": [eos]},
+                {"id": "chunked", "prompt_ids": [1] * 19, "generated_ids": [4] * 8 + [eos]},
             ]
         )
     )
@@ -55,8 +60,6 @@ def test_bounded_capture_matches_dense_scores_and_resumes(tmp_path):
         "64",
         "--max_new_tokens",
         "16",
-        "--eos_token_ids",
-        "0",
         "--prefill_chunk_size",
         "8",
         "--work_dir",
@@ -68,6 +71,8 @@ def test_bounded_capture_matches_dense_scores_and_resumes(tmp_path):
         "--audit",
         "--runner_sha256",
         os.environ["KL_STUDY_RUNNER_SHA256"],
+        "--evaluator_commit",
+        os.environ["KL_STUDY_EVALUATOR_COMMIT"],
     ]
     subprocess.run(command, check=True)
     report = json.loads(output.read_text())
