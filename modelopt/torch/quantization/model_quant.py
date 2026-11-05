@@ -46,7 +46,7 @@ from modelopt.torch.utils import atomic_print
 
 from . import model_calib
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
-from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe, _algorithm_methods
+from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe, _algorithm_methods, _rewrites_weights
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
 from .kv_cache_auto_quant import (
@@ -1254,10 +1254,13 @@ def auto_quantize(
     search_constraints = cast("ConstraintsDict", constraints or {})
     searcher.validate_search_input(search_constraints, search_config)
 
-    # Some refusals need the converted quantizers to tell which weights a candidate rewrites. A
-    # failure before any candidate calibrates hands back the unconverted modules, so the caller can
-    # retry on the same model, which a converted model would refuse.
-    restore_modules = _save_module_attributes(model)
+    # A weight-rewriting candidate's refusals need the converted quantizers to tell which weights it
+    # rewrites. A failure before any candidate calibrates then hands back the unconverted modules,
+    # so the caller can retry on the same model, which a converted model would refuse. The saved
+    # modules hold every weight conversion replaces (HF Conv1D's), so other searches save none and
+    # the searcher drops them once those checks pass.
+    if any(_rewrites_weights(QuantRecipe(cfg, name=name)) for cfg, name in all_processed_formats):
+        searcher.restore_unconverted = _save_module_attributes(model)
     # Calibration turns pre-quant-scale folding off for the whole process. Hand back the policy
     # found here on every exit, also after a failure while scoring, so later calibrations fold.
     folding_pqs_to_weights = model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS
@@ -1275,8 +1278,8 @@ def auto_quantize(
             set_quantizer_by_cfg(model, fixed_recipe.config.quant_cfg)
         searcher.search(model, search_constraints, config=search_config)
     except BaseException:
-        if not searcher.calibration_started:
-            restore_modules()
+        if searcher.restore_unconverted is not None:
+            searcher.restore_unconverted()
         raise
     finally:
         model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = folding_pqs_to_weights

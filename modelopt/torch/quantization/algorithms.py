@@ -139,16 +139,17 @@ _WEIGHT_REWRITING_METHODS = frozenset({"gptq", "imatrix"})
 _REWRITE_COMPATIBLE_METHODS = _WEIGHT_REWRITING_METHODS | {None, "max"}
 
 
-def _algorithm_methods(algorithm) -> set:
-    if algorithm is None:
-        return {None}
+def _algorithm_entries(algorithm) -> list[dict]:
+    """Each calibration step of ``algorithm`` as a dict of its method and options."""
     if isinstance(algorithm, list | tuple):
-        return set().union(*(_algorithm_methods(a) for a in algorithm))
-    if isinstance(algorithm, str):
-        return {algorithm}
+        return [entry for a in algorithm for entry in _algorithm_entries(a)]
     if hasattr(algorithm, "model_dump"):
         algorithm = algorithm.model_dump()
-    return {algorithm.get("method")}
+    return [algorithm if isinstance(algorithm, dict) else {"method": algorithm}]
+
+
+def _algorithm_methods(algorithm) -> set:
+    return {entry.get("method") for entry in _algorithm_entries(algorithm)}
 
 
 def _rewrites_weights(recipe: "QuantRecipe") -> bool:
@@ -825,9 +826,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     quantizer_states: dict
     method_name: str | None = None
     method_config_keys: frozenset[str] = frozenset()
-    # Set once the checks before calibration pass; ``auto_quantize`` hands back the unconverted
-    # model for a failure before that.
-    calibration_started: bool = False
+    # Hands back the unconverted model for a failure before calibration; ``auto_quantize`` sets it
+    # and ``before_search`` drops it once the checks before calibration pass.
+    restore_unconverted: Callable[[], None] | None = None
 
     quant_grouping_rules = [
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
@@ -1302,6 +1303,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     f"weight itself, but also calibrates with {sorted(unsupported)}, which would "
                     "quantize a transformed weight. Combine GPTQ or imatrix only with max."
                 )
+            # A rerun would resume from per-layer checkpoints, which load the rewritten weights
+            # into new tensors that restoring the source weights does not reach.
+            layerwise = [e.get("layerwise") for e in _algorithm_entries(recipe.config.algorithm)]
+            if any(isinstance(lw, dict) and lw.get("checkpoint_dir") for lw in layerwise):
+                raise NotImplementedError(
+                    f"AutoQuantize candidate {recipe} rewrites weights with a layerwise "
+                    "checkpoint_dir, whose resume would leave the rewritten weights in the model. "
+                    "Drop checkpoint_dir; the AutoQuantize checkpoint resumes the search."
+                )
             for hparam in quant_recipe_hparams:
                 for module, attr, quantizer in hparam._iter_quantizer_choices(recipe):
                     param = _rewritten_weight(recipe, hparam.name, module, attr, quantizer)
@@ -1515,7 +1525,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self._verify_resolved_constraint(quant_recipe_hparams)
 
         source_weights = self._snapshot_source_weights(quant_recipe_hparams, search_recipes)
-        self.calibration_started = True
+        # Free the weights conversion replaced before calibration and scoring.
+        self.restore_unconverted = None
         QuantRecipe.disable_folding_pqs_to_weights()
 
         # Iterate over the search recipes and calibrate the quantizers for each recipe

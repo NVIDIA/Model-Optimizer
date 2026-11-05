@@ -648,6 +648,7 @@ def test_auto_quantize_snapshots_only_the_weights_calibration_rewrites(moe, monk
         "rotated_gptq",
         "rotated_imatrix",
         "awq_gptq",
+        "layerwise_checkpoint",
     ],
 )
 def test_auto_quantize_refusal_hands_back_the_unconverted_model(case, request):
@@ -678,6 +679,12 @@ def test_auto_quantize_refusal_hands_back_the_unconverted_model(case, request):
         # AWQ leaves its scale on the weight quantizer, which GPTQ's codes do not account for, and
         # the selected model would fold the scale into the codes scoring measured.
         formats = [_recipe([{"method": "awq_lite"}, GPTQ], "iq2_xxs")]
+    elif case == "layerwise_checkpoint":
+        # A rerun would resume from per-layer checkpoints holding the rewritten weights, which
+        # load into new tensors that restoring the source weights does not reach.
+        checkpoint_dir = str(request.getfixturevalue("tmp_path"))
+        layerwise = {"enable": True, "checkpoint_dir": checkpoint_dir}
+        formats = [_recipe({**GPTQ, "layerwise": layerwise}, "iq2_xxs")]
     model = copy.deepcopy(source)
     if case == "aliased":
         # Distinct Parameters over one storage, which deepcopy would split: GPTQ on the first layer

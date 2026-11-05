@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
+import gc
 import os
 import warnings
+import weakref
 from contextlib import nullcontext
 
 import pytest
@@ -32,6 +34,8 @@ from _test_utils.torch.transformers_models import (
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe.loader import load_recipe
+from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
     _QuantHFParallelLinear,
@@ -49,13 +53,13 @@ from transformers.integrations.finegrained_fp8 import FP8Linear
 
 
 class HFModel(nn.Module):
-    def __init__(self):
+    def __init__(self, in_features=3, out_features=5):
         super().__init__()
         self.net = nn.Sequential(
             # initialization is (out_features, in_features) instead of (in_features, out_features)
-            transformers.pytorch_utils.Conv1D(5, 3),
+            transformers.pytorch_utils.Conv1D(out_features, in_features),
             nn.ReLU(),
-            transformers.pytorch_utils.Conv1D(5, 5),
+            transformers.pytorch_utils.Conv1D(out_features, out_features),
         )
 
     def forward(self, x):
@@ -132,6 +136,66 @@ def test_convert_conv1d():
     out_1 = model_ref(x)
     out_2 = model_test(x)
     assert torch.allclose(out_1, out_2)
+
+
+_Q8_0_GPTQ_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": "q8_0",
+                "block_sizes": {-1: 32},
+                "backend": "ggml",
+                "effective_bits": GGML_FORMAT_REGISTRY["q8_0"].effective_bits,
+            },
+        },
+    ],
+    "algorithm": {"method": "gptq", "block_size": 256},
+}
+
+
+@pytest.mark.parametrize("rewrites", [False, True], ids=["int8", "q8_0_gptq"])
+def test_auto_quantize_frees_the_conv1d_weights_conversion_replaces(monkeypatch, rewrites):
+    # Conversion transposes each Conv1D weight into a new parameter. Only a search with a
+    # weight-rewriting candidate keeps the old ones, to hand back on a refusal, and only until its
+    # checks before calibration pass.
+    model = HFModel(in_features=256, out_features=256)
+    replaced = [
+        weakref.ref(m.weight)
+        for m in model.modules()
+        if isinstance(m, transformers.pytorch_utils.Conv1D)
+    ]
+    alive = []
+
+    def count_alive():
+        gc.collect()
+        alive.append(sum(ref() is not None for ref in replaced))
+
+    before_search = _AutoQuantizeBaseSearcher.before_search
+
+    def counting_before_search(self):
+        count_alive()
+        return before_search(self)
+
+    def forward_step(model, batch):
+        count_alive()
+        return model(batch)
+
+    monkeypatch.setattr(_AutoQuantizeBaseSearcher, "before_search", counting_before_search)
+    mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 10.0},
+        quantization_formats=[_Q8_0_GPTQ_CFG if rewrites else mtq.INT8_DEFAULT_CFG],
+        data_loader=[torch.randn(8, 256) for _ in range(2)],
+        forward_step=forward_step,
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+    after_conversion, *in_forwards = alive
+    assert after_conversion == (len(replaced) if rewrites else 0)
+    assert in_forwards and not any(in_forwards)
 
 
 def test_fp8_linear_per_tensor_dequant(monkeypatch):
