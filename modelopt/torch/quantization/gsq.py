@@ -150,9 +150,9 @@ def _calibration_state(model):
     tensors = list(dict.fromkeys([*parameters, *model.buffers()]))
     originals = [(t, t.detach().to("cpu", copy=True)) for t in tensors]
     module_states = {
-        m: {
-            **m.__dict__,
-            **{
+        m: (
+            dict(m.__dict__),
+            {
                 key: dict(m.__dict__[key])
                 for key in (
                     "_modules",
@@ -162,7 +162,7 @@ def _calibration_state(model):
                     "_forward_pre_hooks",
                 )
             },
-        }
+        )
         for m in model.modules()
     }
     memo = {id(t): t for t in tensors}
@@ -183,10 +183,15 @@ def _calibration_state(model):
         with torch.no_grad():
             for tensor, original in originals:
                 tensor.copy_(original)
-        for module, saved in module_states.items():
+        for module, (saved, containers) in module_states.items():
+            # Hook handles and shared state retain references to these dictionaries.
+            for key, contents in containers.items():
+                saved[key].clear()
+                saved[key].update(contents)
             module.__dict__.clear()
             module.__dict__.update(saved)
         for q, cls, state in quantizers:
+            state.update({key: module_states[q][0][key] for key in module_states[q][1]})
             q.__class__ = cls
             q.__dict__.clear()
             q.__dict__.update(state)
