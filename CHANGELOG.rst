@@ -8,6 +8,7 @@ Changelog
 
 *Quantization*
 
+- Add an NVFP4 tied-LSQ QAD recipe for Qwen3-VL and Qwen3.5-VL visual attention, MLP, and merger linear layers. The recipe requires QAT/QAD training and is not suitable for calibration-only PTQ.
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
 - The functional quantized-weight export API now exports the KV cache: ``capture_kv_cache_export_state`` returns an attention module's ``k_scale`` / ``v_scale``, and ``build_hf_quantization_config`` takes the KV-cache formats from ``get_kv_cache_export_spec``.
 - Add ``use_weight_scale=False`` to ``awq_lite`` and ``awq_full`` calibration for activation-only AWQ scale search. Existing weight-and-activation scaling remains the default.
