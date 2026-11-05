@@ -458,13 +458,11 @@ def load_model(args: argparse.Namespace):
         print("VLM wrapper detected. Enabling image-text calibration by default.")
         args.calib_with_images = True
 
+    # A model type that brings its own calibration data needs only its processor.
     processor = load_calibration_processor(
         model_type, args.local_checkpoint_path, args.trust_remote_code
     )
-    if processor is not None:
-        # The model type brings its own calibration data, which needs only its processor.
-        pass
-    elif args.calib_with_images:
+    if processor is None and args.calib_with_images:
         # For VLM image calibration, we need an AutoProcessor to build multimodal inputs.
         processor = AutoProcessor.from_pretrained(
             args.local_checkpoint_path,
@@ -494,7 +492,7 @@ def load_model(args: argparse.Namespace):
             extracted_lm = extract_and_prepare_language_model_from_vl(full_model)
             if extracted_lm is not None:
                 language_model = extracted_lm
-    else:
+    elif processor is None:
         if args.specdec_offline_dataset is not None:
             language_model = full_model
         else:
