@@ -231,8 +231,11 @@ def _pin_name(format_name: str) -> str:
 
 
 def _source_name(format_name: str) -> str:
-    # Shares the payload's prefix, so checkpointing and sharding treat it as part of the pin; it
-    # is [*rows, blocks], sharded like the payload's leading dimensions.
+    """The buffer holding a pin's source fingerprint, ``[*rows, blocks]``.
+
+    It shares the payload's prefix, so checkpointing and sharding treat it as part of the pin, and
+    shards like the payload's leading dimensions.
+    """
     return f"{_pin_name(format_name)}_source"
 
 

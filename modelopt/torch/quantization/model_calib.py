@@ -1345,8 +1345,8 @@ def local_hessian_calibrate(
     Weights whose quantizer backend registered a local-Hessian encoder (see
     :func:`~modelopt.torch.quantization.utils.calib_utils.register_local_hessian_encoder`), such as
     the GGML IQ formats, are instead encoded once from their Hessian over the encoder's own block
-    size, and replaced by their fake-quantized value. ``block_size`` and the amax-search options
-    do not apply to them. As with imatrix, a quantizer that already holds final codes is left
+    size: their codes are pinned to the quantizer and the weight is left as is. ``block_size`` and
+    the amax-search options do not apply to them. As with imatrix, a quantizer that already holds final codes is left
     alone, so ``[gptq, local_hessian]`` runs GPTQ where it applies and this on any weight it leaves.
 
     We recommend using Local-Hessian with layerwise calibration enabled
@@ -1414,6 +1414,7 @@ def local_hessian_calibrate(
         acc.accumulate(input_local)
 
     def warn_fallback(name, weight, quantizer):
+        """Warn about a weight the amax search cannot block; encoders validate their own."""
         if not _has_local_hessian_encoder(quantizer):  # validated against the encoder's own block
             _warn_local_hessian_fallback(name, weight, quantizer, block_size, warned)
 
@@ -1441,6 +1442,7 @@ def local_hessian_calibrate(
 
     # Phase 3a: encode the weights an encoder takes, freeing each Hessian once it is used.
     def encode(weight, quantizer):
+        """Encode one weight from its Hessian, then free the Hessian unless debugging."""
         acc = accumulators.get(id(quantizer))
         hessian = None if acc is None else acc.normalized_hessian()
         kept = encoders[id(quantizer)].encode(weight, quantizer, hessian, perc_damp)
@@ -2964,6 +2966,7 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
             handle.remove()
 
     def encode(weight, quantizer):
+        """Encode one weight weighted by its inputs' per-column second moments."""
         sum_sq, count = targets[id(quantizer)]
         second_moments = None if count == 0 else sum_sq.to(weight.device) / count
         kept = encoders[id(quantizer)].encode(weight, quantizer, second_moments)

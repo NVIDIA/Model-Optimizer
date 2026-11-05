@@ -622,19 +622,23 @@ def register_gptq_helper(backend: str, factory: type[GPTQHelper]) -> None:
     _GPTQ_HELPER_REGISTRY[backend] = factory
 
 
-class ImatrixEncoder:
-    """Encodes a weight once, its search weighted by its inputs' per-column second moments.
-
-    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` collects ``E[x_j^2]`` for
-    every weight whose quantizer an encoder accepts, then calls :meth:`encode` with it.
-    """
+class _WeightEncoder:
+    """An encoder a one-pass calibration hands each weight whose quantizer it accepts."""
 
     def accepts(self, quantizer) -> bool:
         """Whether this encoder handles ``quantizer``; decided before calibration runs."""
         raise NotImplementedError
 
     def validate(self, weight: torch.Tensor, quantizer) -> None:
-        """Raise if :meth:`encode` would refuse ``weight``; checked before calibration runs."""
+        """Raise if ``encode`` would refuse ``weight``; checked before calibration runs."""
+
+
+class ImatrixEncoder(_WeightEncoder):
+    """Encodes a weight once, its search weighted by its inputs' per-column second moments.
+
+    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` collects ``E[x_j^2]`` for
+    every weight whose quantizer an encoder accepts, then calls :meth:`encode` with it.
+    """
 
     def encode(
         self, weight: torch.Tensor, quantizer, second_moments: torch.Tensor | None
@@ -660,7 +664,7 @@ def register_imatrix_encoder(backend: str, encoder: ImatrixEncoder) -> None:
     _IMATRIX_ENCODER_REGISTRY[backend] = encoder
 
 
-class LocalHessianEncoder:
+class LocalHessianEncoder(_WeightEncoder):
     """Encodes a weight once, its search guided by its inputs' local Hessian.
 
     :func:`modelopt.torch.quantization.model_calib.local_hessian_calibrate` collects ``E[x x^T]``
@@ -670,21 +674,15 @@ class LocalHessianEncoder:
 
     block_size: int
 
-    def accepts(self, quantizer) -> bool:
-        """Whether this encoder handles ``quantizer``; decided before calibration runs."""
-        raise NotImplementedError
-
-    def validate(self, weight: torch.Tensor, quantizer) -> None:
-        """Raise if :meth:`encode` would refuse ``weight``; checked before calibration runs."""
-
     def encode(
         self, weight: torch.Tensor, quantizer, hessian: torch.Tensor | None, perc_damp: float
     ) -> torch.Tensor:
-        """Return ``weight`` fake-quantized by ``quantizer``, guided by ``hessian``.
+        """Encode ``weight`` guided by ``hessian`` and return the weight to keep.
 
-        ``hessian`` is ``[in_features // block_size, block_size, block_size]``, or ``None`` when no
-        calibration input reached the weight. ``perc_damp`` is the fraction of its mean diagonal to
-        add to its diagonal where the encoder scores by it.
+        That is ``weight`` fake-quantized by ``quantizer``, or ``weight`` itself when ``quantizer``
+        re-derives the encoding from it. ``hessian`` is ``[in_features // block_size, block_size,
+        block_size]``, or ``None`` when no calibration input reached the weight. ``perc_damp`` is
+        the fraction of its mean diagonal to add to its diagonal where the encoder scores by it.
         """
         raise NotImplementedError
 

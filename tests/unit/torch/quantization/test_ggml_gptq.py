@@ -433,10 +433,19 @@ def test_folding_a_bf16_weight_decodes_the_pinned_payload():
 
 
 # Q8_0 keeps no scales: its pin holds while the weight is the decoding. IQ2_XS keeps its pinned
-# scales: it re-encodes the unrounded weight, so needs the importance too.
-@pytest.mark.parametrize("num_bits", ["q8_0", "iq2_xs"])
-def test_pin_survives_save_and_restore(num_bits):
-    model, inputs = _gptq_model(num_bits=num_bits, algorithm={**GPTQ, "importance_weighted": True})
+# scales: it re-encodes the unrounded weight, so needs the importance too, and local_hessian's
+# searched choices need the source fingerprint as well.
+@pytest.mark.parametrize(
+    ("num_bits", "algorithm"),
+    [
+        ("q8_0", {**GPTQ, "importance_weighted": True}),
+        ("iq2_xs", {**GPTQ, "importance_weighted": True}),
+        ("iq2_xs", {"method": "local_hessian"}),
+    ],
+    ids=["q8_0-gptq", "iq2_xs-gptq", "iq2_xs-local_hessian"],
+)
+def test_pin_survives_save_and_restore(num_bits, algorithm):
+    model, inputs = _gptq_model(num_bits=num_bits, algorithm=algorithm)
     buffer = io.BytesIO()
     mto.save(model, buffer)
     buffer.seek(0)
