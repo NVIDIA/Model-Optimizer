@@ -323,9 +323,11 @@ def test_expert_parallel_auto_quantize_and_export_match_the_whole_model(
     them, dense replicated or FSDP2-sharded -- each rank scoring its own batch, gives the costs,
     scores and formats of the whole model scoring every rank's batch, in float32, where only their
     order of summation differs. The no-gather writer's mixed-format checkpoint, weights and
-    quantization config, then matches the whole model's single-process export."""
-    if Version(transformers.__version__) < Version("5.16"):
-        pytest.skip("the torch_a2a forward wrappers are pre-hooks below transformers 5.16")
+    quantization config, then matches the whole model's single-process export. From transformers
+    5.16 the experts load as DTensors behind forward wrappers quantizer insertion drops; before it,
+    as each rank's plain share behind forward pre-hooks."""
+    if Version(transformers.__version__) < Version(moe._EP_MIN_TRANSFORMERS):
+        pytest.skip(f"expert parallelism needs transformers >= {moe._EP_MIN_TRANSFORMERS}")
     ep_degree = dist_workers.world_size // ep_share
     if ep_degree < 2 or dist_workers.world_size % ep_share or NUM_EXPERTS % ep_degree:
         pytest.skip(f"{NUM_EXPERTS} experts do not shard over EP {ep_degree} on these GPUs")
