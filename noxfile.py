@@ -211,9 +211,7 @@ def _install_built_from_source(session, *names):
         if wheel is None:
             raise RuntimeError(f"No wheel for {name!r} in {wheelhouse} after building it")
         wheels.append(wheel)
-    # Built against the container's packages: re-resolving their dependencies lets quack-kernels'
-    # pin downgrade the container's nvidia-cutlass-dsl, which breaks torch.compile of any matmul.
-    session.run("python", "-m", "pip", "install", "--no-deps", *wheels)
+    session.run("python", "-m", "pip", "install", *wheels)
 
 
 # Container: nvcr.io/nvidia/pytorch:26.07-py3 or later with CUDA 13
@@ -222,6 +220,9 @@ def gpu(session):
     _install_built_from_source(session, "fast_hadamard_transform")
     session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test,dev-fla]")
     _install_built_from_source(session, "mamba_ssm", "causal_conv1d")
+    # quack-kernels (via mamba-ssm) pins an older nvidia-cutlass-dsl than the image's
+    # nvidia-cutlass-operators needs, and Inductor (torch >= 2.14) imports it to compile any matmul.
+    session.run("python", "-m", "pip", "uninstall", "-y", "nvidia-cutlass-operators")
     # Every wheel is built: CI saves the wheelhouse only then, so a run that stopped halfway cannot
     # freeze a partial wheelhouse under the cache key.
     with open(os.path.join(_wheelhouse(), ".complete"), "w"):
