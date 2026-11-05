@@ -28,6 +28,7 @@ from pathlib import Path
 
 import torch
 from export_distilled_megatron_to_hf import export_llm_to_hf, save_vlm_to_hf
+from finetuning import _configure_trainable_parameters
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
 from megatron.bridge.recipes.utils.optimizer_utils import (
@@ -767,7 +768,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
                 student = unwrap_model(chunk)
                 if is_vlm:
                     student = student.language_model
-                mtq.enable_full_rank_training(student, args.trainable_parameter_patterns)
+                _configure_trainable_parameters(student, args.trainable_parameter_patterns)
             return model_chunks
 
         distill_provider.register_pre_wrap_hook(_select_trainable_student_hook, prepend=True)

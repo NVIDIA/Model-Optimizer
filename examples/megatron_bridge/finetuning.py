@@ -13,19 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Selective full-rank training of fake-quantized weights."""
+"""Parameter selection for the Megatron-Bridge distillation example."""
 
 import fnmatch
 
 from torch import nn
 
-from .lora import _QuantLoRALinear, enable_quant_input_gradients
-from .qtensor import QTensorWrapper
+from modelopt.torch.quantization.lora import _QuantLoRALinear, enable_quant_input_gradients
+from modelopt.torch.quantization.qtensor import QTensorWrapper
 
-__all__ = ["enable_full_rank_training"]
+__all__ = []
 
 
-def enable_full_rank_training(model: nn.Module, target_parameters: list[str]) -> nn.Module:
+def _configure_trainable_parameters(model: nn.Module, target_parameters: list[str]) -> nn.Module:
     """Train only parameters matching shell-style patterns, retaining fake quantizers.
 
     Match names relative to the student root, before DDP/optimizer construction.

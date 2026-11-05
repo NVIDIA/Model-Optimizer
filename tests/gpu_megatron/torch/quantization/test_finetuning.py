@@ -23,6 +23,7 @@ from _test_utils.torch.megatron.models import HAS_MAMBA, get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import get_batch, initialize_for_megatron
 
 import modelopt.torch.quantization as mtq
+from examples.megatron_bridge.finetuning import _configure_trainable_parameters
 
 
 @pytest.mark.skipif(not HAS_MAMBA, reason="Hybrid model fixture requires Mamba")
@@ -48,7 +49,7 @@ def _test_full_rank_hybrid_routed_experts(recompute, rank, size):
         return m(tokens, positions, attention_mask)
 
     mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward)
-    mtq.enable_full_rank_training(
+    _configure_trainable_parameters(
         model, ["*.local_experts.*.linear_fc1.weight", "*.local_experts.*.linear_fc2.weight"]
     )
     before = {n: p.detach().clone() for n, p in model.named_parameters()}
