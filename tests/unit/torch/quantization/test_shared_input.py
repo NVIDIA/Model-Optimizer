@@ -594,6 +594,24 @@ def test_hf_mla_down_projections_keep_own_per_tensor_ranges(algorithm):
     assert kv_down.weight_quantizer.amax > q_down.weight_quantizer.amax
 
 
+def test_hf_gates_keep_own_static_nvfp4_global_ranges():
+    """Outside Megatron-Core, KDA-style gates next to q/k/v keep their own global ranges."""
+    attn = _DummyAttention()
+    for name in ("g_proj", "f_a_proj", "b_proj"):
+        attn.add_module(name, nn.Linear(32, 32, bias=False))
+    with torch.no_grad():
+        attn.g_proj.weight.mul_(8)
+    quant_cfg = [
+        {"enable": False, "quantizer_name": "*"},
+        {"cfg": _STATIC_NVFP4, "quantizer_name": "*weight_quantizer"},
+    ]
+    mtq.quantize(attn, {"quant_cfg": quant_cfg, "algorithm": "max"}, None)
+
+    q_global = attn.q_proj.weight_quantizer.global_amax
+    assert torch.equal(q_global, attn.v_proj.weight_quantizer.global_amax)
+    assert attn.g_proj.weight_quantizer.global_amax > q_global
+
+
 def test_mla_down_projections_share_the_fp8_stage_of_sequential_weight_quantizers():
     mla = _DummyMLA()
     mtq.replace_quant_module(mla)

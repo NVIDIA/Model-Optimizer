@@ -122,10 +122,11 @@ def _collect_grouped_linears(model: nn.Module) -> list[list[nn.Module]]:
     )
     groups: list[list[nn.Module]] = []
     for parent in model.modules():
-        for sibling_names in patterns:
+        candidates = [[getattr(parent, n, None) for n in names] for names in patterns]
+        for children in candidates + _fused_projection_groups(parent):
             members = [
                 child
-                for child in (getattr(parent, n, None) for n in sibling_names)
+                for child in children
                 if child is not None
                 and _is_calibrated_nvfp4_static(getattr(child, "weight_quantizer", None))
             ]
@@ -171,7 +172,6 @@ _FUSED_MCORE_PROJECTIONS = (
 # MLA and KDA). HF models get the same ranges at export, which fuses every group sharing an input.
 _FUSED_HF_NAMED_PROJECTIONS = (("q_a_proj", "kv_a_proj_with_mqa"), ("q_proj", "k_proj", "v_proj"))
 # Kimi K3 also fuses its gates with them (vLLM's ``fused_qkv_a_g_proj`` and ``in_proj_qkvgfab``).
-# Static NVFP4 weights share a global range only within the groups above.
 _FUSED_HF_NAMED_GATED_PROJECTIONS = (
     ("q_a_proj", "kv_a_proj_with_mqa", "g_proj"),
     ("q_proj", "k_proj", "v_proj", "g_proj", "f_a_proj", "b_proj"),
@@ -195,7 +195,7 @@ def _fused_projection_groups(module: nn.Module) -> list[list[nn.Module]]:
 def _sync_fused_projection_amax(model: torch.nn.Module) -> None:
     """Give Megatron-Core projections deployments fuse one per-tensor input and weight range each.
 
-    Static NVFP4 weights share their global range through ``SHARED_PATTERNS`` instead.
+    Static NVFP4 weights share their global range in :func:`_sync_fused_projection_global_amax`.
     """
     for module in model.modules():
         for members, quantizer_name in itertools.product(
@@ -222,6 +222,30 @@ def _sync_fused_projection_amax(model: torch.nn.Module) -> None:
                     quantizer.amax = shared.to(amax).reshape(amax.shape)
 
 
+@torch.no_grad()
+def _sync_fused_projection_global_amax(model: nn.Module) -> None:
+    """Give the static NVFP4 weights of each Megatron-Core fused group one global range.
+
+    ``SHARED_PATTERNS`` already ties the q/k/v and MLA down-projection groups. Name patterns can't
+    add Kimi K3's ``g_proj``, which KDA fuses with q/k/v and MLA with q_a/kv_a, so this widens those
+    groups in place, keeping the existing ties.
+    """
+    for module in model.modules():
+        for members in _fused_projection_groups(module):
+            quantizers = [
+                member.weight_quantizer
+                for member in members
+                if _is_calibrated_nvfp4_static(getattr(member, "weight_quantizer", None))
+                and member.weight_quantizer.global_amax is not None
+                and not member.weight_quantizer.global_amax.is_meta
+            ]
+            if len(quantizers) < 2:
+                continue
+            shared = torch.stack([q.global_amax.float().reshape(()) for q in quantizers]).max()
+            for quantizer in quantizers:
+                quantizer.global_amax = shared
+
+
 def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) -> None:
     """Finalize calibrated static quantizers and attached shared state.
 
@@ -234,8 +258,9 @@ def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) ->
     _sync_fused_projection_amax(model)
     SharedWeightGlobalAmaxState.populate(model)
     promote_static_block_weight_quantizers(model)
-    # Under the default patterns, verify the fusible name groups were actually synced.
+    # Under the default patterns, add the groups they miss and verify the fusible groups were synced.
     if weight_patterns == list(SHARED_PATTERNS):
+        _sync_fused_projection_global_amax(model)
         _check_grouped_weight_global_amax_synced(model)
 
 

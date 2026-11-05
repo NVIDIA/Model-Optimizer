@@ -2719,7 +2719,7 @@ def test_hf_named_fused_projections_share_ranges(distributed_setup_size_1, quant
             assert torch.equal(first.input_quantizer.amax, other.input_quantizer.amax)
             if not first.weight_quantizer.is_nvfp4_static:
                 assert torch.equal(first.weight_quantizer.amax, other.weight_quantizer.amax)
-            elif name in core:
+            else:
                 assert torch.equal(
                     first.weight_quantizer.global_amax, other.weight_quantizer.global_amax
                 )
