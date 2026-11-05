@@ -428,13 +428,13 @@ class DFlashModule(nn.Module):
         self._maybe_init_rotary_emb(device=noise_embedding.device)
         return self._body()(noise_embedding, target_hidden, position_ids, attention_mask)
 
-    def compile_body(self):
-        """Inductor-compile the draft stack; ``_body`` runs it in training only.
+    def compile_body(self, enabled: bool = True):
+        """Inductor-compile the draft stack, or with ``enabled=False`` run it eagerly again.
 
-        ``dynamic=False`` relies on the pinned block count, while generation runs at varying
-        lengths and would recompile for each.
+        ``_body`` runs the compiled stack in training only. ``dynamic=False`` relies on the
+        pinned block count, while generation runs at varying lengths and would recompile for each.
         """
-        self._compiled_body = torch.compile(self._forward_body, dynamic=False)
+        self._compiled_body = torch.compile(self._forward_body, dynamic=False) if enabled else None
 
     def _body(self):
         """The compiled draft stack while training, if ``compile_body`` ran; eager otherwise."""

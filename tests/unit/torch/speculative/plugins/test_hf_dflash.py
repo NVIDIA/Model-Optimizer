@@ -39,6 +39,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 import modelopt.torch.speculative.plugins.dflash_flex_attention as dflash_flex_attention
 import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
+from modelopt.torch.speculative.config import DFlashConfig
 from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
     DFlashBaseModelOutput,
@@ -358,6 +359,57 @@ class TestFlexAttentionConflicts:
         assert restored.dflash_use_flex_attention
         restored.train()
         assert restored.dflash_module._body() != restored.dflash_module._forward_body
+
+
+class TestResumedConfig:
+    """A resumed run trains with its own dflash settings and keeps the draft it resumes."""
+
+    @staticmethod
+    def _restored(tmp_path, **overrides):
+        """A DFlash model restored from a checkpoint saved under ``overrides``, and its config."""
+        mto.enable_huggingface_checkpointing()
+        config = get_dflash_config()
+        config.update(overrides)
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", config)])
+        model.save_pretrained(tmp_path / "ckpt")
+        return AutoModelForCausalLM.from_pretrained(tmp_path / "ckpt"), config
+
+    def test_training_settings_follow_the_resumed_run(self, tmp_path):
+        """Compile and flex turned off at resume take effect and reach the next checkpoint."""
+        restored, config = self._restored(
+            tmp_path, dflash_use_torch_compile=True, dflash_use_flex_attention=True
+        )
+        off = {"dflash_use_torch_compile": False, "dflash_use_flex_attention": False}
+        recipe = DFlashConfig(**{**config, **off, "dflash_num_anchors": 16})
+
+        assert set(restored.apply_resumed_config(recipe)) == {*off, "dflash_num_anchors"}
+        restored.restore_draft_precision()
+        restored.train()
+        assert restored.dflash_module._body() == restored.dflash_module._forward_body
+        assert not restored.dflash_use_flex_attention
+        assert restored._num_anchors == 16
+        restored.save_pretrained(tmp_path / "next")
+        again = AutoModelForCausalLM.from_pretrained(tmp_path / "next")
+        assert not again.dflash_use_torch_compile and not again.dflash_use_flex_attention
+        assert again._num_anchors == 16
+
+    def test_a_change_to_the_draft_itself_is_refused(self, tmp_path):
+        restored, config = self._restored(tmp_path)
+        recipe = DFlashConfig(**{**config, "dflash_block_size": 2 * config["dflash_block_size"]})
+        with pytest.raises(ValueError, match="dflash_block_size"):
+            restored.apply_resumed_config(recipe)
+
+    def test_what_the_resumed_run_leaves_unset_keeps_the_checkpoint_value(self, tmp_path):
+        """Defaults never override the checkpoint, and a None mask token defers to it."""
+        restored, _ = self._restored(tmp_path, dflash_num_anchors=16)
+        assert restored.apply_resumed_config(DFlashConfig(dflash_mask_token_id=None)) == {}
+        assert restored._num_anchors == 16
+
+    def test_the_classified_fields_exist(self):
+        """A renamed field would otherwise drop out of the sets and silently turn structural."""
+        classified = DFlashConfig.RESUMABLE_FIELDS | DFlashConfig.INIT_ONLY_FIELDS
+        assert classified <= set(DFlashConfig.model_fields)
 
 
 class TestFlexTiles:

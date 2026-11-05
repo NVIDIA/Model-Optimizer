@@ -131,7 +131,7 @@ class HFDSparkModel(HFDFlashModel):
         return DSparkModule(dflash_config)
 
     def modify(self, config):
-        """Initialize the DSpark draft module and read the loss-mixing weights."""
+        """Initialize the DSpark draft module."""
         arch_config = config.dflash_architecture_config
         if arch_config.get("markov_rank") is None:
             raise ValueError(
@@ -139,16 +139,20 @@ class HFDSparkModel(HFDFlashModel):
                 "dflash_architecture_config (the Markov head's low-rank dimension)."
             )
         super().modify(config)
+
+    def _configure_training(self, config):
+        """Also read the loss-mixing weights and pick the TVD chunk kernel."""
+        if config.dflash_confidence_head_alpha > 0 and not self.dflash_module.use_confidence_head:
+            raise ValueError(
+                "dflash_confidence_head_alpha > 0 but the confidence head was not built; "
+                "set dflash_architecture_config.use_confidence_head=true."
+            )
+        super()._configure_training(config)
         # Three-term loss weights (DSpark only). Defaults follow the DeepSpec recipe
         # (L1/TVD-dominant) so a config that only sets the head still trains sensibly.
         self.dflash_ce_loss_alpha = config.dflash_ce_loss_alpha
         self.dflash_l1_loss_alpha = config.dflash_l1_loss_alpha
         self.dflash_confidence_head_alpha = config.dflash_confidence_head_alpha
-        if self.dflash_confidence_head_alpha > 0 and not self.dflash_module.use_confidence_head:
-            raise ValueError(
-                "dflash_confidence_head_alpha > 0 but the confidence head was not built; "
-                "set dflash_architecture_config.use_confidence_head=true."
-            )
         # Compiling fuses the chunk's six vocab-wide elementwise passes.
         self._tvd_chunk_fn = (
             torch.compile(_tvd_chunk, dynamic=False, fullgraph=True)

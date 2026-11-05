@@ -140,6 +140,7 @@ Changelog
 - Fix streaming speculative-decoding training capturing another request's hidden states when the vLLM serve ran requests concurrently, and failing on vLLM 0.29 and later. Retrain drafters trained in streaming mode against a serve that ran requests concurrently.
 - Fix DFlash-family drafters (DFlash, DFlash2, DSpark, Domino, LiLiCorr) trained from scratch with ``examples/speculative_decoding/main.py`` having their RoPE frequencies rounded to BF16, so they trained under different rotary phases than vLLM serves them with.
 - Fix DFlash2's candidate-selector loss weighing every block position equally and dividing by its own count of positions, unlike the backbone loss and the SGLang/SpecForge DFlash2 reference. Logged DFlash2 losses change.
+- Fix DFlash-family training resumed from a consolidated checkpoint silently keeping the checkpoint's ``dflash`` settings. The resumed run now applies the training settings its recipe states, such as loss weights, ``dflash_use_torch_compile`` and ``dflash_use_flex_attention``, and refuses one that changes the draft itself, such as ``dflash_block_size``.
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^

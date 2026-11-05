@@ -107,7 +107,7 @@ class HFLiLiCorrModel(HFDFlashModel):
         return LiLiCorrModule(dflash_config)
 
     def modify(self, config):
-        """Initialize the LiLiCorr draft module and resolve the objective weights."""
+        """Initialize the LiLiCorr draft module."""
         # The grouped convolution is OPTIONAL here (unlike DFlash2, which requires it),
         # but the two geometry keys are all-or-nothing. Setting one alone would build a
         # draft with no convolutions at all and report nothing, and the serving loader
@@ -125,7 +125,10 @@ class HFLiLiCorrModel(HFDFlashModel):
                 "without convolutions."
             )
         super().modify(config)
+        self._lilicorr_metrics = None
 
+    def _configure_training(self, config):
+        """Also resolve the objective weights, and state them in the log."""
         weights = {name: float(getattr(config, name)) for name in _TERM_WEIGHT_FIELDS}
         unset = [name for name, value in weights.items() if value < 0.0]
         if unset:
@@ -134,23 +137,25 @@ class HFLiLiCorrModel(HFDFlashModel):
                 "Set every dflash_lilicorr_w_* explicitly so the objective's composition is "
                 "readable from the config alone."
             )
-        self.dflash_lilicorr_w_ce = weights["dflash_lilicorr_w_ce"]
-        self.dflash_lilicorr_w_margin = weights["dflash_lilicorr_w_margin"]
-        self.dflash_lilicorr_w_pen = weights["dflash_lilicorr_w_pen"]
-        self.dflash_lilicorr_w_cal = float(config.dflash_lilicorr_w_cal)
-        if not any(weights.values()) and self.dflash_lilicorr_w_cal == 0.0:
+        w_cal = float(config.dflash_lilicorr_w_cal)
+        if not any(weights.values()) and w_cal == 0.0:
             raise ValueError(
                 "All LiLiCorr objective weights are 0, so the reranker would never "
                 "receive a gradient and would be exported randomly initialized. Set at "
                 "least one of dflash_lilicorr_w_ce / _w_margin / _w_pen / _w_cal above 0."
             )
-
-        self.dflash_lilicorr_margin = float(config.dflash_lilicorr_margin)
-        if self.dflash_lilicorr_w_margin > 0.0 and self.dflash_lilicorr_margin <= 0.0:
+        margin = float(config.dflash_lilicorr_margin)
+        if weights["dflash_lilicorr_w_margin"] > 0.0 and margin <= 0.0:
             raise ValueError(
                 "dflash_lilicorr_w_margin > 0 requires a positive dflash_lilicorr_margin "
                 "(the hinge width); the shipped 'margin' variant uses 2.0."
             )
+        super()._configure_training(config)
+        self.dflash_lilicorr_w_ce = weights["dflash_lilicorr_w_ce"]
+        self.dflash_lilicorr_w_margin = weights["dflash_lilicorr_w_margin"]
+        self.dflash_lilicorr_w_pen = weights["dflash_lilicorr_w_pen"]
+        self.dflash_lilicorr_w_cal = w_cal
+        self.dflash_lilicorr_margin = margin
 
         head = self.dflash_module.lilicorr
         # Stated at startup because the composition is the variant: a run's own log has
@@ -173,7 +178,6 @@ class HFLiLiCorrModel(HFDFlashModel):
             self.dflash_lilicorr_w_cal,
             self.dflash_lilicorr_margin,
         )
-        self._lilicorr_metrics = None
 
     @property
     def _needs_base_logits(self) -> bool:
