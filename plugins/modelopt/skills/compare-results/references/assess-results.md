@@ -64,17 +64,17 @@ the interval unreliable.
 
 ## Assessment
 
-Compare the unrounded signed-loss CI with the user's nonnegative maximum
-allowed drop `M`, in matching units; the acceptance boundary is `-M`:
+Compare the unrounded signed-loss CI with the user's minimum acceptable signed
+loss `M ≤ 0`, in matching units. For example, `M = -1 pp` allows a 1 pp drop:
 
-- **Within margin:** `-M < CI_low`. The entire CI meets the target.
-- **Substantial regression:** `CI_high < -M`. The entire CI exceeds the allowed drop.
-- **Possible regression:** `CI_low ≤ -M ≤ CI_high < 0`. Worse than baseline,
+- **Within margin:** `M < CI_low`. The entire CI meets the target.
+- **Substantial regression:** `CI_high < M`. The entire CI exceeds the allowed drop.
+- **Possible regression:** `CI_low ≤ M ≤ CI_high < 0`. Worse than baseline,
   but unresolved against the allowed drop.
-- **Inconclusive:** `CI_low ≤ -M` and `0 ≤ CI_high`. Both an unacceptable drop
+- **Inconclusive:** `CI_low ≤ M` and `0 ≤ CI_high`. Both an unacceptable drop
   and no degradation remain plausible.
 
-The last two cases, including equality at `-M`, leave the target unresolved.
+The last two cases, including equality at `M`, leave the target unresolved.
 Separately, `CI_high < 0` indicates a significant degradation at the stated CI
 level. A significant drop can still meet the target; failure to detect a drop
 does not prove acceptability. Without an explicit target, feasibility is inconclusive.
