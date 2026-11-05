@@ -424,11 +424,17 @@ class HFEagleModel(EagleModel):
         self._cached_attn_blk_masks = {}
         self._cached_attn_blk_mask_context = None
 
-    def _get_ttt_attention_mask(self, batch_size, seq_length, ttt_step):
+    @property
+    def _ttt_mask_dtype(self):
+        """Resolve the dtype string that Hugging Face writes during checkpoint saves."""
         dtype = (
             getattr(self._base_llm_config, "dtype", None)
             or self.eagle_module.layers[0].input_layernorm.weight.dtype
         )
+        return getattr(torch, dtype.removeprefix("torch.")) if isinstance(dtype, str) else dtype
+
+    def _get_ttt_attention_mask(self, batch_size, seq_length, ttt_step):
+        dtype = self._ttt_mask_dtype
         context = (seq_length, self.device, dtype, self.eagle_config._attn_implementation)
         if context != self._cached_attn_blk_mask_context:
             self._cached_attn_blk_masks.clear()
@@ -557,16 +563,15 @@ class HFEagleModel(EagleModel):
     ) -> BlockMask | torch.Tensor:
         """Return TTT attention_mask tensor of type BlockMask or Tensor depends on eagle attn impl."""
         msk_func = get_ttt_msk_func(seq_length, ttt_step)
-        dtype = (
-            getattr(self._base_llm_config, "dtype", None)
-            or self.eagle_module.layers[0].input_layernorm.weight.dtype
-        )
+        dtype = self._ttt_mask_dtype
         dtypemin = torch.finfo(dtype).min
         q_len = seq_length
         kv_len = seq_length * (1 + ttt_step)
         if self.eagle_config._attn_implementation == "flex_attention":
             # Return block mask for flex attention
-            block_mask = create_block_mask(msk_func, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len)
+            block_mask = create_block_mask(
+                msk_func, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len, device=self.device
+            )
             return block_mask
         else:
             # Return tensor mask for non-flex attention

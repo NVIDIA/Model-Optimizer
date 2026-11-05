@@ -19,12 +19,14 @@ from copy import deepcopy
 
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
+from torch.nn.attention.flex_attention import BlockMask
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import EAGLE3_DEFAULT_CFG
 
 
-def test_ttt_attention_mask_cache_with_variable_lengths():
+def test_ttt_attention_mask_cache_with_variable_lengths(tmp_path):
+    """Reuse masks across batches and checkpoint saves, rebuilding when context changes."""
     model = get_tiny_llama(dtype=torch.float32)
     config = deepcopy(EAGLE3_DEFAULT_CFG["config"])
     config["eagle_architecture_config"].update(
@@ -38,14 +40,51 @@ def test_ttt_attention_mask_cache_with_variable_lengths():
     mtsp.convert(model, mode=[("eagle", config)])
     model.train()
 
-    for batch_size, seq_length in ((1, 8), (2, 4), (1, 8)):
+    projected_logits = []
+    handle = model._base_model_lm_head.register_forward_hook(
+        lambda _module, _inputs, logits: projected_logits.append(logits.detach().clone())
+    )
+    previous_masks = None
+    previous_length = None
+    for batch_size, seq_length in ((1, 8), (2, 8), (2, 4), (1, 8)):
         input_ids = torch.randint(0, model.config.vocab_size, (batch_size, seq_length))
         output = model(input_ids=input_ids, labels=input_ids)
         assert torch.isfinite(output.loss)
         output.loss.backward()
+        if previous_masks is None:
+            masks_before_save = dict(model._cached_attn_blk_masks)
+            expected_logits = list(projected_logits)
+            projected_logits.clear()
+            expected_gradients = {
+                name: parameter.grad.clone()
+                for name, parameter in model.named_parameters()
+                if parameter.grad is not None
+            }
+            model.zero_grad(set_to_none=True)
+            model.save_pretrained(tmp_path)
+            restored_output = model(input_ids=input_ids, labels=input_ids)
+            assert all(
+                model._cached_attn_blk_masks[step] is mask
+                for step, mask in masks_before_save.items()
+            )
+            torch.testing.assert_close(projected_logits, expected_logits)
+            torch.testing.assert_close(restored_output.loss, output.loss)
+            restored_output.loss.backward()
+            for name, parameter in model.named_parameters():
+                if name in expected_gradients:
+                    torch.testing.assert_close(parameter.grad, expected_gradients[name])
         model.zero_grad(set_to_none=True)
         assert len(model._cached_attn_blk_masks) == 2
         for step in (1, 2):
             mask = model._get_ttt_attention_mask(batch_size, seq_length, step)
             assert mask.shape == (1, 1, seq_length, seq_length * (step + 1))
             assert model._get_ttt_attention_mask(batch_size, seq_length, step) is mask
+            if previous_length == seq_length:
+                assert mask is previous_masks[step]
+        previous_masks = dict(model._cached_attn_blk_masks)
+        previous_length = seq_length
+        projected_logits.clear()
+
+    model.eagle_config._attn_implementation = "flex_attention"
+    assert isinstance(model._get_ttt_attention_mask(1, 8, 1), BlockMask)
+    handle.remove()
