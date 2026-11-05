@@ -319,6 +319,10 @@ class PTQSpec(SpecSection):
     """Why no device map can be used for the model: the flow loads it whole and moves it to the
     target device, whatever the run asks for."""
 
+    dtype_kwarg: Literal["dtype", "torch_dtype"] = "dtype"
+    """The keyword the model's loading code takes its precision by: ``dtype`` for transformers'
+    own classes, ``torch_dtype`` for a checkpoint whose own code was written for the old name."""
+
     sequential_device_map: str | None = None
     """Why a load on several GPUs uses ``device_map="sequential"`` and not the balanced ``"auto"``.
 
