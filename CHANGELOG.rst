@@ -1,6 +1,13 @@
 Changelog
 =========
 
+0.47.1 (2026-11-06)
+^^^^^^^^^^^^^^^^^^^
+
+**Bug Fixes**
+
+- Fix NVFP4 fake quantization (e.g. ``NVFP4_DEFAULT_CFG``) with Triton 3.9, as in the PyTorch 26.11 container, on GPUs with compute capability 8.9 or newer: it failed with ``NotImplementedError: Block pointers have been removed in favor of the tensor descriptor API``.
+
 0.47 (2026-09-23)
 ^^^^^^^^^^^^^^^^^
 
