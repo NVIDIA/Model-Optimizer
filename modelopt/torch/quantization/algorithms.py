@@ -156,6 +156,30 @@ def _rewrites_weights(recipe: "QuantRecipe") -> bool:
     return bool(_algorithm_methods(recipe.config.algorithm) & _WEIGHT_REWRITING_METHODS)
 
 
+def _refuse_layerwise_dirs(recipe: "QuantRecipe") -> None:
+    """Refuse layerwise directories whose contents would outlive the candidate's calibration."""
+    for entry in _algorithm_entries(recipe.config.algorithm):
+        layerwise = entry.get("layerwise")
+        if not isinstance(layerwise, dict) or not layerwise.get("enable"):
+            continue
+        # The export replaces each calibrated layer's weights with packed ones, which scoring and
+        # the other candidates' calibrations would then run.
+        if layerwise.get("export_dir"):
+            raise NotImplementedError(
+                f"AutoQuantize candidate {recipe} sets layerwise.export_dir, whose export would "
+                "leave the model in export form before scoring. Drop export_dir and export the "
+                "searched model afterwards."
+            )
+        # A rerun would resume from per-layer checkpoints, which load the rewritten weights
+        # into new tensors that restoring the source weights does not reach.
+        if layerwise.get("checkpoint_dir") and _rewrites_weights(recipe):
+            raise NotImplementedError(
+                f"AutoQuantize candidate {recipe} rewrites weights with a layerwise "
+                "checkpoint_dir, whose resume would leave the rewritten weights in the model. "
+                "Drop checkpoint_dir; the AutoQuantize checkpoint resumes the search."
+            )
+
+
 def _storage_span(tensor: torch.Tensor):
     """``tensor``'s storage and the bytes of it ``tensor`` spans; None if it holds no data here."""
     if tensor.is_meta or isinstance(tensor, DTensor) or tensor.numel() == 0:
@@ -1302,15 +1326,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     f"{sorted(methods & _WEIGHT_REWRITING_METHODS)}, whose codes are for the "
                     f"weight itself, but also calibrates with {sorted(unsupported)}, which would "
                     "quantize a transformed weight. Combine GPTQ or imatrix only with max."
-                )
-            # A rerun would resume from per-layer checkpoints, which load the rewritten weights
-            # into new tensors that restoring the source weights does not reach.
-            layerwise = [e.get("layerwise") for e in _algorithm_entries(recipe.config.algorithm)]
-            if any(isinstance(lw, dict) and lw.get("checkpoint_dir") for lw in layerwise):
-                raise NotImplementedError(
-                    f"AutoQuantize candidate {recipe} rewrites weights with a layerwise "
-                    "checkpoint_dir, whose resume would leave the rewritten weights in the model. "
-                    "Drop checkpoint_dir; the AutoQuantize checkpoint resumes the search."
                 )
             for hparam in quant_recipe_hparams:
                 for module, attr, quantizer in hparam._iter_quantizer_choices(recipe):

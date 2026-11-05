@@ -198,6 +198,43 @@ def test_auto_quantize_frees_the_conv1d_weights_conversion_replaces(monkeypatch,
     assert in_forwards and not any(in_forwards)
 
 
+def test_auto_quantize_refuses_layerwise_export_before_converting(tmp_path):
+    # Exporting each calibrated layer would replace its weights with packed ones before scoring.
+    source = get_tiny_llama()
+    model = copy.deepcopy(source)
+    export_dir = tmp_path / "export"
+    config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    config["algorithm"] = {
+        "method": "max",
+        "layerwise": {"enable": True, "export_dir": str(export_dir)},
+    }
+    input_ids = model.dummy_inputs["input_ids"]
+
+    def search():
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 11.0},
+            quantization_formats=[config],
+            data_loader=[{"input_ids": input_ids} for _ in range(2)],
+            forward_step=lambda model, batch: model(**batch),
+            loss_func=lambda output, batch: output.logits.float().square().sum(),
+            num_calib_steps=2,
+            num_score_steps=2,
+            # Otherwise layerwise export stops at the lm_head quantizer before exporting a layer.
+            disabled_layers=["*lm_head*"],
+        )
+
+    with pytest.raises(NotImplementedError):
+        search()
+
+    assert [type(m) for m in model.modules()] == [type(m) for m in source.modules()]
+    for weight, original in zip(model.parameters(), source.parameters()):
+        assert torch.equal(weight, original)
+    assert not export_dir.exists()
+    config["algorithm"] = "max"
+    search()
+
+
 def test_fp8_linear_per_tensor_dequant(monkeypatch):
     module = FP8Linear(2, 2, block_size=(128, 128))
     module.weight_scale_inv = nn.Parameter(torch.tensor(2.0))
