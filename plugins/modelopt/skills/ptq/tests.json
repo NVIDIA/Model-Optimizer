@@ -10,6 +10,8 @@
         "Skill auto-triggers and reads SKILL.md",
         "Checks README support table — Qwen3 is listed",
         "Takes path 4A or 4B depending on environment",
+        "For containerized HF PTQ, selects NGC26.09 or a justified tested clean CUDA development image, pins its digest, and explicitly overrides slurm_config.container on the launcher path",
+        "Records resolved image and package versions and chooses a model-compatible Transformers pin within ModelOpt's supported range",
         "Runs hf_ptq.py with --qformat nvfp4",
         "Produces checkpoint directory with config.json and model safetensors"
       ]

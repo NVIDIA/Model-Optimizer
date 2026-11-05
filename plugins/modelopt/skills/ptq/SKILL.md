@@ -27,6 +27,15 @@ After completing them you should know:
 - Launcher available?
 - Which workspace to use
 
+For containerized Hugging Face PTQ, use `nvcr.io/nvidia/pytorch:26.09-py3`
+(AMD64/ARM64), not an inference image's dependency stack. Set the launcher's
+`slurm_config.container` explicitly; do not inherit its TRT-LLM default.
+Use a matching cached `.sqsh` when available. If the vendor Python packages
+conflict, use a verified clean CUDA development image with released Torch wheels
+in an isolated venv; see `references/slurm-setup-ptq.md` for installation and
+provenance gates. Pin a model-compatible Transformers version within ModelOpt's
+supported range. Serving uses a separate deployment environment.
+
 ## Step 2 — Is the model supported?
 
 Check the support table in `examples/hf_ptq/README.md` for verified HF models.
