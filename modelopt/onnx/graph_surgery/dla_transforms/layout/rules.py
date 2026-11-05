@@ -92,9 +92,9 @@ class _ShapeControl(_ShapeRule):
         if node.op_type == "Reshape":
             values = [output[i] if value == 0 else value for i, value in enumerate(values)]
             if len(values) == 5:
-                if 1 not in values:
+                if 1 not in output:
                     raise ValueError("Reshape: 5D targets need a unary dimension")
-                values.remove(1)
+                values.pop(output.index(1))
         if len(values) > 4:
             raise ValueError(
                 f"{node.op_type}: targets above four dimensions need an additional transform"
