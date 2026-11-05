@@ -30,7 +30,10 @@ if [ "$BACKEND" = "vllm" ] && [ "${API_MODE:-openai}" != "openai" ]; then
     echo "vLLM multimodal generation requires API_MODE=openai."
     exit 1
 fi
-[ -z "${CONTAINER_PYTHONPATH:-}" ] || export PYTHONPATH="$CONTAINER_PYTHONPATH"
+# Prepend the caller's path. Replacing PYTHONPATH would drop a base image path.
+if [ -n "${CONTAINER_PYTHONPATH:-}" ]; then
+    export PYTHONPATH="${CONTAINER_PYTHONPATH}${PYTHONPATH:+:$PYTHONPATH}"
+fi
 
 if [ "${INSTALL_OPENCV_HEADLESS:-0}" = "1" ]; then
     python3 -c "import cv2" || python3 -m pip install --user opencv-python-headless
@@ -116,10 +119,11 @@ fi
 
 # Remote code stays off unless the caller opts in. Set TRUST_REMOTE_CODE=true
 # only for a checkpoint you trust; Cosmos3-Edge needs its registered model code.
+# The same gate applies to the vLLM and SGLang launches below.
 trust_remote_code="${TRUST_REMOTE_CODE:-false}"
-VLLM_TRUST_ARGS=()
+TRUST_REMOTE_ARGS=()
 if [[ "${trust_remote_code,,}" == "true" || "$trust_remote_code" == "1" ]]; then
-    VLLM_TRUST_ARGS+=(--trust-remote-code)
+    TRUST_REMOTE_ARGS+=(--trust-remote-code)
 fi
 
 SERVER_PORTS=()
@@ -131,7 +135,7 @@ if [ "$SGLANG_TP_SIZE" -eq 1 ]; then
             CUDA_VISIBLE_DEVICES=$gpu vllm serve /model/ \
                 --tensor-parallel-size 1 --served-model-name model \
                 --port "$port" --host 0.0.0.0 \
-                "${VLLM_TRUST_ARGS[@]}" \
+                "${TRUST_REMOTE_ARGS[@]}" \
                 --media-io-kwargs "{\"video\":{\"num_frames\":$NUM_FRAMES}}" &
         else
             CUDA_VISIBLE_DEVICES=$gpu \
@@ -142,7 +146,7 @@ if [ "$SGLANG_TP_SIZE" -eq 1 ]; then
                 --port "$port" \
                 --host 0.0.0.0 \
                 ${SGLANG_EXTRA_ARGS:-} \
-                --trust-remote-code &
+                "${TRUST_REMOTE_ARGS[@]}" &
         fi
         SERVER_PIDS+=("$!")
     done
@@ -153,7 +157,7 @@ else
         CUDA_VISIBLE_DEVICES=$gpu_list vllm serve /model/ \
             --tensor-parallel-size "$SGLANG_TP_SIZE" --served-model-name model \
             --port "$BASE_PORT" --host 0.0.0.0 \
-            "${VLLM_TRUST_ARGS[@]}" \
+            "${TRUST_REMOTE_ARGS[@]}" \
             --media-io-kwargs "{\"video\":{\"num_frames\":$NUM_FRAMES}}" &
     else
         CUDA_VISIBLE_DEVICES=$gpu_list \
@@ -164,7 +168,7 @@ else
             --port "$BASE_PORT" \
             --host 0.0.0.0 \
             ${SGLANG_EXTRA_ARGS:-} \
-            --trust-remote-code &
+            "${TRUST_REMOTE_ARGS[@]}" &
     fi
     SERVER_PIDS+=("$!")
 fi
