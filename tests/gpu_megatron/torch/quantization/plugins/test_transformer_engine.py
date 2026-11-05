@@ -14,12 +14,15 @@
 # limitations under the License.
 
 import copy
+from functools import partial
 
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformer_engine as te
 from _test_utils.torch.misc import set_seed
+from _test_utils.torch.quantization.quant_utils import NVFP4_LSQ_TIED_CFG
 from _test_utils.torch.quantization.quantize_common import quantize_model_and_forward
 
 import modelopt.torch.opt as mto
@@ -199,6 +202,87 @@ def test_quantize_forward_backward():
 
         # In-directly tests that gradients were computed correctly
         assert linear.weight.grad is not None and linear.weight.grad.abs().sum() > 0.0
+
+
+@pytest.mark.parametrize("scale_only", [False, True])
+@pytest.mark.parametrize(
+    "module_cls",
+    [
+        te.pytorch.Linear,
+        partial(te.pytorch.LayerNormLinear, normalization="RMSNorm", return_layernorm_output=True),
+    ],
+    ids=["Linear", "LayerNormLinear"],
+)
+def test_lsq_scale_grad(module_cls, scale_only):
+    """LSQ gradients of a quantized TE linear match a functional reference.
+
+    With ``scale_only`` the scales are the only trainable parameters, as in scale-only learning, so
+    neither the layer input nor the norm needs a gradient.
+    """
+    set_seed()
+    model = module_cls(32, 16).cuda()
+    x = torch.randn(4, 32, device="cuda")
+    mtq.quantize(model, NVFP4_LSQ_TIED_CFG, lambda m: m(x))
+    for name, param in model.named_parameters():
+        param.requires_grad_(not scale_only or name.startswith("weight_quantizer."))
+
+    out = model(x)
+    # LayerNormLinear also returns its GEMM input, the normalized x.
+    out, gemm_input = out if isinstance(out, tuple) else (out, x)
+    # Without grad, TE calls the autograd Function's forward directly.
+    with torch.no_grad():
+        no_grad_out = model(x)
+    no_grad_out = no_grad_out[0] if isinstance(no_grad_out, tuple) else no_grad_out
+    torch.testing.assert_close(no_grad_out, out.detach())
+    grad_out = torch.randn_like(out)
+    out.backward(grad_out)
+
+    checked = [model.weight_quantizer._amax_post] + ([] if scale_only else [model.weight])
+    reference = F.linear(
+        model.input_quantizer(gemm_input.detach()), model.weight_quantizer(model.weight)
+    )
+    expected = torch.autograd.grad(reference, checked, grad_out)
+    for param, grad in zip(checked, expected):
+        # Transformer Engine runs fp32 GEMMs in TF32; set_seed() turns TF32 off for the reference.
+        torch.testing.assert_close(param.grad, grad, rtol=1e-2, atol=1e-2)
+    if scale_only:
+        assert all(
+            param.grad is None
+            for name, param in model.named_parameters()
+            if not name.startswith("weight_quantizer.")
+        )
+
+
+def test_layernorm_linear_weight_grad_uses_quantizer_backward():
+    """LayerNormLinear's weight gradient goes through the weight quantizer's backward, as Linear's does.
+
+    With ``pass_through_bwd=False`` (clipped STE), weights outside the quantizer's amax get no gradient.
+    """
+    set_seed()
+    model = te.pytorch.LayerNormLinear(
+        32, 16, normalization="RMSNorm", return_layernorm_output=True
+    ).cuda()
+    x = torch.randn(4, 32, device="cuda")
+    config = {
+        "quant_cfg": {
+            "*weight_quantizer": {"num_bits": 8, "axis": 0, "pass_through_bwd": False},
+            "*input_quantizer": {"enable": False},
+        },
+        "algorithm": "max",
+    }
+    mtq.quantize(model, config, lambda m: m(x))
+    # Clip the largest weights of every output channel.
+    model.weight_quantizer.amax = model.weight_quantizer.amax / 2
+
+    out, ln_out = model(x)
+    grad_out = torch.randn_like(out)
+    out.backward(grad_out)
+
+    reference = F.linear(ln_out.detach(), model.weight_quantizer(model.weight))
+    (expected,) = torch.autograd.grad(reference, model.weight, grad_out)
+    assert (expected == 0).any()
+    # Transformer Engine runs fp32 GEMMs in TF32; set_seed() turns TF32 off for the reference.
+    torch.testing.assert_close(model.weight.grad, expected, rtol=1e-2, atol=1e-2)
 
 
 @pytest.mark.parametrize(

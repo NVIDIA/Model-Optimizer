@@ -54,3 +54,29 @@ def assert_nvfp4_static_amaxes_fp32(amax_dtypes, model_dtype, label):
         f"{label}: expected all NVFP4 static amaxes to be fp32 for model dtype {model_dtype}, "
         f"got {amax_dtypes}"
     )
+
+
+# Static NVFP4 weights with tied, learnable LSQ scales (pre = post) and dynamic NVFP4 inputs, as in
+# the general/qad/nvfp4_lsq-* recipes.
+NVFP4_LSQ_TIED_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+    },
+    "algorithm": {
+        "method": "lsq",
+        "learnable_amax": ["pre", "post"],
+        "tied_amax": True,
+        "scale_algorithm": {"method": "max"},
+    },
+}
