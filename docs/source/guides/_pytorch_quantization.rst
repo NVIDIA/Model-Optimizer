@@ -454,7 +454,7 @@ Only ``gptq``, ``max`` and ``mse`` are supported as GSQ initializers. The nested
 options such as GPTQ damping. Set layerwise options on GSQ itself.
 Staged calibration requires original unscaled inputs.
 
-The default recipes use dense Llama staged reconstruction. Supply exactly
+The default recipes use staged reconstruction for the supported dense decoders. Supply exactly
 ``initializer_samples`` sequences (default 512), followed by ``train_samples``
 training sequences (default 4096) in the replayable loop. Keep validation data
 outside this loop. Sequences retain their attention masks, positions, and rotary
@@ -485,11 +485,20 @@ by default. Compatible CPU buffers are reused only after refinement completes.
 The complete activation set must fit in host RAM. File-backed activation caching
 is unsupported.
 
-Only dense Transformers Llama decoder layers with all seven projections and
-static block-16 NVFP4 weight quantizers are supported. Activations and KV cache
-remain unquantized. Tied, sharded or offloaded weights, pre-scaled inputs, fused
-MoE experts and distributed execution are unsupported. Use layerwise calibration
-to process a full Llama model one decoder layer at a time.
+Supported native Transformers decoders are dense Llama, Qwen2 and Qwen2.5
+(``Qwen2DecoderLayer``), Qwen3, Mistral, and original Gemma. They must expose all
+seven attention and gated-MLP projections with static block-16 NVFP4 weights.
+Use the same recipes and ``hf_ptq.py --recipe`` entry point for these families.
+Native attention, including Qwen3 Q/K normalization and Mistral sliding-window
+masks, remains in use. Gemma embedding scaling and MLP nonlinearities are preserved.
+The Q/K Hessian objective remains a surrogate before Qwen3 Q/K normalization.
+
+Activations and KV cache remain unquantized. MoE, tied or sharded quantized weights,
+offloaded weights, pre-scaled inputs and distributed execution are unsupported.
+Gemma2/3, Phi variants, fused projections, scaled-residual Granite blocks and hybrid
+Qwen3.5 or Nemotron-H decoders require different reconstruction boundaries and are
+not supported. Matching projection names alone does not establish support.
+Use layerwise calibration to process a full model one decoder layer at a time.
 
 Each stage installs its final hard iterate, even if it has higher loss than the
 initializer. There is no separate end-to-end scale-training phase, and the paper's

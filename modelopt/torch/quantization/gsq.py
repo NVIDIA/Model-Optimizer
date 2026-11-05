@@ -42,7 +42,7 @@ __all__ = ["gsq"]
 
 
 def gsq(model, forward_loop, **kwargs):
-    """Refine dense Llama NVFP4 weights with staged local-shift reconstruction.
+    """Refine supported dense NVFP4 decoders with staged local-shift reconstruction.
 
     The replay loop supplies initializer sequences followed by training sequences.
     Final hard weights and scales use ordinary ModelOpt save/restore and export.

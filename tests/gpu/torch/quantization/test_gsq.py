@@ -25,6 +25,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from _test_utils.torch.transformers_models import get_tiny_llama
 from safetensors.torch import load_file
+from transformers import (
+    AutoModelForCausalLM,
+    GemmaConfig,
+    LlamaConfig,
+    MistralConfig,
+    Qwen2Config,
+    Qwen3Config,
+)
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -35,6 +43,40 @@ from modelopt.torch.quantization.config import GSQCalibConfig
 from modelopt.torch.quantization.gsq import _LocalShift, gsq
 from modelopt.torch.quantization.nn import StaticBlockScaleQuantizer
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
+
+_DENSE_CONFIGS = {
+    "llama": LlamaConfig,
+    "qwen2": Qwen2Config,
+    "qwen3": Qwen3Config,
+    "mistral": MistralConfig,
+    "gemma": GemmaConfig,
+}
+
+_DENSE_INITIALIZERS = [("llama", method) for method in ("gptq", "max", "mse")] + [
+    (family, "max") for family in _DENSE_CONFIGS if family != "llama"
+]
+
+
+def _dense_model(family, **overrides):
+    torch.manual_seed(1234)
+    config = _DENSE_CONFIGS[family](
+        **{
+            "hidden_size": 64,
+            "intermediate_size": 64,
+            "head_dim": 16,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "num_hidden_layers": 1,
+            "vocab_size": 32,
+            "max_position_embeddings": 32,
+            "dtype": torch.bfloat16,
+            **overrides,
+        }
+    )
+    if family == "mistral":
+        config.sliding_window = 8
+    config._attn_implementation = "eager"
+    return AutoModelForCausalLM.from_config(config).cuda().eval()
 
 
 def _config(initializer):
@@ -52,22 +94,11 @@ def _config(initializer):
     return config
 
 
-@pytest.mark.parametrize("method", ["gptq", "max", "mse"])
+@pytest.mark.parametrize(("family", "method"), _DENSE_INITIALIZERS)
 @pytest.mark.parametrize("baseline", [False, True])
-def test_staged_gsq_streaming_matches_device_cache(method, baseline):
+def test_staged_gsq_streaming_matches_device_cache(family, method, baseline):
     torch.manual_seed(42)
-    reference = (
-        get_tiny_llama(
-            hidden_size=64,
-            intermediate_size=64,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            num_hidden_layers=2,
-        )
-        .cuda()
-        .bfloat16()
-        .eval()
-    )
+    reference = _dense_model(family, num_hidden_layers=2)
     streamed = deepcopy(reference)
     ids = torch.arange(16, device="cuda").reshape(1, -1)
 
@@ -178,20 +209,10 @@ def test_staged_gsq_rejects_preexisting_awq_scaling_without_mutation():
         torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("method", ["gptq", "max", "mse"])
+@pytest.mark.parametrize(("family", "method"), _DENSE_INITIALIZERS)
 @pytest.mark.parametrize("change", ["tokens", "mask", "positions"])
-def test_staged_gsq_isolates_initializer_data_and_trains_both_joint_regions(method, change):
-    model = (
-        get_tiny_llama(
-            hidden_size=64,
-            intermediate_size=64,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            num_hidden_layers=1,
-        )
-        .cuda()
-        .eval()
-    )
+def test_staged_gsq_isolates_initializer_data_and_trains_both_joint_regions(family, method, change):
+    model = _dense_model(family)
     other = deepcopy(model)
     config = _config({"method": method})
     config["algorithm"].update(
@@ -242,19 +263,11 @@ def test_staged_gsq_isolates_initializer_data_and_trains_both_joint_regions(meth
         )
 
 
-def test_staged_gsq_qk_responds_to_correlations_between_hessian_blocks():
+@pytest.mark.parametrize("family", _DENSE_CONFIGS)
+def test_staged_gsq_qk_responds_to_correlations_between_hessian_blocks(family):
     method = "max"
-    base = (
-        get_tiny_llama(
-            hidden_size=256,
-            intermediate_size=256,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            num_hidden_layers=1,
-            dtype=torch.float32,
-        )
-        .cuda()
-        .eval()
+    base = _dense_model(
+        family, hidden_size=256, intermediate_size=256, head_dim=64, dtype=torch.float32
     )
     layer = base.model.layers[0]
     x = torch.randn(1, 16, 1, device="cuda").expand(-1, -1, 256).clone()
@@ -376,18 +389,9 @@ def test_gsq_uses_constant_qk_and_cosine_joint_rates(monkeypatch, steps):
     assert calls == pytest.approx([1.0, 1.0] + expected * 2)
 
 
-def test_gsq_rolls_back_mutating_initializer_failure():
-    model = (
-        get_tiny_llama(
-            hidden_size=64,
-            intermediate_size=64,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            num_hidden_layers=1,
-        )
-        .cuda()
-        .eval()
-    )
+@pytest.mark.parametrize("family", _DENSE_CONFIGS)
+def test_gsq_rolls_back_mutating_initializer_failure(family):
+    model = _dense_model(family)
     config = _config({"method": "gptq", "block_size": 64})
     mtq.quantize(model, {**config, "algorithm": None})
     layer = model.model.layers[0]
@@ -426,15 +430,10 @@ def test_gsq_rolls_back_mutating_initializer_failure():
     assert torch.isfinite(model(torch.ones(1, 8, device="cuda", dtype=torch.long)).logits).all()
 
 
+@pytest.mark.parametrize("family", _DENSE_CONFIGS)
 @pytest.mark.parametrize("method", ["gptq", "max", "mse"])
-def test_layerwise_gsq_hf_export_preserves_hard_codes(method, tmp_path):
-    model = (
-        get_tiny_llama(
-            hidden_size=64, intermediate_size=64, num_attention_heads=4, num_key_value_heads=4
-        )
-        .cuda()
-        .eval()
-    )
+def test_layerwise_gsq_hf_export_preserves_hard_codes(family, method, tmp_path):
+    model = _dense_model(family, num_hidden_layers=2)
     x = torch.randint(0, 32, (2, 16), device="cuda")
     config = _config({"method": method})
     config["algorithm"].update(initializer_samples=1, train_samples=1, batch_size=1)
@@ -442,6 +441,14 @@ def test_layerwise_gsq_hf_export_preserves_hard_codes(method, tmp_path):
     def forward(m):
         for row in x.split(1):
             m(row, use_cache=False, attention_mask=torch.ones_like(row))
+
+    converted = deepcopy(model)
+    mtq.quantize(converted, {**config, "algorithm": None})
+    with mtq.set_quantizer_by_cfg_context(converted, [{"quantizer_name": "*", "enable": False}]):
+        torch.testing.assert_close(
+            converted(x, use_cache=False).logits, model(x, use_cache=False).logits, rtol=0, atol=0
+        )
+    del converted
 
     cpu_rng, cuda_rng = torch.get_rng_state(), torch.cuda.get_rng_state()
     mtq.quantize(model, config, forward)
@@ -453,12 +460,7 @@ def test_layerwise_gsq_hf_export_preserves_hard_codes(method, tmp_path):
     assert torch.isfinite(actual).all()
     state = tmp_path / "staged.pth"
     mto.save(model, state)
-    restored = mto.restore(
-        get_tiny_llama(
-            hidden_size=64, intermediate_size=64, num_attention_heads=4, num_key_value_heads=4
-        ).cuda(),
-        state,
-    ).eval()
+    restored = mto.restore(_dense_model(family, num_hidden_layers=2), state).eval()
     torch.testing.assert_close(restored(x, use_cache=False).logits, actual, rtol=0, atol=0)
     expected = {}
     for name, module in model.named_modules():

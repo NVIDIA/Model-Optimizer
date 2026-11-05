@@ -20,6 +20,7 @@ from copy import deepcopy
 
 import pytest
 import torch
+from transformers import AutoModelForCausalLM, Gemma2Config, Qwen2MoeConfig
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
@@ -108,3 +109,34 @@ def test_gsq_rejects_removed_linear_options(field):
 def test_gsq_rejects_restart_and_streaming_export(field, tmp_path):
     with pytest.raises(ValueError):
         GSQCalibConfig(layerwise={"enable": True, field: str(tmp_path)})
+
+
+@pytest.mark.parametrize("config_type", [Gemma2Config, Qwen2MoeConfig])
+def test_gsq_rejects_unsupported_dense_and_moe_decoders_without_mutation(config_type):
+    config = config_type(
+        hidden_size=64,
+        intermediate_size=64,
+        head_dim=16,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=1,
+        vocab_size=32,
+        num_experts=2,
+        num_experts_per_tok=1,
+        moe_intermediate_size=32,
+        shared_expert_intermediate_size=32,
+    )
+    model = AutoModelForCausalLM.from_config(config).eval()
+    quant_config = load_recipe("general/ptq/nvfp4_gsq-max").quantize.model_dump()
+    mtq.quantize(model, {**quant_config, "algorithm": None})
+    before = deepcopy(model.state_dict())
+    with pytest.raises(ValueError):
+        mtq.calibrate(
+            model,
+            quant_config["algorithm"],
+            lambda m: m(torch.ones(1, 8, dtype=torch.long), use_cache=False),
+        )
+    assert before.keys() == model.state_dict().keys()
+    for name, value in before.items():
+        torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
+    assert all(not hasattr(layer, "_layerwise_calib") for layer in model.model.layers)

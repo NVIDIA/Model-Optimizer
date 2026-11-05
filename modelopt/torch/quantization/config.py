@@ -1477,7 +1477,8 @@ class GSQCalibConfig(QuantizeAlgorithmConfig):
     """Local-shift Gumbel-Softmax refinement of dense NVFP4 weight-only quantization.
 
     ``initializer`` accepts GPTQ, max or mse and their full configs.
-    Reconstruction supports all seven projections of a dense Llama decoder.
+    Reconstruction supports the seven projections of dense Llama, Qwen2/2.5,
+    Qwen3, Mistral and Gemma decoders.
     """
 
     method: Literal["gsq"] = ModeloptField("gsq")
