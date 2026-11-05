@@ -2100,6 +2100,7 @@ def _is_plain_fake_quant(q: nn.Module) -> TypeGuard[TensorQuantizer]:
         # Nothing applied around the quantization itself.
         and q.backend is None
         and q.pre_quant_scale is None
+        and q.bias is None
         and not q.rotate_is_enabled
         and not q.rotate_back_is_enabled
         # Hooks expect the quantizer itself to run, forward and backward.

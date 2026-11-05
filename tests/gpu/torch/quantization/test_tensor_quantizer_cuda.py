@@ -28,6 +28,7 @@ from pydantic import ValidationError
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
+from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
 from modelopt.torch.quantization.nn.modules import tensor_quantizer
 
 
@@ -126,6 +127,24 @@ class TestTensorQuantizerfp4:
         output_contiguous = quantizer(contiguous_tensor)
         output_non_contiguous = quantizer(non_contiguous_tensor)
         assert torch.equal(output_contiguous, output_non_contiguous)
+
+    def test_fp4_affine_bias(self):
+        quantizer = tensor_quantizer.TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=(2, 1),
+                block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                bias={-2: None, -4: None, "type": "static"},
+            )
+        ).cuda()
+        # Centered on the calibrated bias of 128, the values are +-6, exact NVFP4 endpoints.
+        x = torch.full((1, 1, 2, 16), 122.0, device="cuda", dtype=torch.bfloat16)
+        x[:, :, 1] = 134.0
+
+        enable_stats_collection(quantizer)
+        quantizer(x)
+        finish_stats_collection(quantizer)
+
+        torch.testing.assert_close(quantizer(x), x, rtol=0, atol=0)
 
 
 def test_use_constant_amax_captures_in_cuda_graph():

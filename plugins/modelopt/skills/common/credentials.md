@@ -50,6 +50,8 @@ Generate at <https://ngc.nvidia.com/setup/api-key>.
 ### Docker
 
 ```bash
+# If security is a concern, pass the key with --password-stdin instead of -p,
+# which leaves it in shell history and the process list.
 docker login nvcr.io -u '$oauthtoken' -p <NGC_API_KEY>
 ```
 

@@ -234,6 +234,26 @@ def test_ggml_backend_caches_packed_weight_and_invalidates_on_change(monkeypatch
     fake_quant(weight, quantizer, block_chunk_size=2)
     assert call_count == 3
 
+    # Megatron's distributed optimizer writes updated weights through ``.data`` views of its
+    # parameter buffer, which leaves their version counter as it was; the step retires the payload.
+    trainable, frozen = (torch.nn.Parameter(weight.clone(), requires_grad=r) for r in (True, False))
+    for param in (trainable, frozen):
+        fake_quant(param, quantizer, block_chunk_size=2)
+        param.data.add_(0.01)
+        torch.optim.SGD([trainable], lr=0.0).step()
+        fake_quant(param, quantizer, block_chunk_size=2)
+    # Packed twice for the trainable weight; once for the frozen one, which no optimizer updates.
+    assert call_count == 6
+
+    # Unfreezing the cached weight in place, as a trainer configuring trainable parameters does,
+    # lets the next optimizer step retire its payload too.
+    frozen.requires_grad_(True)
+    fake_quant(frozen, quantizer, block_chunk_size=2)
+    frozen.data.add_(0.01)
+    torch.optim.SGD([frozen], lr=0.0).step()
+    fake_quant(frozen, quantizer, block_chunk_size=2)
+    assert call_count == 7
+
 
 def test_narrow_to_float32_matches_the_cuda_load_float_policy():
     """Non-finite elements become zero; finite out-of-range elements saturate."""

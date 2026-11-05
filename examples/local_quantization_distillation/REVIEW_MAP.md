@@ -1,8 +1,9 @@
 # Review map: local quantization distillation
 
-The comparison base is `origin/main` at `7d442467504cdae155812baf15242628d96971b5`.
-Include untracked files when reviewing this working tree. Nothing has been committed
-or published. The AutoModel dependency has no working-tree modifications.
+The comparison base is `origin/main` at `8c614286acd653670fb7ee6e9b4fac4da62a1626`.
+Review the branch diff against that revision. Historical validation measurements
+retain their original source revisions. The AutoModel dependency has no working-tree
+modifications.
 
 The feature has four dependency-ordered review areas. These are review slices,
 not separate user APIs or separate copies of the training loop.
