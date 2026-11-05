@@ -1,6 +1,6 @@
 # Assess results
 
-Apply only after validating both evaluation runs and confirming comparability
+Start by validating both evaluation runs and confirming comparability
 using the [compare-results checklist](../SKILL.md#comparability-checklist).
 Use the task recipe's canonical metric and minimum run count.
 
@@ -15,23 +15,21 @@ s = sample_stddev(accuracy_r)         # divisor R - 1
 SE = s / sqrt(R)
 ```
 
-Use retry-level accuracy for both the mean and SD—not pooled question outcomes.
-The SE denominator is the number of valid independent retries, not questions or
-questions × retries. Cached replay and infrastructure recovery of the same
-observation do not add independent retries. Retain every valid planned run.
+Use retry-level accuracy for both the mean and SD, and the number of valid
+independent retries for `R`. Count each observation once across cached replay
+and infrastructure recovery. Retain every valid planned run.
 
 Report each mean and SE in percent for percentage metrics. Use the t-based 95%
 score interval `mean ± t(0.975, R-1)*SE`, with at least two valid independent
-runs. Never substitute SD for SE. These intervals describe generation/run
-variability on the fixed benchmark, not uncertainty about generalization to new
-questions. Single-run tasks require a metric-appropriate alternative analysis;
-do not invent retry variance.
+runs. Use `SE = s / sqrt(R)` for the interval width. These intervals describe
+generation/run variability on the fixed benchmark. Assess generalization to new
+questions separately. For single-run tasks, use a metric-appropriate alternative
+analysis.
 
 ## Confidence interval on the delta
 
-Report an interval on the difference itself—not a test based on overlapping
-individual score intervals. For independent baseline and candidate retry scores,
-use a two-sided Welch interval:
+Assess the difference using its own confidence interval. For independent
+baseline and candidate retry scores, use a two-sided Welch interval:
 
 ```text
 L = mean_C - mean_B                  # signed loss; negative is worse accuracy
@@ -44,7 +42,7 @@ df = (vB + vC)² / (vB²/(RB-1) + vC²/(RC-1))
 Label the report `L = Candidate - Baseline` for accuracy: `L = -1 pp` means
 the candidate is 1 percentage point worse. For lower-is-better metrics, reverse
 the delta and interval signs so negative still means worse. Express
-percentage-score differences in percentage points, not relative percent.
+percentage-score differences in percentage points.
 
 Calculate with a validated statistical library outside chat. For example,
 [SciPy](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ttest_ind.html)
@@ -52,15 +50,14 @@ Calculate with a validated statistical library outside chat. For example,
 returns the candidate-minus-baseline interval. Welch supports unequal counts and
 variances; it requires at least two independent observations per side and
 compatible run-level means, SDs, and counts (`RB` and `RC`). Use the t quantile
-at the calculated degrees of freedom, not a fixed multiplier.
+at the calculated degrees of freedom.
 
-Missing counts/variance, jointly zero variance, or dependent observations do not
-establish zero uncertainty. Mark the Welch interval unavailable and use a
-reviewed alternative or report inconclusive. For genuinely paired observations,
-use a paired-difference analysis; matched benchmark settings alone do not
-establish statistical pairing. Preserve clustering; do not mix run-level SD
-with question-level counts. Flag small-sample skew/boundary effects that make
-the interval unreliable.
+For missing counts/variance, jointly zero variance, or dependent observations,
+mark the Welch interval unavailable and use a reviewed alternative or report
+inconclusive. Establish pairing from the observation design and use a
+paired-difference analysis for paired observations. Preserve clustering and
+match the SD and count to the same observation unit. Flag small-sample
+skew/boundary effects that make the interval unreliable.
 
 ## Assessment
 
@@ -76,16 +73,15 @@ loss `M ≤ 0`, in matching units. For example, `M = -1 pp` allows a 1 pp drop:
 
 The last two cases, including equality at `M`, leave the target unresolved.
 Separately, `CI_high < 0` indicates a significant degradation at the stated CI
-level. A significant drop can still meet the target; failure to detect a drop
-does not prove acceptability. Without an explicit target, feasibility is inconclusive.
-Use judgment for borderline results and explain it without relabeling an
-unresolved statistical result as established. Missing or unreliable uncertainty
-cannot support a confidence-based acceptance claim.
+level. Assess target compliance separately from significance against zero.
+With an unspecified target, report feasibility as inconclusive. Use judgment
+for borderline results, explain it, and retain the statistical status alongside
+the decision. Support confidence-based acceptance with reliable uncertainty.
 
-Choose sample counts and analysis checkpoints before running; do not sample
-until a favorable result appears. Propose bounded extra runs when uncertainty
-prevents a decision. Results selected across many candidates/tasks or repeated
-looks are exploratory unless confirmed independently or covered by an
-appropriate sequential/multiple-comparison method.
+Choose sample counts, analysis checkpoints, and stopping rules before running.
+Propose bounded extra runs when uncertainty prevents a decision. Label results
+selected across many candidates/tasks or repeated looks as exploratory; use
+independent confirmation or an appropriate sequential/multiple-comparison
+method for confirmatory claims.
 
 Report results using the [report format](../SKILL.md#report-format).
