@@ -35,7 +35,12 @@ from modelopt.torch.export.quantized_weight_export import (
     split_quantized_weight_export_state,
 )
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.nn import GroupedQuantizer, NVFP4StaticQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    GroupedQuantizer,
+    NVFP4StaticQuantizer,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.qtensor import MXFP4QTensor
 
 
@@ -416,14 +421,17 @@ def test_export_spec_rejects_unsupported_quantization(features, quantizer_cfg, e
 
 
 @pytest.mark.parametrize(
-    ("quantization_format", "quantizer_name"),
+    ("quantization_format", "quantizer_name", "mode"),
     [
-        ("w4a16_mxfp4", "weight_quantizer"),
-        ("mxfp4", "weight_quantizer"),
-        ("mxfp4", "input_quantizer"),
+        ("w4a16_mxfp4", "weight_quantizer", "rotate"),
+        ("w4a16_mxfp4", "weight_quantizer", "rotate_back"),
+        ("w4a16_mxfp4", "input_quantizer", "rotate"),
+        ("mxfp4", "weight_quantizer", "rotate"),
+        ("mxfp4", "weight_quantizer", "rotate_back"),
+        ("mxfp4", "input_quantizer", "rotate"),
+        ("mxfp4", "input_quantizer", "rotate_back"),
     ],
 )
-@pytest.mark.parametrize("mode", ["rotate", "rotate_back"])
 def test_export_rejects_rotated_quantizers(quantization_format, quantizer_name, mode):
     module = _capture_linear(quantization_format)
     getattr(module, quantizer_name).set_from_attribute_config(
@@ -434,6 +442,24 @@ def test_export_rejects_rotated_quantizers(quantization_format, quantizer_name, 
         get_quantized_weight_export_spec(module)
     with pytest.raises(NotImplementedError, match="rotated quantizers"):
         capture_quantized_weight_export_state(module)
+
+
+def test_export_allows_disabled_input_quantizer_that_rotates_back():
+    module = _capture_linear("w4a16_mxfp4")
+    module.input_quantizer.set_from_attribute_config(
+        {"rotate": {"enable": True, "mode": "rotate_back"}}
+    )
+
+    assert get_quantized_weight_export_spec(module).quantization_format == "w4a16_mxfp4"
+
+
+def test_export_rejects_sequential_input_quantizers():
+    module = _capture_linear("w4a16_mxfp4")
+    enabled = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3)))
+    module.input_quantizer = SequentialQuantizer(module.input_quantizer, enabled)
+
+    with pytest.raises(NotImplementedError, match="sequential input quantizers"):
+        get_quantized_weight_export_spec(module)
 
 
 @pytest.mark.parametrize("input_enabled", [True, False])

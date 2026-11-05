@@ -360,11 +360,16 @@ def _resolve_quantized_weight_export_inputs(
         raise _UnsupportedQuantizedWeightExportFormatError(
             f"Functional export does not support {quantization_format!r}"
         )
-    # A packed weight cannot carry a rotation of the weight or its input.
+    if isinstance(input_quantizer, SequentialQuantizer):
+        raise _UnsupportedQuantizedWeightExportFormatError(
+            f"Functional export does not support sequential input quantizers for {weight_name!r}"
+        )
+    # A packed weight cannot carry a rotation of the weight or its input. A disabled quantizer
+    # still rotates unless it rotates back.
     if any(
         quantizer is not None
-        and quantizer.is_enabled
-        and getattr(quantizer, "rotate_is_enabled", False)
+        and quantizer.rotate_is_enabled
+        and (quantizer.is_enabled or not quantizer.rotate_back_is_enabled)
         for quantizer in (weight_quantizer, input_quantizer)
     ):
         raise _UnsupportedQuantizedWeightExportFormatError(
