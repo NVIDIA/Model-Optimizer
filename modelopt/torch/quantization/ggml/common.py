@@ -23,6 +23,7 @@ from functools import partial
 from typing import NamedTuple
 
 import torch
+from torch.optim.optimizer import register_optimizer_step_post_hook
 
 GGML_BLOCK_SIZE = 256
 _SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
@@ -41,7 +42,7 @@ class _CacheKey(NamedTuple):
     version: int
 
 
-@dataclass
+@dataclass(eq=False)
 class _PackedWeightCache:
     """One weight's packed payload, reused across forwards.
 
@@ -61,6 +62,32 @@ class _PackedWeightCache:
     block_chunk_size: int
     packed_weights: torch.Tensor
     weight_shape: torch.Tensor
+    # Set by the next optimizer step when the weight is trainable; see _track_trainable.
+    stale: bool = False
+
+
+# Payloads packed from a trainable weight, marked stale by the next optimizer step. Their key
+# carries the weight's version counter, which an optimizer writing the weight through a shared
+# buffer or ``.data`` leaves as it was: Megatron's distributed optimizer copies updated weights into
+# the DDP parameter buffer and all-gathers it, so without this a QAD job keeps the codes of its
+# first forward.
+_TRAINABLE_CACHES: weakref.WeakSet = weakref.WeakSet()
+_STEP_HOOK: list = []
+
+
+def _mark_trainable_caches_stale(*_) -> None:
+    for cache in list(_TRAINABLE_CACHES):
+        cache.stale = True
+    _TRAINABLE_CACHES.clear()
+
+
+def _track_trainable(cache: _PackedWeightCache, base: torch.Tensor) -> None:
+    """Have the next optimizer step mark ``cache`` stale if ``base`` is a trainable weight."""
+    if not base.requires_grad:
+        return
+    if not _STEP_HOOK:
+        _STEP_HOOK.append(register_optimizer_step_post_hook(_mark_trainable_caches_stale))
+    _TRAINABLE_CACHES.add(cache)
 
 
 def _cache_base(inputs: torch.Tensor) -> torch.Tensor:
@@ -115,8 +142,9 @@ def _matching_cache(
     """The quantizer's cached payload if it was packed from ``inputs``, else None.
 
     It matches only while the weight is unchanged since it was packed: the key carries the
-    tensor's version counter, so an in-place update misses. With ``any_contiguous_view`` it also
-    matches another contiguous view of the same values: TensorQuantizer hands fake quant the
+    tensor's version counter, so an in-place update misses, and an optimizer step retires a
+    trainable weight's payload however the step wrote the weight. With ``any_contiguous_view`` it
+    also matches another contiguous view of the same values: TensorQuantizer hands fake quant the
     weight reshaped into 256-value blocks, so export, which holds the weight itself, sees a
     different shape over the same elements in the same order, and so the same GGML blocks.
     """
@@ -125,6 +153,7 @@ def _matching_cache(
     if not (
         isinstance(cache, _PackedWeightCache)
         and input_key is not None
+        and not cache.stale
         and cache.base_ref() is _cache_base(inputs)
         and cache.format_name == format_name
     ):
@@ -202,18 +231,22 @@ def fake_quantize_with_cache(
     cache = _matching_cache(quantizer, inputs, format_name)
     if cache is not None and cache.block_chunk_size == block_chunk_size:
         packed_weights, weight_shape = cache.packed_weights, cache.weight_shape
+        # A weight frozen when it was packed may since have been made trainable in place.
+        _track_trainable(cache, _cache_base(inputs))
     else:
         packed_weights, weight_shape = quantize(inputs, block_chunk_size=block_chunk_size)
         input_key = _input_cache_key(inputs)
         if input_key is not None:
+            base = _cache_base(inputs)
             quantizer._quantizer_cache = _PackedWeightCache(
-                base_ref=weakref.ref(_cache_base(inputs)),
+                base_ref=weakref.ref(base),
                 input_key=input_key,
                 format_name=format_name,
                 block_chunk_size=block_chunk_size,
                 packed_weights=packed_weights,
                 weight_shape=weight_shape,
             )
+            _track_trainable(quantizer._quantizer_cache, base)
         else:
             quantizer._quantizer_cache = None
 
@@ -254,6 +287,11 @@ class GGMLFormat:
     unpack_int8: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
     # Whether ``quantize`` takes a per-input-column ``importance`` that weights its search.
     weighted: bool = False
+    # Each block picks one of ``num_choices`` options -- a local scale, and for IQ1_S its delta --
+    # for each of its ``choice_groups`` groups; ``quantize`` takes them as ``choices``. Zero for
+    # formats without one.
+    choice_groups: int = 0
+    num_choices: int = 0
 
     @property
     def effective_bits(self) -> float:
@@ -481,6 +519,33 @@ def importance_blocks(
     if not (torch.isfinite(importance) & (importance >= 0)).all():
         raise ValueError(f"{format_name} importance must be finite and non-negative")
     return importance.reshape(-1, GGML_BLOCK_SIZE)
+
+
+def choice_blocks(
+    choices: torch.Tensor | None,
+    weight: torch.Tensor,
+    groups: int,
+    num_choices: int,
+    format_name: str,
+) -> torch.Tensor | None:
+    """Per-group ``choices`` as validated ``[weight.numel() // 256, groups]`` int64 rows.
+
+    ``choices`` is shaped ``[*weight.shape[:-1], weight.shape[-1] // 256, groups]``. A given choice
+    replaces the encoder's own pick for that group; the codebook entries and signs are still
+    searched under it.
+    """
+    if choices is None:
+        return None
+    expected = (*weight.shape[:-1], weight.shape[-1] // GGML_BLOCK_SIZE, groups)
+    if tuple(choices.shape) != expected or choices.is_floating_point() or choices.is_complex():
+        raise ValueError(
+            f"{format_name} choices must be an integer {list(expected)} tensor, got "
+            f"{choices.dtype} {tuple(choices.shape)}"
+        )
+    choices = choices.to(device=weight.device, dtype=torch.int64).reshape(-1, groups)
+    if not ((choices >= 0) & (choices < num_choices)).all():
+        raise ValueError(f"{format_name} choices must lie in [0, {num_choices})")
+    return choices
 
 
 def chunk_importance(

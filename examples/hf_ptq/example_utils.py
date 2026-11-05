@@ -22,9 +22,7 @@ import logging
 import os
 import warnings
 from collections.abc import Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import timedelta
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +42,7 @@ from transformers import (
     ProcessorMixin,
 )
 
-from modelopt.recipe import load_recipe
+from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
@@ -56,49 +54,23 @@ from modelopt.torch.models.hf import (
 )
 from modelopt.torch.quantization.mode import get_modelike_from_algo_cfg
 from modelopt.torch.utils import distributed as dist_utils
+from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
+from modelopt.torch.utils.fsdp2_utils import fsdp2_root_unsharded
+from modelopt.torch.utils.logging import warn_rank_0
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
-from modelopt.torch.utils.plugins.model_load_utils import is_fsdp2_text_only_vlm, load_pretrained
+from modelopt.torch.utils.plugins.model_load_utils import (
+    load_pretrained,
+    resolve_distribution_plan,
+    resolve_model_class,
+)
 
 logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 
-@dataclass
-class DistributedState:
-    """Example-local distributed state for model loading, dataloader sharding, and rank-0 output."""
-
-    rank: int
-    world_size: int
-    device: torch.device | str
-    is_main: bool
-
-
-def setup_distributed_args(args):
-    """Initialize and attach ``args.dist_state`` (single-process if FSDP2 off)."""
-    if getattr(args, "use_fsdp2", False):
-        # Raise the collective timeout above NCCL's 30-min default: rank 0's checkpoint write can
-        # exceed it, and barrier() has no per-call timeout (it must be set at PG creation).
-        dist_utils.setup(timeout=timedelta(hours=2))
-        rank = dist_utils.rank()
-        args.dist_state = DistributedState(
-            rank=rank,
-            world_size=dist_utils.size(),
-            device=torch.device(f"cuda:{dist_utils.local_rank()}"),
-            is_main=rank == 0,
-        )
-    else:
-        args.dist_state = DistributedState(rank=0, world_size=1, device=args.device, is_main=True)
-
-
-def cleanup_distributed(args):
-    """Destroy the process group if ``--use_fsdp2`` set it up."""
-    if getattr(args, "use_fsdp2", False):
-        dist_utils.cleanup()
-
-
-def _awq_calibrations(args) -> set[str]:
-    """The AWQ calibrations (``awq_lite``, ``awq_full``) the run's --recipe or --qformat uses."""
+def _calibration_methods(args) -> set[str]:
+    """The calibration methods (``max``, ``awq_lite``, ...) the run's --recipe or --qformat uses."""
     if getattr(args, "recipe", None) is not None:
         recipe = load_recipe(args.recipe)
         configs = [getattr(recipe, "quantize", None)]
@@ -110,12 +82,16 @@ def _awq_calibrations(args) -> set[str]:
     else:
         preset = QUANT_CFG_CHOICES.get(getattr(args, "qformat", None) or "")
         algorithms = [preset.get("algorithm")] if preset is not None else []
-    methods = {
+    return {
         mode.removesuffix("_calibrate")
         for algorithm in algorithms
         for mode, _ in get_modelike_from_algo_cfg(algorithm)
     }
-    return methods & {"awq_lite", "awq_full"}
+
+
+def _awq_calibrations(args) -> set[str]:
+    """The AWQ calibrations (``awq_lite``, ``awq_full``) the run's --recipe or --qformat uses."""
+    return _calibration_methods(args) & {"awq_lite", "awq_full"}
 
 
 def validate_fsdp2_supported(args, config):
@@ -123,11 +99,18 @@ def validate_fsdp2_supported(args, config):
     issues = []
     if "vila" in args.local_checkpoint_path.lower():
         issues.append("VILA (custom builder + non-standard layer layout)")
-    if is_fsdp2_text_only_vlm(config):
-        if getattr(args, "calib_with_images", False):
-            issues.append("image-text calibration (Qwen FSDP2 currently supports text-only inputs)")
-    elif is_nemotron_vl(config) or _is_multimodal_config(config):
-        issues.append("multimodal / VL models (decoder layers not auto-detectable)")
+    # A layout whose decoder layers cannot be found fails in fsdp2_wrap. Encoder-decoder models
+    # have no single decoder stack. Without --calib_with_images a VLM calibrates on text, which a
+    # forward that requires images cannot run.
+    if getattr(config, "is_encoder_decoder", False):
+        issues.append("encoder-decoder models")
+    elif _is_multimodal_config(config) and not getattr(args, "calib_with_images", False):
+        model_class = resolve_model_class(config, getattr(args, "trust_remote_code", False))
+        if model_class is not None and forward_requires_images(model_class):
+            issues.append(
+                f"{model_class.__name__} without --calib_with_images "
+                "(its forward requires image inputs)"
+            )
     if any(
         getattr(cfg, "quantization_config", None) is not None
         for cfg in (config, getattr(config, "text_config", None))
@@ -154,6 +137,152 @@ def validate_fsdp2_supported(args, config):
         )
 
 
+def exports_tensorrt_llm_checkpoint(args, model_type: str | None) -> bool:
+    """Whether the run exports through the deprecated TensorRT-LLM checkpoint exporter."""
+    return (
+        is_trtllm_enc_dec_export(model_type)
+        or args.sparsity_fmt != "dense"
+        or "int8_smoothquant" in args.qformat
+    )
+
+
+def resolve_distribution(args) -> tuple[DistributionPlan, Any]:
+    """Decide how hf_ptq distributes the model, refusing what that run cannot do: ``(plan, config)``.
+
+    :func:`resolve_distribution_plan` decides; ``--use_fsdp2`` asks it for FSDP2 without expert
+    parallelism.
+    """
+    if args.use_fsdp2:
+        # Before the decision, which builds the model on the meta device: some checkpoints these
+        # checks refuse (VILA, multimodal, pack-quantized) cannot be built there.
+        validate_fsdp2_supported(
+            args,
+            AutoConfig.from_pretrained(
+                args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
+            ),
+        )
+    plan, hf_config = resolve_distribution_plan(
+        args.local_checkpoint_path,
+        trust_remote_code=args.trust_remote_code,
+        ep_size=1 if args.use_fsdp2 else None,
+        dense="fsdp" if args.use_fsdp2 else None,
+    )
+    if plan.is_fsdp_dense and not plan.is_expert_parallel and not args.use_fsdp2:
+        raise RuntimeError(
+            f"{plan!r} FSDP2-shards the model, which this script does under --use_fsdp2. Pass it, "
+            "or set MODELOPT_FSDP_SIZE=1 if the model does fit one GPU; an MoE can instead shard its "
+            "experts (MODELOPT_EP_DEGREE above 1)."
+        )
+    if plan.world_size > 1 and exports_tensorrt_llm_checkpoint(args, hf_model_type(hf_config)):
+        # That exporter takes the process count for tensor parallelism.
+        raise NotImplementedError(
+            f"{plan!r}: the TensorRT-LLM checkpoint export (encoder-decoder models, "
+            "--sparsity_fmt, int8_smoothquant) runs in a single process; launch hf_ptq without "
+            "torchrun for it."
+        )
+    if (plan.is_expert_parallel or plan.is_fsdp_dense) and args.vllm_fakequant_export:
+        # It writes the whole model from every rank that exports, and every rank of a sharded
+        # model exports.
+        raise NotImplementedError(
+            f"{plan!r}: --vllm_fakequant_export writes the whole model from one process, which "
+            "holds only its own part of a sharded model; launch hf_ptq without torchrun for it."
+        )
+    if plan.is_expert_parallel and args.experts_implementation is not None:
+        # The expert-parallel load runs the experts through torch_a2a whatever the flag names.
+        raise NotImplementedError(
+            f"{plan!r}: --experts_implementation picks the experts backend a model is loaded with, "
+            "but the expert-parallel load runs the routed experts through torch_a2a whatever it "
+            "names. Drop it, or quantize without expert parallelism: with --use_fsdp2, or in a "
+            "single process."
+        )
+    if (
+        plan.world_size > 1
+        and not args.use_fsdp2
+        and args.recipe is not None
+        and isinstance(load_recipe(args.recipe), ModelOptAutoQuantizeRecipe)
+    ):
+        # Each rank would score its own data, and could pick other formats per layer.
+        raise NotImplementedError(
+            f"{plan!r}: AutoQuantize scores each rank's own calibration data and reduces no score "
+            "across ranks, so ranks could choose different formats per layer; launch hf_ptq "
+            "without torchrun for an AutoQuantize recipe."
+        )
+    if plan.world_size > 1 and not args.use_fsdp2 and "lsq" in _calibration_methods(args):
+        # Its scale calibration is the algorithm it runs first, synced or refused as that one is,
+        # but nothing has checked its learnable scales across ranks yet.
+        warn_rank_0(
+            f"{plan!r}: LSQ has not been validated on a run of several ranks: nothing checks that "
+            "the ranks' learnable scales match. Launch hf_ptq without torchrun for the tested path."
+        )
+    if (
+        plan.world_size > 1
+        and args.recipe is not None
+        and layerwise_export_requested(recipe_layerwise_blocks(load_recipe(args.recipe)))
+    ):
+        # Every rank would write the same shard files.
+        raise NotImplementedError(
+            f"{plan!r}: the recipe's layerwise export writes its checkpoint shards from one "
+            "process; launch hf_ptq without torchrun for it."
+        )
+    if plan.world_size > 1 and not args.use_fsdp2:
+        # Options for loading one model in a single process, refused rather than ignored.
+        # --max_cpu_memory_gb and --max_gpu_memory_gb come only with --offload_folder.
+        for flag, given in (
+            ("--low_memory_mode", args.low_memory_mode),
+            ("--use_seq_device_map", args.use_seq_device_map),
+            ("--offload_folder", args.offload_folder is not None),
+        ):
+            if given:
+                raise NotImplementedError(
+                    f"{plan!r}: {flag} configures loading one model in a single process, but each "
+                    "rank of this run loads its own share or copy of it onto its own GPU. Drop it, "
+                    "or launch hf_ptq without torchrun to use it."
+                )
+    return plan, hf_config
+
+
+def preview_generate_kwargs(model) -> dict[str, Any]:
+    """Extra ``generate`` kwargs that keep every rank of a sharded model decoding a preview.
+
+    Each rank previews the first sample of its own calibration shard, so the ranks finish at
+    different steps. A model its plan shards runs a collective in every forward (the routed experts'
+    all-to-all, FSDP2's all-gathers): a rank that stopped decoding would leave the others blocked in
+    it. ``synced_gpus`` keeps every rank stepping until all of them have finished.
+    """
+    plan = distribution_plan(model)
+    sharded = plan.world_size > 1 and (plan.is_expert_parallel or plan.is_fsdp_dense)
+    return {"synced_gpus": True} if sharded else {}
+
+
+@contextmanager
+def keep_the_experts_implementation(model) -> Iterator[None]:
+    """Keep ``generate`` from switching a MoE's experts to ``batched_mm`` while it decodes.
+
+    On a GPU, ``generate`` runs the experts of a ``grouped_mm`` MoE on ``batched_mm`` for the
+    decoding stage and switches them back (``_optimize_model_for_decode``, Transformers 5.0 and
+    later). Two things follow. ModelOpt's quantizers sit on the ``eager``, ``grouped_mm`` and
+    ``torch_a2a`` forwards, which ``batched_mm`` bypasses, so the preview after PTQ would decode on
+    unquantized experts. And Transformers refuses the switch for an FSDP2-wrapped model, whose class
+    is a subclass built outside its modeling module: ``FSDPQwen3MoeForCausalLM does not support
+    setting experts implementation``. Every module of the model that has the hook is kept from it:
+    a model can generate through a submodule, as a Nemotron-VL model's ``chat`` generates through
+    its language model.
+    """
+    modules = [m for m in model.modules() if hasattr(m, "_optimize_model_for_decode")]
+    # Put back what each module itself held, if anything: a nested use, or a hook bound per instance.
+    own = [(module, vars(module).get("_optimize_model_for_decode")) for module in modules]
+    for module in modules:
+        module._optimize_model_for_decode = nullcontext
+    try:
+        yield
+    finally:
+        for module, held in own:
+            if held is None:
+                del module._optimize_model_for_decode
+            else:
+                module._optimize_model_for_decode = held
+
+
 def run_nemotron_vl_preview(
     full_model,
     tokenizer,
@@ -178,32 +307,37 @@ def run_nemotron_vl_preview(
     """
     from vlm_utils import run_text_only_generation, run_vl_preview_generation
 
-    print(f"Running text-only preview generation for Nemotron VL model ({stage_name})...")
-    question = tokenizer.decode(input_ids[0], skip_special_tokens=True)
-    generation_config = {
-        "max_new_tokens": 100,
-        "do_sample": False,
-        "eos_token_id": tokenizer.eos_token_id,
-    }
+    with keep_the_experts_implementation(full_model):
+        print(f"Running text-only preview generation for Nemotron VL model ({stage_name})...")
+        question = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+        lockstep = preview_generate_kwargs(full_model)
+        generation_config = {
+            "max_new_tokens": 100,
+            "do_sample": False,
+            "eos_token_id": tokenizer.eos_token_id,
+            **lockstep,
+        }
 
-    # Try text-only generation (may fail for encoder-decoder models like Nemotron-Parse)
-    text_response = run_text_only_generation(
-        full_model, tokenizer, question, generation_config, pyt_ckpt_path, trust_remote_code
-    )
+        # Try text-only generation (may fail for encoder-decoder models like Nemotron-Parse)
+        text_response = run_text_only_generation(
+            full_model, tokenizer, question, generation_config, pyt_ckpt_path, trust_remote_code
+        )
 
-    generated_ids = None
-    if text_response is not None:
-        print(f"✅ Text-only generation successful: {text_response[:100]}...")
-        generated_ids = text_response
-    elif allow_fallback:
-        print("Text-only generation failed, falling back to standard generate...")
-        generated_ids = full_model.generate(input_ids, max_new_tokens=100)
+        generated_ids = None
+        if text_response is not None:
+            print(f"✅ Text-only generation successful: {text_response[:100]}...")
+            generated_ids = text_response
+        elif allow_fallback:
+            print("Text-only generation failed, falling back to standard generate...")
+            generated_ids = full_model.generate(input_ids, max_new_tokens=100, **lockstep)
 
-    # Run additional VL test with images
-    print(f"Running additional VL test with images ({stage_name})...")
-    run_vl_preview_generation(full_model, tokenizer, pyt_ckpt_path, stage_name, trust_remote_code)
+        # Run additional VL test with images
+        print(f"Running additional VL test with images ({stage_name})...")
+        run_vl_preview_generation(
+            full_model, tokenizer, pyt_ckpt_path, stage_name, trust_remote_code, lockstep
+        )
 
-    return generated_ids
+        return generated_ids
 
 
 def _is_multimodal_config(config):
@@ -241,18 +375,24 @@ def is_nemotron_vl(model_or_config):
     return any("nemotron" in arch.lower() for arch in architectures)
 
 
-def create_vlm_calibration_loop(full_model, calib_dataloader):
-    """Create a calibration loop for VLM models that handles multimodal inputs.
+def forward_requires_images(model: "torch.nn.Module | type[torch.nn.Module]") -> bool:
+    """Whether ``model.forward`` cannot run without images (``pixel_values`` has no default)."""
+    param = inspect.signature(model.forward).parameters.get("pixel_values")
+    return param is not None and param.default is inspect.Parameter.empty
 
-    This function inspects the model's forward signature and filters batch kwargs
-    to only include supported parameters, then calls the appropriate forward method.
+
+def create_vlm_calibration_forward(full_model):
+    """Return ``forward(batch)``, which runs one multimodal calibration batch through the VLM.
+
+    It filters the batch kwargs to the parameters the model's forward accepts, then calls the
+    appropriate forward method. :func:`create_vlm_calibration_loop` runs it over a dataloader; an
+    expert-parallel run hands it to ``distributed_forward_loop`` instead.
 
     Args:
         full_model: The full VLM model
-        calib_dataloader: DataLoader yielding multimodal batches
 
     Returns:
-        A calibration function that can be passed to mtq.quantize()
+        A function that runs one batch through ``full_model``
     """
     # Import here to avoid circular dependency
     from nemotron_vl_calib import safe_nemotron_vl_forward
@@ -276,37 +416,56 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
         or (is_nemotron_vl(full_model) and not hasattr(full_model, "extract_feature"))
     )
 
+    # Inspect model's forward signature to determine what parameters it accepts
+    forward_params = inspect.signature(full_model.forward).parameters
+    accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in forward_params.values())
+    allowed_keys = set(forward_params.keys())
+
+    def forward(batch):
+        # For encoder-decoder models, rename input_ids → decoder_input_ids
+        # and disable KV caching to avoid tuple index errors in decoder layers
+        if is_enc_dec and "input_ids" in batch and "pixel_values" in batch:
+            batch["decoder_input_ids"] = batch.pop("input_ids")
+            if "attention_mask" in batch:
+                batch["decoder_attention_mask"] = batch.pop("attention_mask")
+            batch["use_cache"] = False
+
+        # Filter batch to only include parameters the model accepts
+        if accepts_kwargs:
+            call_kwargs = batch
+        else:
+            call_kwargs = {k: v for k, v in batch.items() if k in allowed_keys}
+        # Remove None values
+        call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
+
+        if use_safe_forward:
+            safe_nemotron_vl_forward(full_model, call_kwargs)
+        else:
+            full_model(**call_kwargs)
+
+    return forward
+
+
+def create_vlm_calibration_loop(full_model, calib_dataloader):
+    """Create a calibration loop for VLM models that handles multimodal inputs.
+
+    It runs every batch through :func:`create_vlm_calibration_forward`.
+
+    Args:
+        full_model: The full VLM model
+        calib_dataloader: DataLoader yielding multimodal batches
+
+    Returns:
+        A calibration function that can be passed to mtq.quantize()
+    """
+
     def calibrate_loop(_model):
-        # Inspect model's forward signature to determine what parameters it accepts
-        forward_params = inspect.signature(full_model.forward).parameters
-        accepts_kwargs = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in forward_params.values()
-        )
-        allowed_keys = set(forward_params.keys())
-
+        forward = create_vlm_calibration_forward(full_model)
         full_model.eval()
-        with torch.no_grad():
+        # The safe-forward branch calls submodules directly, skipping the FSDP2 root's pre-forward.
+        with torch.no_grad(), fsdp2_root_unsharded(full_model):
             for batch in calib_dataloader:
-                # For encoder-decoder models, rename input_ids → decoder_input_ids
-                # and disable KV caching to avoid tuple index errors in decoder layers
-                if is_enc_dec and "input_ids" in batch and "pixel_values" in batch:
-                    batch["decoder_input_ids"] = batch.pop("input_ids")
-                    if "attention_mask" in batch:
-                        batch["decoder_attention_mask"] = batch.pop("attention_mask")
-                    batch["use_cache"] = False
-
-                # Filter batch to only include parameters the model accepts
-                if accepts_kwargs:
-                    call_kwargs = batch
-                else:
-                    call_kwargs = {k: v for k, v in batch.items() if k in allowed_keys}
-                # Remove None values
-                call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
-
-                if use_safe_forward:
-                    safe_nemotron_vl_forward(full_model, call_kwargs)
-                else:
-                    full_model(**call_kwargs)
+                forward(batch)
 
     return calibrate_loop
 
@@ -604,8 +763,19 @@ def get_model(
     offload_folder=None,
     max_cpu_memory_gb=None,
     max_gpu_memory_gb=None,
+    distribution: DistributionPlan | None = None,
 ):
     print(f"Initializing model from {ckpt_path}")
+    # The plan to load the whole model by on every rank; a single process's by default. Only a plan
+    # the caller gave reaches load_pretrained: without one it decides itself as before, and refuses
+    # MODELOPT_* knobs asking to shard over a launch whose process group is not set up.
+    plan = distribution or DistributionPlan()
+    if plan.is_expert_parallel or plan.is_fsdp_dense:
+        raise ValueError(
+            f"{plan!r} shards the model over the ranks, but get_model loads the whole model on "
+            "every rank: load it with load_pretrained."
+        )
+    routing = {} if distribution is None else {"distribution": distribution}
 
     _disk_offload = offload_folder is not None
     if _disk_offload and max_cpu_memory_gb is None:
@@ -616,9 +786,25 @@ def get_model(
             UserWarning,
         )
 
-    device_map = "auto"
-    if device == "cpu":
-        device_map = "cpu"
+    # Under torchrun each rank asks for its own "cuda:<local_rank>". Do not fall through to "auto":
+    # accelerate runs its placement heuristic INDEPENDENTLY in every rank, and on a node whose GPUs
+    # are all idle every rank scores them identically and picks the SAME card. All ranks' weights,
+    # and with them every quantizer's _amax buffer, then live on one GPU; the first NCCL collective
+    # binds the whole data-parallel group to that single device and aborts with "Duplicate GPU
+    # detected : rank 1 and rank 0 both on CUDA device ...". Every load path below honours the pin
+    # except those that load with no device map (Nemotron VL): each rank builds a whole copy in host
+    # memory and only then moves it to its own GPU, so the node needs one host copy per rank.
+    # A dense model too large to replicate per rank wants --use_fsdp2, not "auto" sharding: under
+    # data-parallel calibration each rank must own its own GPU. A single process keeps "auto".
+    # hf_ptq hands in its run's torch.device, which never equals a string such as "cpu".
+    on_cpu = torch.device(device).type == "cpu"
+    if plan.world_size > 1 and not on_cpu and ":" not in str(device):
+        raise ValueError(
+            f"{plan!r} has each rank hold its own copy of the model on its own GPU, but "
+            f"device={device!r} names no GPU index; pass the rank's own GPU, cuda:<local_rank>."
+        )
+    pinned = {"": str(device)} if not on_cpu and plan.world_size > 1 else None
+    device_map = "cpu" if on_cpu else pinned or "auto"
 
     # Prepare config kwargs for loading
     config_kwargs = {"trust_remote_code": trust_remote_code} if trust_remote_code else {}
@@ -654,13 +840,24 @@ def get_model(
     # modules together for checkpoints that fit; larger ones can still spill and split a
     # tied pair, and need an explicit single-device map. Multi-GPU only: a single-GPU split
     # cannot separate a tied pair, and sequential would needlessly cap max_memory there.
-    if device != "cpu" and torch.cuda.device_count() > 1 and is_diffusion_gemma(hf_config):
+    if (
+        not pinned
+        and not on_cpu
+        and torch.cuda.device_count() > 1
+        and is_diffusion_gemma(hf_config)
+    ):
         print(
             "Detected DiffusionGemma model. Using device_map='sequential'; the balanced "
             "'auto' mapping can split its tied encoder/decoder weights across GPUs."
         )
         use_seq_device_map = True
 
+    if use_seq_device_map and pinned:
+        raise ValueError(
+            f"--use_seq_device_map spreads one model over every GPU, but each rank of this run "
+            f"holds its own copy on its own GPU ({device}). Drop it, or shard the model with "
+            "--use_fsdp2."
+        )
     if use_seq_device_map:
         device_map = "sequential"
         # If we use sequential, set max_memory limit to ensure that the model does not occupy the full GPU
@@ -712,6 +909,7 @@ def get_model(
             ckpt_path,
             AutoModelForCausalLM,
             model_type=hf_config.model_type,
+            **routing,
             device_map=device_map,
             **model_kwargs,
         )
@@ -723,7 +921,8 @@ def get_model(
                 ckpt_path,
                 AutoModelForCausalLM,
                 model_type=hf_config.model_type,
-                device_map="auto",
+                **routing,
+                device_map=pinned or "auto",
                 trust_remote_code=trust_remote_code,
                 dtype="auto",
                 **experts_kwargs,
@@ -750,7 +949,8 @@ def get_model(
             ckpt_path,
             AutoModelForCausalLM,
             model_type=hf_config.model_type,
-            device_map="cpu" if device == "cpu" else "sequential",
+            **routing,
+            device_map="cpu" if on_cpu else pinned or "sequential",
             **model_kwargs,
         )
     else:
@@ -836,7 +1036,9 @@ def get_model(
                 f"Offload folder: {offload_folder}\n"
                 "Weights exceeding GPU+CPU budgets will be streamed from disk."
             )
-        else:
+        elif not pinned:
+            # A pinned copy goes onto its rank's GPU whole, by a map that ignores max_memory: sizing
+            # it over the node's GPUs would print a limit the load does not apply.
             inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
             if "cpu" in inferred_device_map.values():
                 for _device in max_memory:
@@ -858,6 +1060,7 @@ def get_model(
             ckpt_path,
             auto_model_module,
             model_type=hf_config.model_type,
+            **routing,
             device_map=device_map,
             **model_kwargs2,
         )
@@ -866,11 +1069,11 @@ def get_model(
         _unpack_compressed_linear_weights(model, ckpt_path)
 
     # If device_map was disabled (None), manually move model to target device
-    if device_map is None and device != "cpu":
+    if device_map is None and not on_cpu:
         print(f"Moving model to {device} device...")
         model = model.to(device)
 
-    if device == "cuda" and not is_model_on_gpu(model):
+    if torch.device(device).type == "cuda" and not is_model_on_gpu(model):
         print("Warning: Some parameters are not on a GPU. Calibration can be slow or hit OOM")
 
     return model
@@ -1031,6 +1234,13 @@ def recipe_layerwise_blocks(recipe) -> list[dict]:
         if block is not None:
             blocks.append(block if isinstance(block, dict) else block.model_dump())
     return blocks
+
+
+def layerwise_export_requested(blocks) -> bool:
+    """Whether a recipe's ``layerwise`` blocks (:func:`recipe_layerwise_blocks`) export layerwise."""
+    return any(
+        block.get("export_dir") is not None and block.get("enable", False) for block in blocks
+    )
 
 
 def _layerwise_checkpoint_dir(algorithm) -> str | None:

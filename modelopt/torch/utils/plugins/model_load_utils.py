@@ -38,6 +38,7 @@ import transformers
 import transformers.distributed as hf_distributed
 import transformers.modeling_utils as hf_modeling_utils
 from huggingface_hub import snapshot_download
+from packaging.version import parse
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -54,10 +55,19 @@ from transformers import (
     AutoModelForImageTextToText,
     AutoModelForSeq2SeqLM,
     AutoModelForSpeechSeq2Seq,
+    FineGrainedFP8Config,
+    GenerationConfig,
     PretrainedConfig,
 )
 from transformers.conversion_mapping import get_model_conversion_mapping
-from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
+from transformers.core_model_loading import (
+    WeightConverter,
+    build_glob_alternation,
+    dot_natural_key,
+    rename_source_key,
+)
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
+from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
 from modelopt.torch.export.model_utils import get_language_model_from_vl
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -80,6 +90,7 @@ from modelopt.torch.utils.moe import (
     _SUB_CONFIG_ATTRS,
     _choose_ep_degree,
     _ep_config,
+    _ep_spec,
     _fsdp2_way_out,
     _num_experts_from_config,
     _routed_expert_keys,
@@ -108,7 +119,6 @@ except ImportError:
 __all__ = [
     "build_meta_causal_lm",
     "fsdp2_wrap",
-    "is_fsdp2_text_only_vlm",
     "load_and_prepare_ep",
     "load_pretrained",
     "parallel_load_and_prepare_fsdp2",
@@ -120,9 +130,29 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def is_fsdp2_text_only_vlm(config) -> bool:
-    """Whether the VLM has a supported text-only FSDP2 decoder layout."""
-    return getattr(config, "model_type", None) in {"qwen3_5", "qwen3_5_moe"}
+def _meta_model_factory(config):
+    """Auto class that builds ``config``'s whole model, vision tower included for a VLM.
+
+    A remote-code checkpoint is built with the head its ``auto_map`` registers: image-text-to-text
+    for a multimodal config that registers it, else causal-LM (Nemotron VL registers its full model
+    there). A Transformers VLM is built as image-text-to-text: ``AutoModelForCausalLM`` rejects most
+    VLM configs, and for the rest may build a text-only class whose parameter names no longer match
+    the checkpoint.
+    """
+    auto_map = getattr(config, "auto_map", None) or {}
+    multimodal = hasattr(config, "vision_config")
+    if "AutoModelForImageTextToText" in auto_map and (
+        multimodal or "AutoModelForCausalLM" not in auto_map
+    ):
+        return AutoModelForImageTextToText
+    if "AutoModelForCausalLM" in auto_map:
+        return AutoModelForCausalLM
+    if (
+        multimodal
+        and getattr(config, "model_type", None) in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
+    ):
+        return AutoModelForImageTextToText
+    return AutoModelForCausalLM
 
 
 def _resolve_checkpoint_dir(ckpt_path: str, rank: int) -> str:
@@ -185,6 +215,7 @@ def _conversion_plan(model: nn.Module, conversions: list | None = None) -> dict 
     if not (legacy_renames or renamings or converters):
         return None
     return {
+        "conversions": conversions,
         "legacy_renames": legacy_renames,
         "renamings": renamings,
         "converters": converters,
@@ -255,6 +286,21 @@ def _convert_keys(plan: dict, state: dict) -> dict:
     return result
 
 
+def resolve_model_class(config, trust_remote_code: bool = False) -> type | None:
+    """The class :func:`build_meta_causal_lm` builds for ``config``, found without building it.
+
+    ``None`` when it cannot be resolved that way: remote code without ``trust_remote_code``, or a
+    config type no Transformers auto class maps.
+    """
+    factory = _meta_model_factory(config)
+    auto_map = getattr(config, "auto_map", None) or {}
+    if factory.__name__ in auto_map:
+        if not trust_remote_code:
+            return None
+        return get_class_from_dynamic_module(auto_map[factory.__name__], config._name_or_path)
+    return factory._model_mapping.get(type(config), None)
+
+
 def build_meta_causal_lm(
     ckpt_path: str,
     trust_remote_code: bool,
@@ -284,11 +330,7 @@ def build_meta_causal_lm(
     dtype = getattr(hf_config, "dtype", None) or torch.bfloat16
     from accelerate import init_empty_weights  # only real callers of this function need it
 
-    model_factory = auto_class
-    if model_factory is None:
-        model_factory = AutoModelForCausalLM
-        if is_fsdp2_text_only_vlm(hf_config):
-            model_factory = AutoModelForImageTextToText
+    model_factory = auto_class if auto_class is not None else _meta_model_factory(hf_config)
     # Where transformers records the class a remote-code build registers: in the auto class built
     # through, and in those a remote VLM builds its towers through. Read without a fallback: if a
     # release moves it, this fails here rather than leave one rank's model without generate.
@@ -305,6 +347,22 @@ def build_meta_causal_lm(
         for registered, saved in kept:
             registered.clear()
             registered.update(saved)
+    # from_pretrained keeps a model's ``_keep_in_fp32_modules(_strict)`` tensors in fp32 as it loads
+    # them; a build from the config gives them ``dtype``, and the load would then round them to it.
+    dtype_plan = model._get_dtype_plan(dtype)
+    if dtype_plan:
+        pattern, group_to_glob, _ = build_glob_alternation(list(dtype_plan))
+        for name, tensor in chain(model.named_parameters(), model.named_buffers()):
+            if match := pattern.search(name):
+                tensor.data = tensor.data.to(dtype_plan[group_to_glob[match.lastgroup]])
+    # from_pretrained reads the checkpoint's generation_config.json; a build from the config gets
+    # defaults without its stop/pad tokens, which an export would then write in its place.
+    if (
+        ckpt_path
+        and os.path.isfile(os.path.join(ckpt_path, "generation_config.json"))
+        and model.can_generate()
+    ):
+        model.generation_config = GenerationConfig.from_pretrained(ckpt_path)
     model.eval()
     return model
 
@@ -385,31 +443,60 @@ def _group_sources_by_layer(
     plans: list[dict],
     model_param_names: set[str],
     layer_prefixes: list[str],
-) -> tuple[dict[int, list[str]], list[str], list[str]]:
+) -> tuple[dict[int, list[str]], list[str], list[str], set[str]]:
     """Bucket checkpoint keys by the decoder layer their converted target lives in.
 
-    Returns ``(layer_sources, non_layer_sources, unplaced)``: ``layer_sources[i]`` holds the keys
-    targeting decoder layer ``i``, ``non_layer_sources`` holds root (embed/lm_head/norm) keys, and
-    ``unplaced`` NAMES the keys whose target isn't in the model -- weights the built model has no
-    home for (an MTP head, an auxiliary tower). The names are kept, not just counted, so the export
-    can copy them through: PTQ never touches them, but the exported checkpoint is still expected to
-    contain them.
+    Returns ``(layer_sources, non_layer_sources, unplaced, targets)``: ``layer_sources[i]`` holds
+    the keys targeting decoder layer ``i``, ``non_layer_sources`` holds root (embed/lm_head/norm)
+    keys, and ``unplaced`` NAMES the keys whose target isn't in the model -- weights the built model
+    has no home for (an MTP head, an auxiliary tower). The names are kept, not just counted, so the
+    export can copy them through: PTQ never touches them, but the exported checkpoint is still
+    expected to contain them. ``targets`` holds the parameter names some key loads into.
     """
     layer_sources: dict[int, list[str]] = {i: [] for i in range(len(layer_prefixes))}
     non_layer_sources: list[str] = []
     unplaced: list[str] = []
+    targets: set[str] = set()
     for ckpt_key in ckpt_keys:
         target = _target_param(plans, ckpt_key, model_param_names)
         if target is None:
             unplaced.append(ckpt_key)
             continue
+        targets.add(target)
         for i, prefix in enumerate(layer_prefixes):
             if target.startswith(prefix):
                 layer_sources[i].append(ckpt_key)
                 break
         else:
             non_layer_sources.append(ckpt_key)
-    return layer_sources, non_layer_sources, unplaced
+    return layer_sources, non_layer_sources, unplaced, targets
+
+
+def _check_every_param_sourced(model: nn.Module, sourced_targets: set[str]) -> None:
+    """Raise if a parameter (or meta buffer) of ``model`` gets no tensor from the checkpoint.
+
+    The FSDP2 loader materializes the model with uninitialized storage, so a parameter no checkpoint
+    key converts into would silently calibrate on garbage, e.g. when a VLM checkpoint names its
+    weights in a layout the conversion plan does not cover. A tied pair (``lm_head`` and the
+    embedding) counts as sourced if either name is: ``tie_weights`` fills the other after the load,
+    from the mapping it recomputes here.
+    """
+    sourced = set(sourced_targets)
+    tied = getattr(model, "get_expanded_tied_weights_keys", None)
+    for target, source in (tied(all_submodels=True) if tied else {}).items():
+        if target in sourced or source in sourced:
+            sourced.update((target, source))
+    required = chain(
+        (n for n, _ in model.named_parameters()),
+        (n for n, b in model.named_buffers() if b.is_meta),
+    )
+    missing = sorted(n for n in required if n not in sourced)
+    if missing:
+        raise RuntimeError(
+            f"FSDP2 load: {len(missing)} parameter(s) of the built model get no tensor from the "
+            f"checkpoint, e.g. {missing[:5]}. The checkpoint's key layout does not match the "
+            "model class it was built with."
+        )
 
 
 def unplaced_source_keys(
@@ -730,12 +817,10 @@ def _sharded_load_kwargs(
         )
     # As build_meta_causal_lm builds: AutoModelForCausalLM refuses most VLMs' configs, and builds
     # some as the language model alone, whose other towers the export would carry unquantized.
-    builds = (
-        AutoModelForImageTextToText if is_fsdp2_text_only_vlm(hf_config) else AutoModelForCausalLM
-    )
+    builds = _meta_model_factory(hf_config)
     if _auto_class(hf_config, trust_remote_code=trust_remote_code) is not builds:
         raise NotImplementedError(
-            f"The {route} load builds a causal LM, or a text-only VLM it supports, which this "
+            f"The {route} load builds a causal LM or a vision-language model, which this "
             f"{model_type} checkpoint is not. To load it whole on every rank, pass its model class "
             f"as auto_class, with {_whole_instead(decided)}."
         )
@@ -1490,14 +1575,16 @@ def parallel_load_and_prepare_fsdp2(
 
     model = build_meta_causal_lm(resolved_path, trust_remote_code, attn_implementation, hf_config)
 
+    # transformers fuses/renames checkpoint keys so they no longer match param names 1:1
+    # (None => nothing to convert). Taken before the wrap: fully_shard swaps in an ``FSDP<cls>``
+    # class that transformers treats as custom code, dropping that class's renamings (a VLM's
+    # ``model.layers`` -> ``model.language_model.layers``). Parameter names are unchanged by it.
+    plan = _conversion_plan(model)
+
     # fsdp2_wrap shards each decoder layer + the root (embed/lm_head/norm sharded, not replicated).
     decoder_layers = fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
     module_to_name = {m: n for n, m in model.named_modules()}
     layer_prefixes = [module_to_name[layer] + "." for layer in decoder_layers]
-
-    # transformers fuses/renames checkpoint keys so they no longer match param names 1:1
-    # (None => nothing to convert).
-    plan = _conversion_plan(model)
 
     # Valid targets; keys converting to anything else are aux weights (e.g. an MTP head) we skip.
     model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
@@ -1506,7 +1593,7 @@ def parallel_load_and_prepare_fsdp2(
     # non_layer_sources). Every tensor in the files the index names, not only the ones it lists, so
     # the unplaced ones fall out of this same pass. A model built from its config ran no
     # conversions of its own, so the stock plan is the only one.
-    layer_sources, non_layer_sources, unplaced = _group_sources_by_layer(
+    layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
         checkpoint_tensor_files(resolved_path),
         [plan] if plan else [],
         model_param_names,
@@ -1522,6 +1609,13 @@ def parallel_load_and_prepare_fsdp2(
     # it came from. Not a state dict: holding these tensors from load to export would waste the
     # memory this loader exists to save.
     record_unplaced_source_keys(model, resolved_path, unplaced)
+    # What from_pretrained records: the conversions some checkpoint key used, or all of them on a
+    # Transformers without ``was_used``. The export reverts these and would otherwise query the
+    # wrapped class, which has lost them.
+    model._weight_conversions = [
+        c for c in (plan["conversions"] if plan else []) if getattr(c, "was_used", lambda: True)()
+    ]
+    _check_every_param_sourced(model, sourced_targets)
 
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
 
@@ -1766,10 +1860,14 @@ def _decide_distribution(
             f"{replicate} to load it without expert parallelism, whole on every rank."
         )
     # Why the expert-parallel load would refuse this MoE, or None, whatever EP degree is set: its
-    # spec, the transformers it needs, its checkpoint or its plan. An MoE it refuses cannot be
-    # expert-parallel here, so is not refused below for being left whole.
+    # spec, the transformers it needs, its spec's prepare, its checkpoint or its plan. An MoE it
+    # refuses cannot be expert-parallel here, so is not refused below for being left whole.
     refusal = (
-        (_spec_refusal(hf_config.model_type) or _ep_load_refusal(hf_config, ep_plan))
+        (
+            _spec_refusal(hf_config.model_type)
+            or _prepare_refusal(hf_config, ckpt_path, trust_remote_code)
+            or _ep_load_refusal(hf_config, ep_plan)
+        )
         if experts
         else None
     )
@@ -1793,17 +1891,35 @@ def _decide_distribution(
             f"the expert-parallel load cannot take it: {refusal}"
         )
     # Why the expert-parallel load cannot shard the dense part, if it cannot: the export cannot write
-    # it sharded within several expert-data-parallel replicas.
+    # it sharded within several expert-data-parallel replicas, and Distributed Checkpoint, which
+    # loads it sharded, reads a block-fp8 checkpoint's tensors as stored, with no dequantization.
     unshardable, remedy = None, ""
+    block_fp8 = ep_size > 1 and _ckpt_quant_method(hf_config, ckpt_path) == "fp8"
     if ep_size > 1 and world_size // ep_size > 1:
         unshardable = (
             f"within each of its {world_size // ep_size} expert-data-parallel replicas, a layout "
             "the export cannot write yet"
         )
+        # No EP degree lets a block-fp8 dense part shard (below), so none is offered for one.
         remedy = (
-            " Set MODELOPT_EP_DEGREE to the world size if it divides the expert count, "
+            " Set MODELOPT_FSDP_SIZE=1 if the dense part fits one GPU, or start from an "
+            "unquantized copy of the model."
+            if block_fp8
+            else " Set MODELOPT_EP_DEGREE to the world size if it divides the expert count, "
             "MODELOPT_EP_DEGREE=1 to FSDP2-shard the whole model without expert parallelism, or "
             "MODELOPT_FSDP_SIZE=1 if the dense part fits one GPU."
+        )
+    elif block_fp8:
+        # Expert-parallel only, as its remedy holds there alone: the expert-parallel load is the one
+        # that dequantizes block FP8 as it loads. Without expert parallelism the dense part is the
+        # whole model, and the FSDP2 load refuses a quantized checkpoint itself (_load_sharded).
+        unshardable = (
+            "from a block-fp8 checkpoint: Distributed Checkpoint reads it as stored, with no "
+            "dequantization"
+        )
+        remedy = (
+            " Set MODELOPT_FSDP_SIZE=1 to replicate it, which dequantizes it as it loads, or start "
+            "from an unquantized copy of the model."
         )
     if dense == "auto":
         # A rank holds a whole copy of what expert parallelism does not shard, and its 1/ep_size
@@ -1928,11 +2044,14 @@ def resolve_distribution_plan(
     Unless the call or rank 0's knobs rule expert parallelism out (a single process, an
     ``auto_class`` the sharded loads refuse, or an EP degree of 1, which auto is for a model whose
     spec refuses expert parallelism on the installed transformers), every rank applies the model's
-    spec to a copy of the config first
-    (:func:`~modelopt.torch.utils.moe.apply_distributed_support`): for several models it is what
-    supplies the expert-parallel plan, and an expert-parallel plan returns that copy. Any other
-    plan returns the config without it, which the export would otherwise write out; the spec's
-    ``prepare`` has run for it all the same, which its contract allows
+    spec to a copy of the config first, in the collective "model spec" step: its plan, and what
+    makes the checkpoint's own code importable, with no ``prepare`` run
+    (:func:`~modelopt.torch.utils.moe.apply_distributed_support` with ``prepare=False``). For
+    several models it is what supplies the expert-parallel plan. An EP degree of 1 still builds the
+    model, so the step then runs what makes the checkpoint's own code build, and nothing else of the
+    spec (:attr:`~modelopt.torch.models.EPSpec.make_buildable`). An expert-parallel plan then has
+    every rank prepare a copy of the config as read, in the collective "model spec prepared" step,
+    and returns that copy. Any other plan returns the config as read, with no ``prepare`` run
     (:attr:`~modelopt.torch.models.EPSpec.prepare`). A plan that
     leaves an expert-parallel MoE whole on every rank raises, unless both knobs ask for exactly
     that: ``ep_size=1`` with ``dense="replicate"`` (``MODELOPT_EP_DEGREE=1`` and
@@ -1979,38 +2098,73 @@ def resolve_distribution_plan(
     # load that is refused, without the spec, whose prepare could fail, or patch the process, for a
     # load that never shards. An EP degree asked for under init_quantized_weights still takes the
     # spec, for the decision to find the experts the load then refuses to shard.
-    prepared = [hf_config]
-    if dist.broadcast_from(
+    stated = [hf_config]
+    # "build" for an EP degree of 1, whose decision still builds the checkpoint's own code, and for
+    # one left to auto under init_quantized_weights, which needs no plan. The build step also readies
+    # that code for the load that follows (it keeps its shims on the module), so it runs even where
+    # the decision then builds nothing: under init_quantized_weights with a dense layout left to
+    # auto or replicated, the whole load still builds the checkpoint's own code.
+    step = dist.broadcast_from(
         "spec",
         lambda: (
             world_size > 1
             and auto_class in (None, AutoModelForCausalLM)
-            and (ep := _ep_degree(ep_size, hf_config.model_type)) != 1
-            and not (ep == "auto" and _init_quantized_weights())
-        ),
-    ):
-        # Before deciding: deciding without the spec would read an expert-parallel MoE as dense. A
-        # rank that cannot apply it fails every rank, as a checkpoint read does above.
-        def spec_applied() -> bool:
-            prepared[0] = apply_distributed_support(
-                hf_config.model_type,
-                copy.deepcopy(hf_config),
-                ckpt_path=ckpt_path,
-                trust_remote_code=trust_remote_code,
+            and (
+                "plan"
+                if (ep := _ep_degree(ep_size, hf_config.model_type)) != 1
+                and not (ep == "auto" and _init_quantized_weights())
+                else "build"
             )
+        ),
+    )
+    if step:
+        # Before deciding: deciding without the spec would read an expert-parallel MoE as dense. Its
+        # plan only: its prepare, which may patch the process, runs for an expert-parallel plan
+        # alone. A rank that cannot apply it fails every rank, as a checkpoint read does above.
+        def spec_stated() -> bool:
+            if step == "plan":
+                stated[0] = apply_distributed_support(
+                    hf_config.model_type,
+                    copy.deepcopy(hf_config),
+                    ckpt_path=ckpt_path,
+                    trust_remote_code=trust_remote_code,
+                    prepare=False,
+                )
+            elif (ep := _ep_spec(hf_config.model_type)) and ep.make_buildable is not None:
+                # A copy, as the plan arm's: the config is returned, and the load builds from it.
+                ep.make_buildable(
+                    copy.deepcopy(hf_config),
+                    ckpt_path=ckpt_path,
+                    trust_remote_code=trust_remote_code,
+                )
             return True
 
-        dist.all_reduce("model spec", spec_applied, all)
+        dist.all_reduce("model spec", spec_stated, all)
     plan = dist.broadcast_from(
         "plan",
         lambda: _decide_distribution(
-            ckpt_path, prepared[0], world_size, ep_size, dense, trust_remote_code, auto_class
+            ckpt_path, stated[0], world_size, ep_size, dense, trust_remote_code, auto_class
         ),
     )
     if plan != DistributionPlan():
         print_rank_0(f"Distribution: {plan!r}")
-    # Only the expert-parallel load shards by the plan the spec attached.
-    return plan, prepared[0] if plan.is_expert_parallel else hf_config
+    if not plan.is_expert_parallel:
+        return plan, hf_config
+    # Only the expert-parallel load shards by the plan the spec attached, and only it gets the spec
+    # prepared, on every rank.
+    prepared = [hf_config]
+
+    def spec_applied() -> bool:
+        prepared[0] = apply_distributed_support(
+            hf_config.model_type,
+            copy.deepcopy(hf_config),
+            ckpt_path=ckpt_path,
+            trust_remote_code=trust_remote_code,
+        )
+        return True
+
+    dist.all_reduce("model spec prepared", spec_applied, all)
+    return plan, prepared[0]
 
 
 def _make_expert_param_matcher(ep_plan: dict[str, Any]):
@@ -2201,6 +2355,244 @@ def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_st
         )
 
 
+_FINEGRAINED_FP8_PATCHED = False
+
+
+def _patch_finegrained_fp8_dequant(target_dtype=None):
+    """Correct transformers' block-FP8 dequant (``Fp8Dequantize._dequantize_one``) for DeepSeek-V3.
+
+    transformers 5.9's ``_dequantize_one`` infers the block geometry by *dividing* the weight shape
+    by the scale-grid shape and requires exact divisibility::
+
+        block_m = rows // scale_rows  # assumes rows == scale_rows * block_m exactly
+
+    But DeepSeek-V3 block-FP8 uses a fixed 128x128 block with a *ceil* scale grid, so a weight whose
+    dimension isn't a multiple of 128 has a partial last block: e.g. ``kv_a_proj_with_mqa`` is
+    (576, 7168) with a (5, 56) grid -> ``576 % 5 != 0`` raises ``ValueError``, and degenerate/empty
+    scale grids from the merged/sharded expert path hit ``rows % 0`` -> ``ZeroDivisionError``.
+
+    Replace it with a divisibility-free tile-and-crop: broadcast each per-block scale over its
+    ``block`` rows/cols (block size from the real ``weight_block_size`` when the grid is inexact,
+    else derived), then crop to the weight shape -- correct for both full and partial last blocks,
+    2-D dense linears and (leading-dim-broadcast) per-expert tensors. Idempotent.
+
+    The override takes block-FP8 weights only. Any other weight goes to transformers' own dequant,
+    which from 5.9 unpacks packed FP4 (``float4_e2m1fn_x2``, or ``int8``) itself: DeepSeek-V4 declares
+    block FP8 but stores its routed experts that way, with ``[1, 32]`` scales.
+
+    transformers >= 5.10.1 keeps its own dequant. Upstream fixed two of the show-stoppers there -- the
+    loader's expert ``tensor_idx`` check became ``any(op is MergeModulelist ...)`` (bug 1) and
+    ``_dequantize_one`` gained an ``output_dtype`` the loader passes as the destination dtype (bug 3).
+    It still derives the block from the scale grid (bug 2), which a partial last block makes wrong: 576
+    rows under a 5-row grid do not divide at all, and 448 rows under a 4-row grid divide into blocks of
+    112 instead of 128. So there a block-FP8 weight whose grid is the configured block's ceil grid and
+    that has a partial last block is padded to whole blocks for it and the result cropped back.
+    """
+    global _FINEGRAINED_FP8_PATCHED
+    from transformers.integrations import finegrained_fp8 as _fp8
+
+    if isinstance(target_dtype, str):
+        # A config can name its dtype, or carry "auto" for the checkpoint's own, and Tensor.to reads a
+        # string as a device: take the torch.dtype it names, and for "auto" the bfloat16 default.
+        name = target_dtype.rsplit(".", 1)[-1]
+        target_dtype = torch.bfloat16 if name == "auto" else getattr(torch, name)
+    if target_dtype is not None:
+        # The model dtype the override emits, kept current even if already patched, and on the class
+        # with the override: a re-imported copy of this module sets the dtype the installed one reads.
+        _fp8.Fp8Dequantize._modelopt_dequant_dtype = target_dtype
+    if _FINEGRAINED_FP8_PATCHED:
+        return
+
+    fp8_dtypes = {
+        getattr(torch, name)
+        for name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
+        if hasattr(torch, name)
+    }
+    if parse(transformers.__version__) >= parse("5.10.1"):
+        # Re-importing this module loses its flag, and the wrapper calls the method it replaces:
+        # the class keeps a flag of its own, so the wrapper never wraps itself.
+        if getattr(_fp8.Fp8Dequantize, "_modelopt_dequant_patched", False):
+            _FINEGRAINED_FP8_PATCHED = True
+            return
+        _stock_dequantize_one = _fp8.Fp8Dequantize._dequantize_one
+
+        def _dequantize_partial_blocks(self, quantized, scales, *args, **kwargs):
+            if quantized.dim() < 2 or scales.dim() < 2 or quantized.dtype not in fp8_dtypes:
+                return _stock_dequantize_one(self, quantized, scales, *args, **kwargs)
+            rows, cols = quantized.shape[-2:]
+            block = getattr(
+                getattr(self.hf_quantizer, "quantization_config", None), "weight_block_size", None
+            ) or (128, 128)
+            ceil_grid = (-(-rows // block[0]), -(-cols // block[1]))
+            if tuple(scales.shape[-2:]) != ceil_grid or (
+                rows % block[0] == 0 and cols % block[1] == 0
+            ):
+                return _stock_dequantize_one(self, quantized, scales, *args, **kwargs)
+            pad_rows, pad_cols = ceil_grid[0] * block[0] - rows, ceil_grid[1] * block[1] - cols
+            # Padded in its own fp8 dtype, through a same-size uint8 view (pad has no fp8 kernel), so
+            # transformers' dequant gets the input it is written for, without an fp32 copy.
+            padded = torch.nn.functional.pad(
+                quantized.view(torch.uint8), (0, pad_cols, 0, pad_rows)
+            ).view(quantized.dtype)
+            out = _stock_dequantize_one(self, padded, scales, *args, **kwargs)
+            return out[..., :rows, :cols]
+
+        _fp8.Fp8Dequantize._dequantize_one = _dequantize_partial_blocks
+        _fp8.Fp8Dequantize._modelopt_dequant_patched = True
+        _FINEGRAINED_FP8_PATCHED = True
+        return
+
+    # The release's own dequant, for the weights the override leaves to it. Releases without one
+    # (5.5) dequantize inline and never call the override. On a re-imported module it is the method
+    # the earlier copy's override replaced: wrapping that override would run its cast first.
+    stock = vars(_fp8.Fp8Dequantize).get("_dequantize_one")
+    stock = getattr(stock, "_modelopt_replaced", stock)
+
+    def _dequantize_one(self, quantized, scales, output_dtype=None):
+        # Emit the MODEL compute dtype (bf16), NOT the scale dtype. DeepSeek's weight_scale_inv is F32;
+        # transformers' original out_dtype logic would return F32 weights, which then run against bf16
+        # activations -> "mat1 and mat2 have the same dtype" RuntimeError in the calibration matmuls.
+        # A loader that passes the destination dtype, as transformers' does from 5.10.1, knows it best.
+        out_dtype = (
+            output_dtype or getattr(type(self), "_modelopt_dequant_dtype", None) or torch.bfloat16
+        )
+        if quantized.dtype not in fp8_dtypes:
+            # Block FP8 only: read as fp8, packed FP4 (two values a byte) would come out at half its
+            # width and wrong. transformers' own dequant unpacks it.
+            if stock is None:
+                raise ValueError(f"block-FP8 dequant: a {quantized.dtype} weight is not block FP8.")
+            return stock(self, quantized, scales).to(out_dtype)
+        if quantized.dim() < 2 or scales.dim() < 2:
+            raise ValueError(
+                f"block-FP8 dequant: weight {tuple(quantized.shape)} with scales "
+                f"{tuple(scales.shape)} is not a block-scaled 2-D weight."
+            )
+        q = quantized.to(torch.float32, copy=True)
+        rows, cols = q.shape[-2:]
+        scale_rows, scale_cols = scales.shape[-2:]
+        if scale_rows == 0 or scale_cols == 0 or scales.numel() == 0:
+            # Only an empty weight has no scales. A non-empty one with an empty grid was sliced
+            # apart from its scales (as 5.9's expert tensor_idx bug did): emitting it unscaled would
+            # load wrong weights without a word.
+            if q.numel() == 0:
+                return q.to(out_dtype)
+            raise ValueError(
+                f"block-FP8 dequant: weight {tuple(q.shape)} has an empty scale grid "
+                f"{tuple(scales.shape)}; the weight and its scales were sliced apart."
+            )
+        wbs = getattr(
+            getattr(self.hf_quantizer, "quantization_config", None), "weight_block_size", None
+        ) or (128, 128)
+
+        def _blk(dim, sgrid, cfg_blk):
+            # A ceil scale grid at the config block size (DeepSeek's uniform 128x128, incl. partial last
+            # block e.g. 576 -> 5 blocks) is the common case -- trust the config block. Only a grid that
+            # is NOT the ceil-at-config-block (a coarser/per-tensor scale) derives the block by division;
+            # never infer from exact divisibility alone (576 % 5 and 9 % 3 both mislead).
+            if sgrid == -(-dim // cfg_blk):
+                return cfg_blk
+            if dim % sgrid == 0:
+                return dim // sgrid
+            # Neither: no block is known to place it, and guessing would scale rows wrongly.
+            raise ValueError(
+                f"block-FP8 dequant: a scale grid of {sgrid} fits neither the configured block "
+                f"{cfg_blk} nor an even split of {dim}."
+            )
+
+        block_m = _blk(rows, scale_rows, wbs[0])
+        block_n = _blk(cols, scale_cols, wbs[1])
+        # Scale q, its own copy, in place: its whole column blocks through a view, then a partial
+        # last one. The scales are tiled over the rows only, so no full-size fp32 tile is built.
+        s = scales.to(torch.float32).repeat_interleave(block_m, dim=-2)[..., :rows, :]
+        whole = cols // block_n
+        q[..., : whole * block_n].unflatten(-1, (whole, block_n)).mul_(s[..., :whole, None])
+        if whole < scale_cols:
+            q[..., whole * block_n :].mul_(s[..., whole:])
+        return q.to(out_dtype)
+
+    _dequantize_one._modelopt_replaced = stock  # type: ignore[attr-defined]
+
+    # --- Fix the routed-expert block-FP8 load corruption (transformers 5.9) ---------------------
+    # The FP8 quantizer's update_weight_conversions PREPENDS Fp8Dequantize to each converter's
+    # operations, so for the fused-MoE experts converter operations[0] becomes Fp8Dequantize instead
+    # of the original MergeModulelist. The state-dict loader only assigns a per-expert tensor_idx when
+    # ``isinstance(mapping.operations[0], MergeModulelist)`` (core_model_loading.py) -- with the prepend
+    # that check fails, tensor_idx becomes None, and GroupedGemmParallel.shard_tensor then row-slices
+    # each per-expert (2048,7168) weight to param[rank*local:(rank+1)*local] = (16,7168) and slices the
+    # scales full/empty per rank. Result: gate_up_proj loads as (256,32,7168), a grouped-GEMM contraction
+    # mismatch at calibration. Fix: FUSE the prepended Fp8Dequantize into the expert MergeModulelist (a
+    # MergeModulelist subclass that dequantizes each per-expert (weight,scale) pair, dropping scales, then
+    # stacks) so operations[0] IS a MergeModulelist again -- the loader assigns tensor_idx (whole-expert
+    # selection + EP shard) and Concatenate still runs after scales are dropped. Idempotent (flag-guarded).
+    try:
+        from transformers.core_model_loading import MergeModulelist as _MergeModulelist
+        from transformers.core_model_loading import WeightConverter as _WeightConverter
+        from transformers.quantizers.quantizer_finegrained_fp8 import (
+            FineGrainedFP8HfQuantizer as _FineGrainedFP8HfQuantizer,
+        )
+
+        # Fuse the prepended Fp8Dequantize INTO the expert MergeModulelist: dequantize each per-expert
+        # (weight, scale) pair -- dropping scales -- then stack, exactly as the intended
+        # [Fp8Dequantize, MergeModulelist, Concatenate] chain does, but packaged as a single op that
+        # *is a* MergeModulelist. That keeps operations[0] a MergeModulelist so the loader assigns each
+        # per-expert its tensor_idx (whole-expert selection + EP shard) AND Concatenate still runs after
+        # dequant has dropped the scales (Concatenate cats every remaining source pattern, so it must not
+        # see scale keys). Net execution is identical to upstream's intent; only the op layout changes.
+        class _DequantThenMerge(_MergeModulelist):
+            def __init__(self, deq, dim=0):
+                super().__init__(dim)
+                self._deq = deq
+
+            def convert(self, input_dict, source_patterns=None, target_patterns=None, **kwargs):
+                deq_out = self._deq.convert(
+                    input_dict,
+                    source_patterns=source_patterns,
+                    target_patterns=target_patterns,
+                    **kwargs,
+                )
+                return super().convert(
+                    deq_out,
+                    source_patterns=source_patterns,
+                    target_patterns=target_patterns,
+                    **kwargs,
+                )
+
+        # A transformers without the hook prepends no dequant to the expert converters: nothing to fuse.
+        if hasattr(_FineGrainedFP8HfQuantizer, "update_weight_conversions") and not getattr(
+            _FineGrainedFP8HfQuantizer, "_modelopt_uwc_patched", False
+        ):
+            _orig_uwc = _FineGrainedFP8HfQuantizer.update_weight_conversions
+
+            def _uwc_fixed(self, weight_conversions):
+                convs = _orig_uwc(self, weight_conversions)
+                for conv in convs:
+                    ops = getattr(conv, "operations", None)
+                    # Match the expert converter update_weight_conversions produced:
+                    # [Fp8Dequantize, MergeModulelist, <Concatenate...>]. Fuse ops[0]+ops[1].
+                    if (
+                        isinstance(conv, _WeightConverter)
+                        and ops
+                        and len(ops) >= 2
+                        and isinstance(ops[0], _fp8.Fp8Dequantize)
+                        and isinstance(ops[1], _MergeModulelist)
+                    ):
+                        deq, mml = ops[0], ops[1]
+                        ops[:2] = [_DequantThenMerge(deq, dim=mml.dim)]
+                return convs
+
+            _FineGrainedFP8HfQuantizer.update_weight_conversions = _uwc_fixed
+            _FineGrainedFP8HfQuantizer._modelopt_uwc_patched = True
+    except Exception as e:
+        # Unpatched, every routed expert would load sliced apart from its scales (see above).
+        raise RuntimeError(
+            f"block-FP8 load: could not fuse transformers' expert dequant into its merge ({e})."
+        ) from e
+
+    # Rebound once the fuse is in, so a refused patch leaves transformers as it was.
+    _fp8.Fp8Dequantize._dequantize_one = _dequantize_one
+    _FINEGRAINED_FP8_PATCHED = True
+
+
 def _fsdp2_shard_dense(model: nn.Module, fsdp_mesh, expert_modules) -> int:
     """FSDP2-shard the dense part over ``fsdp_mesh``, block by block; return the blocks wrapped.
 
@@ -2273,7 +2665,8 @@ def _fsdp2_shard_dense(model: nn.Module, fsdp_mesh, expert_modules) -> int:
 
 # The checkpoint formats load_and_prepare_ep dequantizes as it loads, beside unquantized ones (None).
 # Not MXFP4: transformers dequantizes it into GPT-OSS's transposed expert layout, whatever the model's.
-_EP_SOURCE_FORMATS: frozenset[str | None] = frozenset({None})
+# fp8 is block FP8; _ckpt_quant_method calls per-tensor FP8 fp8-per-tensor, which the load refuses.
+_EP_SOURCE_FORMATS: frozenset[str | None] = frozenset({None, "fp8"})
 
 # The ep_plan styles the expert-parallel load swaps for its torch_a2a styles. It keeps these and
 # grouped_gemm, and drops any other.
@@ -2327,6 +2720,19 @@ def _ep_plan_refusal(ep_plan: dict[str, str]) -> str | None:
     return None
 
 
+def _prepare_refusal(hf_config, ckpt_path: str, trust_remote_code: bool) -> ValueError | None:
+    """Why the model spec's ``prepare`` would refuse this checkpoint, or ``None``.
+
+    ``prepare`` runs only once the plan is decided expert-parallel, so the decision asks first
+    (``EPSpec.prepare_refusal``): a checkpoint it refuses cannot be expert-parallel here.
+    """
+    ep = _ep_spec(hf_config.model_type)
+    if ep is None or ep.prepare_refusal is None:
+        return None
+    why = ep.prepare_refusal(hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code)
+    return ValueError(why) if why is not None else None
+
+
 def _ep_load_refusal(hf_config, ep_plan: dict[str, str]) -> Exception | None:
     """The error the expert-parallel load refuses this model with, by its config, or ``None``.
 
@@ -2335,7 +2741,11 @@ def _ep_load_refusal(hf_config, ep_plan: dict[str, str]) -> Exception | None:
     parallelism out, or the transformers release it needs, is not asked here: the plan decision and
     the load ask the spec first (:func:`~modelopt.torch.utils.moe.check_distributed_support`).
     """
-    if (method := _ckpt_quant_method(hf_config)) not in _EP_SOURCE_FORMATS:
+    # The formats it takes include those the spec's prepare, which runs only once the plan is
+    # decided, has the experts decompress as they load.
+    ep = _ep_spec(hf_config.model_type)
+    takes = _EP_SOURCE_FORMATS | frozenset(ep.decompressed_formats if ep is not None else ())
+    if (method := _ckpt_quant_method(hf_config)) not in takes:
         return NotImplementedError(
             f"The expert-parallel load cannot dequantize a {method!r} checkpoint; an unquantized "
             "copy of the model would load expert-parallel."
@@ -2352,19 +2762,56 @@ def _decompressed_as_loaded(cfg) -> bool:
     return _onfly_decompress.is_marked(cfg)
 
 
-def _ckpt_quant_method(cfg):
+def _ckpt_quant_method(cfg, ckpt_path: str | None = None):
     """Return the checkpoint's native quantization method, or ``None``.
 
     Return the checkpoint's native quantization method (e.g. ``"fp8"`` for block-fp8 DeepSeek-V3),
     or ``None`` if the checkpoint isn't natively quantized. Checks the top config, then a VLM's
-    ``text_config`` or ``llm_config``.
+    ``text_config`` or ``llm_config``. Per-tensor FP8 (AutoFP8's), which names the same method as
+    block FP8 but no ``weight_block_size``, is ``"fp8-per-tensor"``. transformers' FP8 config object
+    fills in a 128x128 block whatever the checkpoint names, so for one the ``config.json`` in
+    ``ckpt_path`` says whether the checkpoint names a block; without a readable one (a Hub ID, say)
+    it is ``"fp8-unverified"``, for the load to refuse rather than guess.
     """
     for c in config_levels(cfg):
         qc = getattr(c, "quantization_config", None)
         m = qc.get("quant_method") if isinstance(qc, dict) else getattr(qc, "quant_method", None)
         if m:
             # transformers' config objects carry a QuantizationMethod enum, whose str() is not its value.
-            return str(getattr(m, "value", m))
+            m = str(getattr(m, "value", m))
+            if not isinstance(qc, dict) and m == "fp8":
+                qc = _config_json_quantization(ckpt_path)
+                if qc is None:
+                    return "fp8-unverified"
+            block = (
+                qc.get("weight_block_size")
+                if isinstance(qc, dict)
+                else getattr(qc, "weight_block_size", None)
+            )
+            # transformers reads per-tensor FP8 as 128x128 blocks and loads its weights unscaled.
+            return "fp8-per-tensor" if m == "fp8" and not block else m
+    return None
+
+
+def _config_json_quantization(ckpt_path: str | None) -> dict | None:
+    """The ``quantization_config`` the checkpoint's own ``config.json`` names, or ``None``.
+
+    Read as stored: the top level, else a VLM's text or LLM config, where :func:`_ckpt_quant_method`
+    looks too.
+    """
+    if not ckpt_path:
+        return None
+    try:
+        with open(os.path.join(ckpt_path, "config.json")) as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):  # valid JSON, but no config
+        return None
+    for c in (raw, raw.get("text_config"), raw.get("llm_config")):
+        qc = c.get("quantization_config") if isinstance(c, dict) else None
+        if isinstance(qc, dict):
+            return qc
     return None
 
 
@@ -2534,13 +2981,16 @@ def load_and_prepare_ep(
     ``num_experts / ep_size`` routed experts and a replica of the dense part, and tokens reach their
     experts' ranks by all-to-all, so every rank must calibrate on data of its own.
 
-    It loads unquantized checkpoints, on transformers 5.7 or later. A refusal on any rank -- of its
-    transformers, the config, the checkpoint, its GPU, or in the load -- raises on every rank. In
-    the load that rests on ``from_pretrained`` running no collective, as transformers'
-    expert-parallel load does not on 5.7 through 5.18.
+    It loads unquantized checkpoints on transformers 5.7 or later, and block-FP8 ones, which it
+    dequantizes as they load, on 5.8 or later. A refusal on any rank -- of its transformers, the
+    config, the checkpoint, its GPU, or in the load -- raises on every rank. In the load that rests
+    on ``from_pretrained`` running no collective, as transformers' expert-parallel load does not on
+    5.7 through 5.18.
 
     With ``plan.dense == "fsdp"`` the dense part is FSDP2-sharded over the ``ep`` group instead,
-    each rank loading only its shard: for a model whose dense part does not fit one GPU.
+    each rank loading only its shard: for a model whose dense part does not fit one GPU. A block-FP8
+    checkpoint cannot be loaded that way: Distributed Checkpoint reads it as stored, with no
+    dequantization.
 
     The model builds with its LM head where an auto class builds one; ``require_lm_head=False``
     builds a VLM without it. Without ``hf_config`` every rank reads the checkpoint's config itself;
@@ -2590,7 +3040,32 @@ def load_and_prepare_ep(
         # first, as load_pretrained does, for an EP degree asked for or a plan handed in: no other
         # checkpoint of the model, nor a plan of its own, would load.
         check_distributed_support(hf_config.model_type)
-        quant_method = _ckpt_quant_method(hf_config)
+        quant_method = _ckpt_quant_method(hf_config, ckpt_path)
+        if quant_method == "fp8":
+            # 5.8 added the hooks block-fp8 is dequantized through (Fp8Dequantize._dequantize_one,
+            # update_weight_conversions). On 5.7 the experts' converter takes their fp8 weights before
+            # the dequant can, and they would load unscaled.
+            moe.require_transformers("5.8", "Dequantizing a block-fp8 checkpoint expert-parallel")
+        if plan.is_fsdp_dense and quant_method == "fp8":
+            raise NotImplementedError(
+                f"{plan!r}: the dense part of a block-fp8 checkpoint cannot be sharded: Distributed "
+                "Checkpoint reads it as stored, with no dequantization. Plan dense='replicate'."
+            )
+        if quant_method == "fp8-per-tensor":
+            # Not "cannot dequantize fp8", which it does: the block size it needs is what is missing.
+            raise NotImplementedError(
+                "The expert-parallel load dequantizes block-fp8 checkpoints, which name their block in "
+                "quantization_config.weight_block_size, and this fp8 checkpoint names none: per-tensor "
+                "scales (AutoFP8's) would load as 128x128 blocks, leaving the weights unscaled. Start "
+                "from an unquantized copy of the model."
+            )
+        if quant_method == "fp8-unverified":
+            raise NotImplementedError(
+                "This fp8 config came in as transformers' config object, whose 128x128 block is a "
+                f"default, and {ckpt_path!r} holds no config.json to say whether the checkpoint names "
+                "one: per-tensor scales would load as blocks, leaving the weights unscaled. Hand the "
+                "config as AutoConfig.from_pretrained reads it, or a local checkpoint."
+            )
         if quant_method not in _EP_SOURCE_FORMATS and not _decompressed_as_loaded(hf_config):
             # transformers' own quantizer would load it as stored, for PTQ to treat as plain weights.
             dequantized = ", ".join(sorted(f for f in _EP_SOURCE_FORMATS if f))
@@ -2765,6 +3240,22 @@ def load_and_prepare_ep(
         from_pretrained_kwargs["tp_plan"] = "auto"
     if attn_implementation is not None:
         from_pretrained_kwargs["attn_implementation"] = attn_implementation
+    # Native block-FP8 checkpoints (e.g. DeepSeek-V3: quantization_config.quant_method="fp8", e4m3 with
+    # weight_block_size) must be DEQUANTIZED to the model dtype on load: ModelOpt PTQ inserts/exports quantizers on
+    # plain bf16 Linears, and the EP grouped_gemm experts expect bf16 fused params -- not fp8 blocks with
+    # weight_scale_inv. Mirror get_model's mxfp4 dequant-on-load, using FineGrainedFP8Config(dequantize=True).
+    # (compressed-tensors pack-quantized experts, e.g. Kimi, are handled separately by the on-the-fly
+    # decompressor plugin; here we only cover the native fp8 case.)
+    if quant_method == "fp8":
+        # transformers keeps the checkpoint's quantization_config, its weight_block_size included,
+        # and takes only the loading attributes (dequantize) from this one.
+        from_pretrained_kwargs["quantization_config"] = FineGrainedFP8Config(dequantize=True)
+        _patch_finegrained_fp8_dequant(
+            dtype
+        )  # correct transformers' block-fp8 dequant; emit model dtype
+        print_rank_0(
+            f"[ep] native block-fp8 checkpoint -> FineGrainedFP8Config(dequantize=True) -> {dtype}"
+        )
     # Swap the plan to the torch_a2a styles and select the torch_a2a experts forward: tokens reach
     # their experts' ranks by all-to-all around the quantizable grouped GEMM.
     register_torch_a2a()  # idempotent; register the experts forward + the two styles, right before use
