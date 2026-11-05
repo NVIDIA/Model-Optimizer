@@ -20,7 +20,7 @@ from torch.autograd import Function
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.backends.gemm_registry import gemm_registry
-from modelopt.torch.quantization.backends.utils import fp4_compatible
+from modelopt.torch.quantization.backends.utils import check_attributes, fp4_compatible
 from modelopt.torch.quantization.qtensor import NVFP4QTensor, QTensorWrapper
 from modelopt.torch.quantization.utils import reduce_amax
 
@@ -234,20 +234,14 @@ def _nvfp4_availability_check(module, input, args, kwargs):
     for key, value in input_cfg.items():
         if key == "enable":
             continue
-        if (
-            not hasattr(module.input_quantizer, key)
-            or getattr(module.input_quantizer, key) != value
-        ):
+        if not check_attributes(module.input_quantizer, key, value):
             return False
 
     # Check weight quantizer config
     for key, value in weight_cfg.items():
         if key == "enable":
             continue
-        if (
-            not hasattr(module.weight_quantizer, key)
-            or getattr(module.weight_quantizer, key) != value
-        ):
+        if not check_attributes(module.weight_quantizer, key, value):
             return False
 
     # When the input.shape[1] is not the multiple of 64, GEMM will sometimes output NaN.
