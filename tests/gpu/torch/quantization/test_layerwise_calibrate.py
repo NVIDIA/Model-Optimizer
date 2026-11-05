@@ -107,10 +107,7 @@ def _register_test_discoverer(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("disk_backed", [False, True])
-def test_quantize_streams_activation_dataset_without_gpu_cache_growth(
-    monkeypatch, tmp_path, disk_backed, record_property
-):
+def test_quantize_streams_activation_dataset_without_gpu_cache_growth(monkeypatch, record_property):
     _register_test_discoverer(monkeypatch)
 
     def peak(samples):
@@ -122,7 +119,6 @@ def test_quantize_streams_activation_dataset_without_gpu_cache_growth(
                 "layerwise": {
                     "enable": True,
                     "activation_cache_device": "cpu",
-                    "activation_cache_dir": str(tmp_path) if disk_backed else None,
                 },
             },
         }
@@ -143,8 +139,6 @@ def test_quantize_streams_activation_dataset_without_gpu_cache_growth(
     record_property("small_peak_bytes", small)
     record_property("large_peak_bytes", large)
     assert large < small + 8 * 1024**2
-    if disk_backed:
-        assert not list(tmp_path.iterdir())
 
 
 def test_layerwise_calib_func_called_per_layer(monkeypatch):

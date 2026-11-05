@@ -479,76 +479,22 @@ learned. Distinct native scale groups remain distinct within joint regions.
 CPU memory holds replay sequences and original weights; device memory holds
 five logits per trained weight, gradients, and Lion momentum for one region.
 
-The GSQ recipes set ``layerwise.activation_cache_device="cpu"`` so the outer
-layerwise collector also streams inputs from CPU. Other layerwise algorithms
-keep their existing device-cache default. To back CPU buffers with temporary
-files, set ``layerwise.activation_cache_dir`` to a writable scratch directory.
-Calibration forwards must use ``use_cache=False`` with CPU activation storage.
-For example::
+The GSQ recipes set ``layerwise.activation_cache_device="cpu"`` to stream
+outer layerwise inputs from host memory; other algorithms retain device caching
+by default. Compatible CPU buffers are reused only after refinement completes.
+The complete activation set must fit in host RAM. File-backed activation caching
+is unsupported.
 
-    config["algorithm"]["layerwise"].update(
-        activation_cache_device="cpu",
-        activation_cache_dir="/path/to/activation-scratch",
-        checkpoint_dir="/path/to/layer-checkpoints",
-    )
+Only dense Transformers Llama decoder layers with all seven projections and
+static block-16 NVFP4 weight quantizers are supported. Activations and KV cache
+remain unquantized. Tied, sharded or offloaded weights, pre-scaled inputs, fused
+MoE experts and distributed execution are unsupported. Use layerwise calibration
+to process a full Llama model one decoder layer at a time.
 
-Inputs stay unchanged throughout refinement and compatible buffers are reused
-when propagating through the completed layer. CPU mode retains only the latest
-committed activation boundary on disk, alongside all layer weight checkpoints.
-Scratch files are separate from checkpoints and removed on normal return or
-exception. CPU transfers preserve tensor dtypes and metadata but add transfer
-overhead; file-backed caches also require sufficient storage and I/O bandwidth.
-
-For independent linear reconstruction, set ``reconstruction="linear"``.
-``steps``, ``max_tokens`` (cached tokens per linear), and
-``gradient_accumulation_steps`` control that mode. It supports arbitrary dense
-linear layouts, while staged mode requires all seven Llama decoder projections.
-There is no separate end-to-end scale-training phase. The paper's results on
-other grids do not establish NVFP4 quality gains.
-
-The implementation supports dense ``nn.Linear`` modules with static NVFP4
-block size 16. Activations and KV cache remain unquantized. Fused MoE experts,
-tied quantized weights, sharded model weights and AutoQuant candidate switching
-are unsupported. Resident weights must be on one device per rank.
-
-Distributed staged calibration
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Staged GSQ supports replicated data parallel execution on one or multiple nodes.
-Initialize the default WORLD process group and bind each process to its local GPU
-before quantization. Every rank must load the same model and use the same resolved
-configuration. Record a replicated ``DistributionPlan`` using
-``set_distribution_plan``. Custom data parallel subgroups, tensor or expert
-parallelism and FSDP are rejected. Linear reconstruction remains single process.
-
-The caller owns data selection and sharding. Create separate globally ordered
-initializer and training lists, and independently take ``items[rank::world_size]``
-from each. Emit the local initializer sequences first, followed by local training
-sequences. ``initializer_samples``, ``train_samples`` and ``batch_size`` are global;
-``microbatch_size`` limits each rank's device work. All ranks follow the same
-global logical batches and optimizer schedule. Uneven shards, partial batches and
-empty local contributions retain every global sample without padding or dropping.
-Do not use a sampler that changes this ordering or duplicates tail samples.
-
-See ``examples/hf_ptq/gsq_distributed.py`` for a ``torchrun`` launcher example.
-Use the same rendezvous settings and a shared checkpoint path on multiple nodes.
-Bulk activations stay rank local on CPU or mapped storage. Model weights, logits
-and optimizer state remain replicated; this does not reduce their memory floor.
-Seeds are repeatable at a fixed topology. Reduction order and stochastic sampling
-can change numerical results across GPU counts.
-
-Distributed layer checkpoints save one common layer state and separate activation
-and output metadata files per rank. The shared manifest advances after every rank
-successfully saves the checkpoint boundary. An interrupted layer is retrained.
-Resume requires the same GPU count, resolved quantization and GSQ settings, and
-round robin shard mapping. The manifest validates these automatically. The caller
-must keep source model, tokenizer, datasets and exact ordering unchanged; the
-``forward_loop`` API does not identify these. Legacy single process checkpoints
-remain usable on one process and cannot be resumed as distributed checkpoints.
-
-Every stage retains its final hard state, including when it has higher loss
-than the initializer; validation does not select earlier epochs. GSQ discards
-its logits after calibration, storing
-hard weights and native scales in the ordinary ModelOpt checkpoint. Save/restore
-and Hugging Face export use the existing APIs. Write shared output files from
-rank zero only after calibration completes.
+Each stage installs its final hard iterate, even if it has higher loss than the
+initializer. There is no separate end-to-end scale-training phase, and the paper's
+results on other grids do not establish NVFP4 quality gains. GSQ discards logits
+after calibration and stores hard weights and native scales in the ordinary
+ModelOpt checkpoint. Use ``modelopt.torch.opt.save`` / ``restore`` and final
+Hugging Face export normally. Restart checkpoints and streaming per-layer export
+are unsupported for GSQ.

@@ -726,17 +726,6 @@ class LayerwiseConfig(ModeloptBaseConfig):
         default="device",
         description="Keep captured inputs on their original device, or stream batches from CPU.",
     )
-    activation_cache_dir: str | None = ModeloptField(
-        default=None,
-        description="Optional scratch directory for file-backed CPU activation buffers.",
-    )
-
-    @model_validator(mode="after")
-    def _validate_activation_storage(self):
-        if self.activation_cache_dir is not None and self.activation_cache_device != "cpu":
-            raise ValueError("activation_cache_dir requires activation_cache_device='cpu'")
-        return self
-
     get_qdq_activations_from_prev_layer: bool = ModeloptField(
         default=True,
         title="Cache next-layer inputs from QDQ outputs of prior layers.",
@@ -1487,21 +1476,18 @@ class LSQConfig(QuantizeAlgorithmConfig):
 class GSQCalibConfig(QuantizeAlgorithmConfig):
     """Local-shift Gumbel-Softmax refinement of dense NVFP4 weight-only quantization.
 
-    ``initializer`` accepts GPTQ, max or mse and their full configs. Staged
-    reconstruction supports replicated data parallel calibration over WORLD.
-    Sample counts and batch_size are global; microbatch_size is per rank.
+    ``initializer`` accepts GPTQ, max or mse and their full configs.
+    Reconstruction supports all seven projections of a dense Llama decoder.
     """
 
     method: Literal["gsq"] = ModeloptField("gsq")
     initializer: str | dict[str, Any] = ModeloptField(default={"method": "gptq"})
-    reconstruction: Literal["linear", "staged"] = ModeloptField(default="linear")
     qk_steps: int = ModeloptField(default=2000, ge=1)
     epochs: int = ModeloptField(default=10, ge=1)
     initializer_samples: int = ModeloptField(default=512, ge=1)
     train_samples: int = ModeloptField(default=4096, ge=1)
     microbatch_size: int = ModeloptField(default=16, ge=1)
     hessian_damping: float = ModeloptField(default=0.01, gt=0, allow_inf_nan=False)
-    steps: int = ModeloptField(default=100, ge=1)
     assignment_lr: float = ModeloptField(default=1e-4, gt=0, allow_inf_nan=False)
     scale_lr: float = ModeloptField(default=5e-5, gt=0, allow_inf_nan=False)
     temperature: float = ModeloptField(default=2.0, gt=0, allow_inf_nan=False)
@@ -1511,19 +1497,15 @@ class GSQCalibConfig(QuantizeAlgorithmConfig):
     prior_strength: float = ModeloptField(default=6.0, ge=0, allow_inf_nan=False)
     init_std: float = ModeloptField(default=0.01, gt=0, allow_inf_nan=False)
     weight_decay: float = ModeloptField(default=1.0, ge=0, allow_inf_nan=False)
-    gradient_accumulation_steps: int = ModeloptField(default=1, ge=1)
-    max_tokens: int = ModeloptField(default=1024, ge=1)
     batch_size: int = ModeloptField(default=64, ge=1)
-    eval_every: int = ModeloptField(default=10, ge=1)
     seed: int = ModeloptField(default=0, ge=0)
 
     @model_validator(mode="after")
     def _validate_staged_replay(self):
-        if self.reconstruction == "staged":
-            if not self.layerwise.get_qdq_activations_from_prev_layer:
-                raise ValueError("Staged GSQ requires inputs from the quantized prefix")
-            if self.gradient_accumulation_steps != 1:
-                raise ValueError("Use microbatch_size for staged GSQ gradient accumulation")
+        if not self.layerwise.get_qdq_activations_from_prev_layer:
+            raise ValueError("GSQ requires inputs from the quantized prefix")
+        if self.layerwise.checkpoint_dir is not None or self.layerwise.export_dir is not None:
+            raise ValueError("GSQ supports completed-model saving and export only")
         return self
 
     @field_validator("initializer", mode="before")

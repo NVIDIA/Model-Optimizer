@@ -38,7 +38,7 @@ from modelopt.torch.utils import distributed as dist
 from .layer_utils import sync_moe_gate_up_amax
 from .model_utils import TiedWeightMap, _release_exported_tensors, get_language_model_from_vl
 from .quant_aware_conversion import build_reverse_name_mapper, revert_quant_config_names
-from .quant_format import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4, QUANTIZATION_W4A16_NVFP4
+from .quant_format import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4
 from .quant_utils import (
     _get_kv_cache_postprocess_config,
     _postprocess_single_tensor,
@@ -62,7 +62,7 @@ from .unified_export_hf_streaming import _assert_no_split_rules
 
 # Fusable per layer because the groups (q/k/v, gate/up) never cross a decoder boundary.
 # AWQ and SVDQuant also need pre-quant-scale steps, which are still whole-model.
-_PER_LAYER_FUSABLE_FORMATS = frozenset({QUANTIZATION_NVFP4, QUANTIZATION_W4A16_NVFP4})
+_PER_LAYER_FUSABLE_FORMATS = frozenset({QUANTIZATION_NVFP4})
 
 SUPPORTED_FORMATS = FUSION_FREE_FORMATS | _PER_LAYER_FUSABLE_FORMATS
 
@@ -136,9 +136,7 @@ def assert_formats_supported(module: nn.Module, scope: str) -> None:
         )
 
 
-def assert_layerwise_export_supported(
-    model: nn.Module, *, allow_data_parallel: bool = False
-) -> None:
+def assert_layerwise_export_supported(model: nn.Module) -> None:
     """Raise unless per-layer export is valid for this model."""
     assert_formats_supported(model, "before calibration")
 
@@ -155,15 +153,10 @@ def assert_layerwise_export_supported(
         )
 
     if dist.is_initialized() and dist.size() > 1:
-        if not allow_data_parallel:
-            raise NotImplementedError(
-                "layerwise export does not support multi-process jobs (e.g. FSDP2): every rank "
-                "would write the same shard files. Use single-process calibration."
-            )
-        if dist.distribution_plan(model) != dist.DistributionPlan(world_size=dist.size()):
-            raise NotImplementedError(
-                "Data parallel layerwise export requires replicated WORLD placement"
-            )
+        raise NotImplementedError(
+            "layerwise export does not support multi-process jobs (e.g. FSDP2): every rank "
+            "would write the same shard files. Use single-process calibration."
+        )
 
 
 class LayerwiseExporter:
@@ -214,9 +207,7 @@ class LayerwiseExporter:
         if not any(m is module for m in self._announced_on):
             self._announced_on.append(module)
 
-    def bind(
-        self, calibrated_layers: list[nn.Module], *, allow_data_parallel: bool = False
-    ) -> None:
+    def bind(self, calibrated_layers: list[nn.Module]) -> None:
         """Validate the model and snapshot what the tail pass needs.
 
         Called from calibration, after quantizer insertion and before any layer is converted
@@ -225,7 +216,7 @@ class LayerwiseExporter:
         if self._bound:
             return
         model = self._model
-        assert_layerwise_export_supported(model, allow_data_parallel=allow_data_parallel)
+        assert_layerwise_export_supported(model)
         # Tensor transforms regroup state across keys; no per-layer pass reverses that.
         _assert_no_split_rules(model)
 

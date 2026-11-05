@@ -33,7 +33,6 @@ def test_weight_only_gsq_recipes(recipe):
     algorithm = GSQCalibConfig(**config.algorithm)
     assert algorithm.initializer == {"method": recipe}
     assert algorithm.layerwise.enable
-    assert algorithm.reconstruction == "staged"
     assert algorithm.layerwise.activation_cache_device == "cpu"
     model = torch.nn.Linear(64, 16)
     mtq.quantize(model, {**config.model_dump(), "algorithm": None})
@@ -59,10 +58,8 @@ def test_gsq_rejects_incompatible_quantizers_without_mutation(config):
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("steps", 0),
         ("temperature", 0),
         ("scale_lr", float("nan")),
-        ("max_tokens", 0),
         ("qk_steps", 0),
         ("epochs", 0),
     ],
@@ -94,8 +91,20 @@ def test_staged_gsq_rejects_unsupported_layout_without_mutation():
     mtq.quantize(model, {**config, "algorithm": None})
     before = deepcopy(model.state_dict())
     with pytest.raises(ValueError):
-        mtq.calibrate(
-            model, {"method": "gsq", "reconstruction": "staged"}, lambda m: m(torch.ones(1, 4, 64))
-        )
+        mtq.calibrate(model, {"method": "gsq"}, lambda m: m(torch.ones(1, 4, 64)))
     for name, value in before.items():
         torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "field", ["reconstruction", "steps", "max_tokens", "eval_every", "gradient_accumulation_steps"]
+)
+def test_gsq_rejects_removed_linear_options(field):
+    with pytest.raises(ValueError):
+        GSQCalibConfig(**{field: 1})
+
+
+@pytest.mark.parametrize("field", ["checkpoint_dir", "export_dir"])
+def test_gsq_rejects_restart_and_streaming_export(field, tmp_path):
+    with pytest.raises(ValueError):
+        GSQCalibConfig(layerwise={"enable": True, field: str(tmp_path)})

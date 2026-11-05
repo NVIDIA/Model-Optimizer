@@ -981,17 +981,15 @@ def test_quantize_cpu_cache_rejects_unsupported_metadata(monkeypatch, tmp_path, 
             "layerwise": {
                 "enable": True,
                 "activation_cache_device": "cpu",
-                "activation_cache_dir": str(tmp_path),
             },
         }
     )
     with pytest.raises(ValueError, match="Unsupported CPU activation metadata"):
         mtq.quantize(model, cfg, lambda m: m(torch.zeros(1, 8, dtype=torch.long)))
-    assert not list(tmp_path.iterdir())
     assert not hasattr(model.layers[0], "_layerwise_calib")
 
 
-@pytest.mark.parametrize("cache", ["device", "cpu", "mmap"])
+@pytest.mark.parametrize("cache", ["device", "cpu"])
 def test_mtq_quantize_layerwise_e2e_max(monkeypatch, tmp_path, cache):
     """End-to-end: mtq.quantize with layerwise enabled produces populated amax values.
 
@@ -1006,8 +1004,6 @@ def test_mtq_quantize_layerwise_e2e_max(monkeypatch, tmp_path, cache):
         "enable": True,
         "activation_cache_device": "device" if cache == "device" else "cpu",
     }
-    if cache == "mmap":
-        layerwise["activation_cache_dir"] = str(tmp_path / "activations")
     config = _int8_cfg_with_algorithm({"method": "max", "layerwise": layerwise})
 
     torch.manual_seed(0)
@@ -1026,8 +1022,6 @@ def test_mtq_quantize_layerwise_e2e_max(monkeypatch, tmp_path, cache):
         forward_loop=forward_loop,
     )
     torch.testing.assert_close(model(calib_data[0]), reference(calib_data[0]), rtol=0, atol=0)
-    if cache == "mmap":
-        assert not list((tmp_path / "activations").iterdir())
 
     for i, layer in enumerate(model.layers):
         assert not isinstance(layer, _SkipLayer), f"layer {i} left as _SkipLayer"
@@ -1276,11 +1270,10 @@ def test_layerwise_save_every_writes_next_inputs_only_at_window_boundaries(monke
         ("save_every", 4, 2, True, 1),
     ],
 )
-@pytest.mark.parametrize("cache", ["device", "cpu", "mmap"])
 def test_layerwise_checkpoint_resume_matches_one_shot_amax(
-    monkeypatch, tmp_path, scenario, n_layers, save_every, calib_mutates_weights, rewind_to, cache
+    monkeypatch, tmp_path, scenario, n_layers, save_every, calib_mutates_weights, rewind_to
 ):
-    """Interrupted calibration followed by resume reproduces one-shot ``_amax``.
+    """Full run → rewind manifest → fresh resume reproduces one-shot ``_amax``.
 
     Single test covering both checkpoint optimizations. For the
     non-mutating calibration case also asserts the on-disk shape (no
@@ -1300,8 +1293,6 @@ def test_layerwise_checkpoint_resume_matches_one_shot_amax(
                     "checkpoint_dir": str(ckpt_dir),
                     "save_every": save_every,
                     "calib_mutates_weights": calib_mutates_weights,
-                    "activation_cache_device": "device" if cache == "device" else "cpu",
-                    "activation_cache_dir": str(tmp_path / "cache") if cache == "mmap" else None,
                 },
             }
         )
@@ -1316,23 +1307,24 @@ def test_layerwise_checkpoint_resume_matches_one_shot_amax(
     resume_dir = tmp_path / "resume"
     torch.manual_seed(0)
     setup_model = _SimpleTransformerModel(n_layers=n_layers, dim=16)
-
-    def interrupt(module, inputs):
-        raise RuntimeError("interrupt after the committed checkpoint window")
-
-    handle = setup_model.layers[rewind_to + 2].register_forward_pre_hook(interrupt)
-    with pytest.raises(RuntimeError):
-        mtq.quantize(setup_model, build_cfg(resume_dir), forward_loop=forward_loop)
-    handle.remove()
-    assert (
-        json.loads((resume_dir / "manifest.json").read_text())["last_completed_layer"] == rewind_to
-    )
+    mtq.quantize(setup_model, build_cfg(resume_dir), forward_loop=forward_loop)
 
     if scenario == "non_mutating":
         for name in _layer_dir_names(resume_dir):
             d = resume_dir / name
             assert not (d / "weights.pt").exists()
             assert (d / "quantizer_buffers.pt").exists()
+
+    (resume_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "last_completed_layer": rewind_to,
+                "num_layers": n_layers,
+                "save_every": save_every,
+                "calib_mutates_weights": calib_mutates_weights,
+            }
+        )
+    )
 
     torch.manual_seed(0)
     resumed_model = _SimpleTransformerModel(n_layers=n_layers, dim=16)

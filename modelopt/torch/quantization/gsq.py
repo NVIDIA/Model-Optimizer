@@ -18,24 +18,20 @@
 from collections import defaultdict
 from contextlib import contextmanager
 from copy import deepcopy
-from math import cos, pi
 from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
-from torch.func import functional_call
 from torch.utils.checkpoint import checkpoint
 
 from modelopt.torch.utils import distributed as dist_utils
 
 from .config import GSQCalibConfig, QuantizeAlgorithmConfig
-from .conversion import set_quantizer_by_cfg_context
 from .nn import SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
 from .qtensor import NVFP4QTensor
 from .utils import SHARED_PATTERNS, find_shared_input_groups, is_quantized_linear
-from .utils.gsq_distributed import DistributedGSQ
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -46,12 +42,12 @@ __all__ = ["gsq"]
 
 
 def gsq(model, forward_loop, **kwargs):
-    """Refine initialized codes and native scales using linear or staged reconstruction.
+    """Refine dense Llama NVFP4 weights with staged local-shift reconstruction.
 
-    Original targets are collected before the initializer changes weights. Final hard weights
-    and scales use ordinary ModelOpt checkpoint and NVFP4 export state.
+    The replay loop supplies initializer sequences followed by training sequences.
+    Final hard weights and scales use ordinary ModelOpt save/restore and export.
     """
-    # The calibration registry imports this module to register the GSQ entrypoint.
+    # Deferred imports break the calibration registry/export dependency cycle.
     from modelopt.torch.export.quant_utils import preprocess_linear_fusion
 
     from .gsq_staged import StagedReplay, refine_staged
@@ -61,13 +57,10 @@ def gsq(model, forward_loop, **kwargs):
     config = GSQCalibConfig(**kwargs)
     if forward_loop is None:
         raise ValueError("GSQ requires a replayable forward_loop")
-    distributed = DistributedGSQ()
-    with distributed.check():
-        modules = _validate_model(model, config)
-        if config.reconstruction == "staged":
-            StagedReplay.validate(model, modules)
-    distributed.consistent(config.model_dump(mode="json"))
-    distributed.consistent([(n, tuple(m.weight.shape), str(m.weight.dtype)) for n, m in modules])
+    modules = _validate_model(model)
+    if not modules:
+        return
+    StagedReplay.validate(model, modules)
     mode, options = get_modelike_from_algo_cfg(config.initializer)[0]
     descriptor = CalibrateModeRegistry[mode]
     initializer = cast("QuantizeAlgorithmConfig", descriptor.config_class(**options))
@@ -75,83 +68,39 @@ def gsq(model, forward_loop, **kwargs):
         raise ValueError("Set layerwise on GSQ, rather than on its initializer")
     if initializer.moe_calib_experts_ratio is not None:
         raise ValueError("GSQ does not support MoE calibration")
-    if not modules:
-        return
     device = modules[0][1].weight.device
     cuda_devices = [device.index] if device.type == "cuda" else []
     with _calibration_state(model) as originals, torch.random.fork_rng(devices=cuda_devices):
-        # Seed only the devices whose RNG states fork_rng preserves.
         torch.default_generator.manual_seed(config.seed)
         if cuda_devices:
-            torch.cuda.default_generators[device.index].manual_seed(config.seed + distributed.rank)
-        if config.reconstruction == "staged":
-            with distributed.check():
-                replay = StagedReplay(model, forward_loop, config, originals)
-            initializer_loop = replay.initialize
-        else:
-            samples = _collect_targets(model, modules, forward_loop, config.max_tokens)
-            initializer_loop = forward_loop
+            torch.cuda.default_generators[device.index].manual_seed(config.seed)
+        replay = StagedReplay(model, forward_loop, config, originals)
         if any(not isinstance(m.weight_quantizer, StaticBlockScaleQuantizer) for _, m in modules):
             max_calibrate(model, forward_loop=None)
         initialize: Callable[..., ConvertReturnType] = descriptor.convert
-        initialized_model, _ = initialize(model, initializer, forward_loop=initializer_loop)
+        initialized_model, _ = initialize(model, initializer, forward_loop=replay.initialize)
         if initialized_model is not model:
             raise ValueError("GSQ initializer must calibrate the original model in place")
         for _, siblings in find_shared_input_groups(model, SHARED_PATTERNS):
             preprocess_linear_fusion(siblings)
-            if (
-                len(
-                    {
-                        id(cast("StaticBlockScaleQuantizer", m.weight_quantizer).global_amax)
-                        for m in siblings
-                    }
-                )
-                != 1
-            ):
+            if len({id(m.weight_quantizer.global_amax) for m in siblings}) != 1:
                 raise ValueError(
                     "GSQ initializer must share global scales for fusible NVFP4 siblings"
                 )
         for _, module in modules:
-            distributed.broadcast(module.weight.data)
-            distributed.broadcast(module.weight_quantizer.amax)
-            distributed.broadcast(module.weight_quantizer.global_amax)
-        for parameter in model.parameters():
-            parameter.requires_grad_(False)
-        groups = defaultdict(list)
-        for name, module in modules:
-            quantizer = module.weight_quantizer
-            if not isinstance(quantizer, StaticBlockScaleQuantizer) or quantizer._lsq:
+            q = module.weight_quantizer
+            if not isinstance(q, StaticBlockScaleQuantizer) or q._lsq:
                 raise ValueError("GSQ initializer did not produce static NVFP4 scales")
-            groups[id(quantizer.global_amax)].append((name, module))
-        # Fusible siblings share a global scale; optimize them together so installing
-        # one sibling cannot change the native representation of another.
-        for members in groups.values():
-            if config.reconstruction == "linear":
-                _refine(members, samples, config)
-        if config.reconstruction == "staged":
-            refine_staged(model, modules, replay, config)
+        refine_staged(model, modules, replay, config)
 
 
-def _validate_model(model, config=None):
-    if dist_utils.is_distributed_launch() and not torch.distributed.is_initialized():
-        raise ValueError("Initialize the default process group before distributed GSQ")
-    distributed = DistributedGSQ()
-    if distributed.active and dist_utils.distribution_plan(model) != dist_utils.DistributionPlan(
-        world_size=distributed.world_size
+def _validate_model(model):
+    if dist_utils.is_distributed_launch() or (
+        torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
     ):
-        raise ValueError("GSQ requires a replicated WORLD distribution plan")
-    if distributed.active and (config is None or config.reconstruction != "staged"):
-        raise ValueError("Distributed GSQ requires staged reconstruction")
+        raise ValueError("GSQ currently requires single-process calibration")
     modules = []
     for name, module in model.named_modules():
-        if distributed.active and hasattr(module, "parallel_state"):
-            state = module.parallel_state
-            if (
-                state.data_parallel_group.group not in (None, torch.distributed.group.WORLD)
-                or state.tensor_parallel_group.group != -1
-                or state.expert_model_parallel_group.group != -1
-            ):
-                raise ValueError("GSQ requires replicated WORLD data parallel placement")
         if not is_quantized_linear(module):
             continue
         q = module.weight_quantizer
@@ -248,42 +197,6 @@ def _calibration_state(model):
         for name, parameter in model.named_parameters():
             if name in gradients:
                 parameter.requires_grad_(gradients[name])
-
-
-def _collect_targets(model, modules, forward_loop, max_tokens):
-    samples = defaultdict(list)
-    counts = defaultdict(int)
-
-    def hook(name, module, args, kwargs, output):
-        remaining = max_tokens - counts[name]
-        if remaining > 0:
-            inputs = args[0] if args else kwargs["input"]
-            x = inputs.detach().reshape(-1, module.in_features)[:remaining]
-            y = output.detach().reshape(-1, module.out_features)[:remaining]
-            samples[name].append((x.to("cpu", copy=True), y.to("cpu", copy=True)))
-            counts[name] += x.shape[0]
-
-    handles = [
-        m.register_forward_hook(
-            lambda m, a, kw, o, name=n: hook(name, m, a, kw, o), with_kwargs=True
-        )
-        for n, m in modules
-    ]
-    try:
-        with (
-            torch.no_grad(),
-            set_quantizer_by_cfg_context(model, [{"quantizer_name": "*", "enable": False}]),
-        ):
-            forward_loop(model)
-    finally:
-        for handle in handles:
-            handle.remove()
-    if missing := [name for name, _ in modules if not counts[name]]:
-        raise ValueError(f"GSQ calibration did not visit linear modules: {missing}")
-    return {
-        name: (torch.cat([x for x, _ in pairs]), torch.cat([y for _, y in pairs]))
-        for name, pairs in samples.items()
-    }
 
 
 class _LocalShift(nn.Module):
@@ -389,91 +302,3 @@ def _lion_step(groups, momentum, lr_multiplier):
             p.mul_(1 - lr * weight_decay)
             p.add_(m.mul(0.9).add_(p.grad, alpha=0.1).sign_(), alpha=-lr)
             m.lerp_(p.grad, 0.05)
-
-
-def _refine(members, samples, config):
-    device = members[0][1].weight.device
-    q = members[0][1].weight_quantizer
-    global_scale = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(q)
-    global_scale = nn.Parameter(global_scale.clamp_min(torch.finfo(torch.float32).tiny).log())
-    assignments = nn.ModuleList(
-        [_LocalShift(module, global_scale, config) for _, module in members]
-    )
-    groups = [
-        ([a.logits for a in assignments], config.assignment_lr, config.weight_decay),
-        (
-            [p for n, p in assignments.named_parameters() if not n.endswith("logits")],
-            config.scale_lr,
-            0.0,
-        ),
-    ]
-    momentum = {}
-
-    def predict(module, weight, x):
-        return functional_call(module, {"weight": weight}, (x.to(device),))
-
-    @torch.no_grad()
-    def evaluate(initial=False):
-        losses = []
-        for (name, module), assignment in zip(members, assignments):
-            x, y = samples[name]
-            weight = assignment(hard=True, initial=initial)
-            loss = torch.zeros((), device=device)
-            for start in range(0, len(x), config.batch_size):
-                end = start + config.batch_size
-                loss += (
-                    F.mse_loss(
-                        predict(module, weight, x[start:end]).float(),
-                        y[start:end].to(device).float(),
-                        reduction="sum",
-                    )
-                    / y.numel()
-                )
-            losses.append(loss)
-        result = torch.stack(losses).mean()
-        if not torch.isfinite(result):
-            raise FloatingPointError("Nonfinite GSQ reconstruction loss")
-        return result.item()
-
-    with torch.enable_grad():
-        for _, module in members:
-            module.weight_quantizer.disable_quant()
-        for step in range(config.steps):
-            progress = step / max(config.steps - 1, 1)
-            tau = config.temperature + progress * (config.final_temperature - config.temperature)
-            kappa = config.kappa + progress * (config.final_kappa - config.kappa)
-            for p in assignments.parameters():
-                p.grad = None
-            for micro in range(config.gradient_accumulation_steps):
-                for (name, module), assignment in zip(members, assignments):
-                    x, y = samples[name]
-                    start = (
-                        (step * config.gradient_accumulation_steps + micro) * config.batch_size
-                    ) % len(x)
-                    weight = assignment(tau, kappa)
-                    loss = F.mse_loss(
-                        predict(module, weight, x[start : start + config.batch_size]).float(),
-                        y[start : start + config.batch_size].to(device).float(),
-                    )
-                    if not torch.isfinite(loss):
-                        raise FloatingPointError("Nonfinite GSQ reconstruction loss")
-                    (loss / (len(members) * config.gradient_accumulation_steps)).backward()
-            if any(
-                not torch.isfinite(p.grad).all()
-                for p in assignments.parameters()
-                if p.grad is not None
-            ):
-                raise FloatingPointError("Nonfinite GSQ gradients")
-            lr_progress = progress if config.steps > 1 else 1.0
-            _lion_step(groups, momentum, 0.1 + 0.45 * (1 + cos(pi * lr_progress)))
-            if (step + 1) % config.eval_every == 0 or step + 1 == config.steps:
-                evaluate()
-        with torch.no_grad():
-            for (_, module), assignment in zip(members, assignments):
-                weight, amax, global_amax = assignment.snapshot()
-                module.weight.copy_(weight)
-                q = module.weight_quantizer
-                q.amax = amax.to(device).reshape_as(q.amax)
-                q.global_amax = global_amax.to(device).reshape_as(q.global_amax)
-                # Keep export eligibility, while avoiding a second rounding of hard codes.
-                q.disable_quant()
