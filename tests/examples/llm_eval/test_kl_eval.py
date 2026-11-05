@@ -204,3 +204,14 @@ def test_missing_generation_config_preserves_model_eos_ids(kl_eval, monkeypatch,
     manifest = kl_eval._prepare(args)
     assert manifest["eos_token_ids"] == [0, 2]
     assert manifest["prompts"] == [{"block_index": 0, "input_ids": [1, 3, 1]}]
+
+
+def test_topk_ties_use_lowest_token_ids_and_do_not_depend_on_other_requested_heads(kl_eval):
+    reference = torch.tensor([[0.5, *([0.5 / 31] * 31)]]).log()
+    candidate = torch.tensor([[0.5, 0.1, *([0.4 / 30] * 30)]]).log()
+    # The top-2 head is IDs 0 and 1; tied reference probabilities prefer lower IDs.
+    expected = (31 / 32) * math.log(93 / 80) + (1 / 32) * math.log(3 / 16)
+    single = kl_eval.token_kl(reference, candidate, [2])
+    multiple = kl_eval.token_kl(reference, candidate, [1, 2, 32])
+    assert single["conditional_topk_kl"]["2"] == pytest.approx([expected], abs=1e-6)
+    assert multiple["conditional_topk_kl"]["2"] == pytest.approx([expected], abs=1e-6)

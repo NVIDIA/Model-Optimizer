@@ -175,23 +175,26 @@ def _worker(pipe, args, model, role, devices):
                     )
                     if command.get("reference"):
                         expected = token_kl(ref, dense, args.top_ks)
-                        errors = [
-                            abs(a - b)
-                            for a, b in zip(
-                                expected["full_vocab_kl"], result["metrics"]["full_vocab_kl"]
+                        errors = {
+                            "full_vocab_kl": max(
+                                abs(a - b)
+                                for a, b in zip(
+                                    expected["full_vocab_kl"], result["metrics"]["full_vocab_kl"]
+                                )
                             )
-                        ]
+                        }
                         for field in ("conditional_topk_kl", "reference_topk_mass"):
                             for k in expected[field]:
-                                errors.extend(
+                                errors[f"{field}.{k}"] = max(
                                     abs(a - b)
                                     for a, b in zip(expected[field][k], result["metrics"][field][k])
                                 )
-                        error = max(errors)
+                        error = max(errors.values())
                     else:
                         error = (ref - dense).abs().max().item()
+                        errors = {"logprobs": error}
                     if error > 2e-5:
-                        raise ValueError(f"Dense capture audit failed: {error}")
+                        raise ValueError(f"Dense capture audit failed: {errors}")
                     result["dense_max_error"] = error
             else:
                 raise ValueError("Unknown engine command.")

@@ -43,7 +43,7 @@ class _TokenKL(TypedDict):
 
 @torch.inference_mode()
 def token_kl(reference_logprobs, quantized_logprobs, top_ks=(128,), chunk_size=32) -> _TokenKL:
-    """Return per-position forward KL and reference head mass for several conditional heads."""
+    """Return per-position forward KL and head mass; reference ties prefer lower token IDs."""
     if reference_logprobs.ndim != 2 or reference_logprobs.shape != quantized_logprobs.shape:
         raise ValueError("Expected matching [generated positions, vocabulary] log-probabilities.")
     num_tokens, vocab_size = reference_logprobs.shape
@@ -72,7 +72,7 @@ def token_kl(reference_logprobs, quantized_logprobs, top_ks=(128,), chunk_size=3
         full = (log_p.exp() * (log_p - log_q)).sum(-1)
         result["full_vocab_kl"].extend(full.cpu().tolist())
         if top_ks:
-            ids = log_p.topk(top_ks[-1], dim=-1).indices
+            ids = torch.argsort(log_p, dim=-1, descending=True, stable=True)[:, : top_ks[-1]]
             for k in top_ks:
                 p_head = log_p.gather(-1, ids[:, :k])
                 q_head = log_q.gather(-1, ids[:, :k])
