@@ -41,6 +41,7 @@ from transformers import AutoModelForCausalLM, Qwen3MoeConfig
 from modelopt.torch.export.quant_aware_conversion import revert_weight_conversion_quant_aware
 from modelopt.torch.export.unified_export_hf import (
     _export_transformers_checkpoint,
+    _revert_quant_config_names_best_effort,
     export_hf_checkpoint,
 )
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
@@ -96,7 +97,7 @@ def test_torch_a2a_gives_grouped_mms_result_bit_for_bit(dist_workers):
 NUM_LAYERS, NUM_EXPERTS = 2, 8
 
 
-def _save_tiny_qwen3_moe(ckpt_dir):
+def _save_tiny_qwen3_moe(ckpt_dir, dtype=torch.bfloat16):
     config = Qwen3MoeConfig(
         hidden_size=64,
         intermediate_size=128,
@@ -110,7 +111,7 @@ def _save_tiny_qwen3_moe(ckpt_dir):
         max_position_embeddings=64,
     )
     torch.manual_seed(0)
-    AutoModelForCausalLM.from_config(config).to(torch.bfloat16).save_pretrained(ckpt_dir)
+    AutoModelForCausalLM.from_config(config).to(dtype).save_pretrained(ckpt_dir)
 
 
 def _calibrated(model):
@@ -246,4 +247,92 @@ def test_expert_parallel_calibration_and_export_match_the_whole_model(
         ckpt_dir=str(tmp_path / "ckpt"),
         export_dir=tmp_path / "export",
         ep_degree=ep_degree,
+    )
+
+
+def _expert_parallel_auto_quantize_and_export_job(rank, size, ckpt_dir, export_dir, plan):
+    device = torch.device("cuda", rank)
+    batches = [
+        torch.randint(0, 128, (2, 16), generator=torch.Generator().manual_seed(r))
+        for r in range(size)
+    ]
+
+    def search(model, batches):
+        return mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
+            data_loader=[{"input_ids": b.to(device), "labels": b.to(device)} for b in batches],
+            forward_step=lambda model, batch: model(**batch),
+            loss_func=lambda output, _: output.loss,
+            num_calib_steps=len(batches),
+            num_score_steps=len(batches),
+        )[1]
+
+    with bounded_collectives(seconds=300):
+        # The production load, each rank searching on its own batch; and the whole model in one
+        # process searching on every rank's batch, one per step as the ranks do.
+        model = load_pretrained(ckpt_dir, distribution=plan)
+        state = search(model, batches[rank : rank + 1])
+        whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.float32).to(device)
+        for module in whole.modules():
+            module._parallel_state = ParallelState(data_parallel_group=-1)
+        whole_state = search(whole, batches)
+
+        problems = []
+        if state["best"]["recipe"] != whole_state["best"]["recipe"]:
+            problems.append(
+                f"picked {state['best']['recipe']}, not {whole_state['best']['recipe']}"
+            )
+        for name, stat in whole_state["candidate_stats"].items():
+            mine = state["candidate_stats"][name]
+            if (mine["formats"], mine["costs"]) != (stat["formats"], stat["costs"]):
+                problems.append(f"{name}: costs {mine['costs']}, not {stat['costs']}")
+            # float32: the scores differ only by their order of summation.
+            error = _relative_error(torch.tensor(mine["scores"]), torch.tensor(stat["scores"]))
+            if not error < 1e-2:
+                problems.append(f"{name}: scores off by {error:.3g} (relative)")
+
+        # The mixed-format checkpoint the no-gather writer writes, against the single-process one.
+        export_hf_checkpoint(model, dtype=torch.bfloat16, export_dir=export_dir)
+        if rank == 0:
+            written, quant_config = _export_transformers_checkpoint(whole, torch.bfloat16)
+            problems += _export_problems(
+                export_dir, revert_weight_conversion_quant_aware(whole, dict(written))
+            )
+            want = _revert_quant_config_names_best_effort(whole, quant_config)["quantization"]
+            got = json.loads((export_dir / "hf_quant_config.json").read_text())["quantization"]
+            if want["quant_algo"] != "MIXED_PRECISION" or got != want:
+                problems.append(f"hf_quant_config: {got}, not {want}")
+        gathered = [None] * size
+        dist.all_gather_object(gathered, problems)
+
+    found = [problem for problems in gathered for problem in problems]
+    assert not found, "\n".join(found[:20])
+
+
+@pytest.mark.parametrize(
+    ("dense", "ep_share"),
+    [("replicate", 1), ("replicate", 2), ("fsdp", 1)],
+    ids=["dense-replicated-ep-world", "dense-replicated-ep-half", "dense-sharded-ep-world"],
+)
+def test_expert_parallel_auto_quantize_and_export_match_the_whole_model(
+    need_2_gpus, dist_workers, tmp_path, dense, ep_share
+):
+    """AutoQuantize of the production expert-parallel load -- experts over every rank or half of
+    them, dense replicated or FSDP2-sharded -- each rank scoring its own batch, gives the costs,
+    scores and formats of the whole model scoring every rank's batch, in float32, where only their
+    order of summation differs. The no-gather writer's mixed-format checkpoint, weights and
+    quantization config, then matches the whole model's single-process export."""
+    if Version(transformers.__version__) < Version("5.16"):
+        pytest.skip("the torch_a2a forward wrappers are pre-hooks below transformers 5.16")
+    ep_degree = dist_workers.world_size // ep_share
+    if ep_degree < 2 or dist_workers.world_size % ep_share or NUM_EXPERTS % ep_degree:
+        pytest.skip(f"{NUM_EXPERTS} experts do not shard over EP {ep_degree} on these GPUs")
+    _save_tiny_qwen3_moe(tmp_path / "ckpt", dtype=torch.float32)
+    dist_workers.run(
+        _expert_parallel_auto_quantize_and_export_job,
+        ckpt_dir=str(tmp_path / "ckpt"),
+        export_dir=tmp_path / "export",
+        plan=DistributionPlan(dist_workers.world_size, ep_size=ep_degree, dense=dense),
     )

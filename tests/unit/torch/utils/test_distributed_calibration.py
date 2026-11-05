@@ -769,7 +769,7 @@ def test_expert_parallel_calibration_needs_the_experts_expert_parallel_group(
     cpu_dist_workers.run(_expert_parallel_calibration_job, layout=layout)
 
 
-def _expert_parallel_auto_quantize_job(rank, size):
+def _expert_parallel_kv_cache_auto_quantize_job(rank, size):
     model = nn.Sequential(OrderedDict(gate=nn.Linear(16, 16), experts=nn.Linear(16, 16)))
     dp, ep = _EXPERT_LAYOUTS["seeded"]["experts"]
     model.experts._parallel_state = ParallelState(
@@ -783,11 +783,11 @@ def _expert_parallel_auto_quantize_job(rank, size):
         try:  # not pytest.raises, as in _expert_parallel_calibration_job
             mtq.auto_quantize(
                 model,
-                constraints={"effective_bits": 8.0},
-                quantization_formats=[(mtq.INT8_DEFAULT_CFG, "int8")],
+                constraints={"effective_bits": 8.0, "cost_model": "kv_cache"},
+                quantization_formats=[mtq.FP8_KV_CFG],
                 data_loader=[torch.randn(2, 16)],
                 forward_step=lambda m, batch: m(batch),
-                loss_func=lambda output, batch: output.sum(),
+                method="kl_div",
             )
         except NotImplementedError as e:
             raised = str(e)
@@ -798,11 +798,13 @@ def _expert_parallel_auto_quantize_job(rank, size):
     assert all(torch.equal(after[name], tensor) for name, tensor in state.items())
 
 
-def test_auto_quantize_refuses_an_expert_parallel_model_before_changing_it(cpu_dist_workers):
-    """auto_quantize's forwards would run the experts without the expert-parallel forwards that
-    quantization replaces, which distributed_forward_loop restores. So it refuses such a model, with
-    its experts seeded and a candidate every rank syncs, before it converts anything."""
-    cpu_dist_workers.run(_expert_parallel_auto_quantize_job)
+def test_kv_cache_auto_quantize_refuses_an_expert_parallel_model_before_changing_it(
+    cpu_dist_workers,
+):
+    """The KV-cache search requires every rank to hold the same quantizers, and each rank of an
+    expert-parallel model holds its own experts'. So it refuses such a model, with its experts
+    seeded, before it converts anything."""
+    cpu_dist_workers.run(_expert_parallel_kv_cache_auto_quantize_job)
 
 
 # Rank 0 of four at EP 2, in the (edp, ep) = (2, 2) mesh: ranks 0 and 1 shard the experts between
