@@ -47,7 +47,9 @@ from .common import (
     dequantize_blocks,
     importance_blocks,
     iq2_tile_terms,
+    leading_fp16_scales,
     narrow_to_float32,
+    super_block_scales,
     validate_block_chunk_size,
     validate_packed_weights,
     validate_weight,
@@ -117,6 +119,7 @@ def _encode_blocks(
     grid: torch.Tensor,
     weights: torch.Tensor | None = None,
     choices: torch.Tensor | None = None,
+    scales: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Encode a moderate-size batch of flattened 256-value blocks, optionally error-weighted.
 
@@ -131,7 +134,7 @@ def _encode_blocks(
     # has to flip one element. Account for that cost while searching, not after.
     odd_parity = negative.sum(dim=-1).remainder(2).bool()
 
-    d = _predict_iq2_xxs_scales(x)
+    d = _predict_iq2_xxs_scales(x) if scales is None else scales
     d_float = d.float()
 
     xnorm = (vectors.square() if weights is None else weights * vectors.square()).sum(dim=-1)
@@ -204,6 +207,7 @@ def quantize_iq2_xxs(
     block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
     importance: torch.Tensor | None = None,
     choices: torch.Tensor | None = None,
+    scales: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ2_XXS blocks.
 
@@ -214,6 +218,7 @@ def quantize_iq2_xxs(
     weights each value's squared error in the search, as llama.cpp's imatrix does. ``choices``,
     ``[*weight.shape[:-1], weight.shape[-1] // 256, 8]``, fixes each 32-value sub-block's 4-bit
     local scale.
+    ``scales``, one FP16 super-block scale per block, replaces the predicted ones.
     """
     validate_weight(weight, "IQ2_XXS")
     validate_block_chunk_size(block_chunk_size)
@@ -224,6 +229,9 @@ def quantize_iq2_xxs(
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ2_XXS_BLOCK_SIZE)
+    block_scales = super_block_scales(
+        blocks, _predict_iq2_xxs_scales, scales, _SCALE_BLOCK_CHUNK_SIZE
+    )
     grid = iq2_xxs_grid(weight.device)
     packed_shape = (
         *weight.shape[:-1],
@@ -233,12 +241,8 @@ def quantize_iq2_xxs(
     if weight.is_cuda:
         extension = get_cuda_ext_ggml()
         if extension is not None:
-            scale_chunks = [
-                _predict_iq2_xxs_scales(blocks[start : start + _SCALE_BLOCK_CHUNK_SIZE])
-                for start in range(0, blocks.shape[0], _SCALE_BLOCK_CHUNK_SIZE)
-            ]
             packed = extension.iq2_xxs_pack(
-                blocks, grid, torch.cat(scale_chunks), block_importance, block_choices
+                blocks, grid, block_scales, block_importance, block_choices
             )
             return packed.reshape(packed_shape), logical_shape
 
@@ -250,6 +254,7 @@ def quantize_iq2_xxs(
                 block_importance, start, min(start + block_chunk_size, blocks.shape[0])
             ),
             None if block_choices is None else block_choices[start : start + block_chunk_size],
+            block_scales[start : start + block_chunk_size],
         )
         for start in range(0, blocks.shape[0], block_chunk_size)
     ]
@@ -322,6 +327,7 @@ IQ2_XXS_FORMAT = GGMLFormat(
     weighted=True,
     choice_groups=_IQ2_XXS_SUBBLOCKS,
     num_choices=_IQ2_XXS_LOCAL_SCALES,
+    payload_scales=leading_fp16_scales,
 )
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq2_xxs and
