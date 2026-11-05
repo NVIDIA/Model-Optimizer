@@ -28,6 +28,8 @@ EXPECTED_PTQ_FIELDS = {
     "llava_llama": {"fsdp2_unsupported"},  # VILA, NVILA and NVILA-Lite
     "bart": {"no_device_map"},
     "t5": {"no_device_map"},
+    "deci": {"dtype_kwarg"},
+    "nemotron-nas": {"dtype_kwarg"},  # the DeciLM architecture under another model type
     "deepseek": {"preview_unsupported"},
     "deepseek_v3": {"preview_unsupported"},
     "deepseek_v32": {"preview_unsupported"},

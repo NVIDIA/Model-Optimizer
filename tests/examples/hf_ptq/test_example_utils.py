@@ -385,18 +385,22 @@ def test_resolve_init_config_falls_back_when_rederive_raises():
 @pytest.mark.parametrize(
     (
         "architecture",
+        "model_type",
         "model_class_name",
         "expected_config_dtype_kwarg",
         "unexpected_config_dtype_kwarg",
     ),
     [
-        ("LlamaForCausalLM", "LlamaForCausalLM", "dtype", "torch_dtype"),
+        ("DeciLMForCausalLM", "nemotron-nas", "AutoModelForCausalLM", "torch_dtype", "dtype"),
+        ("DeciLMForCausalLM", "deci", "AutoModelForCausalLM", "torch_dtype", "dtype"),
+        ("LlamaForCausalLM", "llama", "LlamaForCausalLM", "dtype", "torch_dtype"),
     ],
 )
 def test_get_model_uses_expected_dtype_kwarg(
     monkeypatch,
     tmp_path,
     architecture,
+    model_type,
     model_class_name,
     expected_config_dtype_kwarg,
     unexpected_config_dtype_kwarg,
@@ -405,7 +409,7 @@ def test_get_model_uses_expected_dtype_kwarg(
     hf_config = SimpleNamespace(
         architectures=[architecture],
         dtype=torch.float16,
-        model_type="llama",
+        model_type=model_type,
         torch_dtype=torch.bfloat16,
     )
 

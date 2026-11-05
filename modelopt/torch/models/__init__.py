@@ -77,6 +77,7 @@ __all__ = [
 from . import (  # isort: skip
     arctic,
     bart,
+    deci,
     deepseek,
     deepseek_v3,
     deepseek_v32,
@@ -98,6 +99,7 @@ from . import (  # isort: skip
     phimoe,
     nemotron,
     nemotron_h,
+    nemotron_nas,
     minimax_m3_vl,
     llama4_text,
     kimi_vl,
