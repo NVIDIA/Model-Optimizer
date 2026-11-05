@@ -211,7 +211,9 @@ def _install_built_from_source(session, *names):
         if wheel is None:
             raise RuntimeError(f"No wheel for {name!r} in {wheelhouse} after building it")
         wheels.append(wheel)
-    session.run("python", "-m", "pip", "install", *wheels)
+    # Built against the container's packages: re-resolving their dependencies lets quack-kernels'
+    # pin downgrade the container's nvidia-cutlass-dsl, which breaks torch.compile of any matmul.
+    session.run("python", "-m", "pip", "install", "--no-deps", *wheels)
 
 
 # Container: nvcr.io/nvidia/pytorch:26.07-py3 or later with CUDA 13
