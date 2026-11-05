@@ -281,7 +281,8 @@ def collect_shared_input_modules(
     model: nn.Module,
     dummy_forward_fn: Callable[[], None],
     collect_layernorms: bool = False,
-) -> tuple[dict, dict | None]:
+    collect_consumers: bool = False,
+) -> tuple[dict, dict | None] | tuple[dict, dict | None, dict]:
     """Collect modules that share the same input using forward hooks.
 
     This is a common helper for both LLM and diffusion model fusion.
@@ -291,20 +292,40 @@ def collect_shared_input_modules(
         dummy_forward_fn: A callable that runs a dummy forward pass on the model.
             Should be a function that takes no arguments.
         collect_layernorms: If True, also collect layernorm output mappings (for AWQ).
+        collect_consumers: If True, additionally record every module that consumes each
+            input tensor (keyed by ``id(tensor)``), so callers can tell whether a norm
+            output feeds modules beyond a fused group.  Appends a third dict to the return.
 
     Returns:
-        A tuple of (input_to_linear, output_to_layernorm).
+        A tuple of (input_to_linear, output_to_layernorm), or
+        (input_to_linear, output_to_layernorm, input_to_consumers) if collect_consumers.
         input_to_linear: Dict mapping input tensor to list of modules sharing that input.
         output_to_layernorm: Dict mapping layernorm output to the layernorm module (or None).
+        input_to_consumers: ``id(tensor) -> [module names]`` that consumed the tensor.
     """
     input_to_linear: dict = defaultdict(list)
     output_to_layernorm: dict | None = defaultdict(lambda: None) if collect_layernorms else None
+    input_to_consumers: dict = defaultdict(list)
+    # keep every recorded tensor alive: the map is keyed by id(), and a freed tensor's id
+    # can be reused by a later layer's tensor, which would fabricate consumer matches
+    _consumer_keepalive: list = []
 
     def _input_hook(module, input, output):
         """Update dictionary with list of all modules that share the same input."""
         if len(input) > 0 and isinstance(input[0], torch.Tensor):
             # TODO: Handle DBRX MoE case
             input_to_linear[input[0]].append(module)
+
+    def _make_consumer_hook(name):
+        """Record every module that consumes a tensor (out-of-group detection)."""
+
+        def _consumer_hook(module, input, output=None):
+            for arg in input:
+                if isinstance(arg, torch.Tensor):
+                    input_to_consumers[id(arg)].append(name)
+                    _consumer_keepalive.append(arg)
+
+        return _consumer_hook
 
     def _output_hook(module, input, output):
         """Update dictionary with mapping of layernorms and their outputs."""
@@ -326,8 +347,13 @@ def collect_shared_input_modules(
             module.name = name
             handle = module.register_forward_hook(_input_hook)
             handles.append(handle)
+        if collect_consumers:
+            # separate from the branches above: EVERY module's input is recorded
+            handles.append(module.register_forward_pre_hook(_make_consumer_hook(name)))
 
     if not handles:
+        if collect_consumers:
+            return input_to_linear, output_to_layernorm, input_to_consumers
         return input_to_linear, output_to_layernorm
 
     # Run dummy forward pass to collect modules sharing same input.
@@ -345,6 +371,8 @@ def collect_shared_input_modules(
         for handle in handles:
             handle.remove()
 
+    if collect_consumers:
+        return input_to_linear, output_to_layernorm, input_to_consumers
     return input_to_linear, output_to_layernorm
 
 
@@ -355,6 +383,7 @@ def _fuse_shared_input_modules(
     qkv_only: bool = False,
     fuse_layernorms: bool = False,
     quantization_format: str | None = None,
+    input_to_consumers: dict | None = None,
 ) -> dict[str, list[str]]:
     """Fuse modules that share the same input.
 
@@ -367,6 +396,9 @@ def _fuse_shared_input_modules(
         qkv_only: If True, only fuse QKV projection layers (for diffusion models).
         fuse_layernorms: If True, also fuse layernorms with pre_quant_scale (for AWQ).
         quantization_format: The quantization format of the model.
+        input_to_consumers: Optional ``id(tensor) -> [module names]`` map from
+            ``collect_shared_input_modules(collect_consumers=True)``.  When provided, a
+            norm whose output also feeds modules outside its fused group is NOT folded.
 
     Returns:
         Dict mapping first module name to list of all fused module names.
@@ -378,6 +410,37 @@ def _fuse_shared_input_modules(
         # Get quantization format for this group of modules
         # (must be re-evaluated per group as different modules may have different formats)
         group_quant_format = get_quantization_format(modules[0]) if modules else quantization_format
+
+        # A fold rewrites the shared-input norm itself (norm_out <- norm_out * pqs), so it is
+        # only valid when that norm output feeds nothing but this group: every other consumer
+        # -- e.g. GatedDeltaNet's in_proj_a / in_proj_b, which recipes exclude from
+        # quantization -- would silently receive pqs-scaled activations.  Detect those
+        # consumers from the same dummy forward and, when present, skip the fold AND the
+        # resmoothing that exists only to give the fold one shared scale.
+        fold_eligible = bool(
+            fuse_layernorms
+            and output_to_layernorm is not None
+            and group_quant_format is not None
+            and group_quant_format != QUANTIZATION_NONE
+            and "awq" in group_quant_format
+            and tensor in output_to_layernorm
+        )
+        out_of_group: list[str] = []
+        if fold_eligible and input_to_consumers is not None:
+            names = set(input_to_consumers.get(id(tensor), ()))
+            # drop modelopt's quantizer plumbing (it sees the tensor on its way into a linear)
+            names = {
+                n
+                for n in names
+                if not isinstance(
+                    model.get_submodule(n), (TensorQuantizer, SequentialQuantizer)
+                )
+            }
+            # drop containers that merely forward the tensor to a module that also got it
+            names = {
+                n for n in names if not any(o != n and o.startswith(n + ".") for o in names)
+            }
+            out_of_group = sorted(names - {getattr(m, "name", "") for m in modules})
 
         if len(modules) > 1 and group_quant_format not in [
             QUANTIZATION_FP8,
@@ -405,19 +468,23 @@ def _fuse_shared_input_modules(
             else:
                 # Fuse all modules that have the same input (LLM models)
                 with fsdp2_aware_weight_update(model, modules):
-                    preprocess_linear_fusion(modules)
-                fused_linears[modules[0].name] = [module.name for module in modules]
-                fused_count += 1
+                    preprocess_linear_fusion(modules, skip_resmooth=bool(out_of_group))
+                if out_of_group:
+                    warnings.warn(
+                        "Not folding pre_quant_scale into "
+                        f"'{getattr(output_to_layernorm[tensor], 'name', '?')}': its output "
+                        f"also feeds non-fused module(s) {out_of_group}.  Those modules would "
+                        "otherwise receive pre_quant_scale-scaled activations; keeping the "
+                        "per-module pre_quant_scale instead.  (Do not fold a norm whose output "
+                        "has consumers outside the group.)",
+                        stacklevel=2,
+                    )
+                else:
+                    fused_linears[modules[0].name] = [module.name for module in modules]
+                    fused_count += 1
 
-            # Fuse layernorms (for AWQ)
-            if (
-                fuse_layernorms
-                and output_to_layernorm is not None
-                and group_quant_format is not None
-                and group_quant_format != QUANTIZATION_NONE
-                and "awq" in group_quant_format
-                and tensor in output_to_layernorm
-            ):
+            # Fuse layernorms (for AWQ) -- never when the norm output has other consumers
+            if fold_eligible and not out_of_group:
                 with fsdp2_aware_weight_update(model, output_to_layernorm[tensor]):
                     fuse_prequant_layernorm(output_to_layernorm[tensor], modules)
 
@@ -504,8 +571,8 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         else:
             model(fake_input)
 
-    input_to_linear, output_to_layernorm = collect_shared_input_modules(
-        model, llm_dummy_forward, collect_layernorms=True
+    input_to_linear, output_to_layernorm, input_to_consumers = collect_shared_input_modules(
+        model, llm_dummy_forward, collect_layernorms=True, collect_consumers=True
     )
 
     fused_linears = _fuse_shared_input_modules(
@@ -515,6 +582,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         qkv_only=False,
         fuse_layernorms=True,
         quantization_format=quantization_format,
+        input_to_consumers=input_to_consumers,
     )
 
     # The dummy forward may not be able to activate all the experts.

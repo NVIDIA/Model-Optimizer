@@ -18,6 +18,7 @@
 import logging
 from collections import defaultdict
 from collections.abc import Generator
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
 from warnings import warn
@@ -1298,23 +1299,37 @@ def all_items_same(item_list):
 
 
 def _update_pre_quant_scale(module, new_pre_quant_scale):
-    old_pre_quant_scale = module.input_quantizer._pre_quant_scale
-    # do the processing in fp32 for numerical stability
-    dtype = module.weight.dtype
-    module.weight = nn.Parameter(
-        (
-            module.weight.to(torch.float32)
-            * old_pre_quant_scale.to(dtype=torch.float32, device=module.weight.device)
-            / new_pre_quant_scale.to(dtype=torch.float32, device=module.weight.device)
-        ).to(dtype)
-    )
-    module.input_quantizer.pre_quant_scale = new_pre_quant_scale
+    # CPU/disk-offloaded modules keep their weights on meta between forwards (accelerate
+    # hooks). Materialize the weight for the rescale below and write the new value back to
+    # the offload holder; otherwise both the rescale and the amax recollection that follows
+    # run on a meta weight, which silently destroys the weight quantizer amax (the export
+    # then fails later while reading it: "Tensor.item() cannot be called on meta tensors").
+    ctx = nullcontext()
+    if hasattr(module, "_hf_hook"):
+        from modelopt.torch.quantization.plugins.accelerate import (
+            weight_access_and_writeback_context,
+        )
 
-    # Redo weights collection
-    module.weight_quantizer.reset_amax()
-    enable_stats_collection(module.weight_quantizer)
-    module.weight_quantizer(module.weight)
-    finish_stats_collection(module.weight_quantizer)
+        ctx = weight_access_and_writeback_context(module, writeback=True)
+
+    with ctx:
+        old_pre_quant_scale = module.input_quantizer._pre_quant_scale
+        # do the processing in fp32 for numerical stability
+        dtype = module.weight.dtype
+        module.weight = nn.Parameter(
+            (
+                module.weight.to(torch.float32)
+                * old_pre_quant_scale.to(dtype=torch.float32, device=module.weight.device)
+                / new_pre_quant_scale.to(dtype=torch.float32, device=module.weight.device)
+            ).to(dtype)
+        )
+        module.input_quantizer.pre_quant_scale = new_pre_quant_scale
+
+        # Redo weights collection
+        module.weight_quantizer.reset_amax()
+        enable_stats_collection(module.weight_quantizer)
+        module.weight_quantizer(module.weight)
+        finish_stats_collection(module.weight_quantizer)
 
 
 def _update_svdquant(modules, new_pre_quant_scale):
@@ -1444,14 +1459,66 @@ def fuse_prequant_to_linear(model: torch.nn.Module, fuse_grouped_heads=False):
                     setattr(linear_pqs_from, "fused_with_prequant", True)
 
 
-def _layernorm_uses_weight_plus_one(module: torch.nn.Module) -> bool:
-    if any(
-        name in type(module).__name__
-        for name in ["LayerNorm1P", "GemmaRMSNorm", "Gemma2RMSNorm", "Gemma3RMSNorm"]
-    ):
-        return True
+# Class names of LayerNorm/RMSNorm implementations whose forward computes
+# ``x * (1 + weight)`` (zero-centered gamma) instead of ``x * weight``.
+#
+# ``fuse_prequant_layernorm`` must invert the ``(1 + weight)`` form when it folds a
+# ``pre_quant_scale`` into the norm, so every architecture adopting this convention has to
+# be listed here.  A missing entry silently applies the plain ``weight * scale`` formula to
+# a zero-centered gamma and corrupts every fused group the norm feeds (observed: >1e5x PPL
+# blow-up on Qwen3.5-style models whose RMSNorm forward is ``out * (1 + weight)``).
+#
+# Matched by substring, so family variants (T5Gemma / VaultGemma / RecurrentGemma RMSNorm,
+# Nemotron LayerNorm1P, ...) are covered by one entry -- except the class names in
+# ``ZERO_CENTERED_NORM_CLASS_EXCLUSIONS``: several HF norms are named ``*RMSNormGated``
+# but compute the plain ``x * weight`` and must NOT be matched.  The lists were swept over
+# the whole installed transformers tree (17 zero-centered classes, 5 plain lookalikes);
+# ``preflight_audit.py`` repeats that sweep per checkpoint at runtime.
+#
+# Extend these sets at runtime for new architectures, or set
+# ``module.zero_centered_gamma = True/False`` on the norm instance; an explicit attribute
+# always wins over the name lists.
+ZERO_CENTERED_NORM_CLASS_NAMES: set[str] = {
+    # Megatron-LM / Nemotron
+    "LayerNorm1P",
+    "NemotronLayerNorm1P",
+    # HF Gemma family
+    "GemmaRMSNorm",
+    "Gemma2RMSNorm",
+    "Gemma3RMSNorm",
+    # HF Qwen3-Next / Qwen3.5 hybrid-attention family
+    "Qwen3NextRMSNorm",
+    "Qwen3_5RMSNorm",
+    "Qwen3_5MoeRMSNorm",
+    # HF Qwen4 / Step-3.7 / MuseGlimmer / MiniMax-M3 / VideoPrism
+    "Qwen4ExpTextRMSNorm",
+    "Step3p7RMSNorm",
+    "MuseGlimmerTextCenteredRMSNorm",
+    "MiniMaxM3VLRMSNorm",
+    "VideoPrismLayerNorm",
+}
 
-    return bool(hasattr(module, "zero_centered_gamma") and module.zero_centered_gamma)
+# Plain ``x * weight`` norms whose class NAME contains one of the names above; without this
+# guard, substring matching would fold ``(1 + w) * s - 1`` into a plain gamma.
+ZERO_CENTERED_NORM_CLASS_EXCLUSIONS: set[str] = {
+    "DiffusionGemmaRMSNorm",
+    "Qwen3NextRMSNormGated",
+    "Qwen3_5MoeRMSNormGated",
+    "Qwen3_5RMSNormGated",
+    "Qwen4ExpTextRMSNormGated",
+}
+
+
+def _layernorm_uses_weight_plus_one(module: torch.nn.Module) -> bool:
+    # An explicit per-instance flag always wins; the name lists are the fallback.
+    if hasattr(module, "zero_centered_gamma"):
+        return bool(module.zero_centered_gamma)
+
+    cls_name = type(module).__name__
+    if any(cls_name == ex or cls_name.startswith(ex) for ex in ZERO_CENTERED_NORM_CLASS_EXCLUSIONS):
+        return False
+
+    return any(name in cls_name for name in ZERO_CENTERED_NORM_CLASS_NAMES)
 
 
 def fuse_prequant_layernorm(
@@ -1472,25 +1539,47 @@ def fuse_prequant_layernorm(
     if not hasattr(modules[0].input_quantizer, "_pre_quant_scale"):
         return
 
-    pre_quant_scale = modules[0].input_quantizer._pre_quant_scale.to(layernorm_module.weight.device)
-    if _layernorm_uses_weight_plus_one(layernorm_module):
-        # For norms that use (1 + weight) in forward, fold pre_quant_scale into the effective weight.
-        fused_weight = (layernorm_module.weight + 1.0) * pre_quant_scale - 1.0
-    else:
-        fused_weight = layernorm_module.weight * pre_quant_scale
-    layernorm_module.weight = torch.nn.Parameter(fused_weight.to(layernorm_module.weight.dtype))
-    if hasattr(layernorm_module, "bias") and layernorm_module.bias is not None:
-        layernorm_module.bias = torch.nn.Parameter(layernorm_module.bias * pre_quant_scale)
+    # CPU/disk-offloaded norms hold their weight on meta between forwards (accelerate hooks).
+    # Materialize it and write the folded value back to the offload holder; otherwise the
+    # fold is computed on a meta tensor (and ``.to(weight.device)`` below moves the scale to
+    # meta too), so the rewritten norm silently reverts to the unfolded weight on export.
+    ctx = nullcontext()
+    if hasattr(layernorm_module, "_hf_hook"):
+        from modelopt.torch.quantization.plugins.accelerate import (
+            weight_access_and_writeback_context,
+        )
+
+        ctx = weight_access_and_writeback_context(layernorm_module, writeback=True)
+
+    with ctx:
+        pre_quant_scale = modules[0].input_quantizer._pre_quant_scale.to(
+            layernorm_module.weight.device
+        )
+        if _layernorm_uses_weight_plus_one(layernorm_module):
+            # For norms that use (1 + weight) in forward, fold pre_quant_scale into the effective weight.
+            fused_weight = (layernorm_module.weight + 1.0) * pre_quant_scale - 1.0
+        else:
+            fused_weight = layernorm_module.weight * pre_quant_scale
+        layernorm_module.weight = torch.nn.Parameter(
+            fused_weight.to(layernorm_module.weight.dtype)
+        )
+        if hasattr(layernorm_module, "bias") and layernorm_module.bias is not None:
+            layernorm_module.bias = torch.nn.Parameter(layernorm_module.bias * pre_quant_scale)
     # Pre_quant_scales of modules must not be exported, since they have been fused with layernorm
     for module in modules:
         delattr(module.input_quantizer, "_pre_quant_scale")
         setattr(module, "fused_with_prequant", True)
 
 
-def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False):
+def preprocess_linear_fusion(
+    modules: list[torch.nn.Module], resmooth_only=False, skip_resmooth: bool = False
+):
     """Preprocess the quantized linears that we plan to fuse.
 
     Use resmooth_only for MOE experts as each individual expert is not fused.
+    Use skip_resmooth when the shared input norm is NOT folded (its output has consumers
+    outside the group): every module then keeps its own pre_quant_scale, which is the AWQ
+    optimum; resmoothing to the group average only exists to give a fold one shared scale.
     """
     quantization_format_list = [get_quantization_format(module) for module in modules]
     assert all_items_same(quantization_format_list), "Modules have different quantization formats"
@@ -1498,7 +1587,7 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
     # Activation
     if hasattr(modules[0], "input_quantizer"):
         # Resmooth
-        if modules[0].input_quantizer.pre_quant_scale is not None:
+        if not skip_resmooth and modules[0].input_quantizer.pre_quant_scale is not None:
             avg_prequant_scale = torch.mean(
                 torch.stack([module.input_quantizer.pre_quant_scale for module in modules]),
                 dim=0,

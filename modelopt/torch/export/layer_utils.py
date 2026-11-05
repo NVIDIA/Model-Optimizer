@@ -62,6 +62,10 @@ from .model_config import (
 from .model_config_utils import pad_weights
 from .postprocess import view_as_float8_e4m3fn_if_needed, view_as_uint8_if_needed
 from .quant_utils import (
+    # Single source of truth for the (1 + weight) norm detection below.  A duplicated
+    # allowlist here missed Qwen3.5-style zero-centered norms and wrote the unfolded
+    # weight into the deployable layernorm config.
+    _layernorm_uses_weight_plus_one,
     get_activation_scaling_factor,
     get_kv_cache_bias,
     get_kv_cache_dtype,
@@ -262,16 +266,7 @@ def build_layernorm_config(module: nn.Module) -> LayernormConfig:
 
     weight = module.weight
 
-    def _weights_plus_one(module):
-        if any(
-            name in type(module).__name__
-            for name in ["LayerNorm1P", "GemmaRMSNorm", "Gemma2RMSNorm", "Gemma3RMSNorm"]
-        ):
-            return True
-
-        return bool(hasattr(module, "zero_centered_gamma") and module.zero_centered_gamma)
-
-    if _weights_plus_one(module):
+    if _layernorm_uses_weight_plus_one(module):
         # megatron layernorm's weight needs to be updated.
         weight = weight.float() + 1.0
 

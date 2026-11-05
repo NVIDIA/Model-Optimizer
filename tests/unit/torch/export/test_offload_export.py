@@ -38,12 +38,17 @@ from _test_utils.torch.quantization.tied_modules import (
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_config import KV_CACHE_FP8
 from modelopt.torch.export.model_utils import TiedWeightMap
-from modelopt.torch.export.quant_utils import _postprocess_single_tensor
+from modelopt.torch.export.quant_utils import (
+    _postprocess_single_tensor,
+    _update_pre_quant_scale,
+    fuse_prequant_layernorm,
+)
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.export.unified_export_hf_streaming import (
     _parse_shard_size,
     _StreamingShardWriter,
 )
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 
@@ -63,11 +68,15 @@ def _make_offloaded_linear(dim: int = 16):
 
 
 def _offload_module(module):
-    """Offload ``module`` like accelerate does: real weight to ``weights_map``, ``.weight`` to a meta Parameter."""
+    """Offload ``module`` like accelerate does and return its weights_map.
+
+    Real weight goes to ``weights_map``, ``.weight`` becomes a meta Parameter.
+    """
     weights_map = {"weight": module.weight.data.clone().cpu()}
     hook = AlignDevicesHook(execution_device="cpu", offload=True, weights_map=weights_map)
     add_hook_to_module(module, hook)
     set_module_tensor_to_device(module, "weight", "meta")
+    return weights_map
 
 
 # ---------------------------------------------------------------------------
@@ -377,3 +386,84 @@ def test_tied_weights_exported_independently_without_cache():
 )
 def test_parse_shard_size_units(size, expected):
     assert _parse_shard_size(size) == expected
+
+
+# ---------------------------------------------------------------------------
+# pre_quant_scale updates and folds on offloaded modules
+# ---------------------------------------------------------------------------
+
+
+def _quantized_linear_with_pre_quant_scale(dim: int = 16, scale: float = 2.0):
+    """An INT4-AWQ quantized Linear carrying an AWQ-lite style per-channel pre_quant_scale."""
+    linear = nn.Linear(dim, dim, bias=False)
+    mtq.quantize(linear, mtq.INT4_AWQ_CFG, lambda m: m(torch.randn(1, dim)))
+    linear.input_quantizer._pre_quant_scale = torch.full((dim,), scale)
+    return linear
+
+
+def _linear_with_pre_quant_scale(scale: torch.Tensor):
+    dim = scale.numel()
+    linear = nn.Linear(dim, dim, bias=False)
+    linear.input_quantizer = TensorQuantizer()
+    linear.input_quantizer._pre_quant_scale = scale.clone()
+    return linear
+
+
+def _zero_centered_norm(dim: int = 4):
+    """A norm named like the real Qwen3.5 norm, whose forward computes ``x * (1 + weight)``."""
+
+    class Qwen3_5RMSNorm(nn.Module):  # noqa: N801 - the real Qwen3.5 class name
+        def __init__(self, hidden_size):
+            super().__init__()
+            self.weight = nn.Parameter(torch.randn(hidden_size))
+
+        def forward(self, x):
+            return x * (1.0 + self.weight)
+
+    return Qwen3_5RMSNorm(dim)
+
+
+def test_update_pre_quant_scale_materializes_offloaded_weight():
+    """The rescaled weight must be written back and the weight amax recollected for real.
+
+    An offloaded module holds its weight on meta between forwards.  Before the fix the
+    rescale and the amax recollection both ran on that meta tensor: the new weight was
+    discarded (the holder kept the old one) and the amax became meta, so the export fails
+    later reading the scale (``Tensor.item() cannot be called on meta tensors``).
+    """
+    linear = _quantized_linear_with_pre_quant_scale()
+    old_scale = linear.input_quantizer._pre_quant_scale.detach().clone()
+    new_scale = torch.full_like(old_scale, 4.0)
+    weights_map = _offload_module(linear)
+    weight_before = weights_map["weight"].clone()
+
+    _update_pre_quant_scale(linear, new_scale)
+
+    expected = (weight_before.float() * old_scale / new_scale).to(weight_before.dtype)
+    assert torch.allclose(weights_map["weight"], expected)
+    assert torch.equal(linear.input_quantizer._pre_quant_scale, new_scale)
+    amax = linear.weight_quantizer.amax
+    assert amax is not None and not amax.is_meta
+    assert linear._hf_hook.offload is True  # offload state restored after the update
+
+
+def test_fuse_prequant_layernorm_materializes_offloaded_norm():
+    """The folded norm weight must be written back to the offload holder.
+
+    Before the fix the fold ran on a meta norm weight (``.to(weight.device)`` moved the
+    pre_quant_scale to meta as well), so the rewritten norm silently held the *unfolded*
+    weight again as soon as the exporter materialized the layer from the offload holder,
+    while the members' pre_quant_scale was deleted: the checkpoint lost the scale entirely.
+    """
+    norm = _zero_centered_norm()
+    scale = torch.tensor([1.0, 2.0, 3.0, 4.0])
+    members = [_linear_with_pre_quant_scale(scale) for _ in range(2)]
+    weights_map = _offload_module(norm)
+    weight_before = weights_map["weight"].clone()
+
+    fuse_prequant_layernorm(norm, members)
+
+    assert torch.allclose(weights_map["weight"], (weight_before + 1.0) * scale - 1.0)
+    assert norm.weight.is_meta  # the fold leaves the norm offloaded
+    for module in members:
+        assert not hasattr(module.input_quantizer, "_pre_quant_scale")
