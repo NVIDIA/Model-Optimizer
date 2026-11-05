@@ -155,7 +155,7 @@ def clear_types_and_shapes_recursive(
                     _clear(vi, clear_shapes)
         else:
             for vi in g.value_info:
-                _clear(vi, clear_shape=True)
+                _clear(vi, clear_shape=clear_shapes)
 
         for out in g.output:
             _clear(out, clear_shapes)

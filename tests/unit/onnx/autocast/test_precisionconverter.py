@@ -212,6 +212,11 @@ def test_simple_convert(
         high_precision_nodes=["gemm", "add"], low_precision_nodes=["relu"]
     )
 
+    converted_value_info = {value.name: value for value in converted_model.graph.value_info}
+    for name in ("gemm_output", "add_output"):
+        shape = converted_value_info[name].type.tensor_type.shape
+        assert [dim.dim_value for dim in shape.dim] == [1, 3]
+
     # Verify input type changed to fp16
     expected_io_type = (
         TensorProto.FLOAT if keep_io_types else low_precision_onnx_type(low_precision_type)

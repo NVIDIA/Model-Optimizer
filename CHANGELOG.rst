@@ -87,7 +87,7 @@ Changelog
 
 **Bug Fixes**
 
-- Fix ONNX AutoCast assigning the same symbolic name to unrelated dimensions, which could cause shape mismatches at inference for dynamic-shape models, including RoPE-based models. Reconvert affected models.
+- Fix ONNX AutoCast inference shape mismatches caused by incorrectly shared symbolic dimensions, and preserve intermediate shapes when using standalone type inference. Reconvert affected models.
 - Fix Hugging Face EAGLE training scaling gradients by the accumulation group size instead of averaging them when gradient accumulation is enabled.
 - QAT and QAD of the GGML formats (IQ, ``q8_0``) now re-encode trainable weights after every optimizer step, including under optimizers that write weights through a shared buffer or ``.data`` such as Megatron's distributed optimizer. With those optimizers the GGML codes used to stay those of each job's first forward, so re-run earlier Megatron QAD of these formats.
 - Fix ONNX loading and quantization graph exports failing on individual initializers larger than 2 GiB, while preserving nested scopes and sequence/optional value types.
