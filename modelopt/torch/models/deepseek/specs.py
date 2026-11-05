@@ -23,7 +23,8 @@ from ..specs import ModelSpec, MoESpec, PTQSpec, register
 
 __all__: list[str] = []
 
-# Shared by every DeepSeek-V3-architecture type: the V2, V3, V3.2 and V4 types and Kimi-K2.
+# Shared by the six types that skip the preview for it: ``deepseek``, ``deepseek_v3``,
+# ``deepseek_v32``, ``deepseek_v4``, ``kimi_k2`` and ``kimi_k25``.
 PREVIEW_UNSUPPORTED = "DeepSeek generation may go OOM"
 
 # No ExportSpec.grouped_expert_export here: the grouped export path is not validated on
