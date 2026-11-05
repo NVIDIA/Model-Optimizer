@@ -22,6 +22,7 @@ import json
 import os
 import re
 import tempfile
+import warnings
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -2464,7 +2465,17 @@ def import_mcore_gpt_from_hf(
         dtype: The weights data type to import.
         trust_remote_code: If True, this allows importing from a wider range of sources.
         moe_router_dtype: The data type to import the moe router weights.
+
+    .. deprecated:: 0.49.0
+        Use Megatron-Bridge's ``AutoBridge`` to load Hugging Face checkpoints instead.
     """
+    warnings.warn(
+        "import_mcore_gpt_from_hf is deprecated as of 0.49.0 and will be removed in 0.50.0. Load "
+        "Hugging Face checkpoints with Megatron-Bridge instead, e.g. "
+        "AutoBridge.from_hf_pretrained(path).to_megatron_provider(load_weights=True).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     importer = GPTModelImporter(
         model,
         pretrained_model_path,
