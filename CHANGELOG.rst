@@ -8,6 +8,8 @@ Changelog
 
 *Quantization*
 
+- Add replicated data parallel staged GSQ calibration with restart checkpoints validated against topology and configuration.
+
 - Add local-shift GSQ for dense NVFP4 weight-only quantization, with staged Llama reconstruction, GPTQ, max and mse initialization, and CPU activation offloading.
 
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.

@@ -488,7 +488,7 @@ is unsupported.
 Only dense Transformers Llama decoder layers with all seven projections and
 static block-16 NVFP4 weight quantizers are supported. Activations and KV cache
 remain unquantized. Tied, sharded or offloaded weights, pre-scaled inputs, fused
-MoE experts and distributed execution are unsupported. Use layerwise calibration
+MoE experts are unsupported. Use layerwise calibration
 to process a full Llama model one decoder layer at a time.
 
 Each stage installs its final hard iterate, even if it has higher loss than the
@@ -496,5 +496,41 @@ initializer. There is no separate end-to-end scale-training phase, and the paper
 results on other grids do not establish NVFP4 quality gains. GSQ discards logits
 after calibration and stores hard weights and native scales in the ordinary
 ModelOpt checkpoint. Use ``modelopt.torch.opt.save`` / ``restore`` and final
-Hugging Face export normally. Restart checkpoints and streaming per-layer export
-are unsupported for GSQ.
+Hugging Face export normally. Streaming per-layer export is unsupported for GSQ.
+
+Distributed staged calibration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Staged GSQ supports replicated data parallel execution on one or multiple nodes.
+Initialize the default WORLD process group and bind each process to its local GPU
+before quantization. Every rank must load the same model and use the same resolved
+configuration. Record a replicated ``DistributionPlan`` using
+``set_distribution_plan``. Custom data parallel subgroups, tensor or expert
+parallelism and FSDP are rejected.
+
+The caller owns data selection and sharding. Create separate globally ordered
+initializer and training lists, and independently take ``items[rank::world_size]``
+from each. Emit the local initializer sequences first, followed by local training
+sequences. ``initializer_samples``, ``train_samples`` and ``batch_size`` are global;
+``microbatch_size`` limits each rank's device work. All ranks follow the same
+global logical batches and optimizer schedule. Uneven shards, partial batches and
+empty local contributions retain every global sample without padding or dropping.
+Do not use a sampler that changes this ordering or duplicates tail samples.
+
+See ``examples/hf_ptq/gsq_distributed.py`` for a ``torchrun`` launcher example.
+Use the same rendezvous settings and a shared checkpoint path on multiple nodes.
+Bulk activations stay rank local on CPU memory. Model weights, logits
+and optimizer state remain replicated; this does not reduce their memory floor.
+Seeds are repeatable at a fixed topology. Reduction order and stochastic sampling
+can change numerical results across GPU counts.
+
+Distributed layer checkpoints save one common layer state and separate activation
+and output metadata files per rank. The shared manifest advances after every rank
+successfully saves the checkpoint boundary. An interrupted layer is retrained.
+Resume requires the same GPU count, resolved quantization and GSQ settings, and
+round robin shard mapping. The manifest validates these automatically. The caller
+must keep source model, tokenizer, datasets and exact ordering unchanged; the
+``forward_loop`` API does not identify these. Legacy single process checkpoints
+remain usable on one process and cannot be resumed as distributed checkpoints.
+
+Write shared completed-model output files from rank zero after calibration finishes.

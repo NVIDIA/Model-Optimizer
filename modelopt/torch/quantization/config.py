@@ -1478,6 +1478,7 @@ class GSQCalibConfig(QuantizeAlgorithmConfig):
 
     ``initializer`` accepts GPTQ, max or mse and their full configs.
     Reconstruction supports all seven projections of a dense Llama decoder.
+    Replicated WORLD calibration uses global sample counts and logical batches.
     """
 
     method: Literal["gsq"] = ModeloptField("gsq")
@@ -1504,8 +1505,8 @@ class GSQCalibConfig(QuantizeAlgorithmConfig):
     def _validate_staged_replay(self):
         if not self.layerwise.get_qdq_activations_from_prev_layer:
             raise ValueError("GSQ requires inputs from the quantized prefix")
-        if self.layerwise.checkpoint_dir is not None or self.layerwise.export_dir is not None:
-            raise ValueError("GSQ supports completed-model saving and export only")
+        if self.layerwise.export_dir is not None:
+            raise ValueError("GSQ supports completed-model export only")
         return self
 
     @field_validator("initializer", mode="before")

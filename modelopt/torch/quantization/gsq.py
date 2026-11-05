@@ -32,6 +32,7 @@ from .config import GSQCalibConfig, QuantizeAlgorithmConfig
 from .nn import SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
 from .qtensor import NVFP4QTensor
 from .utils import SHARED_PATTERNS, find_shared_input_groups, is_quantized_linear
+from .utils.gsq_distributed import DistributedGSQ
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -57,10 +58,15 @@ def gsq(model, forward_loop, **kwargs):
     config = GSQCalibConfig(**kwargs)
     if forward_loop is None:
         raise ValueError("GSQ requires a replayable forward_loop")
-    modules = _validate_model(model)
+    distributed = DistributedGSQ()
+    with distributed.check():
+        modules = _validate_model(model)
+        if modules:
+            StagedReplay.validate(model, modules)
+    distributed.consistent(config.model_dump(mode="json"))
+    distributed.consistent([(n, tuple(m.weight.shape), str(m.weight.dtype)) for n, m in modules])
     if not modules:
         return
-    StagedReplay.validate(model, modules)
     mode, options = get_modelike_from_algo_cfg(config.initializer)[0]
     descriptor = CalibrateModeRegistry[mode]
     initializer = cast("QuantizeAlgorithmConfig", descriptor.config_class(**options))
@@ -73,8 +79,9 @@ def gsq(model, forward_loop, **kwargs):
     with _calibration_state(model) as originals, torch.random.fork_rng(devices=cuda_devices):
         torch.default_generator.manual_seed(config.seed)
         if cuda_devices:
-            torch.cuda.default_generators[device.index].manual_seed(config.seed)
-        replay = StagedReplay(model, forward_loop, config, originals)
+            torch.cuda.default_generators[device.index].manual_seed(config.seed + distributed.rank)
+        with distributed.check():
+            replay = StagedReplay(model, forward_loop, config, originals)
         if any(not isinstance(m.weight_quantizer, StaticBlockScaleQuantizer) for _, m in modules):
             max_calibrate(model, forward_loop=None)
         initialize: Callable[..., ConvertReturnType] = descriptor.convert
@@ -88,6 +95,10 @@ def gsq(model, forward_loop, **kwargs):
                     "GSQ initializer must share global scales for fusible NVFP4 siblings"
                 )
         for _, module in modules:
+            distributed.broadcast(module.weight.data)
+            distributed.broadcast(module.weight_quantizer.amax)
+            distributed.broadcast(module.weight_quantizer.global_amax)
+        for _, module in modules:
             q = module.weight_quantizer
             if not isinstance(q, StaticBlockScaleQuantizer) or q._lsq:
                 raise ValueError("GSQ initializer did not produce static NVFP4 scales")
@@ -95,12 +106,23 @@ def gsq(model, forward_loop, **kwargs):
 
 
 def _validate_model(model):
-    if dist_utils.is_distributed_launch() or (
-        torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
+    if dist_utils.is_distributed_launch() and not torch.distributed.is_initialized():
+        raise ValueError("Initialize the default process group before distributed GSQ")
+    distributed = DistributedGSQ()
+    if distributed.active and dist_utils.distribution_plan(model) != dist_utils.DistributionPlan(
+        world_size=distributed.world_size
     ):
-        raise ValueError("GSQ currently requires single-process calibration")
+        raise ValueError("GSQ requires a replicated WORLD distribution plan")
     modules = []
     for name, module in model.named_modules():
+        if distributed.active and hasattr(module, "parallel_state"):
+            state = module.parallel_state
+            if (
+                state.data_parallel_group.group not in (None, torch.distributed.group.WORLD)
+                or state.tensor_parallel_group.group != -1
+                or state.expert_model_parallel_group.group != -1
+            ):
+                raise ValueError("GSQ requires replicated WORLD data parallel placement")
         if not is_quantized_linear(module):
             continue
         q = module.weight_quantizer
