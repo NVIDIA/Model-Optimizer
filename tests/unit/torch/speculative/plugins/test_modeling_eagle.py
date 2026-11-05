@@ -18,6 +18,8 @@ from copy import deepcopy
 import pytest
 import torch
 from torch.nn import functional as F
+
+pytest.importorskip("transformers")
 from transformers import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
