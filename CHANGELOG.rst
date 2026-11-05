@@ -134,6 +134,7 @@ Changelog
 - Fix dynamic NVFP4 fake quantization with a block size other than 16, such as the block-32 weights of ``W4A8_NVFP4_FP8_CFG`` and ``NVFP4_MLP_WEIGHT_ONLY_CFG``, using blocks of 16 on GPUs with compute capability 8.9 or newer. Regular checkpoint exports after non-layerwise ``max`` calibration are unaffected; redo QAT, QAD, GPTQ, AWQ and layerwise calibration, vLLM fake-quant exports and fake-quantized accuracy evaluation done with such configs.
 - The ``evaluation`` agent skill's NeMo Gym MRCR recipe no longer passes ``HF_TOKEN`` on the command line, where other users on the node could read it, and keeps its rollout script in a private temporary directory instead of a fixed ``/tmp`` path.
 - Fake quantization of an NVFP4 affine KV cache (``nvfp4_affine``) now applies its calibrated bias; it ignored the bias and saturated the simulated KV cache. Re-quantize and re-evaluate models quantized with it.
+- Fix NVFP4 fake quantization (e.g. ``NVFP4_DEFAULT_CFG``) with Triton 3.9, as in the PyTorch 26.11 container, on GPUs with compute capability 8.9 or newer: it failed with ``NotImplementedError: Block pointers have been removed in favor of the tensor descriptor API``.
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^
