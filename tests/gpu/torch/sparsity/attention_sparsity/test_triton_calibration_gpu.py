@@ -137,13 +137,18 @@ class TestTritonCalibrationHF:
         """SparseGPT and prefill calibration share one data loader in either order, and the
         fitted calibration survives save/restore."""
         model = _load_eager(tiny_llama_dir)
+        # Random weights and tokens give near-uniform attention, where no KV tile is skippable and
+        # the calibration has nothing to fit. A repeated token makes the scores depend only on
+        # distance, and sharper queries and keys spread them across the thresholds.
+        with torch.no_grad():
+            for layer in model.model.layers:
+                layer.self_attn.q_proj.weight.mul_(32)
+                layer.self_attn.k_proj.weight.mul_(32)
         config = copy.deepcopy(SKIP_SOFTMAX_TRITON_CALIB)
         config["sparse_cfg"]["calibration"]["target_sparse_ratio"] = {"prefill": 0.5}
         modes = [("sparsegpt", {}), ("sparse_attention", config)]
-        torch.manual_seed(0)
-        vocab_size = model.config.vocab_size
         data_loader = [
-            {"input_ids": torch.randint(0, vocab_size, (1, seq_len)), "use_cache": False}
+            {"input_ids": torch.ones(1, seq_len, dtype=torch.long), "use_cache": False}
             for seq_len in (128, 256, 384, 512)
         ]
         model = mts.sparsify(
@@ -152,7 +157,9 @@ class TestTritonCalibrationHF:
             config={"data_loader": data_loader, "collect_func": lambda x: x},
         )
 
-        assert (model.model.layers[0].self_attn.q_proj.weight == 0).float().mean().item() == 0.5
+        # 2:4 sparse; the weight update can also round a kept bf16 weight to zero
+        q_proj_weight = model.model.layers[0].self_attn.q_proj.weight
+        assert ((q_proj_weight.reshape(-1, 4) == 0).sum(-1) >= 2).all()
         params = _calibration_params(model)
         assert len(params) == model.config.num_hidden_layers
         for p in params:
