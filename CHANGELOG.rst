@@ -8,6 +8,8 @@ Changelog
 
 *Quantization*
 
+- Extend staged NVFP4 GSQ to dense Qwen2/2.5, Qwen3, Mistral and original Gemma models using the existing recipes. MoE remains unsupported.
+
 - Add local-shift GSQ for dense NVFP4 weight-only quantization, with staged Llama reconstruction, GPTQ, max and mse initialization, and CPU activation offloading.
 
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.

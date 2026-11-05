@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Sequence reconstruction stages for dense Llama NVFP4 GSQ calibration."""
+"""Sequence reconstruction stages for supported dense NVFP4 GSQ decoders."""
 
 from math import ceil, cos, pi
 
@@ -36,12 +36,17 @@ class StagedReplay:
     @staticmethod
     def validate(model, modules):
         # Structural lookalikes may differ in residuals, normalization, or RoPE.
-        if (type(model).__name__, type(model).__module__) != (
-            "LlamaDecoderLayer",
-            "transformers.models.llama.modeling_llama",
-        ):
+        if (type(model).__module__, type(model).__name__) not in {
+            ("transformers.models.llama.modeling_llama", "LlamaDecoderLayer"),
+            ("transformers.models.qwen2.modeling_qwen2", "Qwen2DecoderLayer"),
+            ("transformers.models.qwen3.modeling_qwen3", "Qwen3DecoderLayer"),
+            ("transformers.models.mistral.modeling_mistral", "MistralDecoderLayer"),
+            ("transformers.models.gemma.modeling_gemma", "GemmaDecoderLayer"),
+        }:
             raise ValueError(
-                "Staged GSQ requires a Llama decoder layer; enable layerwise calibration"
+                "GSQ requires a supported dense decoder layer (Llama, Qwen2/2.5, Qwen3, "
+                "Mistral or Gemma); MoE and other decoder types are unsupported. "
+                "Enable layerwise calibration for full models."
             )
         expected = {
             "self_attn.q_proj",
@@ -53,7 +58,9 @@ class StagedReplay:
             "mlp.down_proj",
         }
         if {name for name, _ in modules} != expected:
-            raise ValueError("Staged GSQ requires all seven dense Llama projections")
+            raise ValueError(
+                "Staged GSQ requires all seven dense attention and gated-MLP projections"
+            )
         if any(m.input_quantizer.pre_quant_scale is not None for _, m in modules):
             raise ValueError("Staged GSQ requires unscaled inputs")
 
@@ -136,8 +143,13 @@ class _AttentionRegion(nn.Module):
         self.input_layernorm = layer.input_layernorm
         self.self_attn = layer.self_attn
 
-    def forward(self, hidden_states, **kwargs):
-        return hidden_states + self.self_attn(self.input_layernorm(hidden_states), **kwargs)[0]
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        return (
+            hidden_states
+            + self.self_attn(
+                self.input_layernorm(hidden_states), attention_mask=attention_mask, **kwargs
+            )[0]
+        )
 
 
 def refine_staged(model, modules, replay, config):
