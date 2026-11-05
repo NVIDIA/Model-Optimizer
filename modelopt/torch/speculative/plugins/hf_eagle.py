@@ -422,8 +422,17 @@ class HFEagleModel(EagleModel):
             self._activate_torch_compile()
 
         self._cached_attn_blk_masks = {}
+        self._cached_attn_blk_mask_context = None
 
     def _get_ttt_attention_mask(self, batch_size, seq_length, ttt_step):
+        dtype = (
+            getattr(self._base_llm_config, "dtype", None)
+            or self.eagle_module.layers[0].input_layernorm.weight.dtype
+        )
+        context = (seq_length, self.device, dtype, self.eagle_config._attn_implementation)
+        if context != self._cached_attn_blk_mask_context:
+            self._cached_attn_blk_masks.clear()
+            self._cached_attn_blk_mask_context = context
         # compile and cached flex attention masks in first call
         if ttt_step not in self._cached_attn_blk_masks:
             self._cached_attn_blk_masks.update(
