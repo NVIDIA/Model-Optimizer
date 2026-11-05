@@ -598,3 +598,37 @@ def test_serialized_empty_conversations_falls_back_to_messages(tiny_tokenizer, c
     sample = dataset._tokenize_entry(entry)
     assert sample is not None
     assert sample["token_ids"] == tiny_tokenizer("hello", add_special_tokens=False)["input_ids"]
+
+
+@pytest.mark.parametrize("field", ["conversations", "messages", "tools"])
+def test_getitem_resamples_malformed_serialized_fields(tiny_tokenizer, field):
+    class EchoDataset(StreamingDataset):
+        def _fetch(self, sample):
+            return sample
+
+        def _format(self, fetched):
+            return fetched
+
+    tiny_tokenizer.chat_template = "{{ messages[0]['content'] }}"
+    valid = {"conversation_id": "valid", "messages": [{"role": "user", "content": "hello"}]}
+    malformed = {**valid, "conversation_id": "malformed", field: "[invalid"}
+    dataset = EchoDataset([malformed, valid], tiny_tokenizer)
+    sample = dataset[0]
+    assert sample["cid"] == "valid"
+    assert sample["token_ids"] == tiny_tokenizer("hello", add_special_tokens=False)["input_ids"]
+
+
+@pytest.mark.parametrize("tools", [[], "[]"])
+def test_empty_tools_preserve_default_template(tiny_tokenizer, tools):
+    tiny_tokenizer.chat_template = {
+        "default": "{{ messages[0]['content'] }}",
+        "tool_use": "tool {{ messages[0]['content'] }}",
+    }
+    entry = {
+        "conversation_id": "no-tools",
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": tools,
+    }
+    sample = StreamingDataset([entry], tiny_tokenizer)._tokenize_entry(entry)
+    assert sample is not None
+    assert sample["token_ids"] == tiny_tokenizer("hello", add_special_tokens=False)["input_ids"]
