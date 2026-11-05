@@ -408,6 +408,12 @@ def test_unquantized_weight_has_no_export_state_or_spec():
             "only with 128x128 blocks",
             id="fp8-rectangular-blocks",
         ),
+        pytest.param(
+            8,
+            {"num_bits": (4, 3), "axis": None, "backend": "custom"},
+            "custom quantization backends",
+            id="custom-backend",
+        ),
     ],
 )
 def test_export_spec_rejects_unsupported_quantization(features, quantizer_cfg, error):
@@ -442,6 +448,15 @@ def test_export_rejects_rotated_quantizers(quantization_format, quantizer_name, 
         get_quantized_weight_export_spec(module)
     with pytest.raises(NotImplementedError, match="rotated quantizers"):
         capture_quantized_weight_export_state(module)
+
+
+def test_export_rejects_rotation_on_disabled_weight_quantizer():
+    module = _capture_linear("w4a16_mxfp4")
+    module.weight_quantizer.set_from_attribute_config({"rotate": {"enable": True}})
+    module.weight_quantizer.disable()
+
+    with pytest.raises(NotImplementedError, match="rotated quantizers"):
+        get_quantized_weight_export_spec(module)
 
 
 def test_export_allows_disabled_input_quantizer_that_rotates_back():

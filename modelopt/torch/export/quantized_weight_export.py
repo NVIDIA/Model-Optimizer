@@ -349,6 +349,17 @@ def _resolve_quantized_weight_export_inputs(
         return None
     quantized_view, weight_quantizer = resolved
     input_quantizer = _input_quantizer(module, weight_name)
+    # Neither a packed nor an unquantized weight can carry a rotation of the weight or its input.
+    # A disabled quantizer still rotates unless it rotates back.
+    if any(
+        isinstance(quantizer, TensorQuantizer)
+        and quantizer.rotate_is_enabled
+        and (quantizer.is_enabled or not quantizer.rotate_back_is_enabled)
+        for quantizer in (weight_quantizer, input_quantizer)
+    ):
+        raise _UnsupportedQuantizedWeightExportFormatError(
+            f"Functional export does not support rotated quantizers for {weight_name!r}"
+        )
     if not weight_quantizer.is_enabled:
         return None
     quantization_format = _get_quantization_from_quantizers(
@@ -364,16 +375,12 @@ def _resolve_quantized_weight_export_inputs(
         raise _UnsupportedQuantizedWeightExportFormatError(
             f"Functional export does not support sequential input quantizers for {weight_name!r}"
         )
-    # A packed weight cannot carry a rotation of the weight or its input. A disabled quantizer
-    # still rotates unless it rotates back.
     if any(
-        quantizer is not None
-        and quantizer.rotate_is_enabled
-        and (quantizer.is_enabled or not quantizer.rotate_back_is_enabled)
+        quantizer is not None and quantizer.is_enabled and quantizer.backend is not None
         for quantizer in (weight_quantizer, input_quantizer)
     ):
         raise _UnsupportedQuantizedWeightExportFormatError(
-            f"Functional export does not support rotated quantizers for {weight_name!r}"
+            f"Functional export does not support custom quantization backends for {weight_name!r}"
         )
     if quantization_format == QUANTIZATION_FP8_PB_WO and weight_quantizer.block_sizes != {
         -2: 128,
