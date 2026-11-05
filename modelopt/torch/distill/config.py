@@ -56,6 +56,7 @@ class LocalDistillationConfig(ModeloptBaseConfig):
     gradient_clip_norm: float = pydantic.Field(default=1.0, gt=0)
     loss: Literal["mse", "normalized_mse"] = "mse"
     validation_interval: int | None = pydantic.Field(default=None, gt=0)
+    report_interval: int = pydantic.Field(default=16, gt=0)
     selection: Literal["final", "best_validation_per_unit"] = "final"
     checkpoint_interval: int = pydantic.Field(default=128, gt=0)
     checkpoint_dir: str | None = None

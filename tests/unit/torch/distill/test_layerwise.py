@@ -145,14 +145,20 @@ def test_local_quantization_preflight_is_transactional(invalid_selection, monkey
 
 
 @pytest.mark.parametrize("batch_kind", ["dict", "tensor"])
-def test_local_streaming_update_matches_independent_reference(batch_kind):
+@pytest.mark.parametrize("optimizer_name", ["adagrad", "adamw"])
+def test_local_streaming_update_matches_independent_reference(batch_kind, optimizer_name):
     import modelopt.torch.quantization as mtq
     from modelopt.torch.quantization.repair import QuantizationRepairPolicy
 
     class TinyHeadModel(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.layers = torch.nn.ModuleList([torch.nn.Linear(8, 8), torch.nn.Linear(8, 8)])
+            self.layers = torch.nn.ModuleList(
+                [
+                    torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8))
+                    for _ in range(2)
+                ]
+            )
             self.lm_head = torch.nn.Linear(8, 32)
             self.head_lengths = []
 
@@ -180,6 +186,7 @@ def test_local_streaming_update_matches_independent_reference(batch_kind):
         batch = {"input": inputs, "valid_mask": valid, "labels": torch.full((8, 3), -100)}
     config = mtd.LocalDistillationConfig(
         units=["layers.0", "layers.1"],
+        optimizer=optimizer_name,
         updates=1,
         scheduler="constant",
         warmup_fraction=0,
@@ -191,8 +198,9 @@ def test_local_streaming_update_matches_independent_reference(batch_kind):
             target = target_module(current)
         policy = QuantizationRepairPolicy()
         groups = policy.prepare(module, config)
-        optimizer = torch.optim.Adagrad(
-            [{"params": group.params, "lr": group.lr} for group in groups]
+        optimizer_type = torch.optim.Adagrad if optimizer_name == "adagrad" else torch.optim.AdamW
+        optimizer = optimizer_type(
+            [{"params": group.params, "lr": group.lr} for group in groups], weight_decay=0
         )
         prediction = module(current.detach())
         (prediction.float() - target.float()).square()[valid].mean().backward()
@@ -207,7 +215,10 @@ def test_local_streaming_update_matches_independent_reference(batch_kind):
     torch.testing.assert_close(student(inputs), reference(inputs), rtol=1e-6, atol=1e-7)
     assert result.metrics["updates"] == 1
     row = result.metrics["history"][0]["units"]["layers.0"]
+    assert row["learning_rates"] == [config.scale_lr]
     assert row["valid_tokens"] == int(valid.sum())
+    assert result.metrics["phase_timings"]["teacher_forward_host_seconds"] >= 0
+    assert result.metrics["phase_timings"]["student_replay_backward_host_seconds"] >= 0
     assert result.metrics["units"]["layers.0"]["validation_mse"] >= 0
     assert all(parameter.grad is None for parameter in teacher.parameters())
     assert not any(
@@ -216,17 +227,26 @@ def test_local_streaming_update_matches_independent_reference(batch_kind):
     assert not any("_local_repair" in name for name, _ in student.named_modules())
 
 
-def test_local_repair_transactional_resume_matches_uninterrupted(tmp_path):
+@pytest.mark.parametrize("mode", ["scale_only", "joint"])
+def test_local_repair_transactional_resume_matches_uninterrupted(tmp_path, mode):
     import json
 
     import modelopt.torch.quantization as mtq
 
     torch.manual_seed(19)
-    teacher = torch.nn.Sequential(torch.nn.Linear(8, 8)).eval()
+    teacher = torch.nn.Sequential(
+        torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8))
+    ).eval()
     student = mtq.quantize(copy.deepcopy(teacher), mtq.INT8_WEIGHT_ONLY_CFG)
     reference = copy.deepcopy(student)
     batches = [torch.randn(8, 8) for _ in range(2)]
-    config = {"units": ["0"], "updates": 2, "scheduler": "constant", "warmup_fraction": 0}
+    config = {
+        "units": ["0"],
+        "mode": mode,
+        "updates": 2,
+        "scheduler": "constant",
+        "warmup_fraction": 0,
+    }
     expected = mtd.local_distill(reference, teacher, batches, config)
     directory = tmp_path / "resume"
     checkpoint_config = {**config, "checkpoint_dir": str(directory), "checkpoint_interval": 1}
@@ -235,6 +255,10 @@ def test_local_repair_transactional_resume_matches_uninterrupted(tmp_path):
     first = (directory / "latest").read_text().strip()
     manifest = json.loads((directory / first / "COMMITTED.json").read_text())
     assert manifest["step"] == 1
+    saved = torch.load(directory / first / "rank-0.pt", weights_only=False)
+    groups = saved["optimizers"]["0"]["param_groups"]
+    assert len(groups) == (4 if mode == "joint" else 2)
+    assert all(len(group["params"]) == 1 for group in groups)
     with pytest.raises(ValueError, match="sample order"):
         mtd.local_distill(
             student,
@@ -258,10 +282,14 @@ def test_local_repair_transactional_resume_matches_uninterrupted(tmp_path):
     example = torch.randn(2, 8)
     torch.testing.assert_close(result.student(example), expected.student(example), rtol=0, atol=0)
     assert result.metrics["updates"] == 2
+    assert len(result.metrics["history"][-1]["units"]["0"]["learning_rates"]) == (
+        2 if mode == "joint" else 1
+    )
     assert not (directory / first).exists()
     assert len(list(directory.glob("*/COMMITTED.json"))) == 1
     restored = mto.restore(
-        torch.nn.Sequential(torch.nn.Linear(8, 8)), result.report_paths["checkpoint"]
+        torch.nn.Sequential(torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8))),
+        result.report_paths["checkpoint"],
     )
     torch.testing.assert_close(restored(example), result.student(example), rtol=0, atol=0)
 

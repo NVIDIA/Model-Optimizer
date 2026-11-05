@@ -139,6 +139,23 @@ first/last observed update indices identify partial coverage after resuming an o
 checkpoint that did not record these counters. Routed counts describe exposure;
 they do not guarantee each expert improved.
 
+Repair keeps one optimizer per unit, coalescing only fields with matching learning
+rate, role, dtype/device and distributed ownership. Foreach groups are bounded to
+64 MiB of parameters; DTensor fields keep their existing separate groups. Gradient
+reductions retain the original field order, and optimizer checkpoints retain the
+legacy per-field layout so existing repair checkpoints still resume.
+
+`report_interval` defaults to 16 updates. Expert counters stay on device between
+reports and also flush before checkpoints and at completion. Each history row's
+`learning_rates` contains the distinct rates used by that unit, rather than one
+entry per expert field. `optimizer_parameter_groups` records the runtime group
+count. These reporting choices do not change the training objective or updates.
+`phase_timings` reports exclusive **host** seconds for preparation, teacher
+forward, student replay/backward, gradient processing, communication, optimizer,
+validation, checkpointing, finalization and publishing. They include Python and
+any host waits, not synchronized CUDA kernel durations. For device-level timing,
+use the corresponding `modelopt.local_distill.*` PyTorch profiler ranges.
+
 A secondary PPL that exceeds the floating-point range is reported as `null`;
 finite mean cross entropy and KLD remain available and KLD selection continues.
 

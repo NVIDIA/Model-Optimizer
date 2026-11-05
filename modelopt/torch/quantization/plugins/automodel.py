@@ -15,6 +15,7 @@
 
 """Quantizer ownership for AutoModel's native transposed expert projections."""
 
+import inspect
 from contextlib import contextmanager
 from functools import partial
 
@@ -155,18 +156,22 @@ class _QuantAutoModelExperts(QuantModule):
                     "AutoModel expert-input calibration currently requires the native eager expert backend."
                 )
             loop = self._forward_loop
+            signature = inspect.signature(loop)
 
-            def capture_loop(x, weights, indices, token_mask, *projections):
+            def capture_loop(x, weights, indices, token_mask, *projections, **options):
                 nonlocal captured_x, rows, cursor
                 # Native EP gathers before this boundary. Capture the physical
                 # GEMM input, including tokens routed from other EP ranks.
                 captured_x, rows, cursor = x, [], 0
-                start, end = projections[-2:]
+                arguments = signature.bind(
+                    x, weights, indices, token_mask, *projections, **options
+                ).arguments
+                start, end = arguments["experts_start_idx"], arguments["experts_end_idx"]
                 for index in range(start, end):
                     tokens = torch.where((indices == index) & token_mask.unsqueeze(-1))[0]
                     if tokens.numel():
                         rows.append((index - start, tokens))
-                return loop(x, weights, indices, token_mask, *projections)
+                return loop(x, weights, indices, token_mask, *projections, **options)
 
             object.__setattr__(self, "_forward_loop", capture_loop)
         self._current_expert_idx = None
@@ -461,6 +466,15 @@ def _native_decoder_layers(model):
     return None
 
 
+def _requires_prefix_replay(model):
+    return (
+        _is_native_automodel(model)
+        and getattr(model.config, "model_type", None) == "mistral_large4"
+    )
+
+
 LayerActivationCollector.register_decoder_layer_support(
-    _is_native_automodel, _native_decoder_layers
+    _is_native_automodel,
+    _native_decoder_layers,
+    requires_prefix_replay=_requires_prefix_replay,
 )

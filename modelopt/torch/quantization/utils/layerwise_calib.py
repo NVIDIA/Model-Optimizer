@@ -217,6 +217,7 @@ class LayerActivationCollector:
     """
 
     _decoder_layer_support: list[tuple[Any, Any]] = []
+    _prefix_replay_support: list[Callable[[nn.Module], bool]] = []
     _LAYER_ATTR = "_layerwise_calib"
 
     def __init__(self, model: nn.Module, status_callback: Callable[[str], None] | None = None):
@@ -226,6 +227,7 @@ class LayerActivationCollector:
         self._layer_to_idx: dict[nn.Module, int] = {}
         self._patched = False
         self._status_callback = status_callback
+        self.replay_prefix = self.requires_prefix_replay(model)
 
     def _swap_to_dummy(self, idx: int):
         """Replace decoder layer *idx* with a parameter-free dummy.
@@ -257,11 +259,23 @@ class LayerActivationCollector:
         return LayerActivationCollector.get_decoder_layers(model) is not None
 
     @classmethod
-    def register_decoder_layer_support(cls, is_supported: Any, discoverer: Any):
+    def register_decoder_layer_support(
+        cls, is_supported: Any, discoverer: Any, *, requires_prefix_replay=None
+    ):
         """Register a (predicate, discoverer) pair for decoder-layer detection."""
         entry = (is_supported, discoverer)
         if entry not in cls._decoder_layer_support:
             cls._decoder_layer_support.append(entry)
+        if (
+            requires_prefix_replay is not None
+            and requires_prefix_replay not in cls._prefix_replay_support
+        ):
+            cls._prefix_replay_support.append(requires_prefix_replay)
+
+    @classmethod
+    def requires_prefix_replay(cls, model: nn.Module) -> bool:
+        """Whether inter-block state requires real prefix execution during capture."""
+        return any(predicate(model) for predicate in cls._prefix_replay_support)
 
     @staticmethod
     def _extract_output_meta(output):
@@ -444,6 +458,18 @@ class LayerActivationCollector:
         * Layer ``i``     → **capture** (record inputs, then early-stop).
         """
         assert self._decoder_layers is not None
+
+        if self.replay_prefix:
+            # Shared K/V and index state can outlive the immediately preceding block.
+            # Recompute per batch rather than caching every producer's activations.
+            for index in range(layer_idx):
+                layer = self._decoder_layers[index]
+                layer._layerwise_calib.mode = "original"
+                layer._layerwise_calib.collected_inputs.clear()
+            current = self._decoder_layers[layer_idx]._layerwise_calib
+            current.mode = "capture"
+            current.collected_inputs = []
+            return
 
         if layer_idx > 1:
             idx = layer_idx - 2

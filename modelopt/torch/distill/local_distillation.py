@@ -22,6 +22,7 @@ import random
 import time
 import uuid
 from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from itertools import chain
 from pathlib import Path
@@ -35,6 +36,7 @@ from modelopt.torch.utils import print_rank_0
 
 from .config import LocalDistillationConfig
 from .local_checkpoint import LocalRepairCheckpoint, _batch_hash
+from .local_optimizer import load_optimizer_state_dict, make_optimizer, optimizer_state_dict
 from .local_units import ModuleLocalDistillationAdapter, mse_statistics
 
 __all__ = ["LocalDistillationResult", "local_distill"]
@@ -106,6 +108,9 @@ class _LocalRunner:
         self.student, self.teacher, self.units = student, teacher, units
         self.config, self.adapter = config, adapter
         self.policies, self.optimizers = {}, {}
+        self.optimizer_fields = {}
+        self.pending_coverage = {}
+        self.phase_stack = []
         self.metrics: dict[str, Any] = {
             "updates": 0,
             "units": {unit.name: {} for unit in units},
@@ -116,6 +121,24 @@ class _LocalRunner:
         self.consumed_batches = 0
         self.consumed_hashes = []
         self.runtime = None
+
+    @contextmanager
+    def _phase(self, name):
+        # Exclusive host time does not synchronize CUDA. Profiler labels retain
+        # the corresponding device work when used with torch.profiler.profile.
+        frame = [time.perf_counter(), 0.0]
+        self.phase_stack.append(frame)
+        try:
+            with torch.profiler.record_function("modelopt.local_distill." + name):
+                yield
+        finally:
+            elapsed = time.perf_counter() - frame[0]
+            self.phase_stack.pop()
+            if self.phase_stack:
+                self.phase_stack[-1][1] += elapsed
+            timings = self.metrics.setdefault("phase_timings", {})
+            key = name + "_host_seconds"
+            timings[key] = timings.get(key, 0.0) + elapsed - frame[1]
 
     def _parameters(self, unit):
         return {
@@ -224,18 +247,19 @@ class _LocalRunner:
             )
             if self.runtime:
                 self.runtime.register(self.student.get_submodule(unit.student_path), policy)
-            optimizer = (
-                torch.optim.Adagrad if self.config.optimizer == "adagrad" else torch.optim.AdamW
-            )
             self.metrics["units"][unit.name]["trainable_parameters_local"] = sum(
                 parameter.numel() for group in groups for parameter in group.params
             )
-            self.optimizers[unit.name] = optimizer(
-                [
-                    {"params": group.params, "lr": group.lr, "initial_lr": group.lr}
-                    for group in groups
-                ],
-                weight_decay=0,
+            partition = (
+                getattr(self.runtime, "optimizer_group_key", lambda parameter: id(parameter))
+                if self.runtime is not None
+                else None
+            )
+            self.optimizers[unit.name], self.optimizer_fields[unit.name] = make_optimizer(
+                groups, self.config, partition
+            )
+            self.metrics["units"][unit.name]["optimizer_parameter_groups"] = len(
+                self.optimizers[unit.name].param_groups
             )
 
     def _microbatches(self, batches):
@@ -269,26 +293,46 @@ class _LocalRunner:
             yield batch
 
     def _record_coverage(self, unit, coverage):
-        if not coverage:
-            return
-        report = self.metrics["units"][unit.name].setdefault("expert_coverage", {})
+        pending = self.pending_coverage.setdefault(unit.name, {})
         for name, counts in coverage.items():
-            previous = report.get(name, {}).get("routed_assignments", [0] * counts.numel())
-            accumulated = [old + new for old, new in zip(previous, counts.tolist(), strict=True)]
-            report[name] = {
-                "routed_assignments": accumulated,
-                "first_observed_step": report.get(name, {}).get(
-                    "first_observed_step", self.metrics["updates"] + 1
-                ),
-                "last_observed_step": self.metrics["updates"] + 1,
-                "unobserved_experts": [i for i, count in enumerate(accumulated) if count == 0],
-            }
+            if name in pending:
+                pending[name][0].add_(counts)
+            else:
+                pending[name] = [counts.detach().clone(), self.metrics["updates"] + 1]
+
+    def _flush_coverage(self):
+        for unit in self.units:
+            pending = self.pending_coverage.get(unit.name, {})
+            values = {name: value[0] for name, value in pending.items()}
+            if values and hasattr(self.adapter, "reduce_coverage"):
+                with self._phase("communication"):
+                    self.adapter.reduce_coverage(values)
+            if not values:
+                continue
+            report = self.metrics["units"][unit.name].setdefault("expert_coverage", {})
+            for name, counts in values.items():
+                previous = report.get(name, {}).get("routed_assignments", [0] * counts.numel())
+                accumulated = [
+                    old + new for old, new in zip(previous, counts.tolist(), strict=True)
+                ]
+                report[name] = {
+                    "routed_assignments": accumulated,
+                    "first_observed_step": report.get(name, {}).get(
+                        "first_observed_step", pending[name][1]
+                    ),
+                    "last_observed_step": self.metrics["updates"],
+                    "unobserved_experts": [i for i, count in enumerate(accumulated) if count == 0],
+                }
+        self.pending_coverage.clear()
 
     def _measure(self, batches, training):
         totals = {}
 
         def consume(unit, record):
-            with torch.set_grad_enabled(training):
+            with (
+                self._phase("student_replay_backward" if training else "student_validation"),
+                torch.set_grad_enabled(training),
+            ):
                 module = self.student.get_submodule(unit.student_path)
                 with self.adapter.observe_replay(module, training) as coverage:
                     prediction = self.adapter.replay(module, record)
@@ -316,8 +360,10 @@ class _LocalRunner:
                 totals[unit.name].add_(values)
 
         for microbatch in self._microbatches(batches):
-            self.adapter.teacher_microbatch(self.teacher, self.units, microbatch, consume)
-        return self.runtime.reduce_statistics(totals, training) if self.runtime else totals
+            with self._phase("teacher_forward" if training else "teacher_validation"):
+                self.adapter.teacher_microbatch(self.teacher, self.units, microbatch, consume)
+        with self._phase("communication"):
+            return self.runtime.reduce_statistics(totals, training) if self.runtime else totals
 
     def _validate(self, dataloader, baseline=False):
         values = self._measure(dataloader, False)
@@ -340,6 +386,7 @@ class _LocalRunner:
 
     def _save(self, dataloader, step):
         assert self.checkpoint is not None
+        self._flush_coverage()
         data = (
             {"state": dataloader.state_dict()}
             if hasattr(dataloader, "state_dict")
@@ -351,7 +398,8 @@ class _LocalRunner:
             {
                 "parameters": {unit.name: self._parameter_state(unit) for unit in self.units},
                 "optimizers": {
-                    name: optimizer.state_dict() for name, optimizer in self.optimizers.items()
+                    name: optimizer_state_dict(optimizer, self.optimizer_fields[name])
+                    for name, optimizer in self.optimizers.items()
                 },
                 "metrics": self.metrics,
                 "best": self.best,
@@ -381,7 +429,11 @@ class _LocalRunner:
         batches = self.checkpoint.restore_data_cursor(restore_cursor)
         for unit in self.units:
             self._load_parameters(unit, state["parameters"][unit.name])
-            self.optimizers[unit.name].load_state_dict(state["optimizers"][unit.name])
+            load_optimizer_state_dict(
+                self.optimizers[unit.name],
+                self.optimizer_fields[unit.name],
+                state["optimizers"][unit.name],
+            )
         self.metrics, self.best = state["metrics"], state["best"]
         torch.set_rng_state(state["torch_rng"])
         random.setstate(state["python_rng"])
@@ -468,12 +520,14 @@ class _LocalRunner:
             self.teacher.eval()
             self._guard(self._validate_output)
             first_batch = self._guard(lambda: self._next_first(batches))
-            self._prepare(first_batch)
+            with self._phase("preparation"):
+                self._prepare(first_batch)
             batches = chain((first_batch,), batches)
             del first_batch
             start = 0
             if self.config.resume_from:
-                start, batches = self._restore(dataloader)
+                with self._phase("restore"):
+                    start, batches = self._restore(dataloader)
             elif validation is not None:
                 self._validate(validation, baseline=True)
             for step in range(start + 1, self.config.updates + 1):
@@ -492,47 +546,52 @@ class _LocalRunner:
                     denominator = energy if self.config.loss == "normalized_mse" else count
                     if denominator <= 0:
                         raise ValueError("Repair requires a nonempty objective denominator.")
-                    parameters = [
-                        parameter
-                        for group in optimizer.param_groups
-                        for parameter in group["params"]
-                    ]
+                    # Optimizer tiling may differ for uneven local field sizes;
+                    # collectives and clipping retain the canonical field order.
+                    parameters = self.optimizer_fields[unit.name]
                     if self.runtime:
-                        self.runtime.reduce_gradients(parameters)
-                    for parameter in parameters:
-                        if parameter.grad is not None:
-                            parameter.grad.div_(denominator)
-                    norm = (
-                        self.runtime.clip_gradients(parameters, self.config.gradient_clip_norm)
-                        if self.runtime
-                        else nn.utils.clip_grad_norm_(
-                            parameters, self.config.gradient_clip_norm, error_if_nonfinite=True
+                        with self._phase("communication"):
+                            self.runtime.reduce_gradients(parameters)
+                    with self._phase("gradient_processing"):
+                        for parameter in parameters:
+                            if parameter.grad is not None:
+                                parameter.grad.div_(denominator)
+                        norm = (
+                            self.runtime.clip_gradients(parameters, self.config.gradient_clip_norm)
+                            if self.runtime
+                            else nn.utils.clip_grad_norm_(
+                                parameters, self.config.gradient_clip_norm, error_if_nonfinite=True
+                            )
                         )
-                    )
-                    optimizer.step()
-                    self.policies[unit.name].project_()
+                    with self._phase("optimizer_step"):
+                        optimizer.step()
+                        self.policies[unit.name].project_()
                     row["units"][unit.name] = {
                         "mse": error / count,
                         "elements": count,
                         "gradient_norm": float(norm),
                         "valid_tokens": int(tokens),
-                        "learning_rates": [group["lr"] for group in optimizer.param_groups],
+                        "learning_rates": list(
+                            dict.fromkeys(group["lr"] for group in optimizer.param_groups)
+                        ),
                     }
                 self.metrics["history"].append(row)
                 self.metrics["updates"] = step
-                if step == start + 1 or step % 16 == 0:
-                    values = list(row["units"].values())
-                    print_rank_0(
-                        json.dumps(
-                            {
-                                "repair_step": step,
-                                "total_steps": self.config.updates,
-                                "mean_unit_mse": sum(value["mse"] for value in values)
-                                / max(1, len(values)),
-                                "elapsed_seconds": time.perf_counter() - started,
-                            }
+                if step == start + 1 or step % self.config.report_interval == 0:
+                    with self._phase("reporting"):
+                        self._flush_coverage()
+                        values = list(row["units"].values())
+                        print_rank_0(
+                            json.dumps(
+                                {
+                                    "repair_step": step,
+                                    "total_steps": self.config.updates,
+                                    "mean_unit_mse": sum(value["mse"] for value in values)
+                                    / max(1, len(values)),
+                                    "elapsed_seconds": time.perf_counter() - started,
+                                }
+                            )
                         )
-                    )
                 if (
                     validation is not None
                     and self.config.validation_interval
@@ -542,7 +601,10 @@ class _LocalRunner:
                 if self.config.checkpoint_dir and (
                     step % self.config.checkpoint_interval == 0 or step == self.config.updates
                 ):
-                    self._save(dataloader, step)
+                    with self._phase("checkpoint"):
+                        self._save(dataloader, step)
+            with self._phase("reporting"):
+                self._flush_coverage()
             if validation is not None:
                 self._validate(validation)
             if self.config.selection == "best_validation_per_unit":
@@ -555,11 +617,13 @@ class _LocalRunner:
             for unit in self.units:
                 policy = self.policies[unit.name]
                 if self.runtime:
-                    self.runtime.finalize_policy(
-                        self.student.get_submodule(unit.student_path), policy
-                    )
+                    with self._phase("finalization"):
+                        self.runtime.finalize_policy(
+                            self.student.get_submodule(unit.student_path), policy
+                        )
                 else:
-                    policy.finalize_()
+                    with self._phase("finalization"):
+                        policy.finalize_()
         finally:
             for policy in self.policies.values():
                 policy.close()
@@ -568,7 +632,8 @@ class _LocalRunner:
             for module, training in flags.items():
                 module.training = training
         self._record_runtime(started, devices)
-        paths = self._publish() if self.config.output_dir else {}
+        with self._phase("publish"):
+            paths = self._publish() if self.config.output_dir else {}
         self._record_runtime(started, devices)
         if paths:
             Path(paths["metrics"]).write_text(json.dumps(self.metrics, indent=2) + "\n")

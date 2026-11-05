@@ -25,6 +25,9 @@ from .kimi import *
 from .llama import *
 from .mimo_v2_flash import *
 from .minimax_m3_vl import *
+from .mistral_large4 import *
+from .muse_spark import *
+from .nemotron_omni import *
 from .nemotron_v3 import *
 from .qwen3 import *
 from .qwen3_5 import *

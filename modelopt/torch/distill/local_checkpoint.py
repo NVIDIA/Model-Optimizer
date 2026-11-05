@@ -145,7 +145,9 @@ class LocalRepairCheckpoint(_CheckpointRanks):
             runtime.checkpoint_group() if runtime is not None else None,
             distributed=runtime is not None,
         )
-        settings = config.model_dump(exclude={"checkpoint_dir", "resume_from", "output_dir"})
+        settings = config.model_dump(
+            exclude={"checkpoint_dir", "resume_from", "output_dir", "report_interval"}
+        )
         self.identity = {
             "student": _model_hash(student),
             "teacher": _model_hash(teacher),

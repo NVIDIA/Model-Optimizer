@@ -45,6 +45,7 @@ class AutoModelLocalDistillationAdapter(ModuleLocalDistillationAdapter):
         self._runtime = None
         self._pipeline = None
         self._family = None
+        self._coverage_valid_mask = None
 
     @property
     def allows_empty_stage(self):
@@ -235,8 +236,6 @@ class AutoModelLocalDistillationAdapter(ModuleLocalDistillationAdapter):
         """Count valid routed assignments before EP gather, once per data lane."""
         from modelopt.torch.quantization.plugins.automodel import _QuantAutoModelExperts
 
-        from .runtime import _sum
-
         counts, handles = {}, []
 
         def count(name, child, args, kwargs):
@@ -244,10 +243,15 @@ class AutoModelLocalDistillationAdapter(ModuleLocalDistillationAdapter):
             indices = kwargs.get("indices", args[3] if len(args) > 3 else None)
             if mask is None or indices is None:
                 raise ValueError("Native expert coverage requires routing indices and token_mask.")
-            total = child._parameters["gate_and_up_projs"].shape[0]
-            assignments = indices[mask.bool()].reshape(-1)
-            value = torch.bincount(assignments[assignments >= 0], minlength=total)
-            counts[name].add_(value)
+            mask = mask.bool().reshape(-1)
+            if self._coverage_valid_mask is not None:
+                mask = mask & self._coverage_valid_mask.reshape(-1)
+            assignments = indices.reshape(-1).to(torch.int64)
+            valid = mask.reshape(-1, 1).expand(-1, indices.shape[-1]).reshape(-1)
+            contributions = (valid & assignments.ge(0)).to(torch.int64)
+            # Static output/assignment shapes avoid bincount and masked-index
+            # allocation synchronizations in the hot replay path.
+            counts[name].scatter_add_(0, assignments.clamp_min(0), contributions)
 
         try:
             if training:
@@ -269,6 +273,11 @@ class AutoModelLocalDistillationAdapter(ModuleLocalDistillationAdapter):
         finally:
             for handle in handles:
                 handle.remove()
+
+    def reduce_coverage(self, counts):
+        """Reduce accumulated routed assignments only at reporting boundaries."""
+        from .runtime import _sum
+
         if self._runtime is not None:
             for value in counts.values():
                 _sum(value, self._runtime.dp_cp)
@@ -288,12 +297,17 @@ class AutoModelLocalDistillationAdapter(ModuleLocalDistillationAdapter):
 
     def replay(self, module, record):
         """Replay through the FSDP owner when its child weights are sharded."""
-        if self._runtime is not None:
-            return self._runtime.replay(module, record, self)
-        args, kwargs = self.snapshot_inputs(record.args, record.kwargs)
-        return select_output(
-            self.replay_unit(module, args, kwargs, record.replay_state), record.output_selector
-        )
+        previous = self._coverage_valid_mask
+        self._coverage_valid_mask = record.valid_mask
+        try:
+            if self._runtime is not None:
+                return self._runtime.replay(module, record, self)
+            args, kwargs = self.snapshot_inputs(record.args, record.kwargs)
+            return select_output(
+                self.replay_unit(module, args, kwargs, record.replay_state), record.output_selector
+            )
+        finally:
+            self._coverage_valid_mask = previous
 
     def teacher_microbatch(self, teacher, units, batch, consume):
         """Replay all valid roles through the shared native packing/CP contract."""

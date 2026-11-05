@@ -268,6 +268,14 @@ class AutoModelRuntime:
             for mesh in self.parameter_meshes[id(parameter)]:
                 _sum(parameter.grad, mesh)
 
+    def optimizer_group_key(self, parameter):
+        """Keep expert, TP-sharded and replicated fields in their native ownership groups."""
+        return (
+            tuple(id(mesh) for mesh in self.parameter_meshes[id(parameter)]),
+            id(parameter) in self.expert_parameters,
+            id(parameter) in self.tp_parameters,
+        )
+
     def clip_gradients(self, parameters, max_norm):
         device = parameters[0].device
         expert = torch.zeros((), device=device)

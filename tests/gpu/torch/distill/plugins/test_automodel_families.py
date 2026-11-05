@@ -16,6 +16,7 @@
 """Native small-prefix GPTQ/Bypass coverage using revision-pinned model configs."""
 
 import inspect
+import json
 
 import pytest
 import torch
@@ -76,18 +77,37 @@ def _pair(record, device):
     return teacher, student
 
 
-def _batch(record, device):
+def _batch(record, device, model=None):
     length = 256 if "DeepSeek-V4-Pro" in record["model_id"] else 32
-    tokens = torch.randint(3, 127, (2, length), device=device)
+    tokens = torch.randint(3, 110, (2, length), device=device)
     documents = torch.ones_like(tokens)
     documents[:, length // 2 :] = 2
-    return {
+    batch = {
         "input_ids": tokens,
         "attention_mask": documents,
         "_packed_seq_ids": documents,
         "position_ids": torch.arange(length // 2, device=device).repeat(2, 2),
         "valid_mask": documents.ne(0),
     }
+    if model is not None and native_family(model).name in (
+        "muse_spark",
+        "nemotron_omni",
+        "mistral_large4",
+    ):
+        batch = {key: value[:1].clone() for key, value in batch.items()}
+        batch["input_ids"][:, -1] = 0
+        batch["attention_mask"][:, -1] = 0
+        batch["_packed_seq_ids"][:, -1] = 0
+        batch["position_ids"][:, -1] = 0
+        batch["valid_mask"][:, -1] = False
+        if native_family(model).name == "muse_spark":
+            batch["input_ids"][0, 2] = model.config.patch_token_id
+            batch["pixel_values"] = torch.randn(4, 24, device=device, dtype=torch.bfloat16)
+            batch["image_grid_thw"] = torch.tensor([[1, 2, 2]], device=device)
+        elif native_family(model).name == "nemotron_omni":
+            batch["input_ids"][0, 2:6] = model.img_context_token_id
+            batch["pixel_values"] = torch.randn(1, 3, 8, 8, device=device, dtype=torch.bfloat16)
+    return batch
 
 
 def _logits(model, batch):
@@ -121,7 +141,7 @@ def _reload(record, result, batch, device, tmp_path):
 def test_native_model_family_gptq_bypass_roundtrip(record, format_name, native_eager, tmp_path):
     """Exercise the native distinct-layer prefix, format GPTQ and exact reload."""
     teacher, student = _pair(record, native_eager)
-    batch = _batch(record, native_eager)
+    batch = _batch(record, native_eager, teacher)
     adapter = AutoModelLocalDistillationAdapter()
     family = native_family(student)
     assert family is not None
@@ -149,7 +169,22 @@ def test_native_model_family_gptq_bypass_roundtrip(record, format_name, native_e
             {"quantizer_name": pattern, "cfg": _FORMATS[format_name]}
             for pattern in activation_patterns
         )
+    check_prefix_resume = family.name == "mistral_large4" and format_name == "iq2_s"
+    if check_prefix_resume:
+        checkpoint = tmp_path / "ptq"
+        settings["quantization"]["algorithm"]["layerwise"]["checkpoint_dir"] = str(checkpoint)
     quantize_student(student, [batch], adapter, settings)
+    if check_prefix_resume:
+        manifest = checkpoint / "manifest.json"
+        state = json.loads(manifest.read_text())
+        state["last_completed_layer"] = 4
+        manifest.write_text(json.dumps(state))
+        assert not list(checkpoint.glob("*/next_inputs.pt"))
+        resumed = build_model(record, native_eager)
+        resumed.load_state_dict(teacher.state_dict())
+        quantize_student(resumed, [batch], AutoModelLocalDistillationAdapter(), settings)
+        torch.testing.assert_close(_logits(resumed, batch), _logits(student, batch), rtol=0, atol=0)
+        del resumed
     if family.name == "minimax_m3_vl":
         vision_quantizers = [
             q
@@ -190,7 +225,7 @@ def test_native_model_family_gptq_bypass_roundtrip(record, format_name, native_e
         [batch, batch],
         {
             "updates": 2,
-            "global_batch_size": 2,
+            "global_batch_size": batch["input_ids"].shape[0],
             "micro_batch_size": 1,
             "scheduler": "constant",
             "warmup_fraction": 0,
@@ -200,7 +235,9 @@ def test_native_model_family_gptq_bypass_roundtrip(record, format_name, native_e
     )
     for handle in routing_handles:
         handle.remove()
-    assert len(result.metrics["units"]) == record["minimum_pattern_prefix"]
+    assert len(result.metrics["units"]) == record.get(
+        "expected_repair_units", record["minimum_pattern_prefix"]
+    )
     assert all(
         torch.isfinite(torch.tensor(unit["validation_mse"]))
         for unit in result.metrics["units"].values()
@@ -210,6 +247,18 @@ def test_native_model_family_gptq_bypass_roundtrip(record, format_name, native_e
         for update in result.metrics["history"]
         for unit in update["units"].values()
     )
+    if family.name in ("muse_spark", "nemotron_omni", "mistral_large4"):
+        expected_tokens = int(batch["valid_mask"].sum())
+        for update in result.metrics["history"]:
+            assert all(unit["valid_tokens"] == expected_tokens for unit in update["units"].values())
+        coverage = [
+            counts
+            for unit in result.metrics["units"].values()
+            for counts in unit.get("expert_coverage", {}).values()
+        ]
+        assert coverage
+        for counts in coverage:
+            assert sum(counts["routed_assignments"]) == 2 * expected_tokens * 2
     _reload(record, result, batch, native_eager, tmp_path)
 
 

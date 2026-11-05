@@ -31,16 +31,22 @@ def cases():
 
 def tiny_config(record):
     """Shrink dimensions while retaining the exact distinct decoder prefix."""
+    from transformers import PretrainedConfig
+
     raw = copy.deepcopy(record["config"])
-    text = raw.get("text_config", raw)
+    decode = getattr(PretrainedConfig, "_decode_special_floats", None)
+    if decode is not None:
+        raw = decode(raw)
+    text = raw.get("text_config", raw.get("llm_config", raw))
     prefix = record["minimum_pattern_prefix"]
     if not prefix:
         raise ValueError("Checkpoint has no registered native architecture")
-    original_layers = text["num_hidden_layers"]
+    original_layers = text.get("num_hidden_layers", len(text.get("layers_block_type", [])))
+    selected_layers = record.get("representative_layer_ids", list(range(prefix)))
     # Per-layer discriminators and source identities retain their global indices.
     for key, value in list(text.items()):
         if isinstance(value, list) and len(value) >= original_layers and key != "architectures":
-            text[key] = value[:prefix]
+            text[key] = [value[index] for index in selected_layers]
         elif key in ("kv_source_layer_ids", "index_source_layer_ids", "dspark_target_layer_ids"):
             text[key] = [i for i in value if i < prefix]
     dimensions = {
@@ -107,6 +113,14 @@ def tiny_config(record):
         "num_mtp_modules": 0,
         "dspark_block_size": 0,
         "dspark_noise_token_id": 0,
+        "moe_latent_size": 256,
+        "moe_shared_expert_intermediate_size": 256,
+        "mamba_head_dim": 64,
+        "mamba_num_heads": 8,
+        "ssm_state_size": 16,
+        "n_groups": 1,
+        "chunk_size": 16,
+        "conv_kernel": 4,
     }
     if text.get("qk_rope_head_dim") == 0:
         dimensions["qk_rope_head_dim"] = 0
@@ -122,6 +136,12 @@ def tiny_config(record):
         dimensions["num_key_value_heads"] = 1
     if architecture == "Glm5NextForConditionalGeneration":
         dimensions["num_key_value_heads"] = dimensions["num_attention_heads"]
+    if architecture == "MistralLarge4ForConditionalGeneration":
+        dimensions["num_key_value_heads"] = dimensions["num_attention_heads"]
+        dimensions["head_dim"] = dimensions["qk_nope_head_dim"] + dimensions["qk_rope_head_dim"]
+        dimensions["q_lora_rank"] = None
+        positions = {layer: index for index, layer in enumerate(selected_layers)}
+        text["kv_source_layers"] = [positions[index] for index in text["kv_source_layers"]]
     if "ple_embed_dim" in text:
         dimensions["ple_embed_dim"] = (
             (text.get("ngram_size", 3) - 1) * text.get("heads_per_ngram", 8) * 4
@@ -154,6 +174,13 @@ def tiny_config(record):
             "patch_size": 2,
             "temporal_patch_size": 2,
             "spatial_merge_size": 2,
+            "image_size": 8,
+            "head_dim": 16,
+            "max_img_size": 16,
+            "min_num_patches": 4,
+            "max_num_patches": 64,
+            "num_cls_tokens": 1,
+            "num_registers": 0,
         }.items():
             if key in vision:
                 vision[key] = value
@@ -162,6 +189,91 @@ def tiny_config(record):
                 vision[key] = value[:1]
             elif key == "deepstack_visual_indexes":
                 vision[key] = [0]
+    if architecture == "MuseSparkForConditionalGeneration":
+        text.update(hidden_size=512, num_attention_heads=8, moe_hidden_size=256, sliding_window=16)
+        raw.update(
+            image_token_id=120,
+            patch_token_id=120,
+            video_token_id=121,
+            audio_token_id=122,
+            use_audio_perception=False,
+            out_hidden_size=128,
+            projector_hidden_size=64,
+        )
+        vision.update(layer_types=["full_attention"], pos_emb_height=4, pos_emb_width=4)
+        raw["audio_config"].update(
+            hidden_sizes=[8], depths=[1], patch_sizes=[2], num_hidden_layers=1, out_hidden_size=512
+        )
+    if architecture == "MuseSpark1xOmniForCausalLM":
+        # Retain compressed routing with a complete 256-value IQ input block.
+        raw.update(
+            hidden_size=512,
+            use_audio_perception=False,
+            image_token_id=120,
+            patch_token_id=121,
+            video_token_id=122,
+        )
+        raw["moe"].update(
+            num_experts=4, topk=2, override_routed_hidden_dim=256, compression_factor=2
+        )
+        raw["global_attn_cfg"] = [16 if window else 0 for window in raw["global_attn_cfg"]]
+        vision.update(downsample_factor=2, patch_size=2, patch_temporal=2, projector_input_dim=16)
+        vision["navit_config"].update(
+            hidden_size=8,
+            image_size=8,
+            intermediate_size=16,
+            num_attention_heads=2,
+            num_hidden_layers=1,
+            patch_size=2,
+            patch_temporal=2,
+            vision_output_dim=32,
+        )
+    if architecture == "MistralLarge4ForConditionalGeneration":
+        raw["image_token_index"] = 120
+        # Native from_dict performs the released composite-to-flat conversion.
+        from nemo_automodel.components.models.mistral_large4.config import MistralLarge4Config
+
+        config = MistralLarge4Config.from_dict(raw)
+        config.vision_config.update(image_break_token_id=121, image_end_token_id=122)
+        return config
+    if architecture == "NemotronH_Omni_Reasoning_V3":
+        # Native AutoModel uses this checkpoint's own RADIO implementation.
+        # Only its pinned Python/config files are needed, never checkpoint weights.
+        import pytest
+        from huggingface_hub import snapshot_download
+        from huggingface_hub.errors import LocalEntryNotFoundError
+        from nemo_automodel.components.models.nemotron_omni.model import NemotronOmniConfig
+        from transformers import NemotronHConfig
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+        try:
+            code = snapshot_download(
+                record["model_id"],
+                revision=record["revision"],
+                allow_patterns=["*.py", "config.json"],
+                local_files_only=True,
+            )
+        except LocalEntryNotFoundError:
+            pytest.skip(
+                "Prefetch this pinned Nemotron config and Python code; weights are unnecessary"
+            )
+        radio = get_class_from_dynamic_module("configuration_radio.RadioConfig", code)
+        raw.update(
+            force_image_size=8,
+            patch_size=2,
+            vit_hidden_size=32,
+            projector_hidden_size=64,
+            img_context_token_id=120,
+            video_context_token_id=121,
+            sound_context_token_id=122,
+        )
+        raw["llm_config"] = NemotronHConfig.from_dict(text)
+        vision["summary_idxs"] = [0]
+        raw["vision_config"] = radio(**vision)
+        raw.pop("model_type", None)
+        config = NemotronOmniConfig(**raw)
+        config.name_or_path = code
+        return config
     sparse = text.get("sparse_attention_config")
     if isinstance(sparse, dict):
         sparse.update(
@@ -200,8 +312,12 @@ def build_model(record, device):
     from nemo_automodel._transformers.registry import MODEL_ARCH_MAPPING
     from nemo_automodel.components.models.common import BackendConfig
 
-    config = tiny_config(record)
     architecture = record["architectures"][0]
+    if architecture not in MODEL_ARCH_MAPPING:
+        import pytest
+
+        pytest.skip(f"This AutoModel version has no native {architecture} implementation")
+    config = tiny_config(record)
     module, name, *_ = MODEL_ARCH_MAPPING[architecture]
     cls = getattr(importlib.import_module(module), name)
     backend = BackendConfig(

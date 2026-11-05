@@ -475,11 +475,16 @@ def test_native_automodel_ep_gradient_and_finalize(runtime):
         all_indices.remainder_(size - 1)
     all_probs = torch.ones(size * 2, 1, device="cuda")
     all_mask = torch.ones(size * 2, device="cuda", dtype=torch.bool)
+    if runtime == "runner":
+        all_mask[-1] = False
+        all_indices[-1] = -1
     with torch.no_grad():
         target = teacher(full_inputs, all_mask, all_probs, all_indices)
     reference_policy = QuantizationRepairPolicy()
     reference_groups = reference_policy.prepare(reference, mtd.LocalDistillationConfig())
-    reference(full_inputs, all_mask, all_probs, all_indices).sub(target).square().mean().backward()
+    reference(full_inputs, all_mask, all_probs, all_indices).sub(target).square()[
+        all_mask
+    ].mean().backward()
     for name in ("gate_and_up_projs", "down_projs"):
         student._parameters[name] = nn.Parameter(
             distribute_tensor(student._parameters[name].detach(), mesh, [Shard(0)]),
@@ -534,7 +539,17 @@ def test_native_automodel_ep_gradient_and_finalize(runtime):
             "token_mask": all_mask[selection],
             "weights": all_probs[selection],
             "indices": all_indices[selection],
+            "valid_mask": all_mask[selection],
         }
+
+        class CoverageAdapter(AutoModelLocalDistillationAdapter):
+            reductions = 0
+
+            def reduce_coverage(self, counts):
+                self.reductions += 1
+                return super().reduce_coverage(counts)
+
+        adapter = CoverageAdapter(context)
         result = mtd.local_distill(
             student,
             teacher,
@@ -543,10 +558,11 @@ def test_native_automodel_ep_gradient_and_finalize(runtime):
                 "units": [""],
                 "updates": 1,
                 "global_batch_size": size * 2,
+                "micro_batch_size": 1,
                 "scheduler": "constant",
                 "warmup_fraction": 0,
             },
-            adapter=AutoModelLocalDistillationAdapter(context),
+            adapter=adapter,
         )
         reference_optimizer = torch.optim.Adagrad(
             [{"params": group.params, "lr": group.lr} for group in reference_groups]
@@ -562,11 +578,12 @@ def test_native_automodel_ep_gradient_and_finalize(runtime):
             all_indices[selection],
         )
         torch.testing.assert_close(actual, expected, rtol=2e-3, atol=1e-7)
-        assert result.metrics["history"][0]["units"][""]["elements"] == target.numel()
+        assert result.metrics["history"][0]["units"][""]["elements"] == target[all_mask].numel()
         coverage = result.metrics["units"][""]["expert_coverage"][""]
-        expected_counts = torch.bincount(all_indices.flatten(), minlength=size).tolist()
+        expected_counts = torch.bincount(all_indices[all_mask].flatten(), minlength=size).tolist()
         assert coverage["routed_assignments"] == expected_counts
         assert coverage["unobserved_experts"] == [size - 1]
+        assert adapter.reductions == 1
         dist.barrier()
         return
     policy = QuantizationRepairPolicy()

@@ -185,3 +185,40 @@ A synthetic 11,008×4,096 individual-quantizer forward/backward probe measured:
 These are medians of five synchronized samples with legal synthetic packed
 payloads. They measure quantizer forward/backward, excluding matrix multiplication,
 teacher execution, optimizer and I/O; they are not whole-model speedups.
+
+## Optimizer/reporting and additional native families (November 5, 2026)
+
+The compatible-field optimizer uses bounded 64 MiB groups while preserving one
+optimizer per repair unit, canonical collective order and the legacy per-field
+optimizer checkpoint representation. The independent CPU reference checks cover
+Adagrad and AdamW updates plus exact scale-only/joint resume. All 73 focused CPU
+repair/calibration cases passed, including prefix-replay PTQ resume.
+
+A full-size representative IQ1_S scale bank (896 FP32 fields, 260,112,384
+parameters) was benchmarked with matched updates. Grouping reduced 896 optimizer
+groups to 16: mean optimizer-step time was 65.49 ms before and 8.52 ms after,
+with maximum parameter difference zero. Peak allocated CUDA memory increased
+from 6,336,020,480 to 6,463,225,856 bytes (about 121 MiB). This is a component
+benchmark, not a full-repair throughput claim; the 64 MiB bound avoids an
+unbounded foreach allocation across the complete MoE.
+
+Job 1569709 passed 132 native GPU cases on AutoModel revision
+`752a71ebf731f84b19ca9af5e7c242be003082bd`: 32 representative model prefixes
+across IQ2_S, IQ1_M, IQ2_XS and NVFP4 W4A4, plus four GDN checks. This includes
+Muse Spark, Mistral Large 4 and Nemotron 3.5 Super VL. The new cases include packed
+padding; Muse/Nemotron also execute their real native image encoders. The same
+job passed 12 distributed scenarios on every one of four ranks: native/shared-runner
+EP updates and expert coverage, GLM PTQ/diagnostics, packed CP MLP/attention/decoder
+repair, TP/FSDP2 including mixed formats, and physical PP with resume. The earlier
+AutoModel revision `bf6cae1d32d3a34a88aa6352f62f0cf1a9bb156a` also passed the
+native GLM IQ2_S GPTQ/repair/reload control.
+
+Job 1569798 passed the 12 new-family cases again plus the existing selective
+Kimi first-MoE test, completing all 133 family-matrix items. The Mistral IQ2_S case
+also rewinds a layerwise PTQ checkpoint at a shared-K/V producer, restores a fresh
+model, and matches uninterrupted PTQ logits exactly. Prefix replay recomputes its
+native layout instead of serializing arbitrary Python objects.
+
+Coverage remains a compatibility result on small random models. It establishes
+neither pretrained quality nor every family/format/distributed-topology combination.
+See [model coverage](MODEL_COVERAGE.md) for native model and modality limits.

@@ -2418,6 +2418,14 @@ def layerwise_calibrate(
             "Layerwise calibration requires a model with identifiable transformer layers."
         )
 
+    if LayerActivationCollector.requires_prefix_replay(model):
+        if export_dir is not None or not qdq_from_prev:
+            raise ValueError(
+                "This architecture requires prefix replay for cross-layer state: "
+                "layerwise calibration requires get_qdq_activations_from_prev_layer=True "
+                "and cannot export layers during calibration. Export after calibration."
+            )
+
     outside_calibrator = _OutsideQuantizerCalibrator(
         model,
         transformer_layers,
@@ -2483,7 +2491,12 @@ def layerwise_calibrate(
 
     try:
         input_getter._patch_all_layers(decoder_layers=transformer_layers)
-        resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
+        resumed_inputs = None
+        if ckpt and start_layer > 0:
+            if input_getter.replay_prefix:
+                ckpt.full_restore(transformer_layers, model)
+            else:
+                resumed_inputs = ckpt.setup_resume(transformer_layers)
 
         # Bootstrap: get first layer's inputs (or use resumed inputs).
         layer_inputs = input_getter.get_first_layer_inputs(
@@ -2550,7 +2563,14 @@ def layerwise_calibrate(
                     exporter.export_layer(layer_idx, layer, layer_inputs)
 
                 if ckpt:
-                    ckpt.save(layer_idx, model, transformer_layers, next_inputs)
+                    # Prefix replay regenerates native side state, which need not
+                    # be serialized as an arbitrary Python layout/cache object.
+                    ckpt.save(
+                        layer_idx,
+                        model,
+                        transformer_layers,
+                        None if input_getter.replay_prefix else next_inputs,
+                    )
 
             layer_pbar.update(1)
             del layer_inputs
@@ -2560,7 +2580,7 @@ def layerwise_calibrate(
         input_getter._unpatch_all_layers()
         layer_pbar.close()
 
-    if ckpt:
+    if ckpt and not input_getter.replay_prefix:
         ckpt.full_restore(transformer_layers, model)
 
     outside_calibrator.calibrate()
