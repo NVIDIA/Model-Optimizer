@@ -65,7 +65,9 @@ def test_eagle_model_convert_save_and_restore(tmp_path, eagle_config, mix_mode):
 
 @pytest.mark.parametrize("eagle_config", [EAGLE3_DEFAULT_CFG])
 @pytest.mark.parametrize("eagle_ttt_steps", [1, 2])
-@pytest.mark.parametrize("eagle_mix_hidden_states_mode", ["sparse_replace", "uniform_layer_sample"])
+@pytest.mark.parametrize(
+    "eagle_mix_hidden_states_mode", ["sparse_replace", "uniform_layer_sample", "unknown"]
+)
 def test_eagle_mix_hidden_states_backward(
     eagle_config, eagle_ttt_steps, eagle_mix_hidden_states_mode
 ):
@@ -85,7 +87,11 @@ def test_eagle_mix_hidden_states_backward(
         }
     )
     config["eagle_mix_hidden_states"] = True
-    config["eagle_mix_hidden_states_mode"] = eagle_mix_hidden_states_mode
+    config["eagle_mix_hidden_states_mode"] = (
+        "sparse_replace"
+        if eagle_mix_hidden_states_mode == "unknown"
+        else eagle_mix_hidden_states_mode
+    )
     config["eagle_ttt_steps"] = eagle_ttt_steps
     config["eagle_use_torch_compile"] = False
 
@@ -94,6 +100,13 @@ def test_eagle_mix_hidden_states_backward(
 
     input_ids = torch.randint(0, model.config.vocab_size, (2, 16))
     labels = input_ids.clone()
+
+    if eagle_mix_hidden_states_mode == "unknown":
+        # Module attributes can be reassigned after the config has been validated.
+        model.eagle_mix_hidden_states_mode = "unknown"
+        with pytest.raises(ValueError):
+            model(input_ids=input_ids, labels=labels)
+        return
 
     outputs = model(input_ids=input_ids, labels=labels)
     assert outputs.loss is not None

@@ -675,18 +675,6 @@ class _DynamicEagleGPTModel(EagleModel):
         self,
         config,
     ):
-        if (
-            self.config.sequence_parallel
-            and not config.eagle_offline
-            and config.eagle_mix_hidden_states
-            and config.eagle_mix_hidden_states_mode == "sparse_replace"
-        ):
-            raise ValueError(
-                "sparse_replace hidden state mixing does not support sequence parallelism. "
-                "Build the model with sequence_parallel=False or set "
-                "eagle_mix_hidden_states_mode='uniform_layer_sample'."
-            )
-
         if self.config.pipeline_model_parallel_size > 1:
             warnings.warn(
                 "Pipeline parallelism detected! _DynamicEagleGPTModel only supports "
@@ -1041,6 +1029,19 @@ class _DynamicEagleGPTModel(EagleModel):
         return_eagle_inputs: bool = False,
         **kwargs,
     ) -> torch.Tensor:
+        if (
+            self.config.sequence_parallel
+            and not return_eagle_inputs
+            and self.post_process
+            and self.eagle_mix_hidden_states
+            and self.eagle_mix_hidden_states_mode == "sparse_replace"
+        ):
+            raise ValueError(
+                "sparse_replace hidden state mixing does not support sequence parallelism. "
+                "Build the model with sequence_parallel=False or set "
+                "eagle_mix_hidden_states_mode='uniform_layer_sample'."
+            )
+
         if position_ids is None or attention_mask is None:
             attention_mask, position_ids = get_default_attention_mask_and_position_ids(input_ids)
 
@@ -1204,7 +1205,7 @@ class _DynamicEagleGPTModel(EagleModel):
                         aligned_hidden_states_history,
                         process_group=get_tensor_model_parallel_group(),
                     )
-                else:
+                elif self.eagle_mix_hidden_states_mode == "sparse_replace":
                     seq_len_s, batch_size, _ = eagle_module_output_hidden_states.shape
                     num_to_replace = max(1, seq_len_s // (2**ttt_step + 1))
 
@@ -1225,6 +1226,10 @@ class _DynamicEagleGPTModel(EagleModel):
                         eagle_module_input_hidden_states[rand_indices[batch_idx], batch_idx, :] = (
                             eagle_module_output_hidden_states[rand_indices[batch_idx], batch_idx, :]
                         )
+                else:
+                    raise ValueError(
+                        f"Unsupported eagle_mix_hidden_states_mode: {self.eagle_mix_hidden_states_mode}"
+                    )
             else:
                 eagle_module_input_hidden_states = eagle_module_output_hidden_states
 

@@ -814,6 +814,10 @@ class HFEagleModel(EagleModel):
                     eagle_input_hiddens[batch_indices, rand_indices] = eagle_output_hiddens[
                         batch_indices, rand_indices
                     ]
+                else:
+                    raise ValueError(
+                        f"Unsupported eagle_mix_hidden_states_mode: {self.eagle_mix_hidden_states_mode}"
+                    )
             else:
                 eagle_input_hiddens = eagle_output_hiddens
 
