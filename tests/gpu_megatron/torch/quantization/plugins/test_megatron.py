@@ -74,7 +74,7 @@ from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     save_sharded_modelopt_state,
 )
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
-from modelopt.torch.quantization.ggml.common import PINNED_PAYLOAD_PREFIX
+from modelopt.torch.quantization.ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.plugins.megatron import (
@@ -1721,8 +1721,14 @@ def _test_ggml_gptq_payload_sharded_state_dict(tmp_path, rank, size):
     gptq = next(algo for algo in config["algorithm"] if algo["method"] == "gptq")
     config["algorithm"] = {**gptq, "layerwise": {"enable": False}}
     mtq.quantize(model_ref, config, get_forward(model_ref))
-    pinned = {k: v for k, v in model_ref.state_dict().items() if PINNED_PAYLOAD_PREFIX in k}
-    assert pinned, "GPTQ pinned no GGML payload"
+    pinned = {
+        k: v
+        for k, v in model_ref.state_dict().items()
+        if PINNED_PAYLOAD_PREFIX in k or PINNED_IMPORTANCE_PREFIX in k
+    }
+    assert any(PINNED_PAYLOAD_PREFIX in k for k in pinned), "GPTQ pinned no GGML payload"
+    # IQ2_XS keeps its pinned scales, so the importance its search used is saved with the payload.
+    assert any(PINNED_IMPORTANCE_PREFIX in k for k in pinned), "GPTQ pinned no importance"
 
     save_distributed_checkpoint(tmp_path, model_ref)
     save_sharded_modelopt_state([model_ref], tmp_path)
@@ -1739,7 +1745,7 @@ def _test_ggml_gptq_payload_sharded_state_dict(tmp_path, rank, size):
 
 
 def test_ggml_gptq_payload_sharded_state_dict(dist_workers, tmp_path):
-    """GPTQ's pinned GGML codes are saved, so a reload exports them instead of re-encoding."""
+    """GPTQ's pinned GGML codes and importance are saved, so a reload re-derives the same codes."""
     dist_workers.run(partial(_test_ggml_gptq_payload_sharded_state_dict, tmp_path))
 
 

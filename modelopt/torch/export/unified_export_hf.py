@@ -681,8 +681,9 @@ def _export_quantized_weight(
                 "GGML unified export currently supports modules with a standard 'weight' "
                 f"attribute, got {weight_name!r} on {type(sub_module).__name__}"
             )
+        # Encode the module's own weight: rounding it to ``dtype`` first could change its codes.
         packed_weight = GGML_FORMAT_REGISTRY[quantization_format].pack(
-            weight.to(dtype), getattr(sub_module, quantizer_attrs.weight_quantizer, None)
+            weight, getattr(sub_module, quantizer_attrs.weight_quantizer, None)
         )
         setattr(sub_module, weight_name, nn.Parameter(packed_weight, requires_grad=False))
         maybe_clear_cuda_cache()

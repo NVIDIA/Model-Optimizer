@@ -24,6 +24,7 @@ import torch.nn as nn
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from modelopt.torch.export.quant_format import GGML_FORMATS
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 
 
 def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
@@ -491,6 +492,13 @@ def _export_fused_experts(
             )
 
         if is_gated:
+            # A GGML format that keeps its pinned scales encodes the whole fused weight first: rows
+            # of its unrounded weight are rows of no pinned decoding, but rows of the decoding are.
+            num_bits = getattr(first_proj_weight_quantizers[idx], "num_bits", None)
+            if num_bits in GGML_FORMATS:
+                first_weight = GGML_FORMAT_REGISTRY[num_bits].pin_current_codes(
+                    first_weight, first_proj_weight_quantizers[idx]
+                )
             projections = [
                 ("gate_proj", first_weight[:expert_dim, :], 0, fused_dim0, True),
                 ("up_proj", first_weight[expert_dim:, :], expert_dim, fused_dim0, True),
