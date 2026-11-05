@@ -26,6 +26,7 @@ exercise the orchestration + format chain, not real byte movement.
 """
 
 import base64
+import json
 import sys
 import types
 from unittest.mock import MagicMock
@@ -543,3 +544,57 @@ def test_answer_only_loss_rejects_slow_tokenizer_without_recovery():
     tok.convert_tokens_to_ids.return_value = None  # defeat recovery detect()s
     with pytest.raises(RuntimeError, match="fast tokenizer"):
         hf_streaming_dataset._tokenize_with_loss_mask(tok, _CONV, answer_only_loss=True)
+
+
+@pytest.mark.parametrize("serialized", [False, True])
+@pytest.mark.parametrize("answer_only_loss", [False, True])
+def test_streaming_entries_preserve_template_inputs(tiny_tokenizer, serialized, answer_only_loss):
+    tokenizer = tiny_tokenizer
+    tokenizer.add_tokens(["reply"])
+    tokenizer.chat_template = (
+        "{{ tools[0]['function']['name'] }} {{ reasoning_effort }} "
+        "{{ builtin_tools[0] }} {{ model_identity }} "
+        "{{ messages[0]['content'] }} {% generation %}{{ messages[1]['content'] }}{% endgeneration %}"
+    )
+    messages = [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "reply"},
+    ]
+    tools = [{"type": "function", "function": {"name": "calculator"}}]
+    entry = {
+        "conversation_id": "prepared",
+        "messages": json.dumps(messages) if serialized else messages,
+        "tools": json.dumps(tools) if serialized else tools,
+        "reasoning_effort": "high",
+        "builtin_tools": ["python"],
+        "model_identity": "assistant",
+    }
+    dataset = StreamingDataset(
+        [entry], tokenizer, config=StreamingConfig(answer_only_loss=answer_only_loss)
+    )
+    sample = dataset._tokenize_entry(entry)
+    assert sample is not None
+    expected_ids = tokenizer(
+        "calculator high python assistant question reply", add_special_tokens=False
+    )["input_ids"]
+    assert sample["token_ids"] == expected_ids
+    expected_mask = (
+        [token_id == tokenizer.convert_tokens_to_ids("reply") for token_id in expected_ids]
+        if answer_only_loss
+        else [1] * len(expected_ids)
+    )
+    assert sample["loss_mask"].tolist() == expected_mask
+
+
+@pytest.mark.parametrize("conversations", ["", "[]", "null"])
+def test_serialized_empty_conversations_falls_back_to_messages(tiny_tokenizer, conversations):
+    tiny_tokenizer.chat_template = "{{ messages[0]['content'] }}"
+    entry = {
+        "conversation_id": "fallback",
+        "conversations": conversations,
+        "messages": json.dumps([{"role": "user", "content": "hello"}]),
+    }
+    dataset = StreamingDataset([entry], tiny_tokenizer)
+    sample = dataset._tokenize_entry(entry)
+    assert sample is not None
+    assert sample["token_ids"] == tiny_tokenizer("hello", add_special_tokens=False)["input_ids"]

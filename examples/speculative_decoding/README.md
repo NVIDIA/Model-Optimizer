@@ -133,6 +133,11 @@ Once we finish dumping hidden states, launch offline training pointing to the hi
 
 For large base models, you can stream hidden states from a live `vllm serve` instead of dumping them to disk: a co-located server produces the base-model hidden states on the fly and sends them to the trainer over NIXL RDMA, scaling to multiple nodes (dedicated serve replicas + DDP trainers). See the launcher examples, e.g. [Kimi-K2.5 streaming EAGLE3](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_eagle3_multi_node.yaml) and [streaming DFlash](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_dflash_multi_node.yaml).
 
+Streaming input accepts `conversations` or `messages` as a list or a JSON-encoded list.
+Per-row `tools`, `reasoning_effort`, `builtin_tools`, and `model_identity` are passed to
+the chat template; `tools` can also be JSON-encoded. Include these fields when the
+conversation depends on them so training uses the same tokenization.
+
 ## Training a Standalone (External) Draft Model
 
 The modes above graft a draft head onto the target. The `external` mode instead
