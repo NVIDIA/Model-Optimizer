@@ -1,6 +1,6 @@
 ---
 name: day0-release
-description: Deterministic end-to-end driver for day-0 quantized-checkpoint releases — chains PTQ → evaluation → comparison with enforced gates between stages (the evaluation stage deploys the checkpoint itself), and returns a publish decision (ACCEPT / REGRESSION / ANOMALOUS / INFEASIBLE). Use when the user asks to "release a model at day-0", "quantize and validate model X is within N% of baseline and tell me if it's publishable", or "run the full day-0 workflow". Do NOT use for single-stage requests — quantizing only (use ptq), serving only (use deployment), evaluating only (use evaluation), or comparing two existing runs (use compare-results).
+description: Deterministic end-to-end driver for day-0 quantized-checkpoint releases — chains PTQ → evaluation → comparison with enforced gates between stages (the evaluation stage deploys the checkpoint itself), and returns a publish decision (ACCEPT / REGRESSION / INDETERMINATE / ANOMALOUS / INFEASIBLE). Use when the user asks to "release a model at day-0", "quantize and validate model X is within N% of baseline and tell me if it's publishable", or "run the full day-0 workflow". Do NOT use for single-stage requests — quantizing only (use ptq), serving only (use deployment), evaluating only (use evaluation), or comparing two existing runs (use compare-results).
 license: Apache-2.0
 ---
 
@@ -165,20 +165,12 @@ rerun the baseline. If no credible comparable external score exists, record the
 baseline as externally unverified and continue using the validated measured
 baseline.
 
-#### Statistical power — check BEFORE trusting any per-task verdict
+#### Uncertainty — check BEFORE trusting any per-task verdict
 
-A task whose measurement noise rivals the threshold cannot decide a gate. Confirm
-each task's repeat count gives a standard error below the threshold; otherwise
-mark it `INDETERMINATE` rather than reporting a pass/fail.
-
-For example, on a 1 % gate on DeepSeek-V4-Pro, both tasks that originally failed passed once measured properly:
-
-| task | runs pooled | drop | verdict |
-| --- | --- | --- | --- |
-| SciCode | 1 | 2.96 pp | REGRESSION |
-| SciCode | 8 | **-0.96 pp** | PASS |
-| IFBench | 5 | 2.73 pp | REGRESSION |
-| IFBench | 16 | **0.63 pp** | PASS |
+Use the [compare-results assessment](../compare-results/references/assess-results.md)
+against the allowed loss, in matching units. A point estimate within threshold
+or an SE below it does not establish acceptance; require the entire signed-loss
+confidence interval above the minimum acceptable margin.
 
 Add precision by submitting the benchmark **more times**, not by raising
 `num_repeats` within a run. SciCode's floor is **8 runs per side**, pooled as a
@@ -204,16 +196,19 @@ normalizes the drop accordingly, so `--threshold 0.01` means "≤1 pt on a 0-100
 task / ≤0.01 on a 0-1 task" uniformly. Pass `--scales '{"task": max}'` to
 override inference if a task's scores happen to fall in an ambiguous range.
 
-`gate_compare.py` checks only the candidate delta; it cannot override a failed
-external baseline check. Combined decision:
+`gate_compare.py` is a preliminary point-estimate check, not the final accuracy
+verdict. It cannot override external sanity or the interval assessment. Combined
+decision (external sanity failures and implausible scores take precedence):
 
-- **ACCEPT (accuracy only)** — no external check failed and every task is within
-  the candidate threshold → continue to **Step 5b**. This verdict covers accuracy
-  alone; advance to Step 6 only once the verbosity gate also passes. A missing
-  comparable external score is not a failure; report it as externally unverified.
-- **REGRESSION** — one or more tasks exceed threshold. **v1 stops here and
-  reports** which tasks regressed by how much. (Picking the next recipe and
-  re-running is deferred — see Scope.)
+- **ACCEPT (accuracy only)** — no external check failed and every task's
+  assessment is **Within margin** → continue to **Step 5b**. Advance to Step 6
+  only once the verbosity gate also passes. A missing comparable external score
+  is not a failure; report it as externally unverified.
+- **REGRESSION** — at least one task's assessment is **Substantial regression**.
+  **v1 stops here and reports** which tasks regressed by how much.
+- **INDETERMINATE** — otherwise, any task's target assessment is unresolved or
+  unavailable (including insufficient valid runs). Stop with `do-not-publish`;
+  report the missing evidence rather than accepting the point-estimate verdict.
 - **ANOMALOUS** — external baseline sanity failed, or scores are otherwise
   implausible (e.g. baseline lower than candidate by a large margin, or a task
   score is outside its valid range) → correct the baseline or surface it.
@@ -257,7 +252,7 @@ Tasks sharing no sample count are `not_comparable`, not a delta. Means under
 ### Step 6 — Closeout
 
 Report the decision with: source vs output size + ratio, per-task baseline /
-candidate / delta / within-threshold, **the verbosity verdict from Step 5b**,
+candidate / signed-loss CI / margin / assessment, **the verbosity verdict from Step 5b**,
 external source and sanity status, MLflow run IDs, and a publish recommendation
 (publish / do-not-publish). Archive artifacts to the workspace.
 
@@ -310,6 +305,7 @@ Return a decision, not a raw artifact:
 
 - `ACCEPT` + report + publish recommendation
 - `REGRESSION` + which tasks failed the threshold and by how much
+- `INDETERMINATE` + unresolved tasks, missing evidence, and `do-not-publish`
 - `ANOMALOUS` / `INFEASIBLE` + reason and next automated action
 - Always: workspace path + MLflow run IDs for traceability
 
