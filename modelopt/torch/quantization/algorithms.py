@@ -173,6 +173,106 @@ def _iter_tensor_quantizers(module: nn.Module):
             yield from _iter_tensor_quantizers(child)
 
 
+def _rewritten_weight(recipe: "QuantRecipe", name: str, module: nn.Module, attr: str, quantizer):
+    """The parameter ``recipe``'s calibration rewrites through ``module.<attr>``, or None.
+
+    Refuses a rewrite the quantizer cannot hold: one that is not a single GGML quantizer, or one
+    that rotates the weight.
+    """
+    enabled = [q for q in _iter_tensor_quantizers(quantizer) if q.is_enabled]
+    if "weight_quantizer" not in attr or not enabled:
+        return None
+    # GPTQ and imatrix are not GGML-specific, but a GGML pin is the only quantizer state that keeps
+    # the codes a calibration chose once the source weight is restored for the next candidate.
+    if any(isinstance(m, SequentialQuantizer) for m in quantizer.modules()) or any(
+        q.backend != "ggml" for q in enabled
+    ):
+        raise ValueError(
+            f"AutoQuantize candidate {recipe} calibrates with "
+            f"{sorted(_algorithm_methods(recipe.config.algorithm))}, which rewrites {name}'s "
+            f"weights, but its {attr} is not a single GGML quantizer that keeps the rewritten "
+            "codes. Search this format with a calibration that leaves weights unchanged."
+        )
+    # GPTQ rewrites every weight it quantizes; imatrix alone only those its backend's encoder takes
+    # (GGML's skips Q8_0). A fused projection is one parameter, and imatrix rewrites the slice of
+    # every expert it encodes, even when other experts use another format.
+    if "gptq" not in _algorithm_methods(recipe.config.algorithm) and not any(
+        map(model_calib._imatrix_encodes, enabled)
+    ):
+        return None
+    # GPTQ and the imatrix encoder pin codes for the weight itself, which a rotating quantizer
+    # would replace with its rotation's.
+    if any(q.rotate_is_enabled for q in enabled):
+        raise NotImplementedError(
+            f"AutoQuantize candidate {recipe} rewrites {name}'s weights, but its {attr} rotates "
+            "them before quantizing, which the codes its calibration pins do not account for. "
+            "Search this format without rotation or with a calibration that leaves weights "
+            "unchanged."
+        )
+    # Only the weight this quantizer covers: "weight_quantizer" -> "weight", a fused module's
+    # "gate_up_proj_weight_quantizers" -> "gate_up_proj".
+    weight_name = (
+        _get_replay_quantizer_attr(attr).removesuffix("weight_quantizer").rstrip("_") or "weight"
+    )
+    param = getattr(module, weight_name, None)
+    if not isinstance(param, nn.Parameter):
+        raise NotImplementedError(
+            f"{name}'s {attr} does not quantize a single weight parameter, which candidate "
+            f"{recipe} would rewrite."
+        )
+    return param
+
+
+def _check_restorable(model: nn.Module, params: dict) -> None:
+    """Refuse a rewritten weight that a CPU copy of it cannot restore, exactly and alone.
+
+    ``params`` maps each weight to its group's name. Such a weight must be materialized and
+    unsharded, stored as a float the GGML decoder writes, and hold storage no other parameter
+    shares.
+    """
+    uses = defaultdict(int)
+    spans = defaultdict(list)  # storage -> (parameter, first byte, end byte) of each parameter
+    for _, param in model.named_parameters(remove_duplicate=False):
+        uses[param] += 1
+        if uses[param] == 1 and (span := _storage_span(param)) is not None:
+            spans[span[0]].append((param, *span[1:]))
+    for param, name in params.items():
+        if param.is_meta or isinstance(param, DTensor):
+            raise NotImplementedError(
+                f"Weight-rewriting AutoQuantize candidates need materialized, unsharded "
+                f"weights; {name}'s are on the meta device (offloaded) or a DTensor (FSDP2)."
+            )
+        # GPTQ and imatrix encode the stored values and the selected codes decode into their
+        # dtype, so a packed or scaled weight (a native FP8 checkpoint's) is refused.
+        if param.dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+            raise NotImplementedError(
+                f"Weight-rewriting AutoQuantize candidates need weights stored unscaled in a "
+                f"16-bit or wider float; {name}'s are {param.dtype}. Dequantize the model "
+                "first, or search it with a calibration that leaves weights unchanged."
+            )
+        span = _storage_span(param)
+        if uses[param] > 1 or (
+            span is not None
+            and any(
+                other is not param and first < span[2] and span[1] < end
+                for other, first, end in spans[span[0]]
+            )
+        ):
+            raise NotImplementedError(
+                f"{name}'s weight shares its storage with another parameter (tied weights, or "
+                "a view of them), which a weight-rewriting AutoQuantize candidate would change "
+                "too. Exclude it from the search or search it with a calibration that leaves "
+                "weights unchanged."
+            )
+
+
+def _full_pin(quantizer, weight: torch.Tensor) -> torch.Tensor | None:
+    """The codes ``quantizer``'s GGML format pinned for all of ``weight``, if it pinned any."""
+    num_bits = getattr(quantizer, "num_bits", None)
+    ggml_format = GGML_FORMAT_REGISTRY.get(num_bits) if isinstance(num_bits, str) else None
+    return None if ggml_format is None else ggml_format.full_pin(quantizer, weight)
+
+
 def _tensor_quantizer_format_signature(quantizer: TensorQuantizer) -> tuple:
     """Return the numerical-format fields relevant to runtime fusion compatibility."""
     return (
@@ -550,6 +650,14 @@ class QuantRecipeHparam(Hparam):
         for nn_module, quantizer_choices in self._all_quantizer_choices[recipe].items():
             for quantizer_attr_name, quantizer in quantizer_choices.items():
                 setattr(nn_module, quantizer_attr_name, quantizer)
+
+    def _iter_quantizer_choices(self, recipe: QuantRecipe | None = None):
+        """Yield ``(module, attr, quantizer)`` of ``recipe``'s quantizers, or every recipe's."""
+        for choice, modules in self._all_quantizer_choices.items():
+            if recipe in (None, choice):
+                for module, quantizers in modules.items():
+                    for attr, quantizer in quantizers.items():
+                        yield module, attr, quantizer
 
     def set_calibration_recipe(self, recipe: QuantRecipe) -> None:
         """Enable ``recipe`` for this calibration pass or isolate the group."""
@@ -1180,19 +1288,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     def _snapshot_source_weights(self, quant_recipe_hparams, search_recipes):
         """CPU copies of the weights candidates' calibrations will rewrite, or None if none will.
 
-        GPTQ rewrites every weight its candidate quantizes, imatrix alone only those its encoder
-        takes (not Q8_0). Refuses, before any calibration, a candidate whose result its quantizers
-        cannot hold (only a single GGML quantizer pins the codes GPTQ chose, and only for the
-        weight itself: not rotated, nor transformed by another method in its algorithm list), a
-        rewritten weight stored packed or scaled (a native FP8 checkpoint's), and one whose storage
-        another parameter also holds (tied weights, or a view of them), which the rewrite would
-        change too.
+        Refuses, before any calibration, a candidate that also transforms the weight it rewrites,
+        one whose quantizers cannot hold the rewrite (``_rewritten_weight``), and one whose weight
+        the copy cannot restore (``_check_restorable``).
         """
         params = {}
-        for recipe in search_recipes:
+        for recipe in filter(_rewrites_weights, search_recipes):
             methods = _algorithm_methods(recipe.config.algorithm)
-            if not methods & _WEIGHT_REWRITING_METHODS:
-                continue
             if unsupported := methods - _REWRITE_COMPATIBLE_METHODS:
                 raise NotImplementedError(
                     f"AutoQuantize candidate {recipe} rewrites weights with "
@@ -1200,87 +1302,14 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     f"weight itself, but also calibrates with {sorted(unsupported)}, which would "
                     "quantize a transformed weight. Combine GPTQ or imatrix only with max."
                 )
-            imatrix_only = "gptq" not in methods
             for hparam in quant_recipe_hparams:
-                for module, quantizers in hparam._all_quantizer_choices.get(recipe, {}).items():
-                    for attr, quantizer in quantizers.items():
-                        enabled = [q for q in _iter_tensor_quantizers(quantizer) if q.is_enabled]
-                        if "weight_quantizer" not in attr or not enabled:
-                            continue
-                        if any(
-                            isinstance(m, SequentialQuantizer) for m in quantizer.modules()
-                        ) or any(q.backend != "ggml" for q in enabled):
-                            raise ValueError(
-                                f"AutoQuantize candidate {recipe} calibrates with "
-                                f"{sorted(_algorithm_methods(recipe.config.algorithm))}, "
-                                f"which rewrites {hparam.name}'s weights, but its {attr} "
-                                "is not a single GGML quantizer that keeps the rewritten codes. "
-                                "Search this format with a calibration that leaves weights unchanged."
-                            )
-                        # A fused projection is one parameter, and imatrix rewrites the slice of
-                        # every expert it encodes, even when other experts use another format.
-                        if imatrix_only and not any(map(model_calib._imatrix_encodes, enabled)):
-                            continue
-                        # GPTQ and the imatrix encoder pin codes for the weight itself, which a
-                        # rotating quantizer would replace with its rotation's.
-                        if any(q.rotate_is_enabled for q in enabled):
-                            raise NotImplementedError(
-                                f"AutoQuantize candidate {recipe} rewrites {hparam.name}'s weights, "
-                                f"but its {attr} rotates them before quantizing, which the codes "
-                                "its calibration pins do not account for. Search this format "
-                                "without rotation or with a calibration that leaves weights unchanged."
-                            )
-                        # Only the weight this quantizer covers: "weight_quantizer" -> "weight",
-                        # a fused module's "gate_up_proj_weight_quantizers" -> "gate_up_proj".
-                        weight_name = (
-                            _get_replay_quantizer_attr(attr)
-                            .removesuffix("weight_quantizer")
-                            .rstrip("_")
-                            or "weight"
-                        )
-                        param = getattr(module, weight_name, None)
-                        if not isinstance(param, nn.Parameter):
-                            raise NotImplementedError(
-                                f"{hparam.name}'s {attr} does not quantize a single weight "
-                                f"parameter, which candidate {recipe} would rewrite."
-                            )
+                for module, attr, quantizer in hparam._iter_quantizer_choices(recipe):
+                    param = _rewritten_weight(recipe, hparam.name, module, attr, quantizer)
+                    if param is not None:
                         params[param] = hparam.name
         if not params:
             return None
-        uses = defaultdict(int)
-        spans = defaultdict(list)  # storage -> (parameter, first byte, end byte) of each parameter
-        for _, param in self.model.named_parameters(remove_duplicate=False):
-            uses[param] += 1
-            if uses[param] == 1 and (span := _storage_span(param)) is not None:
-                spans[span[0]].append((param, *span[1:]))
-        for param, name in params.items():
-            if param.is_meta or isinstance(param, DTensor):
-                raise NotImplementedError(
-                    f"Weight-rewriting AutoQuantize candidates need materialized, unsharded "
-                    f"weights; {name}'s are on the meta device (offloaded) or a DTensor (FSDP2)."
-                )
-            # GPTQ and imatrix encode the stored values and the selected codes decode into their
-            # dtype, so a packed or scaled weight (a native FP8 checkpoint's) is refused.
-            if param.dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
-                raise NotImplementedError(
-                    f"Weight-rewriting AutoQuantize candidates need weights stored unscaled in a "
-                    f"16-bit or wider float; {name}'s are {param.dtype}. Dequantize the model "
-                    "first, or search it with a calibration that leaves weights unchanged."
-                )
-            span = _storage_span(param)
-            if uses[param] > 1 or (
-                span is not None
-                and any(
-                    other is not param and first < span[2] and span[1] < end
-                    for other, first, end in spans[span[0]]
-                )
-            ):
-                raise NotImplementedError(
-                    f"{name}'s weight shares its storage with another parameter (tied weights, or "
-                    "a view of them), which a weight-rewriting AutoQuantize candidate would change "
-                    "too. Exclude it from the search or search it with a calibration that leaves "
-                    "weights unchanged."
-                )
+        _check_restorable(self.model, params)
         return {param: param.detach().to("cpu", copy=True) for param in params}
 
     @staticmethod
@@ -1300,14 +1329,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         for hparam in quant_recipe_hparams:
             for module in hparam.quant_modules:
                 for weight, quantizer in module.iter_weights_for_calibration():
-                    num_bits = getattr(quantizer, "num_bits", None)
-                    if not quantizer.is_enabled or not isinstance(num_bits, str):
-                        continue
-                    ggml_format = GGML_FORMAT_REGISTRY.get(num_bits)
-                    if (
-                        ggml_format is not None
-                        and ggml_format.full_pin(quantizer, weight) is not None
-                    ):
+                    if quantizer.is_enabled and _full_pin(quantizer, weight) is not None:
                         setattr(quantizer, PIN_OVERRIDES_WEIGHT, True)
 
     def _write_selected_codes_to_weights(self):
@@ -1333,11 +1355,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                             )
                 # Including the candidates not selected, which would otherwise replay their codes
                 # over the selected weights if made active again.
-                for quantizers in hparam._all_quantizer_choices.values():
-                    for quantizer in (q for qs in quantizers.values() for q in qs.values()):
-                        for q in _iter_tensor_quantizers(quantizer):
-                            if replays(q):
-                                setattr(q, PIN_OVERRIDES_WEIGHT, False)
+                for _, _, quantizer in hparam._iter_quantizer_choices():
+                    for q in filter(replays, _iter_tensor_quantizers(quantizer)):
+                        setattr(q, PIN_OVERRIDES_WEIGHT, False)
 
     def before_search(self):
         """Prepare the model for search by calibrating the quantizers  and collecting ``AutoQuantize`` score."""
