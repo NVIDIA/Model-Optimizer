@@ -39,7 +39,7 @@ change is being measured, typically a further quantized version of the baseline.
    unverified rather than claiming the check passed, then continue using the
    validated measured baseline.
 7. Follow [Assess results](references/assess-results.md) to calculate retry
-   means, SEs, score intervals, and a Welch confidence interval on degradation.
+   means, SEs, score intervals, and a Welch confidence interval on signed loss.
 8. Report comparability, external baseline sanity, and quantized-feasibility
    verdicts before interpreting the delta as model quality. If the user did not
    provide an acceptance threshold, report feasibility as inconclusive instead
@@ -93,8 +93,9 @@ must be reported.
 Include:
 
 - Baseline and candidate identifiers.
-- Per-task metric path, baseline and candidate scores with SEs, degradation,
-  confidence intervals and method, sample/run counts, and an Assessment column.
+- Per-task metric path, baseline and candidate scores with SEs, signed loss
+  (`Candidate - Baseline` for accuracy; negative is worse), confidence intervals
+  and method, sample/run counts, and an Assessment column.
   Mark unavailable uncertainty explicitly; keep the assessment concise, not a
   statistics tutorial.
 - Per-task external reference score, source URL, known protocol differences,

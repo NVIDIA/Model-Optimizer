@@ -34,21 +34,22 @@ individual score intervals. For independent baseline and candidate retry scores,
 use a two-sided Welch interval:
 
 ```text
-D = mean_B - mean_C                  # higher-is-better accuracy; positive is worse
+L = mean_C - mean_B                  # signed loss; negative is worse accuracy
 vB = sB² / RB; vC = sC² / RC
-SE_D = sqrt(vB + vC)
+SE_L = sqrt(vB + vC)
 df = (vB + vC)² / (vB²/(RB-1) + vC²/(RC-1))
-[L, U] = D ± t(0.975, df) * SE_D     # two-sided 95% Welch CI
+[CI_low, CI_high] = L ± t(0.975, df) * SE_L  # two-sided 95% Welch CI
 ```
 
-Label the report `Baseline - Candidate`. For lower-is-better metrics, reverse
-the delta and interval signs so positive still means degradation. Express
+Label the report `L = Candidate - Baseline` for accuracy: `L = -1 pp` means
+the candidate is 1 percentage point worse. For lower-is-better metrics, reverse
+the delta and interval signs so negative still means worse. Express
 percentage-score differences in percentage points, not relative percent.
 
 Calculate with a validated statistical library outside chat. For example,
 [SciPy](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ttest_ind.html)
-`ttest_ind(baseline, candidate, equal_var=False).confidence_interval(0.95)`
-returns the baseline-minus-candidate interval. Welch supports unequal counts and
+`ttest_ind(candidate, baseline, equal_var=False).confidence_interval(0.95)`
+returns the candidate-minus-baseline interval. Welch supports unequal counts and
 variances; it requires at least two independent observations per side and
 compatible run-level means, SDs, and counts (`RB` and `RC`). Use the t quantile
 at the calculated degrees of freedom, not a fixed multiplier.
@@ -63,16 +64,20 @@ the interval unreliable.
 
 ## Assessment
 
-Compare the unrounded degradation CI with the user's nonnegative maximum
-allowed loss `M`, in matching units:
+Compare the unrounded signed-loss CI with the user's nonnegative maximum
+allowed drop `M`, in matching units; the acceptance boundary is `-M`:
 
-- `U < M`: evidence the loss is within the target.
-- `L > M`: evidence the loss exceeds the target.
-- Otherwise, including equality: target unresolved.
+- **Within margin:** `-M < CI_low`. The entire CI meets the target.
+- **Substantial regression:** `CI_high < -M`. The entire CI exceeds the allowed drop.
+- **Possible regression:** `CI_low ≤ -M ≤ CI_high < 0`. Worse than baseline,
+  but unresolved against the allowed drop.
+- **Inconclusive:** `CI_low ≤ -M` and `0 ≤ CI_high`. Both an unacceptable drop
+  and no degradation remain plausible.
 
-Separately, `L > 0` indicates a significant degradation at the stated CI level.
-A significant drop can still meet the target; failure to detect a drop does not
-prove acceptability. Without an explicit target, feasibility is inconclusive.
+The last two cases, including equality at `-M`, leave the target unresolved.
+Separately, `CI_high < 0` indicates a significant degradation at the stated CI
+level. A significant drop can still meet the target; failure to detect a drop
+does not prove acceptability. Without an explicit target, feasibility is inconclusive.
 Use judgment for borderline results and explain it without relabeling an
 unresolved statistical result as established. Missing or unreliable uncertainty
 cannot support a confidence-based acceptance claim.
