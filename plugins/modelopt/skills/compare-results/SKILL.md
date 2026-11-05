@@ -38,7 +38,7 @@ change is being measured, typically a further quantized version of the baseline.
    credible comparable reference exists, label the baseline externally
    unverified rather than claiming the check passed, then continue using the
    validated measured baseline.
-7. Follow [Assess and report](references/assess-results.md) to calculate retry
+7. Follow [Assess results](references/assess-results.md) to calculate retry
    means, SEs, score intervals, and a Welch confidence interval on degradation.
    Report comparability, external baseline sanity, and feasibility against the
    user's acceptance target. Without a target, feasibility is inconclusive.
@@ -86,8 +86,26 @@ baseline check in the evaluation skill's `references/run-validation.md`
 separately tests whether the baseline's absolute score is credible; both guards
 must be reported.
 
-## Assessment
+## Report Format
 
-Load [Assess and report](references/assess-results.md) before interpreting score
-changes or issuing a feasibility verdict. It defines the statistical method,
-uncertainty limitations, and required report fields.
+Include:
+
+- Baseline and candidate identifiers.
+- Per-task metric path, baseline and candidate scores with SEs, degradation,
+  confidence intervals and method, sample/run counts, and an Assessment column.
+  Mark unavailable uncertainty explicitly; keep the assessment concise, not a
+  statistics tutorial.
+- Per-task external reference score, source URL, known protocol differences,
+  percentage-point difference, and sanity status (`verified`, `failed`, or
+  `externally unverified`).
+- Comparability status for prompt/template, generation settings, sample counts,
+  reasoning handling, judge/simulator setup, and score field.
+- Per-task timeout and output-limit counts/rates for both runs, explicit
+  denominators, telemetry coverage, effective limits, and unresolved effects on
+  the score. Unknown accounting or unresolved infrastructure effects prevent an
+  `acceptable` quantization-feasibility verdict.
+- Comparability verdict: comparable, not comparable, or inconclusive.
+- Quantization feasibility verdict: acceptable, not acceptable, or inconclusive.
+  Never report `acceptable` when external baseline sanity failed. An externally
+  unverified baseline does not block `acceptable`; apply the candidate-delta
+  gate and report the missing external corroboration.

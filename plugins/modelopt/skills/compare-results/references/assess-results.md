@@ -1,4 +1,4 @@
-# Assess and report
+# Assess results
 
 Apply only after validating both evaluation runs and confirming comparability
 using the [compare-results checklist](../SKILL.md#comparability-checklist).
@@ -7,12 +7,12 @@ Use the task recipe's canonical metric and minimum run count.
 ## Retry mean, standard deviation, and SE
 
 For each side, let `accuracy_r` be the full benchmark accuracy from fresh,
-independent retry/run `r`, with `n` valid runs:
+independent retry/run `r`, with `R` valid runs:
 
 ```text
 mean = avg(accuracy_r)
-s = sample_stddev(accuracy_r)         # divisor n - 1
-SE = s / sqrt(n)
+s = sample_stddev(accuracy_r)         # divisor R - 1
+SE = s / sqrt(R)
 ```
 
 Use retry-level accuracy for both the mean and SD—not pooled question outcomes.
@@ -20,12 +20,12 @@ The SE denominator is the number of valid independent retries, not questions or
 questions × retries. Cached replay and infrastructure recovery of the same
 observation do not add independent retries. Retain every valid planned run.
 
-Report each mean and SE in percent for percentage metrics. An approximate 95%
-score interval is `mean ± 2*SE`; label it approximate. For small independent-run
-samples, prefer `mean ± t(0.975, n-1)*SE`. Never substitute SD for SE. These
-intervals describe generation/run variability on the fixed benchmark, not
-uncertainty about generalization to new questions. Single-run tasks require a
-metric-appropriate alternative analysis; do not invent retry variance.
+Report each mean and SE in percent for percentage metrics. Use the t-based 95%
+score interval `mean ± t(0.975, R-1)*SE`, with at least two valid independent
+runs. Never substitute SD for SE. These intervals describe generation/run
+variability on the fixed benchmark, not uncertainty about generalization to new
+questions. Single-run tasks require a metric-appropriate alternative analysis;
+do not invent retry variance.
 
 ## Confidence interval on the delta
 
@@ -35,9 +35,9 @@ use a two-sided Welch interval:
 
 ```text
 D = mean_B - mean_C                  # higher-is-better accuracy; positive is worse
-vB = sB² / nB; vC = sC² / nC
+vB = sB² / RB; vC = sC² / RC
 SE_D = sqrt(vB + vC)
-df = (vB + vC)² / (vB²/(nB-1) + vC²/(nC-1))
+df = (vB + vC)² / (vB²/(RB-1) + vC²/(RC-1))
 [L, U] = D ± t(0.975, df) * SE_D     # two-sided 95% Welch CI
 ```
 
@@ -50,8 +50,8 @@ Calculate with a validated statistical library outside chat. For example,
 `ttest_ind(baseline, candidate, equal_var=False).confidence_interval(0.95)`
 returns the baseline-minus-candidate interval. Welch supports unequal counts and
 variances; it requires at least two independent observations per side and
-compatible run-level means, SDs, and counts. Do not use a fixed 2*SE multiplier
-as an exact Welch interval at small degrees of freedom.
+compatible run-level means, SDs, and counts (`RB` and `RC`). Use the t quantile
+at the calculated degrees of freedom, not a fixed multiplier.
 
 Missing counts/variance, jointly zero variance, or dependent observations do not
 establish zero uncertainty. Mark the Welch interval unavailable and use a
@@ -83,26 +83,4 @@ prevents a decision. Results selected across many candidates/tasks or repeated
 looks are exploratory unless confirmed independently or covered by an
 appropriate sequential/multiple-comparison method.
 
-## Report Format
-
-Include:
-
-- Baseline and candidate identifiers.
-- Per-task metric path, baseline and candidate scores with SEs, degradation,
-  confidence intervals and method, sample/run counts, and an Assessment column.
-  Mark unavailable uncertainty explicitly; keep the assessment concise, not a
-  statistics tutorial.
-- Per-task external reference score, source URL, known protocol differences,
-  percentage-point difference, and sanity status (`verified`, `failed`, or
-  `externally unverified`).
-- Comparability status for prompt/template, generation settings, sample counts,
-  reasoning handling, judge/simulator setup, and score field.
-- Per-task timeout and output-limit counts/rates for both runs, explicit
-  denominators, telemetry coverage, effective limits, and unresolved effects on
-  the score. Unknown accounting or unresolved infrastructure effects prevent an
-  `acceptable` quantization-feasibility verdict.
-- Comparability verdict: comparable, not comparable, or inconclusive.
-- Quantization feasibility verdict: acceptable, not acceptable, or inconclusive.
-  Never report `acceptable` when external baseline sanity failed. An externally
-  unverified baseline does not block `acceptable`; apply the candidate-delta
-  gate and report the missing external corroboration.
+Report results using the [report format](../SKILL.md#report-format).
