@@ -55,12 +55,12 @@ that will be followed by a full evaluation.
 | Gate | Failures | Denominator |
 |---|---|---|
 | Response | Truncated, empty-final, or malformed/unusable model outputs | Verified unique successful raw model responses selected for evaluation |
-| Trial | Terminal request/server/transport, judge, sandbox/verifier, terminal action, solver, or harness errors/timeouts | Expected trials including repeats |
+| Trial | Terminal request/server/transport, judge, sandbox/verifier, terminal action, or harness errors/timeouts, excluding errors caused by incorrect model-generated code | Expected trials including repeats |
 
 Failures qualify only when preserved and recorded as incorrect/zero under the
 existing benchmark protocol. Verify this from artifacts and logs, not exception
 strings or summary zeros alone. Failed requests without raw responses belong only
-in the trial gate; ordinary wrong answers are not runtime failures.
+in the trial gate; ordinary wrong answers and errors caused by incorrect model-generated code are not runtime failures.
 
 Report category counts, deduplicated unions, denominators, and rates per
 benchmark/run. Deduplicate overlaps, caches, and resumes by response/trial identity;
