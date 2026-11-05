@@ -321,6 +321,9 @@ def init_quantized_weights(
         legacy_dtype = kwargs.pop("torch_dtype", None)
         if kwargs.get("dtype") is None and legacy_dtype is not None:
             kwargs["dtype"] = legacy_dtype
+        # "auto" asks for the checkpoint's dtype, which the fallback below reads from its config.
+        if kwargs.get("dtype") == "auto":
+            del kwargs["dtype"]
         # load_checkpoint_and_dispatch() gets only the kwargs it takes; the rest build the model.
         dispatch_params = inspect.signature(load_checkpoint_and_dispatch).parameters
         dispatch_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in dispatch_params}
@@ -341,7 +344,9 @@ def init_quantized_weights(
             # config.dtype is None, not absent, when unset, so a getattr default never applies.
             dtype = dispatch_kwargs.get("dtype") or getattr(config, "dtype", None) or torch.float16
             # from_config() raises on any kwarg the model doesn't take.
-            model = cls.from_config(config, dtype=dtype, **kwargs)
+            model = cls.from_config(
+                config, dtype=dtype, trust_remote_code=trust_remote_code, **kwargs
+            )
         # init_empty_weights re-wraps every registered parameter, so the tie made inside
         # from_config is lost; without it the absent tied checkpoint key (e.g. lm_head) stays meta.
         model.tie_weights()
