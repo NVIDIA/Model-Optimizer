@@ -40,8 +40,10 @@ change is being measured, typically a further quantized version of the baseline.
    validated measured baseline.
 7. Follow [Assess results](references/assess-results.md) to calculate retry
    means, SEs, score intervals, and a Welch confidence interval on degradation.
-   Report comparability, external baseline sanity, and feasibility against the
-   user's acceptance target. Without a target, feasibility is inconclusive.
+8. Report comparability, external baseline sanity, and quantized-feasibility
+   verdicts before interpreting the delta as model quality. If the user did not
+   provide an acceptance threshold, report feasibility as inconclusive instead
+   of inventing one.
 
 ## Comparability Checklist
 
