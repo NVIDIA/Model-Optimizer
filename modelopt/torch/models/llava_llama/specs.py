@@ -27,6 +27,8 @@ register(
     ModelSpec(
         model_type="llava_llama",
         modeling_source="remote_code",
-        ptq_spec=PTQSpec(fsdp2_unsupported="VILA (custom builder + non-standard layer layout)"),
+        ptq_spec=PTQSpec(
+            fsdp2_unsupported="VILA / llava_llama (custom builder + non-standard layer layout)"
+        ),
     )
 )

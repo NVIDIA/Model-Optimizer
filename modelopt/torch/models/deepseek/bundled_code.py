@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Loading support shared by the DeepSeek-V3-architecture types."""
+"""Loading support shared by the DeepSeek model types and Kimi-K2."""
 
 __all__ = ["prefers_bundled_code"]
 
@@ -21,8 +21,10 @@ __all__ = ["prefers_bundled_code"]
 def prefers_bundled_code(hf_config, checkpoint_path, config_kwargs) -> bool:
     """Load these checkpoints through the modeling code they ship.
 
-    A DeepSeek-V3 architecture is named ``DeepseekV3ForCausalLM`` under every model type that uses
-    it, and transformers ships a class of that name. Kimi-K2 is the one it would be wrong for: the
-    name alone picks transformers' class for a checkpoint that comes with its own.
+    Every type mapped here keeps the example's old rule, which applied to any architecture with
+    ``Deepseek`` in its name. The rule came from Kimi-K2: its architecture is named
+    ``DeepseekV3ForCausalLM`` under its own model type, so the name alone would pick transformers'
+    class for a checkpoint that comes with its own code. No other reason is recorded for the other
+    types.
     """
     return True
