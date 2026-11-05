@@ -21,7 +21,7 @@ and infrastructure recovery. Retain every valid planned run.
 
 Report each mean and SE in percent for percentage metrics. Use the t-based 95%
 score interval `mean ± t(0.975, R-1)*SE`, with at least two valid independent
-runs.
+runs. If insufficient samples are available, report uncertainty unavailable.
 
 ## Confidence interval on the delta
 
@@ -43,6 +43,10 @@ Calculate with a validated statistical library. For example,
 [SciPy](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ttest_ind.html)
 `ttest_ind(candidate, baseline, equal_var=False).confidence_interval(0.95)`
 returns the candidate-minus-baseline interval.
+
+For paired or clustered observations, use an uncertainty method that preserves
+that dependence, not independent-sample Welch; report the method and observation
+unit. Without a justified method, uncertainty is unavailable.
 
 ## Assessment
 

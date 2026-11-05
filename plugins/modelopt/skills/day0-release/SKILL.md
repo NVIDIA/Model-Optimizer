@@ -117,13 +117,26 @@ produced a wrong verdict on a large MoE, in opposite directions:
 
 The baseline is the **source** (pre-quantization) model on the same task set and
 sampling params. Always run a fresh baseline via the **evaluation** skill,
-which deploys the source model itself. Gate with `gate_run.py`.
+which deploys the source model itself. Gate every run with `gate_run.py`.
+
+Before submitting either side, record per-task run counts, uncertainty method,
+and stopping rule. For retry-level Welch, plan at least two fresh independent
+full-benchmark runs per side (SciCode: at least eight), increasing these fixed
+counts up front if more precision is needed. One AA-suite invocation does not
+supply multiple full runs for GPQA or IFBench: in-run repeats are not independent
+retry scores. A task-specific method using repeat/trial data instead must justify
+its observation unit and dependence assumptions.
+
+Complete the declared plan before the final assessment. Result-dependent reruns,
+repeated looks, or selecting candidates on these results are exploratory: require
+independent confirmation under a fresh declared plan, or a justified
+sequential/selection-aware method, before confidence-based ACCEPT.
 
 ### Step 4 — Quantized eval
 
 Invoke the **evaluation** skill on the quantized checkpoint, matching the
-baseline's task set and sampling params. The evaluation skill stands up the
-serving endpoint itself (it builds the `deployment.command`, e.g. a
+baseline's task set, sampling params, and declared run plan. The evaluation skill
+stands up the serving endpoint itself (it builds the `deployment.command`, e.g. a
 `vllm serve …`), so a serving failure surfaces here as a failed `gate_run.py`
 with `DEPLOYMENT_HEALTH_FAILED`. When that happens, **drop to the deployment
 skill** to reproduce and debug serving in isolation (serve the checkpoint
@@ -172,9 +185,9 @@ against the allowed loss, in matching units. A point estimate within threshold
 or an SE below it does not establish acceptance; require the entire signed-loss
 confidence interval above the minimum acceptable margin.
 
-Add precision by submitting the benchmark **more times**, not by raising
-`num_repeats` within a run. SciCode's floor is **8 runs per side**, pooled as a
-mean — `recipes/tasks/aa/scicode.md`.
+Use the run/stopping plan from Step 3; do not keep extending it to make an
+ordinary CI pass. SciCode's floor remains **8 runs per side** —
+`recipes/tasks/aa/scicode.md`.
 
 **Re-running does not guarantee fresh samples.** With a warm NEL response cache a "re-run" can
 replay cached responses — two runs came back bit-identical to 16 digits. But an equal score is a
