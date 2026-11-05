@@ -10,6 +10,7 @@ Changelog
 
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
 - The functional quantized-weight export API now exports the KV cache: ``capture_kv_cache_export_state`` returns an attention module's ``k_scale`` / ``v_scale``, and ``build_hf_quantization_config`` takes the KV-cache formats from ``get_kv_cache_export_spec``.
+- The functional quantized-weight export API now packs weight-only MXFP4 (``W4A16_MXFP4``) weights, e.g. MXFP4 QAT of GPT-OSS experts, and rejects layers with rotated weight or input quantizers or custom quantization backends, which a packed weight cannot reproduce.
 - Add ``use_weight_scale=False`` to ``awq_lite`` and ``awq_full`` calibration for activation-only AWQ scale search. Existing weight-and-activation scaling remains the default.
 - Support text-only Qwen conditional-generation checkpoints in the experimental FSDP2 weight
   AutoQuantize path and preserve their linear-attention fusion groups during mixed-format export.
@@ -26,6 +27,7 @@ Changelog
 - ``hf_ptq.py`` calibrates Qwen3.8 (``qwen4_exp``) without running its QSA indexer's per-query Python loop when every visible key fits the indexer's token budget, with bit-identical results. On Qwen3.8-Flash-Next this saves about two hours of layerwise calibration.
 - Speed up Hugging Face QAT and QAD with ``QATTrainer``, ``QADTrainer`` or ``--manual_gc``: the ``gc.collect()`` run before each training step now skips the model and optimizer state, saving about 1 s per step (30%) on Qwen3-30B-A3B.
 - Add an opt-in no-gather HuggingFace export for FSDP2-sharded models: with ``MODELOPT_FSDP2_EXPORT=nogather``, ``export_hf_checkpoint`` moves each tensor once, to the one rank that writes it, instead of all-gathering each FSDP2 unit on every rank as the default export does. Fused MoE experts stay sharded, each rank writing its own, and a conversion mapping that splits or merges tensors, which the default export refuses, is reversed as a single-process export reverses it.
+- Add expert-parallel PTQ for HuggingFace MoE models to ``examples/hf_ptq/hf_ptq.py``: under ``torchrun``, each rank holds only its share of the routed experts, tokens reach them by all-to-all, and every rank calibrates on its own slice of the data. ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE`` override the automatic choice of expert-parallel degree and of FSDP2-sharding the dense layers, and the quantized checkpoint is written by every rank in parallel without gathering the model.
 - Add ``python -m modelopt.torch.quantization.utils.scale_compare`` to diff the quantization scales of two exported checkpoints within a tolerance, e.g. to check how reproducible a PTQ run is across repeats or parallel layouts.
 - Add ``--deterministic`` to ``examples/hf_ptq/hf_ptq.py`` for best-effort reproducible PTQ: it seeds every random number generator and selects deterministic torch kernels, and requires an explicit ``--batch_size`` because the default probes it from free GPU memory.
 
@@ -33,6 +35,8 @@ Changelog
 
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
 - Add support for the `SPEED-Bench v1.1 <https://huggingface.co/datasets/nvidia/SPEED-Bench>`_ dataset.
+- With ``training.dataloader_num_workers`` > 0, ``examples/speculative_decoding/main.py`` now yields each training batch as soon as a worker finishes it, so one slow sample, such as a slow hidden-state fetch in streaming training, no longer stalls every DDP rank. Sample order within the prefetch window is then no longer deterministic; set ``training.dataloader_in_order=true`` to restore it (context-parallel and ``full_determinism`` runs always keep it).
+- The ``general/speculative_decoding/dflash2`` recipe now enables ``dflash_use_torch_compile`` and ``dflash_use_flex_attention``, and turns ``tf32`` off, which compilation needs on PyTorch 2.9 and 2.10. To train eagerly as before, start the run with ``dflash.dflash_use_torch_compile=false dflash.dflash_use_flex_attention=false``; a run resumed from a checkpoint keeps the checkpoint's DFlash settings.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
@@ -56,6 +60,7 @@ Changelog
 **Backward Breaking Changes**
 
 - ``QDQAutotunerBase.export_onnx(output_path=...)`` now returns ``None`` instead of serialized bytes. Omit ``output_path`` to keep the bytes-returning behavior, which remains subject to protobuf size limits.
+- ``examples/hf_ptq/hf_ptq.py`` launched by ``torchrun`` on more than one rank without ``--use_fsdp2`` now runs one distributed job instead of one independent run per process: an MoE that can shard its experts runs expert-parallel, any other model is replicated with each rank calibrating its own share of the data, and only rank 0 exports a replicated model. Such a launch refuses ``--low_memory_mode``, ``--use_seq_device_map``, ``--offload_folder``, AutoQuantize recipes and, under expert parallelism, ``--vllm_fakequant_export`` and ``--experts_implementation``, and any multi-rank launch now refuses layerwise-export recipes, the TensorRT-LLM checkpoint export and a ``--device`` other than ``cuda``: launch without ``torchrun`` for them.
 - ``examples/hf_ptq/hf_ptq.py --use_fsdp2`` on more than one GPU now refuses calibration that keeps its statistics on each rank, which calibrated the ranks' shards of a weight differently: AWQ-Lite, AWQ-Full, SVDQuant, local Hessian and imatrix, also as an AutoQuantize candidate (run them without ``--use_fsdp2``). It also raises when a calibration batch runs out of GPU memory, instead of retrying it in smaller pieces: set ``--batch_size`` to one that fits.
 - ``export_mcore_gpt_to_hf`` given a Hugging Face Hub model ID no longer writes the tokenizer, processor, generation config or remote-code files. Pass a local directory instead, e.g. from ``modelopt.torch.export.ensure_local_checkpoint``.
 - Drop support for Python 3.10, which has reached end-of-life. ModelOpt now requires Python 3.11 or later.
@@ -75,6 +80,7 @@ Changelog
 
 - Layerwise-calibration resume (``checkpoint_dir``) now loads checkpoint files with ``weights_only=True``. A checkpoint directory written by an earlier release whose layer inputs hold objects other than tensors, plain containers or Hugging Face dynamic caches can no longer be resumed; recalibrate in a fresh directory, or disable checkpointing.
 - ``export_hf_checkpoint`` now reads how a model is distributed from the plan recorded on it, and raises for an FSDP2-sharded model, or one in a multi-rank run, that carries none. ``load_pretrained`` and ``examples/hf_ptq/hf_ptq.py --use_fsdp2`` record it; for a model you distribute yourself (``fsdp2_wrap`` and ``parallel_load_and_prepare_fsdp2`` record none), or export from several ranks as a DDP script does, record one with ``modelopt.torch.utils.distributed.set_distribution_plan`` before calibrating or exporting it, e.g. ``DistributionPlan(world_size)`` when every rank holds the whole model.
+- Streaming speculative-decoding training's vLLM connector (``modelopt.torch.speculative.plugins.rdma_hidden_states_connector``) now requires vLLM 0.22 or later. It is tested with vLLM 0.29 and later.
 
 **Deprecations**
 
@@ -83,6 +89,8 @@ Changelog
 
 **Bug Fixes**
 
+- Fix Hugging Face EAGLE training scaling gradients by the accumulation group size instead of averaging them when gradient accumulation is enabled.
+- QAT and QAD of the GGML formats (IQ, ``q8_0``) now re-encode trainable weights after every optimizer step, including under optimizers that write weights through a shared buffer or ``.data`` such as Megatron's distributed optimizer. With those optimizers the GGML codes used to stay those of each job's first forward, so re-run earlier Megatron QAD of these formats.
 - Fix ONNX loading and quantization graph exports failing on individual initializers larger than 2 GiB, while preserving nested scopes and sequence/optional value types.
 - Saving ONNX external weights to another directory no longer removes a same-named weight file from the working directory. Existing external weights remain intact when saving a model loaded without weight data.
 - ONNX autotuner file exports now save external weight data without serializing the full model to bytes first.
@@ -90,7 +98,7 @@ Changelog
 - AWQ-Clip's per-tensor clip, which ``nvfp4_awq_clip`` uses, is now searched over every data-parallel rank's data, as its block-wise clip already was, so the replicas of a weight take the same clip (exported amax values of data-parallel runs may change) and ``nvfp4_awq_clip`` works with ``examples/hf_ptq/hf_ptq.py --use_fsdp2`` on several GPUs.
 - ``hf_quant_config.json`` now declares ``pre_quant_scale`` only for INT4 / W4A8 layers that have the tensor; loading INT4 / W4A8 fused-MoE checkpoints in TensorRT-LLM also needs a release whose MoE loader treats it as optional. AWQ, SmoothQuant and SVDQuant now warn when they skip quantized fused-MoE experts.
 - Hugging Face fused MoE experts stored transposed, ``(num_experts, in_dim, out_dim)``, without a quantized wrapper of their own (for example Aria's) are now left unquantized with a warning. They were quantized with gate and up split along the wrong axis, so their exported weights were wrong; the Hugging Face export now refuses such a model's MoE block instead.
-- Calibrating a Megatron-Core MLA model now gives ``linear_q_down_proj`` and ``linear_kv_down_proj`` one per-tensor input and weight range, as vLLM and TensorRT-LLM fuse them into one GEMM with one scale per tensor. Re-calibrate existing MLA checkpoints to get the shared ranges.
+- Calibrating a Megatron-Core model now gives the projections vLLM and TensorRT-LLM fuse into one GEMM one per-tensor input and weight range: MLA's and DeepSeek-V4's down-projections, and HF-named ones such as Kimi K3's MLA and KDA input projections with their gates; static NVFP4 also shares one global weight range between ``q_a_proj`` and ``kv_a_proj_with_mqa`` of Hugging Face DeepSeek-style models. Re-calibrate existing checkpoints to get the shared ranges.
 - Calibrating a Megatron-Core model with pipeline parallelism no longer hangs on, or mixes ranges across stages of, its ``TELinear`` layers (e.g. MLA down-projections, DSA indexer and latent-MoE projections). They now sync ranges over their own pipeline stage's tensor-, data- and context-parallel ranks instead of all ranks.
 - ``export_mcore_gpt_to_hf`` and ``capture_kv_cache_export_state`` now write NVFP4 KV-cache ``k_scale`` / ``v_scale`` as amax / 448, like the HF exporter and as vLLM and TensorRT-LLM expect. They wrote amax / (6 * 448), which overflows in the attention kernels. Re-export Megatron checkpoints with an NVFP4 KV cache.
 - Preserve accumulated histogram counts when computing an entropy calibration threshold with NumPy histograms.
@@ -120,6 +128,7 @@ Changelog
 - Fix ONNX INT4 quantization ending the Python process when the INT4 packing extension fails to build, for example without a C++ compiler. It now falls back to the Python implementation.
 - Fix ``fsdp2_aware_weight_update`` masking an error raised during its unshard (e.g. a CUDA OOM) with a spurious ``UnboundLocalError``.
 - Fix the ``--use_fsdp2`` loader silently leaving weights uninitialized for checkpoints that rely on key renamings Transformers registers on the top-level model class, such as Fuyu's; re-run affected PTQ jobs. The loader now raises if any parameter gets no tensor from the checkpoint.
+- Fix ``--use_fsdp2`` PTQ exports writing a default ``generation_config.json`` instead of the checkpoint's, which dropped its ``eos_token_id`` and ``pad_token_id`` so served models could generate past the end of their answer. Re-export, or copy the source's ``generation_config.json`` into existing exports.
 - Fix the ``--use_fsdp2`` loader rounding the tensors a model lists in ``_keep_in_fp32_modules_strict`` (or ``_keep_in_fp32_modules``, for fp16) to the checkpoint dtype, instead of keeping them in fp32 as ``from_pretrained`` does; re-run affected PTQ jobs. Tensors the model creates in fp32 itself were not affected.
 - EAGLE training with ``eagle_decoder_type="kimik2"`` now downloads the Kimi-K2 modeling code from a pinned ``moonshotai/Kimi-K2-Thinking`` revision and verifies its SHA-256 hashes before importing it. Offline runs need that revision in the Hugging Face cache.
 - Fix the column-major ``DequantizeLinear`` surgery leaving a negative or default ``axis`` attribute unchanged while transposing the weight it refers to, which changed the model's output. Re-run the surgery on affected models.
@@ -132,6 +141,11 @@ Changelog
 - Fix dynamic NVFP4 fake quantization with a block size other than 16, such as the block-32 weights of ``W4A8_NVFP4_FP8_CFG`` and ``NVFP4_MLP_WEIGHT_ONLY_CFG``, using blocks of 16 on GPUs with compute capability 8.9 or newer. Regular checkpoint exports after non-layerwise ``max`` calibration are unaffected; redo QAT, QAD, GPTQ, AWQ and layerwise calibration, vLLM fake-quant exports and fake-quantized accuracy evaluation done with such configs.
 - The ``evaluation`` agent skill's NeMo Gym MRCR recipe no longer passes ``HF_TOKEN`` on the command line, where other users on the node could read it, and keeps its rollout script in a private temporary directory instead of a fixed ``/tmp`` path.
 - Fake quantization of an NVFP4 affine KV cache (``nvfp4_affine``) now applies its calibrated bias; it ignored the bias and saturated the simulated KV cache. Re-quantize and re-evaluate models quantized with it.
+- Fix NVFP4 fake quantization (e.g. ``NVFP4_DEFAULT_CFG``) with Triton 3.9, as in the PyTorch 26.11 container, on GPUs with compute capability 8.9 or newer: it failed with ``NotImplementedError: Block pointers have been removed in favor of the tensor descriptor API``.
+- Fix streaming speculative-decoding training copying the whole training corpus into every rank and every DataLoader worker, which ran trainer nodes out of host memory on corpora of a few million samples. The corpus now stays memory-mapped.
+- Fix streaming speculative-decoding training capturing another request's hidden states when the vLLM serve ran requests concurrently, and failing on vLLM 0.29 and later. Retrain drafters trained in streaming mode against a serve that ran requests concurrently.
+- Fix DFlash-family drafters (DFlash, DFlash2, DSpark, Domino, LiLiCorr) trained from scratch with ``examples/speculative_decoding/main.py`` having their RoPE frequencies rounded to BF16, so they trained under different rotary phases than vLLM serves them with.
+- Fix DFlash2's candidate-selector loss weighing every block position equally and dividing by its own count of positions, unlike the backbone loss and the SGLang/SpecForge DFlash2 reference. Logged DFlash2 losses change.
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^

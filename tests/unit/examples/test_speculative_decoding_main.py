@@ -318,3 +318,22 @@ def test_sparse_path_skips_the_base_head_attach(main_mod, stub_tokenizers):
     assert getattr(draft, "_base_lm_head", None) is None, (
         "the sparse path attached the base head it does not use"
     )
+
+
+@pytest.mark.parametrize(
+    ("cp_size", "full_determinism", "in_order"),
+    [(1, False, False), (2, False, True), (1, True, True)],
+)
+def test_context_parallelism_and_full_determinism_keep_batches_in_order(
+    main_mod, monkeypatch, cp_size, full_determinism, in_order
+):
+    """CP ranks load the same batches, and a deterministic run must not follow worker timing."""
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    args = types.SimpleNamespace(
+        cp_size=cp_size,
+        dp_shard_size=None,
+        dataloader_in_order=False,
+        full_determinism=full_determinism,
+    )
+    main_mod.init_distributed_env(args)
+    assert args.dataloader_in_order == in_order

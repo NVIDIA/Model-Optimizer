@@ -45,7 +45,7 @@ from .nn import (
     TensorQuantizer,
 )
 from .utils import is_quantized, is_quantized_linear
-from .utils.shared_input import MLA_DOWN_PROJ_PATTERN, SharedWeightGlobalAmaxState
+from .utils.shared_input import DOWN_PROJ_PATTERNS, SharedWeightGlobalAmaxState
 
 __all__ = [
     "preserve_quantizer_attributes_context",
@@ -124,7 +124,7 @@ def _restore_shared_quant_state_aliases(
             for pattern in SharedWeightGlobalAmaxState.resolve_patterns(
                 shared_states=getattr(config, "shared_states", None)
             )
-            if pattern != MLA_DOWN_PROJ_PATTERN
+            if pattern not in DOWN_PROJ_PATTERNS
         ]
     SharedWeightGlobalAmaxState.restore(model, patterns=patterns)
 
