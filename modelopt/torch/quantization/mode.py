@@ -38,6 +38,7 @@ from .config import (
     AWQLiteCalibConfig,
     CompressConfig,
     GPTQCalibConfig,
+    GSQCalibConfig,
     ImatrixCalibConfig,
     LocalHessianCalibConfig,
     LSQConfig,
@@ -60,9 +61,11 @@ from .conversion import (
     restore_svdquant_model,
     update_quantize_metadata,
 )
+from .gsq import _gsq_calibration
 from .model_calib import (
     awq,
     gptq,
+    gsq,
     imatrix_calibrate,
     layerwise_calibrate,
     local_hessian_calibrate,
@@ -603,6 +606,25 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = gptq
     _distributed_calibration = True
+
+
+@CalibrateModeRegistry.register_mode
+class GSQModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for regionwise GSQ weight calibration."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        return GSQCalibConfig
+
+    _calib_func = gsq
+
+    @property
+    def convert(self) -> ConvertEntrypoint:
+        def convert(model, config, forward_loop=None):
+            with _gsq_calibration(model, config):
+                return wrapped_calib_func(model, config, forward_loop, func=gsq)
+
+        return convert
 
 
 @CalibrateModeRegistry.register_mode

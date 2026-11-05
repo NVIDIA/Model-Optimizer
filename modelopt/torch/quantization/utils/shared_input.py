@@ -18,7 +18,7 @@
 Weight ``global_amax`` must be unified across modules that get **fused** at export
 (q/k/v -> qkv, gate/up -> gate_up, MLA q_down/kv_down -> fused_qkv_a_proj) so they quantize
 with one per-tensor scale. :func:`find_shared_input_groups` discovers these groups by regex over
-module FQNs; ``SHARED_PATTERNS`` covers the standard q/k/v, gate/up, per-expert w1/w3 and MCore
+module FQNs; ``SHARED_PATTERNS`` covers q/k/v, GDN qkv/z, gate/up, per-expert w1/w3 and MCore
 MLA down-projection names.
 
 Discovery is name/pattern-based (not input-hook-based) on purpose: "shares an input
@@ -56,11 +56,12 @@ __all__ = [
 # Megatron-Core MLA's q_down / kv_down projections, which deployment fuses into fused_qkv_a_proj.
 MLA_DOWN_PROJ_PATTERN = r"(?:(.*)\.)?(?:linear_q_down_proj|linear_kv_down_proj)"
 
-# Groups export fuses: q/k/v -> qkv, MLA q_down/kv_down, gate/up (incl. Mixtral w1/w3) -> gate_up.
+# Groups export fuses: q/k/v, GDN qkv/z, MLA q_down/kv_down, gate/up (incl. Mixtral w1/w3).
 # Regexes are ``re.fullmatch``-ed against module FQNs; ``(?:(.*)\.)?`` captures the
 # immediate parent so MoE ``w1``/``w3`` groups are per-expert.
 SHARED_PATTERNS = (
     r"(?:(.*)\.)?(?:q_proj|k_proj|v_proj)",
+    r"(?:(.*)\.)?(?:in_proj_qkv|in_proj_z)",
     MLA_DOWN_PROJ_PATTERN,
     r"(?:(.*)\.)?(?:gate_proj|up_proj)",
     r"(?:(.*)\.)?(?:w1|w3)",

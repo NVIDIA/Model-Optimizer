@@ -342,7 +342,9 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
     """AutoQuantize searcher scoring with Aumann-Shapley damage attributions (see module doc)."""
 
     method_name = "aumann_shapley"
-    method_config_keys = frozenset({"num_path_nodes", "damage_link", "max_predicted_damage"})
+    method_config_keys = _AutoQuantizeBackwardScoringSearcher.method_config_keys | frozenset(
+        {"num_path_nodes", "damage_link", "max_predicted_damage"}
+    )
 
     @property
     def default_search_config(self) -> SearchConfig:
@@ -436,6 +438,7 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
 
     def validate_search_input(self, constraints, config) -> None:
         """Reject ambiguous target combinations (runs before any model mutation)."""
+        super().validate_search_input(constraints, config)
         if (
             config.get("max_predicted_damage") is not None
             and (constraints or {}).get("effective_bits") is not None
