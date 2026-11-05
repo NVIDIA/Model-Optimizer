@@ -6,7 +6,6 @@
 |---|---|
 | Excessive truncation from output-budget exhaustion | Inspect raw responses to distinguish unfinished reasoning from repetition or context exhaustion. **Increase `max_new_tokens` and rerun** (e.g. `65536 → 131072`) when task policy permits; check context fit, KV headroom, and timeouts first. |
 | Prompt/history exhausts context | Increase supported deployed context; a larger output cap alone cannot help. |
-| Repeated reasoning or malformed actions | Inspect raw outputs and parser/tool protocol; more tokens may only prolong a loop. |
 | GPU/host OOM, KV pressure, disk or quota exhaustion | Reduce concurrency, adjust supported resources, or clean trial-owned temporary data after preserving evidence; verify capacity before retrying. |
 | Preemption or interrupted infrastructure work | Prefer supported same-config resume when cache identity and complete accounting can be proved. |
 | Endpoint overload, rate limits, transient transport errors | Check health, back off, and reduce offending concurrency. Retry after recovery, not repeatedly into the same outage. |
