@@ -33,6 +33,34 @@ Override evaluation settings with `--num_examples`, `--prompt_tokens`, `--max_ne
 
 The reference uses BF16; the quantized checkpoint's KV-cache configuration is followed by default (`--kv_cache_dtype auto`). Override the candidate cache dtype with `--kv_cache_dtype`. Resolved model, quantization, and KV-cache settings are printed and included in detailed results. Scoring teacher-forces the complete sequence through prefill, so it does not establish equivalence to incremental decoding. The metric definitions match the earlier PyTorch prototype; vLLM execution and the exported checkpoint can change generated continuations and measured values.
 
+### Frozen-bank stability studies
+
+`kl_study.py` adds resumable, per-position scoring for user-supplied JSONL banks. Each record needs a unique string `id` and complete `prompt_ids`; `source`, corpus-block identifiers and other provenance can be retained as additional fields. Freeze reference continuations once, then reuse the resulting `generated_ids` for every candidate. Supply the reference's complete EOS token-ID list explicitly.
+
+```sh
+python examples/llm_eval/kl_study.py freeze \
+    --input prompts.jsonl --output frozen.jsonl --model ./bf16 \
+    --work_dir runs/generation --context_limit 16384 --max_new_tokens 8192 \
+    --eos_token_ids 2 --runner_sha256 REVIEWED_RUNNER_SHA256
+
+python examples/llm_eval/kl_study.py score \
+    --input frozen.jsonl --output candidate.json \
+    --model ./bf16 --quantized_model ./export \
+    --work_dir runs/candidate --context_limit 16384 --max_new_tokens 8192 \
+    --eos_token_ids 2 --runner_sha256 REVIEWED_RUNNER_SHA256 \
+    --top_ks 32 64 128 256 512 1024 2048
+```
+
+Choose a context limit supported by both checkpoints and replace the illustrative EOS ID. Prompts remain complete; generation stops at EOS or the smaller of the token cap and available context, with context-limited examples flagged. Scoring includes the EOS prediction and excludes padding and post-EOS positions.
+
+This experimental path intercepts a private vLLM V1 callback. It requires the exact reviewed model-runner source SHA-256 and callback signature, and rejects other runners or pipeline parallelism. Qualify the installed runtime with `--audit` on a bank of at most 64 total tokens per example before a large run. The audit compares against ordinary full-vocabulary prompt and output scores from the same forward pass, including the final prediction; candidate KL also has independent float64 CPU checks at the first, middle and last positions. The offline `validate` phase checks frozen-input structure without loading models; `score --dry_run` additionally checks checkpoint hashes and resume provenance.
+
+Reference and candidate engines remain resident on disjoint GPU groups (`--reference_devices 0,1` and `--candidate_devices 2,3` by default). Each group determines its tensor-parallel size. Both use BF16 KV caches by default; override candidate `--kv_cache_dtype` when needed. The reference distribution buffer holds only one example, requiring at most `max_new_tokens * vocab_size * 4` bytes of scratch space. GPU vocabulary buffers cover at most 64 positions; dense audits are restricted to short controls.
+
+The report retains each position's full KL, conditional KL for every requested k, and reference head probability mass. For a generation-length sweep, average the first `min(length, generated_tokens)` positions within each prompt, then average prompt means equally. Prompt-count sweeps and source-balanced paired resampling can use these scalars without new inference. Conditional KL discards tail mass and need not approach full KL monotonically; retained mass and candidate-rank reversals should accompany top-k convergence claims.
+
+Checkpoint bytes, evaluator code, inputs and settings bind the work directory. Completed example files are written atomically and reused only with matching identities; changed provenance raises an error. Keep a separate work directory per candidate, input bank or configuration, and preserve the manifest and runtime files alongside results. The existing `kl_eval.py` CLI and `mean_kl` result keys remain available; the exported `token_kl` API supplies the per-position multi-k metrics.
+
 ## NeMo Evaluator
 
 [NeMo Evaluator](https://docs.nvidia.com/nemo/evaluator/latest/get-started/quickstart/index.html#self-hosted-options) is the recommended way to evaluate a large choice of benchmarks on quantized checkpoints generated from [hf_ptq](../hf_ptq). Quantized checkpoints can be served with [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang) and then evaluated using NeMo Evaluator.

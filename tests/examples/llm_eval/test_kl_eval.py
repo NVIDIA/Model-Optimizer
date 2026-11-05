@@ -54,6 +54,23 @@ def test_identical_distributions_have_zero_kl(kl_eval):
     assert metrics == pytest.approx({"full_vocab_kl": 0, "conditional_topk_kl": 0}, abs=1e-7)
 
 
+def test_per_token_multi_k_keeps_tail_mass_and_shared_reference_support(kl_eval):
+    reference = torch.tensor([[0.5, 0.3, 0.2], [0.25, 0.25, 0.5]]).log()
+    candidate = torch.tensor([[0.25, 0.25, 0.5], [0.25, 0.25, 0.5]]).log()
+    actual = kl_eval.token_kl(reference, candidate, top_ks=[1, 2, 3], chunk_size=1)
+    # Independently worked: .5 ln 2 + .3 ln 1.2 + .2 ln .4 = .21801191.
+    assert actual["full_vocab_kl"] == pytest.approx([0.21801191, 0], abs=1e-6)
+    assert actual["conditional_topk_kl"]["1"] == pytest.approx([0, 0], abs=1e-6)
+    assert actual["conditional_topk_kl"]["2"] == pytest.approx([0.03158394, 0], abs=1e-6)
+    assert actual["conditional_topk_kl"]["3"] == pytest.approx([0.21801191, 0], abs=1e-6)
+    assert actual["reference_topk_mass"]["2"] == pytest.approx([0.8, 0.75], abs=1e-6)
+
+
+def test_kl_rejects_unnormalized_distributions(kl_eval):
+    with pytest.raises(ValueError, match="normalized"):
+        kl_eval.mean_kl(torch.zeros(1, 3), torch.zeros(1, 3), top_k=2)
+
+
 def _logprob_row(probabilities):
     # vLLM maps token IDs to Logprob records; dictionary order is not vocabulary order.
     return {

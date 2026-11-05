@@ -17,12 +17,14 @@
 
 import argparse
 import json
+import math
 import multiprocessing
 import os
 import random
 import signal
 import tempfile
 from pathlib import Path
+from typing import TypedDict
 
 import numpy as np
 import torch
@@ -30,35 +32,69 @@ import torch.nn.functional as F
 from datasets import load_dataset
 from transformers import AutoConfig, AutoTokenizer, GenerationConfig
 
-__all__ = ["mean_kl"]
+__all__ = ["mean_kl", "token_kl"]
+
+
+class _TokenKL(TypedDict):
+    full_vocab_kl: list[float]
+    conditional_topk_kl: dict[str, list[float]]
+    reference_topk_mass: dict[str, list[float]]
 
 
 @torch.inference_mode()
-def mean_kl(reference_logprobs, quantized_logprobs, top_k=128, chunk_size=32):
-    """Return forward KL means in nats from normalized [positions, vocabulary] log-probabilities."""
+def token_kl(reference_logprobs, quantized_logprobs, top_ks=(128,), chunk_size=32) -> _TokenKL:
+    """Return per-position forward KL and reference head mass for several conditional heads."""
     if reference_logprobs.ndim != 2 or reference_logprobs.shape != quantized_logprobs.shape:
         raise ValueError("Expected matching [generated positions, vocabulary] log-probabilities.")
     num_tokens, vocab_size = reference_logprobs.shape
-    if num_tokens == 0 or chunk_size < 1 or not 1 <= top_k <= vocab_size:
-        raise ValueError("Require generated positions, a positive chunk size, and 1 <= top_k <= V.")
-    totals = torch.zeros(2, dtype=torch.float32, device=reference_logprobs.device)
+    top_ks = sorted(set(top_ks))
+    if (
+        num_tokens == 0
+        or chunk_size < 1
+        or any(not isinstance(k, int) or not 1 <= k <= vocab_size for k in top_ks)
+    ):
+        raise ValueError("Require positions, a positive chunk size, and integer 1 <= k <= V.")
+    result: _TokenKL = {
+        "full_vocab_kl": [],
+        "conditional_topk_kl": {str(k): [] for k in top_ks},
+        "reference_topk_mass": {str(k): [] for k in top_ks},
+    }
     for start in range(0, num_tokens, chunk_size):
         log_p = reference_logprobs[start : start + chunk_size].float()
         log_q = quantized_logprobs[start : start + chunk_size].to(log_p)
         if not torch.isfinite(log_p).all() or not torch.isfinite(log_q).all():
             raise ValueError("Non-finite KL: inspect the scores instead of dropping positions.")
-        full_kl = F.kl_div(log_q, log_p, log_target=True, reduction="none").sum(-1)
-        # Conditional KL uses the reference token IDs and independently normalizes each head.
-        ids = log_p.topk(top_k, dim=-1).indices
-        log_p_head = F.log_softmax(log_p.gather(-1, ids), dim=-1)
-        log_q_head = F.log_softmax(log_q.gather(-1, ids), dim=-1)
-        head_kl = F.kl_div(log_q_head, log_p_head, log_target=True, reduction="none").sum(-1)
-        totals += torch.stack((full_kl, head_kl), dim=-1).sum(0)
-    means = totals / num_tokens
-    if not torch.isfinite(means).all():
-        raise ValueError("Non-finite KL: inspect the scores instead of dropping positions.")
-    full_kl, head_kl = means.cpu().tolist()
-    return {"full_vocab_kl": full_kl, "conditional_topk_kl": head_kl}
+        for values in (log_p, log_q):
+            if not torch.allclose(
+                values.logsumexp(-1), values.new_zeros(len(values)), atol=1e-4, rtol=0
+            ):
+                raise ValueError("Expected normalized full-vocabulary log-probabilities.")
+        full = (log_p.exp() * (log_p - log_q)).sum(-1)
+        result["full_vocab_kl"].extend(full.cpu().tolist())
+        if top_ks:
+            ids = log_p.topk(top_ks[-1], dim=-1).indices
+            for k in top_ks:
+                p_head = log_p.gather(-1, ids[:, :k])
+                q_head = log_q.gather(-1, ids[:, :k])
+                p_cond = F.log_softmax(p_head, dim=-1)
+                q_cond = F.log_softmax(q_head, dim=-1)
+                head = (p_cond.exp() * (p_cond - q_cond)).sum(-1)
+                result["conditional_topk_kl"][str(k)].extend(head.cpu().tolist())
+                result["reference_topk_mass"][str(k)].extend(
+                    p_head.logsumexp(-1).exp().cpu().tolist()
+                )
+    return result
+
+
+@torch.inference_mode()
+def mean_kl(reference_logprobs, quantized_logprobs, top_k=128, chunk_size=32):
+    """Return forward KL means in nats from normalized [positions, vocabulary] log-probabilities."""
+    metrics = token_kl(reference_logprobs, quantized_logprobs, [top_k], chunk_size)
+    return {
+        "full_vocab_kl": math.fsum(metrics["full_vocab_kl"]) / len(reference_logprobs),
+        "conditional_topk_kl": math.fsum(metrics["conditional_topk_kl"][str(top_k)])
+        / len(reference_logprobs),
+    }
 
 
 def _continuation_logprobs(output, prompt_tokens, vocab_size):

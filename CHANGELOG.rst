@@ -1,6 +1,15 @@
 Changelog
 =========
 
+0.49.0 (2026-11-xx)
+^^^^^^^^^^^^^^^^^^^
+
+**New Features**
+
+*Quantization*
+
+- Add offline vLLM KL evaluation for exported checkpoints against BF16 references, with full-vocabulary and conditional top-k metrics. Frozen JSONL banks support resumable, bounded per-position scoring for dataset, top-k and workload stability studies.
+
 0.48.0 (2026-10-xx)
 ^^^^^^^^^^^^^^^^^^^
 
@@ -13,7 +22,6 @@ Changelog
 
 *Quantization*
 
-- Add an offline vLLM KL evaluator for exported ModelOpt checkpoints against BF16 references on shared WikiText-prompted continuations, reporting full-vocabulary and conditional top-k KL. Supply both checkpoints directly; no calibration is required.
 - Backfill checkpoint aliases for nine more published NVFP4 releases, so each is reachable from its source model's hub path: ``zai-org/GLM-5.1`` and ``GLM-5.2``, ``MiniMaxAI/MiniMax-M2.5`` and ``MiniMax-M3``, ``deepseek-ai/DeepSeek-V3.1`` and ``DeepSeek-V3.2``, ``Qwen/Qwen3-235B-A22B-Instruct-2507`` and ``-Thinking-2507``, and ``Qwen/Qwen3.6-27B``. Each imports an existing general or architecture recipe wholesale rather than copying its body.
 - Add composed Hugging Face AutoQuantize recipes that run fixed PTQ or weight AutoQuantize before
   a separate KV-cache AutoQuantize stage, with independent resumable checkpoints for the weight and
