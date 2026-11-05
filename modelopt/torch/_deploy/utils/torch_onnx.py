@@ -43,7 +43,9 @@ from modelopt.onnx.export import (
     NVFP4QuantExporter,
     ONNXQuantExporter,
 )
+from modelopt.onnx.export.nvfp4_dtype import canonicalize_nvfp4_fp16
 from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_with_smallest_nonzero
+from modelopt.onnx.trt_utils import infer_types_shapes_tensorrt
 from modelopt.onnx.utils import (
     change_casts_to_fp16,
     check_model_uses_external_data,
@@ -61,6 +63,7 @@ from modelopt.onnx.utils import (
     remove_redundant_casts,
 )
 from modelopt.torch.quantization.export_onnx import configure_linear_module_onnx_quantizers
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils import flatten_tree, standardize_named_model_args
 from modelopt.torch.utils._pytree import TreeSpec
 
@@ -406,6 +409,26 @@ def is_fp8_quantized(model: nn.Module) -> bool:
     return False
 
 
+def _prepare_nvfp4_fp16_export(model: nn.Module) -> nn.Module:
+    """Convert compute to FP16 in place while retaining quantizer buffer values and dtypes."""
+    dtypes = {p.dtype for p in model.parameters() if p.is_floating_point()}
+    if not dtypes.issubset({torch.float32, torch.float16}):
+        raise ValueError("The B export strategy supports FP32/FP16 source parameters only.")
+    saved = [
+        (module, name, value.detach().clone())
+        for module in model.modules()
+        if isinstance(module, TensorQuantizer)
+        for name, value in module.named_buffers(recurse=False)
+        if value.is_floating_point()
+    ]
+    try:
+        model.half()
+    finally:
+        for module, name, value in saved:
+            setattr(module, name, value)
+    return model
+
+
 @contextlib.contextmanager
 def _disable_fp8_conv_weight_quantizers(model: nn.Module):
     """Temporarily disable FP8 weight quantizers on Conv layers during ONNX export.
@@ -661,7 +684,15 @@ def get_onnx_bytes_and_metadata(
     if dq_only:
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
 
-    if weights_dtype in ["fp16", "bf16"] and not is_bf16_fp8_noop:
+    if (
+        uses_fp4
+        and not (uses_fp8 or uses_other_unsupported_quantizer)
+        and weights_dtype == "fp16"
+        and source_parameter_dtypes == {torch.float16}
+    ):
+        onnx_opt_graph = canonicalize_nvfp4_fp16(onnx_opt_graph)
+        onnx_opt_graph = infer_types_shapes_tensorrt(onnx_opt_graph, strongly_typed=True)
+    elif weights_dtype in ["fp16", "bf16"] and not is_bf16_fp8_noop:
         if uses_other_unsupported_quantizer or uses_fp8:
             onnx_opt_graph = convert_float_to_float16(
                 onnx_opt_graph,
