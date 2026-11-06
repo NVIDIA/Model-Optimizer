@@ -35,6 +35,7 @@ from _test_utils.torch.transformers_models import (
 import modelopt.torch.quantization as mtq
 from modelopt.recipe.loader import load_recipe
 from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
+from modelopt.torch.quantization.config import LayerwiseConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
@@ -203,7 +204,10 @@ def test_auto_quantize_frees_the_conv1d_weights_conversion_replaces(monkeypatch,
     [{"export_dir": "export"}, {"export_dir": ""}, {"checkpoint_dir": "checkpoint"}],
     ids=["export_dir", "empty_export_dir", "checkpoint_dir_beside_gptq"],
 )
-def test_auto_quantize_refuses_layerwise_dirs_before_converting(monkeypatch, tmp_path, layerwise):
+@pytest.mark.parametrize("as_config", [False, True], ids=["dict", "LayerwiseConfig"])
+def test_auto_quantize_refuses_layerwise_dirs_before_converting(
+    monkeypatch, tmp_path, layerwise, as_config
+):
     # Exporting each calibrated layer would replace its weights with packed ones before scoring,
     # and an empty path exports into the working directory. Resuming the max candidate's layers
     # would load their weights into new Parameters, which the restore after GPTQ does not reach.
@@ -211,7 +215,11 @@ def test_auto_quantize_refuses_layerwise_dirs_before_converting(monkeypatch, tmp
     source = get_tiny_llama()
     model = copy.deepcopy(source)
     config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
-    config["algorithm"] = {"method": "max", "layerwise": {"enable": True, **layerwise}}
+    layerwise = {"enable": True, **layerwise}
+    config["algorithm"] = {
+        "method": "max",
+        "layerwise": LayerwiseConfig(**layerwise) if as_config else layerwise,
+    }
     formats = [config, _Q8_0_GPTQ_CFG] if "checkpoint_dir" in layerwise else [config]
     input_ids = model.dummy_inputs["input_ids"]
 

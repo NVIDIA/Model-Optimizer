@@ -52,7 +52,7 @@ from ._auto_quantize_cost import (
     get_auto_quantize_cost_model,
     normalize_auto_quantize_constraints,
 )
-from .config import QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
+from .config import LayerwiseConfig, QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
 from .conversion import set_quantizer_by_cfg
 from .ggml import GGML_FORMAT_REGISTRY
 from .ggml.common import PIN_OVERRIDES_WEIGHT
@@ -159,12 +159,13 @@ def _rewrites_weights(recipe: "QuantRecipe") -> bool:
 def _refuse_layerwise_dirs(recipe: "QuantRecipe", search_rewrites_weights: bool) -> None:
     """Refuse layerwise directories whose contents would outlive the candidate's calibration."""
     for entry in _algorithm_entries(recipe.config.algorithm):
-        layerwise = entry.get("layerwise")
-        if not isinstance(layerwise, dict) or not layerwise.get("enable"):
+        # A dict, or a LayerwiseConfig a dict algorithm keeps as given.
+        layerwise = LayerwiseConfig.model_validate(entry.get("layerwise") or {})
+        if not layerwise.enable:
             continue
         # The export replaces each calibrated layer's weights with packed ones, which scoring and
         # the other candidates' calibrations would then run. An empty path exports here.
-        if layerwise.get("export_dir") is not None:
+        if layerwise.export_dir is not None:
             raise NotImplementedError(
                 f"AutoQuantize candidate {recipe} sets layerwise.export_dir, whose export would "
                 "leave the model in export form before scoring. Drop export_dir and export the "
@@ -172,11 +173,7 @@ def _refuse_layerwise_dirs(recipe: "QuantRecipe", search_rewrites_weights: bool)
             )
         # A resume that restores the layers' weights loads them into new Parameters, which the
         # source-weight restore after a rewriting candidate's calibration does not reach.
-        if (
-            search_rewrites_weights
-            and layerwise.get("checkpoint_dir")
-            and layerwise.get("calib_mutates_weights", True)
-        ):
+        if search_rewrites_weights and layerwise.checkpoint_dir and layerwise.calib_mutates_weights:
             raise NotImplementedError(
                 f"AutoQuantize candidate {recipe} sets a layerwise checkpoint_dir whose resume "
                 "restores the layers' weights, which would replace the weights this search "
