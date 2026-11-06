@@ -382,7 +382,8 @@ def test_write_jsonl_is_atomic(tmp_path: Path):
     assert not path.exists()
 
 
-def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("grouped", [False, True])
+def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch, grouped):
     plain, packed = tmp_path / "a.jsonl", tmp_path / "b.jsonl.gz"
     lines = [json.dumps(_chat(i)) for i in range(20)]
     # Malformed records, unparseable or unconvertible, are skipped with a warning as in the
@@ -400,15 +401,30 @@ def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch):
         "output_dir": str(tmp_path / "blend"),
         "output_format": "chat_jsonl",
         "target_samples": 40,
-        "sources": [_source("a", split=None, files=list(paths))],
+        "sources": [
+            _source("a", split=None, files=list(paths), revision="a" * 40 if grouped else None)
+        ],
     }
+    if grouped:
+        config.update(
+            group_split=True, shuffle_buffer_size=8, validation_samples=2, target_samples=20
+        )
     config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
-    assert blend_module.prepare_chat_data_blend(config_path) == {"validation": 2, "train": 38}
+    assert blend_module.prepare_chat_data_blend(config_path) == {
+        "validation": 2,
+        "train": 18 if grouped else 38,
+    }
     out = tmp_path / "blend"
     rows = _read_jsonl(out / "train.jsonl") + _read_jsonl(out / "validation.jsonl")
-    assert sorted(r["messages"][0]["content"] for r in rows) == sorted(f"q{i}" for i in range(40))
-    # The part is named after its first file.
-    assert len(list((out / "parts").glob("org--a_a_*.jsonl"))) == 1
+    if grouped:
+        assert len({r["messages"][0]["content"] for r in rows}) == 20
+        assert max(int(r["messages"][0]["content"][1:]) for r in rows) >= 20
+    else:
+        assert sorted(r["messages"][0]["content"] for r in rows) == sorted(
+            f"q{i}" for i in range(40)
+        )
+        # The part is named after its first file.
+        assert len(list((out / "parts").glob("org--a_a_*.jsonl"))) == 1
 
 
 def test_chat_blend_drops_untrainable_rows_and_pairs_the_rest(
@@ -453,3 +469,150 @@ def test_pair_rows_pairs_long_with_short_under_the_cap():
         frozenset("ab"),
         frozenset("df"),
     }
+
+
+def test_grouped_blend_refills_filters_and_isolates_questions(tmp_path: Path, monkeypatch):
+    """Different answers survive, exact duplicates refill, and whole questions stay held out."""
+    a = [_chat(i) for i in range(70)]
+    a[1]["messages"][-1]["reasoning_content"] = "Different reasoning"
+    a.insert(
+        2, {"messages": [a[1]["messages"][0], {"role": "assistant", "content": "another answer"}]}
+    )
+    a[:0] = [
+        a[0],
+        _image_chat(99),
+        {"messages": [{"role": "assistant", "content": '<img src="a.png">'}]},
+    ]
+    a[:0] = [
+        42,
+        {**_chat(98), "images": b"image bytes"},
+        {"messages": [{"role": "assistant", "content": "<think>unfinished"}]},
+    ]
+    sources = [_source("a", revision="a" * 40), _source("b", revision="b" * 40)]
+    b = [_chat(0)] + [_chat(i) for i in range(200, 270)]
+    monkeypatch.setattr(
+        blend_module,
+        "_iter_rows",
+        lambda source, *args: iter(a if source["hf_dataset"] == "org/a" else b),
+    )
+    config = {
+        "output_dir": str(tmp_path / "out"),
+        "output_format": "chat_jsonl",
+        "target_samples": 80,
+        "validation_samples": 8,
+        "group_split": True,
+        "shuffle": True,
+        "seed": 4,
+        "filter_image_references": True,
+        "filter_invalid_reasoning": True,
+        "sources": sources,
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config))
+    assert blend_module.prepare_chat_data_blend(path) == {"train": 72, "validation": 8}
+    out = tmp_path / "out"
+    first = {
+        name: (out / name).read_bytes()
+        for name in ["train.jsonl", "validation.jsonl", "manifest.jsonl"]
+    }
+    manifest = _read_jsonl(out / "manifest.jsonl")
+    groups = {
+        name: {m["group_id"] for m in manifest if m["split"] == name}
+        for name in ["train", "validation"]
+    }
+    assert groups["train"].isdisjoint(groups["validation"])
+    all_rows = _read_jsonl(out / "train.jsonl") + _read_jsonl(out / "validation.jsonl")
+    assert len({json.dumps(r, sort_keys=True) for r in all_rows}) == 80
+    assert (
+        sum(r["messages"][-1].get("reasoning_content") == "Different reasoning" for r in all_rows)
+        == 1
+    )
+    report = json.loads((out / "report.json").read_text())
+    assert all(s["train"] + s["validation"] == s["target"] for s in report["sources"])
+    assert sum(s["counts"].get("exact_duplicate", 0) for s in report["sources"]) >= 1
+    # A fresh output and a warm cache must produce the same record order and provenance.
+    blend_module.prepare_chat_data_blend(path)
+    (out / "train.jsonl").write_text("corrupt\n")
+    blend_module.prepare_chat_data_blend(path)
+    assert (out / "train.jsonl").read_bytes() == first["train.jsonl"]
+    config["output_dir"] = str(tmp_path / "again")
+    config["sources"].reverse()
+    path.write_text(yaml.safe_dump(config))
+    blend_module.prepare_chat_data_blend(path)
+    assert first == {name: (tmp_path / "again" / name).read_bytes() for name in first}
+
+
+def test_grouped_blend_reports_exhaustion_but_does_not_swallow_reader_failure(
+    tmp_path: Path, monkeypatch
+):
+    sources = [_source("a", revision="a" * 40)]
+    monkeypatch.setattr(
+        blend_module, "_iter_rows", lambda *args: iter([_chat(i) for i in range(6)])
+    )
+    config = {
+        "output_dir": str(tmp_path / "out"),
+        "output_format": "chat_jsonl",
+        "target_samples": 20,
+        "validation_samples": 2,
+        "group_split": True,
+        "sources": sources,
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config))
+    assert blend_module.prepare_chat_data_blend(path) == {"train": 4, "validation": 2}
+    report = json.loads((tmp_path / "out/report.json").read_text())
+    assert report["sources"][0]["shortfall"] == 14
+
+    def broken(*args):
+        yield _chat(0)
+        raise OSError("network interrupted")
+
+    monkeypatch.setattr(blend_module, "_iter_rows", broken)
+    config["seed"] = 91
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(OSError, match="network interrupted"):
+        blend_module.prepare_chat_data_blend(path)
+
+
+def test_grouped_blend_restores_pinned_questions(tmp_path: Path, monkeypatch):
+    grouped = importlib.import_module("modelopt.torch.utils.plugins._chat_blend")
+    # Only the remote reader is replaced; exercise restoration, alias grouping and selection.
+    grouped._questions.cache_clear()
+    monkeypatch.setattr(
+        grouped,
+        "load_dataset",
+        lambda *args, **kwargs: [{"question": f"Solve problem {i}."} for i in range(30)],
+    )
+    raw = [
+        {
+            "dataset": "apps",
+            "split": "train",
+            "index": i,
+            "messages": [
+                {"role": "user", "content": "-"},
+                {"role": "assistant", "content": str(i), "reasoning_content": "reason"},
+            ],
+        }
+        for i in range(30)
+    ]
+    monkeypatch.setattr(blend_module, "_iter_rows", lambda *args: iter(raw))
+    config = {
+        "output_dir": str(tmp_path / "out"),
+        "output_format": "chat_jsonl",
+        "target_samples": 20,
+        "validation_samples": 2,
+        "group_split": True,
+        "question_sources": {"apps": {"hf_dataset": "codeparrot/apps", "revision": "c" * 40}},
+        "sources": [_source("cp", split="competitive_coding_python_part00", revision="a" * 40)],
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config))
+    blend_module.prepare_chat_data_blend(path)
+    records = _read_jsonl(tmp_path / "out/train.jsonl") + _read_jsonl(
+        tmp_path / "out/validation.jsonl"
+    )
+    for row in records:
+        a = row["messages"][-1]
+        assert f"Solve problem {a['content']}." in row["messages"][0]["content"]
+        assert a["reasoning_content"] == "reason"
+    grouped._questions.cache_clear()

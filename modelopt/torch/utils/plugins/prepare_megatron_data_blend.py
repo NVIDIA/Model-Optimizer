@@ -25,6 +25,7 @@ import os
 import random
 import re
 import shutil
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -39,6 +40,7 @@ from modelopt.torch.utils import (
     prepare_messages_for_chat_template,
 )
 
+from ._chat_blend import prepare_grouped_blend
 from .megatron_preprocess_data import megatron_preprocess_data
 
 __all__ = ["prepare_chat_data_blend", "prepare_megatron_data_blend"]
@@ -110,9 +112,15 @@ def _download_files(source: dict[str, Any], output_dir: Path) -> list[str]:
     """Download the repository ``files`` of a source and return their local paths."""
     dataset = source["hf_dataset"]
     raw_dir = output_dir.parent / "raw" / dataset.replace("/", "--")
+    if "revision" in source:
+        raw_dir /= source["revision"]
     return [
         huggingface_hub.hf_hub_download(
-            repo_id=dataset, filename=file, repo_type="dataset", local_dir=raw_dir
+            repo_id=dataset,
+            filename=file,
+            repo_type="dataset",
+            local_dir=raw_dir,
+            **({"revision": source["revision"]} if "revision" in source else {}),
         )
         for file in source["files"]
     ]
@@ -199,7 +207,7 @@ def _to_chat(
         chat: dict[str, Any] = {"messages": messages}
         # As in the tokenizing mode, the chat template renders the tool definitions into the prompt;
         # Megatron-Bridge turns a top-level system prompt into the leading system message.
-        for key in ("tools", "system"):
+        for key in ("tools", "system", "chat_template_kwargs"):
             if row.get(key):
                 chat[key] = row[key]
     else:
@@ -240,7 +248,8 @@ def _iter_rows(
     source: dict[str, Any], output_dir: Path, shuffle: bool, seed: int
 ) -> Iterator[dict[str, Any]]:
     """Yield the rows of a source: its ``files`` in order, or its Hugging Face split, streamed."""
-    if "files" in source:
+
+    def file_rows():
         for path in _download_files(source, output_dir):
             opener = gzip.open if path.endswith(".gz") else open
             with opener(path, "rt", encoding="utf-8") as f:
@@ -250,13 +259,34 @@ def _iter_rows(
                     try:
                         yield json.loads(line)
                     except ValueError as e:
-                        # As in the tokenizing reader: some Nemotron files carry a malformed record.
                         print(f"[WARN] Skipping malformed JSONL record in {path}: {e}", flush=True)
+
+    buffer_size = source.get("shuffle_buffer_size", 1000)
+    if "files" in source:
+        rows = file_rows()
+        # Keep legacy file ordering unless buffer shuffling was explicitly configured.
+        if not shuffle or "shuffle_buffer_size" not in source:
+            yield from rows
+            return
+        rng, buffer = random.Random(seed), []
+        for row in rows:
+            if len(buffer) < buffer_size:
+                buffer.append(row)
+            else:
+                i = rng.randrange(len(buffer))
+                yield buffer[i]
+                buffer[i] = row
+        rng.shuffle(buffer)
+        yield from buffer
         return
     dataset = load_dataset(
-        source["hf_dataset"], source.get("config"), split=source["split"], streaming=True
+        source["hf_dataset"],
+        source.get("config"),
+        split=source["split"],
+        streaming=True,
+        **({"revision": source["revision"]} if "revision" in source else {}),
     )
-    yield from dataset.shuffle(seed=seed) if shuffle else dataset
+    yield from dataset.shuffle(seed=seed, buffer_size=buffer_size) if shuffle else dataset
 
 
 def _take_chat_rows(
@@ -342,7 +372,10 @@ def _part_path(parts_dir: Path, source: dict[str, Any], settings: dict[str, Any]
 
     A part holds the first usable rows of the source, so it serves any budget it covers.
     """
-    selection = {key: source.get(key) for key in ("hf_dataset", "config", "split", "files")}
+    selection = {
+        key: source.get(key)
+        for key in ("hf_dataset", "revision", "config", "split", "files", "shuffle_buffer_size")
+    }
     selection.update(settings, content_field=source["content_field"])
     digest = hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest()[:16]
     label = source.get("split") or Path(source["files"][0]).name.split(".")[0]
@@ -480,6 +513,16 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
             f"reasoning_content must be one of {sorted(REASONING_CONTENT_MODES)}, "
             f"got {reasoning_content!r}."
         )
+    grouped_options = {
+        "question_sources",
+        "validation_samples",
+        "shuffle_buffer_size",
+        "filter_image_references",
+        "filter_tool_calls",
+        "filter_invalid_reasoning",
+    }
+    if grouped_options.intersection(config) and not config.get("group_split"):
+        raise ValueError("Question isolation and filtering options require group_split: true.")
     budgets = _chat_budgets(config)
     output_dir = Path(config["output_dir"])
     parts_dir = output_dir / "parts"
@@ -493,6 +536,9 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
     loss_mode = config.get("loss_mode", "assistant")
     if loss_mode == "full":  # keeps rows without an assistant turn
         settings["loss_mode"] = loss_mode
+
+    if config.get("group_split"):
+        return prepare_grouped_blend(config_path, config, sys.modules[__name__])
 
     rows: list[dict[str, Any]] = []
     for source, want in zip(config["sources"], budgets):
@@ -546,6 +592,13 @@ def prepare_megatron_data_blend(config_path: Path) -> list[tuple[float, str]]:
         "loss_mode",
         "pack_max_tokens",
         "num_workers",
+        "group_split",
+        "question_sources",
+        "validation_samples",
+        "shuffle_buffer_size",
+        "filter_image_references",
+        "filter_tool_calls",
+        "filter_invalid_reasoning",
     } & config.keys()
     if chat_keys:
         raise ValueError(f"Tokenized blends do not use {sorted(chat_keys)}.")
