@@ -112,7 +112,11 @@ def _tokenize_with_loss_mask(
         # warns and returns an ALL-ZERO assistant mask, which trains every sample at
         # zero loss with no other symptom. (The regex matches the tag itself, not the
         # unrelated `add_generation_prompt` identifier most templates contain.)
-        template = getattr(tokenizer, "chat_template", None) or ""
+        template_kwargs = dict(template_kwargs or {})
+        template = tokenizer.get_chat_template(
+            chat_template=template_kwargs.get("chat_template"), tools=template_kwargs.get("tools")
+        )
+        template_kwargs["chat_template"] = template
         if not re.search(r"\{%-?\s*generation\b", template):
             raise RuntimeError(
                 "answer_only_loss=True needs assistant masks, but the tokenizer's chat "

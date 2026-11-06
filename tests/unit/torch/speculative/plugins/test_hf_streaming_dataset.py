@@ -508,6 +508,7 @@ def _fast_tokenizer_with_template(template: str, seq: int = 8) -> MagicMock:
     tok = MagicMock()
     tok.is_fast = True
     tok.chat_template = template
+    tok.get_chat_template.return_value = template
     tok.apply_chat_template.return_value = {
         "input_ids": torch.arange(seq, dtype=torch.long).unsqueeze(0),
         "assistant_masks": torch.ones(1, seq, dtype=torch.long),
@@ -595,6 +596,53 @@ def test_streaming_entries_preserve_template_inputs(tiny_tokenizer, serialized, 
         else [1] * len(expected_ids)
     )
     assert sample["loss_mask"].tolist() == expected_mask
+
+
+@pytest.mark.parametrize("tools", [None, [], [{"type": "function", "function": {"name": "f"}}]])
+def test_answer_only_loss_resolves_named_templates(tiny_tokenizer, tools):
+    tiny_tokenizer.add_tokens(["tool", "reply"])
+    template = (
+        "{{ messages[0]['content'] }} "
+        "{% generation %}{{ messages[1]['content'] }}{% endgeneration %}"
+    )
+    tiny_tokenizer.chat_template = {"default": template, "tool_use": "tool " + template}
+    entry = {
+        "conversation_id": "named",
+        "messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "reply"}],
+    }
+    if tools is not None:
+        entry["tools"] = tools
+    sample = StreamingDataset(
+        [entry], tiny_tokenizer, config=StreamingConfig(answer_only_loss=True)
+    )._tokenize_entry(entry)
+    assert sample is not None
+    expected = "tool hi reply" if tools else "hi reply"
+    expected_ids = tiny_tokenizer(expected, add_special_tokens=False)["input_ids"]
+    assert sample["token_ids"] == expected_ids
+    assert sample["loss_mask"].tolist() == [0] * (len(expected_ids) - 1) + [1]
+
+
+@pytest.mark.parametrize("named_override", [False, True])
+def test_answer_only_loss_uses_explicit_template_override(tiny_tokenizer, named_override):
+    tiny_tokenizer.add_tokens(["reply"])
+    template = "{{ messages[0]['content'] }} {% generation %}reply{% endgeneration %}"
+    tiny_tokenizer.chat_template = {
+        "default": "untagged",
+        "tool_use": "untagged",
+        "selected": template,
+    }
+    kwargs = {
+        "chat_template": "selected" if named_override else template,
+        "tools": [{"type": "function", "function": {"name": "f"}}],
+    }
+    original_kwargs = dict(kwargs)
+    ids, mask = hf_streaming_dataset._tokenize_with_loss_mask(
+        tiny_tokenizer, _CONV, answer_only_loss=True, template_kwargs=kwargs
+    )
+    expected_ids = tiny_tokenizer("hi reply", add_special_tokens=False)["input_ids"]
+    assert ids.squeeze(0).tolist() == expected_ids
+    assert mask.tolist() == [0] * (len(expected_ids) - 1) + [1]
+    assert kwargs == original_kwargs
 
 
 @pytest.mark.parametrize("conversations", ["", "[]", "null"])
