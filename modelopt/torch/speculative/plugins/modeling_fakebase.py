@@ -17,6 +17,8 @@
 
 import json
 import os
+import types
+import warnings
 
 import torch
 import torch.nn as nn
@@ -96,6 +98,92 @@ _SAFETENSORS_INDEX_FILENAME = "model.safetensors.index.json"
 # Single-file safetensors names to try, in order.  Mistral native checkpoints
 # use ``consolidated.safetensors`` instead of the HF-standard ``model.safetensors``.
 _SAFETENSORS_SINGLE_FILENAMES = ["model.safetensors", "consolidated.safetensors"]
+# Muse-Spark applies a weightless RMSNorm to its token embeddings and a multiplier and tanh
+# soft cap to its logits. Both live in the model's code, not its config, hence the table.
+_MUSE_SPARK_MODEL_TYPES = frozenset({"muse_spark", "muse_spark_text"})
+
+
+class _NormedEmbedding(nn.Embedding):
+    """``nn.Embedding`` followed by an RMSNorm with no gain, computed in fp32.
+
+    The draft embeds its block tokens through ``embed_tokens``, so the norm has to live in
+    the module every caller resolves rather than at the call sites.
+    """
+
+    def __init__(self, *args, eps: float, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.eps = eps
+
+    def forward(self, input_ids):
+        h = super().forward(input_ids)
+        h32 = h.float()
+        return (h32 * torch.rsqrt(h32.pow(2).mean(-1, keepdim=True) + self.eps)).to(h.dtype)
+
+
+class _SoftCappedLMHead(nn.Linear):
+    """``lm_head`` followed by ``cap * tanh(multiplier * logits / cap)``, computed in fp32.
+
+    Draft and teacher logits both come through this head, so the draft trains against the
+    distribution the target actually samples from.
+    """
+
+    def __init__(self, *args, logits_multiplier=None, logits_soft_cap=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.logits_multiplier = logits_multiplier
+        self.logits_soft_cap = logits_soft_cap
+
+    def forward(self, x):
+        logits = super().forward(x)
+        out = logits.float()
+        if self.logits_multiplier is not None:
+            out = out * self.logits_multiplier
+        if self.logits_soft_cap is not None:
+            out = self.logits_soft_cap * torch.tanh(out / self.logits_soft_cap)
+        return out.to(logits.dtype)
+
+
+def _select_base_transforms(base_cfg) -> dict:
+    """FakeBaseConfig fields for what the base does outside ``embed_tokens`` and ``lm_head``."""
+    if getattr(base_cfg, "model_type", None) not in _MUSE_SPARK_MODEL_TYPES:
+        return {}
+    return {
+        "embed_norm": True,
+        "logits_multiplier": getattr(base_cfg, "output_multiplier", None),
+        "logits_soft_cap": getattr(base_cfg, "final_logit_softcapping", None),
+    }
+
+
+def _load_base_config(source: str, trust_remote_code: bool):
+    """The checkpoint's config, or its raw ``config.json`` if transformers lacks the model_type.
+
+    FakeBaseModel reads only scalars, so the JSON is enough for them. Anything the model does
+    outside embed_tokens and lm_head is not in the JSON, which is why _select_base_transforms
+    and the final-norm table are keyed by model_type.
+    """
+    try:
+        return transformers.AutoConfig.from_pretrained(source, trust_remote_code=trust_remote_code)
+    except ValueError as exc:
+        if "does not recognize this architecture" not in str(exc):
+            raise
+    if os.path.isdir(source):
+        path = os.path.join(source, "config.json")
+    else:
+        path = hf_hub_download(repo_id=source, filename="config.json")
+    with open(path) as f:
+        raw = json.load(f)
+    warnings.warn(
+        f"transformers does not know model_type {raw.get('model_type')!r}; reading {path} "
+        "directly for the dimensions FakeBaseModel needs.",
+        stacklevel=2,
+    )
+    return types.SimpleNamespace(
+        **{
+            key: types.SimpleNamespace(**value)
+            if key in _VLM_CONFIG_ATTRS and isinstance(value, dict)
+            else value
+            for key, value in raw.items()
+        }
+    )
 
 
 class FakeBaseConfig(PretrainedConfig):
@@ -118,6 +206,9 @@ class FakeBaseConfig(PretrainedConfig):
         rms_norm_eps=1e-6,
         rope_theta=None,
         final_norm_type=None,
+        embed_norm=False,
+        logits_multiplier=None,
+        logits_soft_cap=None,
         **kwargs,
     ):
         """Initialize FakeBaseConfig with minimal model configuration parameters."""
@@ -127,6 +218,11 @@ class FakeBaseConfig(PretrainedConfig):
         # (model whose final-norm type we don't know). See _FINAL_NORM_CLASSES /
         # _FINAL_NORM_TYPE_BY_MODEL_TYPE. Persisted so a reloaded config rebuilds the same norm.
         self.final_norm_type = final_norm_type
+        # The base's embedding and logit transforms (see _select_base_transforms), persisted
+        # so a reloaded config rebuilds the same modules.
+        self.embed_norm = embed_norm
+        self.logits_multiplier = logits_multiplier
+        self.logits_soft_cap = logits_soft_cap
         self.num_hidden_layers = num_hidden_layers
         # Mirror the original base layer count. The non-fake offline path loads with
         # num_hidden_layers=0 and stashes the real count here (see utils.load_vlm_or_llm);
@@ -184,10 +280,27 @@ class FakeBaseModel(PreTrainedModel):
         self.model = nn.Module()
         self.model.layers = nn.ModuleList()
         self.model.dtype = config.dtype
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, dtype=config.dtype)
-        self.lm_head = nn.Linear(
-            config.hidden_size, config.vocab_size, bias=False, dtype=config.dtype
-        )
+        if config.embed_norm:
+            self.embed_tokens = _NormedEmbedding(
+                config.vocab_size, config.hidden_size, dtype=config.dtype, eps=config.rms_norm_eps
+            )
+        else:
+            self.embed_tokens = nn.Embedding(
+                config.vocab_size, config.hidden_size, dtype=config.dtype
+            )
+        if config.logits_multiplier is not None or config.logits_soft_cap is not None:
+            self.lm_head = _SoftCappedLMHead(
+                config.hidden_size,
+                config.vocab_size,
+                bias=False,
+                dtype=config.dtype,
+                logits_multiplier=config.logits_multiplier,
+                logits_soft_cap=config.logits_soft_cap,
+            )
+        else:
+            self.lm_head = nn.Linear(
+                config.hidden_size, config.vocab_size, bias=False, dtype=config.dtype
+            )
         # Final pre-lm_head norm, applied before lm_head when reconstructing base logits for
         # self-logit-distillation (vLLM-captured final hidden states are un-normed). Built ONLY
         # when the base model's final-norm type is known (config.final_norm_type set); otherwise
@@ -212,9 +325,7 @@ class FakeBaseModel(PreTrainedModel):
         """
         from modelopt.torch.export.plugins.hf_spec_export import _get_rope_theta
 
-        orig_config = transformers.AutoConfig.from_pretrained(
-            source, trust_remote_code=trust_remote_code
-        )
+        orig_config = _load_base_config(source, trust_remote_code)
         # For vlms, detect language model config based on _VLM_CONFIG_ATTRS
         base_cfg = next(
             (
@@ -242,6 +353,7 @@ class FakeBaseModel(PreTrainedModel):
             final_norm_type=_select_final_norm_type(
                 getattr(base_cfg, "model_type", None), base_cfg
             ),
+            **_select_base_transforms(base_cfg),
         )
         model = cls(config)
         # Load lm_head, embed_tokens, and (for known models) the final norm into the model.

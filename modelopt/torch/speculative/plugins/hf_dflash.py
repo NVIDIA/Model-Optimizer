@@ -96,6 +96,7 @@ from .modeling_fakebase import (
     _BASE_MODEL_PATHS,
     _EMBED_TOKENS_PATHS,
     _LM_HEAD_PATHS,
+    _SoftCappedLMHead,
     find_final_norm_path,
 )
 from .modeling_final_norm import _apply_base_final_norm
@@ -610,9 +611,10 @@ class HFDFlashModel(DFlashModel):
                 )
         head = self._base_model_lm_head
         # The fused pass reads lm_head.weight directly: whatever a bias, a quantizer or a
-        # hook adds in lm_head's forward would be silently skipped.
+        # hook adds in lm_head's forward would be silently skipped. The fake base's soft cap
+        # is the one transform it reproduces (see _fused_head_transform).
         plain_forward = (
-            type(head).forward is torch.nn.Linear.forward
+            type(head).forward in (torch.nn.Linear.forward, _SoftCappedLMHead.forward)
             and "forward" not in vars(head)
             and not (head._forward_hooks or head._forward_pre_hooks)
         )
@@ -1122,6 +1124,14 @@ class HFDFlashModel(DFlashModel):
         """``(statistics with gradient, top_k)`` a variant's own terms read from the fused pass."""
         return set(), 0
 
+    def _fused_head_transform(self):
+        """The logit transform the base ``lm_head`` applies after its projection, if any."""
+        head = self._base_model_lm_head
+        return {
+            "logit_scale": getattr(head, "logits_multiplier", None),
+            "soft_cap": getattr(head, "logits_soft_cap", None),
+        }
+
     def _fused_head_stats(self, draft_hidden, base_outputs, label_positions, flat_targets):
         """Every statistic of the draft's logits the loss reads, from one fused pass."""
         grads, top_k = self._fused_head_extras()
@@ -1145,6 +1155,7 @@ class HFDFlashModel(DFlashModel):
             grads=grads,
             top_k=top_k,
             **teacher,
+            **self._fused_head_transform(),
         )
 
     def forward(

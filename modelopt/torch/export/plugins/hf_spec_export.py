@@ -453,6 +453,16 @@ class DFlashExporter(SpeculativeDecodingExporter):
             config["dflash_config"]["attention_sink_bias"] = True
             config["attention_sink_bias"] = True
 
+        # The target's logit transform, which vLLM's DFlash2 reads only from dflash_config
+        # (default: none). Read off the head the draft logits were trained through.
+        head = model._base_model_lm_head
+        for key, attr in (
+            ("output_multiplier", "logits_multiplier"),
+            ("final_logit_softcapping", "logits_soft_cap"),
+        ):
+            if (value := getattr(head, attr, None)) is not None:
+                config["dflash_config"][key] = float(value)
+
         # Inject the export-time YaRN rope_scaling from the dflash_export_rope_scaling
         # config field (empty dict disables). Mirrors eagle's eagle_export_rope_scaling.
         export_rope_scaling = getattr(self.model, "dflash_export_rope_scaling", None)
