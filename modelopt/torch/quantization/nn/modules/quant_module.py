@@ -145,6 +145,8 @@ class QuantModule(DynamicModule):
         quantizer: TensorQuantizer | SequentialQuantizer,
         weights: Iterable[torch.Tensor],
         keep_attrs: bool = False,
+        *,
+        quantize_dtype: torch.dtype = torch.float32,
     ):
         """Fold ``quantizer`` into each weight view in place, then disable and clean it once.
 
@@ -159,9 +161,11 @@ class QuantModule(DynamicModule):
         members = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
         for weight in weights:
             folded = weight
-            # Each member's output is in the weight dtype, as in the forward pass.
+            # Each member's output is in the weight dtype, as in the forward pass. Materialize a
+            # contiguous copy in ``quantize_dtype`` first: transposed expert weights are views, and
+            # quantizing the view in place folded the wrong values for GPT-OSS / Llama 4.
             for member in members:
-                folded = member(folded.float().contiguous()).to(weight.dtype)
+                folded = member(folded.to(quantize_dtype).contiguous()).to(weight.dtype)
             weight.data.copy_(folded)
         quantizer.disable()
         quantizer.disable_rotate()
