@@ -40,7 +40,7 @@ from modelopt.torch.quantization.ggml.common import (
     pinned_importance,
     pinned_packed_weight,
 )
-from modelopt.torch.quantization.ggml.gptq import gptq_group_update
+from modelopt.torch.quantization.ggml.gptq import compensated_block_hessian, gptq_group_update
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.quantization.utils.calib_utils import (
     compute_hessian_inverse,
@@ -91,6 +91,22 @@ def test_group_update_folds_each_group_error_through_its_inverse_hessian_block()
     gptq_group_update(weight, h_inv, 8, 4, _round_in_groups_of_4)
 
     torch.testing.assert_close(weight, expected, rtol=1e-4, atol=1e-5)
+
+
+def test_compensated_block_hessian_is_the_schur_complement_of_the_remaining_columns():
+    # Fixing a group while only the later columns compensate costs inv(inv(H_FF)_gg), with F the
+    # group and every column after it; the plain damped H_gg would match only the last group.
+    _, hessian, h_inv = _problem(cols=16)
+    damped = hessian + 0.01 * hessian.diagonal().mean() * torch.eye(16)
+    for start in (0, 4, 8, 12):
+        remaining = slice(start, None)
+        expected = torch.linalg.inv(torch.linalg.inv(damped[remaining, remaining])[:4, :4])
+        torch.testing.assert_close(
+            compensated_block_hessian(h_inv, slice(start, start + 4)),
+            expected,
+            rtol=1e-4,
+            atol=1e-4,
+        )
 
 
 def test_group_update_rejects_blocks_that_split_a_group():
