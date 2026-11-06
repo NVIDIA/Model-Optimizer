@@ -75,7 +75,7 @@ def _load_checkpoint_tensors(checkpoint_path: Path) -> dict[str, torch.Tensor]:
             0,
         ),
     ],
-    ids=["qwen3", "qwen3_lora_nvfp4", "qwen3_5_moe_vl"],
+    ids=["qwen3_full_rank", "qwen3_lora_nvfp4", "qwen3_5_moe_vl"],
 )
 def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
     """Quantize a tiny model, run QAD from the quantized student, and export the result.
@@ -85,6 +85,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
     """
     hf_model_path = create_student(tmp_path)
     is_vlm = "vision_config" in (hf_model_path / "config.json").read_text()
+    full_rank = not lora_rank and not is_vlm
     # mrope rotary embeddings CP-shard themselves, so the VLM exercises the path where the batch's
     # position ids must stay full-length. The LLM case stays on tensor parallelism.
     cp_size = num_gpus if is_vlm else 1
@@ -94,8 +95,8 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
     train_iters = 3
     early_exit_iter = 2
     calib_dataset = "cnn_dailymail"
-    if lora_rank:
-        # Keep the LoRA smoke test independent of dataset downloads on the GPU node.
+    if lora_rank or full_rank:
+        # Keep selective-training coverage independent of dataset downloads on the GPU node.
         calib_path = tmp_path / "calibration.jsonl"
         calib_path.write_text(
             "\n".join(
@@ -136,7 +137,12 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
     # The LoRA case trains only adapters, so its base weights would not exercise the cache's gradient.
     distill_cmd = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"]
-        + ([] if lora_rank else ["--fake_quant_weight_cache"]),
+        + ([] if lora_rank else ["--fake_quant_weight_cache"])
+        + (
+            ["--trainable_params", "*.mlp.linear_fc1.weight", "*.mlp.linear_fc2.weight"]
+            if full_rank
+            else []
+        ),
         student_hf_path=hf_model_path,
         student_megatron_path=quantized_megatron_path,
         teacher_hf_path=hf_model_path,
@@ -156,9 +162,9 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
         log_interval=1,
         exit_interval=early_exit_iter,
         exit_duration_in_mins=10,
-        recompute_granularity="full" if lora_rank else None,
-        recompute_method="uniform" if lora_rank else None,
-        recompute_num_layers=1 if lora_rank else None,
+        recompute_granularity="full" if lora_rank or full_rank else None,
+        recompute_method="uniform" if lora_rank or full_rank else None,
+        recompute_num_layers=1 if lora_rank or full_rank else None,
     )
     run_example_command(distill_cmd, example_path="megatron_bridge", setup_free_port=True)
     distilled_megatron_path = distill_output_dir / "checkpoints"
@@ -260,7 +266,9 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
 
     # Step 4: export for vLLM fake-quant evaluation (test_quantize_export.py covers the rest).
     # Only QAD saves a VLM's language model alone; the export must still carry the vision tower.
-    if is_vlm:
+    # Full-rank checkpoints retain activation-gradient wrappers through merge_quant_lora;
+    # cover both unified export above and fold_weight in the fake-quant exporter here.
+    if is_vlm or full_rank:
         fakequant_path = tmp_path / "qad_vllm_fakequant"
         fakequant_cmd = extend_cmd_parts(
             [
@@ -279,7 +287,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
             fakequant_path,
             hf_model_path,
             check_values=False,
-            bit_exact_prefixes=("model.visual.",),
+            bit_exact_prefixes=("model.visual.",) if is_vlm else (),
         )
         recipe = yaml.safe_load((fakequant_path / "quant_recipe.yaml").read_text())
         state = torch.load(fakequant_path / "quantizer_state.pth", weights_only=True)

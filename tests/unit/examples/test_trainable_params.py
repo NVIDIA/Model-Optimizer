@@ -88,6 +88,13 @@ def test_full_rank_training_and_restore(recompute, restore_kind):
         opt.step()
     torch.testing.assert_close(model[1].weight, restored[1].weight, rtol=0, atol=0)
     torch.testing.assert_close(model(inputs), restored(inputs), rtol=0, atol=0)
+    restored.eval()
+    expected = restored(inputs).detach()
+    parameter_names = list(dict(restored.named_parameters()))
+    mtq.merge_quant_lora(restored)
+    mtq.fold_weight(restored)
+    assert list(dict(restored.named_parameters())) == parameter_names
+    torch.testing.assert_close(restored(inputs), expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
