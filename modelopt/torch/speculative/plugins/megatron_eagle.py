@@ -1144,8 +1144,11 @@ class _DynamicEagleGPTModel(EagleModel):
             and self.eagle_mix_hidden_states_mode == "uniform_layer_sample"
         ):
             # Match the gathered, sequence-first outputs added to history below.
+            # Sampling is replicated across TP ranks, so its gradients must not be summed.
             aligned_hidden_states_history = [
-                gather_from_sequence_parallel_region(eagle_module_input_hidden_states)
+                gather_from_sequence_parallel_region(
+                    eagle_module_input_hidden_states, tensor_parallel_output_grad=False
+                )
                 if self.config.sequence_parallel
                 else eagle_module_input_hidden_states
             ]

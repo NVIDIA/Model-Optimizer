@@ -166,6 +166,7 @@ def _test_speculative_gpt_model(
         if mix_hidden_states_mode == "uniform_layer_sample" and not sequence_parallel:
             handle = model.eagle_module.register_forward_pre_hook(check_tp_inputs)
             torch.cuda.manual_seed(1234 + rank)
+        mixing_rng_state = torch.cuda.get_rng_state()
         try:
             eagle_loss = model(prompt_tokens, position_ids, attention_mask, labels=labels)
         finally:
@@ -180,6 +181,24 @@ def _test_speculative_gpt_model(
             fc_grad = model.eagle_module.fc.weight.grad
             assert fc_grad is not None and torch.isfinite(fc_grad).all()
             assert torch.count_nonzero(fc_grad) > 0
+
+            if sequence_parallel and mix_hidden_states_mode == "uniform_layer_sample":
+                reference = create_model(initialize_megatron=False, sequence_parallel=False).cuda()
+                reference = mtsp.convert(reference, deepcopy(mtsp_config)).to(torch.bfloat16)
+                reference.load_state_dict(model.state_dict())
+                torch.cuda.set_rng_state(mixing_rng_state)
+                reference_loss = reference(
+                    prompt_tokens, position_ids, attention_mask, labels=labels
+                )
+                reference_loss.mean().backward()
+                torch.testing.assert_close(eagle_loss, reference_loss, rtol=1e-2, atol=1e-3)
+
+                # Match Megatron's sum of replicated FC parameter gradients across SP shards.
+                sp_grad = fc_grad.detach().float().clone()
+                torch.distributed.all_reduce(sp_grad, group=get_tensor_model_parallel_group())
+                reference_grad = reference.eagle_module.fc.weight.grad.float()
+                # Allow BF16 accumulation differences, but reject TP-scaled gradients.
+                assert (sp_grad - reference_grad).norm() <= 0.01 * reference_grad.norm()
 
 
 @pytest.mark.parametrize(
