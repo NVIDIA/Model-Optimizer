@@ -234,6 +234,8 @@ class EagleTrainerWithAccLog(Trainer):
     ):
         super().__init__(*args, **kwargs)
         self.lora_lr_multiplier = lora_lr_multiplier
+        # compute_loss drops num_items_in_batch, so Trainer must average the mean loss.
+        self.model_accepts_loss_kwargs = False
 
     def get_train_dataloader(self):
         """Apply ``dataloader_in_order``, which ``Trainer`` forwards only from transformers 5.15."""
@@ -322,6 +324,17 @@ class EagleTrainerWithAccLog(Trainer):
                 self.optimizer.param_groups = new_groups
         return self.optimizer
 
+    def training_step(self, *args, **kwargs):
+        """Average mean losses once and restore the shared accumulation count."""
+        accumulation_steps = self.accelerator.gradient_accumulation_steps
+        try:
+            if not self.model_accepts_loss_kwargs and self.compute_loss_func is None:
+                # Trainer already averages these losses before calling backward.
+                self.accelerator.gradient_accumulation_steps = 1
+            return super().training_step(*args, **kwargs)
+        finally:
+            self.accelerator.gradient_accumulation_steps = accumulation_steps
+
     def compute_loss(self, *args, **kwargs):
         """Override compute_loss to save train accs and per-component losses in trainer state."""
         if not hasattr(self.state, "training_accs"):
@@ -329,9 +342,6 @@ class EagleTrainerWithAccLog(Trainer):
         if not hasattr(self.state, "component_losses"):
             self.state.component_losses = {"eagle": [], "preservation": []}
         kwargs.pop("num_items_in_batch", None)
-        if not self.model_accepts_loss_kwargs and self.compute_loss_func is None:
-            # Trainer averages these mean losses before backward; Accelerate must not divide again.
-            self.accelerator.gradient_accumulation_steps = 1
         loss, outputs = super().compute_loss(return_outputs=True, *args, **kwargs)
         if hasattr(outputs, "train_acc") and any(outputs.train_acc):
             self.state.training_accs.append(outputs.train_acc)
