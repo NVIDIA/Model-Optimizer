@@ -210,11 +210,13 @@ class TransformersLocalDistillationAdapter(ModuleLocalDistillationAdapter):
         )
         return value
 
-    def parallelize(self, model):
+    def parallelize(self, model, *, initialize=None):
         """Use Transformers' own inference stages and native TP plans.
 
         PP transports the teacher forward only; student gradients are local to
         their independent repair units and need no inter-stage backward.
+        A native ``initialize(model)`` callback can materialize a meta model
+        after TP/EP ownership is established and before FSDP wraps its storage.
         """
         if self.mesh is None:
             raise ValueError("parallelize requires an explicit device mesh.")
@@ -222,9 +224,11 @@ class TransformersLocalDistillationAdapter(ModuleLocalDistillationAdapter):
             from .parallel import parallelize_native_transformers
 
             self._native_parallel_metadata[id(model)] = parallelize_native_transformers(
-                model, self.context
+                model, self.context, initialize=initialize
             )
             return model
+        if initialize is not None:
+            raise ValueError("An initialization callback requires the native HF mesh manager.")
         tp, pp = _submesh(self.mesh, "tp"), _submesh(self.mesh, "pp")
         ep = _submesh(self.mesh, "ep")
         if _size(ep) > 1:

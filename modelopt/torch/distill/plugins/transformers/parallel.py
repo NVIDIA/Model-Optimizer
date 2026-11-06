@@ -271,7 +271,7 @@ def _validate_parameter_geometry(module, name, style, mesh, full_name):
         validate_activation_partition(activation, view)
 
 
-def parallelize_native_transformers(model, context):
+def parallelize_native_transformers(model, context, *, initialize=None):
     """Apply explicit native TP/EP plans and prepare repair fields before FSDP2.
 
     Return per-model plans, expert IDs, packed representation and prepared field
@@ -300,6 +300,8 @@ def parallelize_native_transformers(model, context):
     }
     error, plans, partitions, global_ids = None, None, None, None
     try:
+        if initialize is not None and (not callable(initialize) or adopted):
+            raise ValueError("Initialization requires a callable and an undistributed model.")
         if adopted:
             current = model._mesh_manager
             for axes in (context.device_mesh.mesh_dim_names, context.moe_mesh.mesh_dim_names):
@@ -427,6 +429,13 @@ def parallelize_native_transformers(model, context):
                     is_expert_parallel=True,
                 )
                 modules[name]._modelopt_safe_masked_ep = True
+    if initialize is not None:
+        error = None
+        try:
+            initialize(model)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        _synchronize_validation(context, error)
     context.tp_quantizer_layouts[id(model)] = prepare_quantizer_partitions(model, context)
     if not adopted and context.data_mesh.size() > 1:
         apply_fully_sharded_data_parallelism(model, context.mesh_manager, fsdp_plan, ep_plan)
