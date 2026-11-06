@@ -27,6 +27,8 @@ from torch.utils.checkpoint import checkpoint
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.lora import QuantLoRAInputRegistry
+from modelopt.torch.quantization.mode import QuantizeModeRegistry
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.qtensor import INT4QTensor, QTensorWrapper
 
@@ -264,3 +266,32 @@ def test_quant_lora_folding_requires_merge(temporary):
         if not temporary:
             mtq.fold_weight(student)
         torch.testing.assert_close(student(inputs), output, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "mode", ["quantize", "auto_quantize", "real_quantize", "quant_input_gradients"]
+)
+def test_input_gradient_mode_rejects_reconversion(mode):
+    """Reject conflicting mode chains before converting an installed activation wrapper."""
+    model = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16))
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.arange(8)))
+    mtq.enable_quant_input_gradients(model)
+    state = copy.deepcopy(mto.modelopt_state(model))
+    types = {n: type(m) for n, m in model.named_modules()}
+    with pytest.raises(AssertionError):
+        mto.apply_mode(model, mode, registry=QuantizeModeRegistry)
+    assert state == mto.modelopt_state(model)
+    assert types == {n: type(m) for n, m in model.named_modules()}
+
+
+def test_input_gradient_restore_requires_registered_boundary(monkeypatch):
+    """Refuse restoration when the activation plugin recorded by the checkpoint is absent."""
+    model = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16))
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.arange(8)))
+    mtq.enable_quant_input_gradients(model)
+    state = mto.modelopt_state(model)
+    # Simulate an unavailable optional activation plugin, retaining the real restore path.
+    monkeypatch.setattr(QuantLoRAInputRegistry, "_registry", {})
+    fresh = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16))
+    with pytest.raises(ValueError):
+        mto.restore_from_modelopt_state(fresh, state)

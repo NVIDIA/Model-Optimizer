@@ -86,7 +86,10 @@ def test_full_rank_training_and_restore(recompute, restore_kind):
     torch.testing.assert_close(model(inputs), restored(inputs), rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("invalid", ["unmatched", "shared", "packed", "adapters", "empty"])
+@pytest.mark.parametrize(
+    "invalid",
+    ["unmatched", "shared", "packed", "adapters", "empty", "missing_boundary", "real_quantize"],
+)
 def test_full_rank_validation_is_atomic(invalid):
     """Reject invalid selections without changing parameter trainability."""
     model = nn.Sequential(nn.Linear(16, 16), nn.Linear(16, 16))
@@ -102,10 +105,18 @@ def test_full_rank_validation_is_atomic(invalid):
     elif invalid == "adapters":
         mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))
         mtq.enable_quant_lora(model)
+    elif invalid == "missing_boundary":
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))
+    elif invalid == "real_quantize":
+        model = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16))
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.arange(8)))
+        mtq.compress(model, {"compress": {"default": False}})
+        patterns = ["1.bias"]
     else:
         patterns = []
     before = {n: p.requires_grad for n, p in model.named_parameters()}
-    with pytest.raises(ValueError):
+    error_type = AssertionError if invalid == "real_quantize" else ValueError
+    with pytest.raises(error_type):
         configure_trainable_parameters(model, patterns)
     assert before == {n: p.requires_grad for n, p in model.named_parameters()}
 

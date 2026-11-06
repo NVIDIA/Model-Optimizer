@@ -427,7 +427,7 @@ DeepSeek-V4-Flash with SequentialMLP experts, append:
 Every pattern must match each local model chunk; stages without matches are unsupported.
 Only selected parameters in the distilled student train; the teacher stays frozen.
 For VLMs, names are relative to `language_model`; vision/projector settings are untouched.
-Quantizers and activation gradients remain enabled.
+Quantizers and activation gradients remain enabled; unsupported activation stacks are rejected.
 
 Reuse the selection and `--student_megatron_path` with ModelOpt state on native resume;
 selection fails if that state has not been restored before wrapping. Native checkpointing

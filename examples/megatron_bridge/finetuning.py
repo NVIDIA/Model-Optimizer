@@ -61,7 +61,8 @@ def configure_trainable_parameters(model: nn.Module, target_parameters: list[str
             "Restore student ModelOpt state with --student_megatron_path before selecting "
             "trainable parameters, including on native resume."
         )
+    model = enable_quant_input_gradients(model)
     model.requires_grad_(False)
     for name in selected:
         parameters[name].requires_grad_(True)
-    return enable_quant_input_gradients(model)
+    return model

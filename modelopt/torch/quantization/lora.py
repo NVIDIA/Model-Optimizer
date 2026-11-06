@@ -138,13 +138,24 @@ def enable_quant_input_gradients(model: nn.Module) -> nn.Module:
 
     Call before DDP and optimizer construction. This does not change parameter
     trainability; the training recipe still selects parameters on every launch.
+    Raise if no registered activation boundary is available.
     """
+    _validate_quant_input_gradients(model)
     if not any(
         not isinstance(module, _QuantLoRAInput) and type(module) in QuantLoRAInputRegistry
         for module in model.modules()
     ):
         return model
     return apply_mode(model, "quant_input_gradients", registry=QuantizeModeRegistry)
+
+
+def _validate_quant_input_gradients(model):
+    if not any(
+        isinstance(module, _QuantLoRAInput) or type(module) in QuantLoRAInputRegistry
+        for module in model.modules()
+    ):
+        types = ", ".join(sorted({type(module).__name__ for module in model.modules()}))
+        raise ValueError(f"No registered activation-gradient boundary for module types: {types}")
 
 
 def _enable_quant_input_gradients(model):
@@ -157,6 +168,7 @@ def _enable_quant_input_gradients(model):
 
 def _convert_quant_input_gradients(model, config):
     """Wrap activation boundaries and retain the current quantizer metadata."""
+    _validate_quant_input_gradients(model)
     _enable_quant_input_gradients(model)
     metadata = {}
     _update_quant_metadata(model, config, metadata)
@@ -165,6 +177,7 @@ def _convert_quant_input_gradients(model, config):
 
 def _restore_quant_input_gradients(model, config, metadata):
     """Restore quantizers and activation wrappers before checkpoint tensors are loaded."""
+    _validate_quant_input_gradients(model)
     restore_quantizer_state(model, QuantizeConfig(), metadata)
     return _enable_quant_input_gradients(model)
 
@@ -241,7 +254,13 @@ class QuantInputGradientsModeDescriptor(ModeDescriptor):
 
     name = "quant_input_gradients"
     config_class = ModeloptBaseConfig
-    next_prohibited_modes = {"quant_lora"}
+    next_prohibited_modes = {
+        "quant_lora",
+        "quantize",
+        "auto_quantize",
+        "real_quantize",
+        "quant_input_gradients",
+    }
     convert = staticmethod(_convert_quant_input_gradients)
     restore = staticmethod(_restore_quant_input_gradients)
     update_for_save = staticmethod(_update_quant_metadata)
