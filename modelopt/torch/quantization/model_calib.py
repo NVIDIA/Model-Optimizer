@@ -1087,8 +1087,6 @@ def _warn_local_hessian_fallback(name, weight, weight_quantizer, block_size, war
 
 def _is_quant_fused_experts(module: nn.Module) -> bool:
     """Whether ``module`` is a converted HF fused-MoE-experts wrapper with per-expert quantizers."""
-    if callable(getattr(module, "iter_expert_projections", None)):
-        return True
     first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     return hasattr(module, "_current_expert_idx") and hasattr(
         module, f"{first_proj_attr}_weight_quantizers"
@@ -1103,9 +1101,6 @@ def _fused_expert_projections(module: nn.Module):
     per expert forward with ``module._current_expert_idx`` set to that expert; under grouped_mm
     and torch_a2a once per projection, on a batch sorted by expert (``module._grouped_offs``).
     """
-    if callable(getattr(module, "iter_expert_projections", None)):
-        yield from module.iter_expert_projections()
-        return
     first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     for weight_name, quantizers_name, input_q_name in (
         (
@@ -1189,8 +1184,8 @@ class _WeightInputHook:
     def __init__(self, hook: Callable):
         self.hook = hook
 
-    def __call__(self, *args):
-        return self.hook(*args)
+    def __call__(self, module, args):
+        self.hook(module, args)
 
 
 def _register_weight_input_hooks(model, names, capture, on_weight=None):
@@ -2418,14 +2413,6 @@ def layerwise_calibrate(
             "Layerwise calibration requires a model with identifiable transformer layers."
         )
 
-    if LayerActivationCollector.requires_prefix_replay(model):
-        if export_dir is not None or not qdq_from_prev:
-            raise ValueError(
-                "This architecture requires prefix replay for cross-layer state: "
-                "layerwise calibration requires get_qdq_activations_from_prev_layer=True "
-                "and cannot export layers during calibration. Export after calibration."
-            )
-
     outside_calibrator = _OutsideQuantizerCalibrator(
         model,
         transformer_layers,
@@ -2491,12 +2478,7 @@ def layerwise_calibrate(
 
     try:
         input_getter._patch_all_layers(decoder_layers=transformer_layers)
-        resumed_inputs = None
-        if ckpt and start_layer > 0:
-            if input_getter.replay_prefix:
-                ckpt.full_restore(transformer_layers, model)
-            else:
-                resumed_inputs = ckpt.setup_resume(transformer_layers)
+        resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
 
         # Bootstrap: get first layer's inputs (or use resumed inputs).
         layer_inputs = input_getter.get_first_layer_inputs(
@@ -2563,14 +2545,7 @@ def layerwise_calibrate(
                     exporter.export_layer(layer_idx, layer, layer_inputs)
 
                 if ckpt:
-                    # Prefix replay regenerates native side state, which need not
-                    # be serialized as an arbitrary Python layout/cache object.
-                    ckpt.save(
-                        layer_idx,
-                        model,
-                        transformer_layers,
-                        None if input_getter.replay_prefix else next_inputs,
-                    )
+                    ckpt.save(layer_idx, model, transformer_layers, next_inputs)
 
             layer_pbar.update(1)
             del layer_inputs
@@ -2580,7 +2555,7 @@ def layerwise_calibrate(
         input_getter._unpatch_all_layers()
         layer_pbar.close()
 
-    if ckpt and not input_getter.replay_prefix:
+    if ckpt:
         ckpt.full_restore(transformer_layers, model)
 
     outside_calibrator.calibrate()
@@ -2752,9 +2727,7 @@ def gptq(
                     module._weight_input_capture = True
                     expert_handles.update((id(quantizers[i]), h) for i, h in per_expert.items())
                     hooks.append(
-                        input_quantizer.register_forward_hook(
-                            _WeightInputHook(_make_expert_hook(module, per_expert))
-                        )
+                        input_quantizer.register_forward_hook(_make_expert_hook(module, per_expert))
                     )
 
     placement = Counter(

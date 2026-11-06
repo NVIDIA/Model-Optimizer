@@ -63,7 +63,36 @@ def _model_hash(model):
     for name, module in model.named_modules():
         if hasattr(module, "num_bits") and hasattr(module, "backend"):
             digest.update(str((name, module.extra_repr())).encode())
+    config = getattr(model, "config", None)
+    if callable(getattr(config, "to_dict", None)):
+        digest.update(b"model_config:")
+        digest.update(json.dumps(_semantic_config(config), sort_keys=True).encode())
     return digest.hexdigest()
+
+
+def _semantic_config(value):
+    if callable(getattr(value, "to_dict", None)):
+        original, value = value, value.to_dict()
+        # Keep live subconfigs so their omitted execution choices are included too.
+        for name in value:
+            nested = getattr(original, name, None)
+            if callable(getattr(nested, "to_dict", None)):
+                value[name] = nested
+        # HF omits these when saving, although they affect execution precision/math.
+        for name in ("distributed_config", "_attn_implementation", "_experts_implementation"):
+            if hasattr(original, name):
+                value[name] = getattr(original, name)
+    if isinstance(value, dict):
+        return {
+            key: _semantic_config(item)
+            for key, item in value.items()
+            if key not in {"_name_or_path", "_commit_hash", "transformers_version"}
+        }
+    if isinstance(value, (list, tuple)):
+        return [_semantic_config(item) for item in value]
+    if isinstance(value, (torch.dtype, Path)):
+        return str(value)
+    return value
 
 
 def _batch_hash(batch):

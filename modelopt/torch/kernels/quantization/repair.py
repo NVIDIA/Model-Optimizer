@@ -83,10 +83,19 @@ def _decode_iq(
             entry = low | (((high >> ((group % 4) * 2)) & 3) << 8)
             signs = tl.load(packed + base + 34 + group, valid, 0).to(tl.int32)
         else:
-            low = tl.load(packed + base + 2 + 2 * group, valid, 0).to(tl.int32)
-            high = tl.load(packed + base + 3 + 2 * group, valid, 0).to(tl.int32)
-            code = low | (high << 8)
-            entry, sign_index = code & 511, code >> 9
+            if kind == "iq2_xxs":
+                subblock = base + 2 + (group // 4) * 8
+                entry = tl.load(packed + subblock + group % 4, valid, 0).to(tl.int32)
+                auxiliary = tl.load(packed + subblock + 4, valid, 0).to(tl.int32)
+                auxiliary |= tl.load(packed + subblock + 5, valid, 0).to(tl.int32) << 8
+                auxiliary |= tl.load(packed + subblock + 6, valid, 0).to(tl.int32) << 16
+                auxiliary |= tl.load(packed + subblock + 7, valid, 0).to(tl.int32) << 24
+                sign_index = (auxiliary >> ((group % 4) * 7)) & 127
+            else:
+                low = tl.load(packed + base + 2 + 2 * group, valid, 0).to(tl.int32)
+                high = tl.load(packed + base + 3 + 2 * group, valid, 0).to(tl.int32)
+                code = low | (high << 8)
+                entry, sign_index = code & 511, code >> 9
             parity = sign_index ^ (sign_index >> 4)
             parity ^= parity >> 2
             parity ^= parity >> 1
@@ -111,6 +120,10 @@ def decode_iq_levels(packed, format_name, shape):
         from modelopt.torch.quantization.ggml.iq2_xs import iq2_xs_grid
 
         grid, block_bytes = iq2_xs_grid(packed.device), 74
+    elif format_name == "iq2_xxs":
+        from modelopt.torch.quantization.ggml.iq2_xxs import iq2_xxs_grid
+
+        grid, block_bytes = iq2_xxs_grid(packed.device), 66
     else:
         raise ValueError(f"No native repair-level decoder for {format_name!r}.")
     elements = math.prod(shape)

@@ -2096,6 +2096,9 @@ def _is_plain_fake_quant(q: nn.Module) -> TypeGuard[TensorQuantizer]:
         and q._if_quant
         and q._fake_quant
         and not q._if_calib
+        and "_fake_quantize" not in q.__dict__
+        and "forward" not in q.__dict__
+        and getattr(q, "_native_weight_meta", None) is None
         and not q._use_constant_amax
         # Nothing applied around the quantization itself.
         and q.backend is None
@@ -2126,6 +2129,10 @@ def _try_stacked_fake_quant(weight: torch.Tensor, quantizers: nn.ModuleList) -> 
         or weight.shape[0] != len(quantizers)
     ):
         return None
+    if getattr(quantizers[0], "_local_repair_active", False):
+        from ...repair_formats import grouped_native_repair
+
+        return grouped_native_repair(quantizers, weight.dtype)
     plain = [q for q in quantizers if _is_plain_fake_quant(q)]
     if len(plain) != len(quantizers):
         return None

@@ -1,78 +1,31 @@
-# Review map: local quantization distillation
+# Source and review map
 
-The comparison base is `origin/main` at `8c614286acd653670fb7ee6e9b4fac4da62a1626`.
-Review the branch diff against that revision. Historical validation measurements
-retain their original source revisions. The AutoModel dependency has no working-tree
-modifications.
+[Return to the API guide](README.md). The review base is `origin/main` at
+`8c614286acd653670fb7ee6e9b4fac4da62a1626`; historical measurements retain their
+own runtime/source revisions.
 
-The feature has four dependency-ordered review areas. These are review slices,
-not separate user APIs or separate copies of the training loop.
-
-| Area | Main entry points | Why it changes |
+| Owner | Entry points | Review focus |
 |---|---|---|
-| Native quantization prerequisites | `quantization/model_calib.py`, `mode.py`, `model_quant.py`, `utils/core_utils.py`, `plugins/{automodel,huggingface}.py` | Native expert calibration, distributed statistics and FSDP-owned weight access. Preserve activation calibration and expert routing. |
-| Native format fields and persistence | `quantization/{repair,repair_formats}.py`, `qtensor/`, `ggml/scale_fields.py`, `utils/{native_weight,weight_source}.py`, `export/`, `backends/nvfp4_gemm.py` | Train legal format fields while keeping frozen codes and native checkpoint semantics. Optional external formats register their own provider. |
-| Generic local distillation | `distill/{config,local_distillation,local_units,local_checkpoint,layerwise_distillation_model}.py` | Shared streaming teacher capture/replay, independent unit optimizers, masking, validation and transactional resume. No AutoModel imports in the generic runner. |
-| AutoModel and tutorial | `distill/plugins/automodel/`, this example directory and the public RST guide | Optional model-family selection, packed inputs, EP/CP/TP/FSDP2/PP ownership, native DCP and reproducible end-to-end recipes. |
+| Repair API | `modelopt/torch/distill/config.py`, `local_distillation.py`, `local_units.py` | Once-resolved unit/quantizer preflight plan, valid-token objectives and independent unit optimizers |
+| Shared runtime | `modelopt/torch/distill/local_parallel.py`, `local_runtime.py`, `local_checkpoint.py` | Typed RealizedMeshContext, physical gradient/statistic ownership, PP scheduling and exact resume |
+| Native fields | `modelopt/torch/quantization/repair.py`, `repair_formats.py`, `repair_partition.py` | Legal native scale projection, bounded immutable constants, partition geometry and final writeback |
+| Native kernels | `modelopt/torch/kernels/quantization/repair.py` | IQ decoding, grouped scale application, gradients and large-index addressing |
+| HF adapter | `modelopt/torch/distill/plugins/transformers/adapter.py`, `families/`, `packing.py`, `output_head.py` | Semantic units, conservative document coalescing, output-head contracts and per-forward side state |
+| HF distributed | `parallel.py`, `context_parallel.py`, `functional_fsdp.py`, `checkpoint.py` in that plugin | Native HF plans, CP execution modes, callable FSDP owners and topology-native DCP |
+| Text extensions | `modelopt/torch/models/{deepseek_v41,kimi_k31,step5,mimo_v2}/` | Published architecture math, native precision, checkpoint reconstruction and cache semantics |
+| Example tools | `prepare_data.py`, `evaluate.py`, `benchmark_*.py` | Unique splits, chunked full-vocabulary KLD, projection modes and explicit benchmark topology |
 
-## AutoModel integration
+Start with native format/partition invariants, then the shared local runner,
+then HF placement and family behavior. Model-specific math belongs in the model;
+family descriptors describe ownership and replay rather than replacing forward
+kernels. Optional formats register their repair/checkpoint contracts explicitly.
 
-The public import remains
-`modelopt.torch.distill.plugins.automodel.AutoModelLocalDistillationAdapter`.
-Everything specific to AutoModel execution lives in its plugin package:
+Training uses hidden-output MSE; whole-model initializer/result assessment uses
+held-out teacher KLD. Inspect exact token counts and `context_parallel_modes`
+before interpreting a metric. Native checkpoint restore preserves topology and
+fields; deployment conversion has separate fusion/layout restrictions.
 
-- `adapter.py`: interface and orchestration.
-- `families/`: registered family-owned specs, packing, transport and replay-state hooks.
-- `runners.py`: shared native fast replay, replaceable by a family descriptor.
-- `packing.py`: common repair/diagnostic packing and context-parallel preparation.
-- `runtime.py` and `parallel.py`: objective, gradient and native parameter ownership.
-- `pipeline.py`: physical-stage scheduling and replay.
-- `checkpoint.py`: native distributed state and publishing.
-
-The quantization plugin is separate because PTQ also needs native expert projection
-ownership and calibration, before any Bypass runner exists. General format and
-FSDP fixes stay in their existing owners rather than being hidden in model adaptors.
-
-## Selection and evidence
-
-Held-out full-vocabulary KL(teacher || candidate) selects the PTQ initializer and
-retained repaired checkpoint. PPL/CE on this surrogate dataset is secondary.
-The repair objective remains local hidden-output MSE on all valid packed tokens.
-Native ModelOpt saves preserve the repaired format fields; deployment conversion
-can perform its existing fusion/resmoothing and should be checked again with KL.
-
-`VALIDATION.md` separates tiny native/distributed correctness checks from pretrained
-model measurements. Random-prefix tests establish compatibility, not model quality.
-The completed MiMo experiment used a frozen source snapshot. Its pretrained-model
-results are recorded separately in `RESULTS.md`.
-
-## Publishing boundaries
-
-Keep operational run manifests, source snapshots, cluster batch scripts and secrets
-and internal development notes outside the package. Review shared-core/format
-prerequisites separately before the higher-level runner. Do not describe the entire
-working tree as a tutorial-only change.
-
-## Performance and optional providers
-
-The generic runner owns no model-name switch. AutoModel families own temporary
-routing state and can replace unit execution inside the existing FSDP ownership
-window. The default native MoE path batches homogeneous expert fields and uses
-one-launch native IQ1_M/IQ2_S/IQ2_XS level decoding plus differentiable block scales.
-Other quantizers retain their native execution. Performance evidence must distinguish
-full-width component replay from end-to-end model training.
-
-External codecs are registered, not embedded: `register_repair_backend` chooses
-native repair state and TP capability, and native tensor subclasses register their
-checkpoint identity. Built-in examples and tests use the formats supplied by
-ModelOpt; optional providers are imported explicitly by their callers.
-
-## Adapter-owned native writeback
-
-Each weight repair state implements `finalize_(quantizer, weight)`; activation
-states implement `finalize_(quantizer)`. The policy resolves current native
-weight bindings, delegates writeback, and removes temporary state. Format states
-own legal field projection, weight-coordinate folding and native payload pinning.
-External providers inherit or override this contract without public type dispatch.
-Both grouped and individual IQ quantizers share native IQ1_M/IQ2_S/IQ2_XS level
-decoding during native replay; CPU, missing-Triton and other-codec fallbacks remain.
+[Validation](VALIDATION.md) lists regression coverage and executed checks;
+[Results](RESULTS.md) distinguishes current compatibility from older timings.
+Keep operational snapshots, cluster scripts, full run ledgers and credentials
+outside the distributable example.

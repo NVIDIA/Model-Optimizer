@@ -38,7 +38,6 @@ with import_plugin("apex"):
     from .apex import *
 
 from .attention import *
-from .automodel import *
 from .custom import *
 from .gated_delta_net import *
 

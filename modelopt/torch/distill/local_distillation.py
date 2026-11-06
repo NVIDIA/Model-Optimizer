@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from itertools import chain
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
@@ -37,7 +37,10 @@ from modelopt.torch.utils import print_rank_0
 from .config import LocalDistillationConfig
 from .local_checkpoint import LocalRepairCheckpoint, _batch_hash
 from .local_optimizer import load_optimizer_state_dict, make_optimizer, optimizer_state_dict
-from .local_units import ModuleLocalDistillationAdapter, mse_statistics
+from .local_units import ModuleLocalDistillationAdapter, RepairUnit, mse_statistics
+
+if TYPE_CHECKING:
+    from modelopt.torch.quantization.repair import _UnitRepairPlan
 
 __all__ = ["LocalDistillationResult", "local_distill"]
 
@@ -49,6 +52,12 @@ class LocalDistillationResult:
     student: nn.Module
     metrics: dict[str, Any] = field(default_factory=dict)
     report_paths: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _LocalRepairPlan:
+    units: tuple[RepairUnit, ...]
+    quantizers: dict[str, "_UnitRepairPlan"]
 
 
 def local_distill(
@@ -65,7 +74,7 @@ def local_distill(
     Preflight is transactional. A zero-update call checks ownership and returns
     the original PTQ model, without adding a distillation wrapper or teacher.
     """
-    from modelopt.torch.quantization.repair import preflight_quantizers
+    from modelopt.torch.quantization.repair import _resolve_quantizer_plan
     from modelopt.torch.quantization.utils import is_quantized
 
     config = (
@@ -81,14 +90,17 @@ def local_distill(
         return LocalDistillationResult(
             student, {"updates": 0, "units": [unit.name for unit in units]}
         )
-    report = preflight_quantizers(
+    report, quantizers = _resolve_quantizer_plan(
         [student.get_submodule(unit.student_path) for unit in units], config
     )
     if hasattr(adapter, "validate_preflight"):
         adapter.validate_preflight(report)
-    else:
-        report.require_supported()
-    return _LocalRunner(student, teacher, units, config, adapter).run(
+    report.require_supported()
+    plan = _LocalRepairPlan(
+        tuple(units),
+        {unit.name: quantizer for unit, quantizer in zip(units, quantizers, strict=True)},
+    )
+    return _LocalRunner(student, teacher, plan, config, adapter).run(
         train_dataloader, validation_dataloader
     )
 
@@ -104,7 +116,9 @@ def _learning_rate_factor(config, step):
 
 
 class _LocalRunner:
-    def __init__(self, student, teacher, units, config, adapter):
+    def __init__(self, student, teacher, plan, config, adapter):
+        self.plan, units = plan, plan.units
+        self.modules = {name: quantizers.unit for name, quantizers in plan.quantizers.items()}
         self.student, self.teacher, self.units = student, teacher, units
         self.config, self.adapter = config, adapter
         self.policies, self.optimizers = {}, {}
@@ -143,7 +157,7 @@ class _LocalRunner:
     def _parameters(self, unit):
         return {
             name: parameter
-            for name, parameter in self.student.get_submodule(unit.student_path).named_parameters()
+            for name, parameter in self.modules[unit.name].named_parameters()
             if parameter.requires_grad
         }
 
@@ -224,7 +238,7 @@ class _LocalRunner:
             and torch.distributed.is_initialized()
             and torch.distributed.get_world_size() > 1
         ):
-            raise ValueError("Distributed local repair requires the AutoModel runtime adapter.")
+            raise ValueError("Distributed local repair requires a distributed runtime adapter.")
         self.update_batch_size = (
             self.runtime.local_batch_size if self.runtime else self.config.global_batch_size
         )
@@ -239,14 +253,15 @@ class _LocalRunner:
         for unit in self.units:
             policy = QuantizationRepairPolicy()
             self.policies[unit.name] = policy
-            module = self.student.get_submodule(unit.student_path)
+            module = self.modules[unit.name]
+            quantizers = self.plan.quantizers[unit.name]
             groups = (
-                self.runtime.prepare_policy(module, policy, self.config)
+                self.runtime.prepare_policy(quantizers, policy, self.config)
                 if self.runtime
-                else policy.prepare(module, self.config)
+                else policy._prepare(quantizers, self.config)
             )
             if self.runtime:
-                self.runtime.register(self.student.get_submodule(unit.student_path), policy)
+                self.runtime.register(module, policy)
             self.metrics["units"][unit.name]["trainable_parameters_local"] = sum(
                 parameter.numel() for group in groups for parameter in group.params
             )
@@ -333,7 +348,7 @@ class _LocalRunner:
                 self._phase("student_replay_backward" if training else "student_validation"),
                 torch.set_grad_enabled(training),
             ):
-                module = self.student.get_submodule(unit.student_path)
+                module = self.modules[unit.name]
                 with self.adapter.observe_replay(module, training) as coverage:
                     prediction = self.adapter.replay(module, record)
                 if training:
@@ -481,6 +496,9 @@ class _LocalRunner:
             )
             / 3600,
         )
+        execution = getattr(self.adapter, "execution_metadata", dict)()
+        if execution:
+            self.metrics["execution"] = execution
 
     def run(self, dataloader, validation):
         if validation is not None and iter(validation) is validation:
@@ -618,9 +636,7 @@ class _LocalRunner:
                 policy = self.policies[unit.name]
                 if self.runtime:
                     with self._phase("finalization"):
-                        self.runtime.finalize_policy(
-                            self.student.get_submodule(unit.student_path), policy
-                        )
+                        self.runtime.finalize_policy(self.modules[unit.name], policy)
                 else:
                     with self._phase("finalization"):
                         policy.finalize_()

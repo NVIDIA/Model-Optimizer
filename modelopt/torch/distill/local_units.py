@@ -67,10 +67,10 @@ def teacher_forward_kwargs(teacher, kwargs):
     """Avoid cache and unused full-token logits in repair-only teacher passes."""
     kwargs = dict(kwargs)
     parameters = inspect.signature(teacher.forward).parameters
-    for name, value in (("use_cache", False), ("logits_to_keep", 1)):
+    for name, value in (("use_cache", False), ("logits_to_keep", 1), ("num_logits_to_keep", 1)):
         parameter = parameters.get(name)
         if parameter is not None and parameter.kind != inspect.Parameter.POSITIONAL_ONLY:
-            kwargs[name] = value
+            kwargs[name] = False if name == "use_cache" else kwargs.get(name, value)
     return kwargs
 
 
@@ -280,6 +280,27 @@ class ModuleLocalDistillationAdapter:
                 batch,
             )
 
+    def teacher_forward_target(self, teacher):
+        """Select a model-owned forward entry point, preserving the root's hooks."""
+        return teacher
+
+    def forward_teacher(self, teacher, args, kwargs):
+        """Run the real task forward, including FSDP hooks on outer HF wrappers."""
+        target = self.teacher_forward_target(teacher)
+        kwargs = teacher_forward_kwargs(target, kwargs)
+        if target is teacher:
+            return teacher(*args, **kwargs)
+        had_override = "forward" in teacher.__dict__
+        previous = teacher.__dict__.get("forward")
+        teacher.forward = lambda *args, **kwargs: target(*args, **kwargs)
+        try:
+            return teacher(*args, **kwargs)
+        finally:
+            if had_override:
+                teacher.forward = previous
+            else:
+                delattr(teacher, "forward")
+
     def teacher_microbatch(self, teacher, units, batch, consume):
         """Stream each boundary directly to its independent repair consumer."""
         # Local import avoids the layerwise wrapper's module initialization cycle.
@@ -302,4 +323,4 @@ class ModuleLocalDistillationAdapter:
         else:
             args, kwargs = (batch if isinstance(batch, tuple) else (batch,)), {}
         with local_replay_boundaries(teacher, units, self, batch, consume), torch.no_grad():
-            teacher(*args, **teacher_forward_kwargs(teacher, kwargs))
+            self.forward_teacher(teacher, args, kwargs)

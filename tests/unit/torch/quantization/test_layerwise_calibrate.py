@@ -1227,7 +1227,6 @@ def test_layerwise_save_every_writes_next_inputs_only_at_window_boundaries(monke
         # just-calibrated layer's state before the next-layer capture forward
         # swaps it to _SkipLayer.
         ("save_every", 4, 2, True, 1),
-        ("prefix_replay", 4, 1, True, 0),
     ],
 )
 def test_layerwise_checkpoint_resume_matches_one_shot_amax(
@@ -1240,8 +1239,6 @@ def test_layerwise_checkpoint_resume_matches_one_shot_amax(
     ``weights.pt``, ``quantizer_buffers.pt`` present per layer).
     """
     _register_test_discoverer(monkeypatch)
-    if scenario == "prefix_replay":
-        monkeypatch.setattr(LayerActivationCollector, "_prefix_replay_support", [lambda m: True])
 
     calib_data = [torch.randint(0, 32, (2, 8))]
     forward_loop = lambda m: [m(b) for b in calib_data]  # noqa: E731

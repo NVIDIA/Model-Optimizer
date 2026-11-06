@@ -13,4 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""AutoModel local quantization distillation walkthrough."""
+"""Transformers local quantization distillation, data and diagnostics examples."""

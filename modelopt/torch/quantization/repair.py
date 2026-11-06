@@ -87,6 +87,8 @@ def _scale_adapter(quantizer, mode="scale_only"):
         raise ValueError(f"No repair adapter for backend {quantizer.backend!r}.")
     if not quantizer.fake_quant:
         return CompressedScale
+    if (getattr(quantizer, "_native_weight_meta", None) or {}).get("native_scale_buffers"):
+        return FakeNativeScale
     if mode == "weight_only":
         return NativeWeightShadow
     if quantizer.bias is not None and not isinstance(quantizer.num_bits, int):
@@ -137,10 +139,16 @@ def _stored_weight_quantizer(quantizer):
 
 def preflight_quantizers(units, config):
     """Inspect quantizers without reading sharded weight views or changing state."""
+    return _resolve_quantizer_plan(units, config)[0]
+
+
+def _resolve_quantizer_plan(units, config):
     problems, seen = [], set()
+    plans = []
     count = 0
     weight_ids, weight_scale_ids = set(), set()
     for index, unit in enumerate(units):
+        entries = []
         owned = 0
         for module in unit.modules():
             if not isinstance(module, QuantModule):
@@ -151,7 +159,9 @@ def preflight_quantizers(units, config):
                     validate(config)
                 except ValueError as exc:
                     problems.append(f"Unit {index}: {exc}")
-            for container in module.iter_weight_quantizers_for_calibration():
+            for weight_index, container in enumerate(
+                module.iter_weight_quantizers_for_calibration()
+            ):
                 weight_ids.update(
                     id(q) for q in container.modules() if isinstance(q, TensorQuantizer)
                 )
@@ -182,12 +192,16 @@ def preflight_quantizers(units, config):
                         raise ValueError(
                             "Weight/joint/requantization requires a native code-update adapter."
                         )
+                    entries.append((_WeightBinding(module, weight_index), quantizer, factory))
                 except ValueError as exc:
                     problems.append(f"Unit {index}: {exc}")
         if not owned:
             problems.append(f"Unit {index} has no enabled weight quantizer.")
+        plans.append(_UnitRepairPlan(unit, tuple(entries)))
     if config.tune_activations:
-        for unit in units:
+        for plan in plans:
+            activations = []
+            unit = plan.unit
             for quantizer in unit.modules():
                 if (
                     not isinstance(quantizer, TensorQuantizer)
@@ -209,9 +223,11 @@ def preflight_quantizers(units, config):
                         raise ValueError(
                             "Activation tuning requires calibrated static integer thresholds."
                         )
+                    activations.append(quantizer)
                 except (ValueError, AssertionError) as exc:
                     problems.append(str(exc))
-    return CapabilityReport(count, tuple(problems))
+            plan.activations = tuple(activations)
+    return CapabilityReport(count, tuple(problems)), tuple(plans)
 
 
 @dataclass
@@ -233,6 +249,13 @@ class _WeightBinding:
         from torch.distributed.tensor import DTensor
 
         return weight.to_local() if isinstance(weight, DTensor) else weight
+
+
+@dataclass
+class _UnitRepairPlan:
+    unit: nn.Module
+    weights: tuple[tuple[_WeightBinding, TensorQuantizer, Any], ...]
+    activations: tuple[TensorQuantizer, ...] = ()
 
 
 def _repair_fake_quantize(quantizer, inputs):
@@ -287,31 +310,12 @@ class QuantizationRepairPolicy:
 
     def prepare(self, unit, config):
         """Freeze a unit and return independent native-field optimizer groups."""
-        preflight_quantizers([unit], config).require_supported()
-        entries = []
-        seen, weight_ids = set(), set()
-        for module in unit.modules():
-            if not isinstance(module, QuantModule):
-                continue
-            for index, (weight, container) in enumerate(module.iter_weights_for_calibration()):
-                weight_ids.update(
-                    id(q) for q in container.modules() if isinstance(q, TensorQuantizer)
-                )
-                quantizer = _stored_weight_quantizer(container)
-                if quantizer is None:
-                    continue
-                if id(quantizer) in seen:
-                    raise ValueError(
-                        "A weight quantizer has multiple owners; group their native fields explicitly."
-                    )
-                seen.add(id(quantizer))
-                if isinstance(weight, QTensorWrapper):
-                    entries.append((_WeightBinding(module, index), quantizer, CompressedScale))
-                    continue
-                factory: Any = _scale_adapter(quantizer, config.mode)
-                entries.append((_WeightBinding(module, index), quantizer, factory))
-        if not entries:
-            raise ValueError("The selected repair unit has no enabled weight quantizer.")
+        report, plans = _resolve_quantizer_plan([unit], config)
+        report.require_supported()
+        return self._prepare(plans[0], config)
+
+    def _prepare(self, plan, config):
+        unit = plan.unit
         self._flags.setdefault(
             unit, {name: parameter.requires_grad for name, parameter in unit.named_parameters()}
         )
@@ -330,8 +334,10 @@ class QuantizationRepairPolicy:
         groups = []
         parameter_ids = set()
         try:
-            for binding, quantizer, factory in entries:
+            for binding, quantizer, factory in plan.weights:
                 weight = binding.resolve()
+                if isinstance(weight, QTensorWrapper):
+                    factory = CompressedScale
                 method = "dequantize" if factory is CompressedScale else "_fake_quantize"
                 had_override = method in quantizer.__dict__
                 previous_override = quantizer.__dict__.get(method)
@@ -386,13 +392,7 @@ class QuantizationRepairPolicy:
                         )
                     )
             if config.tune_activations:
-                for quantizer in unit.modules():
-                    if (
-                        not isinstance(quantizer, TensorQuantizer)
-                        or not quantizer.is_enabled
-                        or id(quantizer) in weight_ids
-                    ):
-                        continue
+                for quantizer in plan.activations:
                     state = StaticActivationScale(quantizer)
                     self._tie_shared_scales(state, quantizer)
                     had_override = "_fake_quantize" in quantizer.__dict__

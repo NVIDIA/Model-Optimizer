@@ -129,13 +129,8 @@ def _restore_shared_quant_state_aliases(
     SharedWeightGlobalAmaxState.restore(model, patterns=patterns)
 
 
-def restore_quantizer_state(
-    model: nn.Module, config: QuantizeConfig, metadata: MetadataDict, *, post_restore: bool = True
-):
+def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: MetadataDict):
     """Restore the quantizer states from the given state dict.
-
-    ``post_restore=False`` defers weight-dependent hooks when a native
-    distributed loader will restore the exact quantizer buffers afterward.
 
     For MCore sharded checkpoint (torch-dist), quantizer_state is removed from the
     metadata and stored with the main checkpoint as extra_state (similar to TransformerEngine).
@@ -178,11 +173,10 @@ def restore_quantizer_state(
             maybe_promote_nvfp4_static_quantizer(module, state)
             module.set_from_modelopt_state(state)
 
-    if post_restore:
-        for name, module in model.named_modules():
-            if isinstance(module, QuantModule):
-                name = get_unwrapped_name(name, model)
-                module.modelopt_post_restore(name)
+    for name, module in model.named_modules():
+        if isinstance(module, QuantModule):
+            name = get_unwrapped_name(name, model)
+            module.modelopt_post_restore(name)
 
     _restore_shared_quant_state_aliases(model, config, metadata)
 

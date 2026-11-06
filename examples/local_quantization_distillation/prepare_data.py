@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prepare a unique, conversation-disjoint native AutoModel packed corpus."""
+"""Prepare unique, conversation-disjoint text packs with explicit document boundaries."""
 
 import argparse
 import hashlib
@@ -59,7 +59,6 @@ def prepare_packed_corpus(
     sequence_length,
     pack_counts,
     seed=42,
-    padding_idx=0,
     source_metadata=None,
     calibration_sequence_length=None,
 ):
@@ -70,8 +69,6 @@ def prepare_packed_corpus(
     fragment of a conversation belongs to the same split. Split assignment does
     not depend on the requested sizes, so longer training budgets share a prefix.
     """
-    from nemo_automodel.components.datasets.llm.neat_packing import _build_packed_sample
-
     output = Path(output).resolve()
     if output.exists():
         raise ValueError("Packed corpus output must be a new directory.")
@@ -128,11 +125,17 @@ def prepare_packed_corpus(
                 lengths[split] += len(chunk)
                 start = stop
                 if lengths[split] == split_lengths[split]:
-                    pack = _build_packed_sample(samples[split], split_lengths[split], padding_idx)
-                    values = {**pack, "document_ids": pack["attention_mask"]}
+                    packed = samples[split]
+                    values = {
+                        field: np.concatenate([sample[field] for sample in packed])
+                        for field in ("input_ids", "labels")
+                    }
+                    sizes = [len(sample["input_ids"]) for sample in packed]
+                    values["document_ids"] = np.repeat(np.arange(1, len(packed) + 1), sizes)
+                    values["position_ids"] = np.concatenate([np.arange(size) for size in sizes])
                     index = written[split]
                     for field in _FIELDS:
-                        arrays[split][field][index] = values[field].numpy()
+                        arrays[split][field][index] = values[field]
                     streams[split].write(
                         json.dumps({"pack": index, "fragments": fragments[split]}) + "\n"
                     )
@@ -156,7 +159,7 @@ def prepare_packed_corpus(
             streams[split].close()
         manifest = {
             "version": 1,
-            "packing": "nemo_neat_document_ids",
+            "packing": "document_ids",
             "sequence_length": sequence_length,
             "seed": seed,
             "source": source_metadata or {},
@@ -202,7 +205,11 @@ class PackedBatchSequence(Sequence):
         """Open immutable packed rows without sampler padding or epoch repetition."""
         root = Path(directory)
         self.manifest = json.loads((root / "manifest.json").read_text())
-        if self.manifest["version"] != 1 or self.manifest["packing"] != "nemo_neat_document_ids":
+        # Earlier corpora used a backend-named identifier for the same array layout.
+        if self.manifest["version"] != 1 or self.manifest["packing"] not in (
+            "document_ids",
+            "nemo_neat_document_ids",
+        ):
             raise ValueError("Unsupported packed-corpus contract.")
         self.fingerprint = _hash(root / "manifest.json")
         self.size = self.manifest["partitions"][partition]["packs"]
@@ -374,7 +381,6 @@ def main():
             "diagnostic": args.diagnostic_packs,
         },
         seed=args.seed,
-        padding_idx=tokenizer.pad_token_id or 0,
         source_metadata={
             "dataset": args.dataset,
             "revision": revision,

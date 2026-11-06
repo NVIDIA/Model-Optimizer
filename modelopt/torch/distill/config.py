@@ -52,7 +52,7 @@ class LocalDistillationConfig(ModeloptBaseConfig):
     updates: int = pydantic.Field(default=512, ge=0)
     global_batch_size: int = pydantic.Field(default=8, gt=0)
     micro_batch_size: int | None = pydantic.Field(default=None, gt=0)
-    sequence_length: int = pydantic.Field(default=4096, gt=0)
+    sequence_length: int = pydantic.Field(default=32768, gt=0)
     gradient_clip_norm: float = pydantic.Field(default=1.0, gt=0)
     loss: Literal["mse", "normalized_mse"] = "mse"
     validation_interval: int | None = pydantic.Field(default=None, gt=0)

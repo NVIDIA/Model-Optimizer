@@ -8,7 +8,7 @@ Changelog
 
 *Quantization*
 
-- Add local quantization distillation (Bypass) for existing ModelOpt PTQ models, with frozen-code scale repair, mixed-format units and AutoModel distributed execution. The GLM Flash tutorial covers GPTQ IQ2_S initialization, unique packed data, native checkpoint resume and held-out PPL/KL diagnostics.
+- Add local quantization distillation (Bypass) for existing ModelOpt PTQ models, with frozen-code scale repair, mixed-format units and standalone Transformers support. The Python API supports unique packed data, native checkpoint resume and held-out full-vocabulary teacher KL diagnostics.
 
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
 - The functional quantized-weight export API now exports the KV cache: ``capture_kv_cache_export_state`` returns an attention module's ``k_scale`` / ``v_scale``, and ``build_hf_quantization_config`` takes the KV-cache formats from ``get_kv_cache_export_spec``.

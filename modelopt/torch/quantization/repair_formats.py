@@ -17,11 +17,13 @@
 
 import copy
 import math
+import weakref
 from contextlib import contextmanager
 from contextvars import ContextVar
 
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor
 
 from .ggml.common import pin_packed_weight
 from .ggml.registry import GGML_FORMAT_REGISTRY
@@ -29,6 +31,85 @@ from .ggml.scale_fields import decode_scale_fields, replace_scale_fields
 from .utils.native_weight import pin_native_weight
 
 _FUSED_BLOCK_SCALES = ContextVar("modelopt_fused_repair_scales", default=False)
+_GROUPED_CONSTANT_BYTES = 256 * 1024
+
+
+class _GroupedConstants:
+    def __init__(self, states, tensors, signature):
+        self.sources = tuple(weakref.ref(value) for value in (*states, *tensors))
+        self.signature = signature
+        self.values = {}
+
+    def matches(self, states, tensors, signature):
+        sources = (*states, *tensors)
+        return (
+            self.signature == signature
+            and len(sources) == len(self.sources)
+            and all(ref() is value for ref, value in zip(self.sources, sources, strict=True))
+        )
+
+
+class _GroupedScale(nn.Module):
+    _grouped_constants = None
+
+    def _apply(self, *args, **kwargs):
+        self._grouped_constants = None
+        return super()._apply(*args, **kwargs)
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        self._grouped_constants = None
+        return super()._load_from_state_dict(*args, **kwargs)
+
+
+def _grouped_constant_values(states, fields, layout):
+    """Retain one small immutable group per owner, never levels or autograd values."""
+    if _GROUPED_CONSTANT_BYTES <= 0:
+        with torch.no_grad():
+            return {name: combine(values) for name, (values, combine) in fields.items()}
+    tensors = [tensor for values, _ in fields.values() for tensor in values]
+    cacheable = all(
+        not isinstance(tensor, DTensor) and not tensor.requires_grad and not tensor.is_inference()
+        for tensor in tensors
+    )
+    signature = None
+    if cacheable:
+        signature = (
+            layout,
+            tuple(
+                (
+                    tensor._version,
+                    tensor.untyped_storage()._cdata,
+                    tensor.storage_offset(),
+                    tensor.device,
+                    tensor.dtype,
+                    tuple(tensor.shape),
+                    tensor.stride(),
+                )
+                for tensor in tensors
+            ),
+        )
+    first = states[0]
+    cache = first._grouped_constants
+    if not cacheable or cache is None or not cache.matches(states, tensors, signature):
+        # Release the previous group before allocating another copy of its constants.
+        first._grouped_constants = None
+        cache = None
+        if cacheable:
+            cache = _GroupedConstants(states, tensors, signature)
+            first._grouped_constants = cache
+    result, remaining = {}, _GROUPED_CONSTANT_BYTES
+    with torch.no_grad():
+        for name, (values, combine) in fields.items():
+            if cache is not None and name in cache.values:
+                result[name] = cache.values[name]
+            else:
+                result[name] = combine(values)
+                size = result[name].numel() * result[name].element_size()
+                if cache is not None and size <= remaining:
+                    cache.values[name] = result[name]
+            if cache is not None and name in cache.values:
+                remaining -= result[name].numel() * result[name].element_size()
+    return result
 
 
 @contextmanager
@@ -55,7 +136,7 @@ def _native_scale_kernels(packed):
 
 
 def _decode_repair_levels(packed, fmt, shape, kernels):
-    if kernels is not None and fmt.name in ("iq1_s", "iq1_m", "iq2_s", "iq2_xs"):
+    if kernels is not None and fmt.name in ("iq1_s", "iq1_m", "iq2_s", "iq2_xs", "iq2_xxs"):
         return kernels.decode_iq_levels(packed, fmt.name, shape)
     return fmt.decode_int8(packed, torch.tensor(shape, dtype=torch.int64))[0]
 
@@ -163,7 +244,9 @@ class StaticIntegerScale(nn.Module):
         amax = quantizer._get_amax(processed_weight).detach().float().clone()
         bound = float(2 ** (quantizer.num_bits - 1 + int(quantizer.unsigned)) - 1)
         max_bound = amax.new_tensor(bound)
-        divisor = torch.where(amax > 2**-24, max_bound / amax, torch.ones_like(amax))
+        divisor = torch.where(
+            amax > 2**-24, max_bound / amax.clamp_min(2**-24), torch.ones_like(amax)
+        )
         minimum = 0 if quantizer.unsigned else -bound - int(not quantizer.narrow_range)
         bias = quantizer._get_bias(processed_weight)
         self.register_buffer("bias_value", bias.detach().clone() if bias is not None else None)
@@ -206,7 +289,11 @@ class StaticIntegerScale(nn.Module):
     def forward(self, inputs):
         """Decode original codes or explicitly reproject the selected shadow."""
         amax = self.amax()
-        divisor = torch.where(amax > 2**-24, self.max_bound / amax, torch.ones_like(amax))
+        # Zero-initialized projections have zero calibration thresholds. Even an
+        # inactive torch.where branch must avoid division by zero in backward.
+        divisor = torch.where(
+            amax > 2**-24, self.max_bound / amax.clamp_min(2**-24), torch.ones_like(amax)
+        )
         codes = self.codes.float()
         source = (
             self.shadow if self.shadow is not None else getattr(self, "requantize_source", None)
@@ -238,7 +325,7 @@ class StaticIntegerScale(nn.Module):
         _write_prepared_weight(quantizer, weight, values)
 
 
-class GGMLScale(nn.Module):
+class GGMLScale(_GroupedScale):
     """FP16 super-block and legal discrete local scales, with immutable grid codes."""
 
     def __init__(self, quantizer, processed_weight):
@@ -318,6 +405,9 @@ def grouped_native_repair(quantizers, dtype):
     """
     if not _FUSED_BLOCK_SCALES.get():
         return None
+    repair_states = [getattr(quantizer, "_local_repair_state", None) for quantizer in quantizers]
+    if repair_states and isinstance(repair_states[0], FakeNativeScale):
+        return _grouped_float_repair(repair_states, dtype)
     states: list[GGMLScale] = []
     for quantizer in quantizers:
         state = getattr(quantizer, "_local_repair_state", None)
@@ -334,19 +424,30 @@ def grouped_native_repair(quantizers, dtype):
     kernels = _native_scale_kernels(first.packed)
     if kernels is None:
         return None
-    packed = torch.cat([state.packed.reshape(-1, first.format.block_bytes) for state in states])
+    fields = {
+        "global_base": ([state.global_base for state in states], torch.stack),
+        "global_sign": ([state.global_sign for state in states], torch.stack),
+    }
+    if first.local_delta is not None:
+        fields["local_base"] = ([state.local_base for state in states], torch.stack)
+    fields["packed"] = (
+        [state.packed for state in states],
+        lambda values: torch.cat([value.reshape(-1, first.format.block_bytes) for value in values]),
+    )
+    constants = _grouped_constant_values(states, fields, (first.name, first.weight_shape))
+    packed = constants["packed"]
     rows, columns = first.weight_shape
     shape = (len(states) * rows, columns)
     with torch.no_grad():
         levels = _decode_repair_levels(packed, first.format, shape, kernels)
-    base = torch.stack([state.global_base for state in states])
+    base = constants["global_base"]
     delta = torch.stack([state.global_delta for state in states])
-    sign = torch.stack([state.global_sign for state in states])
+    sign = constants["global_sign"]
     magnitude = _relative_scale(base, delta)
     scales = _ste(magnitude, magnitude.clamp_max(65504).half().float()) * sign
     steps = scales.unsqueeze(-1)
     if first.local_delta is not None:
-        base = torch.stack([state.local_base for state in states])
+        base = constants["local_base"]
         delta = torch.stack([state.local_delta for state in states])
         shadow = (base * delta.exp() - 1) / 2
         local = _ste(shadow, shadow.round().clamp(0, first.local_max))
@@ -354,7 +455,101 @@ def grouped_native_repair(quantizers, dtype):
     return kernels.apply_block_scales(levels, steps, dtype).reshape(len(states), rows, columns)
 
 
-class CompressedScale(nn.Module):
+def _grouped_float_repair(states, dtype):
+    """Decode homogeneous frozen FP8/FP4 codes with batched native scale fields."""
+    first = states[0]
+    shape = tuple(first.native_metadata["shape"])
+    if (
+        first.kind not in ("FP8QTensor", "NVFP4QTensor")
+        or len(shape) != 2
+        or not first.packed_codes.is_cuda
+        or (first.kind == "FP8QTensor" and first.block_sizes)
+        or (
+            first.kind == "NVFP4QTensor"
+            and (
+                shape[-1] % first.block_sizes[-1]
+                or (len(states) * first.packed_codes.numel()) % 128
+                or torch.cuda.get_device_capability(first.packed_codes.device)[0] < 10
+            )
+        )
+        or any(
+            not isinstance(state, FakeNativeScale)
+            or state.kind != first.kind
+            or tuple(state.native_metadata["shape"]) != shape
+            or state.block_sizes != first.block_sizes
+            or state.native_dtypes != first.native_dtypes
+            or state.packed_codes.dtype != first.packed_codes.dtype
+            or state.packed_codes.shape != first.packed_codes.shape
+            or any(
+                getattr(state, "base_" + name).shape != getattr(first, "base_" + name).shape
+                for name in first.native_dtypes
+            )
+            or state.nvfp4_scale_layout is not None
+            or state.deltas.keys() != first.deltas.keys()
+            for state in states
+        )
+    ):
+        return None
+    constants = _grouped_constant_values(
+        states,
+        {
+            **{
+                name: ([getattr(state, "base_" + name) for state in states], torch.stack)
+                for name in first.native_dtypes
+            },
+            "codes": (
+                [state.packed_codes for state in states],
+                lambda values: torch.stack([value.view(torch.uint8) for value in values]),
+            ),
+        },
+        (first.kind, shape, tuple(first.block_sizes.items()) if first.block_sizes else None),
+    )
+    fields = {}
+    for name, native_dtype in first.native_dtypes.items():
+        base = constants[name]
+        if name in first.deltas:
+            delta = torch.stack([state.deltas[name] for state in states])
+            raw = _relative_scale(base, delta)
+            fields[name] = _ste(
+                raw, raw.clamp_max(torch.finfo(native_dtype).max).to(native_dtype).float()
+            )
+        else:
+            fields[name] = base
+    # Concatenate bytes: CUDA does not implement stack/cat for float8 tensors.
+    codes = constants["codes"]
+    if first.kind == "FP8QTensor":
+        levels = codes.view(first.packed_codes.dtype).reshape(len(states), *shape).to(dtype)
+        scale = (
+            fields["scale"]
+            .to(dtype)
+            .reshape(len(states), *([1] * (3 - fields["scale"].ndim)), *fields["scale"].shape[1:])
+        )
+        return levels * scale
+    rows, columns = shape
+    block = first.block_sizes[-1]
+    native = first.native_class(
+        (len(states) * rows, columns), dtype, codes.reshape(len(states) * rows, -1)
+    )
+    with torch.no_grad():
+        # Native FP4 conversion avoids an expanded all-expert int64 LUT index.
+        # The existing kernel needs Blackwell and complete 128-byte tiles.
+        levels = native.dequantize(
+            dtype=torch.bfloat16,
+            fast=True,
+            block_sizes=first.block_sizes,
+            scale=torch.ones((len(states) * rows, columns // block), device=codes.device),
+            double_scale=torch.ones((), device=codes.device),
+        ).reshape(len(states), rows, columns // block, block)
+    double_scale = fields["double_scale"].reshape(len(states), *([1] * (fields["scale"].ndim - 1)))
+    factor = fields["scale"] * double_scale
+    return (
+        (levels * factor.reshape(len(states), rows, columns // block, 1))
+        .reshape(len(states), rows, columns)
+        .to(dtype)
+    )
+
+
+class CompressedScale(_GroupedScale):
     """Native QTensor scale fields; the original packed weight is never rewritten."""
 
     def __init__(self, quantizer, weight):
@@ -512,6 +707,9 @@ class FakeNativeScale(CompressedScale):
         pinned = get_pinned_native_weight(
             quantizer, processed_weight if source_weight is None else source_weight
         )
+        self.native_scale_buffers = pinned is not None and bool(
+            (getattr(quantizer, "_native_weight_meta", None) or {}).get("native_scale_buffers")
+        )
         # Static block preparation reshapes logical matrix axes into block axes.
         # Native codecs own their blocking and must receive the logical matrix,
         # including its native zero padding, rather than blocking it a second time.
@@ -597,3 +795,5 @@ class FakeNativeScale(CompressedScale):
         )
         _write_prepared_weight(quantizer, weight, values)
         pin_native_weight(quantizer, native, weight)
+        if self.native_scale_buffers:
+            quantizer._native_weight_meta["native_scale_buffers"] = True

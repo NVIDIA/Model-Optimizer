@@ -1,197 +1,141 @@
-# Local quantization distillation: advanced configuration
+# Advanced Transformers repair configuration
 
-[Return to the tutorial](README.md).
+[Return to the API guide](README.md).
 
-## Existing PTQ models and mixed formats
+## Native fields and modes
 
-The core entry point does not run or replace PTQ:
+The core `mtd.local_distill` API repairs an existing ModelOpt PTQ student; PTQ
+remains a separate step. Each quantizer keeps its own format, so a unit may mix
+integer, IQ, FP8, NVFP4 and MX weight representations. Calibration and native
+code/scale block geometry remain part of the model contract.
 
-```python
-import modelopt.torch.distill as mtd
-from modelopt.torch.distill.plugins.automodel import AutoModelLocalDistillationAdapter
-
-result = mtd.local_distill(
-    student, teacher, packed_train_batches,
-    {"updates": 512, "sequence_length": 32768, "global_batch_size": 8,
-     "micro_batch_size": 1, "checkpoint_dir": resume_directory},
-    validation_dataloader=packed_validation_batches,
-    adapter=AutoModelLocalDistillationAdapter(existing_mesh_context),
-)
-```
-
-`student` is an existing ModelOpt PTQ model/checkpoint, including a mixture of
-formats. Each enabled quantizer uses its own native field adapter; the repair
-does not force an entire unit into one format. For example, change only the
-down-projection rule in the YAML to use IQ2_S gate/up and NVFP4 down:
-
-```yaml
-- quantizer_name: '*mlp.experts.down_projs_weight_quantizers.*'
-  cfg:
-    num_bits: [2, 1]
-    block_sizes: {-1: 16, type: dynamic, scale_bits: [4, 3]}
-```
-
-For W4A4, configure the corresponding enabled **input** quantizers with the
-chosen activation format during PTQ. Repair executes these activation quantizers
-in the actual student unit, preserving their calibration by default. Disabling
-them would optimize a different model. `tune_activations: true` is a separate
-opt-in with an explicit activation learning rate, subject to native adapter
-capabilities.
-
-Scale-only freezes element codes, signs and lookup tables. FP32 log-scale masters
-project to each format's legal native scale representation in the forward pass,
-using STE through rounding. Finalization stores legal native fields and removes
-repair modules. IQ local multipliers remain valid format values; fixed catalog
-entries are not optimized. Native ModelOpt save/restore preserves codes. GGUF/HF
-deployment export still depends on that exporter's format/layout support.
-
-Full HF deployment export retains its existing fusion and resmoothing steps.
-These can fold pre-quant scales into neighboring weights and quantize those
-weights again. A direct per-weight export reuses a valid native payload, but a
-complete deployment conversion does not promise identical codes or predictions.
-The native ModelOpt/AutoModel checkpoint is the fidelity-preserving repair
-artifact. Recheck KLD on the converted artifact before reporting deployment
-quality or choosing it for serving.
-
-Optional `mode: weight_only` or `joint`, `requantize: true`, activation tuning and
-best-state selection are explicit settings. Unsupported combinations fail during
-preflight before training mutates the model. They are not silently converted to
-another format. The acceptance matrix below describes the checked combinations;
-other format, layout and topology combinations retain their native restrictions.
-
-The current native-field mode coverage is:
-
-| Weight representation | Scale-only (frozen codes) | Weight-only | Joint / scale re-quantization |
+| Weight representation | Scale-only | Weight-only | Joint / requantization |
 |---|---|---|---|
-| Static integer fake quantization, including static affine bias | Yes | Yes | Yes |
-| Dynamic tensorwise integer weights | Yes; learned thresholds are stored as native static weight fields | Original dynamic rule | Yes; learned thresholds are stored |
-| Fake GGML IQ, FP8, NVFP4 and MX formats in the validated matrix | Yes | Original native quantizer with weight STE | Adapter still required |
-| Compressed native QTensor weights | Yes | Adapter still required | Adapter still required |
+| Static integer fake quantization, including affine bias | Native fields | Supported | Supported |
+| Dynamic tensorwise integer | Learned static weight threshold | Original dynamic rule | Learned threshold |
+| Fake GGML IQ, FP8, NVFP4 and MX formats | Supported native fields | Original quantizer with weight STE | Format adapter required |
+| Compressed native QTensor | Supported native fields | Format adapter required | Format adapter required |
 
-Activation tuning currently accepts calibrated static integer thresholds with an
-explicit LR and without TP. Other activation formats execute their original
-forward with frozen calibration. Weight scale repair does not make activation
-codes constant. For scale projection, the reported LR applies to FP32 log-scale
-masters; each forward uses the format's representable values.
+Scale-only freezes codes, signs and catalogs. FP32 log-scale masters project to
+legal native fields in each forward with straight-through gradients through
+rounding. Finalization writes back those fields and removes temporary training
+state. Deployment fusion/resmoothing may change codes; reassess the converted
+artifact with held-out KLD.
 
-## Boundaries and distributed execution
+Enabled activation quantizers execute during replay with their original
+calibration. `tune_activations=True` additionally requires an explicit
+`activation_lr` and supported calibrated static integer thresholds; TP/EP have
+further capability guards. Unsupported combinations fail preflight rather than
+silently changing format or recalibrating shards.
 
-Default discovery picks quantized outer `mlp`/`moe` modules and skips fully
-unquantized units. Set `units` to exact, disjoint paths for attention, GDN, Mamba,
-whole decoder blocks, or architecture-specific boundaries. A custom adapter can
-provide output selection and recurrent-state ownership. Shared trainable fields
-must have one owner; overlapping units are rejected.
+Grouped reconstruction retains at most 256 KiB on a group's first repair state,
+for immutable metadata or small packed payloads that fit. Payload/placement
+changes invalidate reuse. Trainable reconstructions, expanded weights and
+gathered parameters are never cached. [Component measurements](RESULTS.md)
+preserve exact values/gradients; they do not establish a full repair speedup.
 
-Native family adapters resolve semantic `unit_types` through AutoModel's own
-decoder discovery, including `ffn` on DeepSeek V4.1, `linear_attn` for Qwen GDN,
-and `mixer` for Nemotron Mamba. For example, `unit_types: [gdn]` selects native
-Qwen GDN blocks, and `unit_types: [decoder]` selects complete decoder blocks.
-Native GDN's fused convolution honors weight and static input quantization;
-its output quantization needs an unfused adapter. Dynamic convolution activation
-thresholds with CP are currently refused.
+## Native distributed placement
 
-The AutoModel adapter reuses its native mesh, dispatch, CP sharder and FSDP owner
-unsharding. It supports physical non-interleaved PP via the existing teacher
-`AutoPipeline`:
+The caller launches processes and constructs the meshes. For four ranks, this
+example overlaps dense TP2/FSDP2 with expert EP4:
 
 ```python
-adapter = AutoModelLocalDistillationAdapter(
-    mesh_context, teacher_pipeline=teacher_pipeline,
-)
-result = mtd.local_distill(
-    student_pipeline.info.model_parts[0], teacher_pipeline.info.model_parts[0],
-    packed_train_batches, config, adapter=adapter,
+from torch.distributed.device_mesh import init_device_mesh
+from transformers.distributed.configuration_utils import DistributedConfig
+from transformers.distributed.utils import TransformersDeviceMesh
+from modelopt.torch.distill.plugins.transformers import TransformersLocalDistillationAdapter
+
+dense = init_device_mesh("cuda", (1, 2, 2), mesh_dim_names=("pp", "fsdp", "tp"))
+expert = init_device_mesh("cuda", (1, 1, 4), mesh_dim_names=("pp", "efsdp", "ep"))
+adapter = TransformersLocalDistillationAdapter(TransformersDeviceMesh(dense, expert))
+for model in (teacher, student):  # PTQ already calibrated identically on all ranks
+    model.config.distributed_config = DistributedConfig(tp_size=2, fsdp_size=2, ep_size=4)
+    adapter.parallelize(model)
+dp_size = dense["fsdp"].size()
+dp_rank = dense["fsdp"].get_local_rank()
+```
+
+Dense and expert meshes contain the same ranks and satisfy
+`efsdp * ep == fsdp * tp`; EP is a multiple of TP. Native HF experts are sharded
+over the expert axis rather than internally tensor-sharded. EP therefore does
+not multiply the number of unique samples. Feed the same batch to TP/EP peers;
+`fsdp` identifies unique data lanes. Frozen base weights need no DDP reducer;
+the repair runtime reduces trainable fields according to their physical owners.
+
+For combined CP/EP, use dense `(pp, cp, fsdp, tp)` and expert
+`(pp, cp, efsdp, ep)` roots with matching ordered CP peer groups. Dense
+statistics/gradients span `cp * fsdp`; expert replicas span `cp * efsdp`.
+Read `execution.context_parallel_modes`: `native_sdpa` uses chronological
+sequence shards, while `replicated_full_context` retains full inputs/compute on
+every CP rank and masks loss ownership. The latter provides no forward-compute
+or activation-memory savings.
+
+Torch `DeviceMesh` is also supported for compatible DP/CP/TP/PP arrangements,
+including data-axis aliases `fsdp` and HSDP `dp_replicate`/`dp_shard`. The newer
+HF EP interface requires `TransformersDeviceMesh`. Native `DistributedConfig`
+rejects FSDP+PP and dispatch-EP+PP. Whole-model diagnostics require PP=1 and
+matching outer dataloader schedules on all ranks; the adapter rejects unequal
+exhaustion before entering model collectives.
+
+Physical TP partitions must preserve complete native code/scale blocks,
+activation statistics and transforms. Output quantization that needs unsupported
+post-reduction execution is refused. For a custom feature-sharded repair unit,
+the family can override `objective_tp_mesh`; ordinary column-sharded Linear
+units already use a global feature denominator and count tokens once.
+
+## Model publication and exact resume
+
+`output_dir` publishes a topology-native Torch DCP model checkpoint. Every rank
+participates; immutable files have integrity metadata and an atomic commit
+manifest. Restore using `adapter.restore(model, directory)` into the matching
+converted graph, modes, aliases and physical topology. Committed directories
+may be relocated. This is distinct from a consolidated HF/GGUF deployment export.
+
+Use `checkpoint_dir`, `checkpoint_interval` and `resume_from` for interrupted
+repair. Resume restores per-unit optimizer state, scheduler position, RNG and
+the consumed unique data prefix. Recreate the same teacher, PTQ initializer,
+data order and topology before resuming:
+
+```python
+repair = mtd.LocalDistillationConfig(
+    updates=512, global_batch_size=8, micro_batch_size=1,
+    checkpoint_dir="/path/to/resume", checkpoint_interval=128,
+    resume_from="/path/to/resume",
 )
 ```
 
-PP finishes the current forward-only teacher microbatch, then replays its
-stage-local records with immediate backward, as in Puzzletron. Empty embedding/head stages still participate in execution and
-checkpoint transactions. Virtual/interleaved schedules are refused. The simple
-GPTQ/diagnostic CLI above uses PP=1. Native topology-preserving DCP checkpoints
-are not topology-changing deployment exports.
+`selection="final"` retains the last update. The explicit
+`best_validation_per_unit` option uses local validation MSE; whole-model KLD
+selection remains the caller's responsibility.
 
-## Focused validation
+## Custom families and optional formats
 
-The development checks use tiny native models, not a full GLM quality run:
+For a custom HF text root, pass a family descriptor explicitly:
 
-- Native integer, IQ2_S, NVFP4 W4A4, MXFP4/6/8 and MXINT8: nonzero scale gradients
-  and exact native checkpoint round trips.
-- Native expert-parallel mixed-format gradients/updates against an unsharded
-  reference; FSDP2, TP2 and packed CP2 repair/reference comparisons.
-- Native PP2 with uneven ownership and an embedding-only stage; interrupted
-  all-rank checkpoint resume and native DCP restore into a fresh skeleton.
-- Unique packed-data cursor and paired full-vocabulary diagnostics/masking.
+```python
+from modelopt.torch.distill.plugins.transformers import TransformersFamilyAdapter
 
-See the development run ledger for measured short-probe results. Full-model
-quality, throughput and memory measurements remain separate experiments.
+family = TransformersFamilyAdapter(
+    name="custom_text", decoder_paths=("model.text_decoder.layers",),
+)
+adapter = TransformersLocalDistillationAdapter(family_adapter=family)
+```
 
-[Native model coverage](MODEL_COVERAGE.md) lists the ranked-model and Qwen
-compatibility probes, native family boundaries, and implementation limits.
+Override `unit_attributes`, `document_batches` and `snapshot_unit_state` for
+semantic boundaries, isolation and temporary routing state. `batch_packed_documents`
+is a family opt-in to conservative text-document coalescing, not permission to
+batch arbitrary masks or metadata. `output_head` identifies the actual task head;
+`transform_logits` preserves post-projection math such as Muse/Mistral transforms.
+Context-coupled head activation statistics require a specialized diagnostic path and are
+explicitly refused by the generic chunked evaluator. Model forward math stays
+in the model. `functional_children`
+describes child weights read directly by their parent; native FSDP lifecycle
+wrapping keeps gather/backward/reshard inside the owning calls.
+`additional_fsdp_children` can separate called projections from an FP32 parent.
+Preserve native per-module dtypes: blanket BF16 conversion or FSDP mixed
+precision can round required FP32 recurrence/router/compression parameters.
 
-### Reviewing this feature
-
-[REVIEW_MAP.md](REVIEW_MAP.md) covers the complete implementation against main,
-including shared quantization prerequisites and the optional AutoModel integration.
-Training reports include per-native-expert routed-assignment counts and explicitly
-list unobserved experts. Counts exclude padding and validation, reduce over unique
-data/context lanes before EP gather, and are accumulated in resume state. Their
-first/last observed update indices identify partial coverage after resuming an older
-checkpoint that did not record these counters. Routed counts describe exposure;
-they do not guarantee each expert improved.
-
-Repair keeps one optimizer per unit, coalescing only fields with matching learning
-rate, role, dtype/device and distributed ownership. Foreach groups are bounded to
-64 MiB of parameters; DTensor fields keep their existing separate groups. Gradient
-reductions retain the original field order, and optimizer checkpoints retain the
-legacy per-field layout so existing repair checkpoints still resume.
-
-`report_interval` defaults to 16 updates. Expert counters stay on device between
-reports and also flush before checkpoints and at completion. Each history row's
-`learning_rates` contains the distinct rates used by that unit, rather than one
-entry per expert field. `optimizer_parameter_groups` records the runtime group
-count. These reporting choices do not change the training objective or updates.
-`phase_timings` reports exclusive **host** seconds for preparation, teacher
-forward, student replay/backward, gradient processing, communication, optimizer,
-validation, checkpointing, finalization and publishing. They include Python and
-any host waits, not synchronized CUDA kernel durations. For device-level timing,
-use the corresponding `modelopt.local_distill.*` PyTorch profiler ranges.
-
-A secondary PPL that exceeds the floating-point range is reported as `null`;
-finite mean cross entropy and KLD remain available and KLD selection continues.
-
-## Native family execution
-
-`distill/plugins/automodel/families/` follows the per-family descriptor pattern
-used by ModelOpt model specs and Puzzletron AnyModel. A small registry resolves
-the native implementation; each family owns semantic boundaries, packed inputs,
-CP setup and optional per-forward replay state. Adding a family does not require
-editing a central model-name switch. The registry is backend-specific: HF model
-specs remain architecture data shared by other ModelOpt subsystems.
-
-Each descriptor can select `unit_runner`. The default native fast runner preserves
-the original model's router, shared/latent experts, activation/clipping and dispatch,
-while batching compatible IQ expert scale work. IQ1_M/IQ2_S/IQ2_XS immutable levels
-use a native GPU decoder; heterogeneous representations retain their original
-quantizers. CPU and unavailable-kernel paths retain native reference behavior.
-No decoded weight cache persists between repair units. Correctness precedes speed:
-family-specific runners must match native outputs, scale gradients and routing.
-
-DeepSeek-V4 hash/vision routing has temporary token metadata outside the MoE's
-ordinary arguments. Its descriptor snapshots that state before the teacher gate
-consumes it and restores the corresponding state around student replay. Kimi's
-latent projections and SiTU remain native; they are not replaced by generic SwiGLU.
-
-Repair teacher forwards set `logits_to_keep=1` when the explicit forward signature
-supports it. All decoder hidden tokens still train; only unused terminal logits
-shrink. PP terminal metadata follows that shape and is restored afterward.
-Standalone PPL/KLD diagnostics retain full token logits.
-
-## Optional external format plugins
-
-ModelOpt does not import optional format providers automatically. Import the
-provider before quantization or checkpoint restore. Providers may register a
-quantization backend/GPTQ helper through the existing APIs and a native scale
-repair factory through `register_repair_backend`. Native tensor subclasses register
-for pinned-payload restoration; names must be unique. TP ownership must be declared
-and implemented explicitly. No external provider is required for the GLM IQ2_S
-tutorial or the built-in format compatibility suite.
+Optional format providers explicitly register a factory with
+`register_repair_backend` and their native checkpoint tensor identity. Import
+the provider before PTQ or restore. TP partition support must be declared and
+implemented by that provider. No external provider is needed for built-in formats.

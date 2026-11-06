@@ -764,7 +764,6 @@ class _FakePackTokenizer:
 def test_local_repair_packing_has_unique_cursor_and_disjoint_conversations(
     tmp_path, calibration_length
 ):
-    pytest.importorskip("nemo_automodel.components.datasets.llm.neat_packing")
     import json
 
     import numpy as np

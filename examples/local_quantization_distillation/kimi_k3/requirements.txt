@@ -1,2 +1,0 @@
-# The released pinned Kimi tokenizer uses TikToken.
-tiktoken==0.12.0
