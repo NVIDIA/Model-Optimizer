@@ -933,12 +933,16 @@ def to_quantized_weight(
             # for MOE stacked weights
             # Clear GPU cache to avoid pontential GPU OOM issues for large models.
             clear_cuda_cache()
-            return (weight / weights_scaling_factor.unsqueeze(-1)).to(torch.float8_e4m3fn)
+            return (
+                (weight / weights_scaling_factor.unsqueeze(-1))
+                .clamp_(-448.0, 448.0)
+                .to(torch.float8_e4m3fn)
+            )
         # A 0-d scale would not promote a bf16 weight, so the division would round in bf16 instead of
         # float32 like fake quantization. A 1-d scale promotes in-kernel, without a float32 copy.
         if weights_scaling_factor.dim() == 0:
             weights_scaling_factor = weights_scaling_factor.reshape(1)
-        return (weight / weights_scaling_factor).to(torch.float8_e4m3fn)
+        return (weight / weights_scaling_factor).clamp_(-448.0, 448.0).to(torch.float8_e4m3fn)
 
     if quantization in [QUANTIZATION_INT8_SQ, QUANTIZATION_INT8_WO]:
         return (weight / weights_scaling_factor[:, None]).round().clamp(-128, 127).to(torch.int8)
@@ -956,7 +960,11 @@ def to_quantized_weight(
             # Handle different scale tensor shapes
             if weights_scaling_factor.dim() == 1:
                 # Per-expert scaling only: (num_experts,) -> (num_experts, 1, 1)
-                return (weight / weights_scaling_factor[:, None, None]).to(torch.float8_e4m3fn)
+                return (
+                    (weight / weights_scaling_factor[:, None, None])
+                    .clamp_(-448.0, 448.0)
+                    .to(torch.float8_e4m3fn)
+                )
             elif weights_scaling_factor.dim() == 2:
                 # Per-channel scaling: check which dimension matches
                 if weights_scaling_factor.shape[0] != weight.shape[0]:
@@ -972,16 +980,26 @@ def to_quantized_weight(
                     )
                 if weights_scaling_factor.shape[-1] == weight.shape[-1]:
                     # (num_experts, input_dim) -> (num_experts, 1, input_dim), BMM-style
-                    return (weight / weights_scaling_factor.unsqueeze(-2)).to(torch.float8_e4m3fn)
+                    return (
+                        (weight / weights_scaling_factor.unsqueeze(-2))
+                        .clamp_(-448.0, 448.0)
+                        .to(torch.float8_e4m3fn)
+                    )
                 elif weights_scaling_factor.shape[-1] == weight.shape[-2]:
                     # (num_experts, output_dim) -> (num_experts, output_dim, 1), Standard MoE case
-                    return (weight / weights_scaling_factor.unsqueeze(-1)).to(torch.float8_e4m3fn)
+                    return (
+                        (weight / weights_scaling_factor.unsqueeze(-1))
+                        .clamp_(-448.0, 448.0)
+                        .to(torch.float8_e4m3fn)
+                    )
                 else:
                     raise ValueError(
                         f"Cannot determine correct unsqueeze dimension for FP8_PC_PT quantization. "
                         f"weight shape: {weight.shape}, scale shape: {weights_scaling_factor.shape}"
                     )
-        return (weight / weights_scaling_factor[:, None]).to(torch.float8_e4m3fn)
+        return (
+            (weight / weights_scaling_factor[:, None]).clamp_(-448.0, 448.0).to(torch.float8_e4m3fn)
+        )
 
     if quantization in [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ]:
         return pack_int4_in_uint8(weight, weights_scaling_factor, block_size)
