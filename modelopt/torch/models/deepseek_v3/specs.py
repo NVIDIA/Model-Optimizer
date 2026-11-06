@@ -19,7 +19,8 @@ Covers the transformers-native V3 family (V3, R1, V3.1). The remote-code
 ``DeepseekMoE`` block of DeepSeek-MoE is a separate spec under ``deepseek``.
 """
 
-from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, register
+from ..deepseek.specs import PREVIEW_UNSUPPORTED
+from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, PTQSpec, register
 
 __all__: list[str] = []
 
@@ -49,6 +50,7 @@ register(
         min_transformers_version="5.5",
         export_spec=ExportSpec(grouped_expert_export=True),
         ep_spec=EPSpec(base_model_ep_plan=BASE_MODEL_EP_PLAN),
+        ptq_spec=PTQSpec(preview_unsupported=PREVIEW_UNSUPPORTED),
         moe_spec=MoESpec(
             block_names=("DeepseekV3MoE",),
             expert_linear_names=("gate_proj", "down_proj", "up_proj"),

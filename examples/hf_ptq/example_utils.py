@@ -36,19 +36,17 @@ from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
-    AutoProcessor,
     AutoTokenizer,
     PreTrainedTokenizerBase,
-    ProcessorMixin,
 )
 
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.export import has_spec_opt
-from modelopt.torch.export.model_utils import is_multimodal_model
-from modelopt.torch.models import hf_model_type
+from modelopt.torch.models import get_ptq_spec, hf_model_type
 from modelopt.torch.models.hf import (
     checkpoint_has_mtp,
+    forward_calibration_batch,
     prefers_bundled_code,
     prepare_model_for_loading,
 )
@@ -97,8 +95,8 @@ def _awq_calibrations(args) -> set[str]:
 def validate_fsdp2_supported(args, config):
     """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
     issues = []
-    if "vila" in args.local_checkpoint_path.lower():
-        issues.append("VILA (custom builder + non-standard layer layout)")
+    if (unsupported := get_ptq_spec(hf_model_type(config)).fsdp2_unsupported) is not None:
+        issues.append(unsupported)
     # A layout whose decoder layers cannot be found fails in fsdp2_wrap. Encoder-decoder models
     # have no single decoder stack. Without --calib_with_images a VLM calibrates on text, which a
     # forward that requires images cannot run.
@@ -127,7 +125,7 @@ def validate_fsdp2_supported(args, config):
             "use a non-AWQ format)"
         )
     if not issues and checkpoint_has_mtp(config.model_type, args.local_checkpoint_path):
-        issues.append("Nemotron-H MTP (auxiliary modules are not constructed by the FSDP2 loader)")
+        issues.append("MTP weights (auxiliary modules are not constructed by the FSDP2 loader)")
 
     if issues:
         raise NotImplementedError(
@@ -283,7 +281,7 @@ def keep_the_experts_implementation(model) -> Iterator[None]:
                 module._optimize_model_for_decode = held
 
 
-def run_nemotron_vl_preview(
+def run_vlm_preview(
     full_model,
     tokenizer,
     input_ids,
@@ -292,7 +290,7 @@ def run_nemotron_vl_preview(
     allow_fallback=False,
     trust_remote_code=False,
 ):
-    """Run text-only and VL preview generation for Nemotron VL models.
+    """Run text-only and VL preview generation for VLM wrappers.
 
     Args:
         full_model: The full VL model
@@ -308,7 +306,7 @@ def run_nemotron_vl_preview(
     from vlm_utils import run_text_only_generation, run_vl_preview_generation
 
     with keep_the_experts_implementation(full_model):
-        print(f"Running text-only preview generation for Nemotron VL model ({stage_name})...")
+        print(f"Running text-only preview generation for the VLM wrapper ({stage_name})...")
         question = tokenizer.decode(input_ids[0], skip_special_tokens=True)
         lockstep = preview_generate_kwargs(full_model)
         generation_config = {
@@ -318,7 +316,7 @@ def run_nemotron_vl_preview(
             **lockstep,
         }
 
-        # Try text-only generation (may fail for encoder-decoder models like Nemotron-Parse)
+        # Try text-only generation (may fail for encoder-decoder models)
         text_response = run_text_only_generation(
             full_model, tokenizer, question, generation_config, pyt_ckpt_path, trust_remote_code
         )
@@ -351,30 +349,6 @@ def _is_multimodal_config(config):
     )
 
 
-def is_nemotron_vl(model_or_config):
-    """Check if model or config indicates a Nemotron VL model.
-
-    Args:
-        model_or_config: Either a model instance or a config object.
-
-    Returns:
-        bool: True if it's a Nemotron VL model, False otherwise.
-    """
-    # Try to get config from model, or use directly if it's a config
-    if hasattr(model_or_config, "config"):
-        config = model_or_config.config
-
-        if not is_multimodal_model(model_or_config):
-            return False
-    else:
-        config = model_or_config
-        if not _is_multimodal_config(config):
-            return False
-
-    architectures = getattr(config, "architectures", [])
-    return any("nemotron" in arch.lower() for arch in architectures)
-
-
 def forward_requires_images(model: "torch.nn.Module | type[torch.nn.Module]") -> bool:
     """Whether ``model.forward`` cannot run without images (``pixel_values`` has no default)."""
     param = inspect.signature(model.forward).parameters.get("pixel_values")
@@ -394,27 +368,8 @@ def create_vlm_calibration_forward(full_model):
     Returns:
         A function that runs one batch through ``full_model``
     """
-    # Import here to avoid circular dependency
-    from nemotron_vl_calib import safe_nemotron_vl_forward
-
     # Check if model is encoder-decoder (needs decoder_input_ids instead of input_ids)
     is_enc_dec = getattr(full_model.config, "is_encoder_decoder", False)
-
-    # Which batches go through safe_nemotron_vl_forward:
-    #   - Nano VL and other InternVL-style wrappers, recognised by `img_context_token_id`, need
-    #     its embedding-injection path.
-    #   - The omni wrappers define neither `img_context_token_id` nor `extract_feature`; they
-    #     merge vision inside their own forward. They need the helper's fallback, which carries
-    #     the dtype-cast `pixel_values` and sets `use_cache=False`. Requiring `extract_feature`
-    #     to be absent keeps a Nemotron VL model that has the helper but no `img_context_token_id`
-    #     out of the InternVL branch.
-    # Encoder-decoder VL models (Nemotron-Parse) keep the plain forward: their batch carries
-    # `decoder_input_ids`, which the helper does not recognise, so routing them through it would
-    # return without a forward pass and silently skip calibration.
-    use_safe_forward = not is_enc_dec and (
-        hasattr(full_model, "img_context_token_id")
-        or (is_nemotron_vl(full_model) and not hasattr(full_model, "extract_feature"))
-    )
 
     # Inspect model's forward signature to determine what parameters it accepts
     forward_params = inspect.signature(full_model.forward).parameters
@@ -438,9 +393,8 @@ def create_vlm_calibration_forward(full_model):
         # Remove None values
         call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
 
-        if use_safe_forward:
-            safe_nemotron_vl_forward(full_model, call_kwargs)
-        else:
+        # A model whose plugin has its own calibration forward runs the batch itself.
+        if not forward_calibration_batch(full_model, call_kwargs):
             full_model(**call_kwargs)
 
     return forward
@@ -519,20 +473,6 @@ def is_speculative(hf_config):
     )
 
 
-def is_diffusion_gemma(hf_config) -> bool:
-    """Check if the model architecture is DiffusionGemma.
-
-    Underscores are ignored: the family is spelled ``diffusion_gemma`` in configs
-    and ``DiffusionGemma`` in class names. The nested ``text_config`` is checked too,
-    since multi-modal wrappers keep the family name there.
-    """
-    names = []
-    for cfg in (hf_config, getattr(hf_config, "text_config", None)):
-        names.append(getattr(cfg, "model_type", None) or "")
-        names.extend(getattr(cfg, "architectures", None) or [])
-    return any("diffusiongemma" in name.lower().replace("_", "") for name in names)
-
-
 def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTokenizerBase:
     print(f"Initializing tokenizer from {ckpt_path}")
 
@@ -546,41 +486,6 @@ def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTok
     assert tokenizer.pad_token is not None, f"Pad token for {ckpt_path} cannot be set!"
 
     return tokenizer
-
-
-def get_processor(
-    ckpt_path,
-    model_type,
-    trust_remote_code=False,
-    attn_implementation=None,
-) -> ProcessorMixin | None:
-    """Load a processor appropriate for the given model type."""
-    model_kwargs = {"trust_remote_code": trust_remote_code}
-    if attn_implementation is not None:
-        model_kwargs["attn_implementation"] = attn_implementation
-
-    if model_type == "whisper":
-        processor = AutoProcessor.from_pretrained(
-            ckpt_path,
-            padding_side="left",
-            **model_kwargs,
-        )
-        if processor.tokenizer.pad_token is None:
-            processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        assert processor.tokenizer.pad_token is not None, (
-            f"Pad token for {ckpt_path} cannot be set!"
-        )
-
-        return processor
-    else:
-        # Try to load AutoProcessor for other VL models (e.g., Nemotron-Parse)
-        try:
-            processor = AutoProcessor.from_pretrained(ckpt_path, **model_kwargs)
-            print(f"Loaded AutoProcessor for model type: {model_type}")
-            return processor
-        except Exception as e:
-            print(f"Could not load processor for {model_type}: {e}")
-            return None
 
 
 def get_dtype(dtype):
@@ -731,9 +636,9 @@ def _get_config_dtype(config):
     return config_dtype
 
 
-def _apply_dtype_to_config(model_kwargs, config_dtype, architecture, apply_config_dtype=False):
+def _apply_dtype_to_config(model_kwargs, config_dtype, dtype_kwarg, apply_config_dtype=False):
     model_kwargs = model_kwargs.copy()
-    if "DeciLM" in architecture:
+    if dtype_kwarg == "torch_dtype":
         model_kwargs["torch_dtype"] = config_dtype
         model_kwargs.pop("dtype", None)
     elif apply_config_dtype:
@@ -792,8 +697,9 @@ def get_model(
     # and with them every quantizer's _amax buffer, then live on one GPU; the first NCCL collective
     # binds the whole data-parallel group to that single device and aborts with "Duplicate GPU
     # detected : rank 1 and rank 0 both on CUDA device ...". Every load path below honours the pin
-    # except those that load with no device map (Nemotron VL): each rank builds a whole copy in host
-    # memory and only then moves it to its own GPU, so the node needs one host copy per rank.
+    # except those that load with no device map (a spec's ``no_auto_device_map`` or
+    # ``no_device_map``): each rank builds a whole copy in host memory and only then moves it to
+    # its own GPU, so the node needs one host copy per rank.
     # A dense model too large to replicate per rank wants --use_fsdp2, not "auto" sharding: under
     # data-parallel calibration each rank must own its own GPU. A single process keeps "auto".
     # hf_ptq hands in its run's torch.device, which never equals a string such as "cpu".
@@ -812,16 +718,13 @@ def get_model(
     # Load config once and handle VL model detection
     try:
         hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
-
-        if is_nemotron_vl(hf_config):
-            print(
-                "Detected Nemotron VL model from config. "
-                "Disabling automatic device mapping for compatibility."
-            )
-            device_map = None
     except Exception as e:
         print(f"Error: Could not load config from {ckpt_path}: {e}")
         raise RuntimeError(f"Failed to load model configuration from {ckpt_path}") from e
+    ptq = get_ptq_spec(hf_model_type(hf_config))
+    if ptq.no_auto_device_map is not None:
+        print(f"Loading without an automatic device map: {ptq.no_auto_device_map}.")
+        device_map = None
     if attn_implementation is not None:
         config_kwargs["attn_implementation"] = attn_implementation
 
@@ -834,22 +737,15 @@ def get_model(
     )
     model_kwargs.update(experts_kwargs)
 
-    # DiffusionGemma ties encoder/decoder weights. device_map "auto" (balanced) can split
-    # a tied pair across GPUs, leaving one side on the meta device and breaking generation.
-    # Sequential packs the model onto GPU 0 first (up to gpu_mem_percentage), keeping tied
-    # modules together for checkpoints that fit; larger ones can still spill and split a
-    # tied pair, and need an explicit single-device map. Multi-GPU only: a single-GPU split
-    # cannot separate a tied pair, and sequential would needlessly cap max_memory there.
+    # Multi-GPU only: a single GPU cannot split what is tied, and sequential would needlessly cap
+    # max_memory there.
     if (
         not pinned
         and not on_cpu
         and torch.cuda.device_count() > 1
-        and is_diffusion_gemma(hf_config)
+        and ptq.sequential_device_map is not None
     ):
-        print(
-            "Detected DiffusionGemma model. Using device_map='sequential'; the balanced "
-            "'auto' mapping can split its tied encoder/decoder weights across GPUs."
-        )
+        print(f"Using device_map='sequential': {ptq.sequential_device_map}.")
         use_seq_device_map = True
 
     if use_seq_device_map and pinned:
@@ -865,14 +761,8 @@ def get_model(
         max_memory = {key: value * gpu_mem_percentage for key, value in max_memory.items()}
         model_kwargs["max_memory"] = max_memory
 
-    if hf_config.model_type == "bart":
-        # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors
-        device_map = None
-
-    if hf_config.model_type == "t5":
-        # device_map "auto" can naively shard T5's tied encoder/decoder embeddings and
-        # position-bias buffers across GPUs, which non-deterministically produces NaN
-        # activations during calibration on multi-GPU machines (see HF transformers #21093).
+    if ptq.no_device_map is not None:
+        print(f"Loading without a device map: {ptq.no_device_map}.")
         device_map = None
 
     # Helper function to check if model has pack-quantized config. Checks both the top-level
@@ -958,16 +848,13 @@ def get_model(
             raise ValueError(f"Model config at {ckpt_path} has no architectures defined")
         architecture = hf_config.architectures[0]
 
-        # DeepSeek ships bundled modeling code, but the built-in class is what the
-        # disk-offload and streaming-export paths are validated against.
-        # Also use it when the model plugin says the built-in class can't represent the checkpoint
-        # (dense Nemotron-H on Transformers 5.5, whose built-in class is MoE-only).
-        use_bundled_code = trust_remote_code and (
-            "Deepseek" in architecture
-            or (
-                hasattr(transformers, architecture)
-                and prefers_bundled_code(hf_config.model_type, hf_config, ckpt_path, config_kwargs)
-            )
+        # Use the checkpoint's bundled code when the model plugin says the built-in class can't
+        # represent it (dense Nemotron-H on Transformers 5.5, whose built-in class is MoE-only) or
+        # is the wrong one for it (a DeepSeek architecture).
+        use_bundled_code = (
+            trust_remote_code
+            and hasattr(transformers, architecture)
+            and prefers_bundled_code(hf_config.model_type, hf_config, ckpt_path, config_kwargs)
         )
 
         if not hasattr(transformers, architecture) or use_bundled_code:
@@ -1011,7 +898,7 @@ def get_model(
             # unless specified by the hf_config.
             config_dtype = _get_config_dtype(config_for_init)
             model_kwargs2 = _apply_dtype_to_config(
-                model_kwargs, config_dtype, architecture, apply_config_dtype=True
+                model_kwargs, config_dtype, ptq.dtype_kwarg, apply_config_dtype=True
             )
             if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                 model_kwargs2.pop("trust_remote_code", None)
@@ -1053,7 +940,7 @@ def get_model(
                 )
                 model_kwargs["max_memory"] = max_memory
 
-        model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, architecture)
+        model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, ptq.dtype_kwarg)
         if _disk_offload:
             model_kwargs2["offload_folder"] = offload_folder
         model = load_pretrained(
@@ -1097,11 +984,12 @@ def generate_excludes_prompt(model) -> bool:
     """Return whether ``model.generate()`` returns only the decoder sequence, without the prompt.
 
     True for encoder-decoder models, so ``hf_ptq.py`` decodes their preview output whole instead
-    of slicing off a prompt-length prefix. ``diffusion_gemma`` is structurally encoder-decoder but
-    returns prompt+canvas concatenated, so it is excluded (AR-style decode applies).
+    of slicing off a prompt-length prefix. A model whose spec says ``generate()`` includes the
+    prompt, though it is structurally encoder-decoder, is excluded (AR-style decode applies).
     """
     config = model.config
-    return bool(getattr(config, "is_encoder_decoder", False)) and not is_diffusion_gemma(config)
+    includes_prompt = get_ptq_spec(hf_model_type(config)).generate_includes_prompt
+    return bool(getattr(config, "is_encoder_decoder", False)) and includes_prompt is None
 
 
 def save_source_config(args, export_path) -> None:

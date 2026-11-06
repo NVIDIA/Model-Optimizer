@@ -36,6 +36,7 @@ from _test_utils.torch.transformers_models import (
 from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM, GenerationMixin, LlamaConfig
 
+from modelopt.torch.models import PTQSpec
 from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
@@ -71,6 +72,14 @@ def test_fsdp2_vlm_validation(model_type, architectures, calib_with_images, pack
         target.quantization_config = {"quant_method": "compressed-tensors"}
     expected = pytest.raises(NotImplementedError, match=error) if error else nullcontext()
     with expected:
+        example_utils.validate_fsdp2_supported(args, config)
+
+
+def test_fsdp2_refuses_a_model_its_spec_lists():
+    """Found by model type, not by what the checkpoint path is called."""
+    args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=False)
+    config = SimpleNamespace(model_type="llava_llama", architectures=["LlavaLlamaModel"])
+    with pytest.raises(NotImplementedError, match="VILA"):
         example_utils.validate_fsdp2_supported(args, config)
 
 
@@ -376,19 +385,22 @@ def test_resolve_init_config_falls_back_when_rederive_raises():
 @pytest.mark.parametrize(
     (
         "architecture",
+        "model_type",
         "model_class_name",
         "expected_config_dtype_kwarg",
         "unexpected_config_dtype_kwarg",
     ),
     [
-        ("DeciLMForCausalLM", "AutoModelForCausalLM", "torch_dtype", "dtype"),
-        ("LlamaForCausalLM", "LlamaForCausalLM", "dtype", "torch_dtype"),
+        ("DeciLMForCausalLM", "nemotron-nas", "AutoModelForCausalLM", "torch_dtype", "dtype"),
+        ("DeciLMForCausalLM", "deci", "AutoModelForCausalLM", "torch_dtype", "dtype"),
+        ("LlamaForCausalLM", "llama", "LlamaForCausalLM", "dtype", "torch_dtype"),
     ],
 )
 def test_get_model_uses_expected_dtype_kwarg(
     monkeypatch,
     tmp_path,
     architecture,
+    model_type,
     model_class_name,
     expected_config_dtype_kwarg,
     unexpected_config_dtype_kwarg,
@@ -397,7 +409,7 @@ def test_get_model_uses_expected_dtype_kwarg(
     hf_config = SimpleNamespace(
         architectures=[architecture],
         dtype=torch.float16,
-        model_type="llama",
+        model_type=model_type,
         torch_dtype=torch.bfloat16,
     )
 
@@ -444,7 +456,6 @@ def test_get_model_uses_expected_dtype_kwarg(
         monkeypatch.delattr(example_utils.transformers, architecture, raising=False)
     else:
         monkeypatch.setattr(example_utils.transformers, model_class_name, FakeLlamaForCausalLM)
-    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
     monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
@@ -462,21 +473,32 @@ def test_get_model_uses_expected_dtype_kwarg(
 
 
 @pytest.mark.parametrize(
-    ("model_type", "architecture", "device_count", "expected_device_map"),
+    ("model_type", "architecture", "device_count", "use_seq_device_map", "expected_device_map"),
     [
         # DiffusionGemma ties encoder/decoder weights; "auto" can split a tied pair
         # across GPUs, so multi-GPU loads must fall back to "sequential".
-        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 2, "sequential"),
-        # Detection must also work off ``architectures`` alone, without ``model_type``.
-        (None, "DiffusionGemmaForConditionalGeneration", 2, "sequential"),
+        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 2, False, "sequential"),
         # Single GPU cannot split a tied pair, so it keeps the unrestricted "auto" map.
-        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 1, "auto"),
+        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 1, False, "auto"),
         # "gemma" is a substring of "diffusiongemma"; other Gemmas must not match.
-        ("gemma3", "Gemma3ForCausalLM", 2, "auto"),
+        ("gemma3", "Gemma3ForCausalLM", 2, False, "auto"),
+        # T5 and BART cannot take a device map at all, whatever the run asks for.
+        ("t5", "T5ForConditionalGeneration", 2, False, None),
+        ("t5", "T5ForConditionalGeneration", 2, True, None),
+        ("bart", "BartForConditionalGeneration", 2, False, None),
+        # A wrapper that cannot take "auto" loads on one device, unless the run asks for sequential.
+        ("NemotronH_Nano_VL_V2", "NemotronH_Nano_VL_V2", 2, False, None),
+        ("NemotronH_Nano_VL_V2", "NemotronH_Nano_VL_V2", 2, True, "sequential"),
     ],
 )
-def test_get_model_device_map_for_diffusion_gemma(
-    monkeypatch, tmp_path, model_type, architecture, device_count, expected_device_map
+def test_get_model_device_map(
+    monkeypatch,
+    tmp_path,
+    model_type,
+    architecture,
+    device_count,
+    use_seq_device_map,
+    expected_device_map,
 ):
     calls = {}
     hf_config = SimpleNamespace(
@@ -511,58 +533,25 @@ def test_get_model_device_map_for_diffusion_gemma(
     # (e.g. Gemma3ForCausalLM) reappears on the next ``hasattr`` and the real one loads.
     # raising=False: DiffusionGemma may not exist in the installed transformers.
     monkeypatch.setattr(example_utils.transformers, architecture, FakeArchitecture, raising=False)
-    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
     monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
     monkeypatch.setattr(torch.cuda, "device_count", lambda: device_count)
 
-    example_utils.get_model(str(tmp_path), device="cuda", trust_remote_code=True)
+    example_utils.get_model(
+        str(tmp_path),
+        device="cuda",
+        trust_remote_code=True,
+        use_seq_device_map=use_seq_device_map,
+    )
 
     assert calls["from_pretrained"]["device_map"] == expected_device_map
     # Sequential caps per-GPU memory; "auto" must stay unrestricted.
     if expected_device_map == "sequential":
         assert calls["from_pretrained"]["max_memory"] == {0: 1024 * 0.8}
-    else:
+    elif not use_seq_device_map:
         assert "max_memory" not in calls["from_pretrained"]
-
-
-@pytest.mark.parametrize(
-    ("hf_config", "expected"),
-    [
-        (SimpleNamespace(model_type="diffusion_gemma", architectures=None), True),
-        (SimpleNamespace(model_type=None, architectures=["DiffusionGemmaForCausalLM"]), True),
-        (SimpleNamespace(model_type="gemma3", architectures=["Gemma3ForCausalLM"]), False),
-        # Multi-modal wrappers keep the family name on the nested ``text_config``.
-        (
-            SimpleNamespace(
-                model_type="multimodal",
-                architectures=["SomeWrapperForConditionalGeneration"],
-                text_config=SimpleNamespace(model_type="diffusion_gemma"),
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model_type="multimodal",
-                text_config=SimpleNamespace(architectures=["DiffusionGemmaForCausalLM"]),
-            ),
-            True,
-        ),
-        # A non-DiffusionGemma nested config must not match.
-        (
-            SimpleNamespace(
-                model_type="multimodal", text_config=SimpleNamespace(model_type="gemma3")
-            ),
-            False,
-        ),
-        # Stub configs may omit either attribute entirely.
-        (SimpleNamespace(), False),
-    ],
-)
-def test_is_diffusion_gemma(hf_config, expected):
-    assert example_utils.is_diffusion_gemma(hf_config) is expected
 
 
 @pytest.mark.parametrize(
@@ -640,7 +629,6 @@ def test_get_model_selects_bundled_or_builtin_class(
     monkeypatch.setattr(example_utils, "AutoModelForCausalLM", _record("bundled"))
     monkeypatch.setattr(example_utils.transformers, architecture, _record("builtin"), raising=False)
     monkeypatch.setattr(example_utils, "prepare_model_for_loading", lambda *a, **k: nullcontext())
-    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
     monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
@@ -673,6 +661,22 @@ def test_nemotron_h_prefers_bundled_code_for_unsupported_block_type(monkeypatch)
     assert example_utils.prefers_bundled_code("nemotron_h", hf_config, "ckpt", {})
     monkeypatch.setattr(modeling, "MIXER_TYPES", {"mamba": object, "mlp": object})
     assert not example_utils.prefers_bundled_code("nemotron_h", hf_config, "ckpt", {})
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expected"),
+    [
+        ("deepseek", True),
+        ("deepseek_v3", True),
+        ("deepseek_v32", True),
+        ("deepseek_v4", True),
+        ("kimi_k2", True),  # the DeepseekV3ForCausalLM architecture under its own model type
+        ("kimi_k25", False),  # its own architecture, KimiK25ForConditionalGeneration
+        ("llama", False),
+    ],
+)
+def test_deepseek_architectures_prefer_bundled_code(model_type, expected):
+    assert example_utils.prefers_bundled_code(model_type, SimpleNamespace(), "ckpt", {}) is expected
 
 
 # ---------- get_tokenizer ----------------------------------------------------
@@ -885,12 +889,12 @@ def test_a_rank_device_pins_the_whole_model_to_it(
 
 @pytest.mark.parametrize(
     "checkpoint",
-    ["pack-quantized", "mxfp4", "diffusion-gemma"],
+    ["pack-quantized", "mxfp4", "sequential-map"],
 )
 def test_every_load_path_keeps_the_rank_pin(monkeypatch, tmp_path, checkpoint):
-    """A pack-quantized or MXFP4 checkpoint loads through a path of its own, and DiffusionGemma asks
-    for a sequential map on a multi-GPU node; each would otherwise place every rank's copy over the
-    same GPUs."""
+    """A pack-quantized or MXFP4 checkpoint loads through a path of its own, and a model spec can
+    ask for a sequential map on a multi-GPU node; each would otherwise place every rank's copy over
+    the same GPUs."""
     quantization_config = {
         "pack-quantized": {"quant_method": "compressed-tensors", "format": "pack-quantized"},
         "mxfp4": {"quant_method": "mxfp4"},
@@ -898,8 +902,12 @@ def test_every_load_path_keeps_the_rank_pin(monkeypatch, tmp_path, checkpoint):
     LlamaConfig(
         architectures=["LlamaForCausalLM"], quantization_config=quantization_config, **_TINY
     ).save_pretrained(tmp_path)
-    if checkpoint == "diffusion-gemma":
-        monkeypatch.setattr(example_utils, "is_diffusion_gemma", lambda config: True)
+    if checkpoint == "sequential-map":
+        monkeypatch.setattr(
+            example_utils,
+            "get_ptq_spec",
+            lambda model_type: PTQSpec(sequential_device_map="its weights are tied"),
+        )
         monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
     monkeypatch.setattr(example_utils, "_unpack_compressed_linear_weights", lambda *args: None)
     placed = []
@@ -961,3 +969,57 @@ def test_without_a_plan_the_load_decides_and_refuses_sharding_knobs_it_cannot_ho
 
     with pytest.raises(RuntimeError, match="MODELOPT_FSDP_SIZE=world ask to shard"):
         example_utils.get_model(str(tmp_path), device="cuda:0")
+
+
+# ---------- create_vlm_calibration_loop --------------------------------------
+
+
+class _Wrapper(torch.nn.Module):
+    """Records the kwargs its forward gets; no ``extract_feature``, like an omni wrapper."""
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.calls: list[dict] = []
+
+    def forward(self, **kwargs):
+        self.calls.append(kwargs)
+        return torch.zeros(1)
+
+
+def _vlm_batch():
+    return {
+        "input_ids": torch.ones(1, 4, dtype=torch.long),
+        "pixel_values": torch.zeros(2, 3, 8, 8),
+        "attention_mask": torch.ones(1, 4, dtype=torch.long),
+        "position_ids": None,
+    }
+
+
+def test_the_calibration_loop_lets_the_models_plugin_run_the_batch():
+    """An omni wrapper's own calibration forward carries the dtype cast and ``use_cache=False``,
+    which the loop's plain forward would bypass."""
+    model = _Wrapper(SimpleNamespace(model_type="nemotron_h_omni", is_encoder_decoder=False))
+    model.vision_model = SimpleNamespace(config=SimpleNamespace(torch_dtype=torch.bfloat16))
+
+    example_utils.create_vlm_calibration_loop(model, [_vlm_batch()])(model)
+
+    assert len(model.calls) == 1
+    passed = model.calls[0]
+    assert passed["use_cache"] is False
+    assert passed["pixel_values"].dtype is torch.bfloat16
+    assert "position_ids" not in passed
+
+
+def test_the_calibration_loop_keeps_the_plain_forward_for_encoder_decoder_vlms():
+    """An encoder-decoder VLM batch is renamed to ``decoder_input_ids``, which a calibration
+    forward looking for ``input_ids`` would not recognise, silently skipping calibration."""
+    model = _Wrapper(SimpleNamespace(model_type="nemotron_parse", is_encoder_decoder=True))
+
+    example_utils.create_vlm_calibration_loop(model, [_vlm_batch()])(model)
+
+    assert len(model.calls) == 1
+    passed = model.calls[0]
+    assert "decoder_input_ids" in passed, "the encoder-decoder rename reached the model"
+    assert "input_ids" not in passed
+    assert passed["pixel_values"].dtype is torch.float32, "no calibration forward touched it"
