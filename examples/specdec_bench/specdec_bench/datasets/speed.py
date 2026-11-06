@@ -14,11 +14,13 @@
 # limitations under the License.
 
 # mypy: disable-error-code="index"
-# Paper-derived prompt strings carry intentional whitespace/long lines; keep them verbatim.
-# ruff: noqa: E501, W291, W293, PLR1704
-import random
+# Paper-derived prompt strings carry intentional long lines; keep them verbatim.
+# ruff: noqa: E501
+import ast
+import json
 import re
 from enum import StrEnum
+from itertools import chain
 from pathlib import Path
 from typing import Any, Literal, get_args
 
@@ -42,6 +44,7 @@ config_type = Literal[
     "throughput_8k",
     "throughput_16k",
     "throughput_32k",
+    "throughput_100k",
 ]
 TURNS_PLACEHOLDER = "FULL BENCHMARK DATA SHOULD BE FETCHED FROM THE SOURCE USING SPECDEC_BENCH"
 
@@ -76,14 +79,8 @@ DATASETS_AND_LOADERS_FUNCTIONS = {
     BenchmarkDataset.CNN_DAILYMAIL.value: lambda dataset_name, config_name: load_dataset(
         dataset_name, config_name, split="test"
     ),
-    BenchmarkDataset.HLE.value: lambda dataset_name, config_name: (
-        load_dataset(
-            dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb"
-        )
-        if config_name != "train_test_split"
-        else load_dataset(
-            dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb"
-        ).train_test_split(test_size=0.5, shuffle=True, seed=42)
+    BenchmarkDataset.HLE.value: lambda dataset_name, config_name: load_dataset(
+        dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb"
     ),
     BenchmarkDataset.LIVECODEBENCH.value: lambda dataset_name, config_name: load_dataset(
         "json",
@@ -166,19 +163,10 @@ class SPEEDBench(Dataset):
             self.external_datasets[full_name] = DATASETS_AND_LOADERS_FUNCTIONS[dataset_name](
                 dataset_name, config_name
             )
-            if config_name == "train_test_split":
-                self.external_datasets[full_name] = (
-                    self.external_datasets[full_name]["train"],
-                    self.external_datasets[full_name]["test"],
-                )
         return self.external_datasets[full_name]
 
     @staticmethod
-    def _generate_stackselect_prompt(
-        question: str, answers: list[str], answer: str, num_tokens: int
-    ) -> str:
-        random.seed(42)
-        encoder = tiktoken.get_encoding("o200k_base")
+    def _generate_stackselect_prompt(question: str, answers: list[str]) -> str:
         # Original prompt as given in Ada-LEval paper: https://arxiv.org/pdf/2404.06480
         prompt = """
 You are an AI assistant. Your job is to find out the most helpful answer to a given question.
@@ -203,7 +191,7 @@ XXX(The content of answer 2)
 .
 An:
 XXX(The content of answer n)
-Now the answers are over, please decide which answer is the most helpful one to the question. 
+Now the answers are over, please decide which answer is the most helpful one to the question.
 You must give me the designation of the MOST helpful answer and the reason why you choose this answer.
 For every other answer, you must give me the reason why you do not choose this answer.
 
@@ -222,35 +210,10 @@ An: The reason why you do not choose this answer.
         prompt += "The question is given below.\n"
         prompt += question + "\n\n"
         prompt += "Possible answers are given below.\n"
-        tokens_prompt = len(encoder.encode(prompt, disallowed_special=()))
         end_prompt = "Now the answers are over, please decide which answer is the most helpful one to the question. \n"
         end_prompt += "You must give me the designation of the MOST helpful answer and the reason why you choose this answer.\n"
         end_prompt += "For every other answer, you must give me the reason why you do not choose this answer.\n"
-        end_prompt_tokens = len(encoder.encode(end_prompt, disallowed_special=()))
-        correct_answer_i = int(answer.strip("A")) - 1
-        correct_answer_tokens = len(
-            encoder.encode(
-                answer + ":\n\n" + answers[correct_answer_i] + "\n\n",
-                disallowed_special=(),
-            )
-        )
-        all_tokens = tokens_prompt + end_prompt_tokens + correct_answer_tokens
-        answers_to_add_stop = 0
         for i, answer in enumerate(answers):
-            if i == correct_answer_i:
-                continue
-            answer_to_add = f"A{i + 1}:\n\n{answer}\n\n"
-            answer_to_add_tokens = len(encoder.encode(answer_to_add, disallowed_special=()))
-            if all_tokens + answer_to_add_tokens > num_tokens:
-                break
-            answers_to_add_stop = i
-        answers_to_add = (
-            answers[: answers_to_add_stop + 1]
-            if answers_to_add_stop >= correct_answer_i
-            else [answers[correct_answer_i], *answers[: answers_to_add_stop + 1]]
-        )
-        random.shuffle(answers_to_add)
-        for i, answer in enumerate(answers_to_add):
             prompt += f"A{i + 1}:\n\n{answer}\n\n"
         prompt += end_prompt
         return prompt
@@ -261,53 +224,55 @@ An: The reason why you do not choose this answer.
         original_instruction = "\n    You are an AI assistant. Your job is to sort multiple book sections into the correct order.\n    Each time, you will be provided with 4 pieces of text.\n    These texts form a continuous part of a book, but are provided in random order.\n    You need to find the correct order and return the answer in a string.\n    For example, if you output [4, 1, 3, 2], that means the correct order is: Part 4 -> Part 1 -> Part 3 -> Part 2.\n    You will also be provided with the neighboring paragraphs before and after the 4 pieces of texts. \n\n    The case sample is shown below and you should give me the answer in the format exactly the same as the sample. \n\n    However, you should NOT focus on the content of sample answer. \n\n    Please do NOT output any extra content. \n    Sample Input (format only): \n\n    Before: XXX (Text before the continuous book part)\n\n\n    Part 1: XXX\n\n\n    Part 2: XXX\n\n\n    Part 3: XXX\n\n\n    Part 4: XXX\n\n\n    After: XXX (Text after the continuous book part)\n\n\n    Sample Output (format only): \n\n    Answer: [4, 1, 3, 2] \n\n\n\n"
 
         new_instruction = """
-You are an AI assistant. Your job is to sort multiple book sections into the correct order.    
+You are an AI assistant. Your job is to sort multiple book sections into the correct order.
     Each time, you will be provided with 4 pieces of text.
-    These texts form a continuous part of a book, but are provided in random order.    
-    You need to find the correct order and write the all the parts in the correct order.    
-    For example, if the correct order is: Part 4 -> Part 1 -> Part 3 -> Part 2, you need to answer with a continous text of all the parts in the correct order.
-    You should NOT change the text, just write it in the order it should appear.   
+    These texts form a continuous part of a book, but are provided in random order.
+    You need to find the correct order and write the all the parts in the correct order.
+    For example, if the correct order is: Part 4 -> Part 1 -> Part 3 -> Part 2, you need to answer with a continuous text of all the parts in the correct order.
+    You should NOT change the text, just write it in the order it should appear.
     You will also be provided with the neighboring paragraphs before and after the 4 pieces of texts.
     You should NOT output the before and after paragraphs, just the text in the correct order.
-    
-    The case sample is shown below and you should give me the answer in the format exactly the same as the sample. 
-    
-    However, you should NOT focus on the content of sample answer. 
-    
-    Please do NOT output any extra content. 
 
-    Sample Input (format only): 
-    
+    The case sample is shown below and you should give me the answer in the format exactly the same as the sample.
+
+    However, you should NOT focus on the content of sample answer.
+
+    Please do NOT output any extra content.
+
+    Sample Input (format only):
+
     Before: BBB (Text before the continuous book part)
-    
-    
+
+
     Part 1: XXX
 
 
     Part 2: YYY
-    
-    
+
+
     Part 3: ZZZ
-    
-    
+
+
     Part 4: WWW
 
 
     After: AAA (Text after the continuous book part)
-    
-    Sample Output (format only): 
-    
-    Answer: 
+
+    Sample Output (format only):
+
+   Answer:
 
 
-    WWW
+   WWW
 
-    XXX
+   XXX
 
-    ZZZ
+   ZZZ
 
-    YYY
-    """
+   YYY
+
+
+"""
         return prompt.replace(original_instruction, new_instruction, 1)
 
     @staticmethod
@@ -320,7 +285,7 @@ You are an AI assistant. Your job is to sort multiple book sections into the cor
         )
         # Inspired by the prompt used in BAMBOO paper: https://arxiv.org/pdf/2309.13345
         prompt = f"""
-I want you to act as a long dialogue completer. 
+I want you to act as a long dialogue completer.
 Given a long dialogue(s), your objectives are:
 1. Add one speaker mentioned in the past dialogue(s) at the end of the last sentence of each dialogue (between START CONTENT and END CONTENT) to complete the sentence and ensure its semantic integrity.  At here, the added word must be a person's name which appears in the dialogue.
 2. Continue the dialogue(s) with one or more speakers who appeared in the dialogue(s) before. Be coherent with the previous dialogue(s) and be creative in your response.
@@ -446,31 +411,93 @@ her fear and anger)."""
 
     @staticmethod
     def _generate_hle_prompt(
-        example: dict[str, Any],
-        hle_train: "pd.DataFrame",
-        num_tokens: int,
-        rng: "np.random.Generator",
+        example: dict[str, Any], demonstrations: list[dict[str, Any]], context_tokens: int
     ) -> str:
         encoder = tiktoken.get_encoding("o200k_base")
-        prompt = (
+        prefix = encoder.encode(
             "Please answer the question below.\n\nHere are some examples of question and answer pairs in the category of "
             + example["category"]
-            + ":\n\n"
+            + ":\n\n",
+            disallowed_special=(),
         )
-        prompt_tokens = encoder.encode(prompt)
-        example_tokens = encoder.encode(example["question"])
-        current_num_tokens = len(prompt_tokens) + len(example_tokens)
-        hle_train_category = hle_train[hle_train["category"] == example["category"]]
-
-        while current_num_tokens < num_tokens:
-            hle_train_category_sample = hle_train_category.sample(1, random_state=rng)
-            prompt += hle_train_category_sample["demonstration"].iloc[0]
-            current_num_tokens += len(hle_train_category_sample["tokens"].iloc[0])
-            prompt_tokens += list(hle_train_category_sample["tokens"].iloc[0])
-
-        return encoder.decode(
-            prompt_tokens[: num_tokens - len(example_tokens) + 1] + example_tokens
+        suffix = encoder.encode(
+            "\n\nQuestion: " + example["question"] + "\n\nAnswer: ", disallowed_special=()
         )
+        context = list(
+            chain.from_iterable(
+                encoder.encode(
+                    "Question: " + demo["question"] + "\n\nAnswer: " + demo["rationale"] + "\n\n",
+                    disallowed_special=(),
+                )
+                for demo in demonstrations
+            )
+        )
+        if not 0 < context_tokens <= len(context):
+            raise ValueError("Invalid HLE demonstration-token cutoff")
+        return encoder.decode(prefix + context[:context_tokens] + suffix)
+
+    @staticmethod
+    def _trim_textsort_prompt(prompt: str, part_four: str, num_tokens: int) -> str:
+        encoder = tiktoken.get_encoding("o200k_base")
+
+        def encode(text: str) -> list[int]:
+            return encoder.encode(text, disallowed_special=())
+
+        length = len(encode(prompt))
+        if num_tokens - 1 <= length <= num_tokens:
+            return prompt
+        tokens = encode(part_four)
+        start = prompt.index(part_four)
+        marker = "\n\n[... middle of Part 4 omitted to fit the 100K prompt ...]\n\n"
+        maximum = len(tokens) - 200
+        if length < num_tokens or maximum <= 0:
+            raise ValueError("TextSort Part 4 cannot be trimmed to the target length")
+
+        def candidate(remove_count):
+            remaining = len(tokens) - remove_count
+            left, right = remaining // 2, remaining - remaining // 2
+            result = (
+                prompt[:start]
+                + encoder.decode(tokens[:left])
+                + marker
+                + encoder.decode(tokens[-right:])
+                + prompt[start + len(part_four) :]
+            )
+            return result, len(encode(result))
+
+        remove_count = min(maximum, length - num_tokens + len(encode(marker)))
+        tried, best = set(), None
+        for _ in range(12):
+            remove_count = max(1, min(maximum, remove_count))
+            if remove_count in tried:
+                break
+            tried.add(remove_count)
+            result, length = candidate(remove_count)
+            if best is None or (abs(length - num_tokens), length) < (
+                abs(best[1] - num_tokens),
+                best[1],
+            ):
+                best = (result, length)
+            if length == num_tokens:
+                return result
+            remove_count += length - num_tokens
+        center = max(1, min(maximum, remove_count))
+        for radius in (8, 32, 128):
+            for remove_count in range(max(1, center - radius), min(maximum, center + radius) + 1):
+                if remove_count in tried:
+                    continue
+                tried.add(remove_count)
+                result, length = candidate(remove_count)
+                if best is None or (abs(length - num_tokens), length) < (
+                    abs(best[1] - num_tokens),
+                    best[1],
+                ):
+                    best = (result, length)
+                if length == num_tokens:
+                    return result
+        if best is not None and best[1] == num_tokens - 1:
+            return best[0]
+        raise ValueError("Could not fit TextSort Part 4 to the target length")
 
     @staticmethod
     def _get_num_tokens_from_config(speed_config: config_type | str) -> int:
@@ -516,30 +543,32 @@ her fear and anger)."""
                     external_dataset[external_dataset["id"] == src_id]["question"].iloc[0]
                 ]
             elif "throughput" in speed_config:
-                num_tokens = self._get_num_tokens_from_config(speed_config)
-                hle_train, hle_test = self._get_external_dataset(
-                    BenchmarkDataset.HLE.value, config_name="train_test_split"
-                )
-                hle_train = hle_train.to_pandas()
-                hle_train = hle_train[hle_train["image"] == ""]
-                hle_train["demonstration"] = hle_train.apply(
-                    lambda e: (
-                        "Question: " + e["question"] + "\n\nAnswer: " + e["rationale"] + "\n\n"
-                    ),
-                    axis=1,
-                )
-                hle_train["tokens"] = hle_train["demonstration"].apply(
-                    lambda e: tiktoken.get_encoding("o200k_base").encode(e, disallowed_special=())
-                )
-                src_id = example["src_id"]
-                hle_test = hle_test.to_pandas()
-                external_dataset_example = hle_test[hle_test["id"] == src_id].iloc[0]
-                self.hle_rng = getattr(self, "hle_rng", np.random.default_rng(42))
-                example["turns"] = [
-                    self._generate_hle_prompt(
-                        external_dataset_example, hle_train, num_tokens, self.hle_rng
+                fields = json.loads(example["src_id"])
+                if "hle_by_id" not in self.external_datasets:
+                    dataset = self._get_external_dataset(
+                        BenchmarkDataset.HLE.value, config_name="test"
                     )
-                ]
+                    self.external_datasets["hle_by_id"] = (
+                        dataset.select_columns(["id", "category", "question", "rationale"])
+                        .to_pandas()
+                        .set_index("id")
+                        .to_dict("index")
+                    )
+                rows = self.external_datasets["hle_by_id"]
+                prompt = self._generate_hle_prompt(
+                    rows[fields["target"]],
+                    [rows[src_id] for src_id in fields["demos"]],
+                    fields["tokens"],
+                )
+                num_tokens = self._get_num_tokens_from_config(speed_config)
+                actual_tokens = len(
+                    tiktoken.get_encoding("o200k_base").encode(prompt, disallowed_special=())
+                )
+                if not num_tokens - 1 <= actual_tokens <= num_tokens:
+                    raise ValueError(
+                        f"HLE prompt for {example['src_id']} has {actual_tokens} tokens; expected {num_tokens - 1} to {num_tokens}"
+                    )
+                example["turns"] = [prompt]
             else:
                 raise ValueError(f"Invalid speed_config: {speed_config}")
 
@@ -582,6 +611,7 @@ her fear and anger)."""
 
         elif BenchmarkDataset.OPUS100.value in example["source"]:
             _, config_name, src_id = example["src_id"].split("_")
+            src_lang = config_name.split("-")[0]
             external_dataset = self._get_external_dataset(
                 BenchmarkDataset.OPUS100.value, config_name=config_name
             )
@@ -589,7 +619,7 @@ her fear and anger)."""
             example["turns"] = [
                 example["turns"][0]
                 .removeprefix(f"{TURNS_PLACEHOLDER}\n\n")
-                .format(question=external_dataset_example["translation"][0])
+                .format(question=external_dataset_example["translation"][0][src_lang])
             ]
 
         elif BenchmarkDataset.CHATRAG_BENCH.value in example["source"]:
@@ -601,38 +631,31 @@ her fear and anger)."""
             example["turns"] = self._generate_chatrag_bench_prompt(external_dataset_example)
 
         elif BenchmarkDataset.MMLU_PRO.value in example["source"]:
-            external_dataset = self._get_external_dataset(
-                BenchmarkDataset.MMLU_PRO.value, config_name="test"
-            )
-            src_id = int(example["src_id"].split("(")[1].split(",")[0])
-            external_dataset_example = external_dataset.select(
-                range(src_id, src_id + len(example["turns"]))
-            )
+            if "mmlu_pro_grouped" not in self.external_datasets:
+                external_dataset = self._get_external_dataset(
+                    BenchmarkDataset.MMLU_PRO.value, config_name="test"
+                ).to_pandas()
+                external_dataset["group"] = external_dataset.index // 2
+                self.external_datasets["mmlu_pro_grouped"] = external_dataset.groupby(
+                    ["group", "category"]
+                ).agg({"question": list, "options": list})
+            external_dataset = self.external_datasets["mmlu_pro_grouped"]
+            src_id = ast.literal_eval(example["src_id"].removeprefix("mmlu_pro_"))
+            external_dataset_example = external_dataset.loc[src_id]
             example["turns"] = self._generate_mmlu_pro_prompt(
                 external_dataset_example, example["sub_category"]
             )
 
         elif BenchmarkDataset.ADALEVAL_STACKSELECT.value in example["source"]:
             num_tokens = self._get_num_tokens_from_config(speed_config)
+            fields = json.loads(example["src_id"])
             external_dataset = self._get_external_dataset(
-                BenchmarkDataset.ADALEVAL_STACKSELECT.value,
-                config_name=example["source"],
-            ).to_pandas()
-            src_id = example["src_id"]
-            external_dataset_example = external_dataset[
-                external_dataset["question_id"] == src_id
-            ].iloc[0]
-            example["turns"] = [
-                self._pad_or_truncate_prompt(
-                    self._generate_stackselect_prompt(
-                        question=external_dataset_example["question"],
-                        answers=external_dataset_example["all_answers"],
-                        answer=external_dataset_example["answer"],
-                        num_tokens=num_tokens,
-                    ),
-                    num_tokens,
-                )
-            ]
+                BenchmarkDataset.ADALEVAL_STACKSELECT.value, config_name=example["source"]
+            )
+            row = external_dataset[fields["row"]]
+            answers = [row["all_answers"][index] for index in fields["answers"]]
+            prompt = self._generate_stackselect_prompt(row["question"], answers)
+            example["turns"] = [self._pad_or_truncate_prompt(prompt, num_tokens)]
 
         elif BenchmarkDataset.ADALEVAL_TEXTSORT.value in example["source"]:
             num_tokens = self._get_num_tokens_from_config(speed_config)
@@ -641,11 +664,17 @@ her fear and anger)."""
             )
             src_id = example["src_id"].split("_")[1]
             external_dataset_example = external_dataset.select([int(src_id)])
+            prompt = self._generate_textsort_prompt(external_dataset_example["prompt"][0])
+            # Preserve exact v1.1 reconstruction: only 100K trims Part 4, and short
+            # prompts must fail rather than introduce padding absent from the benchmark.
+            # v1.1 reconstruction selects chapters[3] and locates its text verbatim;
+            # an answer order such as [4, 1, 3, 2] does not change that selection.
             example["turns"] = [
-                self._pad_or_truncate_prompt(
-                    self._generate_textsort_prompt(external_dataset_example["prompt"][0]),
-                    num_tokens,
+                self._trim_textsort_prompt(
+                    prompt, external_dataset_example["chapters"][0][3], num_tokens
                 )
+                if num_tokens == 100_000
+                else self._pad_or_truncate_prompt(prompt, num_tokens)
             ]
 
         elif BenchmarkDataset.ROLEBENCH.value in example["source"]:
@@ -702,7 +731,9 @@ her fear and anger)."""
             The loaded (and optionally filtered / truncated) HuggingFace dataset.
         """
         if config_name_or_dataset_path in get_args(config_type):
-            dataset = load_dataset("nvidia/SPEED-Bench", config_name_or_dataset_path, split="test")
+            dataset = load_dataset(
+                "nvidia/SPEED-Bench", config_name_or_dataset_path, split="test", revision="v1.1"
+            )
         else:
             config_name_or_dataset_path_path = Path(config_name_or_dataset_path)
             if not config_name_or_dataset_path_path.exists():

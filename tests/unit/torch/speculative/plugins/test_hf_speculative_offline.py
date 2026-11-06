@@ -31,6 +31,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_tokenizer
+from transformers import TrainingArguments
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config
@@ -635,6 +636,46 @@ def test_get_dummy_inputs_offline(eagle_model):
     hidden_size = eagle_model.config.hidden_size
     assert dummy["base_model_outputs"]["base_model_hidden_states"].shape[-1] == hidden_size
     assert dummy["base_model_outputs"]["base_model_input_embeds"].shape[-1] == hidden_size
+
+
+@pytest.mark.parametrize("accumulation_steps", [2, 3])
+def test_eagle_trainer_accumulated_gradients(tmp_path, accumulation_steps):
+    """Trainer averages native EAGLE losses for full and partial accumulation groups."""
+    model = get_tiny_llama(num_hidden_layers=4, dtype=torch.float32)
+    mtsp.convert(
+        model,
+        mode=[("eagle", {**TINY_EAGLE_MODE_CFG, "eagle_use_torch_compile": False})],
+    )
+    trainer = _eagle_utils.EagleTrainerWithAccLog(
+        model=model,
+        args=TrainingArguments(
+            output_dir=str(tmp_path),
+            use_cpu=True,
+            report_to=[],
+            gradient_accumulation_steps=accumulation_steps,
+        ),
+    )
+    batches = [
+        {"input_ids": torch.randint(0, 32, (1, 8)), "labels": torch.zeros(1, 8, dtype=torch.long)}
+        for _ in range(2)
+    ]
+    trainer.current_gradient_accumulation_steps = len(batches)
+    model.train()
+    for batch in batches:
+        (model(**batch).loss / len(batches)).backward()
+    expected = {
+        name: parameter.grad.clone()
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    model.zero_grad(set_to_none=True)
+
+    for batch in batches:
+        trainer.training_step(model, batch, num_items_in_batch=torch.tensor(16))
+
+    for name, parameter in model.named_parameters():
+        if parameter.requires_grad:
+            torch.testing.assert_close(parameter.grad, expected[name])
 
 
 # ---------------------------------------------------------------------------

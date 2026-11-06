@@ -59,6 +59,7 @@ from modelopt.torch.opt.conversion import ApplyModeError
 from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
+from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.model_calib import (
     _expert_slices,
     _register_weight_input_hooks,
@@ -2730,6 +2731,14 @@ def test_native_fp8_experts_reject_packed_weight_updates(cfg, algorithm):
         name: getattr(experts, name).detach().clone() for name in ("gate_up_proj", "down_proj")
     }
     mtq.calibrate(experts, algorithm, forward_loop=lambda m: m(inputs, indices, routing))
+    if algorithm == "imatrix":
+        # IQ formats keep the weight unrounded and pin the codes imatrix chose instead.
+        quantizers = [
+            q for q in experts.modules() if getattr(q, "num_bits", None) == cfg["num_bits"]
+        ]
+        assert quantizers
+        assert all(pinned_packed_weight(q, cfg["num_bits"]) is not None for q in quantizers)
+        return
     for name, weight in unpacked.items():
         assert not torch.equal(getattr(experts, name), weight)
 

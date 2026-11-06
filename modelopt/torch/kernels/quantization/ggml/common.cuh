@@ -119,6 +119,21 @@ inline void check_importance(const char *format, const at::Tensor &input,
   // add a host sync to every encode.
 }
 
+// Fixed per-group choices, [blocks, groups] of any integer dtype. Returns them as contiguous
+// uint8 rows, or an undefined tensor when there are none.
+inline at::Tensor checked_choices(const char *format, const at::Tensor &input,
+                                  const std::optional<at::Tensor> &choices, int groups) {
+  if (!choices.has_value())
+    return at::Tensor();
+  TORCH_CHECK(choices->is_cuda() && choices->get_device() == input.get_device(), format,
+              " choices must be on the input's CUDA device");
+  TORCH_CHECK(!at::isFloatingType(choices->scalar_type()) &&
+                  choices->numel() == input.numel() / kBlockSize * groups,
+              format, " choices must be an integer [blocks, ", groups, "] tensor");
+  // The Python encoders check the range; repeating it here would add a host sync.
+  return choices->to(at::kByte).contiguous();
+}
+
 #ifdef __CUDACC__
 
 // Reads one input element as float32. Non-finite elements are treated as zero, and finiteness is

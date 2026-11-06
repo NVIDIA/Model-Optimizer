@@ -40,10 +40,13 @@ from .codebooks import iq1_s_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
     GGMLFormat,
+    choice_blocks,
     chunk_importance,
     dequantize_blocks,
     importance_blocks,
+    leading_fp16_scales,
     narrow_to_float32,
+    super_block_scales,
     validate_block_chunk_size,
     validate_packed_weights,
     validate_weight,
@@ -74,6 +77,7 @@ _DEFAULT_BLOCK_CHUNK_SIZE = 1024
 # forward. Measured decoding a 2048x5632 weight: 66.5 ms at 256 blocks, 4.2 ms at 4096,
 # where the transient peak is +42 MiB.
 _DEFAULT_DECODE_CHUNK_SIZE = 4096
+_SCALE_BLOCK_CHUNK_SIZE = 4096
 
 
 _GRID_CACHE: dict[torch.device, torch.Tensor] = {}
@@ -96,12 +100,15 @@ def _predict_iq1_s_scales(blocks: torch.Tensor) -> torch.Tensor:
     """Predict one FP16 super-block scale for each flattened block.
 
     The fixed-scale search favors a compressed super-block scale, so this empirical anchor
-    puts d below the full-range value. The CUDA encoder computes the same quantity in its
-    own scale kernel; this is the reference the torch path uses.
+    puts d below the full-range value. Both encoders take d from here, so they cannot disagree
+    on it.
     """
     x = narrow_to_float32(blocks)
     amax = x.abs().amax(dim=1)
-    return ((amax / _IQ1_S_NATIVE_MAX) * _IQ1_S_SCALE_ANCHOR).clamp(max=65504.0).to(torch.float16)
+    # CUDA turns division by a Python scalar into a reciprocal multiply, which rounds differently
+    # from the CPU; a tensor divisor keeps IEEE division, so d is the same on every device.
+    native_max = torch.full_like(amax, _IQ1_S_NATIVE_MAX)
+    return ((amax / native_max) * _IQ1_S_SCALE_ANCHOR).clamp(max=65504.0).to(torch.float16)
 
 
 def _search_shifted_grid(
@@ -168,19 +175,26 @@ def _search_shifted_grid(
 
 
 def _encode_blocks(
-    blocks: torch.Tensor, grid: torch.Tensor, weights: torch.Tensor | None = None
+    blocks: torch.Tensor,
+    grid: torch.Tensor,
+    weights: torch.Tensor | None = None,
+    choices: torch.Tensor | None = None,
+    scales: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Encode a moderate-size batch of flattened 256-value blocks."""
+    """Encode a moderate-size batch of flattened 256-value blocks.
+
+    ``choices``, ``[blocks, 8]``, fixes each sub-block's ``shift * 8 + local`` instead of searching it.
+    """
     x = narrow_to_float32(blocks)
     block_count = x.shape[0]
-    d = _predict_iq1_s_scales(x)
+    d = _predict_iq1_s_scales(x) if scales is None else scales
     d_float = d.float()
     best_error, best_entry = _search_shifted_grid(
         x.reshape(block_count, 32, 8), d_float, grid, weights
     )
 
     group_error = best_error.reshape(block_count, 8, 4, 16).sum(dim=2)
-    selected_choice = group_error.argmin(dim=-1)
+    selected_choice = group_error.argmin(dim=-1) if choices is None else choices
     vector_choice = selected_choice.repeat_interleave(4, dim=1)
     selected_entry = best_entry.gather(2, vector_choice.unsqueeze(-1)).squeeze(-1)
     selected_local = selected_choice & 0x7
@@ -210,6 +224,8 @@ def quantize_iq1_s(
     *,
     block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
     importance: torch.Tensor | None = None,
+    choices: torch.Tensor | None = None,
+    scales: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ1_S blocks.
 
@@ -217,19 +233,28 @@ def quantize_iq1_s(
     and ``[weight.ndim]``. The packed payload remains on the weight's device;
     the logical-shape metadata is kept on CPU. Non-finite input elements are
     treated as zero during packing. ``importance``, a non-negative per-input-column vector,
-    weights each value's squared error in the search, as llama.cpp's imatrix does.
+    weights each value's squared error in the search, as llama.cpp's imatrix does. ``choices``,
+    ``[*weight.shape[:-1], weight.shape[-1] // 256, 8]``, fixes each 32-value group's 3-bit local
+    scale and delta sign, as ``shift * 8 + local``.
+    ``scales``, one FP16 super-block scale per block, replaces the predicted ones.
     """
     validate_weight(weight, "IQ1_S")
     validate_block_chunk_size(block_chunk_size)
     block_importance = importance_blocks(importance, weight, "IQ1_S")
+    block_choices = choice_blocks(choices, weight, 8, 16, "IQ1_S")
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ1_S_BLOCK_SIZE)
+    block_scales = super_block_scales(
+        blocks, _predict_iq1_s_scales, scales, _SCALE_BLOCK_CHUNK_SIZE
+    )
     grid = iq1_s_grid(weight.device)
     if weight.is_cuda:
         extension = get_cuda_ext_ggml()
         if extension is not None:
-            packed = extension.iq1_s_pack(blocks, grid, block_importance)
+            packed = extension.iq1_s_pack(
+                blocks, grid, block_scales, block_importance, block_choices
+            )
             packed_shape = (
                 *weight.shape[:-1],
                 weight.shape[-1] // IQ1_S_BLOCK_SIZE,
@@ -244,6 +269,8 @@ def quantize_iq1_s(
             chunk_importance(
                 block_importance, start, min(start + block_chunk_size, blocks.shape[0])
             ),
+            None if block_choices is None else block_choices[start : start + block_chunk_size],
+            block_scales[start : start + block_chunk_size],
         )
         for start in range(0, blocks.shape[0], block_chunk_size)
     ]
@@ -311,6 +338,9 @@ IQ1_S_FORMAT = GGMLFormat(
     int8_group_size=_IQ1_S_INT8_GROUP_SIZE,
     unpack_int8=_unpack_int8,
     weighted=True,
+    choice_groups=8,
+    num_choices=16,
+    payload_scales=leading_fp16_scales,
 )
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq1_s and

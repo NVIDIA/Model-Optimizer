@@ -235,6 +235,14 @@ class EagleTrainerWithAccLog(Trainer):
         super().__init__(*args, **kwargs)
         self.lora_lr_multiplier = lora_lr_multiplier
 
+    def get_train_dataloader(self):
+        """Apply ``dataloader_in_order``, which ``Trainer`` forwards only from transformers 5.15."""
+        dataloader = super().get_train_dataloader()
+        # accelerate's wrapper forwards attribute reads to the torch loader, not writes.
+        loader = getattr(dataloader, "base_dataloader", dataloader)
+        loader.in_order = getattr(self.args, "dataloader_in_order", True)
+        return dataloader
+
     def create_optimizer(self, model=None):
         """Override to give LoRA parameters a higher learning rate.
 

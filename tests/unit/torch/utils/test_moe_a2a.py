@@ -43,11 +43,13 @@ from torch import nn
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.moe as moe
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.moe import (
     _choose_ep_degree,
     _num_experts_from_config,
     _routed_expert_modules,
     a2a_moe,
+    expert_parallel_mesh,
 )
 
 # Small, fully-deterministic problem. E must be divisible by every world size under test.
@@ -563,3 +565,32 @@ def test_a_transformers_below_a_features_floor_is_refused(monkeypatch, installed
         else nullcontext()
     ):
         moe.require_transformers("5.7", "EP load")
+
+
+# ------------------------------------------------------------------------ expert_parallel_mesh
+
+
+@pytest.mark.parametrize(
+    ("plan", "is_expert_parallel"),
+    [(DistributionPlan(2, ep_size=2), True), (None, False), (DistributionPlan(2), False)],
+    ids=["expert-parallel", "no-plan", "replicated"],
+)
+def test_the_expert_parallel_mesh_comes_with_an_expert_parallel_plan_only(plan, is_expert_parallel):
+    """An expert-parallel plan: the mesh transformers kept on the model. Any other model has none,
+    even with a device mesh on it, as a load through from_pretrained's own TP can leave."""
+    model = model_with_decoder_at("model.")
+    if plan is not None:
+        set_distribution_plan(model, plan)
+    model._device_mesh = mesh = object()
+
+    assert expert_parallel_mesh(model) is (mesh if is_expert_parallel else None)
+
+
+def test_an_expert_parallel_model_without_its_mesh_is_refused():
+    """A model recorded expert-parallel that load_and_prepare_ep did not load has no mesh for
+    calibration to re-install the all-to-all forwards over; it is refused by name."""
+    model = model_with_decoder_at("model.")
+    set_distribution_plan(model, DistributionPlan(2, ep_size=2))
+
+    with pytest.raises(RuntimeError, match="carries no device mesh"):
+        expert_parallel_mesh(model)

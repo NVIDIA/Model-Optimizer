@@ -68,7 +68,7 @@ def test_gptq_on_a_ggml_format_pins_the_payload_it_chose():
     iq1_s = GGML_FORMAT_REGISTRY["iq1_s"]
     packed = pinned_packed_weight(model.weight_quantizer, "iq1_s")
     decoded = iq1_s.dequantize(packed, torch.tensor(model.weight.shape), dtype=torch.float32)
-    torch.testing.assert_close(model.weight.detach(), decoded)
+    # IQ1_S keeps its pinned scales, so GPTQ leaves the weight unrounded; fake quant decodes the pin.
     torch.testing.assert_close(model(inputs), inputs @ decoded.T)
     assert torch.equal(iq1_s.pack(model.weight, model.weight_quantizer).flatten(), packed.flatten())
     plain_weight = plain.weight_quantizer(plain.weight).detach()

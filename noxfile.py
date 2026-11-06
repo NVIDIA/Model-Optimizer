@@ -66,7 +66,11 @@ _CPU_ONLY_ENV = {"CUDA_VISIBLE_DEVICES": ""}
 @nox.parametrize("torch_ver", [nox.param(k, id=k) for k in TORCH_VERSIONS])
 def unit(session, torch_ver, tf_ver):
     """Unit tests — parametrized over torch and transformers versions."""
-    session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]")
+    # compressed-tensors runs the real-library tests of on-the-fly expert decompression; it goes in
+    # with the torchvision pin so the resolver keeps the leg's torch. Not in dev-test: the
+    # transformers-free partial_unit(torch) lane installs that extra, and compressed-tensors pulls in
+    # transformers.
+    session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]", "compressed-tensors")
     tf_pins = TRANSFORMERS_VERSIONS[tf_ver]
     if tf_pins:
         session.install(*tf_pins)
@@ -216,6 +220,9 @@ def gpu(session):
     _install_built_from_source(session, "fast_hadamard_transform")
     session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test,dev-fla]")
     _install_built_from_source(session, "mamba_ssm", "causal_conv1d")
+    # quack-kernels (via mamba-ssm) pins an older nvidia-cutlass-dsl than the image's
+    # nvidia-cutlass-operators needs, and Inductor (torch >= 2.14) imports it to compile any matmul.
+    session.run("python", "-m", "pip", "uninstall", "-y", "nvidia-cutlass-operators")
     # Every wheel is built: CI saves the wheelhouse only then, so a run that stopped halfway cannot
     # freeze a partial wheelhouse under the cache key.
     with open(os.path.join(_wheelhouse(), ".complete"), "w"):

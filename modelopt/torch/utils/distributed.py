@@ -57,6 +57,7 @@ __all__ = [
     "distributed_forward_loop",
     "distributed_run",
     "distribution_plan",
+    "expert_parallel_state",
     "fsdp2_wrap",
     "gather_bytes",
     "gather_state_dicts",
@@ -68,6 +69,7 @@ __all__ = [
     "is_master",
     "rank",
     "recorded_distribution_plan",
+    "reinstall_a2a_forwards",
     "set_distribution_plan",
     "shard_dataloader",
     "size",
@@ -699,6 +701,19 @@ def distributed_run(
             _destroy_group(exc)
 
 
+def expert_parallel_state(model: torch.nn.Module) -> "ParallelState | None":
+    """Return the ``ParallelState`` of the model's routed experts, or ``None`` if none has one.
+
+    An expert-parallel load seeds every routed-expert module with a ``ParallelState`` that carries the
+    expert-model-parallel group; no other module of a HuggingFace model has one.
+    """
+    for module in model.modules():
+        state = getattr(module, "_parallel_state", None)
+        if state is not None and state.expert_model_parallel_group.is_initialized():
+            return state
+    return None
+
+
 class _StridedIterableShard(IterableDataset):
     """Rank-strided shard of a streaming ``IterableDataset`` (no ``len()`` required).
 
@@ -829,15 +844,18 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
     )
 
 
-def _reinstall_a2a_forwards(model, ep_mesh) -> int:
-    """Re-plant the torch_a2a TP forward wrappers that quantizer insertion clobbered.
+def reinstall_a2a_forwards(model, ep_mesh) -> int:
+    """Re-plant the routed experts' all-to-all forwards that quantizer insertion dropped.
 
     transformers installs its TP transforms by replacing ``module.forward`` on the instance
     (``install_forward``); for torch_a2a_experts that wrapper passes the EP ``process_group`` to the
     experts forward. Quantizer insertion rebinds ``module.forward``, dropping it, and the experts
-    forward then raises. Called after conversion, before the first forward. Only a forward quantizer
-    insertion rebound is planted again: a wrapper still in place is kept, since wrapping it again
-    would run its transforms twice. Without an ``ep_mesh`` there is nothing to re-plant.
+    forward then raises. Call this after conversion, before the first forward:
+    :func:`distributed_forward_loop` does, and so must a caller that quantizes an expert-parallel
+    model without that loop (a recipe that runs no calibration runs no loop). Only a forward
+    quantizer insertion rebound is planted again: a wrapper still in place is kept, since wrapping
+    it again would run its transforms twice. ``ep_mesh`` is the mesh the experts are sharded over;
+    without one there is nothing to re-plant. Returns how many forwards it planted again.
     """
     if ep_mesh is None:
         return 0
@@ -894,14 +912,16 @@ def distributed_forward_loop(
     dataloader: DataLoader,
     device: torch.device | str | None = None,
     ep_mesh: "torch.distributed.device_mesh.DeviceMesh | None" = None,
+    forward: Callable[[Mapping], object] | None = None,
 ) -> Callable[[torch.nn.Module], None]:
     """Build an ``mtq.quantize`` ``forward_loop`` for a distributed (e.g. expert-parallel) model.
 
     Moves each batch onto ``device``, when given, and runs the captured ``model`` forward (the EP
-    all-reduce / all-to-all collectives fire inside that forward). A model whose plan
-    (:func:`distribution_plan`) is expert-parallel passes the ``ep_mesh`` its experts are sharded
-    over, for the all-to-all forwards that quantizer insertion drops to be re-installed before the
-    first forward; any other model passes none. ``mtq.quantize`` hands the
+    all-reduce / all-to-all collectives fire inside that forward), or ``forward(batch)`` when given,
+    for batches that need their own call into ``model``, such as a VLM's image-text batches. A
+    model whose plan (:func:`distribution_plan`) is expert-parallel passes the ``ep_mesh`` its
+    experts are sharded over, for the all-to-all forwards that quantizer insertion drops to be
+    re-installed before the first forward; any other model passes none. ``mtq.quantize`` hands the
     ``forward_loop`` callback an inner module that this closure ignores, calling the captured
     top-level ``model`` instead so the full distributed forward (and its collectives) runs.
 
@@ -909,7 +929,8 @@ def distributed_forward_loop(
     the single-node ``_forward_loop`` runs them: a hybrid Mamba/attention model mutates its cache in
     place. Each batch is a mapping of the forward's keyword arguments, as ``model(**batch)`` takes;
     only its tensor values move to ``device``, so tensors nested in a value (a list of images, say)
-    must already be there.
+    must already be there. ``forward`` gets a new dict when ``device`` is given, and the loader's own
+    mapping otherwise: copy that before changing it.
     """
     # Local import to avoid any import cycle within modelopt.torch.utils.
     from modelopt.torch.utils.dataset_utils import _disable_use_cache
@@ -924,7 +945,7 @@ def distributed_forward_loop(
         raise ValueError(f"{plan!r}: the ep_mesh spans {ep_mesh.size()} ranks, not {plan.ep_size}.")
 
     def calibrate(_inner_model):
-        _reinstall_a2a_forwards(model, ep_mesh)
+        reinstall_a2a_forwards(model, ep_mesh)
         with _disable_use_cache(model), torch.no_grad():
             # Hand the caching allocator's unused pool back: NCCL allocates its buffers outside it.
             _release_cached_cuda_memory()
@@ -939,7 +960,10 @@ def distributed_forward_loop(
                         k: (v.to(device) if isinstance(v, torch.Tensor) else v)
                         for k, v in batch.items()
                     }
-                model(**batch)
+                if forward is None:
+                    model(**batch)
+                else:
+                    forward(batch)
             # Again for what runs next (amax sync, export collectives), past the forwards' pool.
             _release_cached_cuda_memory()
 

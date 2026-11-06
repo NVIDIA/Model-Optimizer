@@ -15,25 +15,25 @@
 
 """HuggingFace-coupled MoE expert-parallel (EP) helpers.
 
-Finding a model's routed experts, choosing the EP degree they are sharded over, and the DP=EP
-all-to-all expert transport (``torch_a2a``).
+Finding a model's routed experts, choosing the EP degree they are sharded over, the DP=EP
+all-to-all expert transport (``torch_a2a``). The expert-parallel model loader is
+:func:`~modelopt.torch.utils.plugins.model_load_utils.load_and_prepare_ep`.
 
 The all-to-all transport is plain ``torch.distributed.all_to_all_single`` (NCCL) wrapped around
-transformers' quantizable ``_grouped_linear``. ``register_torch_a2a()`` registers it into
-transformers' ``ExpertsInterface`` lazily -- never at import time, so importing this module has no
-transformers-``ExpertsInterface`` side effect.
+transformers' quantizable ``_grouped_linear``. ``register_torch_a2a()`` registers
+it into transformers' ``ExpertsInterface`` (lazily, from ``load_and_prepare_ep``'s a2a path -- never at
+import time, so importing this module has no transformers-``ExpertsInterface`` side effect).
 """
 
 import warnings
-from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from packaging.version import parse
 from torch.distributed.nn.functional import all_to_all_single as autograd_all_to_all_single
 
-if TYPE_CHECKING:
-    from torch import nn
+from .distributed import distribution_plan
 
 # The transformers release the expert-parallel load needs, for every model: 5.6 builds a model only
 # with the experts implementations it ships, never torch_a2a.
@@ -62,6 +62,12 @@ def require_transformers(min_version: str, feature: str) -> None:
 # The nested configs a VLM's expert-parallel plan and expert count are read from. A spec attaching
 # its plan anywhere else would be read as having none, and the MoE planned as a dense model.
 _SUB_CONFIG_ATTRS = ("text_config", "llm_config")
+
+
+def config_levels(hf_config) -> list:
+    """``hf_config`` and its nested language-model configs, those it has, which may carry its settings."""
+    nested = (getattr(hf_config, attr, None) for attr in _SUB_CONFIG_ATTRS)
+    return [c for c in (hf_config, *nested) if c is not None]
 
 
 def _ep_config(hf_config):
@@ -156,48 +162,75 @@ def _ep_spec(model_type: str):
     return getattr(get_spec(model_type), "ep_spec", None)
 
 
+def _ep_floor(model_type: str) -> str:
+    """The transformers release ``model_type``'s expert parallelism needs.
+
+    The expert-parallel load's own, or its spec's when that is later. A model whose spec states no
+    release, or that has no spec, still needs the load's: auto must pick no EP degree below it,
+    rather than reach the load and fail there.
+    """
+    ep = _ep_spec(model_type)
+    stated = ep.requires_transformers if ep is not None else None
+    return max(_EP_MIN_TRANSFORMERS, stated or _EP_MIN_TRANSFORMERS, key=parse)
+
+
+# What the FSDP2 load takes, as a refusal offering it says. It builds a causal LM and reads its
+# tensors as stored, so a quantized or multimodal checkpoint (GPT-OSS's MXFP4, Llama-4's) needs a
+# single process, as does one with an MTP head the load cannot build (--use_fsdp2 refuses
+# Nemotron-H's).
+_FSDP2_TAKES = "an unquantized causal LM with no MTP head it cannot build (such as Nemotron-H's)"
+
+
+def _fsdp2_way_out(fsdp: str = "MODELOPT_FSDP_SIZE=world") -> str:
+    """How a refusal asks for FSDP2, the way around expert parallelism ``fsdp`` spells."""
+    return f"(--use_fsdp2 in examples/hf_ptq/hf_ptq.py, or {fsdp})"
+
+
+def _spec_refusal(model_type: str) -> RuntimeError | None:
+    """Why ``model_type``'s expert parallelism is refused here, or ``None``.
+
+    A ``NotImplementedError`` where its spec rules it out, a ``RuntimeError`` below its transformers
+    floor: the expert-parallel load's own, or its spec's release when that is later; a model with
+    no spec or no EP section still needs the load's. The reason alone, which a plan loading the
+    model without expert parallelism warns with: :func:`check_distributed_support` refuses with it
+    and the way around expert parallelism.
+    """
+    ep = _ep_spec(model_type)
+    if ep is not None and ep.unsupported:
+        return NotImplementedError(
+            f"{model_type} cannot be quantized expert-parallel yet: {ep.unsupported}"
+        )
+    try:
+        require_transformers(_ep_floor(model_type), f"{model_type} expert-parallel PTQ")
+    except RuntimeError as e:
+        return e
+    return None
+
+
 def check_distributed_support(model_type: str) -> None:
     """Refuse ``model_type``'s expert parallelism if its spec does, or below its transformers floor.
 
-    The floor is the expert-parallel load's own, or its spec's release when that is later; a model
-    with no spec or no EP section still needs the load's.
+    With :func:`_spec_refusal`'s reason, and the way around expert parallelism.
     :func:`apply_distributed_support` checks this before it prepares a config; a config already
     prepared with its plan needs only the check. An EP degree left to ``auto`` picks none for a
     model this refuses (:func:`_spec_refuses_ep`), so only an EP degree asked for explicitly, or an
-    expert-parallel plan handed in, meets these errors; both name the way around expert parallelism.
+    expert-parallel plan handed in, meets these errors.
     """
-    ep = _ep_spec(model_type)
-    # The FSDP2 load builds a causal LM and reads its tensors as stored, so a quantized or
-    # multimodal checkpoint (GPT-OSS's MXFP4, Llama-4's) needs a single process, as does one with
-    # an MTP head the load cannot build (--use_fsdp2 refuses Nemotron-H's).
+    refusal = _spec_refusal(model_type)
+    if refusal is None:
+        return
     without_ep = (
-        "without expert parallelism: in a single process, or FSDP2-sharded (--use_fsdp2 in "
-        "examples/hf_ptq/hf_ptq.py, or MODELOPT_FSDP_SIZE=world) if the FSDP2 load supports the "
-        "checkpoint, which takes an unquantized causal LM with no MTP head it cannot build (such "
-        "as Nemotron-H's)"
+        f"without expert parallelism: in a single process, or FSDP2-sharded {_fsdp2_way_out()} if "
+        f"the FSDP2 load supports the checkpoint, which takes {_FSDP2_TAKES}"
     )
-    if ep is not None and ep.unsupported:
-        raise NotImplementedError(
-            f"{model_type} cannot be quantized expert-parallel yet: {ep.unsupported} Quantize it "
-            f"{without_ep}."
-        )
-    # A model whose spec states no release, or that has no spec, still needs the load's floor: auto
-    # must pick no EP degree below it, rather than reach the load and fail there.
-    stated = ep.requires_transformers if ep is not None else None
-    floor = max(_EP_MIN_TRANSFORMERS, stated or _EP_MIN_TRANSFORMERS, key=parse)
-    try:
-        require_transformers(floor, f"{model_type} expert-parallel PTQ")
-    except RuntimeError as e:
-        raise RuntimeError(f"{e} Or quantize it {without_ep}.") from None
+    if isinstance(refusal, NotImplementedError):
+        raise NotImplementedError(f"{refusal} Quantize it {without_ep}.")
+    raise RuntimeError(f"{refusal} Or quantize it {without_ep}.")
 
 
 def _spec_refuses_ep(model_type: str) -> bool:
     """Whether :func:`check_distributed_support` refuses ``model_type``'s expert parallelism here."""
-    try:
-        check_distributed_support(model_type)
-    except RuntimeError:  # NotImplementedError is one too
-        return True
-    return False
+    return _spec_refusal(model_type) is not None
 
 
 def apply_distributed_support(
@@ -206,6 +239,7 @@ def apply_distributed_support(
     *,
     ckpt_path: "str | None" = None,
     trust_remote_code: bool = False,
+    prepare: bool = True,
 ):
     """Prepare ``hf_config`` so ``model_type`` can be loaded expert-parallel, from its model spec.
 
@@ -220,6 +254,11 @@ def apply_distributed_support(
     would substitute our idea of the layout for the model's own. It wins wherever the load reads
     one (:func:`_ep_config`), not only on the config the spec would take: on the root, or on
     another nested config.
+
+    With ``prepare=False``, the spec's ``prepare`` does not run: the plan it would attach
+    (``prepared_ep_plan``) goes on the config instead, and only what makes the checkpoint's own code
+    import and build runs (``make_buildable``). That is what a plan decision reads, and it changes
+    nothing the model computes or loads, as a load that is not expert-parallel must find the process.
 
     Returns the config to load, unchanged for a model type with no spec or no EP section. The plan
     is written into the config it is given, so a caller that keeps its own config passes a copy, as
@@ -257,10 +296,11 @@ def apply_distributed_support(
                 f"config.{' or config.'.join(attrs)}, which this config does not have, nor a plan "
                 "of its own."
             )
-    if ep.base_model_ep_plan and not existing:
-        target.base_model_ep_plan = dict(ep.base_model_ep_plan)
+    plan = ep.base_model_ep_plan or (None if prepare else ep.prepared_ep_plan)
+    if plan and not existing:
+        target.base_model_ep_plan = dict(plan)
 
-    if ep.prepare is not None:
+    if prepare and ep.prepare is not None:
         hf_config = ep.prepare(hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code)
         # The load builds from the config prepare returns: a bad one would fail only there, far
         # from the spec at fault.
@@ -274,6 +314,8 @@ def apply_distributed_support(
                 f"the expert-parallel load reads one: on the config, or its "
                 f"{' or '.join(_SUB_CONFIG_ATTRS)}."
             )
+    elif not prepare and ep.make_buildable is not None:
+        ep.make_buildable(hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code)
     return hf_config
 
 
@@ -285,9 +327,9 @@ def _spec_ep_plan(model_type: str) -> dict[str, str]:
     (``unsupported``). Empty, too, where the plan ships with transformers rather than the spec
     (``qwen3_moe``, ``minimax_m3_vl``): the config carries it, and
     :func:`apply_distributed_support` keeps it as it is. A model below its spec's transformers floor
-    keeps its plan: its experts are routed all the same, so a run holding them whole on every rank
-    is refused rather than replicated. Only reads the spec: nothing is applied, checked or patched,
-    and ``prepare`` does not run.
+    keeps its plan: its experts are routed all the same, and the plan decision finds them by it to
+    warn that the model loads without expert parallelism, and why. Only reads the spec: nothing is
+    applied, checked or patched, and ``prepare`` does not run.
     """
     ep = _ep_spec(model_type)
     if ep is None or ep.unsupported:
@@ -559,7 +601,9 @@ def register_torch_a2a():
     These two styles are functionally transformers' ``megamoe_router`` / ``megamoe_experts`` (added
     in 5.10.4 for DeepGEMM Mega-MoE), reimplemented here so the transport works below 5.10.4 too.
     The base classes (``RouterParallel``, ``TensorParallelLayer``) are stock wherever the EP infra
-    exists (transformers >= 5.6); ``grouped_gemm`` (expert weight sharding) is stock too.
+    exists (transformers >= 5.6); ``grouped_gemm`` (expert weight sharding) is stock too. A model
+    builds with ``torch_a2a`` only from 5.7, the floor ``load_and_prepare_ep`` enforces: 5.6 accepts
+    only the experts implementations it ships.
     """
     global _TORCH_A2A_REGISTERED
     if _TORCH_A2A_REGISTERED:
@@ -626,3 +670,23 @@ def register_torch_a2a():
     ALL_PARALLEL_STYLES.register("torch_a2a_router", TorchA2ARouter())
     ALL_PARALLEL_STYLES.register("torch_a2a_experts", TorchA2AExperts())
     _TORCH_A2A_REGISTERED = True
+
+
+def expert_parallel_mesh(model: nn.Module):
+    """The mesh ``model``'s routed experts are sharded over, or ``None`` if its plan shards none.
+
+    :func:`~modelopt.torch.utils.plugins.model_load_utils.load_and_prepare_ep` loads the model over
+    its expert-parallel submesh, and keeps that submesh on the model as ``_device_mesh``.
+    Calibration takes the mesh to re-install the all-to-all forwards
+    (:func:`~modelopt.torch.utils.distributed.distributed_forward_loop`).
+    """
+    if not distribution_plan(model).is_expert_parallel:
+        return None
+    mesh = getattr(model, "_device_mesh", None)
+    if mesh is None:
+        raise RuntimeError(
+            f"{type(model).__name__} is planned expert-parallel but carries no device mesh. Pass "
+            "the model load_and_prepare_ep returned, not a submodule of it: the loader keeps the "
+            "mesh it shards the experts over on that model alone."
+        )
+    return mesh
