@@ -149,6 +149,7 @@ Changelog
 - Fix streaming speculative-decoding training copying the whole training corpus into every rank and every DataLoader worker, which ran trainer nodes out of host memory on corpora of a few million samples. The corpus now stays memory-mapped.
 - Fix streaming speculative-decoding training capturing another request's hidden states when the vLLM serve ran requests concurrently, and failing on vLLM 0.29 and later. Retrain drafters trained in streaming mode against a serve that ran requests concurrently.
 - Fix DFlash-family drafters (DFlash, DFlash2, DSpark, Domino, LiLiCorr) trained from scratch with ``examples/speculative_decoding/main.py`` having their RoPE frequencies rounded to BF16, so they trained under different rotary phases than vLLM serves them with.
+- Fix the Megatron-Core Hugging Face export of Qwen3.5 / Qwen3.6 models with an MTP head (e.g. from Megatron-Bridge QAD) leaving out the head's ``mtp.fc`` and its three norms (``mtp.pre_fc_norm_embedding``, ``mtp.pre_fc_norm_hidden``, ``mtp.norm``). Re-export affected checkpoints to use their MTP head.
 - Fix DFlash2's candidate-selector loss weighing every block position equally and dividing by its own count of positions, unlike the backbone loss and the SGLang/SpecForge DFlash2 reference. Logged DFlash2 losses change.
 
 0.48.0 (2026-11-02)

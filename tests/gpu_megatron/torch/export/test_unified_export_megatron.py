@@ -1183,6 +1183,43 @@ def test_mtp_state_dict_index_file(tmp_path):
     assert "mtp*" in exporter.exclude_modules
 
 
+@pytest.mark.parametrize(
+    "arch", ["Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"]
+)
+def test_mtp_state_dict_exports_qwen3_5_mtp_wrapper(tmp_path, arch):
+    """A live Qwen3.5 MTP exports its wrapper's fc and norms under the HF checkpoint's names."""
+    exporter = _make_exporter_for_mtp(tmp_path, arch)
+    exporter.rules = exporter._populate_rule_book()[arch]
+    exporter.dtype = torch.bfloat16
+    # The inner TransformerLayer goes through the base decoder rules, covered elsewhere.
+    exporter._get_decoder_layer_state_dict = lambda *args, **kwargs: None
+    hidden = 8
+    mtp_layer = SimpleNamespace(
+        enorm=torch.nn.RMSNorm(hidden),
+        hnorm=torch.nn.RMSNorm(hidden),
+        eh_proj=torch.nn.Linear(2 * hidden, hidden, bias=False),
+        final_layernorm=torch.nn.RMSNorm(hidden),
+        mtp_model_layer=SimpleNamespace(layer_number=1),
+    )
+    for i, norm in enumerate((mtp_layer.enorm, mtp_layer.hnorm, mtp_layer.final_layernorm)):
+        torch.nn.init.constant_(norm.weight, float(i))
+    exporter.model = SimpleNamespace(mtp=SimpleNamespace(layers=[mtp_layer]))
+
+    mtp_state_dict = exporter._get_mtp_state_dict(copy_from_pretrained=False)
+
+    expected = {
+        "mtp.fc.weight": mtp_layer.eh_proj.weight,
+        "mtp.pre_fc_norm_embedding.weight": mtp_layer.enorm.weight,
+        "mtp.pre_fc_norm_hidden.weight": mtp_layer.hnorm.weight,
+        "mtp.norm.weight": mtp_layer.final_layernorm.weight,
+    }
+    assert mtp_state_dict.keys() == expected.keys()
+    for name, weight in expected.items():
+        torch.testing.assert_close(mtp_state_dict[name], weight.detach().to(torch.bfloat16))
+    # The BF16 fc must be declared unquantized for the deployment's quantization config.
+    assert exporter.exclude_modules == ["mtp.fc"]
+
+
 def _test_glm5_next_export(source, export_dir, rank, size):
     # Models in a reused worker pick their attention backend through process-wide variables,
     # so start without them and don't leak this model's choice to later tests.
