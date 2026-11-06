@@ -62,7 +62,9 @@ def get_rope_caches(
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
 
     theta = getattr(config, "rope_theta", 10000.0)
-    head_dim = config.hidden_size // config.num_attention_heads
+    head_dim = getattr(config, "head_dim", None)
+    if head_dim is None:
+        head_dim = config.hidden_size // config.num_attention_heads
     partial_factor = getattr(config, "partial_rotary_factor", 1.0)
     dim = int(head_dim * partial_factor)
 
