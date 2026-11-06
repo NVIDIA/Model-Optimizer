@@ -2343,8 +2343,10 @@ def _get_awq_quantizer_block_size(tensor: torch.Tensor, quantizer: TensorQuantiz
 def svd(weight, rank):
     original_device = weight.device
     original_dtype = weight.dtype
-    weight_f64 = weight.to(dtype=torch.float64, device=original_device)
-    u, s, vt = torch.linalg.svd(weight_f64, full_matrices=False)
+    # float32 is enough because the factors are cast back to the weight dtype, while float64 is
+    # over 20x slower on GPUs with low float64 throughput, such as GB300.
+    compute_dtype = torch.float64 if original_dtype == torch.float64 else torch.float32
+    u, s, vt = torch.linalg.svd(weight.to(compute_dtype), full_matrices=False)
     us = u[:, :rank] * s[:rank]
     vt = vt[:rank]
     us = us.to(device=original_device, dtype=original_dtype)
