@@ -669,7 +669,7 @@ A model can be expert-parallel when its config declares a `base_model_ep_plan`. 
 ```bash
 torchrun --nproc_per_node=<num_gpus_per_node> \
     hf_ptq.py \
-    --pyt_ckpt_path <path_to_moe_model> \
+    --model_name_or_path <path_to_moe_model> \
     --recipe general/ptq/nvfp4_default-kv_fp8 \
     --calib_size <num_calib_samples> \
     --export_path <export_path>
