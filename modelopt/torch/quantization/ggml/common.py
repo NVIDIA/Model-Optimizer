@@ -200,6 +200,12 @@ def pinned_importance(quantizer, format_name: str) -> torch.Tensor | None:
     return getattr(quantizer, PINNED_IMPORTANCE_PREFIX + format_name, None)
 
 
+# Quantizer attribute that makes its pinned payload stand in for whatever weight it is handed.
+# AutoQuantize sets it while it keeps the source weight for other candidates, so a candidate whose
+# calibration rewrote the weight (GPTQ) still replays its own codes.
+PIN_OVERRIDES_WEIGHT = "_ggml_pin_overrides_weight"
+
+
 # Prefix of the buffer holding a pinned payload; checkpoint code keeps buffers with it.
 PINNED_PAYLOAD_PREFIX = "_ggml_pinned_"
 # Prefix of the buffer holding the importance a pinned payload was searched with, a vector over
@@ -278,7 +284,10 @@ def fake_quantize_with_cache(
         dtype=inputs.dtype,
         block_chunk_size=decode_chunk_size,
     )
-    return inputs + (reconstructed - inputs).detach()
+    # Exactly the reconstruction export decodes, with a straight-through gradient. The usual
+    # ``inputs + (reconstructed - inputs).detach()`` rounds twice in a narrow dtype, so it can
+    # differ wherever the two are far apart, as when a pinned payload replays over a source weight.
+    return reconstructed + (inputs - inputs.detach())
 
 
 @dataclass(frozen=True)
@@ -405,7 +414,13 @@ class GGMLFormat:
         kwargs = {} if block_chunk_size is None else {"block_chunk_size": block_chunk_size}
         pinned = pinned_packed_weight(quantizer, self.name)
         keeps_scales = pinned is not None and self.payload_scales is not None
-        if pinned is not None and self.payload_scales is not None:
+        # Unless the pin stands in for the weight (PIN_OVERRIDES_WEIGHT): AutoQuantize then keeps
+        # the source weight, which these scales would encode to other codes than the pinned ones.
+        if (
+            pinned is not None
+            and self.payload_scales is not None
+            and not getattr(quantizer, PIN_OVERRIDES_WEIGHT, False)
+        ):
             # Encode in the pinned weight's shape, whose last dimension the importance spans; fake
             # quant hands the weight over in 256-value rows.
             pinned_shape = (*pinned.shape[:-2], pinned.shape[-2] * self.block_size)
@@ -472,6 +487,11 @@ class GGMLFormat:
         ):
             return None
         pinned = pinned.to(weight.device).reshape(-1, width, self.block_bytes)
+        if (
+            getattr(quantizer, PIN_OVERRIDES_WEIGHT, False)
+            and self.full_pin(quantizer, weight) is not None
+        ):
+            return pinned.reshape(*weight.shape[:-1], width, self.block_bytes)
         shape = torch.tensor((pinned.shape[0], weight.shape[-1]))
         rows = weight.reshape(-1, weight.shape[-1])
         storage_dtypes = [weight.dtype]
@@ -494,6 +514,28 @@ class GGMLFormat:
             if index is not None:
                 return pinned[index].reshape(*weight.shape[:-1], width, self.block_bytes)
         return None
+
+    def full_pin(self, quantizer, weight: torch.Tensor) -> torch.Tensor | None:
+        """The payload ``quantizer`` pins for all of ``weight``; None if it pins none or some rows."""
+        pinned = pinned_packed_weight(quantizer, self.name)
+        if pinned is None or (
+            pinned.numel() != weight.numel() // self.block_size * self.block_bytes
+        ):
+            return None
+        return pinned
+
+    def decode_pinned(self, quantizer, weight: torch.Tensor) -> torch.Tensor:
+        """``weight`` as its pinned payload decodes, rounded once to its dtype as GPTQ wrote it."""
+        pinned = self.full_pin(quantizer, weight)
+        if pinned is None:
+            raise ValueError(
+                f"No {self.name.upper()} payload pinned for a {tuple(weight.shape)} weight"
+            )
+        return self.dequantize(
+            pinned.to(weight.device).reshape(-1, self.block_bytes),
+            torch.tensor(weight.shape),
+            dtype=weight.dtype,
+        )
 
 
 def leading_fp16_scales(blocks: torch.Tensor) -> torch.Tensor:

@@ -15,11 +15,13 @@
 
 """User-facing quantization API."""
 
+import copy
 import fnmatch
 import inspect
 import os
 import sys
 import warnings
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
 from typing import Any, cast
@@ -42,8 +44,15 @@ from modelopt.torch.quantization.conversion import (
 )
 from modelopt.torch.utils import atomic_print
 
+from . import model_calib
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
-from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe
+from .algorithms import (
+    AUTO_QUANTIZE_SEARCHERS,
+    QuantRecipe,
+    _algorithm_methods,
+    _refuse_layerwise_dirs,
+    _rewrites_weights,
+)
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
 from .kv_cache_auto_quant import (
@@ -612,6 +621,9 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
     "awq_lite",
     "awq_full",
     "awq_clip",
+    # Rewrite weights; AutoQuantize keeps each candidate's codes in its GGML quantizers.
+    "gptq",
+    "imatrix",
 }
 
 
@@ -758,6 +770,62 @@ def _auto_quantize_kv_cache(
         },
     )
     return model, searcher.state_dict()
+
+
+# Module attributes that conversion changes in place, such as hook and submodule dicts and the
+# ModelOpt state list. Their contents are saved, so a rollback keeps each object's identity.
+_CONTAINERS = (dict, OrderedDict, list, set)
+
+
+def _save_module_attributes(model: nn.Module) -> Callable[[], None]:
+    """Return a callable that hands back the modules of ``model`` as they are now.
+
+    Conversion and the AutoQuantize search change module classes and add quantizers, hparams,
+    hooks and ModelOpt state through module attributes; restoring each module's class and
+    attributes undoes them. Conversion also sets attributes of the configs modules hold, e.g. the
+    HF plugin moves fused experts' ``_experts_implementation`` on the root, nested and experts'
+    own configs, so those configs' attributes are restored too. Parameter values are not covered.
+    """
+    saved = [
+        (
+            module,
+            type(module),
+            dict(vars(module)),
+            {k: copy.copy(v) for k, v in vars(module).items() if type(v) in _CONTAINERS},
+        )
+        for module in model.modules()
+    ]
+    configs: dict[int, tuple[Any, dict]] = {}
+    pending = [getattr(module, "config", None) for module in model.modules()]
+    while pending:
+        config = pending.pop()
+        if (
+            isinstance(config, nn.Module)
+            or not hasattr(config, "__dict__")
+            or id(config) in configs
+        ):
+            continue
+        configs[id(config)] = (config, dict(vars(config)))
+        # An HF composite config holds its sub-configs, e.g. ``text_config``.
+        pending.extend(v for k, v in vars(config).items() if k.endswith("_config"))
+
+    def restore():
+        for module, cls, attrs, contents in saved:
+            module.__class__ = cls
+            vars(module).clear()
+            vars(module).update(attrs)
+            for key, content in contents.items():
+                container = attrs[key]
+                container.clear()
+                if isinstance(container, list):
+                    container.extend(content)
+                else:
+                    container.update(content)
+        for config, attrs in configs.values():
+            vars(config).clear()
+            vars(config).update(attrs)
+
+    return restore
 
 
 def auto_quantize(
@@ -1140,10 +1208,14 @@ def auto_quantize(
             for quant_format in search_space["quantization_formats"]
         ),
     ]
+    rewrites_weights = any(
+        _rewrites_weights(QuantRecipe(cfg, name=name)) for cfg, name in all_processed_formats
+    )
     for quant_cfg, name in all_processed_formats:
-        algo = QuantRecipe(quant_cfg, name=name).config.algorithm
-        algo_method = algo["method"] if isinstance(algo, dict) else algo
-        if algo_method not in _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
+        recipe = QuantRecipe(quant_cfg, name=name)
+        algo = recipe.config.algorithm
+        if unsupported := _algorithm_methods(algo) - _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
+            algo_method = ", ".join(sorted(map(str, unsupported)))
             raise ValueError(
                 f"Algorithm '{algo_method}' in '{name}' is not supported by auto_quantize yet. "
                 "Please run auto_quantize with 'max' or 'mse' calibration and use "
@@ -1152,6 +1224,7 @@ def auto_quantize(
         # Every candidate, before the search calibrates any: calibrate() would refuse mid-search.
         _refuse_awq_on_a_sharded_fsdp2_model(model, algo, candidate=name)
         _refuse_unsupported_distributed_calibration(model, algo)
+        _refuse_layerwise_dirs(recipe, rewrites_weights)
 
     # Select the appropriate searcher based on method
     if method_name not in AUTO_QUANTIZE_SEARCHERS:
@@ -1192,18 +1265,35 @@ def auto_quantize(
     search_constraints = cast("ConstraintsDict", constraints or {})
     searcher.validate_search_input(search_constraints, search_config)
 
-    model = apply_mode(
-        model,
-        mode="auto_quantize",
-        registry=QuantizeModeRegistry,
-    )
-    # Disable all quantizers; AutoQuantize will enable the needed ones
-    set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
-    if processed_fixed_quantization_config is not None:
-        fixed_cfg, fixed_name = processed_fixed_quantization_config
-        fixed_recipe = QuantRecipe(fixed_cfg, name=fixed_name)
-        set_quantizer_by_cfg(model, fixed_recipe.config.quant_cfg)
-    searcher.search(model, search_constraints, config=search_config)
+    # A weight-rewriting candidate's refusals need the converted quantizers to tell which weights it
+    # rewrites. A failure before any candidate calibrates then hands back the unconverted modules,
+    # so the caller can retry on the same model, which a converted model would refuse. The saved
+    # modules hold every weight conversion replaces (HF Conv1D's), so other searches save none and
+    # the searcher drops them once those checks pass.
+    if rewrites_weights:
+        searcher.restore_unconverted = _save_module_attributes(model)
+    # Calibration turns pre-quant-scale folding off for the whole process. Hand back the policy
+    # found here on every exit, also after a failure while scoring, so later calibrations fold.
+    folding_pqs_to_weights = model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS
+    try:
+        model = apply_mode(
+            model,
+            mode="auto_quantize",
+            registry=QuantizeModeRegistry,
+        )
+        # Disable all quantizers; AutoQuantize will enable the needed ones
+        set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
+        if processed_fixed_quantization_config is not None:
+            fixed_cfg, fixed_name = processed_fixed_quantization_config
+            fixed_recipe = QuantRecipe(fixed_cfg, name=fixed_name)
+            set_quantizer_by_cfg(model, fixed_recipe.config.quant_cfg)
+        searcher.search(model, search_constraints, config=search_config)
+    except BaseException:
+        if searcher.restore_unconverted is not None:
+            searcher.restore_unconverted()
+        raise
+    finally:
+        model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = folding_pqs_to_weights
 
     return model, searcher.state_dict()
 
