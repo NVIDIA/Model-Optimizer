@@ -622,19 +622,23 @@ def register_gptq_helper(backend: str, factory: type[GPTQHelper]) -> None:
     _GPTQ_HELPER_REGISTRY[backend] = factory
 
 
-class ImatrixEncoder:
-    """Encodes a weight once, its search weighted by its inputs' per-column second moments.
-
-    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` collects ``E[x_j^2]`` for
-    every weight whose quantizer an encoder accepts, then calls :meth:`encode` with it.
-    """
+class _WeightEncoder:
+    """An encoder a one-pass calibration hands each weight whose quantizer it accepts."""
 
     def accepts(self, quantizer) -> bool:
         """Whether this encoder handles ``quantizer``; decided before calibration runs."""
         raise NotImplementedError
 
     def validate(self, weight: torch.Tensor, quantizer) -> None:
-        """Raise if :meth:`encode` would refuse ``weight``; checked before calibration runs."""
+        """Raise if ``encode`` would refuse ``weight``; checked before calibration runs."""
+
+
+class ImatrixEncoder(_WeightEncoder):
+    """Encodes a weight once, its search weighted by its inputs' per-column second moments.
+
+    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` collects ``E[x_j^2]`` for
+    every weight whose quantizer an encoder accepts, then calls :meth:`encode` with it.
+    """
 
     def encode(
         self, weight: torch.Tensor, quantizer, second_moments: torch.Tensor | None
@@ -658,3 +662,38 @@ def register_imatrix_encoder(backend: str, encoder: ImatrixEncoder) -> None:
     ``weight_quantizer.backend`` has a registered encoder.
     """
     _IMATRIX_ENCODER_REGISTRY[backend] = encoder
+
+
+class LocalHessianEncoder(_WeightEncoder):
+    """Encodes a weight once, its search guided by its inputs' local Hessian.
+
+    :func:`modelopt.torch.quantization.model_calib.local_hessian_calibrate` collects ``E[x x^T]``
+    over each ``block_size`` input columns of every weight whose quantizer an encoder accepts, then
+    calls :meth:`encode` with it instead of searching an amax.
+    """
+
+    block_size: int
+
+    def encode(
+        self, weight: torch.Tensor, quantizer, hessian: torch.Tensor | None, perc_damp: float
+    ) -> torch.Tensor:
+        """Encode ``weight`` guided by ``hessian`` and return the weight to keep.
+
+        That is ``weight`` fake-quantized by ``quantizer``, or ``weight`` itself when ``quantizer``
+        re-derives the encoding from it. ``hessian`` is ``[in_features // block_size, block_size,
+        block_size]``, or ``None`` when no calibration input reached the weight. ``perc_damp`` is
+        the fraction of its mean diagonal to add to its diagonal where the encoder scores by it.
+        """
+        raise NotImplementedError
+
+
+_LOCAL_HESSIAN_ENCODER_REGISTRY: dict[str, LocalHessianEncoder] = {}
+
+
+def register_local_hessian_encoder(backend: str, encoder: LocalHessianEncoder) -> None:
+    """Register the :class:`LocalHessianEncoder` for a quantizer backend.
+
+    :func:`modelopt.torch.quantization.model_calib.local_hessian_calibrate` encodes the weights
+    whose ``weight_quantizer.backend`` has one, and searches an amax for the rest.
+    """
+    _LOCAL_HESSIAN_ENCODER_REGISTRY[backend] = encoder
