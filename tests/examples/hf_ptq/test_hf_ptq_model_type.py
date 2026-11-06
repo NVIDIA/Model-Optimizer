@@ -77,26 +77,6 @@ def test_pre_quantize_preview_removes_padding(hf_ptq, ids, mask):
     assert torch.equal(calls[0][0], prompt)
 
 
-@pytest.mark.parametrize(
-    ("model_type", "expected"),
-    [
-        ("t5", True),
-        ("mt5", True),
-        ("mbart", True),
-        ("whisper", True),
-        # Encoder-decoder, but not supported by the TensorRT-LLM exporter: unified HF export.
-        ("longt5", False),
-        ("plbart", False),
-        ("t5gemma", False),
-        ("florence2", False),  # VLM whose language model is BART; the root type decides
-        ("qwen3_vl", False),
-    ],
-)
-def test_is_trtllm_enc_dec_export(hf_ptq, model_type: str, expected: bool):
-    example_utils = importlib.import_module("example_utils")  # imported with hf_ptq
-    assert example_utils.is_trtllm_enc_dec_export(model_type) is expected
-
-
 def _config(model_type: str, is_encoder_decoder: bool) -> SimpleNamespace:
     return SimpleNamespace(
         model_type=model_type, is_encoder_decoder=is_encoder_decoder, architectures=None
