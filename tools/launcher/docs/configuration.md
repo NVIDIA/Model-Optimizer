@@ -1,5 +1,8 @@
 # Configuration
 
+For named tasks, parameters, dependency graphs and output declarations, see
+[Workflow API v2](workflow_v2.md). Unversioned YAMLs retain the format below.
+
 ## Environment Variables
 
 | Variable | Description | Required |

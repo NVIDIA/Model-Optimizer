@@ -27,6 +27,7 @@ import shlex
 import subprocess  # nosec B404
 import sys
 from dataclasses import dataclass
+from graphlib import CycleError, TopologicalSorter
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
@@ -145,6 +146,10 @@ class SandboxTask:
     environment: list[dict[str, str]] = None
     yaml_file: str = None
     skip: bool = False
+    name: str = None
+    depends_on: list[str] = None
+    inputs: dict[str, dict[str, str]] = None
+    outputs: dict[str, dict[str, str]] = None
 
 
 @dataclass
@@ -273,6 +278,9 @@ class SandboxPipeline:
     # Set by caller — used by create_task_from_yaml
     _factory_lookup: dict = None
     inputs: dict[str, dict[str, str]] = None  # Container mount -> {ref, env?, role?}
+    local_execution: bool = False
+    workflow_outputs: dict[str, dict[str, str]] = None
+    parameters: dict = None
 
     def __post_init__(self):
         """Collect tasks from slots/configs and resolve <<global_vars.X>> references."""
@@ -361,7 +369,21 @@ class SandboxPipeline:
                 if task.reqs_file:
                     task.reqs_file = _resolve(task.reqs_file)
 
+        self.tasks = _ordered_tasks(self.tasks)
         _input_declarations(self)
+        for task in self.tasks:
+            if task.inputs:
+                combined = {
+                    **(self.inputs or {}),
+                    **{
+                        mount: {
+                            "ref": "task/output",
+                            **{key: spec[key] for key in ("env", "role") if key in spec},
+                        }
+                        for mount, spec in task.inputs.items()
+                    },
+                }
+                _input_declarations(SimpleNamespace(inputs=combined, assets=None, tasks=[task]))
 
 
 # ---------------------------------------------------------------------------
@@ -755,6 +777,142 @@ def report_versions(base_dir):
 # ---------------------------------------------------------------------------
 
 
+def _ordered_tasks(tasks):
+    if not any(task.name is not None for task in tasks):
+        if any(task.depends_on is not None or task.inputs or task.outputs for task in tasks):
+            raise ValueError("Dependencies and task I/O require named tasks")
+        return tasks
+    names = [task.name for task in tasks]
+    if any(
+        not isinstance(name, str) or not re.fullmatch(r"[A-Za-z][\w-]*", name) for name in names
+    ):
+        raise ValueError("Every task needs a unique name using letters, digits, '_' or '-'")
+    if len(set(names)) != len(names):
+        raise ValueError("Task names must be unique")
+    by_name = {task.name: task for task in tasks}
+    for task in tasks:
+        dependencies = task.depends_on if task.depends_on is not None else []
+        if not isinstance(dependencies, list) or not all(
+            isinstance(name, str) for name in dependencies
+        ):
+            raise ValueError("depends_on must be a list of task names")
+        dependencies = list(dependencies)
+        bindings = set()
+        for output, spec in (task.outputs or {}).items():
+            if not re.fullmatch(r"[A-Za-z][\w-]*", output) or not isinstance(spec, dict):
+                raise ValueError("Outputs must map names to path/kind/env objects")
+            path = spec.get("path")
+            if (
+                set(spec) - {"path", "kind", "env"}
+                or not isinstance(path, str)
+                or not re.fullmatch(r"[\w./-]+", path)
+                or any(part in ("", ".", "..") for part in path.split("/"))
+            ):
+                raise ValueError("Output paths must be normalized relative paths")
+            if "kind" in spec and (not isinstance(spec["kind"], str) or not spec["kind"]):
+                raise ValueError("Output kind must be a nonempty string")
+        _input_declarations(
+            SimpleNamespace(
+                inputs={mount: {"ref": "task/output"} for mount in (task.inputs or {})},
+                assets=None,
+                tasks=[],
+            )
+        )
+        for mount, spec in (task.inputs or {}).items():
+            if not isinstance(spec, dict) or set(spec) - {"from", "env", "role"}:
+                raise ValueError("Task inputs require from and optional env/role")
+            if not isinstance(spec.get("from"), str):
+                raise ValueError("Task input must reference task.output")
+            source = spec["from"].split(".")
+            if len(source) != 2 or source[0] not in by_name:
+                raise ValueError("Task input must reference task.output")
+            producer = by_name[source[0]]
+            if source[1] not in (producer.outputs or {}):
+                raise ValueError("Task input references an unknown output")
+            if "role" in spec and (not isinstance(spec["role"], str) or not spec["role"]):
+                raise ValueError("Input role must be a nonempty string")
+            dependencies.append(producer.name)
+            destination = PurePosixPath(mount)
+            for raw in task.slurm_config.container_mounts or []:
+                target = PurePosixPath(raw.split(":")[1])
+                if target.is_relative_to(destination) or destination.is_relative_to(target):
+                    raise ValueError("Container mounts overlap a task input")
+        if task.inputs and any(
+            arg.startswith("--container-mounts")
+            for raw in task.slurm_config.srun_args or []
+            for arg in shlex.split(raw)
+        ):
+            raise ValueError("srun_args must not override task input mounts")
+        values = task.environment or {}
+        values = values if isinstance(values, list) else [values]
+        for spec in [*(task.inputs or {}).values(), *(task.outputs or {}).values()]:
+            if "env" in spec:
+                env = spec["env"]
+                if not isinstance(env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env):
+                    raise ValueError("Task I/O env must be an environment variable name")
+                if env in bindings or any(env in value for value in values):
+                    raise ValueError("Task I/O environment bindings must be unique")
+                bindings.add(env)
+        task.depends_on = list(dict.fromkeys(dependencies))
+        if any(name not in by_name or by_name[name].skip for name in task.depends_on):
+            raise ValueError("Task depends on an unknown or skipped task")
+    try:
+        order = TopologicalSorter({task.name: task.depends_on for task in tasks}).static_order()
+        return [by_name[name] for name in order]
+    except CycleError as exc:
+        raise ValueError("Workflow dependencies contain a cycle") from exc
+
+
+def _task_io(task, tasks, executor, workspace, host_workspace, local):
+    paths = {
+        name: str(PurePosixPath(workspace) / "outputs" / task.name / spec["path"])
+        for name, spec in (task.outputs or {}).items()
+    }
+    env = {"MODELOPT_WORKSPACE": workspace}
+    env.update(
+        {spec["env"]: paths[name] for name, spec in (task.outputs or {}).items() if "env" in spec}
+    )
+    for mount, spec in (task.inputs or {}).items():
+        producer_name, output = spec["from"].split(".")
+        producer = next(item for item in tasks if item.name == producer_name)
+        source = str(
+            PurePosixPath(host_workspace)
+            / "outputs"
+            / producer_name
+            / producer.outputs[output]["path"]
+        )
+        if local:
+            if "env" not in spec:
+                raise ValueError(
+                    "Local task inputs need env bindings; local execution cannot mount paths"
+                )
+            env[spec["env"]] = source
+        else:
+            mounts = executor.volumes if hasattr(executor, "volumes") else executor.container_mounts
+            mounts.append(f"{source}:{mount}:ro")
+            if "env" in spec:
+                env[spec["env"]] = mount
+    native = isinstance(executor, run.SlurmExecutor)
+    marker = str(PurePosixPath(workspace) / ".success" / task.name)
+    before = [] if native else [f"rm -f {shlex.quote(marker)}"]
+    if not native:
+        before.extend(
+            f"test -f {shlex.quote(str(PurePosixPath(workspace) / '.success' / name))}"
+            for name in task.depends_on
+        )
+    directories = {str(PurePosixPath(path).parent) for path in [marker, *paths.values()]}
+    before.append("mkdir -p " + " ".join(shlex.quote(path) for path in sorted(directories)))
+    after = [f"test -e {shlex.quote(path)}" for path in paths.values()]
+    if native:
+        # Slurm gates the whole distributed step; only rank zero checks shared outputs.
+        after = [
+            'if [ "${SLURM_PROCID:-0}" -eq 0 ]; then ' + (" && ".join(after) or "true") + "; fi"
+        ]
+    else:
+        after.append(f"touch {shlex.quote(marker)}")
+    return env, " && ".join(before), " && ".join(after), paths
+
+
 def _input_declarations(job):
     """Validate mount-keyed inputs without resolving or transferring artifacts."""
     if job.inputs is None:
@@ -1018,8 +1176,13 @@ def run_jobs(
         if job.skip:
             continue
 
+        job.tasks = _ordered_tasks(job.tasks)
+        if job.local_execution and job.inputs:
+            raise ValueError("Local execution cannot mount catalog inputs; use Docker or Slurm")
         assets = _prepare_assets(job, hf_local)
         dependency = None
+        added = {}
+        declared_outputs = {}
         exp = run.Experiment(experiment_title, log_level="INFO")
         job.experiment = exp
 
@@ -1028,7 +1191,7 @@ def run_jobs(
                 if task.skip:
                     print(f"job {job_name} task {task_id}: skipped")
                     continue
-                task_name = f"{job_name}_{task_id}"
+                task_name = f"{job_name}_{task.name or task_id}"
                 task_args = [] if task.args is None else task.args
                 if bool(task.script) == bool(task.inline):
                     raise ValueError(f"{task_name}: set exactly one of `script` or `inline`.")
@@ -1054,7 +1217,10 @@ def run_jobs(
                     }
                 )
 
-                if hf_local is not None:
+                if job.local_execution:
+                    executor = run.LocalExecutor(packager=packager)
+                    task_env = {**default_local_env, **task_env}
+                elif hf_local is not None:
                     executor = build_docker_executor(
                         hf_local,
                         task.slurm_config,
@@ -1094,7 +1260,26 @@ def run_jobs(
                         mounts = executor.container_mounts
                     for item in assets[target]:
                         destination = item.get("mount") or f"/hf-local/{item['name']}"
-                        mounts.append(f"{item['path']}:{destination}:ro")
+                        if destination not in (task.inputs or {}):
+                            mounts.append(f"{item['path']}:{destination}:ro")
+
+                before = after = ""
+                if task.name:
+                    host_workspace = (
+                        str(Path(exp._exp_dir) / "workspace")
+                        if job.local_execution
+                        else f"{job_dir}/{experiment_title}/{exp._id}"
+                    )
+                    workspace = host_workspace if job.local_execution else "/scratchspace"
+                    bindings, before, after, paths = _task_io(
+                        task, job.tasks, executor, workspace, host_workspace, job.local_execution
+                    )
+                    if job.local_execution:
+                        before += " && cd " + shlex.quote(
+                            str(Path(base_dir or os.getcwd()).resolve())
+                        )
+                    task_env.update(bindings)
+                    declared_outputs[task.name] = paths
 
                 # When allow_to_fail is set, use "afterany" so downstream tasks
                 # run even if a predecessor times out or fails.
@@ -1133,13 +1318,33 @@ def run_jobs(
                 elif reqs_prefix:  # reqs + script path: wrap the bash call inline
                     # Quote the script path; task_args keep the launcher's shell-word-split
                     # convention (a "--flag value" item expands to two args), as run.Script does.
-                    script_cmd = " ".join(["bash", shlex.quote(task.script), *task_args])
+                    script_cmd = (
+                        shlex.join(["bash", task.script, *task_args])
+                        if task.name
+                        else " ".join(["bash", shlex.quote(task.script), *task_args])
+                    )
                     task_instance = run.Script(inline=reqs_prefix + script_cmd, env=task_env)
                 else:
                     task_instance = run.Script(task.script, args=task_args, env=task_env)
-                print(f"job {job_name} task {task_id} slurm_config: {task.slurm_config}")
+                if task.name:
+                    command = task_instance.inline or shlex.join(["bash", task.script, *task_args])
+                    task_instance = run.Script(
+                        inline=f"{before} && bash -e -c {shlex.quote(command)} && {after}",
+                        env=task_env,
+                    )
+                    print(f"job {job_name} task {task.name} executor: {type(executor).__name__}")
+                else:
+                    print(f"job {job_name} task {task_id} slurm_config: {task.slurm_config}")
 
-                if dependency is None:
+                if task.name:
+                    added[task.name] = exp.add(
+                        task_instance,
+                        tail_logs=True,
+                        name=task_name,
+                        executor=executor,
+                        dependencies=[added[name] for name in task.depends_on],
+                    )
+                elif dependency is None:
                     dependency = exp.add(
                         task_instance, tail_logs=True, name=task_name, executor=executor
                     )
@@ -1163,9 +1368,65 @@ def run_jobs(
                     for (host, root), resolved in assets.items()
                 ],
             }
-            metadata_path = os.path.join("experiments", experiment_title, exp._id, "metadata.json")
-            os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
-            with open(metadata_path, "w") as f:
+            if added:
+                metadata.update(
+                    api_version="modelopt/v2",
+                    status="prepared",
+                    workspace={"host_path": host_workspace, "task_path": workspace},
+                    parameters=job.parameters or {},
+                    tasks={
+                        task.name: {
+                            "job_id": added[task.name],
+                            "depends_on": task.depends_on,
+                            "outputs": declared_outputs[task.name],
+                            "inputs": task.inputs or {},
+                            "output_specs": task.outputs or {},
+                        }
+                        for task in job.tasks
+                        if not task.skip
+                    },
+                    outputs={
+                        name: declared_outputs[spec["from"].split(".")[0]][
+                            spec["from"].split(".")[1]
+                        ]
+                        for name, spec in (job.workflow_outputs or {}).items()
+                    },
+                )
+            metadata_path = (
+                str(Path(exp._exp_dir) / "metadata.json")
+                if added
+                else os.path.join("experiments", experiment_title, exp._id, "metadata.json")
+            )
+            # NeMo owns creation of its experiment directory; stage adjacent until prepared.
+            staged_path = (
+                str(exp._exp_dir) + ".metadata.json"
+                if Path(metadata_path).parent.resolve() == Path(exp._exp_dir).resolve()
+                else metadata_path
+            )
+            os.makedirs(os.path.dirname(staged_path), exist_ok=True)
+            with open(staged_path, "w") as f:
                 json.dump(metadata, f)
 
-            exp.run(detach=detach)
+            try:
+                exp.run(detach=detach)
+            except Exception:
+                if added:
+                    metadata["status"] = "submission_error"
+                    Path(staged_path).write_text(json.dumps(metadata))
+                raise
+            finally:
+                if staged_path != metadata_path and Path(exp._exp_dir).is_dir():
+                    os.replace(staged_path, metadata_path)
+
+        if added:
+            states = {item.id: str(item.state).split(".")[-1] for item in exp.jobs}
+            failed = not detach and any(state != "SUCCEEDED" for state in states.values())
+            metadata.update(
+                status="submitted" if detach else "failed" if failed else "succeeded",
+                task_states=states,
+            )
+            Path(metadata_path).write_text(json.dumps(metadata))
+            if failed:
+                raise RuntimeError(
+                    "Workflow tasks did not all succeed; inspect the NeMo experiment logs"
+                )

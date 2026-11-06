@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "modelopt-launcher"
-version = "0.1.0"
+version = "0.2.0"
 description = "ModelOpt Launcher — submit quantization, training, and evaluation jobs to Slurm clusters"
 requires-python = ">=3.11"
 dependencies = [

@@ -56,6 +56,7 @@ Changelog
 
 - ModelOpt MCP can track launcher jobs in MLflow and archive terminal status and task logs.
 - Launcher pipelines can prepare declared assets through an optional provider before submission, mount resolved inputs read-only, and record their versions in experiment metadata.
+- Launcher 0.2 adds the ``modelopt/v2`` workflow API with named task graphs, parameter overrides, execution profiles and declared output bindings, while retaining existing YAML support.
 - Launcher pipelines now support mount-keyed ``inputs`` with provider-free references, optional environment bindings, and a versioned resolver protocol; legacy ``assets`` declarations remain supported.
 - The ``evaluation`` agent skill can stop looping ("doom loop") reasoning early: ask it to avoid doom loops and it adds vLLM's ``repetition_detection`` request field (vLLM 0.17.0 or later) to every task, ending a request once its output repeats. Use the same setting for baseline and candidate runs.
 - ``modelopt.torch.utils.plugins.model_load_utils.load_pretrained`` now loads a model distributed under ``torchrun``, with an MoE's routed experts sharded across the ranks, FSDP2-sharded or whole on every rank, by the plan ``resolve_distribution_plan`` decides or one passed as its new ``distribution`` argument.

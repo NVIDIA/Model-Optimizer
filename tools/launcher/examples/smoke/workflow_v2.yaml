@@ -1,0 +1,53 @@
+api_version: modelopt/v2
+name: workflow_v2_smoke
+parameters:
+  value: 7
+tasks:
+  produce:
+    inline: python common/smoke/workflow_v2.py produce
+    environment:
+      SYNTHETIC_VALUE: "${parameters.value}"
+    outputs:
+      checkpoint:
+        path: model/checkpoint.json
+        kind: checkpoint
+        env: RESULT
+  accuracy:
+    inline: python common/smoke/workflow_v2.py accuracy
+    inputs:
+      /inputs/model:
+        from: produce.checkpoint
+        env: MODEL_INPUT
+    outputs:
+      metrics:
+        path: metrics.json
+        kind: metrics
+        env: RESULT
+  speed:
+    inline: python common/smoke/workflow_v2.py speed
+    inputs:
+      /inputs/model:
+        from: produce.checkpoint
+        env: MODEL_INPUT
+    outputs:
+      metrics:
+        path: metrics.json
+        kind: metrics
+        env: RESULT
+  report:
+    inline: python common/smoke/workflow_v2.py report
+    inputs:
+      /inputs/accuracy:
+        from: accuracy.metrics
+        env: ACCURACY_INPUT
+      /inputs/speed:
+        from: speed.metrics
+        env: SPEED_INPUT
+    outputs:
+      summary:
+        path: summary.json
+        kind: metrics
+        env: RESULT
+outputs:
+  summary:
+    from: report.summary

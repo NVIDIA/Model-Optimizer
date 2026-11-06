@@ -49,6 +49,7 @@ from modelopt_launcher.core import (
     set_slurm_config_type,
 )
 from modelopt_launcher.slurm_config import SlurmConfig, slurm_factory
+from modelopt_launcher.workflow import workflow_cli
 
 set_slurm_config_type(SlurmConfig)
 register_factory("slurm_factory", slurm_factory)
@@ -155,7 +156,7 @@ def launch(
         warnings.warn("NEMORUN_HOME is not set. Defaulting to current working directory.")
     run.config.set_nemorun_home(os.environ.get("NEMORUN_HOME", os.getcwd()))
 
-    if hf_local is not None:
+    if hf_local is not None and (pipeline is None or not any(task.name for task in pipeline.tasks)):
         job_dir = os.path.join(os.getcwd(), "local_experiments")
 
     job_table = {}
@@ -211,6 +212,17 @@ def _input_yaml_arguments(argv, directory):
 def main() -> None:
     """Console script entry point for the ``modelopt-launcher`` command."""
     original = sys.argv
+    for index, argument in enumerate(original):
+        path = None
+        if argument == "--yaml" and index + 1 < len(original):
+            path = original[index + 1]
+        elif argument.startswith("--yaml="):
+            path = argument.removeprefix("--yaml=")
+        if path:
+            config = yaml.safe_load(Path(path).read_text())
+            if isinstance(config, dict) and "api_version" in config:
+                workflow_cli(original[1:], launch)
+                return
     with tempfile.TemporaryDirectory(prefix="modelopt-launcher-") as directory:
         try:
             sys.argv = _input_yaml_arguments(original, directory)
