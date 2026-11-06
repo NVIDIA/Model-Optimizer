@@ -16,6 +16,7 @@
 """Unit tests for FakeBaseModel and the fake-base / offline paths in load_vlm_or_llm."""
 
 import json
+import shutil
 import stat
 
 import pytest
@@ -115,10 +116,16 @@ def test_fakebase_missing_lm_head_without_tying_raises(tmp_path, fake_config):
         FakeBaseModel.from_source(str(tmp_path))
 
 
-@pytest.mark.parametrize("layout", ["flat", "tied", "text_config", "llm_config", "unknown_norm"])
+@pytest.mark.parametrize(
+    "layout", ["flat", "tied", "text_config", "llm_config", "unknown_norm", "hub_cache"]
+)
 def test_export_source_slice_preserves_source_and_loader_parity(tmp_path, layout):
     source, destination = tmp_path / "source", tmp_path / "slice"
-    source.mkdir()
+    if layout == "hub_cache":
+        source = tmp_path / "models--org--model" / "snapshots" / "revision"
+    source.mkdir(parents=True)
+    if layout == "flat":
+        source.chmod(0o700)
     config = transformers.LlamaConfig(
         hidden_size=_HIDDEN_SIZE,
         vocab_size=_VOCAB_SIZE,
@@ -195,6 +202,12 @@ def test_export_source_slice_preserves_source_and_loader_parity(tmp_path, layout
     (source / "modeling_custom.py").write_text(
         "# Custom model code remains part of the snapshot.\n"
     )
+    if layout == "hub_cache":
+        blobs = source.parent.parent / "blobs"
+        blobs.mkdir()
+        for path in source.iterdir():
+            path.rename(blobs / path.name)
+            path.symlink_to("../../blobs/" + path.name)
     original_config = (source / "config.json").read_bytes()
 
     assert (
@@ -227,9 +240,20 @@ def test_export_source_slice_preserves_source_and_loader_parity(tmp_path, layout
     assert (destination / "config.json").read_bytes() == original_config
 
 
-@pytest.mark.parametrize("invalid", ["shape", "parent_shard", "absolute_shard"])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "shape",
+        "parent_shard",
+        "absolute_shard",
+        "escaping_shard",
+        "escaping_index",
+        "escaping_single",
+        "sidecar_copy",
+    ],
+)
 def test_export_source_slice_rejects_invalid_source(
-    fake_checkpoint, fake_config, tmp_path, invalid
+    fake_checkpoint, fake_config, tmp_path, monkeypatch, invalid
 ):
     fake_config.save_pretrained(fake_checkpoint)
     shard = fake_checkpoint / "model-00001-of-00001.safetensors"
@@ -240,15 +264,44 @@ def test_export_source_slice_rejects_invalid_source(
     }
     if invalid == "shape":
         tensors["embed_tokens.weight"] = torch.zeros(1, _HIDDEN_SIZE)
-    else:
-        shard = tmp_path.parent / f"{tmp_path.name}-outside.safetensors"
-        index = json.loads((fake_checkpoint / "model.safetensors.index.json").read_text())
-        name = "../" + shard.name if invalid == "parent_shard" else str(shard)
-        index["weight_map"] = dict.fromkeys(tensors, name)
-        (fake_checkpoint / "model.safetensors.index.json").write_text(json.dumps(index))
     safetensors.torch.save_file(tensors, shard)
+    if invalid == "sidecar_copy":
+        (fake_checkpoint / "tokenizer.json").write_text("{}")
+        copy2 = shutil.copy2
+
+        def fail_tokenizer(path, *args, **kwargs):
+            if str(path).endswith("tokenizer.json"):
+                raise PermissionError("unreadable tokenizer")
+            return copy2(path, *args, **kwargs)
+
+        monkeypatch.setattr(shutil, "copy2", fail_tokenizer)
+    elif invalid != "shape":
+        index_path = fake_checkpoint / "model.safetensors.index.json"
+        outside = tmp_path.parent / f"{tmp_path.name}-outside"
+        if invalid == "escaping_index":
+            outside.write_bytes(index_path.read_bytes())
+            index_path.unlink()
+            index_path.symlink_to(outside)
+        else:
+            outside.write_bytes(shard.read_bytes())
+            if invalid == "escaping_shard":
+                shard.unlink()
+                shard.symlink_to(outside)
+            elif invalid == "escaping_single":
+                index_path.unlink()
+                (fake_checkpoint / "model.safetensors").symlink_to(outside)
+            else:
+                index = json.loads(index_path.read_text())
+                name = "../" + outside.name if invalid == "parent_shard" else str(outside)
+                index["weight_map"] = dict.fromkeys(tensors, name)
+                index_path.write_text(json.dumps(index))
+    if invalid not in ("shape", "sidecar_copy"):
+        # Loading retains compatibility with user-created views of externally cached weights.
+        model = FakeBaseModel.from_source(str(fake_checkpoint))
+        torch.testing.assert_close(model.embed_tokens.weight, tensors["embed_tokens.weight"])
+        torch.testing.assert_close(model.lm_head.weight, tensors["lm_head.weight"])
     destination = tmp_path / "slice"
-    with pytest.raises(ValueError):
+    with pytest.raises(PermissionError if invalid == "sidecar_copy" else ValueError):
         FakeBaseModel.export_source_slice(fake_checkpoint, destination)
     assert not destination.exists()
 
