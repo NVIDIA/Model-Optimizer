@@ -198,23 +198,28 @@ def test_auto_quantize_frees_the_conv1d_weights_conversion_replaces(monkeypatch,
     assert in_forwards and not any(in_forwards)
 
 
-def test_auto_quantize_refuses_layerwise_export_before_converting(tmp_path):
-    # Exporting each calibrated layer would replace its weights with packed ones before scoring.
+@pytest.mark.parametrize(
+    "layerwise",
+    [{"export_dir": "export"}, {"export_dir": ""}, {"checkpoint_dir": "checkpoint"}],
+    ids=["export_dir", "empty_export_dir", "checkpoint_dir_beside_gptq"],
+)
+def test_auto_quantize_refuses_layerwise_dirs_before_converting(monkeypatch, tmp_path, layerwise):
+    # Exporting each calibrated layer would replace its weights with packed ones before scoring,
+    # and an empty path exports into the working directory. Resuming the max candidate's layers
+    # would load their weights into new Parameters, which the restore after GPTQ does not reach.
+    monkeypatch.chdir(tmp_path)
     source = get_tiny_llama()
     model = copy.deepcopy(source)
-    export_dir = tmp_path / "export"
     config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
-    config["algorithm"] = {
-        "method": "max",
-        "layerwise": {"enable": True, "export_dir": str(export_dir)},
-    }
+    config["algorithm"] = {"method": "max", "layerwise": {"enable": True, **layerwise}}
+    formats = [config, _Q8_0_GPTQ_CFG] if "checkpoint_dir" in layerwise else [config]
     input_ids = model.dummy_inputs["input_ids"]
 
     def search():
         mtq.auto_quantize(
             model,
             constraints={"effective_bits": 11.0},
-            quantization_formats=[config],
+            quantization_formats=formats,
             data_loader=[{"input_ids": input_ids} for _ in range(2)],
             forward_step=lambda model, batch: model(**batch),
             loss_func=lambda output, batch: output.logits.float().square().sum(),
@@ -230,7 +235,7 @@ def test_auto_quantize_refuses_layerwise_export_before_converting(tmp_path):
     assert [type(m) for m in model.modules()] == [type(m) for m in source.modules()]
     for weight, original in zip(model.parameters(), source.parameters()):
         assert torch.equal(weight, original)
-    assert not export_dir.exists()
+    assert not any(tmp_path.iterdir())
     config["algorithm"] = "max"
     search()
 

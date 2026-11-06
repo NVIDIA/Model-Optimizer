@@ -1208,6 +1208,9 @@ def auto_quantize(
             for quant_format in search_space["quantization_formats"]
         ),
     ]
+    rewrites_weights = any(
+        _rewrites_weights(QuantRecipe(cfg, name=name)) for cfg, name in all_processed_formats
+    )
     for quant_cfg, name in all_processed_formats:
         recipe = QuantRecipe(quant_cfg, name=name)
         algo = recipe.config.algorithm
@@ -1221,7 +1224,7 @@ def auto_quantize(
         # Every candidate, before the search calibrates any: calibrate() would refuse mid-search.
         _refuse_awq_on_a_sharded_fsdp2_model(model, algo, candidate=name)
         _refuse_unsupported_distributed_calibration(model, algo)
-        _refuse_layerwise_dirs(recipe)
+        _refuse_layerwise_dirs(recipe, rewrites_weights)
 
     # Select the appropriate searcher based on method
     if method_name not in AUTO_QUANTIZE_SEARCHERS:
@@ -1267,7 +1270,7 @@ def auto_quantize(
     # so the caller can retry on the same model, which a converted model would refuse. The saved
     # modules hold every weight conversion replaces (HF Conv1D's), so other searches save none and
     # the searcher drops them once those checks pass.
-    if any(_rewrites_weights(QuantRecipe(cfg, name=name)) for cfg, name in all_processed_formats):
+    if rewrites_weights:
         searcher.restore_unconverted = _save_module_attributes(model)
     # Calibration turns pre-quant-scale folding off for the whole process. Hand back the policy
     # found here on every exit, also after a failure while scoring, so later calibrations fold.

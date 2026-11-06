@@ -156,27 +156,33 @@ def _rewrites_weights(recipe: "QuantRecipe") -> bool:
     return bool(_algorithm_methods(recipe.config.algorithm) & _WEIGHT_REWRITING_METHODS)
 
 
-def _refuse_layerwise_dirs(recipe: "QuantRecipe") -> None:
+def _refuse_layerwise_dirs(recipe: "QuantRecipe", search_rewrites_weights: bool) -> None:
     """Refuse layerwise directories whose contents would outlive the candidate's calibration."""
     for entry in _algorithm_entries(recipe.config.algorithm):
         layerwise = entry.get("layerwise")
         if not isinstance(layerwise, dict) or not layerwise.get("enable"):
             continue
         # The export replaces each calibrated layer's weights with packed ones, which scoring and
-        # the other candidates' calibrations would then run.
-        if layerwise.get("export_dir"):
+        # the other candidates' calibrations would then run. An empty path exports here.
+        if layerwise.get("export_dir") is not None:
             raise NotImplementedError(
                 f"AutoQuantize candidate {recipe} sets layerwise.export_dir, whose export would "
                 "leave the model in export form before scoring. Drop export_dir and export the "
                 "searched model afterwards."
             )
-        # A rerun would resume from per-layer checkpoints, which load the rewritten weights
-        # into new tensors that restoring the source weights does not reach.
-        if layerwise.get("checkpoint_dir") and _rewrites_weights(recipe):
+        # A resume that restores the layers' weights loads them into new Parameters, which the
+        # source-weight restore after a rewriting candidate's calibration does not reach.
+        if (
+            search_rewrites_weights
+            and layerwise.get("checkpoint_dir")
+            and layerwise.get("calib_mutates_weights", True)
+        ):
             raise NotImplementedError(
-                f"AutoQuantize candidate {recipe} rewrites weights with a layerwise "
-                "checkpoint_dir, whose resume would leave the rewritten weights in the model. "
-                "Drop checkpoint_dir; the AutoQuantize checkpoint resumes the search."
+                f"AutoQuantize candidate {recipe} sets a layerwise checkpoint_dir whose resume "
+                "restores the layers' weights, which would replace the weights this search "
+                "restores after rewriting them. Drop checkpoint_dir, or set "
+                "calib_mutates_weights=False on a calibration that leaves weights alone; the "
+                "AutoQuantize checkpoint resumes the search."
             )
 
 
