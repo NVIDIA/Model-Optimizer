@@ -1113,11 +1113,13 @@ def auto_quantize(
         format_shard: Optional ``(index, count)`` to calibrate and score only every ``count``-th
             searched format starting at ``index`` (in canonical compression order), so the
             formats can run in ``count`` parallel processes on the same model, data and
-            arguments; formats a group holds fixed are calibrated by every shard. Each shard
-            saves its scores to ``checkpoint`` without solving; combine the shard checkpoints
-            with :func:`merge_auto_quantize_checkpoints` and pass the result as ``checkpoint``
-            to solve. Scores are per (group, format), so the merged search is the unsharded
-            one. Gradient and KL-divergence methods only.
+            arguments; formats a group holds fixed are calibrated by every shard. With more
+            shards than formats, the shards dealt a format split its groups, so ``count`` can
+            exceed the number of formats (a multiple of it balances best). Each shard saves its
+            scores to ``checkpoint`` without solving; combine the shard checkpoints with
+            :func:`merge_auto_quantize_checkpoints` and pass the result as ``checkpoint`` to
+            solve. Scores are per (group, format), so the merged search is the unsharded one.
+            Gradient and KL-divergence methods only.
 
     Returns: A tuple (model, state_dict) where ``model`` is the searched and quantized model and
         ``state_dict`` contains the history and detailed stats of the search procedure.

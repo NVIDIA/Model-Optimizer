@@ -868,6 +868,7 @@ def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method)
     assert torch.allclose(output_ref, output_test)
 
 
+@pytest.mark.parametrize("split_groups", [False, True])
 @pytest.mark.parametrize(
     "method",
     [
@@ -877,7 +878,7 @@ def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method)
         {"method": "kl_div", "context": 1},
     ],
 )
-def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, method):
+def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, method, split_groups):
     source = TransformerBlock()
     data = [source.get_input() for _ in range(2)]
     formats = [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG]
@@ -910,22 +911,32 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
     model = copy.deepcopy(source)
     with pytest.raises(ValueError, match="format_shard count"):
         search(tmp_path / "refused.pth", (0, 99), model=model)
-    shards = [tmp_path / f"shard{i}.pth" for i in range(2)]
+    # Split, two shards share INT4, one scoring qkv and the other the mlp; in a scoring context,
+    # two share each format and BF16, which is measured there too.
+    count = (8 if isinstance(method, dict) else 4) if split_groups else 2
+    shards = [tmp_path / f"shard{i}.pth" for i in range(count)]
     for i, shard in enumerate(shards):
-        _, state = search(shard, (i, 2), model=model if i == 0 else None)
+        _, state = search(shard, (i, count), model=model if i == 0 else None)
         assert not state["best"]["recipe"]
-    # Each searched format is calibrated by one shard; o_proj's FP8 and a scoring context by both.
+    # Each searched format is calibrated by its shards; o_proj's FP8 and a scoring context by all.
     calibrated = [set(safe_load(shard)["quantizer_states"]) for shard in shards]
-    shared = calibrated[0] & calibrated[1]
-    assert len(shared) == 1 + isinstance(method, dict) and len(calibrated[0] | calibrated[1]) == 3
+    shared = set.intersection(*calibrated)
+    assert len(shared) == 1 + isinstance(method, dict) and len(set.union(*calibrated)) == 3
+    if split_groups and isinstance(method, dict):
+        for shard in shards:  # each measures one recipe, BF16 included, of one searched group
+            stats = safe_load(shard)["candidate_stats"].values()
+            searched = [s for s in stats if len(s["formats"]) > 1]
+            assert sum(score is not None for s in searched for score in s["raw_scores"]) == 1
 
     # Scores sum over batches, so a shard scored over fewer is refused.
     fewer = tmp_path / "fewer_steps.pth"
-    search(fewer, (1, 2), score_steps=1)
+    search(fewer, (1, count), score_steps=1)
     with pytest.raises(ValueError, match="num_score_steps"):
-        model_quant.merge_auto_quantize_checkpoints([shards[0], fewer], str(tmp_path / "x.pth"))
+        model_quant.merge_auto_quantize_checkpoints(
+            [shards[0], fewer, *shards[2:]], str(tmp_path / "x.pth")
+        )
     # So are shards that recorded no counts, as earlier versions saved them.
-    unlabeled = [tmp_path / f"unlabeled{i}.pth" for i in range(2)]
+    unlabeled = [tmp_path / f"unlabeled{i}.pth" for i in range(count)]
     for shard, path in zip(shards, unlabeled):
         state = safe_load(shard)
         del state["num_calib_steps"], state["num_score_steps"]
@@ -937,17 +948,17 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
     interrupted["candidate_stats"] = {}  # as saved between calibration and scoring
     safe_save(interrupted, tmp_path / "interrupted.pth")
     with pytest.raises(ValueError, match="num_calib_steps"):
-        search(tmp_path / "interrupted.pth", (0, 2), calib_steps=1)
+        search(tmp_path / "interrupted.pth", (0, count), calib_steps=1)
     with pytest.raises(ValueError, match="num_score_steps"):
-        search(shards[0], (0, 2), score_steps=1)
-    resumed = search(tmp_path / "interrupted.pth", (0, 2))[1]["candidate_stats"]
+        search(shards[0], (0, count), score_steps=1)
+    resumed = search(tmp_path / "interrupted.pth", (0, count))[1]["candidate_stats"]
     for name, stats in safe_load(shards[0])["candidate_stats"].items():
         assert resumed[name]["raw_scores"] == stats["raw_scores"]
     if method == "kl_div":  # saved before scoring options were recorded, it resumes as before
         unrecorded = safe_load(shards[0])
         del unrecorded["scoring_config"]
         safe_save(unrecorded, tmp_path / "unrecorded.pth")
-        search(tmp_path / "unrecorded.pth", (0, 2))
+        search(tmp_path / "unrecorded.pth", (0, count))
 
     merged = tmp_path / "merged.pth"
     merge_states = model_quant.merge_auto_quantize_shards

@@ -1402,32 +1402,47 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         """The searched formats this format shard leaves to the others; none without sharding.
 
         Formats are dealt round-robin in canonical (compression, then config) order, each
-        calibrated and scored by its own shard. Every shard calibrates the formats groups hold
-        fixed, since those shape the reference the other groups are scored against.
+        calibrated and scored by its own shard. With more shards than formats, the shards dealt a
+        format split the groups that search it round-robin, and each calibrates the format. Every
+        shard calibrates the formats groups hold fixed, since those shape the reference the other
+        groups are scored against.
         """
         if self.format_shard is None:
             return set()
         index, count = self.format_shard
         configurable = [hparam for hparam in quant_recipe_hparams if hparam.is_configurable]
-        searched = [
-            recipe
-            for recipe in search_recipes
-            if not recipe.is_no_quant and any(recipe in hparam.choices for hparam in configurable)
-        ]
-        if count > len(searched):
-            raise ValueError(
-                f"format_shard count {count} exceeds {len(searched)} searched formats."
-            )
-        owned = set(searched[index::count])
+        dealt = self._dealt_recipes(search_recipes, configurable)
+        if count <= len(dealt):
+            owned, scoring = set(dealt[index::count]), configurable
+        else:
+            recipe = dealt[index % len(dealt)]
+            groups = [hparam for hparam in configurable if recipe in hparam.solver_choices]
+            shards = len(range(index % len(dealt), count, len(dealt)))
+            if shards > len(groups):
+                raise ValueError(
+                    f"format_shard count {count} deals {recipe} to {shards} shards, but only "
+                    f"{len(groups)} groups search it."
+                )
+            owned, scoring = {recipe}, groups[index // len(dealt) :: shards]
+        scoring_ids = {id(hparam) for hparam in scoring}
         for hparam in configurable:
-            hparam._scored_recipes = owned
+            hparam._scored_recipes = owned if id(hparam) in scoring_ids else set()
         held = {
             recipe
             for hparam in quant_recipe_hparams
             if not hparam.is_configurable
             for recipe in hparam.choices
         }
-        return set(searched) - owned - held - self._shared_calibration_recipes(quant_recipe_hparams)
+        searched = {recipe for recipe in dealt if not recipe.is_no_quant}
+        return searched - owned - held - self._shared_calibration_recipes(quant_recipe_hparams)
+
+    def _dealt_recipes(self, search_recipes, configurable) -> list:
+        """The recipes format shards deal out, in canonical order: each searched format."""
+        return [
+            recipe
+            for recipe in search_recipes
+            if not recipe.is_no_quant and any(recipe in hparam.choices for hparam in configurable)
+        ]
 
     def _shared_calibration_recipes(self, quant_recipe_hparams) -> set:
         """Recipes every format shard calibrates besides its own (e.g. a scoring context)."""
@@ -2460,10 +2475,20 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
             return set()
         return {self._context_recipe(h) for h in quant_recipe_hparams if h.is_configurable}
 
+    def _dealt_recipes(self, search_recipes, configurable) -> list:
+        recipes = super()._dealt_recipes(search_recipes, configurable)
+        no_quant = QuantRecipe(quant_cfg=None)
+        if self.config["context"] is None or not any(
+            no_quant in hparam.solver_choices for hparam in configurable
+        ):
+            return recipes
+        # BF16 is measured in the quantized context, so shards deal it like a format, last.
+        return [*recipes, no_quant]
+
     def _scores_recipe(self, hparam, recipe) -> bool:
         if recipe.is_no_quant and self.config["context"] is not None:
-            # BF16 is measured in the quantized context; one shard measures it for the merge.
-            return self.format_shard is None or self.format_shard[0] == 0
+            # Measured where the solver may select it, by the shard dealt it for this group.
+            return recipe in hparam.scored_choices and recipe in hparam.solver_choices
         return super()._scores_recipe(hparam, recipe)
 
     @torch.inference_mode()
