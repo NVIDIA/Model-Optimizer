@@ -161,9 +161,7 @@ class QuantModule(DynamicModule):
         members = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
         for weight in weights:
             folded = weight
-            # Each member's output is in the weight dtype, as in the forward pass. Materialize a
-            # contiguous copy in ``quantize_dtype`` first: transposed expert weights are views, and
-            # quantizing the view in place folded the wrong values for GPT-OSS / Llama 4.
+            # Each member's output is in the weight dtype, as in the forward pass.
             for member in members:
                 folded = member(folded.to(quantize_dtype).contiguous()).to(weight.dtype)
             weight.data.copy_(folded)

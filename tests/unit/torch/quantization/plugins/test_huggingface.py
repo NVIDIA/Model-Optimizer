@@ -37,7 +37,12 @@ from modelopt.recipe.loader import load_recipe
 from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.config import LayerwiseConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    QuantLinear,
+    QuantModuleRegistry,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.plugins.huggingface import (
     _QuantHFParallelLinear,
     _TransposedExpertsCalibMixin,
@@ -540,6 +545,36 @@ def test_fold_transposed_expert_weights_preserves_forward(
         if offload is not None:
             assert experts.gate_up_proj.is_meta
             assert experts.down_proj.is_meta
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_fold_transposed_expert_weights_with_sequential_quantizer(dtype):
+    set_seed()
+    model = get_tiny_gpt_oss(num_hidden_layers=1, hidden_size=32, intermediate_size=48)
+    model = model.to(dtype=dtype).eval()
+    input_ids = torch.randint(0, 32, (2, 7))
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*.experts.*weight_quantizer",
+                "cfg": [{"num_bits": 8, "axis": (0, 1)}, {"num_bits": 4, "axis": (0, 1)}],
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, config, lambda m: m(input_ids))
+    experts = next(
+        module for module in model.modules() if isinstance(module, _TransposedExpertsCalibMixin)
+    )
+    quantizers = [quantizer for _, quantizer in experts.iter_weights_for_calibration()]
+    assert all(isinstance(quantizer, SequentialQuantizer) for quantizer in quantizers)
+
+    with torch.no_grad():
+        expected = model(input_ids).logits
+        mtq.fold_weight(model)
+        torch.testing.assert_close(model(input_ids).logits, expected)
+    assert not any(member.is_enabled for quantizer in quantizers for member in quantizer)
 
 
 def test_hf_decoder_discoverer_registration_path():
