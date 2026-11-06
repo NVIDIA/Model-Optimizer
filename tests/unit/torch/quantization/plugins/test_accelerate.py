@@ -25,6 +25,7 @@ from modelopt.torch.quantization.nn import QuantLinearConvBase, TensorQuantizer
 
 try:
     from accelerate.hooks import AlignDevicesHook, ModelHook, add_hook_to_module
+    from accelerate.utils import PrefixedDataset
 except ImportError:
     pytest.skip("accelerate not available", allow_module_level=True)
 
@@ -83,7 +84,8 @@ def test_tensor_quantizer_modelopt_state_with_accelerate_hook():
     pickle.dumps(state)
 
 
-def test_buffer_registered_during_weight_access_survives_buffer_offload():
+@pytest.mark.parametrize("prefixed", [False, True])
+def test_buffer_registered_during_weight_access_survives_buffer_offload(prefixed):
     """GPTQ's payload pin is registered while the offloaded weight is materialized; the hook must
     still be able to reload it after offloading the module again."""
     torch.manual_seed(0)
@@ -95,13 +97,16 @@ def test_buffer_registered_during_weight_access_survives_buffer_offload():
         {"quantizer_name": "*weight_quantizer", "cfg": iq1_s_weights, "enable": True},
     ]
     mtq.quantize(model, {"quant_cfg": quant_cfg, "algorithm": "max"}, lambda m: m(inputs))
-    weights_map = {name: value.detach().clone() for name, value in model.state_dict().items()}
+    prefix = "layer." if prefixed else ""
+    weights_map = {
+        prefix + name: value.detach().clone() for name, value in model.state_dict().items()
+    }
     hook = AlignDevicesHook(
         execution_device="cpu",
         offload=True,
         offload_buffers=True,
         place_submodules=True,
-        weights_map=weights_map,
+        weights_map=PrefixedDataset(weights_map, prefix) if prefixed else weights_map,
     )
     add_hook_to_module(model, hook)
 
