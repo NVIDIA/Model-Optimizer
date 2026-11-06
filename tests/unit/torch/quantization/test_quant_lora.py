@@ -61,7 +61,9 @@ def test_quant_lora_training_restore_and_merge():
     mtq.quantize(student, mtq.INT8_DEFAULT_CFG, lambda m: m(inputs))
     baseline = student(inputs).detach()
     backbone = {name: p.detach().clone() for name, p in student.named_parameters()}
+    assert not mtq.has_quant_lora(student)
     mtq.enable_quant_lora(student, {"rank": 4, "alpha": 8})
+    assert mtq.has_quant_lora(student)
     torch.testing.assert_close(student(inputs), baseline, rtol=0, atol=0)
     assert all(p.requires_grad == ("lora_" in name) for name, p in student.named_parameters())
     optimizer = _optimizer(student)
@@ -97,6 +99,7 @@ def test_quant_lora_training_restore_and_merge():
 
     output = restored(inputs).detach()
     mtq.merge_quant_lora(restored)
+    assert not mtq.has_quant_lora(restored)
     assert not any("lora_" in name for name, _ in restored.named_parameters())
     torch.testing.assert_close(restored(inputs), output, rtol=0, atol=0)
     checkpoint = io.BytesIO()

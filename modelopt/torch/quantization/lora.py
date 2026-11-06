@@ -37,6 +37,7 @@ __all__ = [
     "QuantLoRAConfig",
     "enable_quant_input_gradients",
     "enable_quant_lora",
+    "has_quant_lora",
     "merge_quant_lora",
 ]
 
@@ -115,28 +116,57 @@ def enable_quant_lora(model: nn.Module, config: dict | QuantLoRAConfig | None = 
     The forward quantizes ``W + (alpha / rank) * B @ A``. Save and restore using
     ModelOpt checkpoint APIs to reconstruct adapters before loading tensor/optimizer state.
     """
-    if any(isinstance(module, _QuantLoRALinear) for module in model.modules()):
+    if has_quant_lora(model):
         raise ValueError("Quantization-aware LoRA is already enabled.")
     return apply_mode(model, [("quant_lora", config or {})], registry=QuantizeModeRegistry)
 
 
 def merge_quant_lora(model: nn.Module) -> nn.Module:
     """Merge adapters into floating-point weights, retaining quantizers for deployment export."""
-    if not any(isinstance(module, _QuantLoRALinear) for module in model.modules()):
+    if not has_quant_lora(model):
         return model
     return apply_mode(model, "quant_lora_export", registry=QuantizeModeRegistry)
 
 
-def enable_quant_input_gradients(model: nn.Module) -> nn.Module:
-    """Enable differentiable activation boundaries for training a partially frozen model.
+def has_quant_lora(model: nn.Module) -> bool:
+    """Return whether the model contains unmerged quantization-aware LoRA adapters."""
+    return any(isinstance(module, _QuantLoRALinear) for module in model.modules())
 
-    This does not attach adapters or change parameter trainability. Call before DDP
-    and optimizer construction, including when restoring a native training checkpoint.
+
+def enable_quant_input_gradients(model: nn.Module) -> nn.Module:
+    """Enable activation gradients, recording their wrappers for ModelOpt restoration.
+
+    Call before DDP and optimizer construction. This does not change parameter
+    trainability; the training recipe still selects parameters on every launch.
     """
+    if not any(
+        not isinstance(module, _QuantLoRAInput) and type(module) in QuantLoRAInputRegistry
+        for module in model.modules()
+    ):
+        return model
+    return apply_mode(model, "quant_input_gradients", registry=QuantizeModeRegistry)
+
+
+def _enable_quant_input_gradients(model):
+    """Install registered wrappers within the owning activation-gradient or LoRA mode."""
     for module in list(model.modules()):
         if not isinstance(module, _QuantLoRAInput) and type(module) in QuantLoRAInputRegistry:
             QuantLoRAInputRegistry[type(module)].convert(module)
     return model
+
+
+def _convert_quant_input_gradients(model, config):
+    """Wrap activation boundaries and retain the current quantizer metadata."""
+    _enable_quant_input_gradients(model)
+    metadata = {}
+    _update_quant_metadata(model, config, metadata)
+    return model, metadata
+
+
+def _restore_quant_input_gradients(model, config, metadata):
+    """Restore quantizers and activation wrappers before checkpoint tensors are loaded."""
+    restore_quantizer_state(model, QuantizeConfig(), metadata)
+    return _enable_quant_input_gradients(model)
 
 
 def _convert_quant_lora(model, config):
@@ -170,9 +200,9 @@ def _convert_quant_lora(model, config):
     model.requires_grad_(False)
     for module in targets:
         QuantLoRARegistry[type(module)].convert(module, config=config)
-    enable_quant_input_gradients(model)
+    _enable_quant_input_gradients(model)
     metadata = {}
-    _update_quant_lora(model, config, metadata)
+    _update_quant_metadata(model, config, metadata)
     return model, metadata
 
 
@@ -182,8 +212,8 @@ def _restore_quant_lora(model, config, metadata):
     return _convert_quant_lora(model, config)[0]
 
 
-def _update_quant_lora(model, config, metadata):
-    """Record quantizer metadata for adapter and merged checkpoints."""
+def _update_quant_metadata(model, config, metadata):
+    """Record quantizer metadata for activation-gradient and LoRA checkpoints."""
     update_quantize_metadata(model, QuantizeConfig(), metadata)
 
 
@@ -195,7 +225,7 @@ def _merge_quant_lora(model, config):
         elif isinstance(module, _QuantLoRAInput):
             module.export()
     metadata = {}
-    _update_quant_lora(model, config, metadata)
+    _update_quant_metadata(model, config, metadata)
     return model, metadata
 
 
@@ -203,6 +233,18 @@ def _restore_merged_quant_lora(model, config, metadata):
     """Remove reconstructed factors before restoring the merged checkpoint state."""
     model = _merge_quant_lora(model, config)[0]
     return restore_quantizer_state(model, QuantizeConfig(), metadata)
+
+
+@QuantizeModeRegistry.register_mode
+class QuantInputGradientsModeDescriptor(ModeDescriptor):
+    """Restore differentiable activation boundaries independently of LoRA adapters."""
+
+    name = "quant_input_gradients"
+    config_class = ModeloptBaseConfig
+    convert = staticmethod(_convert_quant_input_gradients)
+    restore = staticmethod(_restore_quant_input_gradients)
+    update_for_save = staticmethod(_update_quant_metadata)
+    update_for_new_mode = staticmethod(_update_quant_metadata)
 
 
 @QuantizeModeRegistry.register_mode
@@ -215,8 +257,8 @@ class QuantLoRAModeDescriptor(ModeDescriptor):
     next_prohibited_modes = {"quant_lora", "quantize", "auto_quantize", "real_quantize"}
     convert = staticmethod(_convert_quant_lora)
     restore = staticmethod(_restore_quant_lora)
-    update_for_save = staticmethod(_update_quant_lora)
-    update_for_new_mode = staticmethod(_update_quant_lora)
+    update_for_save = staticmethod(_update_quant_metadata)
+    update_for_new_mode = staticmethod(_update_quant_metadata)
 
 
 @QuantizeModeRegistry.register_mode
@@ -228,5 +270,5 @@ class QuantLoRAExportModeDescriptor(ModeDescriptor):
     is_export_mode = True
     convert = staticmethod(_merge_quant_lora)
     restore = staticmethod(_restore_merged_quant_lora)
-    update_for_save = staticmethod(_update_quant_lora)
-    update_for_new_mode = staticmethod(_update_quant_lora)
+    update_for_save = staticmethod(_update_quant_metadata)
+    update_for_new_mode = staticmethod(_update_quant_metadata)

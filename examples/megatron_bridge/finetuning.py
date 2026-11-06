@@ -19,7 +19,7 @@ import fnmatch
 
 from torch import nn
 
-from modelopt.torch.quantization.lora import _QuantLoRALinear, enable_quant_input_gradients
+from modelopt.torch.quantization import enable_quant_input_gradients, has_quant_lora
 from modelopt.torch.quantization.qtensor import QTensorWrapper
 
 __all__ = ["configure_trainable_parameters"]
@@ -34,7 +34,7 @@ def configure_trainable_parameters(model: nn.Module, target_parameters: list[str
     """
     if not target_parameters:
         raise ValueError("target_parameters must contain at least one pattern.")
-    if any(isinstance(module, _QuantLoRALinear) for module in model.modules()):
+    if has_quant_lora(model):
         raise ValueError("Full-rank training requires an adapter-free student checkpoint.")
     parameters = dict(model.named_parameters(remove_duplicate=False))
     selected = set()

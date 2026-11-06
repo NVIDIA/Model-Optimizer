@@ -16,6 +16,7 @@
 """Selective full-rank fake-quant training with frozen activation boundaries."""
 
 import copy
+import io
 
 import pytest
 import torch
@@ -29,7 +30,8 @@ from modelopt.torch.quantization.qtensor import INT4QTensor, QTensorWrapper
 
 
 @pytest.mark.parametrize("recompute", [False, True])
-def test_full_rank_training_and_restore(recompute):
+@pytest.mark.parametrize("restore_kind", ["state", "file"])
+def test_full_rank_training_and_restore(recompute, restore_kind):
     """Preserve selective updates and Adam restoration with frozen embeddings."""
     torch.manual_seed(42)
     model = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16), nn.Linear(16, 16))
@@ -57,8 +59,22 @@ def test_full_rank_training_and_restore(recompute):
     assert [n for n, p in model.named_parameters() if p.requires_grad] == ["1.weight"]
     assert not any("lora_" in n for n, _ in model.named_parameters())
     restored = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16), nn.Linear(16, 16))
-    restored = mto.restore_from_modelopt_state(restored, mto.modelopt_state(model))
-    restored.load_state_dict(model.state_dict())
+    if restore_kind == "state":
+        restored = mto.restore_from_modelopt_state(restored, mto.modelopt_state(model))
+        restored.load_state_dict(model.state_dict())
+    else:
+        checkpoint_file = io.BytesIO()
+        mto.save(model, checkpoint_file)
+        checkpoint_file.seek(0)
+        restored = mto.restore(restored, checkpoint_file)
+    restored.requires_grad_(False)
+    restored[1].weight.requires_grad_(True)
+    restored.train()
+    activation = restored[0](inputs)
+    assert activation.requires_grad
+    checkpoint(restored[1], activation, use_reentrant=True).square().mean().backward()
+    assert restored[1].weight.grad.count_nonzero() > 0
+    restored.zero_grad(set_to_none=True)
     configure_trainable_parameters(restored, ["1.weight"])
     restored_optimizer = torch.optim.Adam([restored[1].weight], lr=0.1)
     restored_optimizer.load_state_dict(copy.deepcopy(optimizer.state_dict()))
@@ -68,8 +84,6 @@ def test_full_rank_training_and_restore(recompute):
         opt.step()
     torch.testing.assert_close(model[1].weight, restored[1].weight, rtol=0, atol=0)
     torch.testing.assert_close(model(inputs), restored(inputs), rtol=0, atol=0)
-    with torch.no_grad():
-        assert not restored[0](inputs).requires_grad
 
 
 @pytest.mark.parametrize("invalid", ["unmatched", "shared", "packed", "adapters", "empty"])
