@@ -185,9 +185,7 @@ against the allowed loss, in matching units. A point estimate within threshold
 or an SE below it does not establish acceptance; require the entire signed-loss
 confidence interval above the minimum acceptable margin.
 
-Use the run/stopping plan from Step 3; do not keep extending it to make an
-ordinary CI pass. SciCode's floor remains **8 runs per side** —
-`recipes/tasks/aa/scicode.md`.
+Apply Step 3's declared run/stopping plan.
 
 **Re-running does not guarantee fresh samples.** With a warm NEL response cache a "re-run" can
 replay cached responses — two runs came back bit-identical to 16 digits. But an equal score is a

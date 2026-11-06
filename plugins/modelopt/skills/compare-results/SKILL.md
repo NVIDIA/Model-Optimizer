@@ -38,8 +38,8 @@ change is being measured, typically a further quantized version of the baseline.
    credible comparable reference exists, label the baseline externally
    unverified rather than claiming the check passed, then continue using the
    validated measured baseline.
-7. Follow [Assess results](references/assess-results.md) to calculate retry
-   means, SEs, score intervals, and a Welch confidence interval on signed loss.
+7. Follow [Assess results](references/assess-results.md) to compute deltas and
+   uncertainty; mark unavailable uncertainty explicitly.
 8. Report comparability, external baseline sanity, and quantized-feasibility
    verdicts before interpreting the delta as model quality. If the user did not
    provide an acceptance threshold, report feasibility as inconclusive instead
