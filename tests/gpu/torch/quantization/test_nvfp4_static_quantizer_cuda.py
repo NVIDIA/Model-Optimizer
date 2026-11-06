@@ -239,6 +239,49 @@ class TestNVFP4StaticQuantizer:
 
         assert torch.allclose(output, expected)
 
+    def test_unpromoted_tensor_quantizer_forward_backward(self, device):
+        """Test an unpromoted TensorQuantizer fake-quantizes and backpropagates.
+
+        A plain TensorQuantizer with static NVFP4 attributes reaches the static
+        blockwise FP4 path through the base class when it was never promoted to
+        NVFP4StaticQuantizer (promotion happens in calibration finalize, which
+        some training flows skip). The CPU coverage for this path replaces the
+        triton implementation with a spy, so it validates dispatch only; here
+        the real kernel runs and both the output and the gradient are checked.
+        """
+        num_blocks = 4
+        block_size = 16
+
+        cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: block_size, "type": "static", "scale_bits": (4, 3)},
+        )
+        quantizer = TensorQuantizer(quant_attribute_cfg=cfg).to(device)
+        assert type(quantizer) is TensorQuantizer
+        assert quantizer.is_nvfp4_static
+
+        weight = torch.randn(num_blocks, block_size, device=device, requires_grad=True)
+        per_block_amax = weight.detach().abs().amax(dim=-1)
+        quantizer.amax = per_block_amax
+
+        output = quantizer(weight)
+
+        # Reference: the promoted quantizer with the same config and amax calls
+        # the same implementation, and its global_amax is None, matching the
+        # fallback the unpromoted path uses.
+        reference_quantizer = NVFP4StaticQuantizer.from_tensor_quantizer(
+            TensorQuantizer(quant_attribute_cfg=cfg).to(device)
+        )
+        reference_quantizer.amax = per_block_amax
+        expected = reference_quantizer._fake_quantize(weight.detach())
+
+        assert torch.allclose(output, expected)
+
+        output.sum().backward()
+        assert weight.grad is not None
+        assert weight.grad.shape == weight.shape
+        assert torch.isfinite(weight.grad).all()
+
     def test_static_export_clamps_overflowing_fp8_block_scales(self, device):
         """Static export should match fake quant clamping and never write NaN FP8 scales."""
         cfg = QuantizerAttributeConfig(
