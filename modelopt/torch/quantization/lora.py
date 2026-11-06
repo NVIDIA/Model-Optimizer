@@ -30,7 +30,7 @@ from modelopt.torch.opt.mode import ModeDescriptor
 from .config import QuantizeConfig
 from .conversion import restore_quantizer_state, update_quantize_metadata
 from .mode import QuantizeModeRegistry
-from .nn import QuantModule, QuantModuleRegistry
+from .nn import QuantModule, QuantModuleRegistry, TensorQuantizer
 from .qtensor import QTensorWrapper
 
 __all__ = [
@@ -138,7 +138,7 @@ def enable_quant_input_gradients(model: nn.Module) -> nn.Module:
 
     Call before DDP and optimizer construction. This does not change parameter
     trainability; the training recipe still selects parameters on every launch.
-    Raise if no registered activation boundary is available.
+    Raise if no registered activation boundary or quantizer is available.
     """
     _validate_quant_input_gradients(model)
     if not any(
@@ -156,6 +156,8 @@ def _validate_quant_input_gradients(model):
     ):
         types = ", ".join(sorted({type(module).__name__ for module in model.modules()}))
         raise ValueError(f"No registered activation-gradient boundary for module types: {types}")
+    if not any(isinstance(module, TensorQuantizer) for module in model.modules()):
+        raise ValueError("Activation-gradient setup requires a quantized model with quantizers.")
 
 
 def _enable_quant_input_gradients(model):

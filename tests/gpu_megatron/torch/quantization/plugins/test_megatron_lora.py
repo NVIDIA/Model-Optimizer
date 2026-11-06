@@ -19,11 +19,15 @@ from functools import partial
 
 import pytest
 import torch
+from _test_utils.examples.megatron_example_runner import _load_example_module
 from _test_utils.torch.megatron.models import HAS_MAMBA, get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import get_batch, initialize_for_megatron
 
 import modelopt.torch.quantization as mtq
-from examples.megatron_bridge.finetuning import configure_trainable_parameters
+
+configure_trainable_parameters = _load_example_module(
+    "trainable_params.py", "megatron_bridge"
+).configure_trainable_parameters
 
 
 @pytest.mark.skipif(not HAS_MAMBA, reason="Hybrid model fixture requires Mamba")

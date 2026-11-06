@@ -20,13 +20,17 @@ import io
 
 import pytest
 import torch
+from _test_utils.examples.megatron_example_runner import _load_example_module
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from examples.megatron_bridge.finetuning import configure_trainable_parameters
 from modelopt.torch.quantization.qtensor import INT4QTensor, QTensorWrapper
+
+configure_trainable_parameters = _load_example_module(
+    "trainable_params.py", "megatron_bridge"
+).configure_trainable_parameters
 
 
 @pytest.mark.parametrize("recompute", [False, True])

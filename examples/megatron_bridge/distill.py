@@ -28,7 +28,6 @@ from pathlib import Path
 
 import torch
 from export_distilled_megatron_to_hf import export_llm_to_hf, save_vlm_to_hf
-from finetuning import configure_trainable_parameters
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
 from megatron.bridge.recipes.utils.optimizer_utils import (
@@ -51,6 +50,7 @@ from megatron.bridge.training.distill import distill
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
+from trainable_params import configure_trainable_parameters
 
 try:
     from megatron.bridge.data.builders import DirectHFSFTDatasetConfig

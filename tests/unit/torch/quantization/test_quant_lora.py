@@ -295,3 +295,19 @@ def test_input_gradient_restore_requires_registered_boundary(monkeypatch):
     fresh = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16))
     with pytest.raises(ValueError):
         mto.restore_from_modelopt_state(fresh, state)
+
+
+def test_input_gradient_setup_requires_quantizers():
+    """Reject unquantized models without preventing subsequent quantization."""
+    model = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16))
+    types = {name: type(module) for name, module in model.named_modules()}
+    trainability = {name: parameter.requires_grad for name, parameter in model.named_parameters()}
+    with pytest.raises(ValueError):
+        mtq.enable_quant_input_gradients(model)
+    assert not mto.ModeloptStateManager.is_converted(model)
+    assert types == {name: type(module) for name, module in model.named_modules()}
+    assert trainability == {
+        name: parameter.requires_grad for name, parameter in model.named_parameters()
+    }
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.arange(8)))
+    mtq.enable_quant_input_gradients(model)
