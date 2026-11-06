@@ -25,7 +25,12 @@ from _test_utils.torch.quantization.quantize_common import quantize_model_and_fo
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
-from modelopt.torch.quantization.nn import GroupedQuantizer, QuantModule
+from modelopt.torch.quantization.nn import (
+    GroupedQuantizer,
+    QuantModule,
+    register_quant_backend,
+    unregister_quant_backend,
+)
 
 
 class TELinear(nn.Module):
@@ -170,6 +175,60 @@ def test_fold_weight_grouped_linear(share_weight_quantizer):
         assert torch.allclose(weight, expected_weight)
         assert not quantizer.is_enabled
         assert not hasattr(quantizer, "_amax")
+
+
+def _ste_round(inputs, quantizer):
+    return inputs + (torch.round(inputs * 8) / 8 - inputs).detach()
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_grouped_backend_te_grouped_linear(cached):
+    """A backend's grouped entrypoint fake-quantizes all experts of a GroupedLinear in one call."""
+    set_seed()
+    model = TEGroupedLinear().cuda()
+    data = model.get_input().cuda()
+    grouped_calls = []
+
+    def grouped(inputs, quantizers):
+        grouped_calls.append(len(inputs))
+        return [_ste_round(x, q) for x, q in zip(inputs, quantizers)]
+
+    def step():
+        model.zero_grad()
+        outputs = [model(data) for _ in range(2)]
+        sum(out.square().sum() for out in outputs).backward()
+        weights = [getattr(model.net, f"weight{i}") for i in range(model.num_gemms)]
+        return [out.detach() for out in outputs] + [w.grad.clone() for w in weights]
+
+    register_quant_backend("te_ste", _ste_round)
+    try:
+        cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": 8, "backend": "te_ste"},
+                    "enable": True,
+                },
+            ],
+            "algorithm": "max",
+        }
+        mtq.quantize(model, cfg, lambda m: m(data))
+        reference = step()
+        unregister_quant_backend("te_ste")
+        register_quant_backend("te_ste", _ste_round, grouped_entrypoint=grouped)
+        if cached:
+            mtq.utils.enable_weight_cache(model)
+            with mtq.utils.weight_cache_scope(model) as stats:
+                results = step()
+            assert (stats.misses, stats.hits) == (3, 3)
+        else:
+            results = step()
+    finally:
+        unregister_quant_backend("te_ste")
+    assert grouped_calls == ([3] if cached else [3, 3])
+    for result, expected in zip(results, reference):
+        assert torch.equal(result, expected)
 
 
 def test_quantize_forward_backward():

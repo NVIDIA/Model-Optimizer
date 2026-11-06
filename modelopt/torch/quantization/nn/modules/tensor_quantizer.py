@@ -18,7 +18,7 @@
 import contextlib
 import math
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, Protocol, TypeGuard
 
 import torch
@@ -54,7 +54,7 @@ from ...tensor_quant import (
 )
 from ...utils import is_torch_export_mode
 from ...utils.numeric_utils import E4M3_MAX, fp8_max_for_normalization
-from ...utils.weight_cache import cached_fake_quantize
+from ...utils.weight_cache import cached_fake_quantize, prefill_fake_quantize
 from ..functional import normalized_hadamard_transform
 
 # torch.finfo(...).tiny gives the smallest normal E4M3 value; scale clamping needs
@@ -76,11 +76,20 @@ __all__ = [
 
 
 QuantBackendEntrypoint = Callable[[torch.Tensor, "TensorQuantizer"], torch.Tensor]
+GroupedQuantBackendEntrypoint = Callable[
+    [list[torch.Tensor], list["TensorQuantizer"]], Sequence[torch.Tensor] | None
+]
 
 _QUANT_FUNCTIONAL_BACKENDS: dict[str, QuantBackendEntrypoint] = {}
+_QUANT_GROUPED_BACKENDS: dict[str, GroupedQuantBackendEntrypoint] = {}
 
 
-def register_quant_backend(name: str, entrypoint: QuantBackendEntrypoint) -> None:
+def register_quant_backend(
+    name: str,
+    entrypoint: QuantBackendEntrypoint,
+    *,
+    grouped_entrypoint: GroupedQuantBackendEntrypoint | None = None,
+) -> None:
     """Register a custom quantization backend.
 
     Args:
@@ -90,14 +99,30 @@ def register_quant_backend(name: str, entrypoint: QuantBackendEntrypoint) -> Non
             See :class:`modelopt.torch.quantization.config.QuantizerAttributeConfig`
             for details on choosing from the registered backends via the ``backend`` and
             ``backend_extra_args`` fields.
+        grouped_entrypoint: Optional. ``grouped_entrypoint(inputs, quantizers)`` fake-quantizes several
+            tensors at once, ``inputs[i]`` with ``quantizers[i]``. The experts of a Transformer Engine
+            grouped linear are sent to it when each of their weight quantizers only fake-quantizes with
+            this backend (enabled, not calibrating, no ``block_sizes``, ``pre_quant_scale`` or
+            rotation). ModelOpt calls it without autograd and passes each output's gradient straight
+            through to its input, so it only gets quantizers whose ``entrypoint`` does that too
+            (``pass_through_bwd=True``, no learned scales). It returns ``None`` to leave all inputs to
+            ``entrypoint``, or one tensor per input, in its own storage, equal to
+            ``entrypoint(inputs[i], quantizers[i])``. It must not change its inputs or the quantizers,
+            or issue collectives. Registering the backend again without it removes it.
     """
     if not isinstance(name, str) or not name:
         raise ValueError("Backend name must be a non-empty string.")
     if not callable(entrypoint):
         raise TypeError("Entrypoint must be callable.")
+    if grouped_entrypoint is not None and not callable(grouped_entrypoint):
+        raise TypeError("Grouped entrypoint must be callable.")
     if name in _QUANT_FUNCTIONAL_BACKENDS:
         warnings.warn(f"Overwriting existing backend: {name}")
     _QUANT_FUNCTIONAL_BACKENDS[name] = entrypoint
+    # A grouped entrypoint must give what its entrypoint gives, so a new entrypoint drops an old one.
+    _QUANT_GROUPED_BACKENDS.pop(name, None)
+    if grouped_entrypoint is not None:
+        _QUANT_GROUPED_BACKENDS[name] = grouped_entrypoint
 
 
 def unregister_quant_backend(name: str) -> None:
@@ -109,6 +134,7 @@ def unregister_quant_backend(name: str) -> None:
     if not isinstance(name, str) or not name:
         raise ValueError("Backend name must be a non-empty string.")
     _QUANT_FUNCTIONAL_BACKENDS.pop(name, None)
+    _QUANT_GROUPED_BACKENDS.pop(name, None)
 
 
 def is_registered_quant_backend(name: str) -> bool:
@@ -2086,10 +2112,13 @@ class GroupedQuantizer(_QuantizerContainerBase, nn.ModuleList):
         return outputs
 
 
-def _is_plain_fake_quant(q: nn.Module) -> TypeGuard[TensorQuantizer]:
-    """Whether ``q(x)`` only fake-quantizes ``x`` with its calibrated amax, in any format.
+def _is_plain_fake_quant(
+    q: nn.Module, backend: str | None = None, called: bool = False
+) -> TypeGuard[TensorQuantizer]:
+    """Whether ``q(x)`` only fake-quantizes ``x`` with its calibrated amax, in any format of ``backend``.
 
     Each group rules out something ``TensorQuantizer.forward`` can do that a stacked kernel does not.
+    ``called``: the caller still calls ``q``, so its hooks run.
     """
     return (
         # Subclasses (e.g. static NVFP4, sequential) quantize differently.
@@ -2101,14 +2130,20 @@ def _is_plain_fake_quant(q: nn.Module) -> TypeGuard[TensorQuantizer]:
         and not q._if_calib
         and not q._use_constant_amax
         # Nothing applied around the quantization itself.
-        and q.backend is None
+        and q.backend == backend
         and q.pre_quant_scale is None
         and q.bias is None
         and not q.rotate_is_enabled
         and not q.rotate_back_is_enabled
         # Hooks expect the quantizer itself to run, forward and backward.
-        and not (
-            q._forward_hooks or q._forward_pre_hooks or q._backward_hooks or q._backward_pre_hooks
+        and (
+            called
+            or not (
+                q._forward_hooks
+                or q._forward_pre_hooks
+                or q._backward_hooks
+                or q._backward_pre_hooks
+            )
         )
     )
 
@@ -2154,3 +2189,41 @@ def _try_stacked_fake_quant(weight: torch.Tensor, quantizers: nn.ModuleList) -> 
             weight, torch.cat(amaxes).to(weight.device), pass_through_bwd
         )
     return None
+
+
+def _try_grouped_fake_quant(quantizers, inputs) -> list[torch.Tensor] | None:
+    """``[q(x) for q, x in zip(quantizers, inputs)]``, with the inputs to compute in one grouped backend call.
+
+    Returns None, and the caller calls each quantizer, unless every quantizer only fake-quantizes its
+    input with one custom backend that registered a ``grouped_entrypoint``. Each quantizer is still
+    called, hooks included, and takes the value the grouped call computed for its input.
+    """
+    backend = getattr(quantizers[0], "backend", None) if len(quantizers) else None
+    compute = _QUANT_GROUPED_BACKENDS.get(backend) if backend is not None else None
+    if (
+        compute is None
+        or len(inputs) != len(quantizers)
+        or len({id(q) for q in quantizers}) != len(quantizers)  # one value per quantizer
+        or not all(
+            _is_plain_fake_quant(q, backend, called=True) and q.block_sizes is None
+            for q in quantizers
+        )
+        # forward unwraps DTensors, dequantizes QTensors and returns empty inputs as they are
+        or any(
+            type(x) not in (torch.Tensor, nn.Parameter)
+            or x.numel() == 0
+            or x.device != inputs[0].device
+            for x in inputs
+        )
+        or is_torch_export_mode()
+        or torch.compiler.is_compiling()
+        or torch.onnx.is_in_onnx_export()
+    ):
+        return None
+    # For such a quantizer, forward only makes the input contiguous before cached_fake_quantize.
+    contiguous = [x.contiguous() for x in inputs]
+    with (
+        same_device_as(contiguous[0]),
+        prefill_fake_quantize(quantizers, contiguous, inputs, compute),
+    ):
+        return [q(x) for q, x in zip(quantizers, inputs)]

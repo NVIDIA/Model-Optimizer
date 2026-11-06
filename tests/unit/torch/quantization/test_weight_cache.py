@@ -29,6 +29,7 @@ from modelopt.torch.quantization.nn import (
     register_quant_backend,
     unregister_quant_backend,
 )
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import _try_grouped_fake_quant
 from modelopt.torch.quantization.utils import (
     disable_weight_cache,
     enable_weight_cache,
@@ -39,9 +40,13 @@ from modelopt.torch.quantization.utils import (
 BACKEND_CALLS = []
 
 
+def _ste_round(inputs):
+    return inputs + (torch.round(inputs * 8) / 8 - inputs).detach()
+
+
 def _ste_round_backend(inputs, quantizer):
     BACKEND_CALLS.append(quantizer)
-    return inputs + (torch.round(inputs * 8) / 8 - inputs).detach()
+    return _ste_round(inputs)
 
 
 @pytest.fixture
@@ -174,3 +179,67 @@ def test_enrollment_by_chunk():
     with weight_cache_scope(chunks[0]) as stats:
         chunks[0](torch.randn(4, 16))
     assert stats.misses == 1
+
+
+@pytest.mark.parametrize("case", ["grouped", "hooked", "declined", "learned_scale", "bad_output"])
+def test_grouped_backend_matches_per_quantizer(ste_round_backend, case):
+    grouped_calls = []
+
+    def grouped(inputs, quantizers):
+        grouped_calls.append(len(inputs))
+        if case == "declined":
+            return None
+        outputs = [_ste_round(x) for x in inputs]
+        if case == "bad_output":
+            outputs[-1] = outputs[-1][:1]
+        return outputs
+
+    model = _quantized_mlp(backend="ste_round")
+    quantizers = [model[0].weight_quantizer, model[2].weight_quantizer]
+    weights = [model[0].weight, model[2].weight]
+    if case == "learned_scale":  # its gradient would not be straight-through: it goes alone
+        quantizers[0].register_parameter("scale", nn.Parameter(torch.ones(1)))
+    hook_calls = []
+    if (
+        case == "hooked"
+    ):  # like Megatron's param all-gather hook on every module: the quantizers still run
+        for q in quantizers:
+            q.register_forward_pre_hook(lambda module, args: hook_calls.append(module))
+    ref = [q(w) for q, w in zip(quantizers, weights)]
+    ref_grads = torch.autograd.grad(sum(r.square().sum() for r in ref), weights)
+    hook_calls.clear()
+
+    unregister_quant_backend("ste_round")
+    register_quant_backend("ste_round", _ste_round_backend, grouped_entrypoint=grouped)
+    BACKEND_CALLS.clear()
+    if case == "bad_output":
+        with pytest.raises(ValueError):
+            _try_grouped_fake_quant(quantizers, weights)
+        enable_weight_cache(model)
+        with weight_cache_scope(model) as stats, pytest.raises(ValueError):
+            _try_grouped_fake_quant(quantizers, weights)
+        assert stats.misses == 0  # every output is checked before any is cached
+        return
+    outputs = _try_grouped_fake_quant(quantizers, weights)
+    grads = torch.autograd.grad(sum(o.square().sum() for o in outputs), weights)
+    for out, expected in zip([*outputs, *grads], [*ref, *ref_grads]):
+        assert torch.equal(out, expected)
+    assert (
+        grouped_calls
+        == {"grouped": [2], "hooked": [2], "declined": [2], "learned_scale": [1]}[case]
+    )
+    assert (
+        len(BACKEND_CALLS) == {"grouped": 0, "hooked": 0, "declined": 2, "learned_scale": 1}[case]
+    )
+    assert hook_calls == (quantizers if case == "hooked" else [])
+    if case != "learned_scale":
+        enable_weight_cache(model)
+        with weight_cache_scope(model) as stats:
+            for _ in range(3):
+                _try_grouped_fake_quant(quantizers, weights)
+            with torch.no_grad():
+                weights[0].add_(0)  # a new version: only weight 0 misses
+            outputs = _try_grouped_fake_quant(quantizers, weights)
+        assert all(torch.equal(out, expected) for out, expected in zip(outputs, ref))
+        assert (stats.misses, stats.hits, stats.invalidations) == (3, 5, 1)
+        assert grouped_calls[1:] == [2, 1]  # one grouped call per call with misses, for those only
