@@ -17,6 +17,7 @@
 
 import pytest
 import torch
+from _test_utils.torch.transformers_models import get_tiny_qwen3_moe
 from torch import nn
 
 import modelopt.torch.quantization as mtq
@@ -36,3 +37,17 @@ def test_compress_refuses_w4a8_weights_before_changing_the_model(grouped):
         mtq.compress(model)
 
     assert not is_real_quantized(model)
+
+
+def test_compress_leaves_unpacked_fused_experts_fake_quant():
+    """compress packs a module's ``weight``; a fused experts module's per-expert weight quantizers
+    quantize slices of one 3-D weight nothing packs, so flipping them to real quant would hand its
+    forward and export fold quantized tensors they do not take."""
+    model = get_tiny_qwen3_moe()
+    mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG)
+    mtq.compress(model)
+
+    layer = model.model.layers[0]
+    assert not layer.self_attn.q_proj.weight_quantizer.fake_quant
+    assert all(q.fake_quant for q in layer.mlp.experts.gate_up_proj_weight_quantizers)
+    assert all(q.fake_quant for q in layer.mlp.experts.down_proj_weight_quantizers)
