@@ -1348,6 +1348,9 @@ def local_hessian_calibrate(
     size: their codes are pinned to the quantizer and the weight is left as is. ``block_size`` and
     the amax-search options do not apply to them. As with imatrix, a quantizer that already holds final codes is left
     alone, so ``[gptq, local_hessian]`` runs GPTQ where it applies and this on any weight it leaves.
+    Each such weight holds ``in_features * block_size`` float32 Hessian entries on its input's device
+    until it is encoded (1 KiB per input feature for GGML's 256-wide blocks), so all of them are
+    held at once unless layerwise calibration bounds it to one layer's.
 
     We recommend using Local-Hessian with layerwise calibration enabled
     (``"layerwise": {"enable": True}``) and a calibration batch size of 1.
