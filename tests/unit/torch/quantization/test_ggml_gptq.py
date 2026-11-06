@@ -29,9 +29,12 @@ from _test_utils.torch.quantization.models import TOY_MOE_EXPERTS, TOY_MOE_HIDDE
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
+from modelopt.torch.opt.utils import named_hparams
 from modelopt.torch.quantization import model_calib
+from modelopt.torch.quantization.algorithms import QuantRecipeHparam, _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import (
+    PIN_OVERRIDES_WEIGHT,
     _row_keys,
     pin_packed_weight,
     pinned_importance,
@@ -595,3 +598,251 @@ def test_row_keys_do_not_depend_on_the_batch_a_row_is_hashed_in(dtype):
     assert torch.equal(_row_keys(table[index]), keys[index])
     assert all(torch.equal(_row_keys(table[i : i + 1]), keys[i : i + 1]) for i in index.tolist())
     assert len(keys.unique()) == len(table)
+
+
+def _recipe(algorithm, num_bits):
+    """An AutoQuantize format: ``num_bits`` GGML weights calibrated with ``algorithm``."""
+    config = _iq_config(algorithm, num_bits)
+    config["quant_cfg"][1]["cfg"]["effective_bits"] = GGML_FORMAT_REGISTRY[num_bits].effective_bits
+    return config, num_bits
+
+
+def _search(model, inputs, formats, effective_bits):
+    _, state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": effective_bits},
+        quantization_formats=formats,
+        data_loader=[inputs],
+        forward_step=lambda m, x: m(x),
+        loss_func=lambda output, x: output.square().sum(),
+        num_calib_steps=1,
+        num_score_steps=1,
+    )
+    return state
+
+
+def _two_layers():
+    torch.manual_seed(0)
+    return torch.nn.Sequential(
+        torch.nn.Linear(512, 512, bias=False), torch.nn.Linear(512, 256, bias=False)
+    )
+
+
+def _raw_scores(state, recipe_name):
+    return [
+        stats["raw_scores"][[str(f).split("(")[0] for f in stats["formats"]].index(recipe_name)]
+        for stats in state["candidate_stats"].values()
+    ]
+
+
+def test_auto_quantize_scores_other_candidates_on_the_source_weights_gptq_rewrote():
+    inputs = _inputs()
+    source = _two_layers()
+    alone = _search(copy.deepcopy(source), inputs, [_recipe("max", "iq2_s")], 16.0)
+    model = copy.deepcopy(source)
+    state = _search(model, inputs, [_recipe(GPTQ, "iq2_xxs"), _recipe("max", "iq2_s")], 16.0)
+
+    assert _raw_scores(state, "iq2_s") == pytest.approx(_raw_scores(alone, "iq2_s"))
+    # 16 bits selects BF16 everywhere, so the source weights come back untouched.
+    for selected, original in zip(model.parameters(), source.parameters()):
+        assert torch.equal(selected, original)
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "num_bits", "pinned", "replaces_int4"),
+    [
+        (GPTQ, "iq2_xxs", True, False),
+        # The GGML entry replaces an earlier INT4 entry for the same quantizers.
+        (GPTQ, "iq2_xxs", True, True),
+        ({"method": "imatrix"}, "q8_0", False, False),  # imatrix leaves Q8_0 to plain PTQ
+    ],
+)
+def test_auto_quantize_selects_the_codes_calibration_chose(
+    algorithm, num_bits, pinned, replaces_int4
+):
+    inputs = _inputs()
+    source = _two_layers()
+    model = copy.deepcopy(source)
+    config, name = _recipe(algorithm, num_bits)
+    if replaces_int4:
+        config["quant_cfg"].insert(1, _int4_config(algorithm)["quant_cfg"][1])
+    # Just enough bits to quantize the larger first layer and keep the second in BF16.
+    ggml_format = GGML_FORMAT_REGISTRY[num_bits]
+    sizes = [layer.weight.numel() for layer in source]
+    bits = (sizes[0] * ggml_format.effective_bits + sizes[1] * 16) / sum(sizes)
+    _search(model, inputs, [(config, name)], bits)
+
+    first, second = model
+    assert first.weight_quantizer.num_bits == num_bits
+    assert not second.weight_quantizer.is_enabled
+    payload = pinned_packed_weight(first.weight_quantizer, num_bits)
+    if pinned:
+        decoded = ggml_format.dequantize(
+            payload, torch.tensor(first.weight.shape), dtype=torch.float32
+        )
+        assert torch.equal(first.weight, decoded)
+        assert not torch.equal(payload, ggml_format.quantize(source[0].weight.detach())[0])
+    else:
+        assert payload is None
+        assert torch.equal(first.weight, source[0].weight)
+    assert torch.equal(second.weight, source[1].weight)
+    assert not any(
+        getattr(module, PIN_OVERRIDES_WEIGHT, False)
+        for hparam in _quant_recipe_hparams(model)
+        for quantizers in hparam._all_quantizer_choices.values()
+        for by_attr in quantizers.values()
+        for module in by_attr.values()
+    )
+
+
+def _quant_recipe_hparams(model):
+    return [h for _, h in named_hparams(model, unique=True) if isinstance(h, QuantRecipeHparam)]
+
+
+@pytest.mark.parametrize(
+    "q8_0",
+    [None, "*down_proj_weight_quantizer", "*gate_up_proj_weight_quantizers.0"],
+    ids=["down_proj_disabled", "down_proj_q8_0", "one_gate_up_expert_q8_0"],
+)
+def test_auto_quantize_snapshots_only_the_weights_calibration_rewrites(moe, monkeypatch, q8_0):
+    # imatrix rewrites the IQ2_XXS gate_up_proj experts and leaves Q8_0 or disabled ones alone;
+    # gate_up_proj is one parameter, so any IQ2_XXS expert puts all of it in the snapshot.
+    snapshots = []
+    snapshot = _AutoQuantizeBaseSearcher._snapshot_source_weights
+
+    def record(self, *args):
+        snapshots.append(snapshot(self, *args))
+        return snapshots[-1]
+
+    monkeypatch.setattr(_AutoQuantizeBaseSearcher, "_snapshot_source_weights", record)
+    source = {n: weight.detach().clone() for n, weight in moe.named_parameters()}
+    config, name = _recipe({"method": "imatrix"}, "iq2_xxs")
+    config["quant_cfg"][1]["quantizer_name"] = "*gate_up_proj_weight_quantizer"
+    if q8_0 is not None:
+        q8_0_entry = _recipe({"method": "imatrix"}, "q8_0")[0]["quant_cfg"][1]
+        config["quant_cfg"].append({**q8_0_entry, "quantizer_name": q8_0})
+    _search(moe, _inputs()[:96, :TOY_MOE_HIDDEN], [(config, name)], 16.0)
+
+    [source_weights] = snapshots
+    assert [id(p) for p in source_weights or ()] == [id(moe.mlp.experts.gate_up_proj)]
+    # BF16 wins at 16 bits, so the search hands back the source weights.
+    weights = dict(moe.named_parameters())
+    for weight_name, weight in source.items():
+        assert torch.equal(weights[weight_name], weight), weight_name
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "non_ggml",
+        "tied",
+        "aliased",
+        "fused_moe_configs",
+        "rotated_gptq",
+        "rotated_imatrix",
+        "awq_gptq",
+        "layerwise_checkpoint",
+    ],
+)
+def test_auto_quantize_refusal_hands_back_the_unconverted_model(case, request):
+    inputs = _inputs()
+    source = _two_layers()
+    # An INT4 weight quantizer cannot hold the codes GPTQ would choose.
+    formats = [(_int4_config(GPTQ), "INT4_GPTQ")]
+    if case == "tied":
+        # GPTQ would rewrite the weight under both layers.
+        source[1] = torch.nn.Linear(512, 512, bias=False)
+        source[1].weight = source[0].weight
+        formats = [_recipe(GPTQ, "iq2_xxs")]
+    elif case == "fused_moe_configs":
+        # Conversion moves these fused experts onto a backend their quantizers intercept, on the
+        # root, a nested and the experts' own config.
+        source = request.getfixturevalue("moe")
+        inputs = inputs[:96, :TOY_MOE_HIDDEN]
+        text_config = SimpleNamespace(_experts_implementation="batched_mm")
+        source.config = SimpleNamespace(_experts_implementation="kernels", text_config=text_config)
+        source.mlp.experts.config = SimpleNamespace(_experts_implementation="batched_mm")
+    elif case.startswith("rotated"):
+        # The quantizer would quantize the rotated weight, but the codes GPTQ or the imatrix
+        # encoder pins are the weight's own, so the selection would not be what scoring measured.
+        config, name = _recipe(GPTQ if case == "rotated_gptq" else {"method": "imatrix"}, "iq2_xxs")
+        config["quant_cfg"][1]["cfg"]["rotate"] = True
+        formats = [(config, name)]
+    elif case == "awq_gptq":
+        # AWQ leaves its scale on the weight quantizer, which GPTQ's codes do not account for, and
+        # the selected model would fold the scale into the codes scoring measured.
+        formats = [_recipe([{"method": "awq_lite"}, GPTQ], "iq2_xxs")]
+    elif case == "layerwise_checkpoint":
+        # A rerun would resume from per-layer checkpoints holding the rewritten weights, which
+        # load into new tensors that restoring the source weights does not reach.
+        checkpoint_dir = str(request.getfixturevalue("tmp_path"))
+        layerwise = {"enable": True, "checkpoint_dir": checkpoint_dir}
+        formats = [_recipe({**GPTQ, "layerwise": layerwise}, "iq2_xxs")]
+    model = copy.deepcopy(source)
+    if case == "aliased":
+        # Distinct Parameters over one storage, which deepcopy would split: GPTQ on the first layer
+        # would rewrite the second's weight, also when the second selects BF16.
+        for layers in (source, model):
+            layers[1].weight = torch.nn.Parameter(layers[0].weight[:256])
+        formats = [_recipe(GPTQ, "iq2_xxs")]
+    configs = []
+    if case == "fused_moe_configs":
+        configs = [model.config, model.config.text_config, model.mlp.experts.config]
+    held = [dict(vars(config)) for config in configs]
+
+    with pytest.raises((ValueError, NotImplementedError)):
+        _search(model, inputs, formats, 16.0)
+
+    assert not mto.ModeloptStateManager.is_converted(model)
+    assert [type(m) for m in model.modules()] == [type(m) for m in source.modules()]
+    for weight, original in zip(model.parameters(), source.parameters()):
+        assert torch.equal(weight, original)
+    if configs:
+        restored = [model.config, model.config.text_config, model.mlp.experts.config]
+        assert list(map(id, restored)) == list(map(id, configs))
+        assert [vars(config) for config in configs] == held
+    # The same model can search again: here Q8_0, which imatrix leaves alone even when tied.
+    _search(model, inputs, [_recipe({"method": "imatrix"}, "q8_0")], 16.0)
+    if configs:
+        # A search that converts moves them, so the refusal did hand them back.
+        assert [vars(config) for config in configs] != held
+
+
+@pytest.mark.parametrize("case", ["rewrite_then_fail", "algorithm_list_fails_midway"])
+def test_auto_quantize_calibration_failure_hands_back_the_source_weights(case):
+    inputs = _inputs()
+    if case == "rewrite_then_fail":
+        # GPTQ rewrites the first weight, then cannot encode the second's 640 columns.
+        source = torch.nn.Sequential(
+            torch.nn.Linear(512, 640, bias=False), torch.nn.Linear(640, 256, bias=False)
+        )
+        algorithm = GPTQ
+    else:
+        # GPTQ completes and adds its mode, then layerwise imatrix finds no decoder layers.
+        source = _two_layers()
+        algorithm = [GPTQ, {"method": "imatrix", "layerwise": {"enable": True}}]
+    model = copy.deepcopy(source)
+
+    with pytest.raises((ValueError, RuntimeError)):
+        _search(model, inputs, [_recipe(algorithm, "iq2_xxs")], 16.0)
+
+    for weight, original in zip(model.parameters(), source.parameters()):
+        assert torch.equal(weight, original)
+    assert model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS
+    # The model stays converted, without a mode of the calibration that failed.
+    assert [mode for mode, _ in mto.ModeloptStateManager(model).state_dict()] == ["auto_quantize"]
+
+
+def test_a_replayed_pin_fake_quantizes_to_exactly_its_decoding_in_bf16():
+    torch.manual_seed(0)
+    layer = torch.nn.Linear(512, 64, bias=False).to(torch.bfloat16)
+    mtq.quantize(layer, _iq_config("max", "iq2_xxs"), forward_loop=lambda m: m(layer.weight))
+    iq2_xxs = GGML_FORMAT_REGISTRY["iq2_xxs"]
+    # Codes far smaller than the source weight they replay over.
+    other = torch.randn(layer.weight.shape) * 1e-3
+    pin_packed_weight(layer.weight_quantizer, "iq2_xxs", iq2_xxs.quantize(other)[0])
+    setattr(layer.weight_quantizer, PIN_OVERRIDES_WEIGHT, True)
+
+    replayed = layer.weight_quantizer(layer.weight)
+
+    assert torch.equal(replayed, iq2_xxs.decode_pinned(layer.weight_quantizer, layer.weight))

@@ -22,6 +22,7 @@ import warnings
 import weakref
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -55,6 +56,7 @@ from modelopt.torch.export.quant_utils import (
 from modelopt.torch.export.unified_export_hf import _prepare_moe_inputs
 from modelopt.torch.models import is_moe
 from modelopt.torch.opt.conversion import ApplyModeError
+from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
@@ -688,27 +690,58 @@ class TestIterWeightQuantizersForCalibration:
         assert quantizers_only, "expected per-expert weight quantizers"
         assert [id(q) for q in quantizers_only] == [id(q) for q in from_weights]
 
-    def test_does_not_index_the_fused_weight(self):
-        """The point of the override: no ``weight[idx]``, which is the per-expert collective."""
-        experts = self._convert(_TinyMoEModel())
-
+    @staticmethod
+    def _forbid_indexing(experts):
         class _NoIndexing(torch.Tensor):
             @staticmethod
             def __new__(cls, data):
                 return torch.Tensor._make_subclass(cls, data, False)
 
             def __getitem__(self, item):
-                raise AssertionError("iter_weight_quantizers_for_calibration indexed the weight")
+                raise AssertionError("indexed the weight")
 
         for name in (experts._first_proj_attr, "down_proj"):
             weight = getattr(experts, name)
             setattr(experts, name, nn.Parameter(_NoIndexing(weight.data), requires_grad=False))
+
+    def test_does_not_index_the_fused_weight(self):
+        """The point of the override: no ``weight[idx]``, which is the per-expert collective."""
+        experts = self._convert(_TinyMoEModel())
+        self._forbid_indexing(experts)
 
         assert list(experts.iter_weight_quantizers_for_calibration())
         # The weight iterator is the expensive one; it must still slice, or the guard above is
         # not actually testing anything.
         with pytest.raises(AssertionError, match="indexed the weight"):
             list(experts.iter_weights_for_calibration())
+
+    def test_auto_quantize_leaves_experts_unindexed_when_no_candidate_pinned_codes(self):
+        """Writing back selected codes after a search reads only quantizers when nothing is pinned."""
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        TestQuantFusedExperts._cleanup_registry(expert_type)
+        seq_len = NUM_EXPERTS // TOP_K
+        batch = (
+            torch.randn(seq_len, HIDDEN_DIM),
+            torch.arange(NUM_EXPERTS).reshape(seq_len, TOP_K),
+            torch.ones(seq_len, TOP_K) / TOP_K,
+        )
+        try:
+            mtq.auto_quantize(
+                model,
+                constraints={"effective_bits": 8.0},
+                quantization_formats=[mtq.FP8_DEFAULT_CFG],
+                data_loader=[batch],
+                forward_step=lambda m, b: m.moe.experts(*b),
+                loss_func=lambda output, b: output.square().sum(),
+                num_calib_steps=1,
+                num_score_steps=1,
+            )
+            self._forbid_indexing(model.moe.experts)
+
+            _AutoQuantizeBaseSearcher._write_selected_codes_to_weights(SimpleNamespace(model=model))
+        finally:
+            TestQuantFusedExperts._cleanup_registry(expert_type)
 
 
 class TestExportFusedExperts:
