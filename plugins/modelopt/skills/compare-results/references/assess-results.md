@@ -44,9 +44,7 @@ Calculate with a validated statistical library. For example,
 `ttest_ind(candidate, baseline, equal_var=False).confidence_interval(0.95)`
 returns the candidate-minus-baseline interval.
 
-For paired or clustered observations, use an uncertainty method that preserves
-that dependence, not independent-sample Welch; report the method and observation
-unit. Without a justified method, uncertainty is unavailable.
+Report uncertainty unavailable in degenerate cases.
 
 ## Assessment
 
