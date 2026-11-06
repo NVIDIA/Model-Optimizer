@@ -86,6 +86,7 @@ Changelog
 
 **Deprecations**
 
+- ``modelopt.torch.export.import_mcore_gpt_from_hf`` is deprecated and will be removed in 0.50.0; it now emits a ``DeprecationWarning``. Load Hugging Face checkpoints into Megatron-Core with Megatron-Bridge (``AutoBridge``) instead.
 - ``modelopt.torch.export.copy_non_safetensor_files_from_ckpt`` is deprecated; use ``copy_non_model_files``.
 - PyTorch 2.10 support is deprecated and will be dropped in a future release.
 
