@@ -414,7 +414,13 @@ class GGMLFormat:
         kwargs = {} if block_chunk_size is None else {"block_chunk_size": block_chunk_size}
         pinned = pinned_packed_weight(quantizer, self.name)
         keeps_scales = pinned is not None and self.payload_scales is not None
-        if pinned is not None and self.payload_scales is not None:
+        # Unless the pin stands in for the weight (PIN_OVERRIDES_WEIGHT): AutoQuantize then keeps
+        # the source weight, which these scales would encode to other codes than the pinned ones.
+        if (
+            pinned is not None
+            and self.payload_scales is not None
+            and not getattr(quantizer, PIN_OVERRIDES_WEIGHT, False)
+        ):
             # Encode in the pinned weight's shape, whose last dimension the importance spans; fake
             # quant hands the weight over in 256-value rows.
             pinned_shape = (*pinned.shape[:-2], pinned.shape[-2] * self.block_size)
