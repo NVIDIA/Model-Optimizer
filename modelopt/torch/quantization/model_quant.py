@@ -1316,8 +1316,10 @@ def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint
     """Combine the checkpoints of every ``format_shard`` of one search into one checkpoint.
 
     Pass ``checkpoint`` to :func:`auto_quantize` with the shards' other arguments (and no
-    ``format_shard``) to restore every format's calibration and scores and solve. Under
-    distributed scoring, merge each rank's files separately.
+    ``format_shard``) to restore every format's calibration and scores and solve. The shard files
+    are memory-mapped on the CPU, so any host can merge them, and the restore moves each
+    calibration onto the model's devices. Under distributed scoring, merge each rank's files
+    separately.
 
     Args:
         shard_checkpoints: The checkpoint file of each shard ``0..count-1``, in any order.
@@ -1325,7 +1327,9 @@ def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint
     """
     if os.path.exists(checkpoint):
         raise FileExistsError(f"{checkpoint} exists; merge into a new checkpoint file.")
-    merged = merge_auto_quantize_shards([safe_load(path) for path in shard_checkpoints])
+    merged = merge_auto_quantize_shards(
+        [safe_load(path, map_location="cpu", mmap=True) for path in shard_checkpoints]
+    )
     os.makedirs(os.path.dirname(checkpoint) or ".", exist_ok=True)
     safe_save(merged, checkpoint)
 
