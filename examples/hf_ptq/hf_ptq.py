@@ -774,7 +774,8 @@ def _scored_auto_quantize_state(checkpoint: str) -> dict | None:
         checkpoint = os.path.join(checkpoint, "rank0.pth")
     if not os.path.isfile(checkpoint):
         return None
-    state = safe_load(checkpoint)
+    # Memory-mapped on the CPU: finalizing reads the scores, not every format's calibration.
+    state = safe_load(checkpoint, map_location="cpu", mmap=True)
     stats = state.get("candidate_stats") or {}
     if state.get("format_shard") is not None or not stats:
         return None
