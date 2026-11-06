@@ -71,16 +71,16 @@ def _search_block(ggml_format, block, hessian, importance, chunk_args, decode_ar
     rows, groups = block.shape[0], ggml_format.choice_groups
     group_size = GGML_BLOCK_SIZE // groups
     reference = block.float()
-    errors = torch.empty(
-        (ggml_format.num_choices, rows, GGML_BLOCK_SIZE), dtype=torch.float32, device=block.device
+    packed, _ = ggml_format.quantize(
+        block.contiguous(), importance=importance, every_choice=True, **chunk_args
     )
-    for choice in range(ggml_format.num_choices):
-        fixed = torch.full((rows, 1, groups), choice, device=block.device)
-        packed, shape = ggml_format.quantize(
-            block.contiguous(), importance=importance, choices=fixed, **chunk_args
-        )
-        decoded = ggml_format.dequantize(packed, shape, dtype=torch.float32, **decode_args)
-        torch.sub(decoded, reference, out=errors[choice])
+    errors = ggml_format.dequantize(
+        packed.reshape(-1, 1, ggml_format.block_bytes),
+        torch.tensor([ggml_format.num_choices * rows, GGML_BLOCK_SIZE]),
+        dtype=torch.float32,
+        **decode_args,
+    ).reshape(ggml_format.num_choices, rows, GGML_BLOCK_SIZE)
+    errors -= reference
     errors = errors.reshape(ggml_format.num_choices, rows, groups, group_size)
 
     group_rows = hessian.reshape(groups, group_size, GGML_BLOCK_SIZE)
