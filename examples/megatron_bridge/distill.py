@@ -50,6 +50,7 @@ from megatron.bridge.training.distill import distill
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
+from trainable_params import configure_trainable_parameters
 
 try:
     from megatron.bridge.data.builders import DirectHFSFTDatasetConfig
@@ -179,6 +180,17 @@ def get_args():
             "If the checkpoint carries ModelOpt state (i.e. it is quantized), the quantizers are "
             "restored automatically, turning distillation into Quantization Aware Distillation (QAD)."
         ),
+    )
+    parser.add_argument(
+        "--trainable_params",
+        "--trainable_parameter_patterns",
+        nargs="+",
+        default=None,
+        help="Train only distilled student parameters matching these shell-style patterns. "
+        "For VLMs, names are relative to language_model; vision/projector settings are untouched. "
+        "Requires --student_megatron_path with ModelOpt state, including on native resume, "
+        "an adapter-free, uncompressed checkpoint, and a match for every pattern "
+        "on every local model chunk.",
     )
     # Parallelism arguments
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
@@ -628,6 +640,7 @@ class FakeQuantWeightCache(Callback):
 
 
 def main(args: argparse.Namespace, owns_the_run: bool = True):
+    """Build the student and teacher providers, then run Megatron-Bridge distillation."""
     # --student_hf_path stays as given. The student is built and exported from the local copy of
     # the whole checkpoint in student_local_checkpoint_path, since the HF export reads the source's
     # files from local disk only; student_hub_model_id is the Hub ID, or None for a local path.
@@ -751,6 +764,19 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         kd_config,
         distill_submodule="language_model" if is_vlm else None,
     )
+
+    if args.trainable_params:
+        # Run after initial student restoration; native training resume happens later.
+        def _select_trainable_student_hook(model_chunks):
+            """Select parameters in the distilled student before the teacher is attached."""
+            for chunk in model_chunks:
+                student = unwrap_model(chunk)
+                if is_vlm:
+                    student = student.language_model
+                configure_trainable_parameters(student, args.trainable_params)
+            return model_chunks
+
+        distill_provider.register_pre_wrap_hook(_select_trainable_student_hook, prepend=True)
 
     if args.student_megatron_path:
         # QAD: restore the quantized student weights + ModelOpt state before the KD conversion (a no-op

@@ -64,7 +64,11 @@ def _sink():
 
 
 # torchrun's PContext installs handlers for these and never restores them.
-_LAUNCHER_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
+_LAUNCHER_SIGNALS = tuple(
+    getattr(signal, name)
+    for name in ("SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT")
+    if hasattr(signal, name)
+)
 
 
 @contextlib.contextmanager

@@ -42,6 +42,7 @@ Changelog
 
 *Megatron Framework (M-LM / M-Bridge)*
 
+- Add ``--trainable_params`` (alias ``--trainable_parameter_patterns``) to ``examples/megatron_bridge/distill.py`` to train selected student weights, including full-rank routed-expert QAD. Reuse the selection on native resume.
 - Add ``--sft_in_batch_packing``, ``--moe_aux_loss_coeff`` and ``--dsa_kernel_backend`` to ``examples/megatron_bridge/distill.py`` (``--dsa_kernel_backend`` also to ``quantize.py``): pack ``--sft_hf_dataset`` conversations per micro-batch instead of padding each to ``--seq_length``, override the MoE load-balancing loss weight (e.g. 0 for padded SFT data), and select fused DeepSeek sparse-attention kernels for long sequences.
 - Add ``--fake_quant_weight_cache`` to ``examples/megatron_bridge/distill.py`` to fake-quantize each student weight once per QAD step instead of once per micro-batch and activation recomputation. It costs an extra BF16 copy of the student's quantized weights per GPU.
 - Add ``--document_boundaries`` to ``examples/megatron_bridge/distill.py`` to attend within each document of a pre-tokenized window, and ``tokenizer`` / ``max_length`` / ``pack_max_tokens`` to ``chat_jsonl`` blends to drop conversations with nothing to train and pair the rest for ``--sft_in_batch_packing``. Packed distillation of Gated DeltaNet models needs ``flash-linear-attention`` >= 0.5.2 (earlier versions compute it wrongly), which ``nemo:26.10`` ships.
@@ -51,6 +52,10 @@ Changelog
 - The Megatron unified HF export (``export_mcore_gpt_to_hf``) now copies the source checkpoint's non-model files (tokenizer, processor, remote code, chat templates, ...) into the export unchanged, from local disk only. The ``examples/megatron_bridge`` scripts make a Hugging Face Hub model local first with ``modelopt.torch.export.ensure_local_checkpoint``.
 - Add an end-to-end W4A4 NVFP4 PTQ and QAD tutorial for NVIDIA Nemotron 3.5 Super VL, covering chat-data blend preparation, assistant-only distillation, Hugging Face export and vLLM serving. See `examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/>`_ for details.
 - Add GLM-5.3-Flash (``glm5_next``) support to ``examples/megatron_bridge`` PTQ and unified HF export with the ``models/zai-org/GLM-5.3-Flash-BF16/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`` recipe, matching ``nvidia/GLM-5.3-Flash-NVFP4``, and two GGML IQ2_S recipes for its routed experts: ``models/zai-org/GLM-5.3-Flash-BF16/ptq/iq2_s_experts-q8_0_shared_dense-gptq`` and, with weight-only NVFP4 on the experts' down projections, ``iq2_s_experts-nvfp4_down-q8_0_shared_dense-gptq``. Requires a Megatron-Bridge newer than the ``nemo:26.10`` container; see ``examples/megatron_bridge/README.md``.
+
+*Sparsity*
+
+- ``mts.sparsify`` now also applies sparse attention: pass a sparse attention config such as ``mts.SKIP_SOFTMAX_CALIB`` in place of the mode, or combine it with weight sparsity in one call, e.g. ``mts.sparsify(model, [("sparsegpt", {}), ("sparse_attention", mts.SKIP_SOFTMAX_DEFAULT)], forward_loop=forward_loop)``. ``mts.export`` now also handles models with sparse attention, which it keeps.
 
 *Misc*
 
@@ -88,6 +93,7 @@ Changelog
 
 - ``modelopt.torch.export.import_mcore_gpt_from_hf`` is deprecated and will be removed in 0.50.0; it now emits a ``DeprecationWarning``. Load Hugging Face checkpoints into Megatron-Core with Megatron-Bridge (``AutoBridge``) instead.
 - ``modelopt.torch.export.copy_non_safetensor_files_from_ckpt`` is deprecated; use ``copy_non_model_files``.
+- ``modelopt.torch.sparsity.attention_sparsity.sparsify`` (``mtsa.sparsify``) is deprecated; use ``mts.sparsify(model, config, forward_loop=forward_loop)``.
 - PyTorch 2.10 support is deprecated and will be dropped in a future release.
 
 **Bug Fixes**
