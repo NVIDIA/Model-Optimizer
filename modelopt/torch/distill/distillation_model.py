@@ -124,6 +124,8 @@ class DistillationModel(DynamicModule):
         for handle in self._hook_handles:
             handle.remove()
         self._hook_handles.clear()
+        for layer in {layer for pair in self._layers_to_loss for layer in pair}:
+            delattr(layer, "_intermediate_output")
         return super().export()
 
     @property
