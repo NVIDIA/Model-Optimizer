@@ -279,6 +279,21 @@ def test_kv_autoquantize_checkpoint_uses_dedicated_flag_with_legacy_fallback(mon
         assert hf_ptq._resolve_kv_auto_quantize_checkpoint(args) == "legacy.pth"
 
 
+def test_format_shards_share_a_checkpoint_dir_but_not_a_distributed_launch(monkeypatch):
+    cli = [
+        *("--pyt_ckpt_path", "/local/model"),
+        *("--recipe", "general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits"),
+        *("--auto_quantize_checkpoint", "/work/shards/", "--auto_quantize_format_shard", "3/8"),
+    ]
+    # One command line for every shard, each saving its own file.
+    assert _parse_hf_ptq_args(monkeypatch, *cli)[1].auto_quantize_checkpoint == (
+        "/work/shards/shard3.pth"
+    )
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(monkeypatch, *cli)
+
+
 def test_fixed_ptq_then_kv_rejects_explicit_kv_before_calibration(monkeypatch):
     hf_ptq = _import_hf_ptq(monkeypatch)
     fixed = QuantizeConfig(

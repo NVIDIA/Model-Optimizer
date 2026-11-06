@@ -589,6 +589,29 @@ The example scripts above also have an additional flag `--tasks`, where the actu
 
 > *NOTE: AutoQuantize requires backpropagation of the model. Models without backpropagation support (e.g., Llama-4) will not work with AutoQuantize when using the `gradient` or `aumann_shapley` methods. Aumann-Shapley does not need labels, but it still backpropagates its comparison loss. The `kl_div` method does not require backpropagation.*
 
+### Splitting AutoQuantize across GPUs and nodes
+
+AutoQuantize scores each candidate format of each layer group against the same reference, so the
+search splits into independent processes, *format shards*, whose checkpoints merge into the
+unsharded search. Start every shard `i` of `n` at once with `--auto_quantize_format_shard i/n` and
+a shared directory as `--auto_quantize_checkpoint`, where each saves `shard<i>.pth`; then merge,
+solve and export in one run:
+
+```bash
+for i in 0 1 2 3; do  # one shard per GPU
+  CUDA_VISIBLE_DEVICES=$i python hf_ptq.py --pyt_ckpt_path $HF_PATH --recipe $RECIPE \
+    --auto_quantize_checkpoint /path/to/shards/ --auto_quantize_format_shard $i/4 &
+done; wait
+python hf_ptq.py --pyt_ckpt_path $HF_PATH --recipe $RECIPE --auto_quantize_merge_shards /path/to/shards \
+  --auto_quantize_checkpoint /path/to/merged.pth --export_path /path/to/export
+```
+
+With more shards than searched formats, the shards dealt a format split its layer groups, so more
+GPUs keep shortening the search until a shard's calibration dominates; a multiple of the number of
+formats balances best. [`slurm/multinode_autoquant_ptq.slurm`](slurm/multinode_autoquant_ptq.slurm)
+runs the shards across nodes, one per GPU or one per several GPUs for a model that needs them.
+Each shard is a single process, not a `torchrun` or `--use_fsdp2` launch.
+
 ## Real Quant
 
 When working with large language models, memory constraints can be a significant challenge. ModelOpt provides a workflow for initializing HF models with compressed weights across multiple GPUs to dramatically reduce memory usage. Check `--low_memory_mode` option in hf_ptq.py for more details.

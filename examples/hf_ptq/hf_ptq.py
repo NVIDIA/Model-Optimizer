@@ -107,6 +107,7 @@ from modelopt.torch.utils.distributed import (
     distributed_forward_loop,
     distributed_run,
     distribution_plan,
+    is_distributed_launch,
     local_rank,
     reinstall_a2a_forwards,
     shard_dataloader,
@@ -688,7 +689,12 @@ def _run_auto_quantize_recipe(
             "and --auto_quantize_checkpoint to hand the scores to the finalizing run."
         )
     if merge_shards and not os.path.exists(args.auto_quantize_checkpoint):
-        mtq.merge_auto_quantize_checkpoints(merge_shards.split(","), args.auto_quantize_checkpoint)
+        mtq.merge_auto_quantize_checkpoints(
+            sorted(str(path) for path in Path(merge_shards).glob("shard*.pth"))
+            if os.path.isdir(merge_shards)
+            else merge_shards.split(","),
+            args.auto_quantize_checkpoint,
+        )
     if finalize and format_shard is None:
         search_state = _scored_auto_quantize_state(args.auto_quantize_checkpoint)
         if search_state is not None:
@@ -1537,7 +1543,10 @@ def parse_args() -> argparse.Namespace:
         help=(
             "INDEX/COUNT: calibrate and score only this shard of the searched formats and save "
             "it to --auto_quantize_checkpoint, without solving or exporting. Run every shard "
-            "0..COUNT-1 (e.g. one per GPU), then merge with --auto_quantize_merge_shards."
+            "0..COUNT-1 (e.g. one per GPU), then merge with --auto_quantize_merge_shards. COUNT "
+            "may exceed the number of formats: the shards dealt a format split its layer groups. "
+            "Given a directory --auto_quantize_checkpoint, a shard saves shard<INDEX>.pth in it. "
+            "See slurm/multinode_autoquant_ptq.slurm."
         ),
     )
     parser.add_argument(
@@ -1545,9 +1554,9 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Comma-separated format-shard checkpoints to merge into --auto_quantize_checkpoint "
-            "(if it does not exist yet) before the search, which then restores every format's "
-            "calibration and scores instead of computing them."
+            "Comma-separated format-shard checkpoints, or a directory of shard*.pth files, to "
+            "merge into --auto_quantize_checkpoint (if it does not exist yet) before the search, "
+            "which then restores every format's calibration and scores instead of computing them."
         ),
     )
     parser.add_argument(
@@ -1646,6 +1655,21 @@ def parse_args() -> argparse.Namespace:
         )
     if args.auto_quantize_format_shard is not None and args.auto_quantize_merge_shards:
         parser.error("A format shard cannot also merge shards.")
+    if (args.auto_quantize_format_shard is not None or args.auto_quantize_merge_shards) and (
+        args.use_fsdp2 or is_distributed_launch()
+    ):
+        parser.error(
+            "--auto_quantize_format_shard and --auto_quantize_merge_shards run each shard as one "
+            "process; launch them without torchrun and --use_fsdp2."
+        )
+    if args.auto_quantize_format_shard is not None and (
+        os.path.isdir(args.auto_quantize_checkpoint)
+        or not os.path.splitext(args.auto_quantize_checkpoint)[1]
+    ):
+        # A directory for all shards, so they can share one launch command.
+        args.auto_quantize_checkpoint = os.path.join(
+            args.auto_quantize_checkpoint, f"shard{args.auto_quantize_format_shard[0]}.pth"
+        )
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
 
