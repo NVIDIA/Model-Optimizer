@@ -38,6 +38,7 @@ consecutive-failure circuit breaker, loss_mask alignment); subclasses override
 """
 
 import base64
+import json
 import os
 import re
 import time
@@ -89,6 +90,7 @@ def _tokenize_with_loss_mask(
     conversations: list,
     answer_only_loss: bool,
     max_seq_len: int | None = None,
+    template_kwargs: dict | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Tokenize one conversation and derive its loss mask in the same call.
 
@@ -110,7 +112,11 @@ def _tokenize_with_loss_mask(
         # warns and returns an ALL-ZERO assistant mask, which trains every sample at
         # zero loss with no other symptom. (The regex matches the tag itself, not the
         # unrelated `add_generation_prompt` identifier most templates contain.)
-        template = getattr(tokenizer, "chat_template", None) or ""
+        template_kwargs = dict(template_kwargs or {})
+        template = tokenizer.get_chat_template(
+            chat_template=template_kwargs.get("chat_template"), tools=template_kwargs.get("tools")
+        )
+        template_kwargs["chat_template"] = template
         if not re.search(r"\{%-?\s*generation\b", template):
             raise RuntimeError(
                 "answer_only_loss=True needs assistant masks, but the tokenizer's chat "
@@ -141,6 +147,7 @@ def _tokenize_with_loss_mask(
         add_generation_prompt=False,
         truncation=max_seq_len is not None,
         max_length=max_seq_len,
+        **(template_kwargs or {}),
     )
     input_ids = out["input_ids"]
     seq_len = input_ids.shape[-1]
@@ -289,7 +296,7 @@ class StreamingDataset(Dataset):
     def _tokenize_entry(self, entry: dict) -> dict | None:
         """Tokenize a single entry.
 
-        Returns ``None`` for entries missing ``cid`` / ``conversations``-or-``messages``, or when
+        Returns ``None`` for missing IDs/conversations, malformed serialized fields, or when
         right-truncation to ``max_seq_len`` drops the entire supervised span
         (``answer_only_loss`` mode with the assistant turn at the tail).
         """
@@ -299,14 +306,37 @@ class StreamingDataset(Dataset):
         # carry a degenerate user-only ``messages`` stub (no assistant turn) alongside the real
         # dialogue in ``conversations`` — preferring ``conversations`` picks the real dialogue
         # there, while a ``messages``-only corpus still works via the fallback.
-        convs = entry.get("conversations") or entry.get("messages")
+        try:
+            for key in ("conversations", "messages"):
+                convs = entry.get(key)
+                if isinstance(convs, str) and convs:
+                    convs = json.loads(convs)
+                if convs:
+                    break
+            template_kwargs = {
+                key: json.loads(entry[key])
+                if key == "tools" and isinstance(entry[key], str)
+                else entry[key]
+                for key in ("tools", "reasoning_effort", "builtin_tools", "model_identity")
+                if entry.get(key) is not None
+            }
+        except json.JSONDecodeError:
+            return None
         if cid is None or not convs or not isinstance(convs, list):
             return None
+        tools = template_kwargs.get("tools")
+        if tools is not None and not (
+            isinstance(tools, list) and all(isinstance(tool, dict) for tool in tools)
+        ):
+            return None
+        if tools == [] and isinstance(self.tokenizer.chat_template, dict):
+            template_kwargs["chat_template"] = self.tokenizer.get_chat_template()
         input_ids, loss_mask = _tokenize_with_loss_mask(
             self.tokenizer,
             convs,
             self.config.answer_only_loss,
             max_seq_len=self.config.max_seq_len,
+            template_kwargs=template_kwargs,
         )
         if int(loss_mask.sum()) == 0:
             return None
