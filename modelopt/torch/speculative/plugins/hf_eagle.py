@@ -67,6 +67,9 @@ def default_eagle_aux_layer_ids(num_layers: int) -> list[int]:
 class HFEagleModel(EagleModel):
     """Eagle Model Class for huggingface models."""
 
+    # EAGLE returns a microbatch-mean loss; Trainer must apply accumulation scaling.
+    accepts_loss_kwargs = False
+
     # Context-parallel degree, set by the training script when it launches with cp_size > 1.
     eagle_cp_size: int = 1
 

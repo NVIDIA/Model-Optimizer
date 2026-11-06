@@ -1320,8 +1320,14 @@ class GPTModelExporter:
             return name_to_value, qformat, block_size
         # GGML formats derive all block metadata directly from the weight and do not use amax or
         # separately exported scaling tensors. Keep the weight on-device until it can be packed
-        # along its contraction axis, so the CUDA packer can be used.
+        # along its contraction axis, so the CUDA packer can be used. A weight that keeps pinned
+        # scales goes on as the decoding of its codes, whose row slices pack to the pinned rows.
         if is_iq:
+            name_to_value["weight"] = GGML_FORMAT_REGISTRY[qformat].pin_current_codes(
+                module.weight,
+                getattr(module, "weight_quantizer", None),
+                dtype=name_to_value["weight"].dtype,
+            )
             return name_to_value, qformat, block_size
         # Getting the weight scales
         weight_scale = get_weight_scaling_factor(module)
@@ -1725,12 +1731,13 @@ class GPTModelExporter:
                     module, self.dtype, prefix=prefix
                 )
                 weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
-                name_to_value.pop("weight", None)
+                state_weight = name_to_value.pop("weight", None)
                 seen_qformat, seen_block_size = qformat, block_size
 
-                weight = state_dict[weight_key].to(self.dtype)
-                if qformat not in GGML_FORMATS:
-                    weight = weight.cpu()
+                if qformat in GGML_FORMATS:
+                    weight = state_weight
+                else:
+                    weight = state_dict[weight_key].to(self.dtype).cpu()
                 weight_scale_cpu = (
                     weight_scale.detach().cpu().clone() if weight_scale is not None else None
                 )

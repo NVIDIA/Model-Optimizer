@@ -16,7 +16,9 @@
 """Calibration utilities."""
 
 import fnmatch
+import itertools
 import math
+import sys
 import time
 import warnings
 from collections import Counter, defaultdict
@@ -114,16 +116,17 @@ def _is_calibrated_nvfp4_static(q) -> bool:
 def _collect_grouped_linears(model: nn.Module) -> list[list[nn.Module]]:
     """Collect name-based sibling groups (Q/K/V, MLA down, gate/up, w1/w3) of calibrated NVFP4-static linears."""
     patterns: tuple[tuple[str, ...], ...] = (
-        ("q_proj", "k_proj", "v_proj"),
-        ("linear_q_down_proj", "linear_kv_down_proj"),
+        *_FUSED_HF_NAMED_PROJECTIONS,
+        *_FUSED_MCORE_PROJECTIONS,
         *list_all_possible("gate_up_pairs"),
     )
     groups: list[list[nn.Module]] = []
     for parent in model.modules():
-        for sibling_names in patterns:
+        candidates = [[getattr(parent, n, None) for n in names] for names in patterns]
+        for children in candidates + _fused_projection_groups(parent):
             members = [
                 child
-                for child in (getattr(parent, n, None) for n in sibling_names)
+                for child in children
                 if child is not None
                 and _is_calibrated_nvfp4_static(getattr(child, "weight_quantizer", None))
             ]
@@ -153,26 +156,51 @@ def _check_grouped_weight_global_amax_synced(model: nn.Module) -> None:
             continue
         ref = amaxes[0]
         assert all(torch.equal(a, ref) for a in amaxes), (
-            "A fusible sibling group (q/k/v or gate/up) was not unified to a shared weight "
-            "global_amax; SharedWeightGlobalAmaxState failed to sync it, so the per-block "
-            "MSE scales would be inconsistent across the group."
+            "A fusible sibling group (e.g. q/k/v, gate/up or MLA down-projections) was not "
+            "unified to a shared weight global_amax; SharedWeightGlobalAmaxState failed to sync "
+            "it, so the per-block MSE scales would be inconsistent across the group."
         )
 
 
-@torch.no_grad()
-def _sync_mla_fused_down_proj_amax(model: torch.nn.Module) -> None:
-    """Give Megatron-Core MLA's q_down / kv_down projections one per-tensor input and weight range each.
+# Megatron-Core projections vLLM and TRT-LLM fuse into one GEMM with one scale per tensor: MLA's
+# down-projections (``fused_qkv_a_proj``) and DeepSeek-V4's (``fused_wqa_wkv``).
+_FUSED_MCORE_PROJECTIONS = (
+    ("linear_q_down_proj", "linear_kv_down_proj"),
+    ("linear_q_down_proj", "linear_kv_proj"),
+)
+# HF-named projections deployments fuse, for Megatron-Core modules that keep HF names (e.g. Kimi K3's
+# MLA and KDA). HF models get the same ranges at export, which fuses every group sharing an input.
+_FUSED_HF_NAMED_PROJECTIONS = (("q_a_proj", "kv_a_proj_with_mqa"), ("q_proj", "k_proj", "v_proj"))
+# Kimi K3 also fuses its gates with them (vLLM's ``fused_qkv_a_g_proj`` and ``in_proj_qkvgfab``).
+_FUSED_HF_NAMED_GATED_PROJECTIONS = (
+    ("q_a_proj", "kv_a_proj_with_mqa", "g_proj"),
+    ("q_proj", "k_proj", "v_proj", "g_proj", "f_a_proj", "b_proj"),
+)
 
-    vLLM and TRT-LLM fuse them into one GEMM (``fused_qkv_a_proj``) with one scale per tensor.
-    Static NVFP4 weights share their global range through ``SHARED_PATTERNS`` instead.
+
+def _fused_projection_groups(module: nn.Module) -> list[list[nn.Module]]:
+    # Without Megatron imported no module can be a MegatronModule, so HF-only runs don't import it.
+    megatron_module = getattr(
+        sys.modules.get("megatron.core.transformer.module"), "MegatronModule", None
+    )
+    is_megatron = megatron_module is not None and isinstance(module, megatron_module)
+    fused_names = _FUSED_MCORE_PROJECTIONS
+    if is_megatron:
+        fused_names += _FUSED_HF_NAMED_PROJECTIONS + _FUSED_HF_NAMED_GATED_PROJECTIONS
+    groups = [[getattr(module, name, None) for name in names] for names in fused_names]
+    return [members for members in groups if all(member is not None for member in members)]
+
+
+@torch.no_grad()
+def _sync_fused_projection_amax(model: torch.nn.Module) -> None:
+    """Give Megatron-Core projections deployments fuse one per-tensor input and weight range each.
+
+    Static NVFP4 weights share their global range in :func:`_sync_fused_projection_global_amax`.
     """
     for module in model.modules():
-        members = [
-            getattr(module, name, None) for name in ("linear_q_down_proj", "linear_kv_down_proj")
-        ]
-        if any(member is None for member in members):
-            continue
-        for quantizer_name in ("input_quantizer", "weight_quantizer"):
+        for members, quantizer_name in itertools.product(
+            _fused_projection_groups(module), ("input_quantizer", "weight_quantizer")
+        ):
             quantizers = []
             for member in members:
                 quantizer = getattr(member, quantizer_name, None)
@@ -194,6 +222,30 @@ def _sync_mla_fused_down_proj_amax(model: torch.nn.Module) -> None:
                     quantizer.amax = shared.to(amax).reshape(amax.shape)
 
 
+@torch.no_grad()
+def _sync_fused_projection_global_amax(model: nn.Module) -> None:
+    """Give the static NVFP4 weights of each Megatron-Core fused group one global range.
+
+    ``SHARED_PATTERNS`` already ties the q/k/v and MLA down-projection groups. Name patterns can't
+    add Kimi K3's ``g_proj``, which KDA fuses with q/k/v and MLA with q_a/kv_a, so this widens those
+    groups in place, keeping the existing ties.
+    """
+    for module in model.modules():
+        for members in _fused_projection_groups(module):
+            quantizers = [
+                member.weight_quantizer
+                for member in members
+                if _is_calibrated_nvfp4_static(getattr(member, "weight_quantizer", None))
+                and member.weight_quantizer.global_amax is not None
+                and not member.weight_quantizer.global_amax.is_meta
+            ]
+            if len(quantizers) < 2:
+                continue
+            shared = torch.stack([q.global_amax.float().reshape(()) for q in quantizers]).max()
+            for quantizer in quantizers:
+                quantizer.global_amax = shared
+
+
 def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) -> None:
     """Finalize calibrated static quantizers and attached shared state.
 
@@ -203,11 +255,12 @@ def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) ->
     the default patterns, verifies the name groups were actually synced. Call once ``_amax``
     is final: single-process, or after the distributed amax sync.
     """
-    _sync_mla_fused_down_proj_amax(model)
+    _sync_fused_projection_amax(model)
     SharedWeightGlobalAmaxState.populate(model)
     promote_static_block_weight_quantizers(model)
-    # Under the default patterns, verify the fusible name groups were actually synced.
+    # Under the default patterns, add the groups they miss and verify the fusible groups were synced.
     if weight_patterns == list(SHARED_PATTERNS):
+        _sync_fused_projection_global_amax(model)
         _check_grouped_weight_global_amax_synced(model)
 
 
@@ -952,8 +1005,8 @@ def _mse_calibrate_weights(
 
                 pbar.update(1)
     pbar.close()
-    # The search refines each weight's range on its own; share the fused MLA pair's again.
-    _sync_mla_fused_down_proj_amax(model)
+    # The search refines each weight's range on its own; share the fused projections' again.
+    _sync_fused_projection_amax(model)
 
 
 class _LocalHessianAccumulator:
@@ -2793,6 +2846,13 @@ def _imatrix_sum_of_squares(x: torch.Tensor) -> torch.Tensor:
     return sum_sq
 
 
+def _imatrix_encodes(quantizer) -> bool:
+    """Whether imatrix calibration encodes the weight ``quantizer`` quantizes."""
+    backend = getattr(quantizer, "backend", None)
+    encoder = _IMATRIX_ENCODER_REGISTRY.get(backend) if isinstance(backend, str) else None
+    return encoder is not None and encoder.accepts(quantizer)
+
+
 @torch.no_grad()
 def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None):
     """Encode weights once with their inputs' per-column second moments, llama.cpp's imatrix.
@@ -2812,17 +2872,14 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
     names = module_name_maps(model)
 
     # Pick the targets before the forward disables every weight quantizer.
-    def _accepted(quantizer):
-        backend = getattr(quantizer, "backend", None)
-        encoder = _IMATRIX_ENCODER_REGISTRY.get(backend) if isinstance(backend, str) else None
-        return encoder is not None and encoder.accepts(quantizer)
-
     targets: dict[int, list] = {}  # id(weight quantizer) -> [sum of x^2 per column, token count]
     target_modules = []
     for name, module in names.name_to_module.items():
         if not isinstance(module, QuantModule):
             continue
-        accepted = [q for q in module.iter_weight_quantizers_for_calibration() if _accepted(q)]
+        accepted = [
+            q for q in module.iter_weight_quantizers_for_calibration() if _imatrix_encodes(q)
+        ]
         if accepted:
             target_modules.append((name, module))
             targets.update((id(q), [None, 0]) for q in accepted)
@@ -2878,7 +2935,9 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
         sum_sq, count = targets[id(quantizer)]
         second_moments = None if count == 0 else sum_sq.to(weight.device) / count
         encoder = _IMATRIX_ENCODER_REGISTRY[quantizer.backend]
-        weight.copy_(encoder.encode(weight, quantizer, second_moments))
+        kept = encoder.encode(weight, quantizer, second_moments)
+        if kept is not weight:
+            weight.copy_(kept)
 
     # Weights readable as they stand are grouped by device and encoded by one thread per GPU: a
     # model that device_map spreads over GPUs would otherwise keep all but one of them idle.

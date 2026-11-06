@@ -147,6 +147,10 @@ def test_export_per_block_quantized_weight():
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
 
 
+_W4A16_MXFP4_CFG = copy.deepcopy(mtq.MXFP4_DEFAULT_CFG)
+_W4A16_MXFP4_CFG["quant_cfg"].append({"quantizer_name": "*input_quantizer", "enable": False})
+
+
 @pytest.mark.parametrize(
     "quant_cfg",
     [
@@ -156,6 +160,7 @@ def test_export_per_block_quantized_weight():
         mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
         mtq.MXFP8_DEFAULT_CFG,
         mtq.MXFP4_DEFAULT_CFG,
+        _W4A16_MXFP4_CFG,
         mtq.W4A8_MXFP4_FP8_CFG,
         mtq.W4A8_NVFP4_FP8_CFG,
     ],
