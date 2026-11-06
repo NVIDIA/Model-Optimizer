@@ -17,6 +17,7 @@
 
 from copy import deepcopy
 
+import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
 from torch.nn.attention.flex_attention import BlockMask
@@ -25,7 +26,8 @@ import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import EAGLE3_DEFAULT_CFG
 
 
-def test_ttt_attention_mask_cache_with_variable_lengths(tmp_path):
+@pytest.mark.parametrize("context_change", ["dtype", "device"])
+def test_ttt_attention_mask_cache_with_variable_lengths(tmp_path, context_change):
     """Reuse masks across batches and checkpoint saves, rebuilding when context changes."""
     model = get_tiny_llama(dtype=torch.float32)
     config = deepcopy(EAGLE3_DEFAULT_CFG["config"])
@@ -76,15 +78,43 @@ def test_ttt_attention_mask_cache_with_variable_lengths(tmp_path):
         model.zero_grad(set_to_none=True)
         assert len(model._cached_attn_blk_masks) == 2
         for step in (1, 2):
-            mask = model._get_ttt_attention_mask(batch_size, seq_length, step)
+            mask = model._get_ttt_attention_mask(
+                batch_size, seq_length, step, device=input_ids.device, dtype=torch.float32
+            )
             assert mask.shape == (1, 1, seq_length, seq_length * (step + 1))
-            assert model._get_ttt_attention_mask(batch_size, seq_length, step) is mask
+            assert (
+                model._get_ttt_attention_mask(
+                    batch_size, seq_length, step, device=input_ids.device, dtype=torch.float32
+                )
+                is mask
+            )
             if previous_length == seq_length:
                 assert mask is previous_masks[step]
         previous_masks = dict(model._cached_attn_blk_masks)
         previous_length = seq_length
         projected_logits.clear()
 
-    model.eagle_config._attn_implementation = "flex_attention"
-    assert isinstance(model._get_ttt_attention_mask(1, 8, 1), BlockMask)
     handle.remove()
+    if context_change == "dtype":
+        model.bfloat16()
+        model.save_pretrained(tmp_path)
+        model.float()
+        input_ids = torch.randint(0, model.config.vocab_size, (1, 8))
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            assert torch.isfinite(model(input_ids=input_ids, labels=input_ids).loss)
+        masks_before_cast = dict(model._cached_attn_blk_masks)
+        assert all(mask.dtype == torch.bfloat16 for mask in masks_before_cast.values())
+        assert torch.isfinite(model(input_ids=input_ids, labels=input_ids).loss)
+        assert all(
+            mask.dtype == torch.float32 and mask is not masks_before_cast[step]
+            for step, mask in model._cached_attn_blk_masks.items()
+        )
+    else:
+        # A split base must not place draft masks on its first parameter's device.
+        model.get_input_embeddings().to("meta")
+    model.eagle_config._attn_implementation = "flex_attention"
+    block_mask = model._get_ttt_attention_mask(
+        1, 8, 1, device=input_ids.device, dtype=torch.float32
+    )
+    assert isinstance(block_mask, BlockMask)
+    assert block_mask.kv_num_blocks.device == model.eagle_module.fc.weight.device
