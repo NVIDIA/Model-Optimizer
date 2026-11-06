@@ -31,7 +31,7 @@ Example usage to quantize Qwen3-8B to NVFP4 on 2 GPUs (Tensor Parallelism = 2):
     1024 samples from default dataset are used for calibration (sequence length = 4096).
 
     torchrun --nproc_per_node 2 quantize.py \
-        --hf_model_name_or_path Qwen/Qwen3-8B \
+        --model_name_or_path Qwen/Qwen3-8B \
         --quant_cfg nvfp4 \
         --tp_size 2 \
         --calib_batch_size 1 \
@@ -41,7 +41,7 @@ Example usage to quantize Qwen3-8B to NVFP4 on 2 GPUs (Tensor Parallelism = 2):
 Equivalent run using a YAML recipe (authoritative for quant_cfg + algorithm + KV-cache config):
 
     torchrun --nproc_per_node 2 quantize.py \
-        --hf_model_name_or_path Qwen/Qwen3-8B \
+        --model_name_or_path Qwen/Qwen3-8B \
         --recipe general/ptq/nvfp4_default-kv_fp8 \
         --tp_size 2 \
         --calib_batch_size 1 \
@@ -69,6 +69,7 @@ from transformers import AutoProcessor
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
+from modelopt.cli import add_model_args
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 from modelopt.recipe.presets import (
     KV_CACHE_NONE,
@@ -117,7 +118,7 @@ QUANTIZE = Tool(
     # ``or "none"``: neither flag is required, and a run without one fails in get_quant_config
     # rather than while being named.
     variant=lambda args: Path(args.recipe).stem if args.recipe else (args.quant_cfg or "none"),
-    model=lambda args: args.hf_model_name_or_path,
+    model=lambda args: args.model_name_or_path,
     checkpoint=lambda args: args.export_megatron_path,
     texts=lambda args: resolved_recipe_texts(args.recipe),
     outputs=lambda args: {
@@ -129,8 +130,7 @@ QUANTIZE = Tool(
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--hf_model_name_or_path", type=str, required=True)
-    parser.add_argument("--trust_remote_code", action="store_true")
+    add_model_args(parser, aliases=("--hf_model_name_or_path",))
     parser.add_argument(
         "--no_moe_grouped_gemm",
         action="store_true",
@@ -332,11 +332,9 @@ def get_quant_config(args: argparse.Namespace) -> dict:
 
 
 def main(args: argparse.Namespace):
-    # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
+    # --model_name_or_path stays as given. Later steps read the local copy of the whole
     # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local path.
-    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
-        args.hf_model_name_or_path
-    )
+    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(args.model_name_or_path)
     trust_remote_code = is_safe_repo(
         trust_remote_code=args.trust_remote_code, hf_path=args.local_checkpoint_path
     )

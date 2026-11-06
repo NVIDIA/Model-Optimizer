@@ -15,7 +15,7 @@
 
 """Expand a GGML checkpoint exported by hf_ptq.py into an INT8 checkpoint that vLLM serves.
 
-python hf_ptq.py --pyt_ckpt_path <model> --recipe general/ptq/iq1_s --export_path <ggml_dir>
+python hf_ptq.py --model_name_or_path <model> --recipe general/ptq/iq1_s --export_path <ggml_dir>
 python convert_ggml_to_int8.py <ggml_dir> <int8_dir>
 vllm serve <int8_dir>
 """

@@ -20,7 +20,7 @@ Two mechanisms, dispatched on the model type:
     ``AutoBridge.export_ckpt`` (which reads the checkpoint's actual per-layer shapes and therefore
     handles both homogeneous and heterogeneous students).
   - VLM: only the ``language_model`` submodule is distilled and checkpointed, so the full VLM is
-    reassembled in memory -- vision tower + projector from the original HF model (--student_hf_path),
+    reassembled in memory -- vision tower + projector from the original HF model (--student_model_name_or_path),
     the distilled language model from the checkpoint -- and written with ``AutoBridge.save_hf_weights``.
 
 These two helpers (``export_llm_to_hf`` / ``save_vlm_to_hf``) are also reused by distill.py for its
@@ -29,21 +29,21 @@ final-checkpoint export.
 Example LLM (Homogeneous or Puzzletron Heterogeneous):
 
     torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
-        --student_hf_path Qwen/Qwen3-0.6B \
+        --student_model_name_or_path Qwen/Qwen3-0.6B \
         --megatron_path /tmp/distill-out/checkpoints/iter_0000500 \
         --hf_export_path /tmp/distilled-hf_iter_0000500
 
 Example VLM (checkpoint reshards on load, so TP/PP/EP need not match training):
 
     torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
-        --student_hf_path Qwen/Qwen3-VL-4B-Instruct \
+        --student_model_name_or_path Qwen/Qwen3-VL-4B-Instruct \
         --megatron_path /tmp/distill-out/checkpoints/iter_0000500 \
         --hf_export_path /tmp/distilled-vlm-hf_iter_0000500
 
 Example selected validation iterations:
 
     torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
-        --student_hf_path Qwen/Qwen3-0.6B \
+        --student_model_name_or_path Qwen/Qwen3-0.6B \
         --megatron_path /tmp/distill-out/checkpoints \
         --hf_export_path /tmp/distilled-hf-validation \
         --export_iterations all
@@ -72,6 +72,7 @@ from mlflow_utils import (
 from transformers import AutoConfig
 
 import modelopt.torch.utils.distributed as dist
+from modelopt.cli import add_model_args
 from modelopt.torch.export import copy_non_model_files, ensure_local_checkpoint
 from modelopt.torch.utils import print_args, print_rank_0
 from modelopt.torch.utils.mlflow import Tool, masked_args
@@ -93,7 +94,7 @@ DISTILL_EXPORT = Tool(
     ),
     variant_help="the distilled checkpoint's directory name",
     variant=lambda args: checkpoint_name(args.megatron_path),
-    model=lambda args: args.student_hf_path,
+    model=lambda args: args.student_model_name_or_path,
     # The root given, not the per-iteration directories under it: those are pointed at this
     # run by record_exported_checkpoint.
     checkpoint=lambda args: args.hf_export_path,
@@ -202,12 +203,12 @@ def save_vlm_to_hf(
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument(
-        "--student_hf_path",
-        type=str,
-        required=True,
-        help="Student HF model (used for the exported config / tokenizer, and, for VLMs, the vision "
-        "tower / projector weights). Must match the model distilled by distill.py.",
+    add_model_args(
+        parser,
+        role="student",
+        aliases=("--student_hf_path",),
+        help_text="Student HF model (used for the exported config / tokenizer, and, for VLMs, the "
+        "vision tower / projector weights). Must match the model distilled by distill.py.",
     )
     parser.add_argument(
         "--megatron_path",
@@ -242,10 +243,9 @@ def get_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Reference HF model with a homogeneous architecture, used as the export template for a "
-        "heterogeneous (Puzzletron/NAS) student's weights. Defaults to --student_hf_path, which is "
+        "heterogeneous (Puzzletron/NAS) student's weights. Defaults to --student_model_name_or_path, which is "
         "correct for homogeneous students; unused for VLMs.",
     )
-    parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
     parser.add_argument(
         "--no_moe_grouped_gemm",
         action="store_true",
@@ -271,11 +271,11 @@ def get_args() -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace):
-    # --student_hf_path stays as given. Later steps read the local copy of the whole checkpoint in
+    # --student_model_name_or_path stays as given. Later steps read the local copy of the whole checkpoint in
     # student_local_checkpoint_path, since exporters read the source's files from local disk only;
     # student_hub_model_id is the Hub ID, or None for a local path.
     args.student_hub_model_id, args.student_local_checkpoint_path = ensure_local_checkpoint(
-        args.student_hf_path
+        args.student_model_name_or_path
     )
     checkpoint_export_paths: list[tuple[Path, Path]] = _get_checkpoint_export_paths(args)
     # This path drops quantization, so a QAD checkpoint would export silently unquantized.

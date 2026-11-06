@@ -100,7 +100,7 @@ def _run_kv_autoquant_example(rank, size, checkpoint_dir, search_dir, composed):
         else "kv_fp8_nvfp4_cast_kl_div_at_5p4bits"
     )
     args = SimpleNamespace(
-        pyt_ckpt_path=str(checkpoint_dir),
+        model_name_or_path=str(checkpoint_dir),
         local_checkpoint_path=str(checkpoint_dir),
         hub_model_id=None,
         recipe=recipe_name,

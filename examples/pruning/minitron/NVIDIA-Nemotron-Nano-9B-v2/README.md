@@ -145,7 +145,7 @@ Run on **1 node with 8x H100** (~1 hour)
 ```bash
 torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/prune_minitron.py \
   --pp_size 8 \
-  --hf_model_name_or_path nvidia/NVIDIA-Nemotron-Nano-9B-v2 \
+  --model_name_or_path nvidia/NVIDIA-Nemotron-Nano-9B-v2 \
   --trust_remote_code \
   --prune_target_params 7e9 \
   --hparams_to_skip num_attention_heads \
@@ -209,8 +209,8 @@ Run on **96 nodes × 8x H100 (768 GPUs total)**. ~600 H100 GPU-hours per 1k step
 
 ```bash
 torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/distill_minitron.py \
-    --teacher_hf_path nvidia/NVIDIA-Nemotron-Nano-9B-v2 \
-    --student_hf_path /path/to/Nemotron-Nano-9B-v2-Pruned-7B \
+    --teacher_model_name_or_path nvidia/NVIDIA-Nemotron-Nano-9B-v2 \
+    --student_model_name_or_path /path/to/Nemotron-Nano-9B-v2-Pruned-7B \
     --trust_remote_code \
     --tp_size 8 \
     --pp_size 1 \
@@ -334,7 +334,7 @@ Calibrate and export the HF checkpoint from iteration 12800 to FP8 (takes 1-2 mi
 
 ```bash
 python /opt/Model-Optimizer/examples/hf_ptq/hf_ptq.py \
-    --pyt_ckpt_path <output_dir>/checkpoints/hf_iter_12800 \
+    --model_name_or_path <output_dir>/checkpoints/hf_iter_12800 \
     --export_path <output_dir>/checkpoints/hf_iter_12800_fp8 \
     --qformat fp8 \
     --trust_remote_code

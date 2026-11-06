@@ -27,6 +27,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity.attention_sparsity as mtsa
+from modelopt.cli import add_model_args
 from modelopt.torch.export import ensure_local_checkpoint, export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity.config import (
     SKIP_SOFTMAX_CALIB,
@@ -146,18 +147,24 @@ def main(args):
     np.random.seed(RAND_SEED)
     launch_memory_monitor()
 
-    # --pyt_ckpt_path stays as given. Later steps read the local copy of the whole checkpoint in
+    # --model_name_or_path stays as given. Later steps read the local copy of the whole checkpoint in
     # local_checkpoint_path, since exporters read the source's files from local disk only;
     # hub_model_id is the Hub ID, or None for a local path.
-    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(args.pyt_ckpt_path)
+    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(args.model_name_or_path)
     print(f"Loading model: {args.local_checkpoint_path}")
 
     # No need to specify attn_implementation here — mtsa.sparsify() sets it
     # automatically ("eager" for pytorch backend, "modelopt_triton" for triton).
     model = AutoModelForCausalLM.from_pretrained(
-        args.local_checkpoint_path, attn_implementation="eager", dtype="auto", device_map="auto"
+        args.local_checkpoint_path,
+        attn_implementation="eager",
+        dtype="auto",
+        device_map="auto",
+        trust_remote_code=args.trust_remote_code,
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.local_checkpoint_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
+    )
 
     # Set pad token if not set
     if tokenizer.pad_token is None:
@@ -248,11 +255,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
 
     # Model arguments
-    parser.add_argument(
-        "--pyt_ckpt_path",
-        type=str,
-        required=True,
-        help="Specify where the PyTorch checkpoint path is",
+    add_model_args(
+        parser,
+        aliases=("--pyt_ckpt_path",),
+        help_text="Specify where the PyTorch checkpoint path is",
     )
     parser.add_argument(
         "--sparse_attn",

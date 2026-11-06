@@ -647,7 +647,7 @@ def test_mlflow_run_inputs_carry_the_resolved_recipe(monkeypatch, example_utils)
     described = describe_run(args, example_utils.HF_PTQ, args.dist_state.world_size)
     params, texts = described["params"], described["texts"]
 
-    assert params["pyt_ckpt_path"] == "/models/Qwen3-0.6B"
+    assert params["model_name_or_path"] == "/models/Qwen3-0.6B"
     assert params["recipe"] == "general/ptq/nvfp4_default-kv_fp8_cast"
     # $imports are expanded, so the artifact stands alone.
     recipe = yaml.safe_load(texts["recipe/resolved_recipe.yaml"])
@@ -1055,7 +1055,7 @@ def test_post_quantize_stops_the_run_when_a_sharded_models_preview_fails(monkeyp
 
 @pytest.mark.usefixtures("clean_env")
 def test_main_makes_a_hub_checkpoint_local_before_loading(monkeypatch, tmp_path):
-    """--pyt_ckpt_path keeps the Hub ID; the model loads from the local copy resolved first."""
+    """--model_name_or_path keeps the Hub ID; the model loads from the local copy resolved first."""
     hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "org/model")
     calls = []
 
@@ -1068,7 +1068,7 @@ def test_main_makes_a_hub_checkpoint_local_before_loading(monkeypatch, tmp_path)
 
     def load_model(args):
         calls.append(
-            ("load_model", args.pyt_ckpt_path, args.hub_model_id, args.local_checkpoint_path)
+            ("load_model", args.model_name_or_path, args.hub_model_id, args.local_checkpoint_path)
         )
         raise _LoadReachedError
 
