@@ -241,6 +241,7 @@ class QuantInputGradientsModeDescriptor(ModeDescriptor):
 
     name = "quant_input_gradients"
     config_class = ModeloptBaseConfig
+    next_prohibited_modes = {"quant_lora"}
     convert = staticmethod(_convert_quant_input_gradients)
     restore = staticmethod(_restore_quant_input_gradients)
     update_for_save = staticmethod(_update_quant_metadata)

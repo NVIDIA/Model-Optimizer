@@ -429,9 +429,10 @@ Only selected parameters in the distilled student train; the teacher stays froze
 For VLMs, names are relative to `language_model`; vision/projector settings are untouched.
 Quantizers and activation gradients remain enabled.
 
-Reuse the selection on native resume. Native checkpointing restores FP32 masters,
-Adam state, and training counters; `--student_megatron_path` only loads initial
-weights and ModelOpt state. Use Bridge/Core versions with HybridModel support.
+Reuse the selection and `--student_megatron_path` with ModelOpt state on native resume;
+selection fails if that state has not been restored before wrapping. Native checkpointing
+restores FP32 masters, Adam state, and training counters afterward.
+Use Bridge/Core versions with HybridModel support.
 
 ### LoRA QAD
 

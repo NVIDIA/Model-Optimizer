@@ -188,7 +188,8 @@ def get_args():
         default=None,
         help="Train only distilled student parameters matching these shell-style patterns. "
         "For VLMs, names are relative to language_model; vision/projector settings are untouched. "
-        "Requires an adapter-free, uncompressed checkpoint and a match for every pattern "
+        "Requires --student_megatron_path with ModelOpt state, including on native resume, "
+        "an adapter-free, uncompressed checkpoint, and a match for every pattern "
         "on every local model chunk.",
     )
     # Parallelism arguments
@@ -765,7 +766,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     )
 
     if args.trainable_params:
-        # Run after checkpoint restore but before KD conversion introduces the teacher.
+        # Run after initial student restoration; native training resume happens later.
         def _select_trainable_student_hook(model_chunks):
             """Select parameters in the distilled student before the teacher is attached."""
             for chunk in model_chunks:

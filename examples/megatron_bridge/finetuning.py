@@ -19,6 +19,7 @@ import fnmatch
 
 from torch import nn
 
+from modelopt.torch.opt import ModeloptStateManager
 from modelopt.torch.quantization import enable_quant_input_gradients, has_quant_lora
 from modelopt.torch.quantization.qtensor import QTensorWrapper
 
@@ -28,7 +29,8 @@ __all__ = ["configure_trainable_parameters"]
 def configure_trainable_parameters(model: nn.Module, target_parameters: list[str]) -> nn.Module:
     """Train only parameters matching shell-style patterns, retaining fake quantizers.
 
-    Match names relative to the student root, before DDP/optimizer construction.
+    Restore student ModelOpt state first, then select before DDP/optimizer construction.
+    Match names relative to the student root.
     Every pattern must match locally; packed weights and unmerged adapters are rejected.
     Other parameters are frozen, including any learned quantization scales.
     """
@@ -53,6 +55,12 @@ def configure_trainable_parameters(model: nn.Module, target_parameters: list[str
             raise ValueError(
                 f"Full-rank training requires an uncompressed floating weight: {name}."
             )
+    # Creating mode state here would make native checkpoint loading skip saved quantizers.
+    if not ModeloptStateManager.is_converted(model):
+        raise ValueError(
+            "Restore student ModelOpt state with --student_megatron_path before selecting "
+            "trainable parameters, including on native resume."
+        )
     model.requires_grad_(False)
     for name in selected:
         parameters[name].requires_grad_(True)

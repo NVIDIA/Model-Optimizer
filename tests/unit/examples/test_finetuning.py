@@ -108,3 +108,29 @@ def test_full_rank_validation_is_atomic(invalid):
     with pytest.raises(ValueError):
         configure_trainable_parameters(model, patterns)
     assert before == {n: p.requires_grad for n, p in model.named_parameters()}
+
+
+@pytest.mark.parametrize("vlm_root_state", [False, True])
+def test_selection_requires_restored_student_state(vlm_root_state):
+    """Refuse early mode creation that could bypass native quantizer restoration."""
+    student = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16))
+    root = nn.Module()
+    root.language_model = student
+    if vlm_root_state:
+        mtq.quantize(root, mtq.INT8_DEFAULT_CFG, lambda m: m.language_model(torch.arange(8)))
+    parameters = {n: p.requires_grad for n, p in root.named_parameters()}
+    types = {n: type(m) for n, m in root.named_modules()}
+    state = copy.deepcopy(mto.modelopt_state(root))
+    with pytest.raises(ValueError):
+        configure_trainable_parameters(student, ["1.weight"])
+    assert parameters == {n: p.requires_grad for n, p in root.named_parameters()}
+    assert types == {n: type(m) for n, m in root.named_modules()}
+    assert state == mto.modelopt_state(root)
+    assert not mto.ModeloptStateManager.is_converted(student)
+    if vlm_root_state:
+        mto.ModeloptStateManager.transfer_state_dict(root, student)
+    else:
+        mtq.quantize(student, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.arange(8)))
+    configure_trainable_parameters(student, ["1.weight"])
+    assert mto.ModeloptStateManager.is_converted(root)
+    assert [n for n, p in student.named_parameters() if p.requires_grad] == ["1.weight"]

@@ -125,7 +125,16 @@ def test_quant_lora_targets(targets):
 
 
 @pytest.mark.parametrize(
-    "case", ["unquantized", "compressed", "unsupported", "unmatched", "shared_both", "shared_one"]
+    "case",
+    [
+        "unquantized",
+        "compressed",
+        "unsupported",
+        "unmatched",
+        "shared_both",
+        "shared_one",
+        "input_gradients",
+    ],
 )
 def test_quant_lora_rejection_preserves_model(case):
     """Reject invalid targets before modifying any parameters or trainability."""
@@ -139,6 +148,11 @@ def test_quant_lora_rejection_preserves_model(case):
         if case == "shared_one":
             config = {"target_modules": ["0", "1"]}
         error = "does not support shared weight"
+    elif case == "input_gradients":
+        student = nn.Sequential(nn.Embedding(16, 16), nn.Linear(16, 16))
+        mtq.quantize(student, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.arange(8)))
+        mtq.enable_quant_input_gradients(student)
+        error = "quant_lora"
     elif case == "unsupported":
         student = nn.Sequential(nn.Linear(16, 32), nn.Conv2d(1, 2, 1))
         mtq.quantize(
@@ -155,13 +169,14 @@ def test_quant_lora_rejection_preserves_model(case):
             error = "requires uncompressed"
         else:
             config = {"target_modules": ["missing*"]}
-    student[0].bias.requires_grad_(False)
+    next(student.parameters()).requires_grad_(False)
     parameters = dict(student.named_parameters())
     values = {name: p.detach().clone() for name, p in parameters.items()}
     trainability = {name: p.requires_grad for name, p in parameters.items()}
     module_types = {name: type(m) for name, m in student.named_modules()}
 
-    with pytest.raises(ValueError, match=error):
+    error_type = AssertionError if case == "input_gradients" else ValueError
+    with pytest.raises(error_type, match=error):
         mtq.enable_quant_lora(student, config)
 
     after = dict(student.named_parameters())
