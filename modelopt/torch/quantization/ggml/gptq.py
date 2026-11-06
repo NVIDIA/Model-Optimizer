@@ -21,7 +21,8 @@ import torch
 
 from ..extensions import get_cuda_ext_ggml
 from ..utils.calib_utils import GPTQHelper, register_gptq_helper
-from .common import floored_second_moments, pin_packed_weight
+from .common import floored_second_moments, pin_packed_weight, validate_transcode
+from .nvfp4 import nvfp4_transcode
 from .registry import GGML_FORMAT_REGISTRY
 
 __all__ = ["GGMLGPTQHelper", "gptq_group_update"]
@@ -80,6 +81,10 @@ class GGMLGPTQHelper(GPTQHelper):
     encoded each block from -- the error-compensated weight before rounding -- rather than at its
     decoding: under the pinned scales and importance it encodes to the same codes, and QAD trains
     it from there like an unquantized weight instead of from the grid points.
+
+    With an NVFP4 ``transcode``, GPTQ compensates the error of the transcoded weight, the one an
+    FP4 GEMM computes with. A format without pinned scales then keeps the GGML decoding, which the
+    pinned payload matches, rather than the transcoded weight GPTQ wrote.
     """
 
     def updates_on_any_device(self):
@@ -95,9 +100,15 @@ class GGMLGPTQHelper(GPTQHelper):
         weight = self.module.weight if weight is None else weight
         self._weight_dtype = weight.dtype
         super().update_weights(block_size, perc_damp, weight, device)
+        quantizer = self.weight_quantizer
         if self._unrounded is not None:
             weight.data.copy_(self._unrounded.reshape(weight.shape))
-        quantizer = self.weight_quantizer
+        elif (quantizer.backend_extra_args or {}).get("transcode") is not None:
+            # GPTQ wrote the transcoded weight; fake quant transcodes the decoding on each forward.
+            decoded = GGML_FORMAT_REGISTRY[quantizer.num_bits].dequantize(
+                self._packed, torch.tensor(weight.shape), dtype=weight.dtype
+            )
+            weight.data.copy_(decoded.reshape(weight.shape))
         importance = None if self._importance is None else self._importance.to(weight.device)
         pin_packed_weight(quantizer, quantizer.num_bits, self._packed.to(weight.device), importance)
         self._packed = self._unrounded = self._importance = None
@@ -108,6 +119,8 @@ class GGMLGPTQHelper(GPTQHelper):
         extra_args = quantizer.backend_extra_args or {}
         block_chunk_size = extra_args.get("block_chunk_size", ggml_format.block_chunk_size)
         decode_chunk_size = extra_args.get("decode_chunk_size", ggml_format.decode_chunk_size)
+        transcode = extra_args.get("transcode")
+        validate_transcode(transcode)
         payloads = []
         assert self.weight is not None, "_blockwise_update called before update_weights()"
         importance = None
@@ -133,9 +146,11 @@ class GGMLGPTQHelper(GPTQHelper):
                 group.contiguous(), block_chunk_size=block_chunk_size, **kwargs
             )
             payloads.append(packed)
-            return ggml_format.dequantize(
+            decoded = ggml_format.dequantize(
                 packed, shape, dtype=dtype, block_chunk_size=decode_chunk_size
             )
+            # Short of E4M3's range ends, transcoding a column group matches transcoding the weight.
+            return decoded if transcode is None else nvfp4_transcode(decoded, dtype=dtype)
 
         gptq_group_update(
             self.weight, self.h_inv, block_size, ggml_format.block_size, quantize_group

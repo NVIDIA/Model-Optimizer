@@ -25,7 +25,7 @@ def ggml_fake_quant(inputs: torch.Tensor, quantizer) -> torch.Tensor:
     """Dispatch a GGML quantizer to its format-specific implementation."""
     num_bits = getattr(quantizer, "num_bits", None)
     extra_args = getattr(quantizer, "backend_extra_args", None) or {}
-    unknown_args = set(extra_args) - {"block_chunk_size", "decode_chunk_size"}
+    unknown_args = set(extra_args) - {"block_chunk_size", "decode_chunk_size", "transcode"}
     if unknown_args:
         raise ValueError(f"Unsupported ggml backend_extra_args: {sorted(unknown_args)}")
     # num_bits arrives untyped from the quantizer and is a tuple for scalar formats,

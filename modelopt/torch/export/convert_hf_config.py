@@ -24,12 +24,15 @@ from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from .quant_format import GGML_FORMATS
 
 
-def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) -> dict[str, Any]:
+def _quant_algo_to_group_config(
+    quant_algo: str, group_size: int | None = None, input_quant_algo: str | None = None
+) -> dict[str, Any]:
     """Map a per-layer quant_algo string to compressed-tensors config group details.
 
     Args:
         quant_algo: The quantization algorithm name (e.g. "FP8", "NVFP4").
         group_size: Optional group size for block-wise quantization algorithms.
+        input_quant_algo: ``"NVFP4"`` for GGML layers that quantize their inputs (W1A4/W2A4).
 
     Returns:
         Dictionary with ``input_activations`` and ``weights`` entries suitable for
@@ -173,13 +176,21 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             raise ValueError(f"{quant_algo} requires group size {block_size}, got {group_size}")
         # GGML payloads are self-contained blocks, not compressed-tensors integer groups.
         # Keep their format marker outside a ``weights`` quantization scheme.
-        return {
+        ggml_config: dict[str, Any] = {
             "quant_algo": quant_algo,
             "effective_bits": effective_bits,
             "group_size": block_size,
             "packing": "ggml",
             "block_payload_bytes": payload_bytes,
         }
+        if input_quant_algo == "NVFP4":
+            ggml_config["input_activations"] = {
+                "dynamic": False,
+                "num_bits": 4,
+                "type": "float",
+                "group_size": 16,
+            }
+        return ggml_config
     else:
         warnings.warn(
             f"Unsupported quantization algorithm '{quant_algo}' in "
@@ -276,7 +287,9 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
         # Forward the caller's group size so a mismatched one is rejected rather than rewritten
         # to the format's block size.
         ggml_metadata = _quant_algo_to_group_config(
-            quant_algo_value, original_quantization_details.get("group_size")
+            quant_algo_value,
+            original_quantization_details.get("group_size"),
+            original_quantization_details.get("input_quant_algo"),
         )
         new_config.update(ggml_metadata)
     elif quant_algo_value == "NVFP4_SVD":
@@ -333,7 +346,9 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
             algo = layer_cfg.get("quant_algo", "")
             layer_group_size = layer_cfg.get("group_size")
 
-            group_config = _quant_algo_to_group_config(algo, layer_group_size)
+            group_config = _quant_algo_to_group_config(
+                algo, layer_group_size, layer_cfg.get("input_quant_algo")
+            )
             group_config["targets"] = sorted(layer_names)
             config_groups[f"group_{idx}"] = group_config
 

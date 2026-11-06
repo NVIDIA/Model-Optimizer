@@ -25,6 +25,8 @@ from typing import NamedTuple
 import torch
 from torch.optim.optimizer import register_optimizer_step_post_hook
 
+from .nvfp4 import nvfp4_transcode, nvfp4_transcode_scales
+
 GGML_BLOCK_SIZE = 256
 _SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
 # Columns hashed at a time, bounding _row_keys' int64 temporaries to this slice of the weight.
@@ -66,6 +68,8 @@ class _PackedWeightCache:
     weight_shape: torch.Tensor
     # Set by the next optimizer step when the weight is trainable; see _track_trainable.
     stale: bool = False
+    # The payload's NVFP4 transcode scales, searched on the first forward that transcodes.
+    nvfp4_scales: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 # Payloads packed from a trainable weight, marked stale by the next optimizer step. Their key
@@ -287,8 +291,13 @@ def fake_quantize_with_cache(
     decode_chunk_size: int,
     quantize: Callable[..., tuple[torch.Tensor, torch.Tensor]],
     dequantize: Callable[..., torch.Tensor],
+    transcode: str | None = None,
 ) -> torch.Tensor:
-    """Fake-quantize a weight while caching its compact packed representation."""
+    """Fake-quantize a weight while caching its compact packed representation.
+
+    With ``transcode="nvfp4"`` the decoded weight is fake-quantized again to NVFP4, which is what a
+    W1A4 or W2A4 GEMM computes with; the NVFP4 scales are cached beside the payload.
+    """
     cache = _matching_cache(quantizer, inputs, format_name)
     if cache is not None and cache.block_chunk_size == block_chunk_size:
         packed_weights, weight_shape = cache.packed_weights, cache.weight_shape
@@ -297,9 +306,10 @@ def fake_quantize_with_cache(
     else:
         packed_weights, weight_shape = quantize(inputs, block_chunk_size=block_chunk_size)
         input_key = _input_cache_key(inputs)
+        cache = None
         if input_key is not None:
             base = _cache_base(inputs)
-            quantizer._quantizer_cache = _PackedWeightCache(
+            cache = _PackedWeightCache(
                 base_ref=weakref.ref(base),
                 input_key=input_key,
                 format_name=format_name,
@@ -307,18 +317,25 @@ def fake_quantize_with_cache(
                 packed_weights=packed_weights,
                 weight_shape=weight_shape,
             )
-            _track_trainable(quantizer._quantizer_cache, base)
-        else:
-            quantizer._quantizer_cache = None
+            _track_trainable(cache, base)
+        quantizer._quantizer_cache = cache
 
     # Sized separately from the encode chunk: packing happens once per weight and is bounded
     # by its search temporaries, while this runs on every forward and is bounded by launches.
     reconstructed = dequantize(
         packed_weights,
         weight_shape,
-        dtype=inputs.dtype,
+        # A transcode starts from the float32 decoding, as the NVFP4 conversion of the export does.
+        dtype=inputs.dtype if transcode is None else torch.float32,
         block_chunk_size=decode_chunk_size,
     )
+    if transcode is not None:
+        scales = None if cache is None else cache.nvfp4_scales
+        if scales is None:
+            scales = nvfp4_transcode_scales(reconstructed)
+            if cache is not None:
+                cache.nvfp4_scales = scales
+        reconstructed = nvfp4_transcode(reconstructed, *scales, dtype=inputs.dtype)
     # Exactly the reconstruction export decodes, with a straight-through gradient. The usual
     # ``inputs + (reconstructed - inputs).detach()`` rounds twice in a narrow dtype, so it can
     # differ wherever the two are far apart, as when a pinned payload replays over a source weight.
@@ -402,12 +419,18 @@ class GGMLFormat:
         *,
         block_chunk_size: int | None = None,
         decode_chunk_size: int | None = None,
+        transcode: str | None = None,
     ) -> torch.Tensor:
-        """TensorQuantizer backend for this format, with pass-through backward."""
+        """TensorQuantizer backend for this format, with pass-through backward.
+
+        ``transcode="nvfp4"`` fake-quantizes the decoded weight to NVFP4 as well, for GGML weights
+        with NVFP4 activations.
+        """
         if getattr(quantizer, "num_bits", None) != self.name:
             raise ValueError(
                 f"The ggml {self.name.upper()} backend requires num_bits={self.name!r}"
             )
+        validate_transcode(transcode)
         return fake_quantize_with_cache(
             inputs,
             quantizer,
@@ -420,6 +443,7 @@ class GGMLFormat:
             ),
             quantize=partial(self._pinned_or_quantize, quantizer),
             dequantize=self.dequantize,
+            transcode=transcode,
         )
 
     def pack(self, weight: torch.Tensor, quantizer=None) -> torch.Tensor:
@@ -800,6 +824,12 @@ def validate_block_chunk_size(block_chunk_size: int) -> None:
         raise TypeError("block_chunk_size must be an integer")
     if block_chunk_size <= 0:
         raise ValueError(f"block_chunk_size must be positive, got {block_chunk_size}")
+
+
+def validate_transcode(transcode: str | None) -> None:
+    """Refuse a transcode target other than NVFP4, the format of W1A4 and W2A4 GEMMs."""
+    if transcode not in (None, "nvfp4"):
+        raise ValueError(f"The ggml backend transcodes to 'nvfp4' only, got {transcode!r}")
 
 
 def validate_packed_weights(

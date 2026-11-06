@@ -144,6 +144,7 @@ from .quant_utils import (
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
+    get_ggml_input_scale,
     get_quant_config,
     get_quantization_format,
     get_weight_block_size,
@@ -681,11 +682,17 @@ def _export_quantized_weight(
                 "GGML unified export currently supports modules with a standard 'weight' "
                 f"attribute, got {weight_name!r} on {type(sub_module).__name__}"
             )
+        # W1A4/W2A4 layers also export their NVFP4 input_scale.
+        input_scale = get_ggml_input_scale(
+            getattr(sub_module, quantizer_attrs.input_quantizer, None)
+        )
         # Encode the module's own weight: rounding it to ``dtype`` first could change its codes.
         packed_weight = GGML_FORMAT_REGISTRY[quantization_format].pack(
             weight, getattr(sub_module, quantizer_attrs.weight_quantizer, None)
         )
         setattr(sub_module, weight_name, nn.Parameter(packed_weight, requires_grad=False))
+        if input_scale is not None:
+            sub_module.register_buffer(quantizer_attrs.input_scale, input_scale)
         maybe_clear_cuda_cache()
         return
 
