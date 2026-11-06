@@ -133,6 +133,20 @@ Once we finish dumping hidden states, launch offline training pointing to the hi
 
 For large base models, you can stream hidden states from a live `vllm serve` instead of dumping them to disk: a co-located server produces the base-model hidden states on the fly and sends them to the trainer over NIXL RDMA, scaling to multiple nodes (dedicated serve replicas + DDP trainers). See the launcher examples, e.g. [Kimi-K2.5 streaming EAGLE3](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_eagle3_multi_node.yaml) and [streaming DFlash](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_dflash_multi_node.yaml).
 
+Trainers using `model.use_fake_base_for_offline=true` need only the base embeddings, output head and known final norm. Prepare a smaller checkpoint once from a local, revision-pinned snapshot:
+
+```python
+from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
+
+FakeBaseModel.export_source_slice("/models/base-snapshot", "/models/trainer-base")
+```
+
+Use `/models/trainer-base` for the trainer's `model.model_name_or_path`; the teacher still uses the complete snapshot. The slice retains the original config, tokenizer and custom code, including nested text-model configs and tied embeddings. It is a training input, not a checkpoint for serving the base model. For a trusted snapshot that requires custom code, pass `trust_remote_code=True` explicitly.
+
+Streaming recipes must keep `data.streaming_model_name` set to the teacher's served model name.
+
+Regenerate slices after a ModelOpt update that changes which source weights training loads.
+
 ## Training a Standalone (External) Draft Model
 
 The modes above graft a draft head onto the target. The `external` mode instead
