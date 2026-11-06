@@ -1280,11 +1280,12 @@ def auto_quantize(
     searcher.validate_search_input(search_constraints, search_config)
 
     # A weight-rewriting candidate's refusals need the converted quantizers to tell which weights it
-    # rewrites. A failure before any candidate calibrates then hands back the unconverted modules,
-    # so the caller can retry on the same model, which a converted model would refuse. The saved
-    # modules hold every weight conversion replaces (HF Conv1D's), so other searches save none and
-    # the searcher drops them once those checks pass.
-    if rewrites_weights:
+    # rewrites, as does a format shard's check of its count against the searched formats. A failure
+    # before any candidate calibrates then hands back the unconverted modules, so the caller can
+    # retry on the same model, which a converted model would refuse. The saved modules hold every
+    # weight conversion replaces (HF Conv1D's), so other searches save none and the searcher drops
+    # them once those checks pass.
+    if rewrites_weights or format_shard is not None:
         searcher.restore_unconverted = _save_module_attributes(model)
     # Calibration turns pre-quant-scale folding off for the whole process. Hand back the policy
     # found here on every exit, also after a failure while scoring, so later calibrations fold.
@@ -1319,7 +1320,9 @@ def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint
     ``format_shard``) to restore every format's calibration and scores and solve. The shard files
     are memory-mapped on the CPU, so any host can merge them, and the restore moves each
     calibration onto the model's devices. Under distributed scoring, merge each rank's files
-    separately.
+    separately. Shards that recorded different search setups (formats, groups, method, cost, or
+    calibration and scoring step counts) are refused; running every shard on the same weights
+    and batches is up to the caller.
 
     Args:
         shard_checkpoints: The checkpoint file of each shard ``0..count-1``, in any order.
@@ -1331,7 +1334,9 @@ def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint
         [safe_load(path, map_location="cpu", mmap=True) for path in shard_checkpoints]
     )
     os.makedirs(os.path.dirname(checkpoint) or ".", exist_ok=True)
-    safe_save(merged, checkpoint)
+    # Created exclusively: a file or symlink that appeared since the check is refused, not written.
+    with open(checkpoint, "xb") as f:
+        safe_save(merged, f)
 
 
 def get_auto_quantize_config(search_state, constraints=None, verbose=False):

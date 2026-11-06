@@ -927,6 +927,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "candidate_stats": defaultdict(dict),
             "quantizer_states": {},
             "format_shard": None,
+            "num_calib_steps": None,
+            "num_score_steps": None,
             "best": {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False},
         }
 
@@ -1602,6 +1604,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 "Combine shard checkpoints with merge_auto_quantize_checkpoints() first."
             )
         self.format_shard = format_shard
+        # Scores sum over the batches, so shards merge only with the same workload.
+        self.num_calib_steps = self.config["num_calib_steps"]
+        self.num_score_steps = self.config["num_score_steps"]
         other_shards_recipes = self._other_shards_recipes(quant_recipe_hparams, search_recipes)
         calibration_recipes = [r for r in search_recipes if r not in other_shards_recipes]
 
@@ -1876,6 +1881,8 @@ _SHARD_INVARIANT_STATE = (
     "fixed_quantization_config_signature",
     "module_search_space_signature",
     "resolved_search_setup_signature",
+    "num_calib_steps",
+    "num_score_steps",
 )
 
 

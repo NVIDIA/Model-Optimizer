@@ -874,9 +874,9 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, method):
     data = [source.get_input() for _ in range(2)]
     formats = [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG]
 
-    def search(checkpoint, format_shard=None):
+    def search(checkpoint, format_shard=None, model=None, score_steps=2):
         return mtq.auto_quantize(
-            copy.deepcopy(source),
+            copy.deepcopy(source) if model is None else model,
             constraints={"effective_bits": 6.0},
             quantization_formats=formats,
             # o_proj holds FP8, so its calibrated input scale shapes the mlp's scores.
@@ -891,22 +891,37 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, method):
             forward_step=lambda model, batch: model(batch),
             loss_func=(lambda output, batch: output.sum()) if method == "gradient" else None,
             num_calib_steps=2,
-            num_score_steps=2,
+            num_score_steps=score_steps,
             checkpoint=str(checkpoint),
             format_shard=format_shard,
             method=method,
         )
 
     _, expected = search(tmp_path / "full.pth")
+    # A refused shard count hands the model back, so shard 0 then runs on that same model.
+    model = copy.deepcopy(source)
+    with pytest.raises(ValueError, match="format_shard count"):
+        search(tmp_path / "refused.pth", (0, 99), model=model)
     shards = [tmp_path / f"shard{i}.pth" for i in range(2)]
     for i, shard in enumerate(shards):
-        _, state = search(shard, (i, 2))
+        _, state = search(shard, (i, 2), model=model if i == 0 else None)
         assert not state["best"]["recipe"]
     # Each searched format is calibrated by one shard, o_proj's held FP8 by both.
     calibrated = [set(safe_load(shard)["quantizer_states"]) for shard in shards]
     assert len(calibrated[0] & calibrated[1]) == 1 and len(calibrated[0] | calibrated[1]) == 3
 
+    # Scores sum over batches, so a shard scored over fewer is refused.
+    fewer = tmp_path / "fewer_steps.pth"
+    search(fewer, (1, 2), score_steps=1)
+    with pytest.raises(ValueError, match="num_score_steps"):
+        model_quant.merge_auto_quantize_checkpoints([shards[0], fewer], str(tmp_path / "x.pth"))
+
     merged = tmp_path / "merged.pth"
+    merged.symlink_to(tmp_path / "elsewhere.pth")  # planted after the existence check
+    with pytest.raises(FileExistsError):
+        model_quant.merge_auto_quantize_checkpoints(shards, str(merged))
+    assert not (tmp_path / "elsewhere.pth").exists()
+    merged.unlink()
     model_quant.merge_auto_quantize_checkpoints(list(reversed(shards)), str(merged))
     with pytest.raises(ValueError, match="format shard"):
         search(shards[0])
