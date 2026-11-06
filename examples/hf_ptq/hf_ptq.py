@@ -679,16 +679,17 @@ def _run_auto_quantize_recipe(
     primary_is_kv = primary.constraints.cost_model == "kv_cache"
     fixed_quantize_config = recipe.quantize
     finalize = primary.finalize_algorithm is not None
+    # Off unless given, like the shard flags autoquant_utils reads, for args built without them.
+    format_shard = getattr(args, "auto_quantize_format_shard", None)
+    merge_shards = getattr(args, "auto_quantize_merge_shards", None)
     if finalize and (primary_is_kv or followup_kv is not None or not args.auto_quantize_checkpoint):
         raise ValueError(
             "auto_quantize.finalize_algorithm needs a weight search without a KV-cache search "
             "and --auto_quantize_checkpoint to hand the scores to the finalizing run."
         )
-    if args.auto_quantize_merge_shards and not os.path.exists(args.auto_quantize_checkpoint):
-        mtq.merge_auto_quantize_checkpoints(
-            args.auto_quantize_merge_shards.split(","), args.auto_quantize_checkpoint
-        )
-    if finalize and args.auto_quantize_format_shard is None:
+    if merge_shards and not os.path.exists(args.auto_quantize_checkpoint):
+        mtq.merge_auto_quantize_checkpoints(merge_shards.split(","), args.auto_quantize_checkpoint)
+    if finalize and format_shard is None:
         search_state = _scored_auto_quantize_state(args.auto_quantize_checkpoint)
         if search_state is not None:
             # Freeze the per-layer formats for this budget and calibrate the source weights.
@@ -762,8 +763,8 @@ def _run_auto_quantize_recipe(
             # never use the KV-primary legacy fallback and collide with the weight state.
             checkpoint=args.kv_auto_quantize_checkpoint,
         )
-    if args.auto_quantize_format_shard is not None:
-        print(f"Saved format shard {args.auto_quantize_format_shard}; merge every shard to solve.")
+    if format_shard is not None:
+        print(f"Saved format shard {format_shard}; merge every shard to solve.")
         return False
     if finalize:
         print("Saved the AutoQuantize scores; rerun the same command to finalize and export.")
