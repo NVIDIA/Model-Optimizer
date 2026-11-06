@@ -272,6 +272,7 @@ class SandboxPipeline:
 
     # Set by caller — used by create_task_from_yaml
     _factory_lookup: dict = None
+    inputs: dict[str, dict[str, str]] = None  # Container mount -> {ref, env?, role?}
 
     def __post_init__(self):
         """Collect tasks from slots/configs and resolve <<global_vars.X>> references."""
@@ -359,6 +360,8 @@ class SandboxPipeline:
                     task.reqs = _resolve(task.reqs)
                 if task.reqs_file:
                     task.reqs_file = _resolve(task.reqs_file)
+
+        _input_declarations(self)
 
 
 # ---------------------------------------------------------------------------
@@ -752,18 +755,81 @@ def report_versions(base_dir):
 # ---------------------------------------------------------------------------
 
 
-def _prepare_assets(job, hf_local):
-    if not job.assets:
+def _input_declarations(job):
+    """Validate mount-keyed inputs without resolving or transferring artifacts."""
+    if job.inputs is None:
         return {}
-    if not isinstance(job.assets, list) or not all(isinstance(ref, str) for ref in job.assets):
+    if not isinstance(job.inputs, dict):
+        raise ValueError("inputs must map container paths to {ref, env?, role?} objects")
+    if job.assets and job.inputs:
+        raise ValueError("Use inputs or legacy assets, not both")
+    destinations = []
+    environments = set()
+    for mount, spec in job.inputs.items():
+        if (
+            not isinstance(mount, str)
+            or not re.fullmatch(r"/inputs/[\w./-]+", mount)
+            or any(part in ("", ".", "..") for part in mount.split("/")[2:])
+        ):
+            raise ValueError("Input mounts must be normalized paths below /inputs/")
+        destination = PurePosixPath(mount)
+        if any(
+            destination.is_relative_to(other) or other.is_relative_to(destination)
+            for other in destinations
+        ):
+            raise ValueError("Input mounts must not overlap")
+        destinations.append(destination)
+        if (
+            not isinstance(spec, dict)
+            or set(spec) - {"ref", "env", "role"}
+            or not isinstance(spec.get("ref"), str)
+            or not re.fullmatch(r"[\w./:@+-]+", spec["ref"])
+        ):
+            raise ValueError("Each input needs a catalog ref and optional env/role strings")
+        if "role" in spec and (not isinstance(spec["role"], str) or not spec["role"]):
+            raise ValueError("Input role must be a nonempty string")
+        if "env" in spec:
+            env = spec["env"]
+            if not isinstance(env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env):
+                raise ValueError("Input env must be an environment variable name")
+            if env in environments:
+                raise ValueError("Input env names must be unique")
+            environments.add(env)
+            for task in job.tasks:
+                if task.skip:
+                    continue
+                values = task.environment or {}
+                values = values if isinstance(values, list) else [values]
+                if any(env in value and str(value[env]) != mount for value in values):
+                    raise ValueError("Task environment conflicts with a declared input")
+    return job.inputs
+
+
+def _prepare_assets(job, hf_local):
+    inputs = _input_declarations(job)
+    if not job.assets and not inputs:
+        return {}
+    if not inputs and (
+        not isinstance(job.assets, list) or not all(isinstance(ref, str) for ref in job.assets)
+    ):
         raise ValueError("assets must be a list of strings")
-    names = [value.partition("@")[0] for value in job.assets]
-    if len(set(names)) != len(names) or any(
-        not re.fullmatch(r"[\w.-]+/[\w.-]+", name)
-        or any(part in (".", "..") for part in name.split("/"))
-        for name in names
+    names = [] if inputs else [value.partition("@")[0] for value in job.assets]
+    if not inputs and (
+        len(set(names)) != len(names)
+        or any(
+            not re.fullmatch(r"[\w.-]+/[\w.-]+", name)
+            or any(part in (".", "..") for part in name.split("/"))
+            for name in names
+        )
     ):
         raise ValueError("assets must contain unique org/name or org/name@revision references")
+    destinations = (
+        [PurePosixPath(mount) for mount in inputs]
+        if inputs
+        else [PurePosixPath("/hf-local") / name for name in names]
+    )
+    if inputs and not job.asset_resolver:
+        raise ValueError("Mount-keyed inputs require an asset_resolver supporting schema_version 2")
     if job.asset_timeout <= 0:
         raise ValueError("asset_timeout must be positive")
     targets = {}
@@ -771,15 +837,14 @@ def _prepare_assets(job, hf_local):
         if task.skip:
             continue
         mounts = task.slurm_config.container_mounts or []
-        if hf_local is None or task.slurm_config.local:
-            destinations = [PurePosixPath(m.split(":")[1]) for m in mounts if ":" in m]
-            for destination in destinations:
-                if destination == PurePosixPath("/hf-local") and hf_local is None:
+        if inputs or hf_local is None or task.slurm_config.local:
+            mount_destinations = [PurePosixPath(m.split(":")[1]) for m in mounts if ":" in m]
+            for destination in mount_destinations:
+                if not inputs and destination == PurePosixPath("/hf-local") and hf_local is None:
                     continue
                 if any(
-                    destination.is_relative_to(PurePosixPath("/hf-local") / name)
-                    or (PurePosixPath("/hf-local") / name).is_relative_to(destination)
-                    for name in names
+                    destination.is_relative_to(declared) or declared.is_relative_to(destination)
+                    for declared in destinations
                 ):
                     raise ValueError("Container mounts overlap a declared asset destination")
         if hf_local is None and any(
@@ -805,7 +870,9 @@ def _prepare_assets(job, hf_local):
                 isinstance(arg, str) and arg for arg in job.asset_resolver
             ):
                 raise ValueError("asset_resolver must be a nonempty command argv list")
-            request = {"schema_version": 1, "assets": job.assets, "host": host, "hf_local": root}
+            schema = 2 if inputs else 1
+            request = {"schema_version": schema, "host": host, "hf_local": root}
+            request["inputs" if inputs else "assets"] = inputs or job.assets
             try:
                 result = subprocess.run(  # nosec B603 - explicitly configured argv, no shell.
                     job.asset_resolver,
@@ -841,18 +908,44 @@ def _prepare_assets(job, hf_local):
                     + ("" if response.get("retry") else " (same JSON request on stdin)")
                     + f". {diagnostic}"
                 )
-            resolved = response.get("assets", [])
+            resolved = response.get("inputs" if inputs else "assets", [])
             if (
-                response.get("schema_version") != 1
+                response.get("schema_version") != schema
                 or not isinstance(resolved, list)
                 or not all(isinstance(item, dict) for item in resolved)
-                or [a.get("name") for a in resolved] != names
-                or any(
-                    "@" in ref and not isinstance(item.get("version"), str)
-                    for ref, item in zip(job.assets, resolved)
+                or (inputs and [a.get("mount") for a in resolved] != list(inputs))
+                or (not inputs and [a.get("name") for a in resolved] != names)
+                or (
+                    not inputs
+                    and any(
+                        "@" in ref and not isinstance(item.get("version"), str)
+                        for ref, item in zip(job.assets, resolved)
+                    )
+                )
+                or (
+                    inputs
+                    and any(
+                        item.get("ref") != inputs[item["mount"]]["ref"]
+                        or not isinstance(item.get("version"), str)
+                        or not item["version"]
+                        for item in resolved
+                    )
                 )
             ):
                 raise ValueError("Asset resolver returned an incomplete manifest")
+            if inputs:
+                resolved = [
+                    {
+                        **{
+                            key: item[key]
+                            for key in ("path", "version", "backend", "artifact_id")
+                            if key in item
+                        },
+                        "mount": item["mount"],
+                        **inputs[item["mount"]],
+                    }
+                    for item in resolved
+                ]
         elif host is None and all("@" not in ref for ref in job.assets):
             resolved = [{"name": name, "path": str(Path(root, name).resolve())} for name in names]
             if any(not Path(item["path"]).is_dir() for item in resolved):
@@ -953,6 +1046,13 @@ def run_jobs(
                         task_env = task.environment
                 for k, v in task_env.items():
                     task_env[k] = "" if v is None else str(v)
+                task_env.update(
+                    {
+                        spec["env"]: mount
+                        for mount, spec in (job.inputs or {}).items()
+                        if "env" in spec
+                    }
+                )
 
                 if hf_local is not None:
                     executor = build_docker_executor(
@@ -992,9 +1092,9 @@ def run_jobs(
                         )
                         target = (task.slurm_config.host, root)
                         mounts = executor.container_mounts
-                    mounts.extend(
-                        f"{item['path']}:/hf-local/{item['name']}:ro" for item in assets[target]
-                    )
+                    for item in assets[target]:
+                        destination = item.get("mount") or f"/hf-local/{item['name']}"
+                        mounts.append(f"{item['path']}:{destination}:ro")
 
                 # When allow_to_fail is set, use "afterany" so downstream tasks
                 # run even if a predecessor times out or fails.
@@ -1052,20 +1152,20 @@ def run_jobs(
                         dependencies=[dependency],
                     )
 
-            exp.run(detach=detach)
+            # Write metadata for downstream tools
+            metadata = {
+                "experiment_id": exp._id,
+                "job_name": job_name,
+                "allow_to_fail": job.allow_to_fail,
+                "note": job.note,
+                "assets": [
+                    {"host": host, "hf_local": root, "resolved": resolved}
+                    for (host, root), resolved in assets.items()
+                ],
+            }
+            metadata_path = os.path.join("experiments", experiment_title, exp._id, "metadata.json")
+            os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+            with open(metadata_path, "w") as f:
+                json.dump(metadata, f)
 
-        # Write metadata for downstream tools
-        metadata = {
-            "experiment_id": exp._id,
-            "job_name": job_name,
-            "allow_to_fail": job.allow_to_fail,
-            "note": job.note,
-            "assets": [
-                {"host": host, "hf_local": root, "resolved": resolved}
-                for (host, root), resolved in assets.items()
-            ],
-        }
-        metadata_path = os.path.join("experiments", experiment_title, exp._id, "metadata.json")
-        os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f)
+            exp.run(detach=detach)

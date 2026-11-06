@@ -27,6 +27,7 @@ Coverage:
 import json
 import os
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -505,16 +506,30 @@ class TestRunJobsExtended:
 
 
 @pytest.mark.parametrize(
+    "input_ref",
+    [None, "Org/Model@v1", "modelopt:hf/Org/Model/v1", "00000000-0000-0000-0000-000000000001"],
+)
+@pytest.mark.parametrize(
     ("remote", "state"),
     [
         (remote, state)
         for remote in (False, True)
-        for state in ("ready", "waiting", "overlapping_mount")
+        for state in (
+            "ready",
+            "waiting",
+            "overlapping_mount",
+            "submit_failure",
+            "bad_identity",
+            "unpinned",
+            "out_of_cache",
+        )
     ]
     + [(True, "srun_override")]
     + [(False, state) for state in ("missing", "symlink_escape", "bad_json")],
 )
-def test_declared_assets_gate_submission_and_pin_mounts(tmp_path, monkeypatch, remote, state):
+def test_declared_assets_gate_submission_and_pin_mounts(
+    tmp_path, monkeypatch, remote, state, input_ref
+):
     """Only ready inputs reach submission, using pinned mounts and recorded provenance."""
     monkeypatch.chdir(tmp_path)
     root = tmp_path / "hf-local"
@@ -528,18 +543,33 @@ def test_declared_assets_gate_submission_and_pin_mounts(tmp_path, monkeypatch, r
         outside.mkdir()
         snapshot.symlink_to(outside, target_is_directory=True)
     provider = tmp_path / "provider.py"
+    declared = {"/inputs/model": {"ref": input_ref, "env": "MODEL", "role": "base_model"}}
+    response_item = {"path": str(snapshot), "version": "v1"}
+    response_item.update(
+        {"mount": "/inputs/model", "ref": input_ref} if input_ref else {"name": "Org/Model"}
+    )
+    if state == "bad_identity":
+        response_item["ref" if input_ref else "name"] = "Wrong/Model"
+    elif state == "unpinned":
+        response_item.pop("version")
+    elif state == "out_of_cache":
+        response_item["path"] = str(tmp_path / "outside")
     provider.write_text(
         "import json, sys\nrequest = json.load(sys.stdin)\n"
-        "assert request['assets'] == ['Org/Model@v1']\n"
-        f"assert request['host'] == {('login.example.com' if remote else None)!r}\n"
+        + (
+            f"assert request['inputs'] == {declared!r}\n"
+            if input_ref
+            else "assert request['assets'] == ['Org/Model@v1']\n"
+        )
+        + f"assert request['host'] == {('login.example.com' if remote else None)!r}\n"
         f"assert request['hf_local'] == {str(root)!r}\n"
         "print("
         + repr(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2 if input_ref else 1,
                     "status": "waiting" if state == "waiting" else "ready",
-                    "assets": [{"name": "Org/Model", "path": str(snapshot), "version": "v1"}],
+                    "inputs" if input_ref else "assets": [response_item],
                 }
             )
         )
@@ -555,12 +585,14 @@ def test_declared_assets_gate_submission_and_pin_mounts(tmp_path, monkeypatch, r
         container_mounts=[f"{root}:/hf-local"] if remote else [],
     )
     if state == "overlapping_mount":
-        config.container_mounts.append("/unrelated:/hf-local/Org/Model/weights")
+        destination = "/inputs/model" if input_ref else "/hf-local/Org/Model"
+        config.container_mounts.append(f"/unrelated:{destination}/weights")
     if state == "srun_override":
         config.srun_args = ["--container-mounts=/unrelated:/hf-local"]
     pipeline = SandboxPipeline(
         task_0=SandboxTask0(script="test.sh", slurm_config=config),
-        assets=["Org/Model@v1"],
+        assets=None if input_ref else ["Org/Model@v1"],
+        inputs=declared if input_ref else None,
         asset_resolver=[sys.executable, str(provider)],
     )
     executor = MagicMock()
@@ -572,7 +604,7 @@ def test_declared_assets_gate_submission_and_pin_mounts(tmp_path, monkeypatch, r
         patch("core.build_slurm_executor", return_value=executor),
     ):
         factory.return_value._id = "asset_test"
-        if state != "ready":
+        if state not in ("ready", "submit_failure"):
             with pytest.raises(ValueError) as error:
                 run_jobs(
                     {"job": pipeline},
@@ -589,18 +621,42 @@ def test_declared_assets_gate_submission_and_pin_mounts(tmp_path, monkeypatch, r
             if state == "bad_json":
                 assert "provider failure" in str(error.value)
             return
-        run_jobs(
-            {"job": pipeline},
-            None if remote else str(root),
-            "u",
-            None,
-            str(tmp_path),
-            None,
-            {},
-            {},
-            base_dir=str(tmp_path),
-        )
+        if state == "submit_failure":
+            factory.return_value.run.side_effect = RuntimeError("submission failed")
+        with pytest.raises(RuntimeError) if state == "submit_failure" else nullcontext():
+            run_jobs(
+                {"job": pipeline},
+                None if remote else str(root),
+                "u",
+                None,
+                str(tmp_path),
+                None,
+                {},
+                {},
+                base_dir=str(tmp_path),
+            )
         mounts = executor.container_mounts if remote else executor.volumes
-        assert f"{snapshot}:/hf-local/Org/Model:ro" in mounts
+        destination = "/inputs/model" if input_ref else "/hf-local/Org/Model"
+        assert f"{snapshot}:{destination}:ro" in mounts
+        if input_ref:
+            assert factory.return_value.add.call_args.args[0].env["MODEL"] == destination
         metadata = json.loads(Path("experiments/cicd/asset_test/metadata.json").read_text())
         assert metadata["assets"][0]["resolved"][0]["version"] == "v1"
+
+
+@pytest.mark.parametrize(
+    ("inputs", "environment"),
+    [
+        ({"model": {"ref": "Org/Model"}}, None),
+        ({"/inputs/a/../b": {"ref": "Org/Model"}}, None),
+        ({"/inputs/a": {"ref": "Org/Model"}, "/inputs/a/b": {"ref": "Org/Other"}}, None),
+        ({"/inputs/model": "Org/Model"}, None),
+        ({"/inputs/model": {"ref": "Org/Model", "provider": "hf"}}, None),
+        ({"/inputs/model": {"ref": "Org/Model", "env": "MODEL"}}, [{"MODEL": "/wrong"}]),
+        ({"/inputs/model": {"ref": "Org/Model", "env": "MODEL"}}, {"MODEL": "/wrong"}),
+    ],
+)
+def test_invalid_inputs_rejected_before_resolution(inputs, environment):
+    """An invalid declaration must not reach a resolver or executor."""
+    with pytest.raises(ValueError):
+        SandboxPipeline(inputs=inputs, task_0=SandboxTask0(inline="true", environment=environment))

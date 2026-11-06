@@ -23,6 +23,11 @@ Coverage:
     - Global vars: <<global_vars.X>> resolved in both args and environment
 """
 
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
 import yaml
 from core import (
     GlobalVariables,
@@ -32,6 +37,41 @@ from core import (
     SandboxTask1,
     register_factory,
 )
+
+
+@pytest.mark.parametrize("form", ["--yaml", "--yaml=", "pipeline=@"])
+def test_mount_keyed_inputs_through_real_cli(tmp_path, form):
+    """CLI loading preserves literal mount keys and existing task overrides."""
+    declaration = {"/inputs/model.v1": {"ref": "Org/Model@v1", "env": "MODEL"}}
+    pipeline = {
+        "inputs": declaration,
+        "task_0": {"inline": "true", "slurm_config": {"_factory_": "slurm_factory"}},
+    }
+    config = pipeline if form == "pipeline=@" else {"pipeline": pipeline}
+    spec = tmp_path / "workflow.yaml"
+    spec.write_text(yaml.safe_dump(config))
+    resolved = tmp_path / "resolved.yaml"
+    arguments = ["--yaml", str(spec)] if form == "--yaml" else [form + str(spec)]
+    launcher = Path(__file__).resolve().parents[1] / "launch.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(launcher),
+            *arguments,
+            "pipeline.task_0.slurm_config.nodes=2",
+            "--to-yaml",
+            str(resolved),
+            "--yes",
+        ],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    assert resolved.is_file(), result.stdout + result.stderr
+    actual = yaml.safe_load(resolved.read_text())["pipeline"]
+    assert actual["inputs"] == declaration
+    assert actual["task_0"]["slurm_config"]["nodes"] == 2
 
 
 class TestYamlFormatParsing:
