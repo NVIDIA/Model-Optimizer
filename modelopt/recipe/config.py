@@ -489,7 +489,7 @@ class ModelOptEagleRecipe(ModelOptSpeculativeRecipeBase):
 
     @model_validator(mode="after")
     def _derive_eagle_offline(self) -> Self:
-        self.eagle.eagle_offline = self.data.mode != "online"
+        self.eagle.eagle_offline = self.data.mode not in ("online", "packed")
         return self
 
     @model_validator(mode="after")
@@ -522,9 +522,11 @@ class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
     def _derive_dflash_offline(self) -> Self:
         # offline (dumped .pt) and streaming (hidden states via NIXL RDMA from a vLLM
         # serve) both feed pre-computed base hidden states to the DFlash module, so
-        # both set dflash_offline. Only fully-online training runs the base model.
+        # both set dflash_offline. "packed" is an online mode with a different data
+        # source -- pre-tokenized blocks instead of rendered conversations -- and the
+        # base still runs forward, so it must not be treated as offline.
         # Mirrors ModelOptEagleRecipe._derive_eagle_offline.
-        self.dflash.dflash_offline = self.data.mode != "online"
+        self.dflash.dflash_offline = self.data.mode not in ("online", "packed")
         return self
 
 
