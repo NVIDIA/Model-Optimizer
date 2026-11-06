@@ -76,12 +76,12 @@ def _rows_per_chunk(ggml_format: GGMLFormat) -> int:
 def search_scratch(ggml_format: GGMLFormat, rows: int) -> int:
     """Bytes :func:`search_choices` holds at once on ``rows`` rows, as measured with the CUDA codecs.
 
-    For each chunk of rows, every choice's payload and float32 errors, and two einsum temporaries
-    as large as the errors.
+    For each chunk of rows, every choice's payload and float32 errors; the fused search kernel
+    needs nothing as large besides.
     """
     chunk = min(rows, _rows_per_chunk(ggml_format))
     candidates = ggml_format.num_choices * chunk
-    return candidates * (3 * 4 * GGML_BLOCK_SIZE + ggml_format.block_bytes)
+    return candidates * (4 * GGML_BLOCK_SIZE + ggml_format.block_bytes)
 
 
 def _search_block(ggml_format, block, hessian, importance, chunk_args, decode_args):
