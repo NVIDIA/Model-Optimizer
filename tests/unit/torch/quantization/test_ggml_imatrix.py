@@ -28,6 +28,7 @@ from torch import nn
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
+from modelopt.torch.export.moe_utils import _export_fused_experts
 from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
@@ -66,7 +67,9 @@ def _record_importance(monkeypatch):
     calls = []
 
     def recording_quantize(weight, **kwargs):
-        calls.append(kwargs.get("importance"))
+        # Forwards re-encode under the pinned scales; only calibration's own encodes count.
+        if "scales" not in kwargs:
+            calls.append(kwargs.get("importance"))
         return IQ2_XXS.quantize(weight, **kwargs)
 
     monkeypatch.setitem(
@@ -101,7 +104,8 @@ def test_imatrix_pins_the_codes_it_chose():
     mtq.quantize(plain, _config("max"), forward_loop=lambda m: m(inputs))
 
     decoded = _decoded(model.weight_quantizer, model.weight.shape)
-    assert torch.equal(model.weight.detach(), decoded)
+    # IQ2_XXS keeps the pinned scales, so the weight stays as it was and encodes to the pin again.
+    assert torch.equal(model.weight.detach(), original)
     torch.testing.assert_close(model(inputs), inputs @ decoded.T)
 
     def output_error(weight):
@@ -173,7 +177,7 @@ def test_a_module_calibration_never_reached_gets_the_plain_search():
 
     packed, shape = IQ2_XXS.quantize(original)
     plain = IQ2_XXS.dequantize(packed, shape, dtype=torch.float32)
-    assert torch.equal(model["unused"].weight.detach(), plain)
+    assert torch.equal(model["unused"].weight, original)
     assert torch.equal(_decoded(model["unused"].weight_quantizer, original.shape), plain)
 
 
@@ -205,11 +209,42 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
             torch.testing.assert_close(
                 down_calls[idx], _importance((F.silu(gate) * up).square().mean(dim=0))
             )
-        for weight, quantizers in (
-            (experts.gate_up_proj, experts.gate_up_proj_weight_quantizers),
-            (experts.down_proj, experts.down_proj_weight_quantizers),
+        for weight, original_weight, quantizers in (
+            (
+                experts.gate_up_proj,
+                original.experts.gate_up_proj,
+                experts.gate_up_proj_weight_quantizers,
+            ),
+            (experts.down_proj, original.experts.down_proj, experts.down_proj_weight_quantizers),
         ):
-            assert torch.equal(weight[idx].detach(), _decoded(quantizers[idx], weight[idx].shape))
+            assert pinned_packed_weight(quantizers[idx], "iq2_xxs") is not None
+            assert torch.equal(weight[idx], original_weight[idx])
+
+
+def test_hf_export_writes_each_fused_expert_s_pinned_rows(moe):
+    # imatrix leaves the experts' weights unrounded, and export splits gate_up into gate and up.
+    recipe = load_recipe("general/ptq/iq2_xxs_experts_only").quantize.model_dump()
+    mtq.quantize(moe, recipe, lambda m: m(_inputs(rows=96, columns=HIDDEN)))
+    experts = moe.mlp.experts
+    pins = [
+        tuple(
+            pinned_packed_weight(quantizers[idx], "iq2_xxs").clone()
+            for quantizers in (
+                experts.gate_up_proj_weight_quantizers,
+                experts.down_proj_weight_quantizers,
+            )
+        )
+        for idx in range(NUM_EXPERTS)
+    ]
+
+    _export_fused_experts(experts, torch.bfloat16)
+
+    for idx, (gate_up, down) in enumerate(pins):
+        expert = getattr(experts, str(idx))
+        gate, up = gate_up.chunk(2)
+        assert torch.equal(expert.gate_proj.weight, gate)
+        assert torch.equal(expert.up_proj.weight, up)
+        assert torch.equal(expert.down_proj.weight, down)
 
 
 @pytest.mark.parametrize("layerwise", [False, True])

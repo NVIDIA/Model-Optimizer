@@ -56,6 +56,7 @@ from transformers import (
     AutoModelForSeq2SeqLM,
     AutoModelForSpeechSeq2Seq,
     FineGrainedFP8Config,
+    GenerationConfig,
     PretrainedConfig,
 )
 from transformers.conversion_mapping import get_model_conversion_mapping
@@ -89,6 +90,7 @@ from modelopt.torch.utils.moe import (
     _SUB_CONFIG_ATTRS,
     _choose_ep_degree,
     _ep_config,
+    _ep_spec,
     _fsdp2_way_out,
     _num_experts_from_config,
     _routed_expert_keys,
@@ -353,6 +355,14 @@ def build_meta_causal_lm(
         for name, tensor in chain(model.named_parameters(), model.named_buffers()):
             if match := pattern.search(name):
                 tensor.data = tensor.data.to(dtype_plan[group_to_glob[match.lastgroup]])
+    # from_pretrained reads the checkpoint's generation_config.json; a build from the config gets
+    # defaults without its stop/pad tokens, which an export would then write in its place.
+    if (
+        ckpt_path
+        and os.path.isfile(os.path.join(ckpt_path, "generation_config.json"))
+        and model.can_generate()
+    ):
+        model.generation_config = GenerationConfig.from_pretrained(ckpt_path)
     model.eval()
     return model
 
@@ -1850,10 +1860,14 @@ def _decide_distribution(
             f"{replicate} to load it without expert parallelism, whole on every rank."
         )
     # Why the expert-parallel load would refuse this MoE, or None, whatever EP degree is set: its
-    # spec, the transformers it needs, its checkpoint or its plan. An MoE it refuses cannot be
-    # expert-parallel here, so is not refused below for being left whole.
+    # spec, the transformers it needs, its spec's prepare, its checkpoint or its plan. An MoE it
+    # refuses cannot be expert-parallel here, so is not refused below for being left whole.
     refusal = (
-        (_spec_refusal(hf_config.model_type) or _ep_load_refusal(hf_config, ep_plan))
+        (
+            _spec_refusal(hf_config.model_type)
+            or _prepare_refusal(hf_config, ckpt_path, trust_remote_code)
+            or _ep_load_refusal(hf_config, ep_plan)
+        )
         if experts
         else None
     )
@@ -2030,11 +2044,14 @@ def resolve_distribution_plan(
     Unless the call or rank 0's knobs rule expert parallelism out (a single process, an
     ``auto_class`` the sharded loads refuse, or an EP degree of 1, which auto is for a model whose
     spec refuses expert parallelism on the installed transformers), every rank applies the model's
-    spec to a copy of the config first
-    (:func:`~modelopt.torch.utils.moe.apply_distributed_support`): for several models it is what
-    supplies the expert-parallel plan, and an expert-parallel plan returns that copy. Any other
-    plan returns the config without it, which the export would otherwise write out; the spec's
-    ``prepare`` has run for it all the same, which its contract allows
+    spec to a copy of the config first, in the collective "model spec" step: its plan, and what
+    makes the checkpoint's own code importable, with no ``prepare`` run
+    (:func:`~modelopt.torch.utils.moe.apply_distributed_support` with ``prepare=False``). For
+    several models it is what supplies the expert-parallel plan. An EP degree of 1 still builds the
+    model, so the step then runs what makes the checkpoint's own code build, and nothing else of the
+    spec (:attr:`~modelopt.torch.models.EPSpec.make_buildable`). An expert-parallel plan then has
+    every rank prepare a copy of the config as read, in the collective "model spec prepared" step,
+    and returns that copy. Any other plan returns the config as read, with no ``prepare`` run
     (:attr:`~modelopt.torch.models.EPSpec.prepare`). A plan that
     leaves an expert-parallel MoE whole on every rank raises, unless both knobs ask for exactly
     that: ``ep_size=1`` with ``dense="replicate"`` (``MODELOPT_EP_DEGREE=1`` and
@@ -2081,38 +2098,73 @@ def resolve_distribution_plan(
     # load that is refused, without the spec, whose prepare could fail, or patch the process, for a
     # load that never shards. An EP degree asked for under init_quantized_weights still takes the
     # spec, for the decision to find the experts the load then refuses to shard.
-    prepared = [hf_config]
-    if dist.broadcast_from(
+    stated = [hf_config]
+    # "build" for an EP degree of 1, whose decision still builds the checkpoint's own code, and for
+    # one left to auto under init_quantized_weights, which needs no plan. The build step also readies
+    # that code for the load that follows (it keeps its shims on the module), so it runs even where
+    # the decision then builds nothing: under init_quantized_weights with a dense layout left to
+    # auto or replicated, the whole load still builds the checkpoint's own code.
+    step = dist.broadcast_from(
         "spec",
         lambda: (
             world_size > 1
             and auto_class in (None, AutoModelForCausalLM)
-            and (ep := _ep_degree(ep_size, hf_config.model_type)) != 1
-            and not (ep == "auto" and _init_quantized_weights())
-        ),
-    ):
-        # Before deciding: deciding without the spec would read an expert-parallel MoE as dense. A
-        # rank that cannot apply it fails every rank, as a checkpoint read does above.
-        def spec_applied() -> bool:
-            prepared[0] = apply_distributed_support(
-                hf_config.model_type,
-                copy.deepcopy(hf_config),
-                ckpt_path=ckpt_path,
-                trust_remote_code=trust_remote_code,
+            and (
+                "plan"
+                if (ep := _ep_degree(ep_size, hf_config.model_type)) != 1
+                and not (ep == "auto" and _init_quantized_weights())
+                else "build"
             )
+        ),
+    )
+    if step:
+        # Before deciding: deciding without the spec would read an expert-parallel MoE as dense. Its
+        # plan only: its prepare, which may patch the process, runs for an expert-parallel plan
+        # alone. A rank that cannot apply it fails every rank, as a checkpoint read does above.
+        def spec_stated() -> bool:
+            if step == "plan":
+                stated[0] = apply_distributed_support(
+                    hf_config.model_type,
+                    copy.deepcopy(hf_config),
+                    ckpt_path=ckpt_path,
+                    trust_remote_code=trust_remote_code,
+                    prepare=False,
+                )
+            elif (ep := _ep_spec(hf_config.model_type)) and ep.make_buildable is not None:
+                # A copy, as the plan arm's: the config is returned, and the load builds from it.
+                ep.make_buildable(
+                    copy.deepcopy(hf_config),
+                    ckpt_path=ckpt_path,
+                    trust_remote_code=trust_remote_code,
+                )
             return True
 
-        dist.all_reduce("model spec", spec_applied, all)
+        dist.all_reduce("model spec", spec_stated, all)
     plan = dist.broadcast_from(
         "plan",
         lambda: _decide_distribution(
-            ckpt_path, prepared[0], world_size, ep_size, dense, trust_remote_code, auto_class
+            ckpt_path, stated[0], world_size, ep_size, dense, trust_remote_code, auto_class
         ),
     )
     if plan != DistributionPlan():
         print_rank_0(f"Distribution: {plan!r}")
-    # Only the expert-parallel load shards by the plan the spec attached.
-    return plan, prepared[0] if plan.is_expert_parallel else hf_config
+    if not plan.is_expert_parallel:
+        return plan, hf_config
+    # Only the expert-parallel load shards by the plan the spec attached, and only it gets the spec
+    # prepared, on every rank.
+    prepared = [hf_config]
+
+    def spec_applied() -> bool:
+        prepared[0] = apply_distributed_support(
+            hf_config.model_type,
+            copy.deepcopy(hf_config),
+            ckpt_path=ckpt_path,
+            trust_remote_code=trust_remote_code,
+        )
+        return True
+
+    dist.all_reduce("model spec prepared", spec_applied, all)
+    return plan, prepared[0]
 
 
 def _make_expert_param_matcher(ep_plan: dict[str, Any]):
@@ -2668,6 +2720,19 @@ def _ep_plan_refusal(ep_plan: dict[str, str]) -> str | None:
     return None
 
 
+def _prepare_refusal(hf_config, ckpt_path: str, trust_remote_code: bool) -> ValueError | None:
+    """Why the model spec's ``prepare`` would refuse this checkpoint, or ``None``.
+
+    ``prepare`` runs only once the plan is decided expert-parallel, so the decision asks first
+    (``EPSpec.prepare_refusal``): a checkpoint it refuses cannot be expert-parallel here.
+    """
+    ep = _ep_spec(hf_config.model_type)
+    if ep is None or ep.prepare_refusal is None:
+        return None
+    why = ep.prepare_refusal(hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code)
+    return ValueError(why) if why is not None else None
+
+
 def _ep_load_refusal(hf_config, ep_plan: dict[str, str]) -> Exception | None:
     """The error the expert-parallel load refuses this model with, by its config, or ``None``.
 
@@ -2676,7 +2741,11 @@ def _ep_load_refusal(hf_config, ep_plan: dict[str, str]) -> Exception | None:
     parallelism out, or the transformers release it needs, is not asked here: the plan decision and
     the load ask the spec first (:func:`~modelopt.torch.utils.moe.check_distributed_support`).
     """
-    if (method := _ckpt_quant_method(hf_config)) not in _EP_SOURCE_FORMATS:
+    # The formats it takes include those the spec's prepare, which runs only once the plan is
+    # decided, has the experts decompress as they load.
+    ep = _ep_spec(hf_config.model_type)
+    takes = _EP_SOURCE_FORMATS | frozenset(ep.decompressed_formats if ep is not None else ())
+    if (method := _ckpt_quant_method(hf_config)) not in takes:
         return NotImplementedError(
             f"The expert-parallel load cannot dequantize a {method!r} checkpoint; an unquantized "
             "copy of the model would load expert-parallel."

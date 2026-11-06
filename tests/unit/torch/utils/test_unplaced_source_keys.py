@@ -31,6 +31,8 @@ from safetensors.torch import load_file, save_file
 pytest.importorskip("accelerate")
 pytest.importorskip("transformers")
 
+import transformers.core_model_loading as cml
+import transformers.modeling_utils as mu
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -435,10 +437,6 @@ def test_compressed_experts_decompressed_at_load_are_placed(tmp_path, monkeypatc
     )
     if Version(transformers_version) < Version("5.8"):
         pytest.skip("the on-the-fly decompression needs transformers >= 5.8")
-    # Imported once the release is known to have them: transformers 4 has no core_model_loading.
-    import transformers.core_model_loading as cml
-    import transformers.modeling_utils as mu
-
     # The decompressor's hooks are process-wide: undone after the test.
     for owner, name in ((cml, "spawn_materialize"), (mu, "get_model_conversion_mapping")):
         monkeypatch.setattr(owner, name, getattr(owner, name))

@@ -130,7 +130,8 @@ def _update_room(helper, weight, block_size) -> int:
     as large as the weight when the input is no wider than a block; and the codec's tables and
     scratch, about 35 MiB on a GPU's first update. Logging the error afterwards holds the original
     in its own dtype and up to five float32 weight-sized tensors: the result, the original, the
-    error and two products.
+    error and two products. Through both, a GGML format that keeps its scales holds the unrounded
+    weight in its own dtype, counted for every format.
     """
     columns = weight.shape[-1]
     rows = weight.numel() // columns
@@ -138,7 +139,8 @@ def _update_room(helper, weight, block_size) -> int:
     weights = 4 * rows * (2 * columns + 5 * block)
     if helper.log_mse:
         weights = max(weights, (5 * 4 + weight.element_size()) * weight.numel())
-    return 2**26 + 32 * helper.hessian.numel() + weights
+    unrounded = weight.element_size() * weight.numel()
+    return 2**26 + 32 * helper.hessian.numel() + weights + unrounded
 
 
 def update_expert_weights(work, block_size, perc_damp):
@@ -637,9 +639,11 @@ class ImatrixEncoder:
     def encode(
         self, weight: torch.Tensor, quantizer, second_moments: torch.Tensor | None
     ) -> torch.Tensor:
-        """Return ``weight`` fake-quantized by ``quantizer``, weighted by ``second_moments``.
+        """Encode ``weight`` weighted by ``second_moments`` and return the weight to keep.
 
-        ``second_moments`` is ``None`` when no calibration input reached the weight.
+        That is ``weight`` fake-quantized by ``quantizer``, or ``weight`` itself when ``quantizer``
+        re-derives the encoding from it. ``second_moments`` is ``None`` when no calibration input
+        reached the weight.
         """
         raise NotImplementedError
 
