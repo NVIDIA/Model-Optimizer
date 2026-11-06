@@ -52,9 +52,10 @@ def _load_checkpoint_tensors(checkpoint_path: Path) -> dict[str, torch.Tensor]:
 
 @pytest.mark.timeout(720)  # Multiple steps in one test hence takes longer than the default timeout
 @pytest.mark.parametrize(
-    ("create_student", "lora_rank"),
+    ("create_student", "lora_rank", "full_rank"),
     [
-        (lambda tmp_path: create_tiny_qwen3_dir(tmp_path, with_tokenizer=True), 0),
+        (lambda tmp_path: create_tiny_qwen3_dir(tmp_path, with_tokenizer=True), 0, False),
+        (lambda tmp_path: create_tiny_qwen3_dir(tmp_path, with_tokenizer=True), 0, True),
         (
             lambda tmp_path: create_tiny_qwen3_dir(
                 tmp_path,
@@ -63,6 +64,7 @@ def _load_checkpoint_tensors(checkpoint_path: Path) -> dict[str, torch.Tensor]:
                 intermediate_size=256,
             ),
             4,
+            False,
         ),
         pytest.param(
             lambda tmp_path: create_tiny_qwen3_5_moe_vl_dir(
@@ -73,19 +75,20 @@ def _load_checkpoint_tensors(checkpoint_path: Path) -> dict[str, torch.Tensor]:
                 layer_types=["linear_attention", "full_attention"],
             ),
             0,
+            False,
         ),
     ],
-    ids=["qwen3_full_rank", "qwen3_lora_nvfp4", "qwen3_5_moe_vl"],
+    ids=["qwen3", "qwen3_full_rank", "qwen3_lora_nvfp4", "qwen3_5_moe_vl"],
 )
-def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
+def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank, full_rank):
     """Quantize a tiny model, run QAD from the quantized student, and export the result.
 
     Covers what only QAD exercises: that the ModelOpt state survives distillation. Per-architecture
-    export is covered more cheaply by test_quantize_export.py, so keep this to one LLM and one VLM.
+    export is covered more cheaply by test_quantize_export.py. Keep plain LLM training alongside
+    selective full-rank and LoRA training, plus a VLM.
     """
     hf_model_path = create_student(tmp_path)
     is_vlm = "vision_config" in (hf_model_path / "config.json").read_text()
-    full_rank = not lora_rank and not is_vlm
     # mrope rotary embeddings CP-shard themselves, so the VLM exercises the path where the batch's
     # position ids must stay full-length. The LLM case stays on tensor parallelism.
     cp_size = num_gpus if is_vlm else 1
