@@ -110,27 +110,30 @@ class HFDFlash2Model(HFDFlashModel):
 
         return DFlash2Exporter(self)
 
-    def _fused_head_extras(self):
-        """The selector scores the backbone's top-k candidates."""
-        selector = self.dflash_module.candidate_selector
-        return set(), selector.top_k if self.dflash_selector_loss_alpha > 0 else 0
+    def _head_request(self):
+        """The backbone loss's statistics, and the top-k candidates the selector scores."""
+        request = super()._head_request()
+        if self.dflash_selector_loss_alpha <= 0:
+            return request
+        return request.extend(top_k=self.dflash_module.candidate_selector.top_k)
 
     def _selector_loss(
         self,
-        logits,
+        unary_logits,
+        candidate_ids,
         target_ids,
         hidden,
         predecessor_ids,
         supervised_mask,
         loss_weights,
         weight_sum,
-        head_stats=None,
     ):
         """Cross-entropy over the selector's candidate set, and its top-1 accuracy.
 
         Args:
-            logits: Backbone logits per block position ``[B, N, block_size, V]``, or ``None``
-                under ``dflash_fused_loss``, whose pass took their top-k into ``head_stats``.
+            unary_logits: The backbone's logits of its top-k candidates per block position
+                ``[B, N, block_size, k]``, differentiable.
+            candidate_ids: Those candidates' ids, in descending logit order, same shape.
             target_ids: Gold token ids ``[B, N, block_size]``.
             hidden: Backbone hidden states ``[B, N, block_size, H]``.
             predecessor_ids: Teacher-forced predecessor ids ``[B, N, block_size]``.
@@ -146,12 +149,6 @@ class HFDFlash2Model(HFDFlashModel):
         """
         selector = self.dflash_module.candidate_selector
         top_k = selector.top_k
-
-        if logits is None:
-            unary_logits = head_stats.top_logits.view(*target_ids.shape, top_k)
-            candidate_ids = head_stats.top_ids.view(*target_ids.shape, top_k)
-        else:
-            unary_logits, candidate_ids = logits.topk(top_k, dim=-1)
 
         # Train on the strict top-k, the candidate set serving actually builds. A gold
         # token the backbone did not propose is a backbone recall failure, not a
@@ -228,13 +225,12 @@ class HFDFlash2Model(HFDFlashModel):
 
     def _compute_loss(
         self,
-        logits,
+        draft_hidden,
         input_ids,
         anchor_positions,
         block_keep_mask,
         loss_mask,
         *,
-        draft_hidden=None,
         base_outputs=None,
     ):
         """Backbone DFlash loss plus the candidate-selector cross-entropy.
@@ -245,18 +241,17 @@ class HFDFlash2Model(HFDFlashModel):
         the selector's own accuracy is logged separately.
         """
         loss, accuracy, terms = super()._compute_loss(
-            logits,
+            draft_hidden,
             input_ids,
             anchor_positions,
             block_keep_mask,
             loss_mask,
-            draft_hidden=draft_hidden,
             base_outputs=base_outputs,
             return_terms=True,
         )
         if self.dflash_lk_loss_type != "ce":
             loss = self._lk_loss(terms)
-        if self.dflash_selector_loss_alpha <= 0 or draft_hidden is None:
+        if self.dflash_selector_loss_alpha <= 0:
             return loss, accuracy
 
         bsz = input_ids.shape[0]
@@ -279,15 +274,16 @@ class HFDFlash2Model(HFDFlashModel):
 
         # The backbone's own mask and position weights: a block position's choice only
         # matters if every earlier one was accepted, which decay / D-PACE model.
+        per_position = (bsz, n_blocks, block_size, -1)
         selector_loss, selector_accuracy, selector_coverage = self._selector_loss(
-            None if logits is None else logits.reshape(bsz, n_blocks, block_size, -1),
+            terms.head_stats.top_logits.view(per_position),
+            terms.head_stats.top_ids.view(per_position),
             target_ids,
-            draft_hidden.reshape(bsz, n_blocks, block_size, -1),
+            draft_hidden.reshape(per_position),
             predecessor_ids,
             terms.supervised_mask.view_as(target_ids),
             terms.weights.view_as(target_ids),
             terms.weight_sum,
-            head_stats=terms.head_stats,
         )
         self._selector_metrics = {
             "selector_accuracy": selector_accuracy,

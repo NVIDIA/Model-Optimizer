@@ -13,38 +13,145 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fused, row-chunked lm_head statistics for DFlash-family training.
+"""Per-row statistics of an lm_head's logits for DFlash-family training.
 
-The draft's vocab-wide logits are read only through per-row statistics: distillation
-cross-entropy and total variation against a teacher, label cross-entropy, logsumexp, argmax
-and top-k. Each chunk of rows is projected and reduced to those statistics, and the
-hidden-space gradient of every differentiable one is written in the same pass, so no
-``[rows, vocab]`` tensor outlives its chunk or is recomputed in backward.
+A loss reads the draft's vocab-wide logits only through per-row statistics: distillation
+cross-entropy against a teacher, label cross-entropy, logsumexp, argmax and top-k. A
+:class:`HeadRequest` names the ones it reads, and either backend returns them as a
+:class:`HeadStats`:
+
+* :func:`materialized_head_stats` reads them off logits the head already produced, through
+  autograd.
+* :func:`fused_head_stats` projects row chunks through the head's weight and reduces each to
+  the statistics in the same pass, writing the hidden-space gradient of every differentiable
+  one, so no ``[rows, vocab]`` tensor outlives its chunk or is recomputed in backward.
 """
 
 import functools
-from collections.abc import Iterable
 from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 
-__all__ = ["TERMS", "HeadStats", "fused_head_stats"]
+__all__ = [
+    "TERMS",
+    "HeadRequest",
+    "HeadStats",
+    "fused_head_stats",
+    "fused_projection",
+    "materialized_head_stats",
+]
 
-# Per-row statistics that can carry a gradient back to the hidden states.
-TERMS = ("kd_ce", "tv", "hard_ce", "lse")
+# Per-row statistics that can carry a gradient back to the head's input.
+TERMS = ("kd_ce", "hard_ce", "lse")
+
+
+class HeadRequest(NamedTuple):
+    """The statistics of the head's logits a loss reads, honored alike by both backends.
+
+    ``grads`` come back differentiable. ``values`` come back detached, for weights and
+    metrics: a loss term built on one trains nothing, so whatever the loss differentiates
+    belongs in ``grads``. ``top_k`` also returns each row's ``top_k`` ids and their logits,
+    differentiable. Each row's argmax is always returned.
+    """
+
+    grads: frozenset[str] = frozenset()
+    values: frozenset[str] = frozenset()
+    top_k: int = 0
+
+    def extend(self, *, grads=(), values=(), top_k=0) -> "HeadRequest":
+        """This request and more; one head pass serves a single ``top_k``."""
+        if top_k and self.top_k and top_k != self.top_k:
+            raise ValueError(f"One head pass serves one top_k; got {self.top_k} and {top_k}.")
+        return HeadRequest(self.grads | set(grads), self.values | set(values), top_k or self.top_k)
 
 
 class HeadStats(NamedTuple):
-    """Per-row statistics of the head's logits; a statistic that was not requested is ``None``."""
+    """Per-row statistics of the head's logits; a statistic not requested is ``None``."""
 
     kd_ce: torch.Tensor | None  # -sum(p * log q) against the teacher distribution p
-    tv: torch.Tensor | None  # 0.5 * |p - q|_1: one minus the acceptance rate of q against p
     hard_ce: torch.Tensor | None  # -log q[target]
-    lse: torch.Tensor | None  # logsumexp of the logits
+    lse: torch.Tensor | None  # logsumexp of the logits, in fp32
     top1: torch.Tensor  # argmax
     top_ids: torch.Tensor | None  # top-k ids, descending
     top_logits: torch.Tensor | None  # their logits, differentiable
+
+
+def _check_request(request, *, vocab, teacher, targets):
+    """Refuse a request the inputs cannot serve, the same way from either backend."""
+    named = request.grads | request.values
+    if unknown := named - set(TERMS):
+        raise ValueError(f"Unknown statistics {sorted(unknown)}; choose from {TERMS}.")
+    if "kd_ce" in named and teacher is None:
+        raise ValueError("kd_ce needs the teacher's logits or hidden states.")
+    if "hard_ce" in named and targets is None:
+        raise ValueError("hard_ce needs targets.")
+    if request.top_k > vocab:
+        raise ValueError(f"top_k={request.top_k} exceeds the vocabulary size {vocab}.")
+
+
+def materialized_head_stats(
+    logits: torch.Tensor,
+    request: HeadRequest,
+    *,
+    targets: torch.Tensor | None = None,
+    teacher_logits: torch.Tensor | None = None,
+) -> HeadStats:
+    """The requested statistics of ``logits``, which the head already produced, through autograd.
+
+    Args:
+        logits: ``[R, V]`` output of the head, whatever transform its forward applies.
+        request: The statistics to return.
+        targets: ``[R]`` label ids, needed for ``hard_ce``.
+        teacher_logits: ``[R, V]`` teacher logits, needed for ``kd_ce``.
+    """
+    _check_request(request, vocab=logits.shape[-1], teacher=teacher_logits, targets=targets)
+
+    def stat(term, compute):
+        if term in request.grads:
+            return compute()
+        if term in request.values:
+            with torch.no_grad():
+                return compute()
+        return None
+
+    kd_ce = stat(
+        "kd_ce",
+        lambda: (
+            -(torch.softmax(teacher_logits, dim=-1) * torch.log_softmax(logits, dim=-1)).sum(dim=-1)
+        ),
+    )
+    hard_ce = stat("hard_ce", lambda: F.cross_entropy(logits, targets, reduction="none"))
+    top_logits = top_ids = None
+    if request.top_k:
+        top_logits, top_ids = logits.topk(request.top_k, dim=-1)
+    lse = stat("lse", lambda: torch.logsumexp(logits.float(), dim=-1))
+    with torch.no_grad():
+        top1 = logits.argmax(dim=-1)
+    return HeadStats(kd_ce, hard_ce, lse, top1, top_ids, top_logits)
+
+
+def fused_projection(head: nn.Module) -> tuple[torch.Tensor, float | None, float | None]:
+    """``(weight, logit_scale, soft_cap)`` with which :func:`fused_head_stats` reproduces ``head``.
+
+    The fused pass reads ``head.weight`` alone, so it reproduces a bias-free ``nn.Linear``
+    without forward hooks whose forward is either ``nn.Linear``'s own, or applies after the
+    projection exactly the transform its ``logit_transform()`` returns as
+    ``(logit_scale, soft_cap)``. Anything else, such as a bias, a quantizer or a hook, would be
+    skipped silently, so it is refused.
+    """
+    hooked = bool(head._forward_hooks or head._forward_pre_hooks) or "forward" in vars(head)
+    if isinstance(head, nn.Linear) and head.bias is None and not hooked:
+        if type(head).forward is nn.Linear.forward:
+            return head.weight, None, None
+        if hasattr(type(head), "logit_transform"):
+            return (head.weight, *head.logit_transform())
+    raise ValueError(
+        "The fused pass projects with the head's weight alone, so it needs a bias-free "
+        "nn.Linear head with no forward hooks, running nn.Linear's forward or one whose "
+        f"transform logit_transform() declares; got {type(head).__name__}."
+    )
 
 
 def _transform(raw, scale, cap):
@@ -67,18 +174,12 @@ def _chunk_stats(raw, teacher, targets, teacher_is_logits, scale, cap, want, gra
     log_q = z - lse
     q = torch.exp(log_q)
     vals, dz = {}, {}
-    if teacher is not None:
+    if "kd_ce" in want:
         zt = (teacher if teacher_is_logits else _transform(teacher, scale, cap)).float()
         p = torch.softmax(zt, dim=-1)
-        if "kd_ce" in want:
-            vals["kd_ce"] = -(p * log_q).sum(dim=-1)
-            if "kd_ce" in grads:
-                dz["kd_ce"] = q - p
-        if "tv" in want:
-            vals["tv"] = 0.5 * (q - p).abs().sum(dim=-1)
-            if "tv" in grads:
-                sign = torch.sign(q - p)
-                dz["tv"] = 0.5 * q * (sign - (sign * q).sum(dim=-1, keepdim=True))
+        vals["kd_ce"] = -(p * log_q).sum(dim=-1)
+        if "kd_ce" in grads:
+            dz["kd_ce"] = q - p
     if "hard_ce" in want:
         vals["hard_ce"] = -log_q.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
         if "hard_ce" in grads:
@@ -201,53 +302,40 @@ class _FusedHead(torch.autograd.Function):
 def fused_head_stats(
     hidden: torch.Tensor,
     weight: torch.Tensor,
+    request: HeadRequest,
     *,
+    targets: torch.Tensor | None = None,
     teacher_hidden: torch.Tensor | None = None,
     teacher_logits: torch.Tensor | None = None,
-    targets: torch.Tensor | None = None,
-    want: Iterable[str] = (),
-    grads: Iterable[str] = (),
-    top_k: int = 0,
     logit_scale: float | None = None,
     soft_cap: float | None = None,
     chunk: int = 2048,
 ) -> HeadStats:
-    """Per-row statistics of the head's logits ``hidden @ weight.T``, never materialized whole.
+    """The requested statistics of the head's logits ``hidden @ weight.T``, never materialized whole.
 
     On CUDA the per-chunk statistics run through ``torch.compile``.
 
     Args:
-        hidden: ``[R, H]`` rows. The ``grads`` statistics and ``top_logits`` backpropagate into
-            them, and nothing into ``weight``, which must be frozen.
+        hidden: ``[R, H]`` rows. The ``request.grads`` statistics and ``top_logits``
+            backpropagate into them, and nothing into ``weight``, which must be frozen.
         weight: ``[V, H]`` head weight.
-        teacher_hidden: ``[R, H]`` teacher rows to project through the same head. ``kd_ce``
-            and ``tv`` need this or ``teacher_logits``.
-        teacher_logits: ``[R, V]`` teacher logits, used as given.
+        request: The statistics to return.
         targets: ``[R]`` label ids, needed for ``hard_ce``.
-        want: Statistics to return, named as in :data:`TERMS`; ``grads`` are returned too.
-        grads: Statistics to differentiate w.r.t. ``hidden``.
-        top_k: Also return each row's ``top_k`` ids and their logits.
+        teacher_hidden: ``[R, H]`` teacher rows to project through the same head. ``kd_ce``
+            needs this or ``teacher_logits``.
+        teacher_logits: ``[R, V]`` teacher logits, used as given.
         logit_scale: Multiplier the head applies to its projection, if any.
         soft_cap: ``c`` of a ``c * tanh(x / c)`` cap the head applies after ``logit_scale``.
         chunk: Rows per projection; bounds the vocab-wide temporaries.
     """
-    want, grads = set(want), set(grads)
-    if unknown := (want | grads) - set(TERMS):
-        raise ValueError(f"Unknown statistics {sorted(unknown)}; choose from {TERMS}.")
     if weight.requires_grad:
         raise ValueError("fused_head_stats computes no gradient for the head weight; freeze it.")
     if teacher_hidden is not None and teacher_logits is not None:
         raise ValueError("Pass teacher_hidden or teacher_logits, not both.")
-    if top_k > weight.shape[0]:
-        raise ValueError(f"top_k={top_k} exceeds the vocabulary size {weight.shape[0]}.")
     teacher = teacher_hidden if teacher_logits is None else teacher_logits
-    want |= grads
-    if not (torch.is_grad_enabled() and hidden.requires_grad):
-        grads = set()
-    if teacher is None and want & {"kd_ce", "tv"}:
-        raise ValueError("kd_ce and tv need teacher_hidden or teacher_logits.")
-    if targets is None and "hard_ce" in want:
-        raise ValueError("hard_ce needs targets.")
+    _check_request(request, vocab=weight.shape[0], teacher=teacher, targets=targets)
+    want = request.grads | request.values
+    grads = request.grads if torch.is_grad_enabled() and hidden.requires_grad else frozenset()
     return HeadStats(
         *_FusedHead.apply(
             hidden,
@@ -259,7 +347,7 @@ def fused_head_stats(
             soft_cap,
             tuple(t for t in TERMS if t in want),
             tuple(t for t in TERMS if t in grads),
-            top_k,
+            request.top_k,
             chunk,
         )
     )

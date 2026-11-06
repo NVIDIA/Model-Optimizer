@@ -438,7 +438,7 @@ class TestCandidateSelectorAlignment:
             logits.scatter_(-1, candidate_ids[..., slot : slot + 1], float(k - slot))
         return HFDFlash2Model._selector_loss(
             model,
-            logits,
+            *logits.topk(k, dim=-1),
             target_ids,
             torch.randn(
                 b, length, 8, generator=torch.Generator().manual_seed(1), dtype=torch.double

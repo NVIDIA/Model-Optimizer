@@ -76,7 +76,6 @@ from pathlib import Path
 from typing import NamedTuple
 
 import torch
-import torch.nn.functional as F
 from transformers import PreTrainedModel
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config as _Qwen3Config
 from transformers.trainer_pt_utils import LabelSmoother
@@ -85,7 +84,13 @@ from transformers.utils import ModelOutput
 from ..dflash.conversion import DFlashDMRegistry
 from ..dflash.dflash_model import DFlashModel
 from .dflash_flex_attention import build_draft_block_mask
-from .dflash_fused_head import HeadStats, fused_head_stats
+from .dflash_head_stats import (
+    HeadRequest,
+    HeadStats,
+    fused_head_stats,
+    fused_projection,
+    materialized_head_stats,
+)
 from .modeling_dflash import (  # noqa: F401
     DFlashAttention,
     DFlashBaseModelOutput,
@@ -324,15 +329,15 @@ class _DFlashLossTerms(NamedTuple):
     ``ce_per_token`` is ``None`` on the KD path, which never forms a per-position
     cross-entropy. ``weights`` carries the position weighting (decay or D-PACE) and
     normalizes by ``weight_sum``; ``supervised_mask`` is the unweighted mask the
-    reported accuracy uses. ``head_stats`` is the fused pass's statistics of the draft's
-    logits under ``dflash_fused_loss``, and ``None`` otherwise.
+    reported accuracy uses. ``head_stats`` holds every statistic of the draft's logits
+    the model's ``_head_request`` names, for a variant's own terms.
     """
 
     ce_per_token: torch.Tensor | None
     weights: torch.Tensor
     weight_sum: torch.Tensor
     supervised_mask: torch.Tensor
-    head_stats: HeadStats | None = None
+    head_stats: HeadStats
 
 
 @DFlashDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
@@ -343,8 +348,8 @@ class HFDFlashModel(DFlashModel):
     # the anchor's own position onward, so slot 0 (the given anchor) is never supervised.
     _label_shift = 0
 
-    # Set in the body of each class whose `forward` / `_compute_loss` read the draft's logits
-    # only through the fused pass. Checked on the overriding class, so it is not inherited.
+    # Set in the body of each class whose `forward` reads the draft's logits only through
+    # `_draft_head_stats`. Checked on the class defining `forward`, so it is not inherited.
     _supports_fused_loss = True
 
     @property
@@ -601,27 +606,18 @@ class HFDFlashModel(DFlashModel):
 
     def _check_fused_loss(self):
         """Refuse ``dflash_fused_loss`` where it would be ignored or would drop a gradient."""
-        for method in ("forward", "_compute_loss"):
-            owner = next(cls for cls in type(self).__mro__ if method in vars(cls))
-            if not vars(owner).get("_supports_fused_loss", False):
-                raise ValueError(
-                    f"dflash_fused_loss is not supported by {owner.__name__}: its {method} "
-                    "reads the draft's logits directly. Unset dflash_fused_loss."
-                )
-        head = self._base_model_lm_head
-        # The fused pass reads lm_head.weight directly: whatever a bias, a quantizer or a
-        # hook adds in lm_head's forward would be silently skipped.
-        plain_forward = (
-            type(head).forward is torch.nn.Linear.forward
-            and "forward" not in vars(head)
-            and not (head._forward_hooks or head._forward_pre_hooks)
-        )
-        if not plain_forward or head.bias is not None:
+        owner = next(cls for cls in type(self).__mro__ if "forward" in vars(cls))
+        if not vars(owner).get("_supports_fused_loss", False):
             raise ValueError(
-                "dflash_fused_loss projects with lm_head.weight alone, so it needs a bias-free "
-                f"nn.Linear lm_head with no forward hooks; got {type(head).__name__}. Unset "
+                f"dflash_fused_loss is not supported by {owner.__name__}: its forward builds the "
+                "draft's logits itself instead of reading them through _draft_head_stats. Unset "
                 "dflash_fused_loss."
             )
+        head = self._base_model_lm_head
+        try:
+            fused_projection(head)
+        except ValueError as err:
+            raise ValueError(f"dflash_fused_loss: {err} Unset dflash_fused_loss.") from None
         if head.weight.requires_grad:
             raise ValueError(
                 "dflash_fused_loss computes no gradient for lm_head, which is trainable here; "
@@ -1002,26 +998,24 @@ class HFDFlashModel(DFlashModel):
 
     def _compute_loss(
         self,
-        logits,
+        draft_hidden,
         input_ids,
         anchor_positions,
         block_keep_mask,
         loss_mask,
         *,
-        draft_hidden=None,
         base_outputs=None,
         return_terms=False,
     ):
         """Compute weighted cross-entropy (or KD) loss and accuracy.
 
         Args:
-            logits: Draft model output [B, N*block_size, vocab], or ``None`` under
-                ``dflash_fused_loss``, which reads ``draft_hidden`` instead.
+            draft_hidden: Draft hidden states [B, N*block_size, H]. The loss reads the logits
+                they project to only through ``_draft_head_stats``.
             input_ids: Original input token IDs [B, seq_len].
             anchor_positions: Anchor positions per block [B, N].
             block_keep_mask: Valid block mask [B, N].
             loss_mask: Token-level loss mask [B, seq_len].
-            draft_hidden: Draft hidden states [B, N*block_size, H] behind ``logits``.
             base_outputs: The step's ``DFlashBaseModelOutput``: the KD teacher under
                 ``dflash_self_logit_distillation``, and read by variants.
             return_terms: Also return the unreduced pieces behind the loss, so a variant
@@ -1047,25 +1041,8 @@ class HFDFlashModel(DFlashModel):
                 "dflash_self_logit_distillation distills from base_outputs, but none was "
                 "passed; an override of _compute_loss must forward it."
             )
-        # Without logits (dflash_fused_loss), every statistic of them read below comes from
-        # one fused pass over the draft's hidden states.
-        stats = None
-        if logits is None:
-            stats = self._fused_head_stats(
-                draft_hidden, base_outputs, targets.positions, flat_targets
-            )
-        else:
-            flat_logits = logits.view(-1, logits.size(-1))
-        # Non-KD loss is per-token cross-entropy; compute it once (grad enabled) so the
-        # D-PACE confidences below can reuse it instead of a second CE pass. The KD path
-        # optimizes KL, so its confidences need a dedicated no_grad CE pass.
-        loss_per_token = None
-        if not kd:
-            loss_per_token = (
-                stats.hard_ce
-                if stats is not None
-                else F.cross_entropy(flat_logits, flat_targets, reduction="none")
-            )
+        stats = self._draft_head_stats(draft_hidden, base_outputs, targets)
+        loss_per_token = None if kd else stats.hard_ce
 
         weight_mask = _block_position_weights(
             targets.mask,
@@ -1073,38 +1050,19 @@ class HFDFlashModel(DFlashModel):
             _first_predicted_position(self._label_shift),
             decay_factor=self.dflash_loss_decay_factor,
             dpace_alpha=self.dflash_dpace_alpha,
-            target_ce=lambda: (
-                loss_per_token.detach()
-                if loss_per_token is not None
-                else stats.hard_ce
-                if stats is not None
-                else F.cross_entropy(flat_logits, flat_targets, reduction="none")
-            ).view(targets.mask.shape),
+            target_ce=lambda: stats.hard_ce.detach().view(targets.mask.shape),
         )
 
         flat_weights = weight_mask.view(-1)
         valid_count = flat_weights.sum() + 1e-6
 
         if valid_count > 1.0:
-            if kd and stats is not None:
-                loss = (stats.kd_ce * flat_weights).sum() / valid_count
-            elif kd:
-                flat_teacher = self._teacher_logits(base_outputs, label_positions=targets.positions)
-                flat_teacher = flat_teacher.reshape(flat_logits.shape)
-                target_soft = torch.softmax(flat_teacher, dim=-1)
-                draft_logsoft = torch.log_softmax(flat_logits, dim=-1)
-                kd_loss = -(target_soft * draft_logsoft).sum(dim=-1)
-                loss = (kd_loss * flat_weights).sum() / valid_count
-            else:
-                loss = (loss_per_token * flat_weights).sum() / valid_count
-
+            per_token = stats.kd_ce if kd else loss_per_token
+            loss = (per_token * flat_weights).sum() / valid_count
             with torch.no_grad():
-                preds = stats.top1 if stats is not None else flat_logits.argmax(dim=-1)
-                accuracy = _masked_accuracy(preds, flat_targets, binary_eval_mask).item()
+                accuracy = _masked_accuracy(stats.top1, flat_targets, binary_eval_mask).item()
         else:
-            # Under dflash_fused_loss the draft's output is its hidden states: no logits exist.
-            output = draft_hidden if stats is not None else flat_logits
-            loss = self._draft_zero_loss(output.device, through=(output,))
+            loss = self._draft_zero_loss(draft_hidden.device, through=(draft_hidden,))
             accuracy = 0.0
 
         if return_terms:
@@ -1118,33 +1076,50 @@ class HFDFlashModel(DFlashModel):
             return loss, accuracy, terms
         return loss, accuracy
 
-    def _fused_head_extras(self):
-        """``(statistics with gradient, top_k)`` a variant's own terms read from the fused pass."""
-        return set(), 0
-
-    def _fused_head_stats(self, draft_hidden, base_outputs, label_positions, flat_targets):
-        """Every statistic of the draft's logits the loss reads, from one fused pass."""
-        grads, top_k = self._fused_head_extras()
-        teacher = {}
-        if self.dflash_self_logit_distillation:
-            grads = {*grads, "kd_ce"}
-            if base_outputs.logits is not None:
-                rows = self._teacher_logits(base_outputs, label_positions=label_positions)
-                teacher["teacher_logits"] = rows.flatten(0, -2)
-            else:
-                rows = self._teacher_hidden(base_outputs, label_positions=label_positions)
-                teacher["teacher_hidden"] = rows.flatten(0, -2)
-        else:
-            grads = {*grads, "hard_ce"}
-        return fused_head_stats(
-            draft_hidden.flatten(0, -2),
-            self._base_model_lm_head.weight,
-            targets=flat_targets,
+    def _head_request(self):
+        """The statistics of the draft's logits the loss reads; a variant extends it."""
+        return HeadRequest(
+            grads=frozenset({"kd_ce" if self.dflash_self_logit_distillation else "hard_ce"}),
             # D-PACE weighs positions by the draft's confidence in its label.
-            want={"hard_ce"} if self.dflash_loss_objective == "dpace" else (),
-            grads=grads,
-            top_k=top_k,
-            **teacher,
+            values=frozenset({"hard_ce"} if self.dflash_loss_objective == "dpace" else ()),
+        )
+
+    def _draft_head_stats(self, draft_hidden, base_outputs, targets):
+        """The statistics ``_head_request`` names of the logits ``draft_hidden`` projects to.
+
+        ``dflash_fused_loss`` computes them in row chunks fused with the lm_head projection;
+        otherwise the logits are materialized whole. Either way they come back as one
+        ``HeadStats``, so no loss term depends on which.
+        """
+        request = self._head_request()
+        flat_targets = targets.token_ids.view(-1)
+        kd = "kd_ce" in request.grads | request.values
+        if self.dflash_fused_loss:
+            teacher = {}
+            if kd and base_outputs.logits is not None:
+                rows = self._teacher_logits(base_outputs, label_positions=targets.positions)
+                teacher["teacher_logits"] = rows.flatten(0, -2)
+            elif kd:
+                rows = self._teacher_hidden(base_outputs, label_positions=targets.positions)
+                teacher["teacher_hidden"] = rows.flatten(0, -2)
+            weight, logit_scale, soft_cap = fused_projection(self._base_model_lm_head)
+            return fused_head_stats(
+                draft_hidden.flatten(0, -2),
+                weight,
+                request,
+                targets=flat_targets,
+                logit_scale=logit_scale,
+                soft_cap=soft_cap,
+                **teacher,
+            )
+        logits = self._base_model_lm_head(draft_hidden)
+        flat_logits = logits.view(-1, logits.size(-1))
+        teacher_logits = None
+        if kd:
+            teacher_logits = self._teacher_logits(base_outputs, label_positions=targets.positions)
+            teacher_logits = teacher_logits.reshape(flat_logits.shape)
+        return materialized_head_stats(
+            flat_logits, request, targets=flat_targets, teacher_logits=teacher_logits
         )
 
     def forward(
@@ -1301,14 +1276,12 @@ class HFDFlashModel(DFlashModel):
         )
 
         # 6. Compute loss and accuracy
-        logits = None if self.dflash_fused_loss else self._base_model_lm_head(hidden)
         loss, accuracy = self._compute_loss(
-            logits,
+            hidden,
             input_ids,
             anchor_positions,
             block_keep_mask,
             loss_mask,
-            draft_hidden=hidden,
             base_outputs=base_outputs,
         )
 

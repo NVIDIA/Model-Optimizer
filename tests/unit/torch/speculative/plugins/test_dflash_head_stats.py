@@ -13,16 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU tests for the fused lm_head statistics behind ``dflash_fused_loss``."""
+"""CPU tests for both backends of the lm_head statistics behind the DFlash-family loss."""
 
 import pytest
 import torch
 import torch.nn.functional as F
 
-from modelopt.torch.speculative.plugins.dflash_fused_head import TERMS, fused_head_stats
+from modelopt.torch.speculative.plugins.dflash_head_stats import (
+    TERMS,
+    HeadRequest,
+    fused_head_stats,
+    materialized_head_stats,
+)
 
 ROWS, HIDDEN, VOCAB, TOP_K = 37, 16, 50, 4
 CHUNK = 8  # several chunks and a partial last one
+BACKENDS = ["fused", "materialized"]
 
 
 def _transform(raw, scale, cap):
@@ -31,9 +37,21 @@ def _transform(raw, scale, cap):
     return raw if cap is None else cap * torch.tanh(raw / cap)
 
 
+def _stats(backend, hidden, weight, request, scale=None, cap=None, **inputs):
+    """The statistics of the head ``_transform(hidden @ weight.T)``, from ``backend``."""
+    if backend == "fused":
+        return fused_head_stats(
+            hidden, weight, request, logit_scale=scale, soft_cap=cap, chunk=CHUNK, **inputs
+        )
+    if (teacher_hidden := inputs.pop("teacher_hidden", None)) is not None:
+        inputs["teacher_logits"] = _transform(teacher_hidden @ weight.T, scale, cap)
+    return materialized_head_stats(_transform(hidden @ weight.T, scale, cap), request, **inputs)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("teacher_kind", ["hidden", "logits"])
 @pytest.mark.parametrize(("scale", "cap"), [(None, None), (0.7, None), (0.7, 2.0)])
-def test_matches_autograd_on_the_materialized_logits(teacher_kind, scale, cap):
+def test_matches_autograd_on_the_logits(backend, teacher_kind, scale, cap):
     """Every statistic, its gradient under arbitrary per-row upstream weights, and the top-k."""
     torch.manual_seed(0)
     weight = torch.randn(VOCAB, HIDDEN)
@@ -55,7 +73,6 @@ def test_matches_autograd_on_the_materialized_logits(teacher_kind, scale, cap):
     log_q = logits.log_softmax(-1)
     ref = {
         "kd_ce": -(log_p.exp() * log_q).sum(-1),
-        "tv": 0.5 * (log_q.exp() - log_p.exp()).abs().sum(-1),
         "hard_ce": F.cross_entropy(logits, targets, reduction="none"),
         "lse": logits.logsumexp(-1),
     }
@@ -63,21 +80,15 @@ def test_matches_autograd_on_the_materialized_logits(teacher_kind, scale, cap):
     ref_loss = sum((coefs[t] * ref[t]).sum() for t in TERMS) + (top_coefs * top_logits).sum()
     ref_loss.backward()
 
-    fused_hidden = hidden.clone().requires_grad_(True)
-    kwargs = dict(
-        targets=targets,
-        grads=TERMS,
-        top_k=TOP_K,
-        logit_scale=scale,
-        soft_cap=cap,
-        chunk=CHUNK,
-        **teacher,
-    )
-    stats = fused_head_stats(fused_hidden, weight, **kwargs)
+    request = HeadRequest(grads=frozenset(TERMS), top_k=TOP_K)
+    test_hidden = hidden.clone().requires_grad_(True)
+    stats = _stats(backend, test_hidden, weight, request, scale, cap, targets=targets, **teacher)
     loss = sum((coefs[t] * getattr(stats, t)).sum() for t in TERMS)
     (loss + (top_coefs * stats.top_logits).sum()).backward()
     with torch.no_grad():  # values without the gradient work, e.g. an eval pass in train mode
-        no_grad_stats = fused_head_stats(fused_hidden, weight, **kwargs)
+        no_grad_stats = _stats(
+            backend, test_hidden, weight, request, scale, cap, targets=targets, **teacher
+        )
 
     for term in TERMS:
         torch.testing.assert_close(getattr(stats, term), ref[term].detach(), msg=term)
@@ -85,4 +96,17 @@ def test_matches_autograd_on_the_materialized_logits(teacher_kind, scale, cap):
     assert torch.equal(stats.top1, logits.argmax(-1))
     assert torch.equal(stats.top_ids, top_ids)
     torch.testing.assert_close(stats.top_logits, top_logits.detach())
-    torch.testing.assert_close(fused_hidden.grad, ref_hidden.grad)
+    torch.testing.assert_close(test_hidden.grad, ref_hidden.grad)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_values_carry_no_gradient_from_either_backend(backend):
+    """Only ``grads`` statistics are differentiable, so the backends cannot train differently."""
+    torch.manual_seed(0)
+    hidden = torch.randn(ROWS, HIDDEN, requires_grad=True)
+    targets = torch.randint(0, VOCAB, (ROWS,))
+    request = HeadRequest(grads=frozenset({"lse"}), values=frozenset({"hard_ce"}))
+    stats = _stats(backend, hidden, torch.randn(VOCAB, HIDDEN), request, targets=targets)
+    assert stats.lse.requires_grad
+    assert not stats.hard_ce.requires_grad
+    assert stats.kd_ce is None
