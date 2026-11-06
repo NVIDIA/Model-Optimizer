@@ -850,7 +850,8 @@ def auto_quantize(
     ``auto_quantize`` uses sensitivity scores to rank the per-layer quantization formats and search
     for the best quantization formats per-layer. The sensitivity score can be computed with
     gradient-based methods (default), KL divergence loss, or Aumann-Shapley path-integral
-    attributions, controlled by the ``method`` parameter.
+    attributions, controlled by the ``method`` parameter. ``method="rco"`` instead selects
+    weight-only precisions by optimizing a joint model loss over frozen candidates.
 
     Internally this API runs two main phases:
 
@@ -1022,9 +1023,18 @@ def auto_quantize(
             with the number of candidate formats and path nodes, not with the number of whole-model
             configurations the search considers -- see
             :mod:`modelopt.torch.quantization._auto_quantize_shapley`.
+            ``"rco"`` uses Riemannian constrained optimization with causal teacher KL by default;
+            ``forward_step`` must return logits or an output containing ``logits``. Supply explicit
+            weight-only candidates. Its method dictionary accepts ``steps`` (200), ``num_samples``
+            (4 Gumbel samples per step), ``lr`` (0.1), ``temperature`` (1.0),
+            ``final_temperature`` (0.01), ``seed`` (42), and ``kl_chunk_size`` (128 target tokens).
+            Model weights and quantizer scales remain frozen. RCO supports materialized dense
+            linear layers without enabled class-scoped quantizer settings; distributed process groups
+            and offloaded meta weights are unsupported.
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
-            expensive score estimation step.
+            expensive score estimation step. For RCO this caches calibration and initialization
+            scores; allocation optimization runs again with the model and data.
         module_search_spaces: Optional module-specific candidate overrides. Each entry contains
             ``module_name_patterns`` (one or more glob patterns), ``quantization_formats``, and
             optional ``allow_no_quant`` (default True). A matching entry replaces the global
@@ -1264,6 +1274,7 @@ def auto_quantize(
     search_config = searcher.sanitize_search_config(search_config)
     search_constraints = cast("ConstraintsDict", constraints or {})
     searcher.validate_search_input(search_constraints, search_config)
+    searcher.validate_model_input(model, search_config)
 
     # A weight-rewriting candidate's refusals need the converted quantizers to tell which weights it
     # rewrites. A failure before any candidate calibrates then hands back the unconverted modules,

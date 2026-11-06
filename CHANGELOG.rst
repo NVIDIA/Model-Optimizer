@@ -8,6 +8,7 @@ Changelog
 
 *Quantization*
 
+- Add experimental Riemannian constrained optimization for weight-only precision selection with ``mtq.auto_quantize(method={"method": "rco"})``. It optimizes allocation logits over calibrated, frozen candidates using a joint-model loss while retaining AutoQuantize grouping and effective-bit budgets.
 - On Linux x86-64, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; other platforms retain their existing dependency selections.
 - The functional quantized-weight export API now exports the KV cache: ``capture_kv_cache_export_state`` returns an attention module's ``k_scale`` / ``v_scale``, and ``build_hf_quantization_config`` takes the KV-cache formats from ``get_kv_cache_export_spec``.
 - The functional quantized-weight export API now packs weight-only MXFP4 (``W4A16_MXFP4``) weights, e.g. MXFP4 QAT of GPT-OSS experts, and rejects layers with rotated weight or input quantizers or custom quantization backends, which a packed weight cannot reproduce.
