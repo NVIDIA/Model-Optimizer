@@ -1510,12 +1510,16 @@ def _test_gptq_mamba_hybrid(rank, size):
     assert torch.isfinite(forward(model)).all()
 
 
-def test_gptq_hessian_sync_across_dp(dist_workers_size_2):
-    """GPTQ at DP2 must use the Hessian of both ranks' calibration data and agree across ranks."""
-    dist_workers_size_2.run(_test_gptq_hessian_sync_across_dp)
+@pytest.mark.parametrize("recipe", [None, "general/ptq/nvfp4_default-kv_none-gptq"])
+def test_gptq_hessian_sync_across_dp(dist_workers_size_2, recipe):
+    """GPTQ at DP2 must use the Hessian of both ranks' calibration data and agree across ranks.
+
+    The shipped layerwise GPTQ recipe must run at DP2 as well, not only in a single process.
+    """
+    dist_workers_size_2.run(partial(_test_gptq_hessian_sync_across_dp, recipe))
 
 
-def _test_gptq_hessian_sync_across_dp(rank, size):
+def _test_gptq_hessian_sync_across_dp(recipe, rank, size):
     initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
     model = get_mcore_gpt_model(tensor_model_parallel_size=1, num_layers=1).cuda()
     ref_model = get_mcore_gpt_model(tensor_model_parallel_size=1, num_layers=1).cuda()
@@ -1537,8 +1541,12 @@ def _test_gptq_hessian_sync_across_dp(rank, size):
         hessians[self.name] = self.hessian.clone()
         return update_weights(self, *args, **kwargs)
 
-    quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
-    quant_cfg["algorithm"] = {"method": "gptq"}
+    if recipe is None:
+        quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
+        quant_cfg["algorithm"] = {"method": "gptq"}
+    else:
+        quant_cfg = load_recipe(recipe).quantize.model_dump()
+        assert quant_cfg["algorithm"]["layerwise"]["enable"]
     with patch.object(GPTQHelper, "update_weights", capture_hessian):
         mtq.quantize(model, quant_cfg, partial(forward, input_ids_list=[batch[0]]))
         dp_hessians = dict(hessians)
