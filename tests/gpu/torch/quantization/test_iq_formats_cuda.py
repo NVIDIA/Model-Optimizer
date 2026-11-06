@@ -103,13 +103,13 @@ def test_cuda_fixed_choices_match_pytorch_encoder(monkeypatch, name):
     importance = torch.rand(512, generator=generator, device="cuda") + 0.5
 
     packed, _ = fmt.quantize(weight, choices=choices)
-    # The one-pass every_choice kernel must reproduce each forced encode, the payload it stands for.
-    every, _ = fmt.quantize(weight, importance=importance, every_choice=True)
-    for choice in range(fmt.num_choices):
-        forced = torch.full_like(choices, choice)
-        assert torch.equal(
-            every[choice], fmt.quantize(weight, importance=importance, choices=forced)[0]
-        )
+    # The one-pass every_choice kernel must reproduce each forced encode, the payload it stands for,
+    # with an importance and without one, which the local-Hessian search passes when it has none.
+    for weighting in ({"importance": importance}, {}):
+        every, _ = fmt.quantize(weight, every_choice=True, **weighting)
+        for choice in range(fmt.num_choices):
+            forced = torch.full_like(choices, choice)
+            assert torch.equal(every[choice], fmt.quantize(weight, choices=forced, **weighting)[0])
     monkeypatch.setattr(FORMATS[name][0], "get_cuda_ext_ggml", lambda: None)
     assert torch.equal(packed, fmt.quantize(weight, choices=choices)[0])
 
