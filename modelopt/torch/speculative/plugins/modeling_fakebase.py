@@ -36,6 +36,7 @@ from transformers import (
     PreTrainedModel,
 )
 
+from modelopt.torch.export.plugins.hf_spec_export import _get_rope_theta
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     resolve_checkpoint_file,
@@ -225,8 +226,6 @@ class FakeBaseModel(PreTrainedModel):
 
     @staticmethod
     def _config_from_source(source: str, trust_remote_code: bool) -> FakeBaseConfig:
-        from modelopt.torch.export.plugins.hf_spec_export import _get_rope_theta
-
         orig_config = transformers.AutoConfig.from_pretrained(
             source, trust_remote_code=trust_remote_code
         )
@@ -280,7 +279,7 @@ class FakeBaseModel(PreTrainedModel):
         if destination.exists() or destination.is_symlink():
             raise FileExistsError(destination)
         config = cls._config_from_source(str(source), trust_remote_code)
-        weights = cls._source_weights(str(source), config)
+        weights = cls._source_weights(str(source), config, validate_local_paths=True)
         config_path = resolve_checkpoint_file(source, "config.json", max_bytes=None)
         destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
@@ -288,13 +287,14 @@ class FakeBaseModel(PreTrainedModel):
         ) as temporary:
             output = Path(temporary) / "slice"
             output.mkdir()
-            copy_non_model_files(source, output)
+            copy_non_model_files(source, output, strict=True)
             shutil.copy2(config_path, output / "config.json")
             save_file(
                 dict(weights.values()),
                 output / "model.safetensors",
                 metadata={"format": "pt"},
             )
+            shutil.copymode(source, output)
             output.rename(destination)
         return destination
 
@@ -309,7 +309,7 @@ class FakeBaseModel(PreTrainedModel):
         raise RuntimeError(f"Cannot find {label} in checkpoint; tried: {tried}")
 
     @staticmethod
-    def _load_index(source: str) -> dict:
+    def _load_index(source: str, *, validate_local_paths: bool = False) -> dict:
         """Load weight_map from a sharded index, or synthesize one from a single safetensors file.
 
         Sharded checkpoints ship ``model.safetensors.index.json`` mapping every key to its shard;
@@ -320,7 +320,11 @@ class FakeBaseModel(PreTrainedModel):
         def _try_fetch(name: str) -> str | None:
             if os.path.isdir(source):
                 path = os.path.join(source, name)
-                return path if os.path.isfile(path) else None
+                if not os.path.isfile(path):
+                    return None
+                if validate_local_paths:
+                    return str(resolve_checkpoint_file(Path(source), name, max_bytes=None))
+                return path
             try:
                 return hf_hub_download(repo_id=source, filename=name)
             except EntryNotFoundError:
@@ -340,25 +344,34 @@ class FakeBaseModel(PreTrainedModel):
         )
 
     @staticmethod
-    def _resolve_shard_paths(source: str, shard_filenames: list[str]) -> list[str]:
+    def _resolve_shard_paths(
+        source: str, shard_filenames: list[str], *, validate_local_paths: bool = False
+    ) -> list[str]:
         """Return local filesystem paths for each shard filename.
 
-        For a local directory the paths are joined directly; for a HuggingFace Hub repo ID the
-        shards are downloaded via ``hf_hub_download`` (cached on subsequent calls).
+        Export validates local paths; ordinary loading also permits user-created cache views.
+        Hub repo shards are downloaded via ``hf_hub_download`` (cached on subsequent calls).
         """
         if os.path.isdir(source):
-            if any(
-                Path(name).is_absolute() or ".." in Path(name).parts for name in shard_filenames
-            ):
-                raise ValueError("Checkpoint shard filenames must be relative paths without '..'")
+            if validate_local_paths:
+                if any(
+                    Path(name).is_absolute() or ".." in Path(name).parts for name in shard_filenames
+                ):
+                    raise ValueError(
+                        "Checkpoint shard filenames must be relative paths without '..'"
+                    )
+                return [
+                    str(resolve_checkpoint_file(Path(source), name, max_bytes=None))
+                    for name in shard_filenames
+                ]
             return [os.path.join(source, name) for name in shard_filenames]
         return [hf_hub_download(repo_id=source, filename=name) for name in shard_filenames]
 
     @classmethod
     def _source_weights(
-        cls, source: str, config: FakeBaseConfig
+        cls, source: str, config: FakeBaseConfig, *, validate_local_paths: bool = False
     ) -> dict[str, tuple[str, torch.Tensor]]:
-        weight_map = cls._load_index(source)
+        weight_map = cls._load_index(source, validate_local_paths=validate_local_paths)
 
         embed_tokens_key = cls._find_weight_key(weight_map, _EMBED_TOKENS_PATHS, "embed_tokens")
         try:
@@ -373,7 +386,9 @@ class FakeBaseModel(PreTrainedModel):
             keys["norm"] = cls._find_weight_key(weight_map, _FINAL_NORM_PATHS, "final_norm")
         tensors = {}
         for key in dict.fromkeys(keys.values()):
-            (path,) = cls._resolve_shard_paths(source, [weight_map[key]])
+            (path,) = cls._resolve_shard_paths(
+                source, [weight_map[key]], validate_local_paths=validate_local_paths
+            )
             with safe_open(path, framework="pt", device="cpu") as handle:
                 tensors[key] = handle.get_tensor(key)
         result = {}
