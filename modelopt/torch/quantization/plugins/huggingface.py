@@ -45,7 +45,13 @@ from modelopt.torch.utils.distributed import ParallelState, recorded_distributio
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import register
-from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantizer
+from ..nn import (
+    QuantInputBase,
+    QuantModule,
+    QuantModuleRegistry,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from ..nn.modules.quant_linear import _QuantLinear
 from ..nn.modules.tensor_quantizer import _try_stacked_fake_quant
 from ..utils import replace_function, sync_moe_expert_amax
@@ -667,6 +673,14 @@ class _TransposedExpertsCalibMixin:
         for weight_name in ("gate_up_proj", "down_proj"):
             weight = getattr(self, weight_name)
             yield weight.transpose(-1, -2), getattr(self, f"{weight_name}_weight_quantizer")
+
+    def fold_weight(self, keep_attrs: bool = False):
+        """Fold expert weights in the transposed orientation used by their forward."""
+        for weight, quantizer in self.iter_weights_for_calibration():
+            if isinstance(quantizer, (TensorQuantizer, SequentialQuantizer)):
+                QuantModule._fold_weight_quantizer(
+                    quantizer, (weight,), keep_attrs, quantize_dtype=weight.dtype
+                )
 
 
 class _QuantSparseSequentialMoe(QuantModule):

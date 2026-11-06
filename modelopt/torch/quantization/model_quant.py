@@ -64,7 +64,7 @@ from .kv_cache_auto_quant import (
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
 from .mode import QuantizeModeRegistry, _rank_local_calibrations, get_modelike_from_algo_cfg
 from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
-from .utils import is_quantized
+from .utils import enable_weight_access_and_writeback, is_quantized, module_name_maps
 from .utils.core_utils import _get_fsdp2_mesh
 
 __all__ = [
@@ -1375,9 +1375,11 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
     for module in model.modules():
         if isinstance(module, QuantModule):
             module._validate_fold_weight()
+    names = module_name_maps(model)
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
-            module.fold_weight(keep_attrs)
+            with enable_weight_access_and_writeback(module, model, names):
+                module.fold_weight(keep_attrs)
 
 
 @contextmanager

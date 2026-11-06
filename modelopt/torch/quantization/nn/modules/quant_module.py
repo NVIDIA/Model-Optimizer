@@ -145,6 +145,8 @@ class QuantModule(DynamicModule):
         quantizer: TensorQuantizer | SequentialQuantizer,
         weights: Iterable[torch.Tensor],
         keep_attrs: bool = False,
+        *,
+        quantize_dtype: torch.dtype = torch.float32,
     ):
         """Fold ``quantizer`` into each weight view in place, then disable and clean it once.
 
@@ -161,7 +163,7 @@ class QuantModule(DynamicModule):
             folded = weight
             # Each member's output is in the weight dtype, as in the forward pass.
             for member in members:
-                folded = member(folded.float().contiguous()).to(weight.dtype)
+                folded = member(folded.to(quantize_dtype).contiguous()).to(weight.dtype)
             weight.data.copy_(folded)
         quantizer.disable()
         quantizer.disable_rotate()
