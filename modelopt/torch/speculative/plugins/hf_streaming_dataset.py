@@ -320,8 +320,13 @@ class StreamingDataset(Dataset):
             return None
         if cid is None or not convs or not isinstance(convs, list):
             return None
-        if not template_kwargs.get("tools"):
-            template_kwargs.pop("tools", None)
+        tools = template_kwargs.get("tools")
+        if tools is not None and not (
+            isinstance(tools, list) and all(isinstance(tool, dict) for tool in tools)
+        ):
+            return None
+        if tools == [] and isinstance(self.tokenizer.chat_template, dict):
+            template_kwargs["chat_template"] = self.tokenizer.get_chat_template()
         input_ids, loss_mask = _tokenize_with_loss_mask(
             self.tokenizer,
             convs,

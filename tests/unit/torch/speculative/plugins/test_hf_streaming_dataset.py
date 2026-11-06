@@ -611,8 +611,19 @@ def test_serialized_empty_conversations_falls_back_to_messages(tiny_tokenizer, c
     assert sample["token_ids"] == tiny_tokenizer("hello", add_special_tokens=False)["input_ids"]
 
 
-@pytest.mark.parametrize("field", ["conversations", "messages", "tools"])
-def test_getitem_resamples_malformed_serialized_fields(tiny_tokenizer, field):
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("conversations", "[invalid"),
+        ("messages", "[invalid"),
+        ("tools", "[invalid"),
+        ("tools", {"type": "function"}),
+        ("tools", '{"type": "function"}'),
+        ("tools", [1]),
+        ("tools", "[1]"),
+    ],
+)
+def test_getitem_resamples_malformed_fields(tiny_tokenizer, field, value):
     class EchoDataset(StreamingDataset):
         def _fetch(self, sample):
             return sample
@@ -622,7 +633,7 @@ def test_getitem_resamples_malformed_serialized_fields(tiny_tokenizer, field):
 
     tiny_tokenizer.chat_template = "{{ messages[0]['content'] }}"
     valid = {"conversation_id": "valid", "messages": [{"role": "user", "content": "hello"}]}
-    malformed = {**valid, "conversation_id": "malformed", field: "[invalid"}
+    malformed = {**valid, "conversation_id": "malformed", field: value}
     dataset = EchoDataset([malformed, valid], tiny_tokenizer)
     sample = dataset[0]
     assert sample["cid"] == "valid"
@@ -630,11 +641,17 @@ def test_getitem_resamples_malformed_serialized_fields(tiny_tokenizer, field):
 
 
 @pytest.mark.parametrize("tools", [[], "[]"])
-def test_empty_tools_preserve_default_template(tiny_tokenizer, tools):
-    tiny_tokenizer.chat_template = {
-        "default": "{{ messages[0]['content'] }}",
-        "tool_use": "tool {{ messages[0]['content'] }}",
-    }
+@pytest.mark.parametrize("template_mapping", [False, True])
+def test_empty_tools_preserve_template_semantics(tiny_tokenizer, tools, template_mapping):
+    if template_mapping:
+        tiny_tokenizer.chat_template = {
+            "default": "{{ messages[0]['content'] }}",
+            "tool_use": "tool {{ messages[0]['content'] }}",
+        }
+    else:
+        tiny_tokenizer.chat_template = (
+            "{% if tools is not none %}tool {% endif %}{{ messages[0]['content'] }}"
+        )
     entry = {
         "conversation_id": "no-tools",
         "messages": [{"role": "user", "content": "hello"}],
@@ -642,4 +659,5 @@ def test_empty_tools_preserve_default_template(tiny_tokenizer, tools):
     }
     sample = StreamingDataset([entry], tiny_tokenizer)._tokenize_entry(entry)
     assert sample is not None
-    assert sample["token_ids"] == tiny_tokenizer("hello", add_special_tokens=False)["input_ids"]
+    expected = "hello" if template_mapping else "tool hello"
+    assert sample["token_ids"] == tiny_tokenizer(expected, add_special_tokens=False)["input_ids"]
