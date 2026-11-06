@@ -44,6 +44,7 @@ def assert_hf_ckpt_exported(hf_ckpt_dir: Path) -> None:
 
 
 def assert_vae_conv3d_nvfp4_packed(hf_ckpt_dir: Path) -> None:
+    """Check that the exported VAE holds packed NVFP4 Conv3d weights with all their scales."""
     vae_dir = hf_ckpt_dir / "vae"
     with open(vae_dir / "config.json") as file:
         quant_config = json.load(file)["quantization_config"]

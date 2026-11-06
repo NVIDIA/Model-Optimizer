@@ -496,6 +496,7 @@ def _quantize_tiny_wan_vae(quant_cfg, keep):
 
 @torch.no_grad()
 def test_export_wan_vae_nvfp4_conv3d(tmp_path):
+    """Every Wan VAE conv the config declares as NVFP4 is exported packed with its scales."""
     vae = _quantize_tiny_wan_vae(mtq.NVFP4_DEFAULT_CFG, _WAN_VAE_DECODER_RESNET_CONVS)
     convs = {name: m for name, m in vae.named_modules() if isinstance(m, nn.Conv3d)}
     expected = {
@@ -554,6 +555,7 @@ def test_export_wan_vae_nvfp4_conv3d(tmp_path):
 )
 @torch.no_grad()
 def test_export_wan_vae_conv3d_fails_closed(tmp_path, quant_cfg, keep, export_kwargs, error, match):
+    """Unsupported Wan VAE conv exports raise instead of writing a mislabeled checkpoint."""
     vae = _quantize_tiny_wan_vae(quant_cfg, keep)
 
     with pytest.raises(error, match=match):
