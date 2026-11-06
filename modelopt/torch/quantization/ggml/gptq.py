@@ -21,7 +21,7 @@ import torch
 
 from ..extensions import get_cuda_ext_ggml
 from ..utils.calib_utils import GPTQHelper, register_gptq_helper
-from .choice_search import search_choices
+from .choice_search import search_choices, search_scratch
 from .common import floored_second_moments, pin_packed_weight
 from .registry import GGML_FORMAT_REGISTRY
 
@@ -107,6 +107,13 @@ class GGMLGPTQHelper(GPTQHelper):
         fallback's scratch grows with ``block_chunk_size``, past the room the update is checked for.
         """
         return get_cuda_ext_ggml() is not None
+
+    def update_scratch(self, weight):
+        """The local-Hessian search's scratch, when ``local_hessian_scales`` picks the local scales."""
+        ggml_format = GGML_FORMAT_REGISTRY[self.weight_quantizer.num_bits]
+        if not (self.local_hessian_scales and ggml_format.num_choices > 0):
+            return 0
+        return search_scratch(ggml_format, weight.numel() // weight.shape[-1])
 
     def update_weights(self, block_size, perc_damp, weight=None, device=None):
         """Run the GPTQ update, then pin the chosen payload to the weight quantizer."""

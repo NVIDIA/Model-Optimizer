@@ -131,7 +131,8 @@ def _update_room(helper, weight, block_size) -> int:
     scratch, about 35 MiB on a GPU's first update. Logging the error afterwards holds the original
     in its own dtype and up to five float32 weight-sized tensors: the result, the original, the
     error and two products. Through both, a GGML format that keeps its scales holds the unrounded
-    weight in its own dtype, counted for every format.
+    weight in its own dtype, counted for every format. On top comes the helper's own scratch
+    (:meth:`GPTQHelper.update_scratch`), such as a search over each block's local scales.
     """
     columns = weight.shape[-1]
     rows = weight.numel() // columns
@@ -140,7 +141,8 @@ def _update_room(helper, weight, block_size) -> int:
     if helper.log_mse:
         weights = max(weights, (5 * 4 + weight.element_size()) * weight.numel())
     unrounded = weight.element_size() * weight.numel()
-    return 2**26 + 32 * helper.hessian.numel() + weights + unrounded
+    scratch = helper.update_scratch(weight)
+    return 2**26 + 32 * helper.hessian.numel() + weights + unrounded + scratch
 
 
 def update_expert_weights(work, block_size, perc_damp):
@@ -467,6 +469,10 @@ class GPTQHelper:
         device, and fits the room :func:`update_expert_weights` checks for.
         """
         return False
+
+    def update_scratch(self, weight) -> int:
+        """Bytes the update of ``weight`` holds beyond the GPTQ solve's, such as a format's search."""
+        return 0
 
     def update_weights(self, block_size, perc_damp, weight=None, device=None):
         """Run GPTQ blockwise weight update on this helper's weight.
