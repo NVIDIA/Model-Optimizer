@@ -388,6 +388,11 @@ def train():
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             checkpoint, trust_remote_code=recipe.model.trust_remote_code
         )
+        if isinstance(recipe, ModelOptDFlashRecipe):
+            # The restore rebuilt the draft from the checkpoint's saved config; this run's own
+            # training settings apply on top, and a change to the draft itself is refused.
+            for name, (old, new) in model.apply_resumed_config(recipe.dflash).items():
+                print_rank_0(f"Resumed DFlash run: {name} changed from {old!r} to {new!r}.")
         if isinstance(recipe, ModelOptExternalDraftRecipe):
             # The restored draft is already converted (the checkpoint carries
             # modelopt_state.pth), but the base lm_head it is scored against is not part

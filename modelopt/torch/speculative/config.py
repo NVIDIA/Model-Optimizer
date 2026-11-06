@@ -16,7 +16,7 @@
 """Configurations for speculative decoding modes."""
 
 from copy import deepcopy
-from typing import Literal, Self
+from typing import ClassVar, Literal, Self
 
 from pydantic import model_validator
 
@@ -78,6 +78,38 @@ DFLASH_DEFAULT_CFG = {
 
 class DFlashConfig(ModeloptBaseConfig):
     """DFlash config for block-wise parallel speculative decoding."""
+
+    # What a run resumed from a checkpoint may change (HFDFlashModel.apply_resumed_config):
+    # training and execution settings. dflash_init_checkpoint only seeds a new draft. Every
+    # other field defines the draft the checkpoint holds, so a resumed run must keep it.
+    RESUMABLE_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "dflash_self_logit_distillation",
+            "dflash_loss_decay_factor",
+            "dflash_loss_objective",
+            "dflash_dpace_alpha",
+            "dflash_num_anchors",
+            "dflash_report_acc",
+            "dflash_use_torch_compile",
+            "dflash_use_flex_attention",
+            "dflash_export_rope_scaling",
+            "dflash_lambda_base_start",
+            "dflash_lambda_base_decay_ratio",
+            "dflash_ce_loss_alpha",
+            "dflash_l1_loss_alpha",
+            "dflash_confidence_head_alpha",
+            "dflash_lilicorr_w_ce",
+            "dflash_lilicorr_w_margin",
+            "dflash_lilicorr_margin",
+            "dflash_lilicorr_w_pen",
+            "dflash_lilicorr_w_cal",
+            "dflash_lk_loss_type",
+            "dflash_lk_ce_scale",
+            "dflash_lk_ce_decay",
+            "dflash_selector_loss_alpha",
+        }
+    )
+    INIT_ONLY_FIELDS: ClassVar[frozenset[str]] = frozenset({"dflash_init_checkpoint"})
 
     dflash_offline: bool = ModeloptField(
         default=False,

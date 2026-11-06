@@ -115,7 +115,7 @@ class HFDominoModel(HFDFlashModel):
         return DominoModule(dflash_config)
 
     def modify(self, config):
-        """Initialize the Domino draft module and read the lambda_base schedule."""
+        """Initialize the Domino draft module."""
         # Validate head fields up front: a clear error here beats a cryptic
         # AttributeError later in DominoModule.__init__ or the exporter.
         arch_config = config.dflash_architecture_config
@@ -126,6 +126,14 @@ class HFDominoModel(HFDFlashModel):
                 "dflash_architecture_config (the GRU correction head dimensions)."
             )
         super().modify(config)
+        if not getattr(self.dflash_module, "shift_label", True):
+            raise NotImplementedError(
+                "Domino currently supports shift_label=True (next-token alignment) only."
+            )
+
+    def _configure_training(self, config):
+        """Also read the lambda_base schedule."""
+        super()._configure_training(config)
         # Curriculum schedule for the base/final loss mixing weight. Read here
         # (DFlashConfig carries the two fields); updated each step by
         # DominoLambdaCallback. Defaults keep a single forward (e.g. unit tests)
@@ -133,10 +141,6 @@ class HFDominoModel(HFDFlashModel):
         self.dflash_lambda_base_start = config.dflash_lambda_base_start
         self.dflash_lambda_base_decay_ratio = config.dflash_lambda_base_decay_ratio
         self._lambda_base = self.dflash_lambda_base_start
-        if not getattr(self.dflash_module, "shift_label", True):
-            raise NotImplementedError(
-                "Domino currently supports shift_label=True (next-token alignment) only."
-            )
 
     def get_exporter(self):
         """Get the exporter for the Domino draft model."""

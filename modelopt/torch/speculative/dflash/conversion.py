@@ -59,15 +59,19 @@ _REGISTRY_BY_PROJECTOR_TYPE = {
 }
 
 
+def with_default_architecture(architecture_config: dict) -> dict:
+    """``architecture_config`` over the default draft architecture, as convert stores it."""
+    # Lazy import to avoid a circular one.
+    from .default_config import default_dflash_config
+
+    return {**default_dflash_config, **architecture_config}
+
+
 def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertReturnType:
     """Convert the model to a DFlash (or Domino) model as per `config`."""
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
-    # merge custom config with default config (lazy import to avoid circular)
-    from .default_config import default_dflash_config
-
-    custom_config = config.dflash_architecture_config
-    config.dflash_architecture_config = {**default_dflash_config, **custom_config}
+    config.dflash_architecture_config = with_default_architecture(config.dflash_architecture_config)
 
     projector_type = config.dflash_architecture_config.get("projector_type")
     registry = _REGISTRY_BY_PROJECTOR_TYPE.get(projector_type)
