@@ -879,6 +879,14 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, method):
             copy.deepcopy(source),
             constraints={"effective_bits": 6.0},
             quantization_formats=formats,
+            # o_proj holds FP8, so its calibrated input scale shapes the mlp's scores.
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*o_proj*"],
+                    "quantization_formats": [mtq.FP8_DEFAULT_CFG],
+                    "allow_no_quant": False,
+                }
+            ],
             data_loader=data,
             forward_step=lambda model, batch: model(batch),
             loss_func=(lambda output, batch: output.sum()) if method == "gradient" else None,
@@ -894,9 +902,9 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, method):
     for i, shard in enumerate(shards):
         _, state = search(shard, (i, 2))
         assert not state["best"]["recipe"]
-    # Shards hold disjoint formats: 2 of the 3 searched formats on shard 0, 1 on shard 1.
+    # Each searched format is calibrated by one shard, o_proj's held FP8 by both.
     calibrated = [set(safe_load(shard)["quantizer_states"]) for shard in shards]
-    assert not calibrated[0] & calibrated[1] and len(calibrated[0] | calibrated[1]) == 3
+    assert len(calibrated[0] & calibrated[1]) == 1 and len(calibrated[0] | calibrated[1]) == 3
 
     merged = tmp_path / "merged.pth"
     model_quant.merge_auto_quantize_checkpoints(list(reversed(shards)), str(merged))

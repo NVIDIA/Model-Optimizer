@@ -1332,14 +1332,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         ):
             func(self.model, data)
 
-    def _owned_recipes(self, quant_recipe_hparams, search_recipes):
-        """The searched formats this format shard calibrates and scores; None without sharding.
+    def _other_shards_recipes(self, quant_recipe_hparams, search_recipes) -> set:
+        """The searched formats this format shard leaves to the others; none without sharding.
 
-        Formats are dealt round-robin in canonical (compression, then config) order. The fixed
-        recipe is calibrated by every shard because it shapes the scoring reference.
+        Formats are dealt round-robin in canonical (compression, then config) order, each
+        calibrated and scored by its own shard. Every shard calibrates the formats groups hold
+        fixed, since those shape the reference the other groups are scored against.
         """
         if self.format_shard is None:
-            return None
+            return set()
         index, count = self.format_shard
         configurable = [hparam for hparam in quant_recipe_hparams if hparam.is_configurable]
         searched = [
@@ -1354,7 +1355,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         owned = set(searched[index::count])
         for hparam in configurable:
             hparam._scored_recipes = owned
-        return owned
+        held = {
+            recipe
+            for hparam in quant_recipe_hparams
+            if not hparam.is_configurable
+            for recipe in hparam.choices
+        }
+        return set(searched) - owned - held
 
     def _snapshot_source_weights(self, quant_recipe_hparams, search_recipes):
         """CPU copies of the weights candidates' calibrations will rewrite, or None if none will.
@@ -1595,16 +1602,10 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 "Combine shard checkpoints with merge_auto_quantize_checkpoints() first."
             )
         self.format_shard = format_shard
-        owned_recipes = self._owned_recipes(quant_recipe_hparams, search_recipes)
+        other_shards_recipes = self._other_shards_recipes(quant_recipe_hparams, search_recipes)
+        calibration_recipes = [r for r in search_recipes if r not in other_shards_recipes]
 
-        source_weights = self._snapshot_source_weights(
-            quant_recipe_hparams,
-            [
-                r
-                for r in search_recipes
-                if owned_recipes is None or r in {*owned_recipes, fixed_recipe}
-            ],
-        )
+        source_weights = self._snapshot_source_weights(quant_recipe_hparams, calibration_recipes)
         # Free the weights conversion replaced before calibration and scoring.
         self.restore_unconverted = None
         QuantRecipe.disable_folding_pqs_to_weights()
@@ -1612,10 +1613,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         # Iterate over the search recipes and calibrate the quantizers for each recipe
         calibrated_new = False
         try:
-            for recipe in search_recipes:
+            for recipe in calibration_recipes:
                 if recipe == QuantRecipe(quant_cfg=None):  # No-quant format
-                    continue
-                if owned_recipes is not None and recipe not in {*owned_recipes, fixed_recipe}:
                     continue
 
                 for hparam in quant_recipe_hparams:
@@ -1888,7 +1887,12 @@ def merge_auto_quantize_shards(shard_states: Sequence[dict]) -> dict:
             f"Merge needs one checkpoint per format shard (0..count-1, count), got {ids}."
         )
     shards = [state for _, state in sorted(zip(ids, shard_states), key=lambda pair: pair[0])]
-    merged = copy.deepcopy(shards[0])
+    # Copy the containers the merge fills, not the calibrated tensors (GGML codes) they hold.
+    merged = {
+        **shards[0],
+        "quantizer_states": dict(shards[0]["quantizer_states"]),
+        "candidate_stats": copy.deepcopy(shards[0]["candidate_stats"]),
+    }
     for state in shards[1:]:
         for key in _SHARD_INVARIANT_STATE:
             if state.get(key) != merged.get(key):
