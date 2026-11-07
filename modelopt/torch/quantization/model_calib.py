@@ -2186,12 +2186,13 @@ def awq_clip(
     def _clip_search(self, inputs, co_bsz=256, max_tokens=16):
         if inputs.numel() == 0:  # no tokens to search with; their loss, a mean over none, is NaN
             return
-        weight = self.weight
+        self.weight_quantizer.disable()
+        weight = self.weight_quantizer(self.weight)
         self.weight_quantizer.enable()
 
         if self.awq_clip.is_per_tensor_clip(self):
             # In NVFP4, only the per-tensor amax is clipped
-            out_actual = inputs @ self.weight.T
+            out_actual = inputs @ weight.T
             original_amax = self.weight_quantizer.amax.clone()
             self.awq_clip.num_tokens += inputs.shape[0]
             for shrink in self.awq_clip.loss:
