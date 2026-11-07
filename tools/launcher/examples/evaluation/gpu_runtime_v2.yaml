@@ -3,17 +3,19 @@ name: gpu_runtime_check
 parameters:
   suite: basic
   launch_blocking: "0"
+  allocated_gpus: 1
 tasks:
   gpu_runtime:
-    inline: python3 examples/evaluation/gpu_runtime.py --output "$RUNTIME_RESULT" --suite "$RUNTIME_SUITE"
+    inline: python3 examples/evaluation/gpu_runtime.py --output "$RUNTIME_RESULT" --suite "$RUNTIME_SUITE" --visible-gpus "$VISIBLE_GPUS"
     environment:
       RUNTIME_SUITE: ${parameters.suite}
       CUDA_LAUNCH_BLOCKING: ${parameters.launch_blocking}
       TORCHINDUCTOR_COMPILE_THREADS: "1"
+      VISIBLE_GPUS: ${parameters.allocated_gpus}
     resources:
       nodes: 1
       ntasks_per_node: 1
-      gpus_per_node: 1
+      gpus_per_node: ${parameters.allocated_gpus}
     container: vllm/vllm-openai:v0.25.0@sha256:fc56161ee42a011aeee78b65d0a81b6683c7d04402fd40503d14d4d6c98f07cb
     outputs:
       result:

@@ -32,6 +32,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--suite", choices=("basic", "serving"), default="basic")
+    parser.add_argument("--visible-gpus", type=int, default=1)
     args = parser.parse_args()
     result: dict[str, Any] = {
         "status": "failed",
@@ -57,9 +58,12 @@ def main():
         result.update(torch_version=torch.__version__, torch_cuda_version=torch.version.cuda)
         count = torch.cuda.device_count()
         result["gpu_count"] = count
-        if count != 1:
-            raise ValueError(f"Expected one visible GPU, found {count}")
+        if count < 1 or count != args.visible_gpus:
+            raise ValueError(f"Expected {args.visible_gpus} visible GPUs, found {count}")
+        # Some allocations require a full node; these checks use only its first GPU.
+        torch.cuda.set_device(0)
         result.update(
+            active_gpu_count=1,
             gpu_name=torch.cuda.get_device_name(0),
             capability=list(torch.cuda.get_device_capability(0)),
         )

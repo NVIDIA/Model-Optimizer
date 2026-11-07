@@ -35,6 +35,10 @@ The `suite=serving` parameter additionally checks Qwen3-sized projection
 matrices, vLLM RMS normalization, and a real TorchInductor-compiled RMS
 normalization. Use `launch_blocking=1` to report CUDA failures synchronously.
 These operations use synthetic tensors and produce no benchmark measurements.
+For clusters with a minimum GPU allocation, set `allocated_gpus` to that count.
+The diagnostic uses one process on the first visible GPU and records both the
+visible GPU count and `active_gpu_count=1`. All allocated GPUs count toward the
+job's resource footprint, even though only one performs these checks.
 
 The script installs pinned benchmark clients into a temporary virtual
 environment, keeping the serving image's dependencies separate. For a prepared
