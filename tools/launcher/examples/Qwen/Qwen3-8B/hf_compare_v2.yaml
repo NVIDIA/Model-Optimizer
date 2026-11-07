@@ -22,7 +22,7 @@ inputs:
 tasks:
   validate:
     inline: >-
-      python examples/evaluation/compare.py
+      python3 examples/evaluation/compare.py
       --baseline "$BASELINE_MODEL" --candidate "$CANDIDATE_MODEL"
       --dataset "$GSM8K_DATASET" --output "$EVALUATION_RESULTS"
       --baseline-ref "$BASELINE_REF" --candidate-ref "$CANDIDATE_REF"

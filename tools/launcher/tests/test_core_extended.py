@@ -26,6 +26,7 @@ Coverage:
 
 import json
 import os
+import shlex
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -416,10 +417,14 @@ class TestRunJobsExtended:
 
     @patch("core.run.Experiment")
     @patch("core.build_docker_executor")
-    def test_reqs_inline_barrier(self, mock_docker, mock_exp, tmp_path):
+    @pytest.mark.parametrize("named", [False, True])
+    def test_reqs_inline_barrier(self, mock_docker, mock_exp, tmp_path, named):
         """`reqs` on an inline task shlex-quotes pins and wraps the pip barrier."""
         mock_exp_inst = MagicMock()
         mock_exp_inst._id = "exp_reqs_inline"
+        mock_exp_inst._exp_dir = str(tmp_path / "experiment")
+        Path(mock_exp_inst._exp_dir).mkdir()
+        mock_exp_inst.add.return_value = "validate_job"
         mock_exp_inst.__enter__ = MagicMock(return_value=mock_exp_inst)
         mock_exp_inst.__exit__ = MagicMock(return_value=False)
         mock_exp.return_value = mock_exp_inst
@@ -433,9 +438,16 @@ class TestRunJobsExtended:
             slurm_config=MagicMock(),
             reqs="transformers<5 fire",
         )
-        pipeline = SandboxPipeline(task_0=t0)
+        if named:
+            t0.name = "validate"
+            t0.inline = "python3 eval.py"
+        pipeline = (
+            SandboxPipeline(tasks=[t0], artifact_store=str(tmp_path / "store"))
+            if named
+            else SandboxPipeline(task_0=t0)
+        )
 
-        with patch("core.run.Script") as mock_script:
+        with patch("core.run.Script", wraps=core.run.Script) as mock_script:
             run_jobs(
                 job_table={"job": pipeline},
                 hf_local="/tmp/hf",
@@ -450,7 +462,11 @@ class TestRunJobsExtended:
             inline = mock_script.call_args[1]["inline"]
 
         # `<` and `>` are shlex-quoted so the shell treats them literally.
-        assert "python -m pip install 'transformers<5' fire" in inline
+        if named:
+            argv = shlex.split(inline)
+            inline = argv[argv.index("-c") + 1]
+        python = "python3" if named else "python"
+        assert f"{python} -m pip install 'transformers<5' fire" in inline
         # Local rank 0 installs; other ranks wait on a per-job/step/node marker.
         assert '[ "${SLURM_LOCALID:-0}" -eq 0 ]' in inline
         marker = (
@@ -460,7 +476,10 @@ class TestRunJobsExtended:
         assert f"[ -f {marker} ]" in inline
         assert "rm -f" not in inline  # unique marker name means no pre-clear needed
         # The task's own command runs after the barrier (`&&`).
-        assert inline.rstrip().endswith("python eval.py")
+        if named:
+            assert "python3 common/workflow_artifacts.py" in inline
+        else:
+            assert inline.rstrip().endswith("python eval.py")
 
     @patch("core.run.Experiment")
     @patch("core.build_docker_executor")

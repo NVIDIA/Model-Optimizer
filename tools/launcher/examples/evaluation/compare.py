@@ -145,6 +145,8 @@ def performance_command(python, model, tokenizer, concurrency, output, url):
         tokenizer["revision"],
         "--num-prefix-prompts",
         "1",
+        "--num-dataset-entries",
+        "32",
         "--prefix-prompt-length",
         "32768",
         "--synthetic-input-tokens-mean",

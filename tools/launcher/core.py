@@ -1343,10 +1343,13 @@ def run_jobs(
                 # requirements.txt path; reqs is a raw arg string (shlex-quoted so
                 # < > = are literal, letting YAMLs write it unquoted).
                 reqs_prefix = ""
+                python = "python"
+                if task.name:
+                    python = shlex.quote(sys.executable) if job.local_execution else "python3"
                 if task.reqs or task.reqs_file:
                     pkgs = ["-r", shlex.quote(task.reqs_file)] if task.reqs_file else []
                     pkgs += [shlex.quote(tok) for tok in shlex.split(task.reqs or "")]
-                    install = "python -m pip install " + " ".join(pkgs)
+                    install = python + " -m pip install " + " ".join(pkgs)
                     # On Slurm, srun runs this inline on every rank (ntasks_per_node), so install
                     # once per node on local rank 0 behind a filesystem barrier — concurrent pip on
                     # one node corrupts the env. The marker lives in the working dir (/nemo_run/code,
@@ -1399,7 +1402,6 @@ def run_jobs(
                             if isinstance(executor, run.SlurmExecutor)
                             else 1,
                         }
-                        python = shlex.quote(sys.executable) if job.local_execution else "python"
                         worker = (
                             python
                             + " common/workflow_artifacts.py "
