@@ -53,4 +53,5 @@ class DFlashModel(DynamicModule):
         self.dflash_attention_sink = config.dflash_attention_sink
         self.dflash_init_checkpoint = config.dflash_init_checkpoint
         self.dflash_use_flex_attention = config.dflash_use_flex_attention
+        self.dflash_fused_loss = config.dflash_fused_loss
         self.dflash_export_rope_scaling = config.dflash_export_rope_scaling
