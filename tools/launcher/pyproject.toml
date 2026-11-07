@@ -31,7 +31,9 @@ modelopt_launcher = [
     "common/**/*",
     "examples/**/*.yaml",
     "examples/**/*.jinja",
-    "examples/evaluation/**/*",
+    "examples/evaluation/*.py",
+    "examples/evaluation/requirements.txt",
+    "examples/evaluation/README.md",
 ]
 
 [tool.pytest.ini_options]

@@ -84,12 +84,15 @@ def resolve_local(request):
                 name,
                 repo_type=kind,
                 revision=sha,
-                cache_dir=str(root / ".huggingface"),
+                # A separately mounted input cannot follow HF cache links into sibling blobs.
+                local_dir=str(root / ".modelopt-hf" / kind / name / sha),
                 token=os.environ.get("HF_TOKEN"),
             )
         ).resolve()
         if not path.is_dir() or not path.is_relative_to(root):
             raise ValueError("Snapshot must be inside the selected cache root")
+        if any(item.is_symlink() for item in path.rglob("*")):
+            raise ValueError("Input snapshot must be self-contained, without cache symlinks")
         resolved[mount] = {
             "mount": mount,
             "ref": declaration["ref"],

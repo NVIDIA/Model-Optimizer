@@ -31,8 +31,12 @@ _EXAMPLE = _LAUNCHER / "examples/smoke/workflow_v2.yaml"
 _PROFILE = _LAUNCHER / "examples/smoke/local_profile.yaml"
 
 
-@pytest.mark.parametrize("missing_dataset", [False, True])
-def test_hf_inputs_pin_every_revision_before_downloading(tmp_path, monkeypatch, missing_dataset):
+@pytest.mark.parametrize(
+    ("missing_dataset", "linked"), [(False, False), (True, False), (False, True)]
+)
+def test_hf_inputs_pin_every_revision_before_downloading(
+    tmp_path, monkeypatch, missing_dataset, linked
+):
     """Model and dataset snapshots use exact commits; an unresolved input copies no bytes."""
     hub = pytest.importorskip("huggingface_hub")
     from modelopt_launcher.inputs import resolve_local
@@ -42,10 +46,16 @@ def test_hf_inputs_pin_every_revision_before_downloading(tmp_path, monkeypatch, 
             raise ValueError("Dataset unavailable")
         return SimpleNamespace(sha=("a" if repo_type == "model" else "b") * 40)
 
-    def download(name, *, repo_type, revision, cache_dir, **kwargs):
-        path = Path(cache_dir) / repo_type / revision
+    def download(name, *, repo_type, revision, local_dir=None, cache_dir=None, **kwargs):
+        path = Path(local_dir) if local_dir else Path(cache_dir) / repo_type / revision
         path.mkdir(parents=True)
-        (path / "data.json").write_text(json.dumps({"kind": repo_type, "commit": revision}))
+        data = json.dumps({"kind": repo_type, "commit": revision})
+        if linked:
+            blob = tmp_path / "blob"
+            blob.write_text(data)
+            (path / "data.json").symlink_to(blob)
+        else:
+            (path / "data.json").write_text(data)
         return str(path)
 
     monkeypatch.setattr(hub, "HfApi", lambda **_: SimpleNamespace(repo_info=info))
@@ -62,6 +72,9 @@ def test_hf_inputs_pin_every_revision_before_downloading(tmp_path, monkeypatch, 
         with pytest.raises(ValueError):
             resolve_local(request)
         assert not (tmp_path / "cache").exists()
+    elif linked:
+        with pytest.raises(ValueError, match="self-contained"):
+            resolve_local(request)
     else:
         result = resolve_local(request)
         assert result["status"] == "ready"

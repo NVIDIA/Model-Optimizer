@@ -28,6 +28,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 
 TOKENIZER_FILES = (
@@ -273,8 +274,9 @@ def evaluate(args, client_python, workspace):
             sys.executable,
             "-c",
             (
-                "import torch,json; assert torch.cuda.device_count()==1; "
+                "import torch,json,socket,vllm; assert torch.cuda.device_count()==1; "
                 "print(json.dumps({'name':torch.cuda.get_device_name(0), 'count':1, "
+                "'node':socket.gethostname(),'engine_version':vllm.__version__,"
                 "'capability':torch.cuda.get_device_capability(0)}))"
             ),
         ],
@@ -371,6 +373,7 @@ def evaluate(args, client_python, workspace):
                         url,
                     )
                     (cell / "benchmark-command.txt").write_text(shlex.join(command) + "\n")
+                    save(cell / "execution.json", {"started_at": datetime.now(UTC).isoformat()})
                     run(command, cell / "client.log", env=client_env)
                 metrics.update(collect_metrics(arm, role, args.concurrency))
                 save(output / "metrics.json", metrics)
@@ -428,10 +431,15 @@ def main():
                     client = MlflowClient()
                     run_id = os.environ["MLFLOW_RUN_ID"]
                     client.log_artifacts(run_id, str(args.output), artifact_path="evaluation")
+                    manifest = os.environ.get("MODELOPT_INPUTS_MANIFEST")
+                    inputs = json.loads(Path(manifest).read_text()) if manifest else []
+                    model_ids = {item.get("role"): item.get("model_id") for item in inputs}
                     metrics_path = args.output / "metrics.json"
                     if metrics_path.is_file():
                         for name, value in json.loads(metrics_path.read_text()).items():
-                            client.log_metric(run_id, name, value)
+                            client.log_metric(
+                                run_id, name, value, model_id=model_ids.get(name.split(".")[0])
+                            )
 
 
 if __name__ == "__main__":
