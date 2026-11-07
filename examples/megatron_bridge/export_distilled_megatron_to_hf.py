@@ -55,6 +55,7 @@ See `README.md` in this directory for more details.
 """
 
 import argparse
+import os
 from pathlib import Path
 
 import torch
@@ -265,7 +266,8 @@ def get_args() -> argparse.Namespace:
 
     args = parser.parse_args()
     resolve_mlflow_args(args, parser, DISTILL_EXPORT)
-    print_args(masked_args(args))
+    if int(os.environ.get("RANK", "0")) == 0:
+        print_args(masked_args(args))
 
     return args
 

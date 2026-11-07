@@ -360,10 +360,11 @@ def get_args() -> argparse.Namespace:
             args.prune_intermediate_ckpt = f"{args.output_megatron_path}/modelopt_pruning_scores"
         elif args.output_hf_path:
             args.prune_intermediate_ckpt = f"{args.output_hf_path}/modelopt_pruning_scores"
-        print_rank_0(
-            "No directory provided to cache per-rank intermediate pruning scores. "
-            f"Setting to: {args.prune_intermediate_ckpt}"
-        )
+        if int(os.environ.get("RANK", "0")) == 0:
+            print_rank_0(
+                "No directory provided to cache per-rank intermediate pruning scores. "
+                f"Setting to: {args.prune_intermediate_ckpt}"
+            )
 
     if args.prune_export_config:
         try:
@@ -381,7 +382,8 @@ def get_args() -> argparse.Namespace:
 
     resolve_mlflow_args(args, parser, PRUNE)
 
-    print_args(masked_args(args))
+    if int(os.environ.get("RANK", "0")) == 0:
+        print_args(masked_args(args))
 
     # Flipped by main() once a checkpoint is on disk; a run that only scores candidates
     # writes none, and then there is nothing for a provenance pointer to claim.

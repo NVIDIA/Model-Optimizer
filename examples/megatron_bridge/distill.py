@@ -546,7 +546,8 @@ def get_args():
 
     _check_shared_vocabulary(args)
 
-    print_args(masked_args(args))
+    if int(os.environ.get("RANK", "0")) == 0:
+        print_args(masked_args(args))
 
     return args
 
