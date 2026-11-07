@@ -316,7 +316,7 @@ def get_args():
         "--freeze_mtp",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Freeze the student's MTP-specific parameters and disable its MTP loss "
+        help="Freeze the student's MTP-specific parameters and bypass teacher/student MTP forward and loss "
         "(--no-freeze_mtp keeps them training). Unset, they are frozen only when "
         "--kd_loss_alpha is 1.0 and the student is quantized except for its MTP head.",
     )

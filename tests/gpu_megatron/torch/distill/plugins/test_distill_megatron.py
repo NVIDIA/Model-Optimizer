@@ -337,17 +337,17 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size)
 
     distillation_model(prompt_tokens, position_ids, attention_mask, labels=labels)
 
-    # Expect mtp_num_layers + 1 total calls: first mtp_num_layers are MTP heads,
-    # the last one is the main LM head.
-    assert len(recorded_losses) == mtp_num_layers + 1, (
-        f"Expected {mtp_num_layers + 1} loss calls, got {len(recorded_losses)}"
+    # Frozen MTP does not enter the forward/loss path; otherwise its heads precede the main LM.
+    expected_calls = 1 if freeze_mtp else mtp_num_layers + 1
+    assert len(recorded_losses) == expected_calls, (
+        f"Expected {expected_calls} loss calls, got {len(recorded_losses)}"
     )
     for i, loss in enumerate(recorded_losses[:-1]):
         assert loss.any() != mtp_skipped, f"MTP head {i} loss should be zero iff MTP is skipped"
     assert recorded_losses[-1].any() != skip_lm_loss, "Main LM head loss is zero iff skip_lm_loss"
 
 
-def _test_freeze_mtp_training_step(mtp_quantized, freeze_mtp, kd_loss_alpha, rank, size):
+def _test_freeze_mtp_training_step(mtp_quantized, freeze_mtp, kd_loss_alpha, moe, rank, size):
     """Through a training step, the MTP head is frozen exactly when ``freeze_mtp`` resolves to it."""
     set_seed(SEED)
 
@@ -366,7 +366,17 @@ def _test_freeze_mtp_training_step(mtp_quantized, freeze_mtp, kd_loss_alpha, ran
         "vocab_size": vocab_size,
         "activation_func": "squared_relu",
         "mtp_num_layers": 1,
+        "recompute_granularity": "full",
+        "recompute_method": "uniform",
+        "recompute_num_layers": 1,
     }
+    if moe:
+        model_kwargs.update(
+            sequence_parallel=size > 1,
+            num_moe_experts=4,
+            moe_router_load_balancing_type="global_aux_loss",
+            moe_aux_loss_coeff=1e-3,
+        )
     teacher_model = get_mcore_gpt_model(initialize_megatron=True, **model_kwargs).cuda()
     student_model = get_mcore_gpt_model(initialize_megatron=False, **model_kwargs).cuda()
     # Quantization-state fixtures: a quantized body, with or without a quantized MTP head.
@@ -400,6 +410,16 @@ def _test_freeze_mtp_training_step(mtp_quantized, freeze_mtp, kd_loss_alpha, ran
     body_params = {n: p for n, p in named_params.items() if n.startswith("decoder.")}
     assert mtp_params and body_params
     mtp_before = {n: p.detach().clone() for n, p in mtp_params.items()}
+
+    def reject_frozen_mtp(module, args):
+        assert not freeze_mtp, "Frozen MTP must not execute forward or recomputation"
+
+    # Checkpoint recomputation can call the inner transformer layer directly.
+    handles = [
+        module.register_forward_pre_hook(reject_frozen_mtp)
+        for lm in (distillation_model, distillation_model.teacher_model)
+        for module in lm.mtp.modules()
+    ]
     optimizer = torch.optim.AdamW(
         [p for p in named_params.values() if p.requires_grad], lr=1e-2, weight_decay=0.1
     )
@@ -434,6 +454,117 @@ def _test_freeze_mtp_training_step(mtp_quantized, freeze_mtp, kd_loss_alpha, ran
     assert mtp_trained != frozen
     if frozen:
         assert all(torch.equal(p, mtp_before[n]) for n, p in mtp_params.items())
+        assert any(name.startswith("mtp.") for name in distillation_model.sharded_state_dict())
+        with (
+            patch.object(distillation_model.decoder, "forward", side_effect=RuntimeError("probe")),
+            pytest.raises(RuntimeError, match="probe"),
+        ):
+            distillation_model(prompt_tokens, position_ids, attention_mask, labels=labels)
+    for lm in (distillation_model, distillation_model.teacher_model):
+        assert lm.mtp_process and lm.config.mtp_num_layers == 1
+        assert lm.config is lm.decoder.config
+    for handle in handles:
+        handle.remove()
+
+
+def _test_freeze_mtp_tied_weights_pp(rank, size):
+    set_seed(SEED)
+    hidden_size, seq_length, batch_size, vocab_size = 8, 8, 2, 32
+    model_kwargs = {
+        "pipeline_model_parallel_size": size,
+        "num_layers": 2,
+        "hidden_size": hidden_size,
+        "num_attention_heads": 4,
+        "num_query_groups": 2,
+        "ffn_hidden_size": 8,
+        "max_sequence_length": seq_length,
+        "vocab_size": vocab_size,
+        "mtp_num_layers": 1,
+        "share_embeddings_and_output_weights": True,
+    }
+    teacher = get_mcore_gpt_model(initialize_megatron=True, **model_kwargs).cuda()
+    student = get_mcore_gpt_model(**model_kwargs).cuda()
+    cfg = setup_distillation_config(
+        DistillationConfig(freeze_mtp=True), student.config, teacher.config
+    )
+    model = mtd.convert(
+        student,
+        mode=[
+            (
+                "kd_loss",
+                {
+                    "teacher_model": teacher,
+                    "criterion": cfg.criterion,
+                    "loss_balancer": cfg.loss_balancer,
+                },
+            )
+        ],
+    )
+    adjust_distillation_model_for_mcore(model, cfg)
+
+    captured = {}
+    originals = {lm: lm.shared_embedding_or_output_weight for lm in (model, teacher)}
+
+    def capture_output(lm, module, args, output):
+        captured[lm] = (args[0].detach(), output[0].detach())
+
+    def reject_mtp(module, args):
+        raise AssertionError("Frozen MTP must not execute")
+
+    handles = []
+    shared_before = {}
+    if parallel_state.is_pipeline_last_stage():
+        for lm in (model, teacher):
+            shared_before[lm] = lm.embedding.word_embeddings.weight.detach().clone()
+            # Make selecting the unused output-layer weight numerically observable.
+            if (
+                lm.output_layer.weight is not None
+                and lm.output_layer.weight is not lm.embedding.word_embeddings.weight
+            ):
+                with torch.no_grad():
+                    lm.output_layer.weight.zero_()
+            handles.append(lm.output_layer.register_forward_hook(partial(capture_output, lm)))
+            handles.append(lm.mtp.register_forward_pre_hook(reject_mtp))
+
+    tokens = torch.randint(0, vocab_size, (batch_size, seq_length), device="cuda")
+    positions = torch.arange(seq_length, device="cuda").unsqueeze(0).expand_as(tokens)
+    with torch.no_grad():
+        if parallel_state.is_pipeline_first_stage():
+            hidden = model(tokens, positions, None)
+            torch.distributed.send(hidden.contiguous(), dst=1)
+        else:
+            hidden = torch.empty(
+                seq_length, batch_size, 2 * hidden_size, dtype=torch.bfloat16, device="cuda"
+            )
+            torch.distributed.recv(hidden, src=0)
+            model.set_student_input_tensor_shape([(seq_length, batch_size, hidden_size)])
+            model.set_input_tensor([hidden])
+            logits = model(tokens, positions, None)
+            for lm in (model, teacher):
+                activation, actual = captured[lm]
+                checkpoint = lm.state_dict()
+                weight = checkpoint["embedding.word_embeddings.weight"]
+                torch.testing.assert_close(weight, shared_before[lm])
+                torch.testing.assert_close(actual, F.linear(activation, weight))
+                assert lm.mtp_process and lm.config.mtp_num_layers == 1
+            torch.testing.assert_close(logits, captured[model][1].transpose(0, 1).contiguous())
+
+            with (
+                patch.object(model.decoder, "forward", side_effect=RuntimeError("probe")),
+                pytest.raises(RuntimeError, match="probe"),
+            ):
+                model(tokens, positions, None)
+
+    for lm in (model, teacher):
+        assert lm.shared_embedding_or_output_weight == originals[lm]
+        assert lm.config is lm.decoder.config
+    for handle in handles:
+        handle.remove()
+
+
+def test_freeze_mtp_tied_weights_pp(dist_workers_size_2):
+    """PP2 main logits use the tied checkpoint weight while both MTP paths are bypassed."""
+    dist_workers_size_2.run(_test_freeze_mtp_tied_weights_pp)
 
 
 def test_logits_kl_loss(dist_workers):
@@ -629,7 +760,7 @@ def test_topk_logits_kl_loss_top_p_masks_tail():
     assert student.grad is not None and torch.isfinite(student.grad).all()
 
 
-def test_distillation_config_top_p_validation():
+def test_distillation_config_validation():
     with pytest.raises(AssertionError):
         DistillationConfig(logit_kl_top_p=0.9)  # requires logit_kl_topk
     with pytest.raises(AssertionError):
@@ -637,6 +768,24 @@ def test_distillation_config_top_p_validation():
     with pytest.raises(AssertionError):
         DistillationConfig(logit_kl_topk=8, logit_kl_top_p=0.9, logit_kl_top_p_min_k=0)
     DistillationConfig(logit_kl_topk=8, logit_kl_top_p=1.0, logit_kl_top_p_min_k=2)
+
+    for pair in (
+        ("mtp", "decoder.final_layernorm"),
+        ("decoder.final_layernorm", "mtp.layers.0.hnorm", "mse"),
+        ("language_model.mtp.layers.0.hnorm", "decoder.final_layernorm"),
+    ):
+        with pytest.raises(ValueError):
+            DistillationConfig(freeze_mtp=True, intermediate_layer_pairs=[pair])
+        for freeze_mtp in (None, False):
+            DistillationConfig(freeze_mtp=freeze_mtp, intermediate_layer_pairs=[pair])
+
+    DistillationConfig(
+        freeze_mtp=True,
+        intermediate_layer_pairs=[
+            ("decoder.final_layernorm", "decoder.final_layernorm"),
+            ("decoder.mtp_projection", "decoder.mtp_projection", "cosine"),
+        ],
+    )
 
 
 @pytest.mark.parametrize(
@@ -667,10 +816,11 @@ def test_skip_lm_loss_with_mtp(dist_workers, quantized, skip_lm_loss, freeze_mtp
         (True, False, 1.0),
     ],
 )
-def test_freeze_mtp_training_step(dist_workers, mtp_quantized, freeze_mtp, kd_loss_alpha):
+@pytest.mark.parametrize("moe", [False, True])
+def test_freeze_mtp_training_step(dist_workers, mtp_quantized, freeze_mtp, kd_loss_alpha, moe):
     """Through a training step, the MTP head is frozen exactly when ``freeze_mtp`` resolves to it."""
     dist_workers.run(
-        partial(_test_freeze_mtp_training_step, mtp_quantized, freeze_mtp, kd_loss_alpha)
+        partial(_test_freeze_mtp_training_step, mtp_quantized, freeze_mtp, kd_loss_alpha, moe)
     )
 
 

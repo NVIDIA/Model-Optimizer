@@ -22,6 +22,8 @@ import re
 import warnings
 from abc import ABCMeta
 from collections.abc import Callable
+from contextlib import contextmanager
+from copy import copy
 from dataclasses import dataclass, field
 from types import MethodType
 from typing import TYPE_CHECKING
@@ -71,11 +73,11 @@ class DistillationConfig:
             Only the smallest prefix of the (sorted) Top-K whose cumulative teacher probability
             reaches this value contributes to the loss. Requires ``logit_kl_topk``. Must be in (0, 1].
         logit_kl_top_p_min_k: Minimum number of Top-K entries kept per token when top-P is active.
-        freeze_mtp: Whether to freeze the student's MTP-specific parameters and disable its auxiliary
-            MTP loss, which otherwise also trains the shared layers it reads from. ``True`` freezes
-            it and ``False`` keeps it training. ``None`` (default) freezes it only when
-            ``kd_loss_alpha == 1.0`` and the student is quantized except for its MTP head, since
-            there is then no quantization error for the MTP loss to recover.
+        freeze_mtp: ``True`` freezes the student's MTP-specific parameters and bypasses MTP
+            forward/loss for both teacher and student, retaining their checkpoint weights.
+            ``False`` keeps it training. ``None`` (default) freezes its parameters and skips its
+            loss only when ``kd_loss_alpha == 1.0`` and the student is quantized except for its
+            MTP head, since there is then no quantization error for the MTP loss to recover.
     """
 
     intermediate_layer_pairs: list[tuple[str, ...]] = field(default_factory=list)
@@ -115,6 +117,12 @@ class DistillationConfig:
         assert all(len(pair) in (2, 3) for pair in self.intermediate_layer_pairs), (
             f"{self.intermediate_layer_pairs=}"
         )
+        for pair in self.intermediate_layer_pairs:
+            if self.freeze_mtp and any("mtp" in layer.split(".") for layer in pair[:2]):
+                raise ValueError(
+                    "freeze_mtp=True bypasses MTP forward, so intermediate_layer_pairs cannot "
+                    f"reference MTP modules: {pair[:2]}. Remove this pair or set freeze_mtp=False."
+                )
         assert 0 <= self.kd_loss_alpha <= 1, f"{self.kd_loss_alpha=}"
         assert self.logit_kl_temperature > 0, f"{self.logit_kl_temperature=}"
         if self.logit_kl_top_p is not None:
@@ -793,8 +801,12 @@ def adjust_distillation_model_for_mcore(
                     num_frozen += 1
         if num_frozen:
             warn_rank_0(
-                f"MTP head is frozen ({num_frozen} params) and its loss is skipped"
-                + (" (freeze_mtp)." if distill_cfg.freeze_mtp else ": it is outside quantization.")
+                f"MTP head is frozen ({num_frozen} params)"
+                + (
+                    " and its forward/loss are skipped (freeze_mtp)."
+                    if distill_cfg.freeze_mtp
+                    else " and its loss is skipped: it is outside quantization."
+                )
             )
         elif parallel_state.is_pipeline_last_stage():  # earlier stages never hold the MTP head
             warn_rank_0("freeze_mtp is set but the model has no MTP head: nothing to freeze.")
@@ -817,6 +829,34 @@ def adjust_distillation_model_for_mcore(
         _compute_teacher_lm_loss, model.teacher_model
     )
 
+    @contextmanager
+    def _skip_mtp_forward(lm):
+        mtp_process = getattr(lm, "mtp_process", False)
+        config = lm.config
+        mtp_num_layers = getattr(config, "mtp_num_layers", None)
+        # Non-last PP stages retain mtp_num_layers; entering the bypass there is harmless.
+        if not distill_cfg.freeze_mtp or not (mtp_process or mtp_num_layers):
+            yield
+            return
+        tied_mtp = mtp_process and getattr(lm, "share_embeddings_and_output_weights", False)
+        shared_weight_fn = lm.__dict__.get("shared_embedding_or_output_weight")
+        try:
+            if tied_mtp:
+                # MTP also selects the canonical tied weight on the last pipeline stage.
+                lm.shared_embedding_or_output_weight = lambda: lm.embedding.word_embeddings.weight
+            # GPT gates the block and loss separately. Do not alter the decoder's shared config.
+            lm.mtp_process = False
+            lm.config = copy(config)
+            lm.config.mtp_num_layers = 0
+            yield
+        finally:
+            lm.mtp_process, lm.config = mtp_process, config
+            if tied_mtp:
+                if shared_weight_fn is None:
+                    del lm.shared_embedding_or_output_weight
+                else:
+                    lm.shared_embedding_or_output_weight = shared_weight_fn
+
     # HACK: Pipeline-parallel Distillation requires splitting input tensor into student and teacher parts.
     def _set_student_input_tensor_shape(self, shapes: list[tuple[int]]):
         self._tensor_split_idx = shapes[0][-1]
@@ -836,14 +876,15 @@ def adjust_distillation_model_for_mcore(
 
     # HACK: Concatenate output tensors when PP>1 so they can be passed between ranks.
     def _forward(self, *args, **kwargs):
-        with torch.no_grad():
-            self._teacher_model.eval()
-            teacher_output = self._teacher_model(*args, **kwargs)
+        with _skip_mtp_forward(self), _skip_mtp_forward(self._teacher_model):
+            with torch.no_grad():
+                self._teacher_model.eval()
+                teacher_output = self._teacher_model(*args, **kwargs)
 
-        self._lm_loss_call_count = 0  # reset loss-fn call counter for MTP tracking
+            self._lm_loss_call_count = 0  # reset loss-fn call counter for MTP tracking
 
-        with self.only_student_forward():
-            student_output = type(self).forward(self, *args, **kwargs)
+            with self.only_student_forward():
+                student_output = type(self).forward(self, *args, **kwargs)
 
         if not parallel_state.is_pipeline_last_stage():
             return torch.cat([student_output, teacher_output], dim=-1)
