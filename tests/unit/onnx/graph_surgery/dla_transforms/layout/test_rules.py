@@ -28,6 +28,8 @@ from modelopt.onnx.graph_surgery.dla_transforms.layout.passes import snapshot
 from modelopt.onnx.graph_surgery.dla_transforms.layout.rules import (
     AXIS_RULES,
     INDEXING_RULES,
+    NATIVE_RULES,
+    NORMALIZATION_RULES,
     SHAPE_RULES,
 )
 
@@ -455,3 +457,196 @@ def test_shared_reduction_axes_get_separate_live_owners():
         strict=True,
     ):
         np.testing.assert_array_equal(actual, expected.reshape(1, 2, 1, 4))
+
+
+def _native_shape_snapshot(model):
+    return {
+        node: (
+            tuple(static_shape(value) for value in node.inputs),
+            tuple(static_shape(value) for value in node.outputs),
+        )
+        for node in model.graph
+    }
+
+
+def test_instance_normalization_channel_layout():
+    graph = helper.make_graph(
+        [
+            helper.make_node("InstanceNormalization", ["x", "scale", "bias"], ["y"]),
+        ],
+        "instance",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3, 4])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 3, 4])],
+        [
+            numpy_helper.from_array(np.array([1, 2, 3], np.float32), "scale"),
+            numpy_helper.from_array(np.array([0.1, -0.1, 0.2], np.float32), "bias"),
+        ],
+    )
+    source = onnx.shape_inference.infer_shapes(
+        helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)], ir_version=10)
+    )
+    model = ir.serde.deserialize_model(source)
+    planned = {"x": (1, 2, 3, 4), "y": (1, 2, 3, 4)}
+    _, _, count = _apply_rules(
+        model,
+        native_shapes=_native_shape_snapshot(model),
+        planned_shapes=planned,
+        group=NATIVE_RULES,
+    )
+    assert count == 1
+    model.graph.inputs[0].shape = ir.Shape(planned["x"])
+    model.graph.outputs[0].shape = ir.Shape(planned["y"])
+    result = onnx.shape_inference.infer_shapes(ir.serde.serialize_model(model), strict_mode=True)
+    onnx.checker.check_model(result, full_check=True)
+    x = (np.arange(24, dtype=np.float32).reshape(2, 3, 4) % 7) / 8
+    np.testing.assert_allclose(
+        ReferenceEvaluator(source).run(None, {"x": x})[0],
+        ReferenceEvaluator(result).run(None, {"x": x.reshape(1, 2, 3, 4)})[0].reshape(2, 3, 4),
+        rtol=2e-6,
+    )
+    assert [node.op_type for node in result.graph.node] == [
+        "Reshape",
+        "InstanceNormalization",
+        "Reshape",
+    ]
+    middle = list(model.graph)[1]
+    assert static_shape(middle.inputs[0]) == (2, 3, 4, 1)
+
+
+@pytest.mark.parametrize(
+    ("output_count", "packed"), [(1, False), (2, False), (3, False), (3, True)]
+)
+def test_attention_native_ports(output_count, packed):
+    shape = [1, 2, 8]
+    inputs = (
+        [helper.make_tensor_value_info("q", TensorProto.FLOAT, [1, 2, 24])]
+        if packed
+        else [
+            helper.make_tensor_value_info(name, TensorProto.FLOAT, shape)
+            for name in ("q", "k", "v")
+        ]
+    )
+    inputs.extend(
+        [
+            helper.make_tensor_value_info("lengths", TensorProto.INT32, [1]),
+            helper.make_tensor_value_info("total", TensorProto.INT32, []),
+        ]
+    )
+    output_shapes = [[1, 2, 8], [1, 2, 2, 4], [1, 2, 2, 4]]
+    graph = helper.make_graph(
+        [
+            helper.make_node(
+                "GroupQueryAttention",
+                ["q", "" if packed else "k", "" if packed else "v", "", "", "lengths", "total"],
+                ["y", "present_k", "present_v"][:output_count],
+                domain="com.microsoft",
+                num_heads=2,
+                kv_num_heads=2,
+            ),
+        ],
+        "attention",
+        inputs,
+        [
+            helper.make_tensor_value_info(name, TensorProto.FLOAT, dims)
+            for name, dims in zip(
+                ("y", "present_k", "present_v")[:output_count],
+                output_shapes[:output_count],
+                strict=True,
+            )
+        ],
+    )
+    source = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", 1)],
+        ir_version=10,
+    )
+    model = ir.serde.deserialize_model(source)
+    native, planned = snapshot(model)
+    context, rules, count = _apply_rules(
+        model, native_shapes=native, planned_shapes=planned, group=NATIVE_RULES
+    )
+    assert count == 1
+    assert context.apply_patterns(rules) == 0
+    for value in model.graph.inputs:
+        if value.name in planned:
+            value.shape = ir.Shape(planned[value.name])
+    model.graph.outputs[0].shape = ir.Shape(planned["y"])
+    result = ir.serde.serialize_model(model)
+    onnx.checker.check_model(result, full_check=True)
+    attention = next(node for node in model.graph if node.op_type == "GroupQueryAttention")
+    assert [static_shape(value) for value in attention.inputs[:3]] == (
+        [(1, 2, 24), None, None] if packed else [tuple(shape)] * 3
+    )
+    assert attention.inputs[3:5] == (None, None)
+    assert [value.name for value in attention.inputs[5:]] == ["lengths", "total"]
+    assert [static_shape(value) for value in attention.outputs] == [
+        tuple(dims) for dims in output_shapes[:output_count]
+    ]
+    assert [static_shape(value) for value in model.graph.outputs] == [
+        (1, 1, 2, 8),
+        (1, 2, 2, 4),
+        (1, 2, 2, 4),
+    ][:output_count]
+
+
+@pytest.mark.parametrize("strong", [False, True])
+def test_normalization_promotion(strong):
+    graph = helper.make_graph(
+        [
+            helper.make_node("LpNormalization", ["x"], ["norm"], axis=1, p=2),
+            helper.make_node("Mul", ["norm", "gamma"], ["y"]),
+        ],
+        "normalization",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 4])],
+        [numpy_helper.from_array(np.array(1.25, np.float32), "gamma")],
+    )
+    source = onnx.shape_inference.infer_shapes(
+        helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)], ir_version=10)
+    )
+    model = ir.serde.deserialize_model(source)
+    native = {
+        node: (
+            tuple(static_shape(value) for value in node.inputs),
+            tuple(static_shape(value) for value in node.outputs),
+        )
+        for node in model.graph
+    }
+    planned = dict.fromkeys(("x", "norm", "y"), (1, 1, 2, 4))
+    _, _, count = _apply_rules(
+        model,
+        native_shapes=native,
+        planned_shapes=planned,
+        group=NORMALIZATION_RULES,
+        force_fp16_activations=strong,
+    )
+    assert count == 1
+    model.graph.inputs[0].shape = ir.Shape(planned["x"])
+    model.graph.outputs[0].shape = ir.Shape(planned["y"])
+    for node in model.graph:
+        for value in node.outputs:
+            if value.name in planned:
+                value.shape = ir.Shape(planned[value.name])
+    result = onnx.shape_inference.infer_shapes(ir.serde.serialize_model(model), strict_mode=True)
+    onnx.checker.check_model(result, full_check=True)
+    x = np.arange(1, 9, dtype=np.float32).reshape(2, 4) / 8
+    np.testing.assert_allclose(
+        ReferenceEvaluator(source).run(None, {"x": x})[0],
+        ReferenceEvaluator(result).run(None, {"x": x.reshape(1, 1, 2, 4)})[0].reshape(2, 4),
+        rtol=2e-6,
+    )
+    if strong:
+        assert [node.op_type for node in result.graph.node] == [
+            "Mul",
+            "ReduceSum",
+            "Sqrt",
+            "Max",
+            "Div",
+            "Mul",
+        ]
+        assert any(
+            np.array_equal(numpy_helper.to_array(value), np.array(2**-14, np.float32))
+            for value in result.graph.initializer
+        )
+    else:
+        assert next(iter(model.graph)).attributes["axis"].value == -1
