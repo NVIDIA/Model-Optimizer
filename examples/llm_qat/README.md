@@ -30,11 +30,8 @@ install the Hugging Face dependencies and the example-specific requirements:
 <!-- modelopt-snippet: llm-qat-install -->
 ```bash
 pip install -U nvidia-modelopt[hf]
-pip install --no-build-isolation -r examples/llm_qat/requirements.txt
+pip install -r examples/llm_qat/requirements.txt
 ```
-
-`--no-build-isolation` lets FlashAttention build against the PyTorch installed by
-the first command.
 
 The Qwen3-8B example below requires a minimum of **2 x 80GB GPUs**.
 
@@ -60,13 +57,11 @@ See [custom calibration](https://nvidia.github.io/Model-Optimizer/guides/_pytorc
 
 ### QAT
 
-Quantize, fine-tune on labeled data, and export. Start from the repository root:
+Quantize, fine-tune on labeled data, and export:
 
 <!-- modelopt-snippet: llm-qat-quickstart -->
 
 ```sh
-cd examples/llm_qat
-
 # 1. Quantize
 python quantize.py \
   --model_name_or_path Qwen/Qwen3-8B \
@@ -240,19 +235,16 @@ trainer.train()
 trainer.save_model()
 ```
 
-`QADTrainer` extends `QATTrainer` with distillation. Load the teacher first and pass a `DistillArgsWithTeacherModel` instance:
+`QADTrainer` extends `QATTrainer` with distillation. Pass the teacher model and a `DistillArguments` instance:
 
 <!-- modelopt-snippet: llm-qad-trainer -->
 ```python
-from transformers import AutoModelForCausalLM
-
-from modelopt.torch.distill.plugins.huggingface import DistillArgsWithTeacherModel
+from modelopt.torch.distill.plugins.huggingface import DistillArguments
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer
 
-teacher = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B", dtype=model.dtype)
-distill_args = DistillArgsWithTeacherModel(
+distill_args = DistillArguments(
     distill=True,
-    teacher_model=teacher,
+    teacher_model="Qwen/Qwen3-8B",
     criterion="logits_loss",
 )
 
@@ -280,8 +272,7 @@ You can either:
    ```sh
    accelerate launch --config-file configs/accelerate/fsdp2.yaml \
      --fsdp_transformer_layer_cls_to_wrap LlamaDecoderLayer \
-     train.py --config configs/train/qat_nvfp4.yaml \
-     --model_name_or_path llama-quantized --output_dir llama-qat
+     train.py --config configs/train/qat_nvfp4.yaml ...
    ```
 
 2. **Create a custom config** (recommended for repeated use):
@@ -315,8 +306,7 @@ There are two types of configs:
 ```sh
 # YAML + CLI override
 accelerate launch --config-file configs/accelerate/fsdp2.yaml train.py \
-  --config configs/train/qat_nvfp4.yaml --learning_rate 5e-5 \
-  --model_name_or_path qwen3-8b-quantized --output_dir qwen3-8b-qat-override
+  --config configs/train/qat_nvfp4.yaml --learning_rate 5e-5
 ```
 
 See [Dataset Configuration](configs/dataset/README.md) for custom dataset blends and adding new datasets.
