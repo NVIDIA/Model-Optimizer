@@ -90,6 +90,7 @@ from . import (  # isort: skip
     nemotron,
     nemotron_h,
     minimax_m3_vl,
+    kimi_k3,
     llama4_text,
     kimi_vl,
     kimi_k25,
