@@ -6,6 +6,7 @@ parameters:
   dataset: openai/gsm8k@740312add88f781978c0658806c59bc2815b9866
   samples: 64
   candidate_linear_backend: auto
+  compilation_mode: default
 inputs:
   /inputs/baseline:
     ref: ${parameters.baseline}
@@ -27,11 +28,13 @@ tasks:
       --dataset "$GSM8K_DATASET" --output "$EVALUATION_RESULTS"
       --baseline-ref "$BASELINE_REF" --candidate-ref "$CANDIDATE_REF"
       --samples "$ACCURACY_SAMPLES" --candidate-linear-backend "$CANDIDATE_LINEAR_BACKEND"
+      --compilation-mode "$COMPILATION_MODE"
     environment:
       BASELINE_REF: ${parameters.baseline}
       CANDIDATE_REF: ${parameters.candidate}
       ACCURACY_SAMPLES: ${parameters.samples}
       CANDIDATE_LINEAR_BACKEND: ${parameters.candidate_linear_backend}
+      COMPILATION_MODE: ${parameters.compilation_mode}
     resources:
       nodes: 1
       ntasks_per_node: 1

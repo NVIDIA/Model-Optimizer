@@ -18,6 +18,12 @@ with BF16 activations (W4A16), rather than native NVFP4 activation computation.
 The default `auto` lets vLLM select a supported kernel on other hardware.
 Inspect the saved server logs for the actual selected implementation.
 
+For startup failures in TorchInductor, `compilation_mode=none` passes
+`-cc.mode=0` to both servers, disabling `torch.compile` while retaining CUDA
+graphs. The default leaves vLLM's compilation settings unchanged. Results
+record the chosen mode and full commands; compare curves with matching modes.
+See the [vLLM compilation debugging guide](https://docs.vllm.ai/en/v0.25.0/design/debug_vllm_compile/).
+
 The script installs pinned benchmark clients into a temporary virtual
 environment, keeping the serving image's dependencies separate. For a prepared
 environment, pass `--client-python /absolute/venv/bin/python` when calling the
