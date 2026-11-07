@@ -221,6 +221,7 @@ modelopt-launcher --yaml tools/launcher/examples/Qwen/Qwen3-8B/hf_ptq_v2.yaml \
 The preview compiles the spec without downloading inputs or submitting jobs.
 After reviewing it, use `--yes` in place of `--dryrun` to execute. The inherited
 four-hour limit is an example default, rather than a measured runtime estimate.
+Set `slurm.time` and `slurm.mem` in the execution profile to bound a particular run.
 
 `quant`, `calib_size`, `calib_seq`, `calib_batch_size` and `calib_dataset` control
 the existing PTQ arguments. Use a single quantization preset name for `quant`.
