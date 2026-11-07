@@ -37,12 +37,16 @@ class INT4QTensor(BaseQuantizedTensor):
         return 2 ** (num_bits - 1) - 1
 
     @classmethod
-    def quantize(cls, input: torch.Tensor, block_size: int) -> tuple:
+    def quantize(
+        cls, input: torch.Tensor, block_size: int, scales: torch.Tensor | None = None
+    ) -> tuple:
         """Converting a tensor to a quantized format based on INT4 (AWQ) quantization.
 
         Args:
             input (torch.Tensor): The input tensor to be quantized.
             block_size (int): The size of each block for quantization.
+            scales (torch.Tensor): Optional per-block scales (``maxbound / amax``), one per block.
+                Computed from the per-block max of ``input`` when not provided.
 
         Returns:
             tuple: Contains quantized data, input quantization config, and scale quantization config.
@@ -60,9 +64,11 @@ class INT4QTensor(BaseQuantizedTensor):
 
         # get scales for each block
         block_input = input.view(-1, block_size)
-        scales = scale_quant_maxbound / reduce_amax(block_input, -1)
-        # expand scalers to match shape of input
-        scales = scales.view(block_input.shape[0], -1)  # shape: (block_input.shape[0], 1)
+        if scales is None:
+            scales = scale_quant_maxbound / reduce_amax(block_input, -1)
+        # expand scalers to match shape of input (block_input.shape[0], 1); the CUDA kernel
+        # reads scales as the input dtype
+        scales = scales.to(input.dtype).view(block_input.shape[0], -1)
 
         if cuda_ext and input.is_cuda:
             # use a custom cuda kernel if available

@@ -36,3 +36,60 @@ def test_compress_refuses_w4a8_weights_before_changing_the_model(grouped):
         mtq.compress(model)
 
     assert not is_real_quantized(model)
+
+
+@pytest.mark.parametrize(
+    "weight_cfg",
+    [
+        {"num_bits": 4, "block_sizes": {-1: 64}},
+        {"num_bits": 8, "axis": 0},
+        {"num_bits": 8, "block_sizes": {-1: 64}},
+    ],
+    ids=["int4_block", "int8_channel", "int8_block"],
+)
+def test_compress_keeps_calibrated_weight_amax(weight_cfg):
+    """Compressed INT4 / INT8 weights use the calibrated amax, not the weight's own max."""
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(128, 32, bias=False))
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": weight_cfg},
+        ],
+        "algorithm": "max",
+    }
+    x = torch.randn(8, 128)
+    mtq.quantize(model, config, lambda m: m(x))
+    # Stand in for a clip search (AWQ clip, MSE): a calibrated range below the weight's max.
+    weight_quantizer = model[0].weight_quantizer
+    weight_quantizer.amax = weight_quantizer.amax * 0.8
+
+    expected = model(x)
+    mtq.compress(model)
+
+    assert is_real_quantized(model)
+    torch.testing.assert_close(model(x), expected)
+
+
+def test_compress_int4_casts_calibrated_scales_to_weight_dtype():
+    """Scales derived from a float32 amax match the weight dtype, as the CUDA kernel requires."""
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(128, 32, bias=False)).to(torch.bfloat16)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": 4, "block_sizes": {-1: 64}},
+            },
+        ],
+        "algorithm": "max",
+    }
+    x = torch.randn(8, 128, dtype=torch.bfloat16)
+    mtq.quantize(model, config, lambda m: m(x))
+    weight_quantizer = model[0].weight_quantizer
+    weight_quantizer.amax = weight_quantizer.amax.float()
+
+    mtq.compress(model)
+
+    assert weight_quantizer._scale.dtype == torch.bfloat16
