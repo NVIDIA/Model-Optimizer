@@ -528,8 +528,8 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
     def _reduce_loss_scalar(self, value: float) -> float:
         """Reduce a loss scalar over the data-parallel group."""
         # A loss scalar is sharded over DP (disjoint batches) and, only when the loss itself
-        # is vocab-sharded, over TP; it is REPLICATED across EP ranks (unlike per-module
-        # importances, which get_score sums over all three groups).
+        # is vocab-sharded, over TP. The module is a dense one wherever the model has one, whose
+        # DP group spans every rank that scores data of its own and whose EP group is unused.
         module = self._any_score_parallel_module()
         if module is None:
             return value
@@ -552,18 +552,30 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
         )
 
     def _any_score_parallel_module(self):
-        """A module carrying a parallel state, if any.
+        """A module carrying a parallel state, if any: a dense one, where the model has one.
 
         Falls back to quant modules so the loss and token reductions stay consistent with
-        get_score, which uses the same fallback when a score module is a plain container.
+        get_score, which uses the same fallback when a score module is a plain container. A
+        routed expert's DP group holds only the ranks with the same experts, and its EP ranks
+        score data of their own too, so a search over the experts alone reduces over one of
+        the model's dense modules instead.
         """
         hparams = self._configurable_hparams()
-        for collection in ("score_modules", "quant_modules"):
-            for hparam in hparams:
-                for module in getattr(hparam, collection, ()):
-                    if getattr(module, "parallel_state", None) is not None:
-                        return module
-        return None
+        modules = [
+            module
+            for collection in ("score_modules", "quant_modules")
+            for hparam in hparams
+            for module in getattr(hparam, collection, ())
+        ]
+        stated = [
+            module
+            for module in (*modules, *self.model.modules())
+            if getattr(module, "parallel_state", None) is not None
+        ]
+        dense = (
+            m for m in stated if not m.parallel_state.expert_model_parallel_group.is_initialized()
+        )
+        return next(dense, stated[0] if stated else None)
 
     def _exclude_non_finite_candidates(
         self, no_quant

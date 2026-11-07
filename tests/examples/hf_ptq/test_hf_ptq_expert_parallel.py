@@ -276,32 +276,43 @@ def test_a_tensorrt_llm_checkpoint_export_needs_a_single_process(
     ("world_size", "env", "use_fsdp2"),
     [
         pytest.param(2, {"MODELOPT_EP_DEGREE": "2"}, False, marks=needs_ep_transformers),
-        pytest.param(2, {}, False, marks=needs_ep_transformers),
+        pytest.param(
+            2,
+            {"MODELOPT_EP_DEGREE": "1", "MODELOPT_FSDP_SIZE": "1"},
+            False,
+            marks=needs_ep_transformers,
+        ),
         (2, {}, True),
         (1, {}, False),
     ],
     ids=["expert_parallel", "replicated", "use_fsdp2", "single_process"],
 )
-def test_an_auto_quantize_recipe_is_refused_on_the_routes_this_script_adds(
-    hf_ptq, monkeypatch, torchrun, world_size, env, use_fsdp2
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        "general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits",
+        "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+    ],
+    ids=["weights", "then_kv_cache"],
+)
+def test_only_a_kv_cache_search_is_refused_on_the_routes_this_script_adds(
+    hf_ptq, monkeypatch, torchrun, world_size, env, use_fsdp2, recipe
 ):
-    """AutoQuantize scores each rank's own calibration shard and reduces no score across ranks, so
-    the ranks could choose different formats per layer. An expert-parallel or replicated run refuses
-    the recipe before the load; --use_fsdp2 keeps main's warning, and a single process runs it."""
+    """Every rank scores its own calibration shard and AutoQuantize sums the scores over the ranks,
+    so an AutoQuantize recipe runs on every route. The KV-cache search requires every rank to hold
+    the same quantizers, which an expert-parallel run's experts are not: a recipe with that search
+    is refused before the load, and before the weight search it runs first."""
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
-    args = _args(
-        torchrun(world_size=world_size),
-        use_fsdp2=use_fsdp2,
-        recipe="general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits",
-    )
+    args = _args(torchrun(world_size=world_size), use_fsdp2=use_fsdp2, recipe=recipe)
 
-    if world_size == 1 or use_fsdp2:
-        hf_ptq.resolve_distribution(args)
-    else:
-        with pytest.raises(NotImplementedError, match="AutoQuantize"):
+    if env.get("MODELOPT_EP_DEGREE") == "2" and "kv" in recipe:
+        with pytest.raises(NotImplementedError, match="KV-cache AutoQuantize"):
             hf_ptq.resolve_distribution(args)
+    else:
+        plan = hf_ptq.resolve_distribution(args)[0]
+        assert plan.is_expert_parallel == (env.get("MODELOPT_EP_DEGREE") == "2")
 
 
 @pytest.mark.parametrize(

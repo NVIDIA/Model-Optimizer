@@ -43,6 +43,7 @@ from modelopt.torch.quantization.conversion import (
     set_quantizer_by_cfg,
 )
 from modelopt.torch.utils import atomic_print, restore_training_modes
+from modelopt.torch.utils.moe import expert_parallel_mesh
 
 from . import model_calib
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
@@ -673,6 +674,14 @@ def _auto_quantize_kv_cache(
     fixed_quantization_config: dict[str, Any] | str | None,
 ):
     """Run the KV-cache-specific AutoQuantize validation and search lifecycle."""
+    plan = dist.recorded_distribution_plan(model)
+    if plan is not None and plan.is_expert_parallel:
+        raise NotImplementedError(
+            f"KV-cache AutoQuantize does not support a model whose experts are sharded over "
+            f"{plan.ep_size} ranks yet: its search requires every rank to hold the same "
+            "quantizers, and each rank holds its own experts'. Search the KV-cache formats without "
+            "expert parallelism."
+        )
     if dist.size() > 1 and dist.is_dtensor_sharded(model) and not dist.is_fsdp2_model(model):
         raise NotImplementedError("Distributed KV-cache AutoQuantize supports DP/FSDP2, not TP.")
     _validate_parallel_state(model)
@@ -1066,6 +1075,16 @@ def auto_quantize(
 
     .. note::
 
+        On a model distributed over several ranks -- data-parallel, FSDP2-sharded, or with its
+        routed experts sharded expert-parallel as
+        :func:`~modelopt.torch.utils.plugins.model_load_utils.load_pretrained` loads one -- every
+        rank calls ``auto_quantize`` on its own share of the data, and must run the same number of
+        calibration and scoring batches. The scores are summed over the ranks, so every rank
+        picks the same formats as one process scoring all their data. KV-cache search does not
+        support expert parallelism yet.
+
+    .. note::
+
         The ``auto_quantize`` API and algorithm is experimental and subject to change. ``auto_quantize`` searched models
         might not be readily deployable to TensorRT-LLM yet.
 
@@ -1074,15 +1093,6 @@ def auto_quantize(
         if isinstance(quantization_formats, str) or not isinstance(quantization_formats, Sequence):
             raise TypeError("`quantization_formats` must be a sequence of formats.")
         quantization_formats = list(quantization_formats)
-    plan = dist.recorded_distribution_plan(model)
-    if plan is not None and plan.is_expert_parallel:  # before anything converts the model
-        raise NotImplementedError(
-            f"auto_quantize does not support a model whose experts are sharded over {plan.ep_size} "
-            "ranks yet: its forwards would run the experts without the expert-parallel forwards "
-            "that quantization replaces and distributed_forward_loop restores. Quantize it with "
-            "mtq.quantize through distributed_forward_loop, or AutoQuantize in a single process."
-        )
-
     method_name, method_config = _parse_auto_quantize_method(method)
     is_kv_search = constraints is not None and constraints.get("cost_model") == COST_MODEL_KV_CACHE
     if is_kv_search:
@@ -1107,6 +1117,10 @@ def auto_quantize(
             module_search_spaces=module_search_spaces,
             fixed_quantization_config=fixed_quantization_config,
         )
+
+    # Before anything converts the model: an expert-parallel plan without its mesh raises here.
+    plan = dist.recorded_distribution_plan(model)
+    ep_mesh = expert_parallel_mesh(model) if plan is not None and plan.is_expert_parallel else None
 
     method_name = method_name or "gradient"
 
@@ -1265,6 +1279,9 @@ def auto_quantize(
             mode="auto_quantize",
             registry=QuantizeModeRegistry,
         )
+        # Quantizer insertion dropped the routed experts' all-to-all forwards, which the search's
+        # calibration and scoring forwards need.
+        dist.reinstall_a2a_forwards(model, ep_mesh)
         # Disable all quantizers; AutoQuantize will enable the needed ones
         set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
         if processed_fixed_quantization_config is not None:

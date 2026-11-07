@@ -29,7 +29,7 @@ from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
 from modelopt.torch.quantization.kv_cache_auto_quant import _forward_kl
 from modelopt.torch.utils.dataset_utils import create_forward_loop, model_type_is_enc_dec
-from modelopt.torch.utils.distributed import size as world_size
+from modelopt.torch.utils.distributed import distribution_plan
 
 __all__ = ["auto_quantize"]
 
@@ -191,7 +191,8 @@ def auto_quantize(
             "or 'aumann_shapley'"
         )
 
-    score_batch_size = args.batch_size * (world_size() if args.use_fsdp2 else 1)
+    # Every rank of a distributed plan scores a batch of its own shard of the data per step.
+    score_batch_size = args.batch_size * distribution_plan(language_model).world_size
     auto_quantize_kwargs: dict[str, Any] = {
         "constraints": inputs["constraints"],
         "data_loader": calib_dataloader,
