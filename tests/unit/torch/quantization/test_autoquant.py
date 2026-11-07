@@ -869,7 +869,7 @@ def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method)
 
 
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
-def test_format_shards_merge_into_the_unsharded_search(tmp_path, method):
+def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, method):
     source = TransformerBlock()
     data = [source.get_input() for _ in range(2)]
     formats = [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG]
@@ -941,6 +941,16 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, method):
         model_quant.merge_auto_quantize_checkpoints(shards, str(merged))
     assert not (tmp_path / "elsewhere.pth").exists()
     merged.unlink()
+
+    def disk_full(obj, f):  # writes part of the checkpoint, then fails
+        f.write(b"partial")
+        raise OSError("No space left on device")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(model_quant, "safe_save", disk_full)
+        with pytest.raises(OSError, match="No space"):
+            model_quant.merge_auto_quantize_checkpoints(shards, str(merged))
+    assert not merged.exists()  # so the merge can be retried
     model_quant.merge_auto_quantize_checkpoints(list(reversed(shards)), str(merged))
     with pytest.raises(ValueError, match="format shard"):
         search(shards[0])

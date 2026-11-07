@@ -1319,8 +1319,13 @@ def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint
     )
     os.makedirs(os.path.dirname(checkpoint) or ".", exist_ok=True)
     # Created exclusively: a file or symlink that appeared since the check is refused, not written.
-    with open(checkpoint, "xb") as f:
-        safe_save(merged, f)
+    f = open(checkpoint, "xb")
+    try:
+        with f:
+            safe_save(merged, f)
+    except BaseException:
+        os.unlink(checkpoint)  # only this call's partial file, so the merge can be retried
+        raise
 
 
 def get_auto_quantize_config(search_state, constraints=None, verbose=False):
