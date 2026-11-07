@@ -936,10 +936,17 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
         assert resumed[name]["raw_scores"] == stats["raw_scores"]
 
     merged = tmp_path / "merged.pth"
-    merged.symlink_to(tmp_path / "elsewhere.pth")  # planted after the existence check
-    with pytest.raises(FileExistsError):
-        model_quant.merge_auto_quantize_checkpoints(shards, str(merged))
-    assert not (tmp_path / "elsewhere.pth").exists()
+    merge_states = model_quant.merge_auto_quantize_shards
+
+    def merge_racing_a_writer(states):  # another writer creates it after the existence check
+        merged.write_bytes(b"theirs")
+        return merge_states(states)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(model_quant, "merge_auto_quantize_shards", merge_racing_a_writer)
+        with pytest.raises(FileExistsError):
+            model_quant.merge_auto_quantize_checkpoints(shards, str(merged))
+    assert merged.read_bytes() == b"theirs"  # neither overwritten nor removed
     merged.unlink()
 
     def disk_full(obj, f):  # writes part of the checkpoint, then fails

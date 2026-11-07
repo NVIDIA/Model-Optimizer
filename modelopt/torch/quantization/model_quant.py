@@ -1318,7 +1318,7 @@ def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint
         [safe_load(path, map_location="cpu", mmap=True) for path in shard_checkpoints]
     )
     os.makedirs(os.path.dirname(checkpoint) or ".", exist_ok=True)
-    # Created exclusively: a file or symlink that appeared since the check is refused, not written.
+    # Created exclusively: a file that appeared since the check is refused, not overwritten.
     f = open(checkpoint, "xb")
     try:
         with f:
