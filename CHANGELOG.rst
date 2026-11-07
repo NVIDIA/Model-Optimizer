@@ -97,6 +97,7 @@ Changelog
 
 **Bug Fixes**
 
+- ``mtq.compress`` now packs INT4 and INT8 weights with their calibrated ranges, as it already did FP8 weights. It recomputed them from each block or channel max, discarding the ranges found by ``awq_clip``, ``awq_full`` or ``mse`` calibration, so a compressed model no longer matched its fake-quantized outputs.
 - Fix Hugging Face EAGLE training scaling gradients by the accumulation group size instead of averaging them when gradient accumulation is enabled.
 - QAT and QAD of the GGML formats (IQ, ``q8_0``) now re-encode trainable weights after every optimizer step, including under optimizers that write weights through a shared buffer or ``.data`` such as Megatron's distributed optimizer. With those optimizers the GGML codes used to stay those of each job's first forward, so re-run earlier Megatron QAD of these formats.
 - Fix ONNX loading and quantization graph exports failing on individual initializers larger than 2 GiB, while preserving nested scopes and sequence/optional value types.

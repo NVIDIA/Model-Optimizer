@@ -14,6 +14,8 @@
 # limitations under the License.
 """Implements INT8 quantization for efficient tensor storage and computation."""
 
+import math
+
 import torch
 
 from ..qtensor.base_qtensor import BaseQuantizedTensor
@@ -53,9 +55,10 @@ class INT8QTensor(BaseQuantizedTensor):
             tuple: INT8QTensor, scales
         """
         original_input = input
+        if block_sizes:
+            input = reduce_block_padding(input, block_sizes)
         if scales is None:
             if block_sizes:
-                input = reduce_block_padding(input, block_sizes)
                 amax = reduce_block_amax(input, block_sizes)
             else:
                 reduce_axis = convert_quantization_axis_to_reduce_axis(input, axis)
@@ -78,6 +81,13 @@ class INT8QTensor(BaseQuantizedTensor):
                 expected_shape[dim] = (
                     input.shape[dim] // block_size
                 )  # Adjust expected shape for blocks
+
+            # Calibrated amax may be stored flattened over blocks, e.g. (num_blocks, 1).
+            if scales.shape != tuple(expected_shape) and scales.numel() == math.prod(
+                expected_shape
+            ):
+                scales = scales.reshape(expected_shape)
+                expanded_scales = expanded_scales.reshape(expected_shape)
 
             # Assert the shape of `scales` matches expected reduced dimensions
             assert scales.shape == tuple(expected_shape), (

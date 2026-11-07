@@ -864,8 +864,14 @@ class TensorQuantizer(nn.Module):
             )
             buffer_to_register["_scale"] = _scale
         elif self._num_bits == 8:
+            # Use the calibrated amax (e.g. from MSE or AWQ clip search) so the packed weights
+            # match fake quantization; blockwise per-tensor amax is recomputed per block instead.
+            use_amax = self.amax is not None and not (self._block_sizes and self.amax.numel() == 1)
             outputs, _scale = INT8QTensor.quantize(
-                inputs, axis=self._axis, block_sizes=self._block_sizes
+                inputs,
+                scales=self.amax.float() / 127.0 if use_amax else None,
+                axis=self._axis,
+                block_sizes=self._block_sizes,
             )
             buffer_to_register["_scale"] = _scale
         elif self._block_sizes.get("scale_bits", 0) == 8 and self._block_sizes.get(
@@ -907,7 +913,23 @@ class TensorQuantizer(nn.Module):
             buffer_to_register["_scale"] = _weights_scaling_factor
             buffer_to_register["_double_scale"] = _weights_scaling_factor_2
         else:
-            outputs, _scale = INT4QTensor.quantize(inputs, self._block_sizes[-1])
+            block_size = self._block_sizes[-1]
+            # Use the calibrated per-block amax (e.g. from AWQ clip or MSE search) so the packed
+            # weights match fake quantization. Fall back to the block max if the layouts differ.
+            use_amax = (
+                self.amax is not None
+                and inputs.shape[-1] % block_size == 0
+                and self.amax.numel() == inputs.numel() // block_size
+            )
+            outputs, _scale = INT4QTensor.quantize(
+                inputs,
+                block_size,
+                scales=(
+                    INT4QTensor._get_quant_maxbound(num_bits=4) / self.amax.reshape(-1, 1)
+                    if use_amax
+                    else None
+                ),
+            )
             buffer_to_register["_scale"] = _scale
         for k, v in buffer_to_register.items():
             self._set_buffer(k, v)
