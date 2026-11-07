@@ -429,7 +429,7 @@ class ModelOptArgParser(HfArgumentParser):
                 default_str = self._format_default(f.default, f.default_factory)
                 help_text = dict(f.metadata).get("help", "")
                 # Collapse multi-line help into single line
-                help_text = " ".join(help_text.split())
+                help_text = " ".join(help_text.split()).replace("%%", "%")
                 lines.append(f"| {name} | {type_str} | {default_str} | {help_text} |")
 
             lines.append("")
