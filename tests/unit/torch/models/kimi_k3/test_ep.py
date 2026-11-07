@@ -52,7 +52,7 @@ from transformers.core_model_loading import build_glob_alternation
 from transformers.integrations.moe import ALL_EXPERTS_FUNCTIONS
 
 from modelopt.torch.export.quant_aware_conversion import build_reverse_name_mapper
-from modelopt.torch.models import _onfly_decompress, get_spec
+from modelopt.torch.models import _onfly_decompress, _remote_code, get_spec
 from modelopt.torch.models.kimi_k3 import ep as kimi_k3
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import moe
@@ -777,6 +777,50 @@ def test_prepare_refusal_finds_a_config_naming_no_model_class(monkeypatch):
     assert hooks() == before
     assert not _onfly_decompress.is_marked(unnamed)
     assert unnamed.text_config.quantization_config == scheme
+
+
+@pytest.mark.usefixtures(
+    "private_conversion_registry", "restore_loader_hooks", "torch_a2a_unregistered"
+)
+def test_prepare_s_patches_stay_on_the_code_loaded_through_another_path(monkeypatch, tmp_path):
+    """transformers loads another copy of the checkpoint's code for another path to the checkpoint,
+    and executes a module again when the files it hashes change. The prepared config and the
+    converters assume the patched block, so ``prepare`` keeps its patches on every such module, as
+    the other Kimi adapters keep theirs: built through the other path, the code is patched too."""
+    modules = tmp_path / "modules"
+    modules.mkdir()
+    monkeypatch.setattr(dmu, "HF_MODULES_CACHE", str(modules))
+    monkeypatch.syspath_prepend(str(modules))
+    monkeypatch.setattr(dmu, "get_class_in_module", dmu.get_class_in_module)
+    monkeypatch.setattr(dmu, "get_cached_module_file", dmu.get_cached_module_file)
+    monkeypatch.setattr(_remote_code, "_KEPT_PATCHES", {})
+    _restore(monkeypatch, hf_generic, "OutputRecorder")
+    for name in [n for n in sys.modules if n.startswith("transformers_modules.")]:
+        monkeypatch.delitem(sys.modules, name)
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir()
+    shutil.copy(kimi_k3_tiny_modeling.__file__, ckpt / "modeling_kimi_k3.py")
+    text = {"model_type": "kimi_linear", "num_experts": 4, "num_hidden_layers": 2}
+    auto_map = {**_AUTO_MAP, "AutoConfig": "modeling_kimi_k3.KimiK3Config"}
+    stored = {"model_type": "kimi_k3", "auto_map": auto_map, "text_config": text}
+    (ckpt / "config.json").write_text(json.dumps(stored))
+    (tmp_path / "same_ckpt").symlink_to(ckpt)
+    loaded = set(sys.modules)
+    try:
+        config = transformers.AutoConfig.from_pretrained(ckpt, trust_remote_code=True)
+        kimi_k3.prepare(config, ckpt_path=str(ckpt), trust_remote_code=True)
+
+        again = dmu.get_class_from_dynamic_module(
+            _AUTO_MAP["AutoModelForCausalLM"], str(tmp_path / "same_ckpt")
+        )
+
+        assert ".same_ckpt." in again.__module__  # a copy of its own, under the other path
+        assert sys.modules[again.__module__].KimiSparseMoeBlock._kimi_k3_ep_patched
+        assert again.tie_weights._kimi_k3_kwargs_shim
+    finally:
+        for name in set(sys.modules) - loaded:
+            if name.startswith("transformers_modules."):
+                del sys.modules[name]
 
 
 @pytest.mark.usefixtures("private_conversion_registry", "restore_loader_hooks")
