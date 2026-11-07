@@ -144,6 +144,21 @@ def _hf_source(spec: str) -> "HFDatasetSourceConfig":
     return HFDatasetSourceConfig(path_or_dataset=dataset, split=split or "train")
 
 
+def _check_moe_freeze_args(args) -> None:
+    if not (args.freeze_router or args.train_moe_expert_fc_only):
+        return
+    if args.moe_aux_loss_coeff != 0:
+        # The load-balancing loss would keep sending gradient to earlier layers through the router
+        # logits, i.e. train a different objective than these flags were validated with.
+        raise ValueError(
+            "--freeze_router / --train_moe_expert_fc_only require --moe_aux_loss_coeff 0."
+        )
+    if args.train_moe_expert_fc_only and args.pp_size > 1:
+        # Only the last stage holds the final norm, so the other stages would have no trainable
+        # dense parameter and an empty dense optimizer.
+        raise ValueError("--train_moe_expert_fc_only requires --pp_size 1.")
+
+
 def get_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Distillation for Megatron-Bridge.")
@@ -316,17 +331,17 @@ def get_args():
     parser.add_argument(
         "--freeze_router",
         action="store_true",
-        help="Freeze the student's MoE routers and stop their expert-bias updates. Pass "
-        "--moe_aux_loss_coeff 0 as well: the aux loss still sends gradient to earlier layers "
-        "through the router logits.",
+        help="Freeze the student's MoE routers and stop their expert-bias updates. Requires "
+        "--moe_aux_loss_coeff 0: the aux loss still sends gradient to earlier layers through the "
+        "router logits.",
     )
     parser.add_argument(
         "--train_moe_expert_fc_only",
         action="store_true",
-        help="Train only the student's routed-expert FC weights; freeze everything else, routers "
-        "included, except the decoder's final norm (kept trainable so the dense optimizer is not "
-        "empty). Requires --pp_size 1, cannot be combined with a LoRA student, and needs "
-        "--moe_aux_loss_coeff 0.",
+        help="Train only the student's routed-expert FC weights; freeze everything else, routers, "
+        "expert biases and quantizer scales included, except the decoder's final norm (kept "
+        "trainable so the dense optimizer is not empty). Requires --pp_size 1 and "
+        "--moe_aux_loss_coeff 0, and cannot be combined with a LoRA student.",
     )
     parser.add_argument(
         "--fake_quant_weight_cache",
@@ -484,10 +499,7 @@ def get_args():
         raise ValueError("--checkpoint_keep_last must be >= -1.")
     if args.validate_only and args.eval_iters == 0:
         raise ValueError("--validate_only requires --eval_iters > 0.")
-    if args.train_moe_expert_fc_only and args.pp_size > 1:
-        # Only the last stage holds the final norm, so the other stages would have no trainable
-        # dense parameter and an empty dense optimizer.
-        raise ValueError("--train_moe_expert_fc_only requires --pp_size 1.")
+    _check_moe_freeze_args(args)
     if args.pp_size == 1 and (
         args.num_layers_in_first_pipeline_stage or args.num_layers_in_last_pipeline_stage
     ):
@@ -623,6 +635,9 @@ def _add_document_boundaries() -> None:
 
 
 _DECODER_FINAL_NORM = re.compile(r"(^|\.)decoder\.final_(layernorm|norm)\.")
+# Routed-expert FC weights only: sequential ``.weight`` or grouped ``.weight{i}``. Biases and
+# quantizer scales under the experts are not matched.
+_EXPERT_FC_WEIGHT = re.compile(r"\.mlp\.experts\..*\.weight\d*$")
 
 
 def _freeze_student_params(
@@ -632,17 +647,19 @@ def _freeze_student_params(
 
     Returns the (trainable, frozen) parameter counts. With ``check_layout`` (a single pipeline
     stage holds every layer), raise if the option matched nothing, so it is not silently ignored.
+    The layout is validated before any parameter changes, so a refusal leaves the student as is.
     """
     named = list(student.named_parameters())
     if expert_fc_only and any(name.endswith((".lora_A", ".lora_B")) for name, _ in named):
         # LoRA training freezes the backbone and trains the adapters; this mode would freeze the
         # adapters and train the base experts instead, silently undoing that policy.
         raise ValueError("--train_moe_expert_fc_only cannot be combined with a LoRA student.")
+    to_freeze = []
     trainable = frozen = 0
     routers = experts = dense = 0
     for name, param in named:
         is_router = ".router." in name
-        is_expert = ".mlp.experts." in name
+        is_expert = _EXPERT_FC_WEIGHT.search(name) is not None
         # Keep the final norm trainable in expert-only mode: with every dense parameter frozen, the
         # dense distributed optimizer is empty and checkpoint saving crashes on it.
         # Match the decoder's norm by path: an MTP head has its own ``final_layernorm``.
@@ -650,10 +667,10 @@ def _freeze_student_params(
         freeze = (not is_expert and not keep_dense) if expert_fc_only else is_router
         # Only ever freeze: a parameter an earlier step froze (e.g. the LoRA restore) stays frozen.
         if freeze:
-            param.requires_grad_(False)
+            to_freeze.append(param)
         routers += is_router
         experts += is_expert
-        if param.requires_grad:
+        if param.requires_grad and not freeze:
             trainable += param.numel()
             dense += not is_expert
         else:
@@ -662,12 +679,35 @@ def _freeze_student_params(
         if freeze_router and not routers:
             raise ValueError("--freeze_router found no MoE router parameter in the student.")
         if expert_fc_only and not experts:
-            raise ValueError("--train_moe_expert_fc_only found no routed-expert parameter.")
+            raise ValueError("--train_moe_expert_fc_only found no routed-expert FC weight.")
         if expert_fc_only and not dense:
             raise ValueError(
                 "--train_moe_expert_fc_only left no trainable dense parameter (final norm not found)."
             )
+    for param in to_freeze:
+        param.requires_grad_(False)
     return trainable, frozen
+
+
+def _require_grad_from_embedding(student: torch.nn.Module) -> None:
+    """Make the embedding output require grad, which expert-only mode needs.
+
+    With the embedding frozen no activation requires grad, so the checkpointed first layers would
+    silently get no parameter gradients. Raise if there is no embedding to hook.
+    """
+
+    def _hook(_module, _inputs, out):
+        if not torch.is_tensor(out):
+            raise RuntimeError(
+                f"--train_moe_expert_fc_only expects a tensor from the embedding, got {type(out).__name__}."
+            )
+        return out if out.requires_grad else out.requires_grad_(True)
+
+    embeddings = [m for m in student.modules() if type(m).__name__ == "LanguageModelEmbedding"]
+    if not embeddings:
+        raise ValueError("--train_moe_expert_fc_only found no LanguageModelEmbedding to hook.")
+    for module in embeddings:
+        module.register_forward_hook(_hook)
 
 
 class FakeQuantWeightCache(Callback):
@@ -832,17 +872,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
                 check_layout=args.pp_size == 1,
             )
             if args.train_moe_expert_fc_only:
-                # With the embedding frozen no activation requires grad, so the checkpointed first
-                # layers would silently get no parameter gradients.
-                for module in student.modules():
-                    if type(module).__name__ == "LanguageModelEmbedding":
-                        module.register_forward_hook(
-                            lambda _m, _i, out: (
-                                out.requires_grad_(True)
-                                if torch.is_tensor(out) and not out.requires_grad
-                                else out
-                            )
-                        )
+                _require_grad_from_embedding(student)
             print_rank_0(
                 f"Student params: {trainable:,} trainable, {frozen:,} frozen "
                 f"(freeze_router={args.freeze_router}, "
