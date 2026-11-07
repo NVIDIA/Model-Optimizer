@@ -523,6 +523,7 @@ def prepare(
     # path to the checkpoint, and the prepared config and the converters assume the patched block.
     vlm_module = _find_module_defining("KimiK3ForConditionalGeneration", package)
     for module in {kmod, vlm_module} - {None}:
+        _patch_remote_module(module)
         keep_patched(f".{module.__name__.rpartition('.')[2]}", _patch_remote_module)
 
     if not getattr(text_cfg, "base_model_ep_plan", None):

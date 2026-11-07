@@ -484,7 +484,7 @@ def test_prepare_fails_loudly_when_no_loaded_module_defines_the_moe_block(monkey
 
     with pytest.raises(RuntimeError, match="KimiSparseMoeBlock"):
         kimi_k3.prepare(
-            SimpleNamespace(text_config=SimpleNamespace()),
+            SimpleNamespace(text_config=SimpleNamespace(), auto_map=_AUTO_MAP),
             ckpt_path="/ckpt",
             trust_remote_code=True,
         )
