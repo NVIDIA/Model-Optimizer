@@ -1292,6 +1292,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 costs.append(cost)
                 prev_score = score
 
+            # A restored checkpoint loads candidate_stats as a plain dict, not a defaultdict.
+            self.candidate_stats.setdefault(name, {})
             self.candidate_stats[name]["formats"] = formats
             self.candidate_stats[name]["scores"] = scores
             self.candidate_stats[name]["raw_scores"] = raw_scores
