@@ -19,7 +19,7 @@ import torch
 
 from .common import GGML_BLOCK_SIZE, GGMLFormat
 
-__all__ = ["search_choices"]
+__all__ = ["search_choices", "search_scratch"]
 
 # Bounds the candidate errors held at once, num_choices x rows x 256 float32 values (1 GiB).
 _CANDIDATE_ELEMENTS = 1 << 28
@@ -49,7 +49,7 @@ def search_choices(
     hessian = hessian.to(device=weight.device, dtype=torch.float32)
     chunk_args = {} if block_chunk_size is None else {"block_chunk_size": block_chunk_size}
     decode_args = {} if decode_chunk_size is None else {"block_chunk_size": decode_chunk_size}
-    step = max(1, _CANDIDATE_ELEMENTS // (ggml_format.num_choices * GGML_BLOCK_SIZE))
+    step = _rows_per_chunk(ggml_format)
     picks = torch.empty((rows.shape[0], blocks, groups), dtype=torch.int64, device=weight.device)
     for block in range(blocks):
         columns = slice(block * GGML_BLOCK_SIZE, (block + 1) * GGML_BLOCK_SIZE)
@@ -64,6 +64,22 @@ def search_choices(
                 decode_args,
             )
     return picks.reshape(*weight.shape[:-1], blocks, groups)
+
+
+def _rows_per_chunk(ggml_format: GGMLFormat) -> int:
+    """Rows whose candidate errors fit in ``_CANDIDATE_ELEMENTS``."""
+    return max(1, _CANDIDATE_ELEMENTS // (ggml_format.num_choices * GGML_BLOCK_SIZE))
+
+
+def search_scratch(ggml_format: GGMLFormat, rows: int) -> int:
+    """Bytes :func:`search_choices` holds at once on ``rows`` rows, as measured with the CUDA codecs.
+
+    For each chunk of rows, every choice's payload and float32 errors, and two einsum temporaries
+    as large as the errors.
+    """
+    chunk = min(rows, _rows_per_chunk(ggml_format))
+    candidates = ggml_format.num_choices * chunk
+    return candidates * (3 * 4 * GGML_BLOCK_SIZE + ggml_format.block_bytes)
 
 
 def _search_block(ggml_format, block, hessian, importance, chunk_args, decode_args):
