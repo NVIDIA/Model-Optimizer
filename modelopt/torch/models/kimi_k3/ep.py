@@ -90,7 +90,7 @@ import torch.nn as nn
 from modelopt.torch.utils import print_rank_0
 
 from .. import _onfly_decompress
-from .._remote_code import stage_full_remote_closure
+from .._remote_code import keep_patched, stage_full_remote_closure
 from ._remote_fixes import (
     _find_module_defining,
     _install_output_recorder_shim,
@@ -254,6 +254,32 @@ def _patch_kimi_moe_block(kmod) -> None:
     Block.forward = _forward
     Block._kimi_k3_ep_patched = True
     print_rank_0("[kimi_k3] patched KimiSparseMoeBlock: fused experts + ExpertsInterface forward")
+
+
+def _patch_remote_module(module) -> bool:
+    """Apply ``prepare``'s patches to one remote module of Kimi-K3's code: whether it changed it.
+
+    The fused-expert MoE block and the fixes go on the module defining ``KimiSparseMoeBlock``, the
+    ``tie_weights`` shim on the one defining ``KimiK3ForConditionalGeneration``; any other module is
+    left as it is. Idempotent.
+    """
+    changed = False
+    block = getattr(module, "KimiSparseMoeBlock", None)
+    if block is not None and block.__module__ == module.__name__:
+        changed = not getattr(block, "_kimi_k3_ep_patched", False)
+        _patch_kimi_moe_block(module)
+        _patch_kda_a_log(module)
+        _patch_kda_beta_sigmoid(module)
+        _shim_create_causal_mask(module)
+        _patch_kimi_cache_get_mask_sizes(module)
+    vlm = getattr(module, "KimiK3ForConditionalGeneration", None)
+    if vlm is not None and vlm.__module__ == module.__name__:
+        tie_weights = vlm.__dict__.get("tie_weights")
+        changed |= tie_weights is not None and not getattr(
+            tie_weights, "_kimi_k3_kwargs_shim", False
+        )
+        _shim_tie_weights_kwargs(module.__name__.rpartition(".")[0])
+    return changed
 
 
 def _make_importable() -> None:
@@ -492,11 +518,12 @@ def prepare(
     # Recorded at the first patch that lasts, so a step below that raises still leaves the record.
     for patched in PATCHED_EVERY_LOAD:
         mark_patched_every_load(patched)
-    _patch_kda_a_log(kmod)
-    _patch_kda_beta_sigmoid(kmod)
-    _shim_create_causal_mask(kmod)
-    _patch_kimi_cache_get_mask_sizes(kmod)
-    _shim_tie_weights_kwargs(package)
+    # Kept on every module of this code transformers loads, as the other Kimi adapters keep theirs:
+    # it executes a module again when the files it hashes change, and loads another copy for another
+    # path to the checkpoint, and the prepared config and the converters assume the patched block.
+    vlm_module = _find_module_defining("KimiK3ForConditionalGeneration", package)
+    for module in {kmod, vlm_module} - {None}:
+        keep_patched(f".{module.__name__.rpartition('.')[2]}", _patch_remote_module)
 
     if not getattr(text_cfg, "base_model_ep_plan", None):
         # grouped_gemm shards the bf16 fused params; the experts container goes through moe_tp_experts
