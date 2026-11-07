@@ -173,6 +173,9 @@ def auto_quantize(
         def forward_step(model, batch):
             inputs_ = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
             output = model(**inputs_)
+            if output is None:
+                # Layerwise calibration of a candidate stops the forward once it has the inputs.
+                return None
             if is_base_model:
                 assert full_model is not None
                 logits = full_model.lm_head(output.last_hidden_state)
@@ -215,11 +218,14 @@ def auto_quantize(
             }
         )
 
+    format_shard = getattr(args, "auto_quantize_format_shard", None)
+    if format_shard is not None:
+        auto_quantize_kwargs["format_shard"] = format_shard
     language_model, _ = mtq.auto_quantize(
         language_model,
         **auto_quantize_kwargs,
     )
-    if inputs["search_domain"] == "kv_cache":
+    if inputs["search_domain"] == "kv_cache" or format_shard is not None:
         return language_model
 
     # KV cache quantization is uniform; applied after the LP search.
