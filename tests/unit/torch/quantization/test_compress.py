@@ -15,6 +15,8 @@
 
 """CPU tests of mtq.compress."""
 
+import copy
+
 import pytest
 import torch
 from torch import nn
@@ -39,8 +41,9 @@ def test_compress_refuses_w4a8_weights_before_changing_the_model(grouped):
     assert not is_real_quantized(model)
 
 
-def test_compress_nvfp4_static_uses_calibrated_per_block_amax():
-    """Compressing a static NVFP4 weight packs it with the calibrated per-block amax."""
+@pytest.mark.parametrize("tied_lsq", [False, True], ids=["calibrated", "tied_lsq"])
+def test_compress_nvfp4_static_uses_calibrated_per_block_amax(tied_lsq):
+    """Compressing a static NVFP4 weight packs it with the calibrated or learned per-block amax."""
     model = nn.Sequential(nn.Linear(64, 32, bias=False))
     config = {
         "quant_cfg": [
@@ -58,11 +61,19 @@ def test_compress_nvfp4_static_uses_calibrated_per_block_amax():
     }
     mtq.quantize(model, config, lambda m: m(torch.randn(2, 64)))
     quantizer = model[0].weight_quantizer
-    # Clip every block below its max, as MSE or AWQ-clip calibration does.
-    quantizer.amax = quantizer.amax * 0.7
+    # Clip every block below its max, as MSE or AWQ-clip calibration (or LSQ training) does.
+    reference = copy.deepcopy(quantizer)
+    reference.amax = reference.amax * 0.7
+    if tied_lsq:
+        # Tied LSQ moves the per-block amax from ``_amax`` to the learned ``_amax_post``.
+        quantizer.enable_lsq(tied_amax=True)
+        with torch.no_grad():
+            quantizer._amax_post.mul_(0.7)
+    else:
+        quantizer.amax = quantizer.amax * 0.7
     weight = model[0].weight.detach().clone()
-    scale_2 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(quantizer)
-    scale, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(quantizer, weight, scale_2)
+    scale_2 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(reference)
+    scale, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(reference, weight, scale_2)
     expected, _, _ = NVFP4QTensor.quantize(weight, 16, scale, scale_2)
 
     mtq.compress(model)
