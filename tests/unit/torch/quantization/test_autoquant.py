@@ -868,6 +868,99 @@ def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method)
     assert torch.allclose(output_ref, output_test)
 
 
+@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, method):
+    source = TransformerBlock()
+    data = [source.get_input() for _ in range(2)]
+    formats = [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG]
+
+    def search(checkpoint, format_shard=None, model=None, calib_steps=2, score_steps=2):
+        return mtq.auto_quantize(
+            copy.deepcopy(source) if model is None else model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=formats,
+            # o_proj holds FP8, so its calibrated input scale shapes the mlp's scores.
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*o_proj*"],
+                    "quantization_formats": [mtq.FP8_DEFAULT_CFG],
+                    "allow_no_quant": False,
+                }
+            ],
+            data_loader=data,
+            forward_step=lambda model, batch: model(batch),
+            loss_func=(lambda output, batch: output.sum()) if method == "gradient" else None,
+            num_calib_steps=calib_steps,
+            num_score_steps=score_steps,
+            checkpoint=str(checkpoint),
+            format_shard=format_shard,
+            method=method,
+        )
+
+    _, expected = search(tmp_path / "full.pth")
+    # A refused shard count hands the model back, so shard 0 then runs on that same model.
+    model = copy.deepcopy(source)
+    with pytest.raises(ValueError, match="format_shard count"):
+        search(tmp_path / "refused.pth", (0, 99), model=model)
+    shards = [tmp_path / f"shard{i}.pth" for i in range(2)]
+    for i, shard in enumerate(shards):
+        _, state = search(shard, (i, 2), model=model if i == 0 else None)
+        assert not state["best"]["recipe"]
+    # Each searched format is calibrated by one shard, o_proj's held FP8 by both.
+    calibrated = [set(safe_load(shard)["quantizer_states"]) for shard in shards]
+    assert len(calibrated[0] & calibrated[1]) == 1 and len(calibrated[0] | calibrated[1]) == 3
+
+    # Scores sum over batches, so a shard scored over fewer is refused.
+    fewer = tmp_path / "fewer_steps.pth"
+    search(fewer, (1, 2), score_steps=1)
+    with pytest.raises(ValueError, match="num_score_steps"):
+        model_quant.merge_auto_quantize_checkpoints([shards[0], fewer], str(tmp_path / "x.pth"))
+    # So are shards that recorded no counts, as earlier versions saved them.
+    unlabeled = [tmp_path / f"unlabeled{i}.pth" for i in range(2)]
+    for shard, path in zip(shards, unlabeled):
+        state = safe_load(shard)
+        del state["num_calib_steps"], state["num_score_steps"]
+        safe_save(state, path)
+    with pytest.raises(ValueError, match="num_calib_steps"):
+        model_quant.merge_auto_quantize_checkpoints(unlabeled, str(tmp_path / "y.pth"))
+    # A shard resumes its calibration and scores only under the counts that produced them.
+    interrupted = safe_load(shards[0])
+    interrupted["candidate_stats"] = {}  # as saved between calibration and scoring
+    safe_save(interrupted, tmp_path / "interrupted.pth")
+    with pytest.raises(ValueError, match="num_calib_steps"):
+        search(tmp_path / "interrupted.pth", (0, 2), calib_steps=1)
+    with pytest.raises(ValueError, match="num_score_steps"):
+        search(shards[0], (0, 2), score_steps=1)
+    resumed = search(tmp_path / "interrupted.pth", (0, 2))[1]["candidate_stats"]
+    for name, stats in safe_load(shards[0])["candidate_stats"].items():
+        assert resumed[name]["raw_scores"] == stats["raw_scores"]
+
+    merged = tmp_path / "merged.pth"
+    merged.symlink_to(tmp_path / "elsewhere.pth")  # planted after the existence check
+    with pytest.raises(FileExistsError):
+        model_quant.merge_auto_quantize_checkpoints(shards, str(merged))
+    assert not (tmp_path / "elsewhere.pth").exists()
+    merged.unlink()
+
+    def disk_full(obj, f):  # writes part of the checkpoint, then fails
+        f.write(b"partial")
+        raise OSError("No space left on device")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(model_quant, "safe_save", disk_full)
+        with pytest.raises(OSError, match="No space"):
+            model_quant.merge_auto_quantize_checkpoints(shards, str(merged))
+    assert not merged.exists()  # so the merge can be retried
+    model_quant.merge_auto_quantize_checkpoints(list(reversed(shards)), str(merged))
+    with pytest.raises(ValueError, match="format shard"):
+        search(shards[0])
+    _, state = search(merged, score_steps=1)  # unsharded, the counts may change to re-solve
+
+    for name, stats in expected["candidate_stats"].items():
+        assert state["candidate_stats"][name]["raw_scores"] == pytest.approx(stats["raw_scores"])
+    assert state["best"]["recipe"] == expected["best"]["recipe"]
+
+
 def test_auto_quantize_disable_layers():
     model = TransformerBlock()
 
@@ -1083,7 +1176,7 @@ def test_gradient_scoring_tracks_reused_module_invocations():
 
     class TestHparam:
         is_configurable = True
-        choices = [no_quant_recipe, quant_recipe]
+        choices = scored_choices = [no_quant_recipe, quant_recipe]
         active = no_quant_recipe
 
     class ScoreModule(torch.nn.Module):
