@@ -2,6 +2,7 @@ api_version: modelopt/v2
 name: workflow_v2_smoke
 parameters:
   value: 7
+  # Set 0 to allow a scheduler to serialize independent jobs when capacity is limited.
   barrier_timeout_seconds: 15
 tasks:
   produce:
