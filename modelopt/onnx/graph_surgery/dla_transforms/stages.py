@@ -26,6 +26,8 @@ from .layout import rules as layout_rules
 from .operators import passes as operator_passes
 from .operators import rules as operator_rules
 from .patterns import rules as pattern_rules
+from .precision import passes as precision_passes
+from .precision import rules as precision_rules
 from .preprocessing import passes as preprocessing_passes
 from .preprocessing import rules as preprocessing_rules
 
@@ -137,4 +139,19 @@ def cleanup(graph: DlaGraph, *, preserve_identities: Collection[ir.Node] | None 
     graph.apply_pass(_cleanup.RestoreValueNames(names))
     graph.apply_pass(ir.passes.common.RemoveUnusedNodesPass())
     graph.apply_pass(ir.passes.common.TopologicalSortPass())
+    return count
+
+
+def precision(graph: DlaGraph) -> int:
+    """Prepare FP16 storage, rewrite activation casts and finish precision boundaries."""
+    preparation = precision_passes.PrepareFp16()
+    graph.apply_pass(preparation)
+    count = preparation.count
+    count += graph.apply_pattern(precision_rules.Fp16Cast.rule(graph, preparation.retained))
+    boundaries = precision_passes.CastFp16Boundaries(preparation)
+    graph.apply_pass(boundaries)
+    count += boundaries.count
+    graph.apply_pass(ir.passes.common.TopologicalSortPass())
+    count += graph.apply_pattern(pattern_rules.TerminalProjection.rule(graph))
+    graph.apply_pass(ir.passes.common.RemoveUnusedNodesPass())
     return count
