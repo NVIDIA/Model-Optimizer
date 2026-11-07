@@ -95,7 +95,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import enable_determinism, print_rank_0
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
@@ -1313,6 +1313,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=512,
     )
+    parser.add_argument(
+        "--deterministic",
+        help=(
+            "Best-effort reproducible PTQ: seed every random number generator and use "
+            "deterministic torch kernels (an op without one only warns). Needs an explicit "
+            "--batch_size, since the default probes it from free GPU memory and so differs "
+            "between GPUs and runs."
+        ),
+        default=False,
+        action="store_true",
+    )
     parser.add_argument("--export_path", default="exported_model")
     parser.add_argument(
         "--dataset",
@@ -1554,6 +1565,12 @@ def parse_args() -> argparse.Namespace:
     if args.calib_seq <= 0:
         parser.error("--calib_seq must be positive.")
 
+    if args.deterministic and args.batch_size == 0:
+        parser.error(
+            "--deterministic needs an explicit --batch_size: the default probes it from free GPU "
+            "memory, so it differs between GPUs and runs."
+        )
+
     if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
         parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")
 
@@ -1627,6 +1644,10 @@ def main(args: argparse.Namespace):
 
 
 def _main_inner(args: argparse.Namespace):
+    if args.deterministic:
+        # Once the group is up, so only rank 0 reports it; still before the first CUDA matmul.
+        enable_determinism(RAND_SEED)
+
     with mlflow_run(args):
         # --pyt_ckpt_path stays as given. Every later step reads the local copy of the whole
         # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local
