@@ -19,10 +19,18 @@ The default `auto` lets vLLM select a supported kernel on other hardware.
 Inspect the saved server logs for the actual selected implementation.
 
 For startup failures in TorchInductor, `compilation_mode=none` passes
-`-cc.mode=0` to both servers, disabling `torch.compile` while retaining CUDA
-graphs. The default leaves vLLM's compilation settings unchanged. Results
-record the chosen mode and full commands; compare curves with matching modes.
+`-cc.mode=0` to both servers, disabling `torch.compile`. vLLM can also disable
+CUDA graphs when the selected graph mode requires compilation; inspect the
+actual configuration in `server.log`. The default leaves vLLM's compilation
+settings unchanged. Results record the chosen mode and full commands; compare
+curves with matching modes.
 See the [vLLM compilation debugging guide](https://docs.vllm.ai/en/v0.25.0/design/debug_vllm_compile/).
+
+For CUDA startup failures, run `examples/evaluation/gpu_runtime_v2.yaml` with
+a one-GPU profile first. It records the driver, Torch and CUDA versions, then
+checks FP32 and BF16 linear operations without downloading models or installing
+benchmark clients. An internal tracking profile saves `runtime/runtime.json`
+even if a check fails. Passing these checks does not validate the full server.
 
 The script installs pinned benchmark clients into a temporary virtual
 environment, keeping the serving image's dependencies separate. For a prepared

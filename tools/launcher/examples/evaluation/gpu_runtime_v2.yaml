@@ -1,0 +1,18 @@
+api_version: modelopt/v2
+name: gpu_runtime_check
+tasks:
+  gpu_runtime:
+    inline: python3 examples/evaluation/gpu_runtime.py --output "$RUNTIME_RESULT"
+    resources:
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+    container: vllm/vllm-openai:v0.25.0@sha256:fc56161ee42a011aeee78b65d0a81b6683c7d04402fd40503d14d4d6c98f07cb
+    outputs:
+      result:
+        path: runtime.json
+        kind: metrics
+        env: RUNTIME_RESULT
+outputs:
+  result:
+    from: gpu_runtime.result
