@@ -69,6 +69,8 @@ def test_compress_nvfp4_static_uses_calibrated_per_block_amax(tied_lsq):
         quantizer.enable_lsq(tied_amax=True)
         with torch.no_grad():
             quantizer._amax_post.mul_(0.7)
+        # A later load_calib_amax() recreates a stale ``_amax``; the learned amax still wins.
+        quantizer.register_buffer("_amax", reference.amax / 0.7)
     else:
         quantizer.amax = quantizer.amax * 0.7
     weight = model[0].weight.detach().clone()

@@ -108,13 +108,12 @@ class NVFP4QTensor(BaseQuantizedTensor):
     def _get_static_per_block_amax(cls, weight_quantizer):
         """Return per-block amax from restored or live static NVFP4 quantizers.
 
-        Tied LSQ moves the per-block amax from ``_amax`` to ``_amax_post``, which the live
-        quantizer exposes through ``amax``.
+        Tied LSQ keeps the learned per-block amax in ``_amax_post``, which the live quantizer
+        exposes through ``amax``; a ``_amax`` recreated later by ``load_calib_amax`` is stale.
         """
-        per_block_amax = getattr(weight_quantizer, "_amax", None)
-        if per_block_amax is None:
-            per_block_amax = weight_quantizer.amax
-        return per_block_amax
+        if getattr(weight_quantizer, "_lsq", False):
+            return weight_quantizer.amax
+        return weight_quantizer._amax
 
     @classmethod
     def get_weights_scaling_factor_2_from_quantizer(cls, weight_quantizer):
