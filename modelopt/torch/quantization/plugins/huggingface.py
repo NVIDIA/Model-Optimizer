@@ -1241,11 +1241,22 @@ class _QuantFP8Experts(_QuantFusedExperts):
             raise NotImplementedError("Only FP8 E4M3 native expert weights are supported")
         super()._setup()
 
+    def _materialized_dtype(self) -> torch.dtype:
+        """The dtype of the checkpoint's other weights, which the forward casts each expert to.
+
+        Experts unpacked, or dequantized with no dtype asked for, take it, so calibration encodes
+        the weights the fake-quantized forward runs on. The default dtype without a config dtype.
+        """
+        dtype = getattr(self.config, "dtype", None)
+        if isinstance(dtype, torch.dtype) and dtype.is_floating_point and dtype.itemsize > 1:
+            return dtype
+        return torch.get_default_dtype()
+
     def get_expert_weight(self, name, idx, dtype=None):
         weight = self._local_experts(getattr(self, name))[idx]
         if weight.element_size() > 1:
             return weight if dtype is None else weight.to(dtype)
-        dtype = dtype or torch.get_default_dtype()
+        dtype = dtype or self._materialized_dtype()
         scales = self._local_experts(getattr(self, f"{name}_scale_inv"))[idx].float()
         rows, cols = self.block_size or (weight.shape[0] // scales.shape[0], weight.shape[1])
         scales = scales.repeat_interleave(rows, 0).repeat_interleave(cols, 1)
@@ -1278,11 +1289,12 @@ class _QuantFP8Experts(_QuantFusedExperts):
                 f"{type(self).__name__} cannot unpack native FP8 expert weights sharded over the "
                 "experts. Quantize the model without expert parallelism."
             )
+        dtype = self._materialized_dtype()
         for name in names:
             weight = getattr(self, name)
-            unpacked = torch.empty_like(weight, dtype=torch.get_default_dtype())
+            unpacked = torch.empty_like(weight, dtype=dtype)
             for idx in range(self.num_experts):
-                unpacked[idx].copy_(self.get_expert_weight(name, idx))
+                unpacked[idx].copy_(self.get_expert_weight(name, idx, dtype))
             setattr(self, name, nn.Parameter(unpacked, requires_grad=False))
 
 
