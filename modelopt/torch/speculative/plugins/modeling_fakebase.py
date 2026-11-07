@@ -17,6 +17,9 @@
 
 import json
 import os
+import shutil
+import tempfile
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -24,12 +27,19 @@ import transformers
 from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import EntryNotFoundError
 from safetensors import safe_open
+from safetensors.torch import save_file
 from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
     PretrainedConfig,
     PreTrainedModel,
+)
+
+from modelopt.torch.export.plugins.hf_spec_export import _get_rope_theta
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    copy_non_model_files,
+    resolve_checkpoint_file,
 )
 
 from .modeling_final_norm import _FINAL_NORM_CLASSES, _select_final_norm_type
@@ -210,8 +220,12 @@ class FakeBaseModel(PreTrainedModel):
                 local checkpoint; otherwise it is treated as a Hub repo ID and the required
                 files are downloaded via ``huggingface_hub``.
         """
-        from modelopt.torch.export.plugins.hf_spec_export import _get_rope_theta
+        model = cls(cls._config_from_source(source, trust_remote_code))
+        model._load_weights(source)
+        return model
 
+    @staticmethod
+    def _config_from_source(source: str, trust_remote_code: bool) -> FakeBaseConfig:
         orig_config = transformers.AutoConfig.from_pretrained(
             source, trust_remote_code=trust_remote_code
         )
@@ -225,7 +239,7 @@ class FakeBaseModel(PreTrainedModel):
             orig_config,
         )
         # Extract necessary info for spec training from base config
-        config = FakeBaseConfig(
+        return FakeBaseConfig(
             num_hidden_layers=getattr(base_cfg, "num_hidden_layers", None),
             hidden_size=getattr(base_cfg, "hidden_size", None),
             vocab_size=getattr(base_cfg, "vocab_size", None),
@@ -243,10 +257,46 @@ class FakeBaseModel(PreTrainedModel):
                 getattr(base_cfg, "model_type", None), base_cfg
             ),
         )
-        model = cls(config)
-        # Load lm_head, embed_tokens, and (for known models) the final norm into the model.
-        model._load_weights(source)
-        return model
+
+    @classmethod
+    def export_source_slice(
+        cls,
+        source: str | os.PathLike,
+        export_dir: str | os.PathLike,
+        *,
+        trust_remote_code: bool = False,
+    ) -> Path:
+        """Export only the source weights used by fake-base training, without changing their dtype.
+
+        ``source`` must be a local Hugging Face checkpoint. Its original config, tokenizer and
+        custom code are retained; the result is an input to ``from_source``, not a serving model.
+        ``export_dir`` must not exist. Prepare the slice once and share it between trainer workers;
+        the streaming teacher still needs the complete checkpoint.
+        """
+        source, destination = Path(source), Path(export_dir)
+        if not source.is_dir():
+            raise ValueError("source must be a local Hugging Face checkpoint directory")
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(destination)
+        config = cls._config_from_source(str(source), trust_remote_code)
+        weights = cls._source_weights(str(source), config, validate_local_paths=True)
+        config_path = resolve_checkpoint_file(source, "config.json", max_bytes=None)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".base-slice-", dir=destination.parent
+        ) as temporary:
+            output = Path(temporary) / "slice"
+            output.mkdir()
+            copy_non_model_files(source, output, strict=True)
+            shutil.copy2(config_path, output / "config.json")
+            save_file(
+                dict(weights.values()),
+                output / "model.safetensors",
+                metadata={"format": "pt"},
+            )
+            shutil.copymode(source, output)
+            output.rename(destination)
+        return destination
 
     @staticmethod
     def _find_weight_key(weight_map: dict, paths: list[str], label: str) -> str:
@@ -259,7 +309,7 @@ class FakeBaseModel(PreTrainedModel):
         raise RuntimeError(f"Cannot find {label} in checkpoint; tried: {tried}")
 
     @staticmethod
-    def _load_index(source: str) -> dict:
+    def _load_index(source: str, *, validate_local_paths: bool = False) -> dict:
         """Load weight_map from a sharded index, or synthesize one from a single safetensors file.
 
         Sharded checkpoints ship ``model.safetensors.index.json`` mapping every key to its shard;
@@ -270,7 +320,11 @@ class FakeBaseModel(PreTrainedModel):
         def _try_fetch(name: str) -> str | None:
             if os.path.isdir(source):
                 path = os.path.join(source, name)
-                return path if os.path.isfile(path) else None
+                if not os.path.isfile(path):
+                    return None
+                if validate_local_paths:
+                    return str(resolve_checkpoint_file(Path(source), name, max_bytes=None))
+                return path
             try:
                 return hf_hub_download(repo_id=source, filename=name)
             except EntryNotFoundError:
@@ -290,63 +344,69 @@ class FakeBaseModel(PreTrainedModel):
         )
 
     @staticmethod
-    def _resolve_shard_paths(source: str, shard_filenames: list[str]) -> list[str]:
+    def _resolve_shard_paths(
+        source: str, shard_filenames: list[str], *, validate_local_paths: bool = False
+    ) -> list[str]:
         """Return local filesystem paths for each shard filename.
 
-        For a local directory the paths are joined directly; for a HuggingFace Hub repo ID the
-        shards are downloaded via ``hf_hub_download`` (cached on subsequent calls).
+        Export validates local paths; ordinary loading also permits user-created cache views.
+        Hub repo shards are downloaded via ``hf_hub_download`` (cached on subsequent calls).
         """
         if os.path.isdir(source):
+            if validate_local_paths:
+                if any(
+                    Path(name).is_absolute() or ".." in Path(name).parts for name in shard_filenames
+                ):
+                    raise ValueError(
+                        "Checkpoint shard filenames must be relative paths without '..'"
+                    )
+                return [
+                    str(resolve_checkpoint_file(Path(source), name, max_bytes=None))
+                    for name in shard_filenames
+                ]
             return [os.path.join(source, name) for name in shard_filenames]
         return [hf_hub_download(repo_id=source, filename=name) for name in shard_filenames]
 
-    def _load_weights(self, source: str) -> None:
-        """Load lm_head, embed_tokens, and (for known models) the final norm into this model.
+    @classmethod
+    def _source_weights(
+        cls, source: str, config: FakeBaseConfig, *, validate_local_paths: bool = False
+    ) -> dict[str, tuple[str, torch.Tensor]]:
+        weight_map = cls._load_index(source, validate_local_paths=validate_local_paths)
 
-        Reads only the tensors needed (never materializes a whole shard) and copies them into
-        the already-constructed submodules. For unknown models (``final_norm_type`` unset) the
-        norm is neither loaded nor present (``self.norm`` does not exist; see :meth:`__init__`).
-        """
-        weight_map = self._load_index(source)
-
-        embed_tokens_key = self._find_weight_key(weight_map, _EMBED_TOKENS_PATHS, "embed_tokens")
+        embed_tokens_key = cls._find_weight_key(weight_map, _EMBED_TOKENS_PATHS, "embed_tokens")
         try:
-            lm_head_key = self._find_weight_key(weight_map, _LM_HEAD_PATHS, "lm_head")
+            lm_head_key = cls._find_weight_key(weight_map, _LM_HEAD_PATHS, "lm_head")
         except RuntimeError:
             # Tied embeddings: lm_head shares embed_tokens weight and isn't stored separately.
-            if not self.config.tie_word_embeddings:
+            if not config.tie_word_embeddings:
                 raise
             lm_head_key = embed_tokens_key
-
-        # Pull only the tensor we need; avoids materializing the whole file.
-        def _read(key: str) -> torch.Tensor:
-            (path,) = self._resolve_shard_paths(source, [weight_map[key]])
-            with safe_open(path, framework="pt", device="cpu") as h:
-                return h.get_tensor(key)
-
-        # Explicit shape checks: copy_ would broadcast a wrong-but-compatible shape silently.
-        # Use raises (not asserts) so the guard survives python -O / PYTHONOPTIMIZE.
-        hidden, vocab = self.config.hidden_size, self.config.vocab_size
-        embed_tokens_w = _read(embed_tokens_key)
-        lm_head_w = _read(lm_head_key)
-        if embed_tokens_w.shape != (vocab, hidden):
-            raise ValueError(
-                f"embed_tokens weight shape {tuple(embed_tokens_w.shape)} != ({vocab}, {hidden})"
+        keys = {"embed_tokens": embed_tokens_key, "lm_head": lm_head_key}
+        if config.final_norm_type is not None:
+            keys["norm"] = cls._find_weight_key(weight_map, _FINAL_NORM_PATHS, "final_norm")
+        tensors = {}
+        for key in dict.fromkeys(keys.values()):
+            (path,) = cls._resolve_shard_paths(
+                source, [weight_map[key]], validate_local_paths=validate_local_paths
             )
-        if lm_head_w.shape != (vocab, hidden):
-            raise ValueError(
-                f"lm_head weight shape {tuple(lm_head_w.shape)} != ({vocab}, {hidden})"
+            with safe_open(path, framework="pt", device="cpu") as handle:
+                tensors[key] = handle.get_tensor(key)
+        result = {}
+        for role, key in keys.items():
+            tensor = tensors[key]
+            shape = (
+                (config.hidden_size,) if role == "norm" else (config.vocab_size, config.hidden_size)
             )
-        self.embed_tokens.weight.data.copy_(embed_tokens_w)
-        self.lm_head.weight.data.copy_(lm_head_w)
+            # copy_ would broadcast a wrong-but-compatible shape silently.
+            if tensor.shape != shape:
+                raise ValueError(f"{role} weight shape {tuple(tensor.shape)} != {shape}")
+            result[role] = (key, tensor)
+        return result
 
-        # Final norm only for models whose norm type we know (final_norm_type set); when known it
-        # MUST be present — a missing key is a hard error, never a silent skip. Unknown: no norm.
-        if self.config.final_norm_type is not None:
-            norm_w = _read(self._find_weight_key(weight_map, _FINAL_NORM_PATHS, "final_norm"))
-            if norm_w.shape != (hidden,):
-                raise ValueError(f"final-norm weight shape {tuple(norm_w.shape)} != ({hidden},)")
-            self.norm.weight.data.copy_(norm_w)
+    def _load_weights(self, source: str) -> None:
+        """Load only the embeddings, output head and known final norm from the checkpoint."""
+        for role, (_, tensor) in self._source_weights(source, self.config).items():
+            self.get_submodule(role).weight.data.copy_(tensor)
 
     def forward(self, *args, **kwargs):
         """Not implemented: FakeBaseModel omits full model weights and cannot run inference."""
