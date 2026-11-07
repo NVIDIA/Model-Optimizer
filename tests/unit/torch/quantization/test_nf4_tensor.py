@@ -34,14 +34,6 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 _BLOCK_SIZES = {-1: 2, "scale_bits": 8, "scale_block_sizes": {-1: 4}}
 
 
-def _dequantize(x: torch.Tensor, block_sizes: dict) -> torch.Tensor:
-    quantizer = TensorQuantizer(
-        QuantizerAttributeConfig(num_bits=4, block_sizes=block_sizes, fake_quant=False)
-    )
-    # The first call does the real quantize, the second one dequantizes back.
-    return quantizer(quantizer(x))
-
-
 @pytest.mark.parametrize(
     ("test_input", "test_output"),
     [
