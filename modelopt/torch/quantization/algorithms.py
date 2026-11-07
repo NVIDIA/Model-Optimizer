@@ -957,7 +957,10 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         """Validate method-specific inputs before quantizing the model."""
 
     def load_search_checkpoint(self) -> bool:
-        return super().load_search_checkpoint(strict=False)
+        loaded = super().load_search_checkpoint(strict=False)
+        # safe_save stores the defaultdict as a dict, which scoring after a resume fills by name.
+        self.candidate_stats = defaultdict(dict, self.candidate_stats)
+        return loaded
 
     @staticmethod
     def _is_auto_quantize_module(module):
@@ -1604,9 +1607,21 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 "Combine shard checkpoints with merge_auto_quantize_checkpoints() first."
             )
         self.format_shard = format_shard
-        # Scores sum over the batches, so shards merge only with the same workload.
-        self.num_calib_steps = self.config["num_calib_steps"]
-        self.num_score_steps = self.config["num_score_steps"]
+        # Scores sum over the batches, so restored calibration and scores keep the step counts they
+        # were computed with, which a shard's merge compares; a shard refuses to reuse them under
+        # other counts. An unsharded search reuses them as before, e.g. to re-solve a budget.
+        reused = {
+            "num_calib_steps": bool(self.quantizer_states),
+            "num_score_steps": bool(self.candidate_stats),
+        }
+        for key, is_reused in reused.items():
+            if not is_reused:
+                setattr(self, key, self.config[key])
+            elif format_shard is not None and getattr(self, key) != self.config[key]:
+                raise ValueError(
+                    f"This shard's checkpoint was computed with {key}={getattr(self, key)}, not "
+                    f"{self.config[key]}; resume it with the same counts or a new checkpoint."
+                )
         other_shards_recipes = self._other_shards_recipes(quant_recipe_hparams, search_recipes)
         calibration_recipes = [r for r in search_recipes if r not in other_shards_recipes]
 
@@ -1894,6 +1909,12 @@ def merge_auto_quantize_shards(shard_states: Sequence[dict]) -> dict:
             f"Merge needs one checkpoint per format shard (0..count-1, count), got {ids}."
         )
     shards = [state for _, state in sorted(zip(ids, shard_states), key=lambda pair: pair[0])]
+    for key in ("num_calib_steps", "num_score_steps"):
+        # Unrecorded counts would compare equal across shards whose scores scale differently.
+        if any(state.get(key) is None for state in shards):
+            raise ValueError(
+                f"Every format shard must record {key}; rerun shards saved without it."
+            )
     # Copy the containers the merge fills, not the calibrated tensors (GGML codes) they hold.
     merged = {
         **shards[0],

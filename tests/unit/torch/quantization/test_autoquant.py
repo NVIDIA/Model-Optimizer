@@ -874,7 +874,7 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, method):
     data = [source.get_input() for _ in range(2)]
     formats = [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG]
 
-    def search(checkpoint, format_shard=None, model=None, score_steps=2):
+    def search(checkpoint, format_shard=None, model=None, calib_steps=2, score_steps=2):
         return mtq.auto_quantize(
             copy.deepcopy(source) if model is None else model,
             constraints={"effective_bits": 6.0},
@@ -890,7 +890,7 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, method):
             data_loader=data,
             forward_step=lambda model, batch: model(batch),
             loss_func=(lambda output, batch: output.sum()) if method == "gradient" else None,
-            num_calib_steps=2,
+            num_calib_steps=calib_steps,
             num_score_steps=score_steps,
             checkpoint=str(checkpoint),
             format_shard=format_shard,
@@ -915,6 +915,25 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, method):
     search(fewer, (1, 2), score_steps=1)
     with pytest.raises(ValueError, match="num_score_steps"):
         model_quant.merge_auto_quantize_checkpoints([shards[0], fewer], str(tmp_path / "x.pth"))
+    # So are shards that recorded no counts, as earlier versions saved them.
+    unlabeled = [tmp_path / f"unlabeled{i}.pth" for i in range(2)]
+    for shard, path in zip(shards, unlabeled):
+        state = safe_load(shard)
+        del state["num_calib_steps"], state["num_score_steps"]
+        safe_save(state, path)
+    with pytest.raises(ValueError, match="num_calib_steps"):
+        model_quant.merge_auto_quantize_checkpoints(unlabeled, str(tmp_path / "y.pth"))
+    # A shard resumes its calibration and scores only under the counts that produced them.
+    interrupted = safe_load(shards[0])
+    interrupted["candidate_stats"] = {}  # as saved between calibration and scoring
+    safe_save(interrupted, tmp_path / "interrupted.pth")
+    with pytest.raises(ValueError, match="num_calib_steps"):
+        search(tmp_path / "interrupted.pth", (0, 2), calib_steps=1)
+    with pytest.raises(ValueError, match="num_score_steps"):
+        search(shards[0], (0, 2), score_steps=1)
+    resumed = search(tmp_path / "interrupted.pth", (0, 2))[1]["candidate_stats"]
+    for name, stats in safe_load(shards[0])["candidate_stats"].items():
+        assert resumed[name]["raw_scores"] == stats["raw_scores"]
 
     merged = tmp_path / "merged.pth"
     merged.symlink_to(tmp_path / "elsewhere.pth")  # planted after the existence check
@@ -925,7 +944,7 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, method):
     model_quant.merge_auto_quantize_checkpoints(list(reversed(shards)), str(merged))
     with pytest.raises(ValueError, match="format shard"):
         search(shards[0])
-    _, state = search(merged)
+    _, state = search(merged, score_steps=1)  # unsharded, the counts may change to re-solve
 
     for name, stats in expected["candidate_stats"].items():
         assert state["candidate_stats"][name]["raw_scores"] == pytest.approx(stats["raw_scores"])
