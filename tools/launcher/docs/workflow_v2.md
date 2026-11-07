@@ -197,6 +197,41 @@ consumers with the same public workflow spec. Supply a profile containing
 `--param output_version=trial-002` for a new publication. Its checkpoint and metrics
 are synthetic.
 
+## Hugging Face quantization example
+
+`examples/Qwen/Qwen3-8B/hf_ptq_v2.yaml` converts `hf_ptq.yaml` to a named
+`quantize` task. It reuses `common/hf/ptq.sh`, defaults to Qwen3-8B/NVFP4,
+and preserves the original one-node, one-GPU, one-task, four-hour limit and
+TensorRT-LLM container. The original example remains available.
+
+The workflow resolves `model` into a read-only `/inputs/base_model` snapshot
+before GPU submission. Set `model=Org/Model@revision` to pin a revision; the
+selected profile chooses the resolver. Calibration settings are parameters;
+the default `cnn_nemotron_v2_mix` is the PTQ entry point's dataset alias and is
+loaded by PTQ, rather than resolved as a versioned workflow dataset input.
+
+Supply a Slurm or Docker execution profile with `tracking_uri` and either
+`artifact_store` or `artifact_publisher`. From the repository root:
+
+```bash
+modelopt-launcher --yaml tools/launcher/examples/Qwen/Qwen3-8B/hf_ptq_v2.yaml \
+  --profile my-profile.yaml --param output_version=trial-002 --dryrun
+```
+
+The preview compiles the spec without downloading inputs or submitting jobs.
+After reviewing it, use `--yes` in place of `--dryrun` to execute. The inherited
+four-hour limit is an example default, rather than a measured runtime estimate.
+
+`quant`, `calib_size`, `calib_seq`, `calib_batch_size` and `calib_dataset` control
+the existing PTQ arguments. Use a single quantization preset name for `quant`.
+The declared checkpoint directory follows the wrapper's
+`saved_models_base_model_<quant>` naming. `output_ref`, `output_version` and
+`model_name` control publication and registration; choose a fresh output version
+for a new quantization run. Changing the model should also change the output
+reference and registered model name. The published checkpoint and its model
+version can feed later v2 tasks or workflows. Accuracy and speed evaluation are
+separate follow-up workflows; this example performs quantization and export.
+
 ## CPU acceptance fixture
 
 ```bash
