@@ -5164,7 +5164,13 @@ def _reference(weight, scale_inv, block):
     return weight.float() * scale
 
 
+# A block-FP8 weight reaches the dequant in fp8, or in bf16 when transformers loads a tensor that no
+# converter renames in the model dtype (DeepSeek-V3's kv_a_proj_with_mqa); bf16 holds fp8 exactly.
+loaded_in = pytest.mark.parametrize("loaded_in", [None, torch.bfloat16], ids=["fp8", "bf16"])
+
+
 @needs_float8
+@loaded_in
 @pytest.mark.parametrize(
     ("shape", "block", "configured", "grid"),
     [
@@ -5193,7 +5199,7 @@ def _reference(weight, scale_inv, block):
     ],
 )
 def test_dequant_matches_the_blockwise_reference(
-    pre_5_10_transformers, shape, block, configured, grid
+    pre_5_10_transformers, shape, block, configured, grid, loaded_in
 ):
     """``configured`` is the quantization config's block size, ``grid`` the scale grid when it is not
     that block's ceil grid. ``grid-divides-the-rows``: 9 rows of 4-row blocks make a 3-row grid,
@@ -5203,7 +5209,9 @@ def test_dequant_matches_the_blockwise_reference(
     weight, scale_inv = _block_fp8(shape, grid or _ceil_grid(shape, block))
     model_load_utils._patch_finegrained_fp8_dequant(torch.float32)
 
-    out = _dequant_op(configured)._dequantize_one(weight, scale_inv)
+    out = _dequant_op(configured)._dequantize_one(
+        weight if loaded_in is None else weight.to(loaded_in), scale_inv
+    )
 
     assert torch.equal(out, _reference(weight, scale_inv, block))
 
@@ -5469,13 +5477,14 @@ def test_undoing_the_patch_restores_stock_transformers(pre_5_10_transformers, mo
 
 
 @needs_float8
+@loaded_in
 @pytest.mark.parametrize(
     ("shape", "grid"),
     [((576, 7168), (5, 56)), ((192, 256), (2, 2)), ((512, 256), (4, 2))],
     ids=["partial", "partial-dividing-the-grid", "whole"],
 )
 def test_from_5_10_1_its_own_dequant_also_takes_partial_last_blocks(
-    pre_5_10_transformers, monkeypatch, shape, grid
+    pre_5_10_transformers, monkeypatch, shape, grid, loaded_in
 ):
     """Upstream fixed the expert converter there and emits the destination dtype, so its dequant is
     kept and only wrapped. A partial last block (DeepSeek-V3's 576-row kv_a_proj_with_mqa under a
@@ -5489,7 +5498,9 @@ def test_from_5_10_1_its_own_dequant_also_takes_partial_last_blocks(
     weight, scale_inv = _block_fp8(shape, grid)
 
     model_load_utils._patch_finegrained_fp8_dequant(torch.bfloat16)
-    out = _dequant_op((128, 128))._dequantize_one(weight, scale_inv, torch.float32)
+    out = _dequant_op((128, 128))._dequantize_one(
+        weight if loaded_in is None else weight.to(loaded_in), scale_inv, torch.float32
+    )
 
     assert torch.equal(out, _reference(weight, scale_inv, (128, 128)))
     assert vars(FineGrainedFP8HfQuantizer).get("update_weight_conversions", _MISSING) is hook
