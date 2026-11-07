@@ -105,8 +105,9 @@ def llm_to_onnx(model, output_dir, extra_inputs={}, extra_dyn_axes={}):
     num_layers = config.num_hidden_layers
     num_attention_heads = config.num_attention_heads
     num_key_value_heads = config.num_key_value_heads
-    hidden_size = config.hidden_size
-    hidden_size_per_layer = hidden_size // num_attention_heads
+    head_dim = getattr(config, "head_dim", None)
+    if head_dim is None:
+        head_dim = config.hidden_size // num_attention_heads
 
     dummy_bs = 1
     dummy_len = 10
@@ -117,10 +118,10 @@ def llm_to_onnx(model, output_dir, extra_inputs={}, extra_dyn_axes={}):
     dummy_kv_cache = ()
     for i in range(num_layers):
         dummy_k = torch.rand(
-            (dummy_bs, num_key_value_heads, dummy_len, hidden_size_per_layer), dtype=torch.float16
+            (dummy_bs, num_key_value_heads, dummy_len, head_dim), dtype=torch.float16
         ).cuda()
         dummy_v = torch.rand(
-            (dummy_bs, num_key_value_heads, dummy_len, hidden_size_per_layer), dtype=torch.float16
+            (dummy_bs, num_key_value_heads, dummy_len, head_dim), dtype=torch.float16
         ).cuda()
         dummy_kv_cache = (*dummy_kv_cache, (dummy_k, dummy_v))
         input_names.extend([f"past_key_values.{i}.key", f"past_key_values.{i}.value"])

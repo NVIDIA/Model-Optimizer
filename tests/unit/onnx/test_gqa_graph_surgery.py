@@ -27,7 +27,11 @@ from onnx import TensorProto, helper, numpy_helper
 
 pytest.importorskip("transformers", reason="transformers required for GQA graph surgery tests")
 
+from transformers import AutoConfig
+
 from modelopt.onnx.graph_surgery.gqa_replacement import replace_attention_with_gqa
+from modelopt.onnx.graph_surgery.utils.graph_utils import topological_sort_nodes
+from modelopt.onnx.llm_export_utils.export_utils import llm_to_onnx
 
 # Attention shape mirroring ``Qwen/Qwen2.5-0.5B`` — built locally
 _QWEN_CONFIG_KWARGS = {
@@ -548,7 +552,7 @@ def _build_toy_model(hidden_size, num_heads, kv_heads, head_dim, inv_freq_np, nu
                 perm=[0, 2, 1, 3],
             )
         )
-        inits.append(_init(f"{ap}/out_rs", np.array([0, 0, hidden_size], np.int64)))
+        inits.append(_init(f"{ap}/out_rs", np.array([0, 0, q_dim], np.int64)))
         nodes.append(
             helper.make_node(
                 "Reshape",
@@ -718,3 +722,202 @@ class TestGQAGraphSurgery:
 
         assert len(finite) > 0, "All values are non-finite"
         assert finite.max() < 1.0, f"Max abs diff {finite.max():.4f} exceeds tolerance"
+
+
+@pytest.fixture(
+    params=[
+        ("qwen2", 64, "absent", 16),
+        ("qwen2", 64, None, 16),
+        # Scale Qwen3/Mistral widths by 8 while preserving the reported head-dimension ratios.
+        ("qwen3", 32, 16, 16),
+        ("qwen3", 40, 16, 16),
+        ("mistral", 80, 16, 16),
+        ("gemma", 32, 256, 256),
+    ],
+    ids=["absent", "none", "qwen3-64-to-128", "qwen3-80-to-128", "mistral", "gemma"],
+)
+def head_dim_config(request, tmp_path):
+    model_type, hidden_size, configured_dim, expected_dim = request.param
+    config = AutoConfig.for_model(
+        model_type,
+        hidden_size=hidden_size,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=1,
+        intermediate_size=32,
+        vocab_size=100,
+        rope_theta=10000.0,
+        max_position_embeddings=MAX_SEQ_LEN,
+    )
+    if configured_dim == "absent":
+        if hasattr(config, "head_dim"):
+            del config.head_dim
+    else:
+        config.head_dim = configured_dim
+    config_dir = tmp_path / model_type
+    config.save_pretrained(config_dir)
+    return config, config_dir, expected_dim
+
+
+@pytest.mark.parametrize("projection_mode", ["fused", "combined", "unpacked", "packed"])
+def test_configured_head_dim_graph(head_dim_config, projection_mode, tmp_path):
+    config, config_dir, head_dim = head_dim_config
+    heads, kv_heads = config.num_attention_heads, config.num_key_value_heads
+    inv_freq = 1.0 / (10000.0 ** (np.arange(0, head_dim, 2) / head_dim))
+    original = _build_toy_model(config.hidden_size, heads, kv_heads, head_dim, inv_freq)
+    graph = original.graph
+    projections = [n for n in graph.node if any(f"/{p}_proj/MatMul" in n.name for p in "qkv")]
+    weights = {w.name: w for w in graph.initializer}
+    if projection_mode == "combined":
+        prefix = "/model/layers.0/self_attn/qkv_proj"
+        packed = np.concatenate(
+            [numpy_helper.to_array(weights[n.input[1]]) for n in projections], axis=1
+        )
+        graph.initializer.extend(
+            [
+                _init(f"{prefix}/weight", packed),
+                _init(
+                    f"{prefix}/sizes", np.array([heads, kv_heads, kv_heads], np.int64) * head_dim
+                ),
+            ]
+        )
+        index = list(graph.node).index(projections[0])
+        for node in projections:
+            graph.node.remove(node)
+        graph.node.insert(
+            index,
+            helper.make_node(
+                "MatMul",
+                [projections[0].input[0], f"{prefix}/weight"],
+                [f"{prefix}/output"],
+                name=f"{prefix}/MatMul",
+            ),
+        )
+        graph.node.insert(
+            index + 1,
+            helper.make_node(
+                "Split",
+                [f"{prefix}/output", f"{prefix}/sizes"],
+                [n.output[0] for n in projections],
+                axis=-1,
+            ),
+        )
+    elif projection_mode in {"packed", "unpacked"}:
+        # Real DQ weights select the quantized projection paths in surgery.
+        for node in projections:
+            weight = weights[node.input[1]]
+            graph.initializer.extend(
+                [
+                    _init(f"{weight.name}/int8", np.zeros(weight.dims, np.int8)),
+                    _init(f"{weight.name}/scale", np.array(0.02, np.float16)),
+                ]
+            )
+            graph.initializer.remove(weight)
+            graph.node.insert(
+                0,
+                helper.make_node(
+                    "DequantizeLinear",
+                    [f"{weight.name}/int8", f"{weight.name}/scale"],
+                    [weight.name],
+                    name=f"{weight.name}/DQ",
+                ),
+            )
+        original.opset_import[0].version = 21
+        original.ir_version = 10
+
+    onnx.checker.check_model(original, full_check=True)
+    original_path, output_path = tmp_path / "original.onnx", tmp_path / "gqa.onnx"
+    onnx.save(original, original_path)
+    replace_attention_with_gqa(
+        str(original_path),
+        str(output_path),
+        str(config_dir),
+        max_seq_len=MAX_SEQ_LEN,
+        pack_qkv=projection_mode == "packed",
+        use_external_data=False,
+        verbose=False,
+    )
+    result = onnx.load(output_path)
+    # Surgery appends nodes; the checker requires topological order (ORT accepts either).
+    nodes = topological_sort_nodes(result.graph)
+    del result.graph.node[:]
+    result.graph.node.extend(nodes)
+    result = onnx.shape_inference.infer_shapes(result)
+    onnx.checker.check_model(result, full_check=True)
+    tensors = {
+        v.name: v for v in [*result.graph.input, *result.graph.output, *result.graph.value_info]
+    }
+    initializers = {w.name: numpy_helper.to_array(w) for w in result.graph.initializer}
+    gqa = next(n for n in result.graph.node if n.op_type == "GroupQueryAttention")
+    attrs = {a.name: helper.get_attribute_value(a) for a in gqa.attribute}
+    assert attrs["scale"] == pytest.approx(head_dim**-0.5)
+    assert tensors[gqa.output[0]].type.tensor_type.shape.dim[-1].dim_value == heads * head_dim
+    for name in [*gqa.input[3:5], *gqa.output[1:]]:
+        assert tensors[name].type.tensor_type.shape.dim[-1].dim_value == head_dim
+    if projection_mode != "unpacked":
+        assert (
+            tensors[gqa.input[0]].type.tensor_type.shape.dim[-1].dim_value
+            == (heads + 2 * kv_heads) * head_dim
+        )
+    out_proj = next(n for n in result.graph.node if n.name.endswith("/o_proj/MatMul"))
+    assert out_proj.input[0] == gqa.output[0]
+    assert initializers[out_proj.input[1]].shape == (heads * head_dim, config.hidden_size)
+    angles = np.outer(np.arange(MAX_SEQ_LEN), inv_freq)
+    np.testing.assert_allclose(initializers["cos_cache"], np.cos(angles), atol=5e-4)
+    np.testing.assert_allclose(initializers["sin_cache"], np.sin(angles), atol=5e-4)
+    feeds = {
+        "input_ids": np.arange(SEQ_LEN, dtype=np.int64).reshape(1, -1),
+        "attention_mask": np.ones((1, SEQ_LEN), np.int64),
+        "past_key_values.0.key": np.zeros((1, kv_heads, 0, head_dim), np.float16),
+        "past_key_values.0.value": np.zeros((1, kv_heads, 0, head_dim), np.float16),
+    }
+    expected = _run_session(original, {**feeds, "position_ids": feeds["input_ids"]})
+    actual = _run_session(result, feeds)
+    for before, after in zip(expected, actual):
+        np.testing.assert_allclose(after, before, rtol=1e-2, atol=1e-3)
+
+
+class _CacheExportModel(torch.nn.Module):
+    """Tiny decoder projections that consume and extend the exporter's real dummy cache."""
+
+    def __init__(self, config, head_dim):
+        super().__init__()
+        self.config = config
+        self.head_dim = head_dim
+        self.embedding = torch.nn.Embedding(config.vocab_size, config.hidden_size)
+        self.k_proj = torch.nn.Linear(config.hidden_size, config.num_key_value_heads * head_dim)
+        self.v_proj = torch.nn.Linear(config.hidden_size, config.num_key_value_heads * head_dim)
+
+    def forward(self, input_ids, past_key_values):
+        hidden = self.embedding(input_ids)
+        shape = (*input_ids.shape, self.config.num_key_value_heads, self.head_dim)
+        key = self.k_proj(hidden).reshape(shape).transpose(1, 2)
+        value = self.v_proj(hidden).reshape(shape).transpose(1, 2)
+        return hidden, (
+            (
+                torch.cat((past_key_values[0][0], key), dim=2),
+                torch.cat((past_key_values[0][1], value), dim=2),
+            ),
+        )
+
+
+def test_configured_head_dim_export(head_dim_config, monkeypatch, tmp_path):
+    config, _, head_dim = head_dim_config
+    model = _CacheExportModel(config, head_dim).half().eval()
+    # llm_to_onnx places inputs on CUDA; exercise the real export on CPU in unit tests.
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda self: self)
+    llm_to_onnx(model, str(tmp_path))
+    exported = onnx.load(tmp_path / "model.onnx")
+    onnx.checker.check_model(exported, full_check=True)
+    for tensor in [*exported.graph.input[1:], *exported.graph.output[1:]]:
+        assert tensor.type.tensor_type.shape.dim[-1].dim_value == head_dim
+    cache = np.zeros((1, config.num_key_value_heads, 3, head_dim), np.float16)
+    outputs = _run_session(
+        exported,
+        {
+            "input_ids": np.zeros((1, 2), np.int64),
+            "past_key_values.0.key": cache,
+            "past_key_values.0.value": cache,
+        },
+    )
+    assert outputs[1].shape == outputs[2].shape == (1, config.num_key_value_heads, 5, head_dim)
