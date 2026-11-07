@@ -292,12 +292,12 @@ def _force_load_remote_modeling(hf_config, ckpt_path: str, trust_remote_code: bo
     declares in its ``auto_map`` -- no hardcoded remote file/module name. Makes the code importable
     first. Returns that class, whose package holds this checkpoint's remote code.
     """
-    _make_importable()
-    from transformers.dynamic_module_utils import get_class_from_dynamic_module
-
     class_ref = _model_class_ref(hf_config)
     if not class_ref:
         raise RuntimeError(_NO_MODEL_CLASS)
+    _make_importable()
+    from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
     return get_class_from_dynamic_module(class_ref, ckpt_path, trust_remote_code=trust_remote_code)
 
 
@@ -461,6 +461,10 @@ def prepare(
         # Patching below imports the checkpoint's own modeling code, and transformers'
         # get_class_from_dynamic_module runs it without checking trust_remote_code itself.
         raise ValueError(_UNTRUSTED)
+    if _model_class_ref(hf_config) is None:
+        # Checked before the decompressor or a shim is installed, so the refusal leaves the process
+        # as it was.
+        raise RuntimeError(_NO_MODEL_CLASS)
 
     text_cfg = getattr(hf_config, "text_config", None) or hf_config
 
