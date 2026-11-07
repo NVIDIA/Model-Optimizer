@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Keep fixed rule batches and direct IR passes in their required phase order."""
 
 from collections.abc import Collection, Sequence
@@ -155,3 +156,29 @@ def precision(graph: DlaGraph) -> int:
     count += graph.apply_pattern(pattern_rules.TerminalProjection.rule(graph))
     graph.apply_pass(ir.passes.common.RemoveUnusedNodesPass())
     return count
+
+
+def run(
+    model: ir.Model,
+    *,
+    quantized_dtypes=None,
+    remove_all_qdq: bool = False,
+    force_fp16_activations: bool = False,
+) -> dict[str, int]:
+    """Execute the fixed DLA pipeline through one graph context and final cleanup."""
+    graph = DlaGraph(model, force_fp16_activations=force_fp16_activations)
+    retained_identities = {node for node in model.graph if node.op_type == "Identity"}
+    counts = {}
+    counts["preprocessing"] = preprocessing(
+        graph, quantized_dtypes=quantized_dtypes, remove_all_qdq=remove_all_qdq
+    )
+    counts["pattern_rewrites"] = pattern_rewrites(graph)
+    counts["individual_op_rewrites"] = individual_op_rewrites(graph)
+    counts["cleanup"] = cleanup(graph, preserve_identities=retained_identities)
+    if force_fp16_activations:
+        counts["precision"] = precision(graph)
+    deduplicate = _cleanup.DeduplicateInitializers()
+    graph.apply_pass(deduplicate)
+    counts["cleanup"] += deduplicate.removed_count
+    graph.apply_pass(ir.passes.common.TopologicalSortPass())
+    return counts
