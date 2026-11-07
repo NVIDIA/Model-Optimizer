@@ -59,6 +59,12 @@ parser.add_argument(
 )
 parser.add_argument("--system_prompt", nargs="+", type=str, default="", help="System prompt")
 parser.add_argument(
+    "--assistant_prefix",
+    type=str,
+    default="",
+    help="Restore a model-template assistant prefix omitted from API completion text.",
+)
+parser.add_argument(
     "--extra_body", type=json.loads, help="JSON object of additional chat request parameters"
 )
 parser.add_argument(
@@ -162,9 +168,12 @@ def generate_data(sample, idx, system_prompt):
                 choice = response.choices[0]
                 if choice.message.tool_calls or choice.message.function_call:
                     raise RejectedConversationError("Tool calls require a tool-execution loop.")
+                content = (choice.message.content or "").strip()
+                if content and args.assistant_prefix:
+                    content = args.assistant_prefix + content
                 generated_message = {
                     "role": "assistant",
-                    "content": (choice.message.content or "").strip(),
+                    "content": content,
                 }
                 reasoning = getattr(choice.message, "reasoning_content", None) or getattr(
                     choice.message, "reasoning", None

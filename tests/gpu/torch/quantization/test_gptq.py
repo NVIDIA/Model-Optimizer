@@ -14,16 +14,22 @@
 # limitations under the License.
 
 import copy
+import threading
 import time
 
 import pytest
 import torch
+from _test_utils.torch.quantization.models import ToyFusedExperts, ToyMoE
 from _test_utils.torch.transformers_models import get_tiny_llama
 from conftest import requires_triton
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.quantization.extensions import get_cuda_ext_ggml
+from modelopt.torch.quantization.ggml.common import pinned_packed_weight
+from modelopt.torch.quantization.ggml.gptq import GGMLGPTQHelper
 from modelopt.torch.quantization.model_calib import gptq
+from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 from modelopt.torch.quantization.utils import calib_utils
 from modelopt.torch.quantization.utils.calib_utils import (
@@ -59,6 +65,178 @@ def test_hessian_of_a_full_gpu_goes_to_an_idle_gpu(need_2_gpus, monkeypatch):
     helper.accumulate(inputs)
     reference, _ = update_hessian(inputs, torch.zeros(64, 64, device="cuda:0"), 0)
     torch.testing.assert_close(helper.hessian.to("cuda:0"), reference)
+
+
+@pytest.mark.parametrize("inference_mode", [False, True])
+def test_expert_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, inference_mode):
+    """GGML expert updates spread over two GPUs give the one-GPU weights and codes, pinned at home,
+    also on inference tensors under the caller's inference mode, which worker threads do not inherit.
+    """
+    pytest.importorskip("transformers")  # the fused-experts quant wrapper is the HF plugin's
+    get_cuda_ext_ggml(raise_if_failed=True)  # updates move only with the CUDA encoders
+    # Two GGML groups per expert input, so the Hessian carries the first group's error to the next.
+    width = 512
+    shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"},
+            },
+        ],
+        "algorithm": {"method": "gptq", "block_size": 256, "perc_damp": 0.3},
+    }
+    devices = []
+    update_weights = GGMLGPTQHelper.update_weights
+
+    def recording_update_weights(self, *args, device=None, **kwargs):
+        devices.append(device)
+        return update_weights(self, *args, device=device, **kwargs)
+
+    monkeypatch.setattr(GGMLGPTQHelper, "update_weights", recording_update_weights)
+    experts = []
+    try:
+        with torch.inference_mode(inference_mode):
+            inputs = torch.randn(96, width, device="cuda")
+            for gpus in ([0], [0, 1]):
+                monkeypatch.setattr(calib_utils, "get_process_gpus", lambda gpus=gpus: gpus)
+                torch.manual_seed(RAND_SEED)
+                model = ToyMoE(width, width).cuda()
+                mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+                experts.append(model.mlp.experts)
+    finally:
+        QuantModuleRegistry.unregister(ToyFusedExperts)
+
+    assert torch.device("cuda", 1) in devices
+    one_gpu, two_gpus = experts
+    for name in ("gate_up_proj", "down_proj"):
+        assert torch.equal(getattr(one_gpu, name), getattr(two_gpus, name))
+        for q1, q2 in zip(
+            getattr(one_gpu, f"{name}_weight_quantizers"),
+            getattr(two_gpus, f"{name}_weight_quantizers"),
+        ):
+            assert pinned_packed_weight(q2, "iq2_xxs").device == getattr(two_gpus, name).device
+            assert torch.equal(
+                pinned_packed_weight(q1, "iq2_xxs"), pinned_packed_weight(q2, "iq2_xxs")
+            )
+
+
+@pytest.mark.parametrize("inference_mode", [False, True])
+def test_linear_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, inference_mode):
+    """GGML updates of plain linears, a sequential MoE's experts among them, spread over two GPUs
+    as fused experts' do, and give the one-GPU weights and codes, pinned at home; linears whose
+    weights share a storage, tied or overlapping views, keep their order, the later updating the
+    earlier's result."""
+    get_cuda_ext_ggml(raise_if_failed=True)  # updates move only with the CUDA encoders
+    width = 512  # two GGML groups per input, so the Hessian carries the first group's error
+    shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"},
+            },
+        ],
+        "algorithm": {"method": "gptq", "block_size": 256, "perc_damp": 0.3},
+    }
+    devices = []
+    update_weights = GGMLGPTQHelper.update_weights
+    prepare_hessian_inverse = GGMLGPTQHelper._prepare_hessian_inverse
+    # The GPUs' first moved updates both read their weights before either writes one back, so
+    # updates that could race do, also when first-use setup would delay one of them.
+    both_read = threading.Barrier(2, timeout=60)
+    moved = threading.local()
+
+    def recording_update_weights(self, *args, device=None, **kwargs):
+        devices.append(device)
+        moved.first = device is not None and sum(d is not None for d in devices) <= 2
+        return update_weights(self, *args, device=device, **kwargs)
+
+    def prepare_once_both_read(self, *args):
+        if moved.first:
+            both_read.wait()
+        return prepare_hessian_inverse(self, *args)
+
+    monkeypatch.setattr(GGMLGPTQHelper, "update_weights", recording_update_weights)
+    monkeypatch.setattr(GGMLGPTQHelper, "_prepare_hessian_inverse", prepare_once_both_read)
+    models = []
+    with torch.inference_mode(inference_mode):
+        inputs = torch.randn(96, width, device="cuda")
+        for gpus in ([0], [0, 1]):
+            monkeypatch.setattr(calib_utils, "get_process_gpus", lambda gpus=gpus: gpus)
+            torch.manual_seed(RAND_SEED)
+            model = torch.nn.Sequential(
+                *(torch.nn.Linear(width, width, bias=False) for _ in range(8))
+            ).cuda()
+            # After the first, which updates alone: tied linears, then views overlapping in all but
+            # a row; the first of these pairs to be spread holds the GPUs' first updates.
+            model[2].weight = model[1].weight
+            rows = torch.randn(width + 1, width, device="cuda")
+            model[3].weight = torch.nn.Parameter(rows[:-1])
+            model[4].weight = torch.nn.Parameter(rows[1:])
+            mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+            models.append(model)
+
+    assert torch.device("cuda", 1) in devices
+    for one_gpu, two_gpus in zip(*models):
+        assert torch.equal(one_gpu.weight, two_gpus.weight)
+        codes = pinned_packed_weight(two_gpus.weight_quantizer, "iq2_xxs")
+        assert codes.device == two_gpus.weight.device
+        assert torch.equal(pinned_packed_weight(one_gpu.weight_quantizer, "iq2_xxs"), codes)
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "shape", "dtype", "cuda_extension"),
+    [
+        ("iq2_xxs", (16384, 2048), torch.bfloat16, True),  # a projection 8x wider than its input
+        ("iq2_xxs", (65536, 256), torch.bfloat16, True),  # one GPTQ block spans the input
+        # Logging holds the original weight, here twice the size of a float32 copy.
+        ("iq2_xxs", (65536, 512), torch.float64, True),
+        ("iq1_s", (1024, 512), torch.bfloat16, True),
+        # The PyTorch encoder's scratch grows with block_chunk_size, past the room check.
+        ("iq1_s", (1024, 512), torch.bfloat16, False),
+    ],
+)
+@pytest.mark.parametrize("log_mse", [False, True])
+def test_an_update_that_may_move_fits_its_room(
+    need_2_gpus, monkeypatch, num_bits, shape, dtype, cuda_extension, log_mse
+):
+    """An update that may run on another GPU, logging its error or not, peaks there within the
+    room it is admitted with."""
+    if cuda_extension:
+        get_cuda_ext_ggml(raise_if_failed=True)  # without it, no update may move to check
+    else:
+        monkeypatch.setattr(get_cuda_ext_ggml, "extension", None, raising=False)
+    out_features, in_features = shape
+    torch.manual_seed(RAND_SEED)
+    linear = torch.nn.Linear(in_features, out_features, bias=False, dtype=dtype, device="cuda:0")
+    inputs = torch.randn(512, in_features, dtype=dtype, device="cuda:0")
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": num_bits, "block_sizes": {-1: 256}, "backend": "ggml"},
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(linear, config, forward_loop=lambda m: m(inputs))
+    helper = GGMLGPTQHelper(linear, "linear", log_mse=log_mse)
+    helper.accumulate(inputs)
+    block_size = 256
+    worker = torch.device("cuda", 1)
+    torch.cuda.synchronize(worker)
+    torch.cuda.reset_peak_memory_stats(worker)
+    allocated = torch.cuda.memory_allocated(worker)
+    with torch.cuda.device(worker):
+        helper.update_weights(block_size, 0.3, linear.weight, device=worker)
+    peak = torch.cuda.max_memory_allocated(worker) - allocated
+
+    if helper.updates_on_any_device():
+        assert peak <= calib_utils._update_room(helper, linear.weight, block_size)
 
 
 @pytest.mark.parametrize("blocker", ["idle_gpu_full", "idle_gpu_too_small", "multi_rank"])

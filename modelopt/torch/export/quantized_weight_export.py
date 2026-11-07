@@ -79,7 +79,7 @@ _NVFP4_EXPORT_FORMATS = {
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 }
-_MXFP4_EXPORT_FORMATS = {QUANTIZATION_MXFP4, QUANTIZATION_W4A8_MXFP4_FP8}
+_MXFP4_EXPORT_FORMATS = {QUANTIZATION_MXFP4, QUANTIZATION_W4A16_MXFP4, QUANTIZATION_W4A8_MXFP4_FP8}
 _FUNCTIONAL_WEIGHT_EXPORT_FORMATS = (
     _NVFP4_EXPORT_FORMATS
     | _MXFP4_EXPORT_FORMATS
@@ -349,6 +349,17 @@ def _resolve_quantized_weight_export_inputs(
         return None
     quantized_view, weight_quantizer = resolved
     input_quantizer = _input_quantizer(module, weight_name)
+    # Neither a packed nor an unquantized weight can carry a rotation of the weight or its input.
+    # A disabled quantizer still rotates unless it rotates back.
+    if any(
+        isinstance(quantizer, TensorQuantizer)
+        and quantizer.rotate_is_enabled
+        and (quantizer.is_enabled or not quantizer.rotate_back_is_enabled)
+        for quantizer in (weight_quantizer, input_quantizer)
+    ):
+        raise _UnsupportedQuantizedWeightExportFormatError(
+            f"Functional export does not support rotated quantizers for {weight_name!r}"
+        )
     if not weight_quantizer.is_enabled:
         return None
     quantization_format = _get_quantization_from_quantizers(
@@ -360,9 +371,16 @@ def _resolve_quantized_weight_export_inputs(
         raise _UnsupportedQuantizedWeightExportFormatError(
             f"Functional export does not support {quantization_format!r}"
         )
-    if quantization_format == QUANTIZATION_W4A16_MXFP4:
+    if isinstance(input_quantizer, SequentialQuantizer):
         raise _UnsupportedQuantizedWeightExportFormatError(
-            "Functional export does not support weight-only MXFP4"
+            f"Functional export does not support sequential input quantizers for {weight_name!r}"
+        )
+    if any(
+        quantizer is not None and quantizer.is_enabled and quantizer.backend is not None
+        for quantizer in (weight_quantizer, input_quantizer)
+    ):
+        raise _UnsupportedQuantizedWeightExportFormatError(
+            f"Functional export does not support custom quantization backends for {weight_name!r}"
         )
     if quantization_format == QUANTIZATION_FP8_PB_WO and weight_quantizer.block_sizes != {
         -2: 128,
@@ -934,6 +952,7 @@ def build_hf_quantization_config(
         if state is not None:
             requires_input = state.quantization_format not in {
                 QUANTIZATION_FP8_PB_WO,
+                QUANTIZATION_W4A16_MXFP4,
                 QUANTIZATION_W4A16_NVFP4,
             }
             if state.input_quantizer_enabled != requires_input:

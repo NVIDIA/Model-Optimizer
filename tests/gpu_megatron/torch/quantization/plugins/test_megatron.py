@@ -42,7 +42,7 @@ from _test_utils.torch.megatron.utils import (
     save_distributed_checkpoint,
     sharded_state_dict_test_helper,
 )
-from _test_utils.torch.misc import is_blackwell, set_seed
+from _test_utils.torch.misc import set_seed
 from _test_utils.torch.quantization.models import RegularQuantModelForTP
 from _test_utils.torch.quantization.quant_utils import get_model_size
 from _test_utils.torch.quantization.quantize_common import (
@@ -74,7 +74,7 @@ from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     save_sharded_modelopt_state,
 )
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
-from modelopt.torch.quantization.ggml.common import PINNED_PAYLOAD_PREFIX
+from modelopt.torch.quantization.ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.plugins.megatron import (
@@ -344,6 +344,8 @@ def _gpt_model_provider(
                 use_cpu_initialization=meta_device,
                 num_moe_experts=num_moe_experts,
                 moe_grouped_gemm=moe_grouped_gemm,
+                # MoE with TP requires sequence parallelism
+                sequence_parallel=tp_size > 1 and num_moe_experts is not None,
             )
 
     if not meta_device:
@@ -600,19 +602,7 @@ def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     )
 
 
-@pytest.mark.parametrize(
-    "hidden_size",
-    [
-        256,
-        # Runs in the pytest process, so a Blackwell CUDA crash here would break every later test
-        pytest.param(
-            320,
-            marks=pytest.mark.skipif(
-                is_blackwell(), reason="Flaky CUDA illegal memory access on Blackwell"
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("hidden_size", [256, 320])
 def test_regular_state_dict(distributed_setup_size_1, hidden_size):
     initialize_for_megatron(tensor_model_parallel_size=1, pipeline_model_parallel_size=1, seed=SEED)
 
@@ -1520,12 +1510,16 @@ def _test_gptq_mamba_hybrid(rank, size):
     assert torch.isfinite(forward(model)).all()
 
 
-def test_gptq_hessian_sync_across_dp(dist_workers_size_2):
-    """GPTQ at DP2 must use the Hessian of both ranks' calibration data and agree across ranks."""
-    dist_workers_size_2.run(_test_gptq_hessian_sync_across_dp)
+@pytest.mark.parametrize("recipe", [None, "general/ptq/nvfp4_default-kv_none-gptq"])
+def test_gptq_hessian_sync_across_dp(dist_workers_size_2, recipe):
+    """GPTQ at DP2 must use the Hessian of both ranks' calibration data and agree across ranks.
+
+    The shipped layerwise GPTQ recipe must run at DP2 as well, not only in a single process.
+    """
+    dist_workers_size_2.run(partial(_test_gptq_hessian_sync_across_dp, recipe))
 
 
-def _test_gptq_hessian_sync_across_dp(rank, size):
+def _test_gptq_hessian_sync_across_dp(recipe, rank, size):
     initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
     model = get_mcore_gpt_model(tensor_model_parallel_size=1, num_layers=1).cuda()
     ref_model = get_mcore_gpt_model(tensor_model_parallel_size=1, num_layers=1).cuda()
@@ -1547,8 +1541,12 @@ def _test_gptq_hessian_sync_across_dp(rank, size):
         hessians[self.name] = self.hessian.clone()
         return update_weights(self, *args, **kwargs)
 
-    quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
-    quant_cfg["algorithm"] = {"method": "gptq"}
+    if recipe is None:
+        quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
+        quant_cfg["algorithm"] = {"method": "gptq"}
+    else:
+        quant_cfg = load_recipe(recipe).quantize.model_dump()
+        assert quant_cfg["algorithm"]["layerwise"]["enable"]
     with patch.object(GPTQHelper, "update_weights", capture_hessian):
         mtq.quantize(model, quant_cfg, partial(forward, input_ids_list=[batch[0]]))
         dp_hessians = dict(hessians)
@@ -1731,8 +1729,14 @@ def _test_ggml_gptq_payload_sharded_state_dict(tmp_path, rank, size):
     gptq = next(algo for algo in config["algorithm"] if algo["method"] == "gptq")
     config["algorithm"] = {**gptq, "layerwise": {"enable": False}}
     mtq.quantize(model_ref, config, get_forward(model_ref))
-    pinned = {k: v for k, v in model_ref.state_dict().items() if PINNED_PAYLOAD_PREFIX in k}
-    assert pinned, "GPTQ pinned no GGML payload"
+    pinned = {
+        k: v
+        for k, v in model_ref.state_dict().items()
+        if PINNED_PAYLOAD_PREFIX in k or PINNED_IMPORTANCE_PREFIX in k
+    }
+    assert any(PINNED_PAYLOAD_PREFIX in k for k in pinned), "GPTQ pinned no GGML payload"
+    # IQ2_XS keeps its pinned scales, so the importance its search used is saved with the payload.
+    assert any(PINNED_IMPORTANCE_PREFIX in k for k in pinned), "GPTQ pinned no importance"
 
     save_distributed_checkpoint(tmp_path, model_ref)
     save_sharded_modelopt_state([model_ref], tmp_path)
@@ -1749,7 +1753,7 @@ def _test_ggml_gptq_payload_sharded_state_dict(tmp_path, rank, size):
 
 
 def test_ggml_gptq_payload_sharded_state_dict(dist_workers, tmp_path):
-    """GPTQ's pinned GGML codes are saved, so a reload exports them instead of re-encoding."""
+    """GPTQ's pinned GGML codes and importance are saved, so a reload re-derives the same codes."""
     dist_workers.run(partial(_test_ggml_gptq_payload_sharded_state_dict, tmp_path))
 
 
@@ -2673,3 +2677,119 @@ def test_mla_fused_down_projections_share_ranges(distributed_setup_size_1, quant
                 assert torch.equal(q_down.weight_quantizer.amax, kv_down.weight_quantizer.amax)
     finally:
         destroy_model_parallel()  # not a spawned process
+
+
+# Kimi K3's MLA and KDA projections that deployments fuse: those static NVFP4 also shares, then the gates.
+_KIMI_K3_FUSED_PROJECTIONS = {
+    "mla": (("q_a_proj", "kv_a_proj_with_mqa"), ("g_proj",)),
+    "kda": (("q_proj", "k_proj", "v_proj"), ("g_proj", "f_a_proj", "b_proj")),
+}
+
+
+class _HFNamedFusedProjections(MegatronModule):
+    """Projections deployments fuse, under the HF names Kimi K3's Megatron MLA or KDA keeps."""
+
+    def __init__(self, config, names):
+        from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TELinear
+
+        super().__init__(config)
+        kwargs = {"config": config, "init_method": torch.nn.init.normal_, "bias": False}
+        kwargs |= {"skip_bias_add": False, "skip_weight_param_allocation": False}
+        self.names = names
+        for name in names:
+            if name in ("q_a_proj", "kv_a_proj_with_mqa", "f_a_proj"):
+                linear = TELinear(64, 64, parallel_mode="duplicated", **kwargs)
+            else:
+                linear = TEColumnParallelLinear(
+                    64, 64, gather_output=False, is_expert=False, **kwargs
+                )
+            setattr(self, name, linear)
+
+    def forward(self, x):
+        return [getattr(self, name)(x)[0] for name in self.names]
+
+
+@pytest.mark.parametrize("attention", ["mla", "kda"])
+@pytest.mark.parametrize(
+    "quant_cfg", ["FP8_DEFAULT_CFG", "NVFP4_DEFAULT_CFG", "NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG"]
+)
+def test_hf_named_fused_projections_share_ranges(distributed_setup_size_1, quant_cfg, attention):
+    """Megatron-Core modules with HF names get the ranges deployments fuse, as Megatron-Core MLA does."""
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    try:
+        core, gates = _KIMI_K3_FUSED_PROJECTIONS[attention]
+        config = TransformerConfig(num_layers=1, hidden_size=64, num_attention_heads=4)
+        model = _HFNamedFusedProjections(config, core + gates).cuda()
+        with torch.no_grad():  # give the weights in each group different ranges
+            getattr(model, core[-1]).weight.mul_(4)
+            getattr(model, gates[-1]).weight.mul_(8)
+        x = torch.randn(8, 2, 64, device="cuda")
+
+        mtq.quantize(model, copy.deepcopy(getattr(mtq, quant_cfg)), lambda m: m(x))
+
+        first = getattr(model, core[0])
+        for name in core[1:] + gates:
+            other = getattr(model, name)
+            assert torch.equal(first.input_quantizer.amax, other.input_quantizer.amax)
+            if not first.weight_quantizer.is_nvfp4_static:
+                assert torch.equal(first.weight_quantizer.amax, other.weight_quantizer.amax)
+            else:
+                assert torch.equal(
+                    first.weight_quantizer.global_amax, other.weight_quantizer.global_amax
+                )
+    finally:
+        destroy_model_parallel()  # not a spawned process
+
+
+def _test_te_linear_range_sync_helper(tensor_model_parallel_size, rank, size):
+    from megatron.core.extensions.transformer_engine import TELinear
+
+    pipeline_model_parallel_size = size // tensor_model_parallel_size
+    initialize_for_megatron(
+        tensor_model_parallel_size=tensor_model_parallel_size,
+        pipeline_model_parallel_size=pipeline_model_parallel_size,
+        seed=SEED,
+    )
+    config = TransformerConfig(
+        num_layers=pipeline_model_parallel_size,
+        hidden_size=64,
+        num_attention_heads=4,
+        use_cpu_initialization=True,
+    )
+    # A duplicated TELinear, like MLA's down-projections, on every rank; each rank's weight and
+    # input (e.g. a sequence-parallel shard) has its own range.
+    model = torch.nn.ModuleDict(
+        {
+            "linear": TELinear(
+                64,
+                64,
+                parallel_mode="duplicated",
+                config=config,
+                init_method=torch.nn.init.normal_,
+                bias=False,
+                skip_bias_add=False,
+                skip_weight_param_allocation=False,
+            )
+        }
+    ).cuda()
+    with torch.no_grad():
+        model["linear"].weight.mul_(rank + 1)
+    x = torch.randn(8, 2, 64, device="cuda") * (rank + 1)
+    expected = torch.stack([x.abs().amax(), model["linear"].weight.abs().amax()]).float()
+
+    mtq.quantize(model, copy.deepcopy(mtq.FP8_DEFAULT_CFG), lambda m: m["linear"](x))
+
+    # Replicas share their ranges over tensor parallelism; pipeline stages keep their own.
+    if tensor_model_parallel_size > 1:
+        torch.distributed.all_reduce(expected, op=torch.distributed.ReduceOp.MAX)
+    linear = model["linear"]
+    assert torch.equal(linear.input_quantizer.amax.float(), expected[0])
+    assert torch.equal(linear.weight_quantizer.amax.float(), expected[1])
+
+
+@pytest.mark.parametrize("tensor_model_parallel_size", [1, 2])
+def test_te_linear_ranges_sync_within_pipeline_stage(
+    dist_workers_size_2, tensor_model_parallel_size
+):
+    """Megatron-Core TELinear syncs ranges over its TP / DP replicas, not across pipeline stages."""
+    dist_workers_size_2.run(partial(_test_te_linear_range_sync_helper, tensor_model_parallel_size))

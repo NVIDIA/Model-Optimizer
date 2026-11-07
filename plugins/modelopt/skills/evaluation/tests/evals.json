@@ -76,10 +76,12 @@
   {
     "name": "bounded-failures-overlap-and-resume",
     "skills": ["evaluation"],
-    "query": "A complete run has 1000 expected scored trials and 10000 verified unique successful model responses. Solver timeouts affect trials 1-12, harness errors 9-16, and terminal action failures 15-19. Resumed logs duplicate these records. Model response faults affect IDs 1-120 (truncated), 81-170 (empty-final), and 151-190 (malformed). All failures are preserved protocol-valid incorrect/zero outcomes; other checks pass. A second run has the same response faults but 20 runtime-failed trials. Do not launch jobs.",
+    "query": "A complete run has 1000 expected scored trials and 10000 verified unique successful model responses. Terminus-2 solver/harness timeouts affect trials 1-12, harness errors 9-16, and terminal action failures 15-19; artifacts prove these were not caused by incorrect model-generated code. Trials 21-220 have generated-code NameError/ValueError exceptions or sandbox timeouts; artifacts prove these were caused by incorrect model-generated code, including infinite loops, with healthy execution infrastructure and no response faults. Resumed logs duplicate these records. Model response faults affect IDs 1-120 (truncated), 81-170 (empty-final), and 151-190 (malformed). All failures are preserved protocol-valid incorrect/zero outcomes; other checks pass. A second run has the same response faults but 20 runtime-failed trials. Do not launch jobs.",
     "files": [],
     "expected_behavior": [
       "Reports runtime categories 12, 8, 5, deduplicated to 19/1000 = 1.9%; response categories 120, 90, 40, deduplicated to 190/10000 = 1.9%",
+      "Excludes the 200 proven model-code failures from the trial gate while retaining their zero scores and the 1000-trial score denominator; classification follows artifact evidence, not exception names or the sandbox timeout label alone",
+      "Counts the Terminus-2 solver/harness timeouts: the model-code exclusion does not exempt solver failures unrelated to generated code",
       "Accepts the first run with warnings without counting resumed records twice, pooling benchmarks, or adding gate rates",
       "Does not accept the second run: its trial gate is exactly 2%, even though its response gate passes"
     ]

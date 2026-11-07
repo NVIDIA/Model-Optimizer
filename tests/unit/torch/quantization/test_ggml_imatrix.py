@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""imatrix calibration for the GGML formats."""
+"""imatrix and local_hessian calibration for the GGML formats."""
 
 import copy
 import dataclasses
@@ -28,12 +28,17 @@ from torch import nn
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
+from modelopt.torch.export.moe_utils import _export_fused_experts
 from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.ggml.common import pinned_packed_weight
+from modelopt.torch.quantization.ggml.choice_search import search_choices
+from modelopt.torch.quantization.ggml.common import pinned_importance, pinned_packed_weight
 
 IQ2_XXS = GGML_FORMAT_REGISTRY["iq2_xxs"]
 IMATRIX = {"method": "imatrix"}
+LOCAL_HESSIAN = {"method": "local_hessian"}
+# Both encode each weight once from a statistic of its inputs and pin the codes.
+ENCODERS = pytest.mark.parametrize("algorithm", [IMATRIX, LOCAL_HESSIAN], ids=lambda a: a["method"])
 GPTQ = {"method": "gptq", "block_size": 256, "perc_damp": 0.3}
 
 
@@ -66,7 +71,9 @@ def _record_importance(monkeypatch):
     calls = []
 
     def recording_quantize(weight, **kwargs):
-        calls.append(kwargs.get("importance"))
+        # Forwards re-encode under the pinned scales; only calibration's own encodes count.
+        if "scales" not in kwargs:
+            calls.append(kwargs.get("importance"))
         return IQ2_XXS.quantize(weight, **kwargs)
 
     monkeypatch.setitem(
@@ -81,25 +88,29 @@ def _decoded(quantizer, shape):
     return IQ2_XXS.dequantize(pinned, torch.tensor(shape), dtype=torch.float32)
 
 
-def test_imatrix_weights_the_search_by_the_root_of_the_inputs_second_moments(monkeypatch):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_imatrix_weights_the_search_by_the_root_of_the_inputs_second_moments(monkeypatch, dtype):
     calls = _record_importance(monkeypatch)
-    inputs = _inputs(rows=2500)  # more rows than the hook squares at a time
-    mtq.quantize(nn.Linear(512, 8, bias=False), _config(IMATRIX), forward_loop=lambda m: m(inputs))
+    inputs = _inputs(rows=2500).to(dtype)  # more rows than the hook squares at a time
+    model = nn.Linear(512, 8, bias=False, dtype=dtype)
+    mtq.quantize(model, _config(IMATRIX), forward_loop=lambda m: m(inputs))
 
-    torch.testing.assert_close(calls[-1], _importance(inputs.square().mean(dim=0)))
+    torch.testing.assert_close(calls[-1], _importance(inputs.float().square().mean(dim=0)))
 
 
-def test_imatrix_pins_the_codes_it_chose():
+@ENCODERS
+def test_pins_the_codes_it_chose(algorithm):
     torch.manual_seed(0)
     model = nn.Linear(512, 8, bias=False)
     original = model.weight.detach().clone()
     plain = copy.deepcopy(model)
     inputs = _inputs()
-    mtq.quantize(model, _config(IMATRIX), forward_loop=lambda m: m(inputs))
+    mtq.quantize(model, _config(algorithm), forward_loop=lambda m: m(inputs))
     mtq.quantize(plain, _config("max"), forward_loop=lambda m: m(inputs))
 
     decoded = _decoded(model.weight_quantizer, model.weight.shape)
-    assert torch.equal(model.weight.detach(), decoded)
+    # IQ2_XXS keeps the pinned scales, so the weight stays as it was and encodes to the pin again.
+    assert torch.equal(model.weight.detach(), original)
     torch.testing.assert_close(model(inputs), inputs @ decoded.T)
 
     def output_error(weight):
@@ -108,13 +119,27 @@ def test_imatrix_pins_the_codes_it_chose():
     assert output_error(decoded) < output_error(plain.weight_quantizer(plain.weight))
 
 
-def test_imatrix_leaves_codes_gptq_chose():
+@ENCODERS
+def test_weight_only_calibration_runs_one_forward(algorithm):
+    inputs = _inputs()
+    forwards = []
+
+    def forward_loop(model):
+        forwards.append(model)
+        model(inputs)
+
+    mtq.quantize(nn.Linear(512, 8, bias=False), _config(algorithm), forward_loop=forward_loop)
+    assert len(forwards) == 1
+
+
+@ENCODERS
+def test_leaves_codes_gptq_chose(algorithm):
     torch.manual_seed(0)
     gptq_only = nn.Linear(512, 8, bias=False)
     both = copy.deepcopy(gptq_only)
     inputs = _inputs()
     mtq.quantize(gptq_only, _config(GPTQ), forward_loop=lambda m: m(inputs))
-    mtq.quantize(both, _config([GPTQ, IMATRIX]), forward_loop=lambda m: m(inputs))
+    mtq.quantize(both, _config([GPTQ, algorithm]), forward_loop=lambda m: m(inputs))
 
     assert torch.equal(
         pinned_packed_weight(both.weight_quantizer, "iq2_xxs"),
@@ -123,12 +148,13 @@ def test_imatrix_leaves_codes_gptq_chose():
     assert torch.equal(both.weight, gptq_only.weight)
 
 
+@ENCODERS
 @pytest.mark.parametrize("calibrate_inputs", [False, True])
-def test_imatrix_refuses_a_width_it_cannot_encode_before_calibrating(calibrate_inputs):
+def test_refuses_a_width_it_cannot_encode_before_calibrating(algorithm, calibrate_inputs):
     torch.manual_seed(0)
     model = nn.Sequential(nn.Linear(512, 640, bias=False), nn.Linear(640, 8, bias=False))
     original = copy.deepcopy(model)
-    config = _config(IMATRIX)
+    config = _config(algorithm)
     if calibrate_inputs:
         # max_calibrate then runs a forward of its own, which must not run either.
         config["quant_cfg"].append(
@@ -142,7 +168,7 @@ def test_imatrix_refuses_a_width_it_cannot_encode_before_calibrating(calibrate_i
         model(inputs)
 
     with pytest.raises(
-        ValueError, match=r"imatrix cannot encode a weight of 1: .*divisible by 256"
+        ValueError, match=rf"{algorithm['method']} cannot encode a weight of 1: .*divisible by 256"
     ):
         mtq.quantize(model, config, forward_loop=forward_loop)
 
@@ -160,18 +186,19 @@ def test_imatrix_warns_that_ranks_are_not_synced(monkeypatch):
         mtq.quantize(nn.Linear(512, 8, bias=False), _config(IMATRIX), lambda m: m(inputs))
 
 
-def test_a_module_calibration_never_reached_gets_the_plain_search():
+@ENCODERS
+def test_a_module_calibration_never_reached_gets_the_plain_search(algorithm):
     torch.manual_seed(0)
     model = nn.ModuleDict(
         {"used": nn.Linear(512, 8, bias=False), "unused": nn.Linear(512, 8, bias=False)}
     )
     original = model["unused"].weight.detach().clone()
     inputs = _inputs()
-    mtq.quantize(model, _config(IMATRIX), forward_loop=lambda m: m["used"](inputs))
+    mtq.quantize(model, _config(algorithm), forward_loop=lambda m: m["used"](inputs))
 
     packed, shape = IQ2_XXS.quantize(original)
     plain = IQ2_XXS.dequantize(packed, shape, dtype=torch.float32)
-    assert torch.equal(model["unused"].weight.detach(), plain)
+    assert torch.equal(model["unused"].weight, original)
     assert torch.equal(_decoded(model["unused"].weight_quantizer, original.shape), plain)
 
 
@@ -203,11 +230,97 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
             torch.testing.assert_close(
                 down_calls[idx], _importance((F.silu(gate) * up).square().mean(dim=0))
             )
-        for weight, quantizers in (
-            (experts.gate_up_proj, experts.gate_up_proj_weight_quantizers),
-            (experts.down_proj, experts.down_proj_weight_quantizers),
+        for weight, original_weight, quantizers in (
+            (
+                experts.gate_up_proj,
+                original.experts.gate_up_proj,
+                experts.gate_up_proj_weight_quantizers,
+            ),
+            (experts.down_proj, original.experts.down_proj, experts.down_proj_weight_quantizers),
         ):
-            assert torch.equal(weight[idx].detach(), _decoded(quantizers[idx], weight[idx].shape))
+            assert pinned_packed_weight(quantizers[idx], "iq2_xxs") is not None
+            assert torch.equal(weight[idx], original_weight[idx])
+
+
+def test_hf_export_writes_each_fused_expert_s_pinned_rows(moe):
+    # imatrix leaves the experts' weights unrounded, and export splits gate_up into gate and up.
+    recipe = load_recipe("general/ptq/iq2_xxs_experts_only").quantize.model_dump()
+    mtq.quantize(moe, recipe, lambda m: m(_inputs(rows=96, columns=HIDDEN)))
+    experts = moe.mlp.experts
+    pins = [
+        tuple(
+            pinned_packed_weight(quantizers[idx], "iq2_xxs").clone()
+            for quantizers in (
+                experts.gate_up_proj_weight_quantizers,
+                experts.down_proj_weight_quantizers,
+            )
+        )
+        for idx in range(NUM_EXPERTS)
+    ]
+
+    _export_fused_experts(experts, torch.bfloat16)
+
+    for idx, (gate_up, down) in enumerate(pins):
+        expert = getattr(experts, str(idx))
+        gate, up = gate_up.chunk(2)
+        assert torch.equal(expert.gate_proj.weight, gate)
+        assert torch.equal(expert.up_proj.weight, up)
+        assert torch.equal(expert.down_proj.weight, down)
+
+
+def test_local_hessian_codes_hold_until_qad_changes_a_block():
+    # Encoding again would re-pick the searched local scales, so the weight they were picked for
+    # keeps its codes; a block QAD changed is re-encoded under the pinned scale, as after GPTQ.
+    torch.manual_seed(0)
+    model = nn.Linear(512, 16, bias=False)
+    original = model.weight.detach().clone()
+    inputs = _inputs() @ torch.randn(512, 512, generator=torch.Generator().manual_seed(1))
+    mtq.quantize(model, _config(LOCAL_HESSIAN), forward_loop=lambda m: m(inputs))
+    quantizer = model.weight_quantizer
+    pinned = pinned_packed_weight(quantizer, "iq2_xxs").clone()
+    assert torch.equal(model.weight, original)
+    assert torch.equal(IQ2_XXS.pack(model.weight.detach().clone(), quantizer), pinned)
+
+    with torch.no_grad():
+        model.weight[3] += 1e-2
+    packed = IQ2_XXS.pack(model.weight.detach().clone(), quantizer)
+    rescanned, _ = IQ2_XXS.quantize(
+        model.weight.detach(),
+        scales=IQ2_XXS.payload_scales(pinned.reshape(-1, IQ2_XXS.block_bytes)),
+        importance=pinned_importance(quantizer, "iq2_xxs"),
+    )
+    others = [row for row in range(16) if row != 3]
+    assert torch.equal(packed[others], pinned[others])
+    assert torch.equal(packed[3], rescanned[3])
+
+
+def test_local_hessian_lowers_the_output_error_of_correlated_inputs():
+    torch.manual_seed(0)
+    imatrix = nn.Linear(512, 16, bias=False)
+    original = imatrix.weight.detach().clone()
+    local_hessian = copy.deepcopy(imatrix)
+    # Mixed columns: imatrix's per-column statistic cannot see how they move together.
+    inputs = _inputs() @ torch.randn(512, 512, generator=torch.Generator().manual_seed(1))
+    mtq.quantize(imatrix, _config(IMATRIX), forward_loop=lambda m: m(inputs))
+    mtq.quantize(local_hessian, _config(LOCAL_HESSIAN), forward_loop=lambda m: m(inputs))
+
+    def output_error(model):
+        quantized = model.weight_quantizer(model.weight).detach()
+        return ((quantized - original) @ inputs.T).square().sum()
+
+    assert output_error(local_hessian) < 0.95 * output_error(imatrix)
+
+
+@pytest.mark.parametrize("num_bits", ["iq2_xxs", "iq1_s"])
+def test_search_under_the_identity_hessian_keeps_the_encoders_own_choices(num_bits):
+    # Under H = I, the limit heavy damping tends to, the output error is the squared error the
+    # encoder already minimizes group by group.
+    ggml_format = GGML_FORMAT_REGISTRY[num_bits]
+    block = torch.randn(16, 256, generator=torch.Generator().manual_seed(0))
+    choices = search_choices(ggml_format, block, torch.eye(256)[None])
+    assert torch.equal(
+        ggml_format.quantize(block, choices=choices)[0], ggml_format.quantize(block)[0]
+    )
 
 
 @pytest.mark.parametrize("layerwise", [False, True])
