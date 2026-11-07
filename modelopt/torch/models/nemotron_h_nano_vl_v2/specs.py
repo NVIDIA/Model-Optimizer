@@ -15,10 +15,10 @@
 
 """Nemotron Nano VL v2 specs (trust-remote-code model type ``NemotronH_Nano_VL_V2``).
 
-``llama_nemotron_nano_vl``, ``nemotron_h_omni`` and ``nemotron_parse`` take their PTQ facts from
-here, and ``calibration.py`` is the calibration support of all of them but Nemotron-Parse. The
-package has a snake_case name because the model type is not a lowercase module name (see the
-models README).
+``llama_nemotron_nano_vl``, ``nemotron_h_omni``, ``nemotron_h_nano_omni_reasoning_v3`` and
+``nemotron_parse`` take their PTQ facts from here, and ``calibration.py`` is the calibration
+support of all of them but Nemotron-Parse. The package has a snake_case name because the model
+type is not a lowercase module name (see the models README).
 """
 
 from ..specs import ModelSpec, PTQSpec, register

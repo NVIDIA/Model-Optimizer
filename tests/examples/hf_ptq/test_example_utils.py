@@ -996,10 +996,11 @@ def _vlm_batch():
     }
 
 
-def test_the_calibration_loop_lets_the_models_plugin_run_the_batch():
+@pytest.mark.parametrize("model_type", ["nemotron_h_omni", "NemotronH_Nano_Omni_Reasoning_V3"])
+def test_the_calibration_loop_lets_the_models_plugin_run_the_batch(model_type):
     """An omni wrapper's own calibration forward carries the dtype cast and ``use_cache=False``,
     which the loop's plain forward would bypass."""
-    model = _Wrapper(SimpleNamespace(model_type="nemotron_h_omni", is_encoder_decoder=False))
+    model = _Wrapper(SimpleNamespace(model_type=model_type, is_encoder_decoder=False))
     model.vision_model = SimpleNamespace(config=SimpleNamespace(torch_dtype=torch.bfloat16))
 
     example_utils.create_vlm_calibration_loop(model, [_vlm_batch()])(model)

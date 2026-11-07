@@ -108,6 +108,7 @@ from . import (  # isort: skip
     kimi_vl,
     kimi_k25,
     nemotron_h_omni,
+    nemotron_h_nano_omni_reasoning_v3,
     qwen2_moe,
     qwen3,
     qwen3_5_moe,

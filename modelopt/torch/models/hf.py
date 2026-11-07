@@ -56,6 +56,7 @@ _PLUGINS: dict[str, str | tuple[str, ...]] = {
     "nemotron_h_omni": ("nemotron_h.mtp", "nemotron_h_nano_vl_v2.calibration"),
     "NemotronH_Nano_VL_V2": "nemotron_h_nano_vl_v2.calibration",
     "Llama_Nemotron_Nano_VL": "nemotron_h_nano_vl_v2.calibration",
+    "NemotronH_Nano_Omni_Reasoning_V3": "nemotron_h_nano_vl_v2.calibration",
     "qwen4_exp": "qwen4_exp.qsa_indexer",
     "qwen4_exp_text": "qwen4_exp.qsa_indexer",
     "whisper": "whisper.calibration",

@@ -28,6 +28,8 @@ EXPECTED_PTQ_FIELDS = {
     "Llama_Nemotron_Nano_VL": {"vlm_wrapper", "no_auto_device_map"},
     "nemotron_parse": {"vlm_wrapper", "no_auto_device_map"},  # encoder-decoder
     "nemotron_h_omni": {"vlm_wrapper", "no_auto_device_map"},
+    # nemotron_h_omni's published checkpoints, loaded through their own code
+    "NemotronH_Nano_Omni_Reasoning_V3": {"vlm_wrapper", "no_auto_device_map"},
     "diffusion_gemma": {"sequential_device_map", "generate_includes_prompt"},
     "llava_llama": {"fsdp2_unsupported"},  # VILA, NVILA and NVILA-Lite
     "bart": {"no_device_map"},
