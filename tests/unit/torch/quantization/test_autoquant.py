@@ -928,32 +928,33 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
             searched = [s for s in stats if len(s["formats"]) > 1]
             assert sum(score is not None for s in searched for score in s["raw_scores"]) == 1
 
-    # Scores sum over batches, so a shard scored over fewer is refused.
-    fewer = tmp_path / "fewer_steps.pth"
-    search(fewer, (1, count), score_steps=1)
-    with pytest.raises(ValueError, match="num_score_steps"):
-        model_quant.merge_auto_quantize_checkpoints(
-            [shards[0], fewer, *shards[2:]], str(tmp_path / "x.pth")
-        )
-    # So are shards that recorded no counts, as earlier versions saved them.
-    unlabeled = [tmp_path / f"unlabeled{i}.pth" for i in range(count)]
-    for shard, path in zip(shards, unlabeled):
-        state = safe_load(shard)
-        del state["num_calib_steps"], state["num_score_steps"]
-        safe_save(state, path)
-    with pytest.raises(ValueError, match="num_calib_steps"):
-        model_quant.merge_auto_quantize_checkpoints(unlabeled, str(tmp_path / "y.pth"))
-    # A shard resumes its calibration and scores only under the counts that produced them.
-    interrupted = safe_load(shards[0])
-    interrupted["candidate_stats"] = {}  # as saved between calibration and scoring
-    safe_save(interrupted, tmp_path / "interrupted.pth")
-    with pytest.raises(ValueError, match="num_calib_steps"):
-        search(tmp_path / "interrupted.pth", (0, count), calib_steps=1)
-    with pytest.raises(ValueError, match="num_score_steps"):
-        search(shards[0], (0, count), score_steps=1)
-    resumed = search(tmp_path / "interrupted.pth", (0, count))[1]["candidate_stats"]
-    for name, stats in safe_load(shards[0])["candidate_stats"].items():
-        assert resumed[name]["raw_scores"] == stats["raw_scores"]
+    if not split_groups:  # the workload and resume checks do not depend on the split
+        # Scores sum over batches, so a shard scored over fewer is refused.
+        fewer = tmp_path / "fewer_steps.pth"
+        search(fewer, (1, count), score_steps=1)
+        with pytest.raises(ValueError, match="num_score_steps"):
+            model_quant.merge_auto_quantize_checkpoints(
+                [shards[0], fewer, *shards[2:]], str(tmp_path / "x.pth")
+            )
+        # So are shards that recorded no counts, as earlier versions saved them.
+        unlabeled = [tmp_path / f"unlabeled{i}.pth" for i in range(count)]
+        for shard, path in zip(shards, unlabeled):
+            state = safe_load(shard)
+            del state["num_calib_steps"], state["num_score_steps"]
+            safe_save(state, path)
+        with pytest.raises(ValueError, match="num_calib_steps"):
+            model_quant.merge_auto_quantize_checkpoints(unlabeled, str(tmp_path / "y.pth"))
+        # A shard resumes its calibration and scores only under the counts that produced them.
+        interrupted = safe_load(shards[0])
+        interrupted["candidate_stats"] = {}  # as saved between calibration and scoring
+        safe_save(interrupted, tmp_path / "interrupted.pth")
+        with pytest.raises(ValueError, match="num_calib_steps"):
+            search(tmp_path / "interrupted.pth", (0, count), calib_steps=1)
+        with pytest.raises(ValueError, match="num_score_steps"):
+            search(shards[0], (0, count), score_steps=1)
+        resumed = search(tmp_path / "interrupted.pth", (0, count))[1]["candidate_stats"]
+        for name, stats in safe_load(shards[0])["candidate_stats"].items():
+            assert resumed[name]["raw_scores"] == stats["raw_scores"]
 
     merged = tmp_path / "merged.pth"
     merged.symlink_to(tmp_path / "elsewhere.pth")  # planted after the existence check
