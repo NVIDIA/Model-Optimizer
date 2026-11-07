@@ -26,7 +26,7 @@ import torch
 import yaml
 from _test_utils.mlflow import clean_env  # noqa: F401
 from _test_utils.torch.transformers_models import get_tiny_qwen3
-from transformers import Qwen3_5MoeConfig, Qwen3Config, Qwen3MoeConfig
+from transformers import Qwen3_5MoeConfig, Qwen3MoeConfig
 
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import (
@@ -38,7 +38,7 @@ from modelopt.recipe.presets import QUANT_CFG_CHOICES, RecipeSupersededAction
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.utils import mlflow as mlflow_lib
-from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.mlflow import describe_run, run_tags
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
@@ -588,7 +588,8 @@ def test_fsdp2_kv_autoquant_reaches_distributed_model_load(monkeypatch, tmp_path
         assert checkpoint == str(tmp_path)
         raise RuntimeError("distributed loader reached")
 
-    monkeypatch.setattr(hf_ptq, "parallel_load_and_prepare_fsdp2", distributed_load)
+    # hf_ptq loads an FSDP2 plan through load_pretrained.
+    monkeypatch.setattr(hf_ptq, "load_pretrained", distributed_load)
 
     with pytest.raises(RuntimeError, match="distributed loader reached"):
         hf_ptq.load_model(args)
@@ -623,7 +624,7 @@ def test_fsdp2_load_builds_with_the_requested_experts_implementation(monkeypatch
         assert hf_config.get_text_config()._experts_implementation == "eager"
         raise RuntimeError("distributed loader reached")
 
-    monkeypatch.setattr(hf_ptq, "parallel_load_and_prepare_fsdp2", distributed_load)
+    monkeypatch.setattr(hf_ptq, "load_pretrained", distributed_load)
     with pytest.raises(RuntimeError, match="distributed loader reached"):
         hf_ptq.load_model(args)
 
@@ -649,7 +650,7 @@ def test_fsdp2_rejects_mtp_before_distributed_loading(monkeypatch, tmp_path, has
     def distributed_load(*args, **kwargs):
         raise RuntimeError("distributed loader reached")
 
-    monkeypatch.setattr(hf_ptq, "parallel_load_and_prepare_fsdp2", distributed_load)
+    monkeypatch.setattr(hf_ptq, "load_pretrained", distributed_load)
     error, message = (
         (NotImplementedError, "Nemotron-H MTP")
         if has_mtp
@@ -657,27 +658,6 @@ def test_fsdp2_rejects_mtp_before_distributed_loading(monkeypatch, tmp_path, has
     )
     with pytest.raises(error, match=message):
         hf_ptq.load_model(args)
-
-
-def test_the_fsdp2_load_records_the_plan_it_loaded_by(monkeypatch, tmp_path):
-    """Calibration sizes its batch, and the export writes, by the model's distribution plan, and an
-    FSDP2-sharded model without one is refused rather than taken for a single process's."""
-    Qwen3Config(architectures=["Qwen3ForCausalLM"]).save_pretrained(tmp_path)
-    monkeypatch.setenv("RANK", "0")
-    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", str(tmp_path), "--use_fsdp2")
-    args.dist_state = SimpleNamespace(device="cpu", rank=0, world_size=2)
-    args.hub_model_id, args.local_checkpoint_path = None, str(tmp_path)  # as main() sets them
-    model = torch.nn.Linear(1, 1)
-    monkeypatch.setattr(hf_ptq, "parallel_load_and_prepare_fsdp2", lambda *args, **kwargs: model)
-
-    def loaded(model):
-        raise RuntimeError("loaded")
-
-    monkeypatch.setattr(hf_ptq, "prepare_model_for_calibration", loaded)
-
-    with pytest.raises(RuntimeError, match="loaded"):
-        hf_ptq.load_model(args)
-    assert distribution_plan(model) == DistributionPlan(2, dense="fsdp")
 
 
 def test_mlflow_flag_defaults_the_experiment_name(monkeypatch):
@@ -1190,9 +1170,12 @@ def test_post_quantize_export_survives_a_failed_sanity_generate(monkeypatch):
     NVBug 6752977."""
     hf_ptq = _import_hf_ptq(monkeypatch)
 
-    full_model = SimpleNamespace(
-        generate=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
-    )
+    class _FailingModel(torch.nn.Module):
+        def generate(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    full_model = _FailingModel()
+    set_distribution_plan(full_model, DistributionPlan())
     export_calls = []
     monkeypatch.setattr(
         hf_ptq,
@@ -1220,6 +1203,32 @@ def test_post_quantize_export_survives_a_failed_sanity_generate(monkeypatch):
         )
 
     assert len(export_calls) == 1
+
+
+def test_post_quantize_stops_the_run_when_a_sharded_models_preview_fails(monkeypatch):
+    """A sharded model's ranks decode the preview in lockstep: a rank that skipped its failure would
+    go on to the export's collectives while the others still wait in generate's."""
+    hf_ptq = _import_hf_ptq(monkeypatch)
+
+    class _FailingModel(torch.nn.Module):
+        def generate(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    full_model = _FailingModel()
+    set_distribution_plan(full_model, DistributionPlan(2, dense="fsdp"))
+    export_calls = []
+    monkeypatch.setattr(hf_ptq, "export_quantized", lambda *a, **k: export_calls.append((a, k)))
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    ids = torch.zeros(1, 4, dtype=torch.long)
+    args = SimpleNamespace(specdec_offline_dataset=None, verbose=False)
+
+    with pytest.raises(RuntimeError, match="--skip_generate") as stopped:
+        hf_ptq.post_quantize(
+            args, full_model, full_model, "llama", None, None, ids, None, ids, False, None, None
+        )
+
+    assert str(stopped.value.__cause__) == "boom"
+    assert export_calls == []
 
 
 @pytest.mark.usefixtures("clean_env")
@@ -1256,6 +1265,38 @@ def test_main_makes_a_hub_checkpoint_local_before_loading(monkeypatch, tmp_path)
     ]
 
 
+@pytest.mark.parametrize(
+    ("rank", "node_rank", "launches"),
+    [(0, 0, True), (1, 1, False), (4, 0, True)],
+    ids=["rank_0", "other_rank", "first_rank_of_another_node"],
+)
+def test_one_rank_per_node_runs_the_gpu_memory_monitor(
+    monkeypatch, tmp_path, rank, node_rank, launches
+):
+    """The monitor reads every GPU on the node: one per rank would poll them all once per rank and
+    print the same report once per rank, and one on rank 0 alone would report node 0 alone."""
+    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", str(tmp_path))
+    args.dist_state = SimpleNamespace(is_main=rank == 0, rank=rank, world_size=8)
+    monkeypatch.setattr(hf_ptq, "local_rank", lambda: node_rank)
+    launched = []
+
+    class _LoadReachedError(Exception):
+        pass
+
+    def load_model(args):
+        raise _LoadReachedError
+
+    monkeypatch.setattr(torch.compiler, "set_stance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_ptq, "launch_memory_monitor", lambda: launched.append(True))
+    monkeypatch.setattr(hf_ptq, "ensure_local_checkpoint", lambda path: (None, path))
+    monkeypatch.setattr(hf_ptq, "load_model", load_model)
+
+    with pytest.raises(_LoadReachedError):
+        hf_ptq._main_inner(args)
+
+    assert len(launched) == launches
+
+
 def test_tensorrt_llm_export_copies_non_model_files_from_the_local_copy(monkeypatch, tmp_path):
     """The deprecated TensorRT-LLM exporter does not copy them itself; hf_ptq does, from disk."""
     hf_ptq, args = _parse_hf_ptq_args(
@@ -1272,7 +1313,6 @@ def test_tensorrt_llm_export_copies_non_model_files_from_the_local_copy(monkeypa
     copies = []
     monkeypatch.setattr(hf_ptq, "has_spec_opt", lambda model: False)
     monkeypatch.setattr(hf_ptq, "is_multimodal_model", lambda model: False)
-    monkeypatch.setattr(hf_ptq, "is_trtllm_enc_dec_export", lambda model_type: False)
     monkeypatch.setattr(hf_ptq, "remove_hook_from_module", lambda *args, **kwargs: None)
     monkeypatch.setattr(hf_ptq, "export_tensorrt_llm_checkpoint", lambda *args, **kwargs: None)
     monkeypatch.setattr(hf_ptq, "copy_non_model_files", lambda *args: copies.append(args))

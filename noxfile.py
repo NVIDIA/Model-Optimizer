@@ -220,6 +220,9 @@ def gpu(session):
     _install_built_from_source(session, "fast_hadamard_transform")
     session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test,dev-fla]")
     _install_built_from_source(session, "mamba_ssm", "causal_conv1d")
+    # quack-kernels (via mamba-ssm) pins an older nvidia-cutlass-dsl than the image's
+    # nvidia-cutlass-operators needs, and Inductor (torch >= 2.14) imports it to compile any matmul.
+    session.run("python", "-m", "pip", "uninstall", "-y", "nvidia-cutlass-operators")
     # Every wheel is built: CI saves the wheelhouse only then, so a run that stopped halfway cannot
     # freeze a partial wheelhouse under the cache key.
     with open(os.path.join(_wheelhouse(), ".complete"), "w"):

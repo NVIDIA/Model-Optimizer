@@ -14,6 +14,7 @@
 # limitations under the License.
 """End-to-end test for Quantization Aware Distillation (QAD): quantize + distill + export."""
 
+import fnmatch
 import json
 from pathlib import Path
 
@@ -37,14 +38,16 @@ from _test_utils.torch.transformers_models import (
 from torch.distributed.checkpoint import FileSystemReader
 
 
-def _load_checkpoint_tensors(checkpoint_path: Path) -> dict[str, torch.Tensor]:
-    """Model tensors of a Megatron distributed checkpoint (optimizer state excluded)."""
+def _load_checkpoint_tensors(
+    checkpoint_path: Path, *, include_optimizer: bool = False
+) -> dict[str, torch.Tensor]:
+    """Read model tensors and optionally optimizer tensors from a distributed checkpoint."""
     reader = FileSystemReader(str(checkpoint_path))
     metadata = reader.read_metadata().state_dict_metadata
     tensors = {
         name: torch.empty(meta.size, dtype=meta.properties.dtype)
         for name, meta in metadata.items()
-        if not name.startswith("optimizer") and hasattr(meta, "size")
+        if hasattr(meta, "size") and (include_optimizer or not name.startswith("optimizer"))
     }
     dcp.load(tensors, storage_reader=reader)
     return tensors
@@ -52,9 +55,10 @@ def _load_checkpoint_tensors(checkpoint_path: Path) -> dict[str, torch.Tensor]:
 
 @pytest.mark.timeout(720)  # Multiple steps in one test hence takes longer than the default timeout
 @pytest.mark.parametrize(
-    ("create_student", "lora_rank"),
+    ("create_student", "lora_rank", "full_rank"),
     [
-        (lambda tmp_path: create_tiny_qwen3_dir(tmp_path, with_tokenizer=True), 0),
+        (lambda tmp_path: create_tiny_qwen3_dir(tmp_path, with_tokenizer=True), 0, False),
+        (lambda tmp_path: create_tiny_qwen3_dir(tmp_path, with_tokenizer=True), 0, True),
         (
             lambda tmp_path: create_tiny_qwen3_dir(
                 tmp_path,
@@ -63,6 +67,7 @@ def _load_checkpoint_tensors(checkpoint_path: Path) -> dict[str, torch.Tensor]:
                 intermediate_size=256,
             ),
             4,
+            False,
         ),
         pytest.param(
             lambda tmp_path: create_tiny_qwen3_5_moe_vl_dir(
@@ -73,18 +78,21 @@ def _load_checkpoint_tensors(checkpoint_path: Path) -> dict[str, torch.Tensor]:
                 layer_types=["linear_attention", "full_attention"],
             ),
             0,
+            False,
         ),
     ],
-    ids=["qwen3", "qwen3_lora_nvfp4", "qwen3_5_moe_vl"],
+    ids=["qwen3", "qwen3_full_rank", "qwen3_lora_nvfp4", "qwen3_5_moe_vl"],
 )
-def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
+def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank, full_rank):
     """Quantize a tiny model, run QAD from the quantized student, and export the result.
 
     Covers what only QAD exercises: that the ModelOpt state survives distillation. Per-architecture
-    export is covered more cheaply by test_quantize_export.py, so keep this to one LLM and one VLM.
+    export is covered more cheaply by test_quantize_export.py. Keep plain LLM training alongside
+    selective full-rank and LoRA training, plus a VLM.
     """
     hf_model_path = create_student(tmp_path)
     is_vlm = "vision_config" in (hf_model_path / "config.json").read_text()
+    trainable_patterns = ["*.mlp.linear_fc1.weight", "*.mlp.linear_fc2.weight"]
     # mrope rotary embeddings CP-shard themselves, so the VLM exercises the path where the batch's
     # position ids must stay full-length. The LLM case stays on tensor parallelism.
     cp_size = num_gpus if is_vlm else 1
@@ -94,8 +102,8 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
     train_iters = 3
     early_exit_iter = 2
     calib_dataset = "cnn_dailymail"
-    if lora_rank:
-        # Keep the LoRA smoke test independent of dataset downloads on the GPU node.
+    if lora_rank or full_rank:
+        # Keep selective-training coverage independent of dataset downloads on the GPU node.
         calib_path = tmp_path / "calibration.jsonl"
         calib_path.write_text(
             "\n".join(
@@ -136,7 +144,8 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
     # The LoRA case trains only adapters, so its base weights would not exercise the cache's gradient.
     distill_cmd = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"]
-        + ([] if lora_rank else ["--fake_quant_weight_cache"]),
+        + ([] if lora_rank else ["--fake_quant_weight_cache"])
+        + (["--trainable_params", *trainable_patterns] if full_rank else []),
         student_hf_path=hf_model_path,
         student_megatron_path=quantized_megatron_path,
         teacher_hf_path=hf_model_path,
@@ -156,9 +165,9 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
         log_interval=1,
         exit_interval=early_exit_iter,
         exit_duration_in_mins=10,
-        recompute_granularity="full" if lora_rank else None,
-        recompute_method="uniform" if lora_rank else None,
-        recompute_num_layers=1 if lora_rank else None,
+        recompute_granularity="full" if lora_rank or full_rank else None,
+        recompute_method="uniform" if lora_rank or full_rank else None,
+        recompute_num_layers=1 if lora_rank or full_rank else None,
     )
     run_example_command(distill_cmd, example_path="megatron_bridge", setup_free_port=True)
     distilled_megatron_path = distill_output_dir / "checkpoints"
@@ -166,6 +175,23 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
     assert tracker.read_text(encoding="utf-8").strip() == str(early_exit_iter)
     assert (distilled_megatron_path / "iter_0000001").is_dir()
     assert_has_modelopt_state(distilled_megatron_path)
+
+    if full_rank:
+        initial_checkpoint = max(quantized_megatron_path.glob("iter_*"))
+        initial = _load_checkpoint_tensors(initial_checkpoint)
+        trained = _load_checkpoint_tensors(distilled_megatron_path / f"iter_{early_exit_iter:07d}")
+        parameters = {name for name in initial if name.endswith((".weight", ".bias"))}
+        selected = {
+            name
+            for name in parameters
+            if any(fnmatch.fnmatchcase(name, p) for p in trainable_patterns)
+        }
+        frozen = parameters - selected
+        assert selected and any(".self_attention." in name for name in frozen)
+        for name in frozen:
+            assert torch.equal(initial[name].view(torch.uint8), trained[name].view(torch.uint8)), (
+                name
+            )
 
     if not lora_rank and not is_vlm:
         # The weight cache reuses fake-quantized weights within a step; training must not change.
@@ -181,8 +207,8 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
         for name, value in cached.items():
             torch.testing.assert_close(value, uncached[name], rtol=0, atol=0, msg=name)
 
-    if lora_rank:
-        # Reuse the output directory to exercise optimizer and trained-adapter restoration.
+    if lora_rank or full_rank:
+        # Reuse the output directory to exercise native optimizer and selected-weight restoration.
         run_example_command(distill_cmd, example_path="megatron_bridge", setup_free_port=True)
         assert tracker.read_text(encoding="utf-8").strip() == str(train_iters)
         # Compare against the same seed, data, schedule, and PTQ checkpoint without a restart.
@@ -195,24 +221,25 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
         assert (
             reference_checkpoint / "latest_checkpointed_iteration.txt"
         ).read_text().strip() == str(train_iters)
-        adapter_states = []
+        states = []
         for checkpoint_path in (distilled_megatron_path, reference_checkpoint):
-            reader = FileSystemReader(str(checkpoint_path / f"iter_{train_iters:07d}"))
-            metadata = reader.read_metadata().state_dict_metadata
-            adapters = {
-                name: torch.empty(meta.size, dtype=meta.properties.dtype)
-                for name, meta in metadata.items()
-                if name.endswith(("lora_A", "lora_B"))
-            }
-            assert adapters, "Trained checkpoint lost the LoRA factors"
-            dcp.load(adapters, storage_reader=reader)
-            assert any(
-                value.count_nonzero() > 0
-                for name, value in adapters.items()
-                if name.endswith("lora_B")
+            tensors = _load_checkpoint_tensors(
+                checkpoint_path / f"iter_{train_iters:07d}", include_optimizer=full_rank
             )
-            adapter_states.append(adapters)
-        resumed, uninterrupted = adapter_states
+            if lora_rank:
+                tensors = {n: v for n, v in tensors.items() if n.endswith(("lora_A", "lora_B"))}
+                assert tensors, "Trained checkpoint lost the LoRA factors"
+                assert any(
+                    v.count_nonzero() > 0 for n, v in tensors.items() if n.endswith("lora_B")
+                )
+            else:
+                assert any(n.startswith("optimizer") and "exp_avg" in n for n in tensors)
+                for name in frozen:
+                    assert torch.equal(
+                        initial[name].view(torch.uint8), tensors[name].view(torch.uint8)
+                    ), name
+            states.append(tensors)
+        resumed, uninterrupted = states
         assert resumed.keys() == uninterrupted.keys()
         for name, value in resumed.items():
             torch.testing.assert_close(value, uninterrupted[name], rtol=0, atol=0)
@@ -260,7 +287,9 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
 
     # Step 4: export for vLLM fake-quant evaluation (test_quantize_export.py covers the rest).
     # Only QAD saves a VLM's language model alone; the export must still carry the vision tower.
-    if is_vlm:
+    # Full-rank checkpoints retain activation-gradient wrappers through merge_quant_lora;
+    # cover both unified export above and fold_weight in the fake-quant exporter here.
+    if is_vlm or full_rank:
         fakequant_path = tmp_path / "qad_vllm_fakequant"
         fakequant_cmd = extend_cmd_parts(
             [
@@ -279,7 +308,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
             fakequant_path,
             hf_model_path,
             check_values=False,
-            bit_exact_prefixes=("model.visual.",),
+            bit_exact_prefixes=("model.visual.",) if is_vlm else (),
         )
         recipe = yaml.safe_load((fakequant_path / "quant_recipe.yaml").read_text())
         state = torch.load(fakequant_path / "quantizer_state.pth", weights_only=True)

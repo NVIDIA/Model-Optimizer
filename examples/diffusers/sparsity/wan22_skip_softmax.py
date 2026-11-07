@@ -58,7 +58,7 @@ from datasets import load_dataset
 from diffusers import AutoencoderKLWan, WanPipeline
 from diffusers.utils import export_to_video
 
-import modelopt.torch.sparsity.attention_sparsity as mtsa
+import modelopt.torch.sparsity as mts
 from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
@@ -426,7 +426,7 @@ def main() -> None:
             num_blocks = _get_num_blocks(transformer)
             print(f"Applying Triton backend to {name} ({num_blocks} blocks)...")
             config = build_sparse_config(args, num_blocks=num_blocks)
-            mtsa.sparsify(transformer, config, forward_loop=None)
+            mts.sparsify(transformer, config, forward_loop=None)
     else:
         # Build calibration forward loop if needed
         forward_loop = None
@@ -461,7 +461,7 @@ def main() -> None:
             num_blocks = _get_num_blocks(transformer)
             print(f"Applying skip-softmax to {name} ({num_blocks} blocks)...")
             config = build_sparse_config(args, num_blocks=num_blocks)
-            mtsa.sparsify(transformer, config, forward_loop=forward_loop)
+            mts.sparsify(transformer, config, forward_loop=forward_loop)
 
     # ---- Free calibration memory before inference ----
     if not args.baseline and not args.triton_baseline and forward_loop is not None:

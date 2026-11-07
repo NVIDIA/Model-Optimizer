@@ -130,7 +130,8 @@ def _update_room(helper, weight, block_size) -> int:
     as large as the weight when the input is no wider than a block; and the codec's tables and
     scratch, about 35 MiB on a GPU's first update. Logging the error afterwards holds the original
     in its own dtype and up to five float32 weight-sized tensors: the result, the original, the
-    error and two products.
+    error and two products. Through both, a GGML format that keeps its scales holds the unrounded
+    weight in its own dtype, counted for every format.
     """
     columns = weight.shape[-1]
     rows = weight.numel() // columns
@@ -138,7 +139,8 @@ def _update_room(helper, weight, block_size) -> int:
     weights = 4 * rows * (2 * columns + 5 * block)
     if helper.log_mse:
         weights = max(weights, (5 * 4 + weight.element_size()) * weight.numel())
-    return 2**26 + 32 * helper.hessian.numel() + weights
+    unrounded = weight.element_size() * weight.numel()
+    return 2**26 + 32 * helper.hessian.numel() + weights + unrounded
 
 
 def update_expert_weights(work, block_size, perc_damp):
@@ -620,26 +622,32 @@ def register_gptq_helper(backend: str, factory: type[GPTQHelper]) -> None:
     _GPTQ_HELPER_REGISTRY[backend] = factory
 
 
-class ImatrixEncoder:
-    """Encodes a weight once, its search weighted by its inputs' per-column second moments.
-
-    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` collects ``E[x_j^2]`` for
-    every weight whose quantizer an encoder accepts, then calls :meth:`encode` with it.
-    """
+class _WeightEncoder:
+    """An encoder a one-pass calibration hands each weight whose quantizer it accepts."""
 
     def accepts(self, quantizer) -> bool:
         """Whether this encoder handles ``quantizer``; decided before calibration runs."""
         raise NotImplementedError
 
     def validate(self, weight: torch.Tensor, quantizer) -> None:
-        """Raise if :meth:`encode` would refuse ``weight``; checked before calibration runs."""
+        """Raise if ``encode`` would refuse ``weight``; checked before calibration runs."""
+
+
+class ImatrixEncoder(_WeightEncoder):
+    """Encodes a weight once, its search weighted by its inputs' per-column second moments.
+
+    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` collects ``E[x_j^2]`` for
+    every weight whose quantizer an encoder accepts, then calls :meth:`encode` with it.
+    """
 
     def encode(
         self, weight: torch.Tensor, quantizer, second_moments: torch.Tensor | None
     ) -> torch.Tensor:
-        """Return ``weight`` fake-quantized by ``quantizer``, weighted by ``second_moments``.
+        """Encode ``weight`` weighted by ``second_moments`` and return the weight to keep.
 
-        ``second_moments`` is ``None`` when no calibration input reached the weight.
+        That is ``weight`` fake-quantized by ``quantizer``, or ``weight`` itself when ``quantizer``
+        re-derives the encoding from it. ``second_moments`` is ``None`` when no calibration input
+        reached the weight.
         """
         raise NotImplementedError
 
@@ -654,3 +662,38 @@ def register_imatrix_encoder(backend: str, encoder: ImatrixEncoder) -> None:
     ``weight_quantizer.backend`` has a registered encoder.
     """
     _IMATRIX_ENCODER_REGISTRY[backend] = encoder
+
+
+class LocalHessianEncoder(_WeightEncoder):
+    """Encodes a weight once, its search guided by its inputs' local Hessian.
+
+    :func:`modelopt.torch.quantization.model_calib.local_hessian_calibrate` collects ``E[x x^T]``
+    over each ``block_size`` input columns of every weight whose quantizer an encoder accepts, then
+    calls :meth:`encode` with it instead of searching an amax.
+    """
+
+    block_size: int
+
+    def encode(
+        self, weight: torch.Tensor, quantizer, hessian: torch.Tensor | None, perc_damp: float
+    ) -> torch.Tensor:
+        """Encode ``weight`` guided by ``hessian`` and return the weight to keep.
+
+        That is ``weight`` fake-quantized by ``quantizer``, or ``weight`` itself when ``quantizer``
+        re-derives the encoding from it. ``hessian`` is ``[in_features // block_size, block_size,
+        block_size]``, or ``None`` when no calibration input reached the weight. ``perc_damp`` is
+        the fraction of its mean diagonal to add to its diagonal where the encoder scores by it.
+        """
+        raise NotImplementedError
+
+
+_LOCAL_HESSIAN_ENCODER_REGISTRY: dict[str, LocalHessianEncoder] = {}
+
+
+def register_local_hessian_encoder(backend: str, encoder: LocalHessianEncoder) -> None:
+    """Register the :class:`LocalHessianEncoder` for a quantizer backend.
+
+    :func:`modelopt.torch.quantization.model_calib.local_hessian_calibrate` encodes the weights
+    whose ``weight_quantizer.backend`` has one, and searches an amax for the rest.
+    """
+    _LOCAL_HESSIAN_ENCODER_REGISTRY[backend] = encoder
