@@ -31,6 +31,10 @@ a one-GPU profile first. It records the driver, Torch and CUDA versions, then
 checks FP32 and BF16 linear operations without downloading models or installing
 benchmark clients. An internal tracking profile saves `runtime/runtime.json`
 even if a check fails. Passing these checks does not validate the full server.
+The `suite=serving` parameter additionally checks Qwen3-sized projection
+matrices, vLLM RMS normalization, and a real TorchInductor-compiled RMS
+normalization. Use `launch_blocking=1` to report CUDA failures synchronously.
+These operations use synthetic tensors and produce no benchmark measurements.
 
 The script installs pinned benchmark clients into a temporary virtual
 environment, keeping the serving image's dependencies separate. For a prepared

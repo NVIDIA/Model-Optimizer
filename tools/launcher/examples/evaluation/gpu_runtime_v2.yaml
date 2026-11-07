@@ -1,8 +1,15 @@
 api_version: modelopt/v2
 name: gpu_runtime_check
+parameters:
+  suite: basic
+  launch_blocking: "0"
 tasks:
   gpu_runtime:
-    inline: python3 examples/evaluation/gpu_runtime.py --output "$RUNTIME_RESULT"
+    inline: python3 examples/evaluation/gpu_runtime.py --output "$RUNTIME_RESULT" --suite "$RUNTIME_SUITE"
+    environment:
+      RUNTIME_SUITE: ${parameters.suite}
+      CUDA_LAUNCH_BLOCKING: ${parameters.launch_blocking}
+      TORCHINDUCTOR_COMPILE_THREADS: "1"
     resources:
       nodes: 1
       ntasks_per_node: 1
