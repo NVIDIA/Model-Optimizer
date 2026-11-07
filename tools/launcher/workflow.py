@@ -22,6 +22,7 @@ import json
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import fiddle
 import yaml
@@ -117,6 +118,9 @@ def load_workflow(path, profile=None, parameters=None):
             "slurm",
             "asset_resolver",
             "asset_timeout",
+            "artifact_store",
+            "artifact_publisher",
+            "tracking_uri",
         },
         "profile",
     )
@@ -218,7 +222,42 @@ def load_workflow(path, profile=None, parameters=None):
         local_execution=mode == "local",
         asset_resolver=settings.get("asset_resolver"),
         asset_timeout=settings.get("asset_timeout", 900),
+        artifact_store=settings.get("artifact_store"),
+        artifact_publisher=settings.get("artifact_publisher"),
+        tracking_uri=settings.get("tracking_uri"),
     )
+    if pipeline.artifact_publisher is not None and (
+        not isinstance(pipeline.artifact_publisher, list)
+        or not pipeline.artifact_publisher
+        or not all(isinstance(arg, str) and arg for arg in pipeline.artifact_publisher)
+    ):
+        raise ValueError("artifact_publisher must be a nonempty command argv list")
+    if pipeline.artifact_store is not None and (
+        not isinstance(pipeline.artifact_store, str)
+        or not Path(pipeline.artifact_store).is_absolute()
+    ):
+        raise ValueError("artifact_store must be an absolute directory visible to every task")
+    if pipeline.tracking_uri is not None:
+        if not isinstance(pipeline.tracking_uri, str) or not pipeline.tracking_uri:
+            raise ValueError("tracking_uri must be a nonempty URI")
+        uri = urlsplit(pipeline.tracking_uri)
+        if uri.username or uri.password or uri.query or uri.fragment:
+            raise ValueError(
+                "Use environment credentials; tracking_uri must omit credentials and queries"
+            )
+    publications = set()
+    for task in tasks:
+        for spec in (task.outputs or {}).values():
+            if "publish" not in spec:
+                continue
+            if not pipeline.artifact_publisher and not pipeline.artifact_store:
+                raise ValueError("Publication needs profile artifact_store or artifact_publisher")
+            if spec["publish"].get("model_name") and not pipeline.tracking_uri:
+                raise ValueError("Model registration requires profile tracking_uri")
+            key = (spec["publish"]["ref"], spec["publish"]["version"])
+            if key in publications:
+                raise ValueError("Each published artifact version must have one producer")
+            publications.add(key)
     if mode == "local" and (
         pipeline.inputs
         or any("env" not in spec for task in tasks for spec in (task.inputs or {}).values())

@@ -281,6 +281,9 @@ class SandboxPipeline:
     local_execution: bool = False
     workflow_outputs: dict[str, dict[str, str]] = None
     parameters: dict = None
+    artifact_store: str = None
+    artifact_publisher: list[str] = None
+    tracking_uri: str = None
 
     def __post_init__(self):
         """Collect tasks from slots/configs and resolve <<global_vars.X>> references."""
@@ -803,7 +806,7 @@ def _ordered_tasks(tasks):
                 raise ValueError("Outputs must map names to path/kind/env objects")
             path = spec.get("path")
             if (
-                set(spec) - {"path", "kind", "env"}
+                set(spec) - {"path", "kind", "env", "publish"}
                 or not isinstance(path, str)
                 or not re.fullmatch(r"[\w./-]+", path)
                 or any(part in ("", ".", "..") for part in path.split("/"))
@@ -811,6 +814,36 @@ def _ordered_tasks(tasks):
                 raise ValueError("Output paths must be normalized relative paths")
             if "kind" in spec and (not isinstance(spec["kind"], str) or not spec["kind"]):
                 raise ValueError("Output kind must be a nonempty string")
+            if "publish" in spec:
+                publication = spec["publish"]
+                if (
+                    not isinstance(publication, dict)
+                    or set(publication) - {"ref", "version", "model_name", "metadata"}
+                    or not isinstance(publication.get("ref"), str)
+                    or not isinstance(publication.get("version"), str)
+                    or not re.fullmatch(r"[\w.-]+/[\w.-]+", publication["ref"])
+                    or not re.fullmatch(r"[\w.-]+", publication["version"])
+                    or any(part in (".", "..") for part in publication["ref"].split("/"))
+                    or publication["version"] in (".", "..")
+                ):
+                    raise ValueError("Publication needs ref: org/name and a stable version")
+                if "model_name" in publication and (
+                    not isinstance(publication["model_name"], str)
+                    or not re.fullmatch(r"[\w./-]+", publication["model_name"])
+                ):
+                    raise ValueError(
+                        "Registered model name must use letters, digits, '/', '_' or '-'"
+                    )
+                if not isinstance(publication.get("metadata", {}), dict):
+                    raise ValueError("Publication metadata must be a JSON object")
+                try:
+                    encoded = json.dumps(publication.get("metadata", {}), allow_nan=False)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "Publication metadata must contain JSON-compatible values"
+                    ) from exc
+                if len(encoded.encode()) > 65536:
+                    raise ValueError("Publication metadata exceeds 64 KB")
         _input_declarations(
             SimpleNamespace(
                 inputs={mount: {"ref": "task/output"} for mount in (task.inputs or {})},
@@ -939,13 +972,15 @@ def _input_declarations(job):
         destinations.append(destination)
         if (
             not isinstance(spec, dict)
-            or set(spec) - {"ref", "env", "role"}
+            or set(spec) - {"ref", "env", "role", "kind"}
             or not isinstance(spec.get("ref"), str)
             or not re.fullmatch(r"[\w./:@+-]+", spec["ref"])
         ):
             raise ValueError("Each input needs a catalog ref and optional env/role strings")
         if "role" in spec and (not isinstance(spec["role"], str) or not spec["role"]):
             raise ValueError("Input role must be a nonempty string")
+        if spec.get("kind", "model") not in ("model", "dataset"):
+            raise ValueError("Input kind must be model or dataset")
         if "env" in spec:
             env = spec["env"]
             if not isinstance(env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env):
@@ -963,7 +998,7 @@ def _input_declarations(job):
     return job.inputs
 
 
-def _prepare_assets(job, hf_local):
+def _prepare_assets(job, hf_local, user=None, identity=None):
     inputs = _input_declarations(job)
     if not job.assets and not inputs:
         return {}
@@ -986,8 +1021,13 @@ def _prepare_assets(job, hf_local):
         if inputs
         else [PurePosixPath("/hf-local") / name for name in names]
     )
-    if inputs and not job.asset_resolver:
-        raise ValueError("Mount-keyed inputs require an asset_resolver supporting schema_version 2")
+    resolver = job.asset_resolver
+    if inputs and not resolver:
+        resolver = [sys.executable, "-m", "modelopt_launcher.inputs"]
+        if user:
+            resolver += ["--user", user]
+        if identity:
+            resolver += ["--identity", identity]
     if job.asset_timeout <= 0:
         raise ValueError("asset_timeout must be positive")
     targets = {}
@@ -1023,17 +1063,19 @@ def _prepare_assets(job, hf_local):
                 raise ValueError("Remote asset preparation requires a cluster host")
         targets.setdefault(target, None)
     for host, root in targets:
-        if job.asset_resolver:
-            if not isinstance(job.asset_resolver, list) or not all(
-                isinstance(arg, str) and arg for arg in job.asset_resolver
+        if resolver:
+            if not isinstance(resolver, list) or not all(
+                isinstance(arg, str) and arg for arg in resolver
             ):
                 raise ValueError("asset_resolver must be a nonempty command argv list")
             schema = 2 if inputs else 1
             request = {"schema_version": schema, "host": host, "hf_local": root}
+            if inputs and job.tracking_uri:
+                request["tracking_uri"] = job.tracking_uri
             request["inputs" if inputs else "assets"] = inputs or job.assets
             try:
                 result = subprocess.run(  # nosec B603 - explicitly configured argv, no shell.
-                    job.asset_resolver,
+                    resolver,
                     input=json.dumps(request),
                     text=True,
                     capture_output=True,
@@ -1059,7 +1101,7 @@ def _prepare_assets(job, hf_local):
             if result.returncode or response.get("status") != "ready":
                 retry = response.get("retry")
                 if not isinstance(retry, list) or not all(isinstance(arg, str) for arg in retry):
-                    retry = job.asset_resolver
+                    retry = resolver
                 raise ValueError(
                     "Assets are not ready; no job was submitted. Resume with: "
                     + shlex.join(retry)
@@ -1096,7 +1138,16 @@ def _prepare_assets(job, hf_local):
                     {
                         **{
                             key: item[key]
-                            for key in ("path", "version", "backend", "artifact_id")
+                            for key in (
+                                "path",
+                                "version",
+                                "backend",
+                                "artifact_id",
+                                "uri",
+                                "model_uri",
+                                "model_id",
+                                "run_id",
+                            )
                             if key in item
                         },
                         "mount": item["mount"],
@@ -1127,7 +1178,7 @@ def _prepare_assets(job, hf_local):
                 raise ValueError("Resolved asset path must be inside the /hf-local source root")
             if host is None:
                 real = Path(path).resolve()
-                if not real.is_dir() or not real.is_relative_to(Path(root).resolve()):
+                if not real.exists() or not real.is_relative_to(Path(root).resolve()):
                     raise ValueError(
                         "Resolved local asset must be a directory inside its cache root"
                     )
@@ -1179,7 +1230,7 @@ def run_jobs(
         job.tasks = _ordered_tasks(job.tasks)
         if job.local_execution and job.inputs:
             raise ValueError("Local execution cannot mount catalog inputs; use Docker or Slurm")
-        assets = _prepare_assets(job, hf_local)
+        assets = _prepare_assets(job, hf_local, user=user, identity=identity)
         dependency = None
         added = {}
         declared_outputs = {}
@@ -1246,6 +1297,7 @@ def run_jobs(
                     )
                     task_env = {**default_slurm_env, **task_env}
 
+                task_assets = []
                 if assets:
                     if hf_local is not None:
                         target = (None, str(Path(hf_local).resolve()))
@@ -1262,6 +1314,7 @@ def run_jobs(
                         destination = item.get("mount") or f"/hf-local/{item['name']}"
                         if destination not in (task.inputs or {}):
                             mounts.append(f"{item['path']}:{destination}:ro")
+                            task_assets.append(item)
 
                 before = after = ""
                 if task.name:
@@ -1328,6 +1381,31 @@ def run_jobs(
                     task_instance = run.Script(task.script, args=task_args, env=task_env)
                 if task.name:
                     command = task_instance.inline or shlex.join(["bash", task.script, *task_args])
+                    if job.tracking_uri or job.artifact_store or job.artifact_publisher:
+                        task_env.setdefault("MODELOPT_WORKFLOW_ID", exp._id)
+                        request = {
+                            "task": task.name,
+                            "workspace": workspace,
+                            "command": command.removeprefix(reqs_prefix)
+                            if reqs_prefix
+                            else command,
+                            "outputs": task.outputs or {},
+                            "inputs": task.inputs or {},
+                            "assets": task_assets,
+                            "artifact_store": job.artifact_store,
+                            "publisher": job.artifact_publisher,
+                            "tracking_uri": job.tracking_uri,
+                            "workers": task.slurm_config.nodes * task.slurm_config.ntasks_per_node
+                            if isinstance(executor, run.SlurmExecutor)
+                            else 1,
+                        }
+                        python = shlex.quote(sys.executable) if job.local_execution else "python"
+                        worker = (
+                            python
+                            + " common/workflow_artifacts.py "
+                            + shlex.quote(json.dumps(request))
+                        )
+                        command = reqs_prefix + worker
                     task_instance = run.Script(
                         inline=f"{before} && bash -e -c {shlex.quote(command)} && {after}",
                         env=task_env,

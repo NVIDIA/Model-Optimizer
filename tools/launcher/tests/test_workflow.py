@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -28,6 +29,48 @@ from modelopt_launcher.workflow import load_workflow
 _LAUNCHER = Path(__file__).resolve().parents[1]
 _EXAMPLE = _LAUNCHER / "examples/smoke/workflow_v2.yaml"
 _PROFILE = _LAUNCHER / "examples/smoke/local_profile.yaml"
+
+
+@pytest.mark.parametrize("missing_dataset", [False, True])
+def test_hf_inputs_pin_every_revision_before_downloading(tmp_path, monkeypatch, missing_dataset):
+    """Model and dataset snapshots use exact commits; an unresolved input copies no bytes."""
+    hub = pytest.importorskip("huggingface_hub")
+    from modelopt_launcher.inputs import resolve_local
+
+    def info(name, *, repo_type, revision):
+        if missing_dataset and repo_type == "dataset":
+            raise ValueError("Dataset unavailable")
+        return SimpleNamespace(sha=("a" if repo_type == "model" else "b") * 40)
+
+    def download(name, *, repo_type, revision, cache_dir, **kwargs):
+        path = Path(cache_dir) / repo_type / revision
+        path.mkdir(parents=True)
+        (path / "data.json").write_text(json.dumps({"kind": repo_type, "commit": revision}))
+        return str(path)
+
+    monkeypatch.setattr(hub, "HfApi", lambda **_: SimpleNamespace(repo_info=info))
+    monkeypatch.setattr(hub, "snapshot_download", download)
+    request = {
+        "schema_version": 2,
+        "hf_local": str(tmp_path / "cache"),
+        "inputs": {
+            "/inputs/model": {"ref": "Org/Model@branch"},
+            "/inputs/data": {"ref": "Org/Data", "kind": "dataset"},
+        },
+    }
+    if missing_dataset:
+        with pytest.raises(ValueError):
+            resolve_local(request)
+        assert not (tmp_path / "cache").exists()
+    else:
+        result = resolve_local(request)
+        assert result["status"] == "ready"
+        for item, kind, sha in zip(result["inputs"], ("model", "dataset"), ("a", "b")):
+            assert item["version"] == sha * 40
+            assert json.loads((Path(item["path"]) / "data.json").read_text()) == {
+                "kind": kind,
+                "commit": sha * 40,
+            }
 
 
 def _cli(arguments, tmp_path):
@@ -43,15 +86,38 @@ def _cli(arguments, tmp_path):
     )
 
 
-def test_named_dag_real_cli_and_export(tmp_path):
+@pytest.mark.parametrize("tracked", [False, True])
+def test_named_dag_real_cli_and_export(tmp_path, tracked):
     """The portable spec survives export, branches concurrently and joins real outputs."""
     exported = tmp_path / "resolved.yaml"
+    example, profile = _EXAMPLE, _PROFILE
+    if tracked:
+        pytest.importorskip("sqlalchemy")
+        mlflow = pytest.importorskip("mlflow.tracking")
+        uri = "sqlite:///" + str(tmp_path / "tracking.db")
+        client = mlflow.MlflowClient(tracking_uri=uri)
+        client.create_experiment(
+            "ModelOpt workflows", artifact_location=(tmp_path / "mlruns").as_uri()
+        )
+        data = yaml.safe_load((_LAUNCHER / "examples/smoke/artifact_workflow.yaml").read_text())
+        data["parameters"]["model_name"] = "test-checkpoint"
+        example, profile = tmp_path / "workflow.yaml", tmp_path / "profile.yaml"
+        example.write_text(yaml.safe_dump(data))
+        profile.write_text(
+            yaml.safe_dump(
+                {
+                    "executor": "local",
+                    "tracking_uri": uri,
+                    "artifact_store": str(tmp_path / "store"),
+                }
+            )
+        )
     result = _cli(
         [
             "--yaml",
-            str(_EXAMPLE),
+            str(example),
             "--profile",
-            str(_PROFILE),
+            str(profile),
             "--param",
             "value=11",
             "--to-yaml",
@@ -64,7 +130,7 @@ def test_named_dag_real_cli_and_export(tmp_path):
     assert plan["parameters"]["value"] == 11
     assert plan["tasks"]["report"]["depends_on"] == ["accuracy", "speed"]
     # The exported workflow remains executable with a separately supplied profile.
-    result = _cli(["--yaml", str(exported), "--profile", str(_PROFILE), "--yes"], tmp_path)
+    result = _cli(["--yaml", str(exported), "--profile", str(profile), "--yes"], tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     manifests = list((tmp_path / "experiments").rglob("metadata.json"))
     assert len(manifests) == 1
@@ -74,12 +140,39 @@ def test_named_dag_real_cli_and_export(tmp_path):
     assert manifest["tasks"]["accuracy"]["depends_on"] == ["produce"]
     summary = json.loads(Path(manifest["outputs"]["summary"]).read_text())
     assert summary == {"synthetic": True, "accuracy": 11, "speed": 11}
+    if tracked:
+        root = Path(manifest["workspace"]["host_path"]) / ".artifacts"
+        produced = json.loads((root / "produce.json").read_text())
+        model = produced["outputs"]["model"]
+        assert model["model_uri"] == "models:/test-checkpoint/1"
+        for task in ("accuracy", "speed"):
+            consumed = json.loads((root / f"{task}.json").read_text())
+            run = client.get_run(consumed["run_id"])
+            assert run.info.status == "FINISHED"
+            assert run.inputs.model_inputs[0].model_id == model["model_id"]
+            assert consumed["inputs"][0]["model_uri"] == model["model_uri"]
+        version = client.get_model_version("test-checkpoint", "1")
+        assert version.run_id == produced["run_id"]
+        from modelopt_launcher.inputs import resolve_local
+
+        resolved = resolve_local(
+            {
+                "schema_version": 2,
+                "host": None,
+                "hf_local": str(tmp_path / "cache"),
+                "tracking_uri": uri,
+                "inputs": {"/inputs/model": {"ref": model["model_uri"]}},
+            }
+        )
+        snapshot = Path(resolved["inputs"][0]["path"])
+        assert json.loads((snapshot / "checkpoint.json").read_text())["value"] == 11
+        assert resolved["inputs"][0]["model_id"] == model["model_id"]
 
 
-@pytest.mark.parametrize("failure", ["command", "missing_output", "multiline"])
+@pytest.mark.parametrize("failure", ["command", "missing_output", "multiline", "publication"])
 def test_failed_producer_blocks_consumer(tmp_path, failure):
     """A missing output or a failed producer prevents downstream side effects."""
-    workflow = {
+    workflow: dict = {
         "api_version": "modelopt/v2",
         "name": "failure_test",
         "tasks": {
@@ -88,6 +181,7 @@ def test_failed_producer_blocks_consumer(tmp_path, failure):
                     "command": "false",
                     "missing_output": "true",
                     "multiline": 'false\nprintf test > "$RESULT"',
+                    "publication": 'touch "$RESULT"',
                 }[failure],
                 "outputs": {"checkpoint": {"path": "missing.json", "env": "RESULT"}},
             },
@@ -98,13 +192,77 @@ def test_failed_producer_blocks_consumer(tmp_path, failure):
         },
     }
     spec = tmp_path / "failure.yaml"
+    profile = _PROFILE
+    if failure == "publication":
+        workflow["tasks"]["produce"]["outputs"]["checkpoint"]["publish"] = {
+            "ref": "test/conflict",
+            "version": "v1",
+        }
+        store = tmp_path / "store/test/conflict/v1"
+        store.mkdir(parents=True)
+        (store / "manifest.json").write_text("{}")
+        profile = tmp_path / "profile.yaml"
+        profile.write_text(
+            yaml.safe_dump({"executor": "local", "artifact_store": str(tmp_path / "store")})
+        )
     spec.write_text(yaml.safe_dump(workflow))
-    result = _cli(["--yaml", str(spec), "--profile", str(_PROFILE), "--yes"], tmp_path)
+    result = _cli(["--yaml", str(spec), "--profile", str(profile), "--yes"], tmp_path)
     assert result.returncode != 0
     assert not list(tmp_path.rglob("consumer-ran"))
     manifests = list((tmp_path / "experiments").rglob("metadata.json"))
     assert len(manifests) == 1  # Failure retains the run identity and graph.
     assert json.loads(manifests[0].read_text())["status"] == "failed"
+
+
+@pytest.mark.parametrize("fail_rank", [False, True])
+def test_publication_waits_for_every_payload_rank(tmp_path, fail_rank):
+    """A leader publishes once; any failed rank prevents a successful artifact manifest."""
+    output = tmp_path / "workspace/outputs/train/model"
+    output.mkdir(parents=True)
+    request = {
+        "task": "train",
+        "workspace": str(tmp_path / "workspace"),
+        "workers": 2,
+        "command": 'mkdir -p "$RESULT"; '
+        + ('if [ "$SLURM_PROCID" = 1 ]; then exit 7; fi; ' if fail_rank else "")
+        + 'echo "$SLURM_PROCID" > "$RESULT/rank-$SLURM_PROCID.txt"',
+        "inputs": {},
+        "assets": [],
+        "artifact_store": str(tmp_path / "store"),
+        "outputs": {"model": {"path": "model", "publish": {"ref": "test/ranks", "version": "v1"}}},
+    }
+    processes = []
+    try:
+        for rank in range(2):
+            env = dict(os.environ, SLURM_PROCID=str(rank), RESULT=str(output))
+            processes.append(
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(_LAUNCHER / "common/workflow_artifacts.py"),
+                        json.dumps(request),
+                    ],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+        codes = []
+        for process in processes:
+            process.communicate(timeout=10)
+            codes.append(process.returncode)
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    assert all(code != 0 for code in codes) if fail_rank else codes == [0, 0]
+    published = tmp_path / "store/test/ranks/v1/data"
+    if fail_rank:
+        assert not published.exists()
+    else:
+        assert sorted(path.name for path in published.iterdir()) == ["rank-0.txt", "rank-1.txt"]
 
 
 @pytest.mark.parametrize(

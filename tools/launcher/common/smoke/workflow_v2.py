@@ -30,7 +30,10 @@ def main():
     if stage == "produce":
         result = {"synthetic": True, "value": int(os.environ["SYNTHETIC_VALUE"])}
     elif stage in ("accuracy", "speed"):
-        model = json.loads(Path(os.environ["MODEL_INPUT"]).read_text())
+        model_path = Path(os.environ["MODEL_INPUT"])
+        model = json.loads(
+            (model_path / "checkpoint.json" if model_path.is_dir() else model_path).read_text()
+        )
         barrier = Path(os.environ["MODELOPT_WORKSPACE"]) / "barrier"
         barrier.mkdir(exist_ok=True)
         (barrier / stage).touch()
