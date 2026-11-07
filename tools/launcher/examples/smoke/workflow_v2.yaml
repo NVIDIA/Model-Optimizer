@@ -2,6 +2,7 @@ api_version: modelopt/v2
 name: workflow_v2_smoke
 parameters:
   value: 7
+  barrier_timeout_seconds: 15
 tasks:
   produce:
     inline: python common/smoke/workflow_v2.py produce
@@ -14,6 +15,8 @@ tasks:
         env: RESULT
   accuracy:
     inline: python common/smoke/workflow_v2.py accuracy
+    environment:
+      WORKFLOW_BARRIER_TIMEOUT_SECONDS: "${parameters.barrier_timeout_seconds}"
     inputs:
       /inputs/model:
         from: produce.checkpoint
@@ -25,6 +28,8 @@ tasks:
         env: RESULT
   speed:
     inline: python common/smoke/workflow_v2.py speed
+    environment:
+      WORKFLOW_BARRIER_TIMEOUT_SECONDS: "${parameters.barrier_timeout_seconds}"
     inputs:
       /inputs/model:
         from: produce.checkpoint

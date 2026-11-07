@@ -35,7 +35,9 @@ def main():
         barrier.mkdir(exist_ok=True)
         (barrier / stage).touch()
         other = "speed" if stage == "accuracy" else "accuracy"
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + float(
+            os.environ.get("WORKFLOW_BARRIER_TIMEOUT_SECONDS", "15")
+        )
         while not (barrier / other).exists():
             if time.monotonic() >= deadline:
                 raise RuntimeError("Independent tasks did not execute concurrently")
