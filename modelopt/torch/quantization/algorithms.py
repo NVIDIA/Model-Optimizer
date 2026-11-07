@@ -542,7 +542,10 @@ class QuantRecipe(CustomHPType):
                     if module.weight_quantizer.pre_quant_scale is not None:
                         weight_pqs = module.weight_quantizer.pre_quant_scale
                         delattr(module.weight_quantizer, "_pre_quant_scale")
-                        model_calib._apply_weight_pre_quant_scale(module, weight_pqs)
+                        # Folding preserves effective weights and their calibrated clipping thresholds.
+                        model_calib._apply_weight_pre_quant_scale(
+                            module, weight_pqs, recalibrate=False
+                        )
 
 
 class QuantRecipeHparam(Hparam):

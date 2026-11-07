@@ -1577,7 +1577,7 @@ _ENABLE_FOLDING_PQS_TO_WEIGHTS = True
 
 
 @torch.no_grad()
-def _apply_weight_pre_quant_scale(linear, pre_quant_scale):
+def _apply_weight_pre_quant_scale(linear, pre_quant_scale, *, recalibrate: bool = True):
     if _ENABLE_FOLDING_PQS_TO_WEIGHTS:
         linear.weight.data.copy_(
             (linear.weight * pre_quant_scale.to(linear.weight.device).squeeze()[None, :]).to(
@@ -1590,8 +1590,9 @@ def _apply_weight_pre_quant_scale(linear, pre_quant_scale):
             linear.weight.dtype
         )
 
-    linear.weight_quantizer.reset_amax()
-    max_calibrate(linear, lambda linear: linear.weight_quantizer(linear.weight))
+    if recalibrate:
+        linear.weight_quantizer.reset_amax()
+        max_calibrate(linear, lambda linear: linear.weight_quantizer(linear.weight))
 
 
 @torch.no_grad()
