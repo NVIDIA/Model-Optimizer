@@ -748,13 +748,35 @@ def test_a_quantization_config_counts_at_every_level_the_decompressor_reads(leve
     assert kimi_k3._quantized(config, "/ckpt")
 
 
-def test_prepare_refusal_finds_a_config_naming_no_model_class():
-    """``prepare`` loads the checkpoint's code through the class its ``auto_map`` names."""
+@pytest.mark.usefixtures("restore_loader_hooks")
+def test_prepare_refusal_finds_a_config_naming_no_model_class(monkeypatch):
+    """``prepare`` loads the checkpoint's code through the class its ``auto_map`` names. ``prepare``
+    itself refuses a packed checkpoint naming none before it installs anything: the decompressor's
+    hooks, the config's mark and scheme, and the code's staging stay as they were."""
     config = SimpleNamespace(text_config=SimpleNamespace())
 
     assert "auto_map" in kimi_k3.prepare_refusal(config, ckpt_path="/ckpt", trust_remote_code=True)
     config.auto_map = _AUTO_MAP
     assert kimi_k3.prepare_refusal(config, ckpt_path="/ckpt", trust_remote_code=True) is None
+
+    monkeypatch.setattr(dmu, "get_cached_module_file", dmu.get_cached_module_file)
+    _restore(monkeypatch, hf_generic, "OutputRecorder")
+    packed = (None, None, ("weight_packed", "weight_scale"), "mxfp4-pack-quantized")
+    monkeypatch.setattr(_onfly_decompress, "_read_compression", lambda cfg: packed)
+    scheme = {"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"}
+    unnamed = SimpleNamespace(text_config=SimpleNamespace(quantization_config=scheme))
+
+    def hooks():
+        return mu.get_model_conversion_mapping, cml.spawn_materialize, dmu.get_cached_module_file
+
+    before = hooks()
+
+    with pytest.raises(RuntimeError, match="auto_map"):
+        kimi_k3.prepare(unnamed, ckpt_path="/ckpt", trust_remote_code=True)
+
+    assert hooks() == before
+    assert not _onfly_decompress.is_marked(unnamed)
+    assert unnamed.text_config.quantization_config == scheme
 
 
 @pytest.mark.usefixtures("private_conversion_registry", "restore_loader_hooks")
