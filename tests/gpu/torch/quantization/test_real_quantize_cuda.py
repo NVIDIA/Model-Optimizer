@@ -17,6 +17,7 @@
 
 import copy
 import fnmatch
+import json
 
 import pytest
 import torch
@@ -196,6 +197,31 @@ def test_compress_config(model_cls, quant_config, compress_config):
     assert output.shape[0] == input_tensor.shape[0], "Model forward pass failed"
 
 
+_REMOTE_LLAMA = """from transformers import LlamaConfig, LlamaForCausalLM
+
+
+class RemoteLlamaConfig(LlamaConfig):
+    model_type = "remote_llama"
+
+
+class RemoteLlamaForCausalLM(LlamaForCausalLM):
+    config_class = RemoteLlamaConfig
+"""
+
+
+def _use_remote_code(checkpoint_dir):
+    """Make the checkpoint's config and model classes its own code, through ``auto_map``."""
+    (checkpoint_dir / "modeling_remote_llama.py").write_text(_REMOTE_LLAMA)
+    config_file = checkpoint_dir / "config.json"
+    config = json.loads(config_file.read_text())
+    config["model_type"] = "remote_llama"
+    config["auto_map"] = {
+        "AutoConfig": "modeling_remote_llama.RemoteLlamaConfig",
+        "AutoModelForCausalLM": "modeling_remote_llama.RemoteLlamaForCausalLM",
+    }
+    config_file.write_text(json.dumps(config))
+
+
 @pytest.mark.parametrize("quant_config", [mtq.FP8_DEFAULT_CFG])
 @pytest.mark.parametrize("tie_word_embeddings", [False, True])
 @pytest.mark.parametrize(
@@ -217,12 +243,18 @@ def test_compress_config(model_cls, quant_config, compress_config):
         pytest.param({"local_files_only": True}, False, torch.bfloat16, id="hub_kwargs"),
         # The checkpoint sits in a subfolder of the path passed.
         pytest.param({"subfolder": "tiny_llama"}, False, torch.bfloat16, id="subfolder"),
+        # As in from_pretrained(), "auto" is the checkpoint's dtype.
+        pytest.param({"dtype": "auto"}, False, torch.bfloat16, id="dtype_auto"),
+        # The checkpoint ships its model class as code, which from_config() runs only if trusted.
+        pytest.param({"trust_remote_code": True}, False, torch.bfloat16, id="remote_code"),
     ],
 )
 def test_real_quantize_linear(
     quant_config, tie_word_embeddings, load_kwargs, clear_config_dtype, expected_dtype, tmp_path
 ):
     tiny_llama_dir = create_tiny_llama_dir(tmp_path, tie_word_embeddings=tie_word_embeddings)
+    if load_kwargs.get("trust_remote_code"):
+        _use_remote_code(tiny_llama_dir)
     if clear_config_dtype:
         config = AutoConfig.from_pretrained(tiny_llama_dir)
         config.dtype = None
@@ -234,6 +266,8 @@ def test_real_quantize_linear(
     assert model.model.norm.weight.dtype == expected_dtype
     if "attn_implementation" in load_kwargs:
         assert model.config._attn_implementation == load_kwargs["attn_implementation"]
+    if load_kwargs.get("trust_remote_code"):
+        assert type(model).__name__ == "RemoteLlamaForCausalLM"
 
     for _, module in model.named_modules():
         if (
