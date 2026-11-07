@@ -1,0 +1,236 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Overview &mdash; Model Optimizer 0.0.1.dev1+g9bb546c0a</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Installation" href="2_installation.html" />
+    <link rel="prev" title="Welcome to Model Optimizer (ModelOpt) documentation!" href="../index.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Overview</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#nvidia-model-optimizer"><strong>NVIDIA Model Optimizer</strong></a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#techniques">Techniques</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#quantization">Quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#distillation">Distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#pruning">Pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#speculative-decoding">Speculative Decoding</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#sparsity">Sparsity</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Overview</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/getting_started/1_overview.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="overview">
+<h1>Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h1>
+<section id="nvidia-model-optimizer">
+<h2><strong>NVIDIA Model Optimizer</strong><a class="headerlink" href="#nvidia-model-optimizer" title="Link to this heading"></a></h2>
+<p>Minimizing inference costs presents a significant challenge as generative AI models continue to grow in complexity and size.
+The <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer" rel="noopener noreferrer" target="_blank">NVIDIA Model Optimizer</a> (referred to as Model Optimizer, or ModelOpt)
+is a library comprising state-of-the-art model optimization techniques including quantization and sparsity to compress model.
+It accepts a torch or ONNX model as input and provides Python APIs for users to easily stack different model optimization
+techniques to produce optimized &amp; quantized checkpoints. Seamlessly integrated within the NVIDIA AI software ecosystem, the quantized checkpoint generated from Model Optimizer is ready for deployment in downstream inference frameworks like <a class="reference external" href="https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/quantization" rel="noopener noreferrer" target="_blank">TensorRT-LLM</a> or <a class="reference external" href="https://github.com/NVIDIA/TensorRT" rel="noopener noreferrer" target="_blank">TensorRT</a> (Linux). The unified Hugging Face export API supports both transformers and diffusers models. ModelOpt is integrated with <a class="reference external" href="https://github.com/NVIDIA-NeMo/NeMo" rel="noopener noreferrer" target="_blank">NVIDIA NeMo</a> and <a class="reference external" href="https://github.com/NVIDIA/Megatron-LM" rel="noopener noreferrer" target="_blank">Megatron-LM</a> for training-in-the-loop optimization techniques. For enterprise users, the 8-bit quantization with Stable Diffusion is also available on <a class="reference external" href="https://developer.nvidia.com/blog/nvidia-nim-offers-optimized-inference-microservices-for-deploying-ai-models-at-scale/" rel="noopener noreferrer" target="_blank">NVIDIA NIM</a>.</p>
+<p>For Windows users, the <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Model Optimizer for Windows</a> (ModelOpt-Windows) delivers model compression techniques, including quantization, on Windows RTX PC systems. ModelOpt-Windows is optimized for efficient quantization, featuring local GPU calibration, reduced system and video memory consumption, and swift processing times. It integrates seamlessly with the Windows ecosystem, with optimized ONNX models as output for <a class="reference external" href="https://github.com/microsoft/DirectML" rel="noopener noreferrer" target="_blank">Microsoft DirectML</a> and <a class="reference external" href="https://github.com/NVIDIA/TensorRT-RTX" rel="noopener noreferrer" target="_blank">TensorRT-RTX</a> backends. Furthermore, ModelOpt-Windows supports SDKs such as <a class="reference external" href="https://github.com/microsoft/Olive" rel="noopener noreferrer" target="_blank">Microsoft Olive</a> and <a class="reference external" href="https://github.com/microsoft/onnxruntime" rel="noopener noreferrer" target="_blank">ONNX Runtime</a>, enabling the deployment of quantized models across various independent hardware vendors through the DirectML path.</p>
+<p>Model Optimizer for both Linux and Windows are available for free for all developers on <a class="reference external" href="https://pypi.org/project/nvidia-modelopt/" rel="noopener noreferrer" target="_blank">NVIDIA PyPI</a>. Visit the <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer" rel="noopener noreferrer" target="_blank">Model Optimizer GitHub repository</a> for end-to-end
+example scripts and recipes optimized for NVIDIA GPUs.</p>
+<section id="techniques">
+<h3>Techniques<a class="headerlink" href="#techniques" title="Link to this heading"></a></h3>
+<section id="quantization">
+<h4>Quantization<a class="headerlink" href="#quantization" title="Link to this heading"></a></h4>
+<p>Quantization is an effective model optimization technique for large models. Quantization with Model Optimizer can compress
+model size by 2x-4x, speeding up inference while preserving model quality. Model Optimizer enables highly performant
+quantization formats including NVFP4, FP8, INT8, INT4, etc and supports advanced algorithms such as SmoothQuant, AWQ, SVDQuant, and
+Double Quantization with easy-to-use Python APIs. Both Post-training quantization (PTQ) and Quantization-aware training (QAT)
+are supported. Visit <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html#module-modelopt.torch.quantization.config" title="modelopt.torch.quantization.config"><code class="xref py py-meth docutils literal notranslate"><span class="pre">Quantization</span> <span class="pre">Format</span> <span class="pre">page</span></code></a>
+for list of formats supported.</p>
+</section>
+<section id="distillation">
+<h4>Distillation<a class="headerlink" href="#distillation" title="Link to this heading"></a></h4>
+<p>Knowledge Distillation is the use of an existing pretrained “teacher” model to train a smaller, more efficient “student” model.
+It allows for increasing the accuracy and/or convergence speed over traditional training.
+The feature maps and logits of the teacher and student become the targets and predictions for the (user-specified) loss, respectively.
+Model Optimizer allows for minimally-invasive integration of teacher-student Knowledge Distillation into an existing training pipeline
+using the <a class="reference internal" href="../reference/generated/modelopt.torch.distill.distillation.html#modelopt.torch.distill.distillation.convert" title="modelopt.torch.distill.distillation.convert"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtd.convert()</span></code></a> API.</p>
+</section>
+<section id="pruning">
+<h4>Pruning<a class="headerlink" href="#pruning" title="Link to this heading"></a></h4>
+<p>Pruning is a technique to reduce the model size and accelerate the inference by removing unnecessary weights.
+Model Optimizer provides the Python API <a class="reference internal" href="../reference/generated/modelopt.torch.prune.pruning.html#modelopt.torch.prune.pruning.prune" title="modelopt.torch.prune.pruning.prune"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtp.prune()</span></code></a> to prune Linear and
+Conv layers, and Transformer attention heads, MLP, and depth through various different state of the art algorithms.</p>
+</section>
+<section id="speculative-decoding">
+<h4>Speculative Decoding<a class="headerlink" href="#speculative-decoding" title="Link to this heading"></a></h4>
+<p>Speculative Decoding enables your model to generate multiple tokens in each generate step by using a draft model to
+predict tokens that are then validated by the original model in a single forward pass.
+This can be useful for reducing the latency of your model and speeding up inference.
+Model Optimizer provides the Python API <a class="reference internal" href="../reference/generated/modelopt.torch.speculative.speculative_decoding.html#modelopt.torch.speculative.speculative_decoding.convert" title="modelopt.torch.speculative.speculative_decoding.convert"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtsp.convert()</span></code></a> to
+add speculative decoding module to your model.</p>
+</section>
+<section id="sparsity">
+<h4>Sparsity<a class="headerlink" href="#sparsity" title="Link to this heading"></a></h4>
+<p>Sparsity is a technique to further reduce the memory footprint of deep learning models and accelerate the inference.
+Model Optimizer provides the Python API <code class="xref py py-meth docutils literal notranslate"><span class="pre">mts.sparsify()</span></code> to
+automatically apply weight sparsity to a given model. The
+<code class="xref py py-meth docutils literal notranslate"><span class="pre">mts.sparsify()</span></code> API supports
+<a class="reference external" href="https://arxiv.org/pdf/2104.08378" rel="noopener noreferrer" target="_blank">NVIDIA 2:4</a> sparsity pattern and various sparsification methods,
+such as <a class="reference external" href="https://github.com/NVIDIA/apex/tree/master/apex/contrib/sparsity" rel="noopener noreferrer" target="_blank">NVIDIA ASP</a> and
+<a class="reference external" href="https://arxiv.org/abs/2301.00774" rel="noopener noreferrer" target="_blank">SparseGPT</a>. It supports both post-training sparsity (PTS) and
+sparsity-aware training (SAT). The latter workflow is recommended to minimize accuracy
+degradation.</p>
+</section>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../index.html" class="btn btn-neutral float-left" title="Welcome to Model Optimizer (ModelOpt) documentation!" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="2_installation.html" class="btn btn-neutral float-right" title="Installation" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
