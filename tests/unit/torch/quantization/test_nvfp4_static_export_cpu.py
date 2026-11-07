@@ -398,3 +398,32 @@ class TestNVFP4StaticFourOverSixExport:
         assert torch.allclose(selected, (baked.float() / E2M1_MAX).view_as(selected), rtol=1e-5), (
             "Export did not reproduce the baked per-block amax."
         )
+
+
+class TestNVFP4StaticLSQExport:
+    """Scale-only QAD (LSQ) moves the per-block amax into the learned ``_amax_post``."""
+
+    def test_tied_lsq_exports_learned_amax(self):
+        """A tied-LSQ quantizer exports exactly what a static one holding its learned amax does."""
+        weight = torch.randn(8, 64, dtype=torch.bfloat16) * 0.02
+        block_max = _per_block_max(weight)
+        q = _make_static_quantizer(block_max, block_max.max())
+        q.enable_lsq(learnable_amax="post", tied_amax=True)
+        with torch.no_grad():  # stand in for training moving the scales off their calibration
+            q._amax_post.mul_(torch.linspace(0.6, 1.0, q._amax_post.numel()).view_as(block_max))
+        reference = _make_static_quantizer(q._amax_post.detach(), block_max.max())
+
+        for lsq_out, ref_out in zip(
+            _export_round_trip(weight, q), _export_round_trip(weight, reference)
+        ):
+            assert torch.equal(lsq_out, ref_out)
+
+    def test_untied_lsq_refuses_export(self):
+        """Separate pre and post amaxes cannot be one exported scale."""
+        weight = torch.randn(8, 64, dtype=torch.bfloat16)
+        block_max = _per_block_max(weight)
+        q = _make_static_quantizer(block_max, block_max.max())
+        q.enable_lsq(learnable_amax=["pre", "post"], tied_amax=False)
+
+        with pytest.raises(RuntimeError, match="untied"):
+            _export_round_trip(weight, q)
