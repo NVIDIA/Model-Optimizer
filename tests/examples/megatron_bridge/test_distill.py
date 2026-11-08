@@ -465,10 +465,18 @@ def test_require_grad_from_embedding():
 @pytest.mark.parametrize("flag", ["freeze_router", "train_moe_expert_fc_only"])
 def test_moe_freeze_flags_need_zero_aux_loss(flag):
     args = SimpleNamespace(
-        freeze_router=False, train_moe_expert_fc_only=False, moe_aux_loss_coeff=0, pp_size=1
+        freeze_router=False,
+        train_moe_expert_fc_only=False,
+        trainable_params=None,
+        moe_aux_loss_coeff=0,
+        pp_size=1,
     )
     setattr(args, flag, True)
     _check_moe_freeze_args(args)
+    args.trainable_params = ["*.experts.*"]
+    with pytest.raises(ValueError, match="--trainable_params cannot be combined"):
+        _check_moe_freeze_args(args)
+    args.trainable_params = None
     for aux in (None, 0.01):
         args.moe_aux_loss_coeff = aux
         with pytest.raises(ValueError, match="--moe_aux_loss_coeff 0"):

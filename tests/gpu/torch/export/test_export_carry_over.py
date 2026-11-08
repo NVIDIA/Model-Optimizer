@@ -40,7 +40,12 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 from modelopt.torch.quantization.utils import patch_fsdp_mp_dtypes
-from modelopt.torch.utils.distributed import fsdp2_wrap, is_fsdp2_model
+from modelopt.torch.utils.distributed import (
+    DistributionPlan,
+    fsdp2_wrap,
+    is_fsdp2_model,
+    set_distribution_plan,
+)
 
 # Small enough to force the tiny model across several shards, so the multi-file layout -- and the
 # weight index that makes it loadable -- are exercised rather than collapsing to one model.safetensors.
@@ -108,6 +113,8 @@ def _ptq_and_export(rank, size, *, src_dir, export_dir, quant_cfg, **export_kwar
         model.eval()
 
         fsdp2_wrap(model)
+        # Wrapped by hand, the model records how it is distributed, as load_pretrained would.
+        set_distribution_plan(model, DistributionPlan(size, dense="fsdp"))
         # The FSDP2 export path is selected by exactly this predicate, so assert it here: without it
         # the export would silently fall back to the rank-0 gather and the test would pass while
         # never touching the code under test.
@@ -201,6 +208,7 @@ def _ptq_language_model_and_export(rank, size, *, src_dir, export_dir):
         )
         model.eval()
         fsdp2_wrap(model)
+        set_distribution_plan(model, DistributionPlan(size, dense="fsdp"))
         assert is_fsdp2_model(model), "fsdp2_wrap did not shard the VLM"
         torch.distributed.barrier()
 

@@ -75,6 +75,7 @@ A `ModelSpec` holds one attribute per section, each `None` unless the model fill
 |---|---|---|
 | `moe_spec` (`MoESpec`) | MoE architecture facts only — block classes, expert projection naming, which layout that naming describes | the model is dense |
 | `export_spec` (`ExportSpec`) | Per-model data *and policy* of the unified HF export path, e.g. whether grouped expert export is validated for this model | export needs nothing model-specific |
+| `ep_spec` (`EPSpec`) | Per-model data of the expert-parallel PTQ path: the `base_model_ep_plan` to attach and the config it goes on, the transformers release it needs, or why the model cannot be expert-parallel yet | the model is dense, or stock transformers already ships all of it |
 
 `None` means "the model has nothing to say about this", which stays distinct from a
 filled-in-but-empty section.

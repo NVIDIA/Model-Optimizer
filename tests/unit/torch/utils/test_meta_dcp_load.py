@@ -17,16 +17,21 @@
 
 ``_meta_dcp_load`` materializes a model built on ``meta`` and fills it from HF safetensors through
 ``torch.distributed.checkpoint``; ``_map_ckpt_keys_to_model`` bridges checkpoint names to the built
-model's ``state_dict`` names. The loads run for real on CPU, from tiny transformers models into
-hand-written safetensors files. DCP loads in a single process without a process group; the tests that
-need the distributed path start a one-rank gloo group.
+model's ``state_dict`` names; ``_fsdp2_wrap_modules`` picks the blocks FSDP2 shards. The loads run
+for real on CPU, from tiny transformers models into hand-written safetensors files. DCP loads in a
+single process without a process group; the tests that need the distributed path start a one-rank
+gloo group, or run on the pooled two-rank one.
 """
+
+from contextlib import nullcontext
+from unittest import mock
 
 import pytest
 import torch
 import torch.distributed.checkpoint as dcp
 from safetensors.torch import save_file
 from torch import nn
+from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
@@ -34,12 +39,14 @@ from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tenso
 pytest.importorskip("accelerate")
 pytest.importorskip("transformers")
 
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.transformers_models import get_tiny_llama
 from accelerate import init_empty_weights
 from transformers import AutoModelForImageTextToText, Qwen2_5_VLConfig
 
 from modelopt.torch.utils.plugins.model_load_utils import (
     _copy_tied_values,
+    _fsdp2_wrap_modules,
     _map_ckpt_keys_to_model,
     _meta_dcp_load,
 )
@@ -168,6 +175,60 @@ def test_map_ckpt_keys_to_model(conversion_mapping, ckpt_keys, model_keys, expec
         model._checkpoint_conversion_mapping = conversion_mapping
 
     assert _map_ckpt_keys_to_model(model, ckpt_keys, model_keys) == expected
+
+
+# -------------------------------------------------------------------------- FSDP2 wrap boundaries
+
+
+def test_wrap_modules_are_the_decoder_layers():
+    """A causal LM is wrapped at its ``_no_split_modules`` blocks: the decoder layers, in order."""
+    model = _meta_twin(get_tiny_llama)
+
+    assert _fsdp2_wrap_modules(model) == list(model.model.layers)
+
+
+def test_vlm_wraps_only_its_language_layers():
+    """Qwen2.5-VL's wrapper also lists the vision block in ``_no_split_modules``, but only the language
+    layers may be sharded: sharded vision weights deadlock calibration, so the tower stays replicated.
+    """
+    model = _meta_twin(_tiny_qwen2_5_vl)
+    assert type(model.model.visual.blocks[0]).__name__ in model._no_split_modules
+
+    assert _fsdp2_wrap_modules(model) == list(model.model.language_model.layers)
+
+
+@pytest.mark.parametrize("no_split_modules", [None, ["NoSuchBlock"]])
+def test_wrap_modules_fall_back_to_decoder_layer_detection(no_split_modules):
+    """Without usable ``_no_split_modules`` (absent, or naming no module present), modelopt's
+    decoder-layer auto-detection still finds the blocks.
+    """
+    model = _meta_twin(get_tiny_llama)
+    model._no_split_modules = no_split_modules
+
+    assert _fsdp2_wrap_modules(model) == list(model.model.layers)
+
+
+def _vlm_whose_language_model_shows_no_blocks():
+    """A VLM whose own ``_no_split_modules`` names its vision block too, as Qwen2.5-VL's does."""
+    model = nn.Module()
+    model._no_split_modules = ["Linear"]
+    model.language_model = nn.Sequential(nn.Linear(2, 2), nn.Linear(2, 2))
+    model.visual = nn.Linear(2, 2)
+    return model
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda: nn.Sequential(nn.Linear(2, 2), nn.Linear(2, 2)), id="no-blocks"),
+        pytest.param(_vlm_whose_language_model_shows_no_blocks, id="vlm-language-model"),
+    ],
+)
+def test_wrap_modules_refuse_a_model_without_blocks(build):
+    """With neither source of boundaries matching, fail loudly instead of guessing a layout. For a
+    VLM that is its language model's: the VLM's own list would shard the vision blocks too."""
+    with pytest.raises(RuntimeError, match="Could not determine FSDP2 wrap boundaries"):
+        _fsdp2_wrap_modules(build())
 
 
 # --------------------------------------------------------------------------------- meta + DCP load
@@ -582,3 +643,45 @@ def test_a_tie_laid_out_differently_is_refused_and_left_as_it_was(gloo_world_of_
         _copy_tied_values(kept, src, "lm_head.weight")
 
     assert torch.equal(local, before)
+
+
+# ---------------------------------------------------------------- one rank failing to prepare
+
+# Where a rank's preparation fails, before the load's collectives: what it raises, and with what.
+_FAILURES = {
+    "metadata": (HuggingFaceStorageReader, "read_metadata", OSError, "cannot read the checkpoint"),
+    "materialize": (nn.Module, "to_empty", MemoryError, "out of device memory"),
+}
+
+
+def _one_rank_fails_preparing_job(rank, size, ckpt_dir, failure):
+    owner, attr, error, message = _FAILURES[failure]
+    model = _meta_twin(get_tiny_llama)
+    entered, refused = [], None
+
+    def dcp_load(state_dict, **kwargs):
+        # As the load's collectives do: a rank in them waits for every peer.
+        entered.append(rank)
+        torch.distributed.barrier()
+
+    with (
+        bounded_collectives(),
+        mock.patch.object(dcp, "load", dcp_load),
+        mock.patch.object(owner, attr, side_effect=error(message)) if rank == 1 else nullcontext(),
+    ):
+        try:  # not pytest.raises: its failure would end the pooled worker instead of the job
+            _meta_dcp_load(model, ckpt_dir, "cpu", load_names=_every_name(model))
+        except Exception as e:
+            refused = str(e)
+    # Rank 1's failure on both ranks, before either entered the load.
+    assert not entered, (rank, entered)
+    assert refused is not None and message in refused, (rank, refused)
+    assert rank == 1 or "rank 1 failed" in refused, refused
+
+
+@pytest.mark.parametrize("failure", list(_FAILURES))
+def test_a_rank_failing_to_prepare_the_load_fails_every_rank(cpu_dist_workers, tmp_path, failure):
+    """Each rank reads the checkpoint and materializes its params before DCP's collective load. One
+    failing there, alone, fails every rank, rather than leave the others waiting in the load."""
+    ckpt_dir = _save(tmp_path, get_tiny_llama().state_dict())
+    cpu_dist_workers.run(_one_rank_fails_preparing_job, ckpt_dir=ckpt_dir, failure=failure)

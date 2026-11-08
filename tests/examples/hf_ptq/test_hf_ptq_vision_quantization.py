@@ -20,6 +20,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from modelopt.torch.utils.distributed import DistributionPlan
+
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
 
 
@@ -56,6 +58,7 @@ def test_image_calibration_model_target_follows_recipe(
         trust_remote_code=False,
         use_seq_device_map=False,
         attn_implementation=None,
+        experts_implementation=None,
         offload_folder=None,
         max_cpu_memory_gb=None,
         max_gpu_memory_gb=None,
@@ -64,6 +67,8 @@ def test_image_calibration_model_target_follows_recipe(
     )
 
     monkeypatch.setattr(hf_ptq, "get_model", lambda *args, **kwargs: full_model)
+    # A single process's plan, decided without reading the "dummy" checkpoint.
+    monkeypatch.setattr(hf_ptq, "resolve_distribution", lambda args: (DistributionPlan(), None))
     # A VLM's extracted language model reports its own sub-config type; hf_ptq must keep the root's.
     monkeypatch.setattr(
         hf_ptq,
@@ -109,6 +114,7 @@ def test_image_calibration_uses_full_vlm_forward(hf_ptq, monkeypatch):
     args = SimpleNamespace(
         qformat="fp8",
         calib_with_images=True,
+        use_fsdp2=False,
         specdec_offline_dataset=None,
         layerwise_export=False,
     )
