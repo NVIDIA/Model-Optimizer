@@ -1607,11 +1607,12 @@ def test_a_step_with_nothing_to_train_reaches_every_draft_parameter(head, draft_
     ],
     ids=["dflash", "dspark", "domino"],
 )
-def test_shift_label_is_refused_at_convert_but_restores(head_fields, shift_label):
-    """projector_type fixes the label alignment, so a config naming it is refused at convert.
+def test_deprecated_shift_label(head_fields, shift_label):
+    """projector_type fixes the label alignment, so convert drops a shift_label matching it with
+    a warning and refuses any other, which never took effect.
 
-    Restore drops it instead: DSpark used to accept the field and ignore it in training, and
-    the Domino recipe set it, so checkpoints carry it in their modelopt_state.
+    Restore drops either unchecked: DSpark used to accept the field and ignore it in training,
+    and the Domino recipe set it, so checkpoints carry it in their modelopt_state.
     """
     config = get_dflash_config()
     config["dflash_architecture_config"].update(head_fields)
@@ -1625,8 +1626,18 @@ def test_shift_label_is_refused_at_convert_but_restores(head_fields, shift_label
     assert restored._label_shift == model._label_shift
 
     config["dflash_architecture_config"]["shift_label"] = shift_label
-    with pytest.raises(ValueError, match="shift_label is no longer a setting"):
-        mtsp.convert(get_tiny_llama(num_hidden_layers=4), [("dflash", config)])
+    legacy = get_tiny_llama(num_hidden_layers=4)
+    if shift_label != bool(model._label_shift):
+        base_cls = type(legacy)
+        with pytest.raises(ValueError, match="shift_label"):
+            mtsp.convert(legacy, [("dflash", config)])
+        assert type(legacy) is base_cls  # refused before converting
+        return
+    with pytest.warns(FutureWarning, match="shift_label"):
+        mtsp.convert(legacy, [("dflash", config)])
+    assert legacy._label_shift == model._label_shift
+    legacy_config = mto.modelopt_state(legacy)["modelopt_state_dict"][0][1]["config"]
+    assert "shift_label" not in legacy_config["dflash_architecture_config"]
 
 
 class TestTeacherLogits:

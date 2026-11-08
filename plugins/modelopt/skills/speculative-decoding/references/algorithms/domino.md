@@ -86,9 +86,9 @@ export is the whole in-pipeline signal.
 
 ## Quality gate
 
-**Domino has no HF AR validation.** `pseudo_speculative_generate` raises for Domino, so
-keep the recipe's `ar_validate_steps: 0` and measure acceptance on the exported drafter
-in a serving engine.
+**Domino has no acceptance evaluation yet.** `pseudo_speculative_generate` raises and no
+runtime applies the correction head, so keep the recipe's `ar_validate_steps: 0`. Eval
+loss and accuracy (`do_eval`, off in the recipe) exclude the head too.
 
 The training-regression gate from `dflash.md` applies and the Qwen3-8B example sets
 it: `MAX_FINAL_LOSS=5.0`, `MIN_FINAL_ACC=0.15`, checked by `check_regression.py`
@@ -105,9 +105,9 @@ failures (`seq_len` divisibility, offline eval, mask token, chat template) are i
 | Error pattern | Root cause | Fix |
 | --- | --- | --- |
 | `Domino (projector_type='domino') requires ['emb_dim', 'gru_hidden_dim'] in dflash_architecture_config` | GRU head dims missing | Set both in `dflash_architecture_config` |
-| `dflash_architecture_config.shift_label is no longer a setting` | `shift_label` in the config (the old recipe set it) | Remove it; Domino always trains next-token alignment |
+| `dflash_architecture_config.shift_label` deprecation warning, or `... contradicts the model` | `shift_label` in the config (the old recipe set it) | Remove it; Domino always trains next-token alignment |
 | `pure_draft_prefix_len must be in [0, N] (block_size=B), got X` | Prefix length >= block size | Lower it below `block_size` |
 | `DominoLambdaCallback: state.max_steps unset (<=0); lambda_base curriculum disabled` (warning) | `training.max_steps` not set | Set `training.max_steps`, else the curriculum never runs |
-| `Domino has no HF AR validation (pseudo_speculative_generate)` | `ar_validate.py`, or `ar_validate_steps > 0` (training logs `AR validation not available.`) | Evaluate the exported drafter in a serving engine |
+| `Domino acceptance cannot be measured until a runtime applies its correction head` | `ar_validate.py`, or `ar_validate_steps > 0` (training logs `AR validation not available.`) | Keep `ar_validate_steps: 0`; there is no Domino acceptance evaluation yet |
 | DDP error about unused parameters | `ddp_find_unused_parameters` turned off | Keep it `true` |
 | Draft trains but quality is poor | Draft dims left at `Qwen3Config` defaults instead of matching the base | Set the GQA/FFN dims explicitly |

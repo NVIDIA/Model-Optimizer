@@ -260,7 +260,8 @@ class HFDominoModel(HFDFlashModel):
 
         Mirrors ``HFDFlashModel.forward`` for data preparation (reusing the inherited
         anchor/noise/mask/position helpers), then applies the Domino head and the
-        two-term loss. Eval/offline-eval is delegated to the DFlash parent.
+        two-term loss. Eval/offline-eval is delegated to the DFlash parent, so eval loss and
+        accuracy exclude the correction head.
         """
         if not self.training:
             return super().forward(
@@ -357,8 +358,9 @@ class HFDominoModel(HFDFlashModel):
     def pseudo_speculative_generate(self, input_ids, steps=1):
         """Refused: DFlash's decode would draft with the backbone alone, one block position off."""
         raise NotImplementedError(
-            "Domino has no HF AR validation (pseudo_speculative_generate). Set ar_validate_steps "
-            "to 0 and measure acceptance on the exported drafter in a serving engine."
+            "Domino acceptance cannot be measured until a runtime applies its correction head: "
+            "the inherited DFlash decode would draft with the backbone alone, one block position "
+            "off. Set ar_validate_steps to 0."
         )
 
 
