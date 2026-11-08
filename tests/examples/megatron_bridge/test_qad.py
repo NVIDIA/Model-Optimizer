@@ -363,22 +363,20 @@ def test_qad_train_moe_expert_fc_only(tmp_path: Path, num_gpus):
         recompute_granularity="full",
         recompute_method="uniform",
         recompute_num_layers=1,
-        train_iters=3,
-        lr_warmup_iters=1,
-        eval_interval=3,
+        train_iters=1,
+        lr_warmup_iters=0,
+        eval_interval=1,
         eval_iters=1,
         save_interval=1,
         log_interval=1,
     )
     run_example_command(distill_cmd, example_path="megatron_bridge", setup_free_port=True)
 
-    first, last = (
-        _load_checkpoint_tensors(distill_output_dir / "checkpoints" / f"iter_{i:07d}")
-        for i in (1, 3)
-    )
-    assert first.keys() == last.keys()
-    # The helper keeps keys like ``chained_0.optimizer...``, whose state changes on every step.
-    trained = {n for n in first if "optimizer" not in n and not torch.equal(first[n], last[n])}
+    # One step (no warmup, so it moves the weights) is enough: a scale wrongly left trainable makes
+    # Megatron DDP assert at the start of step 2, before a later checkpoint could be compared.
+    initial = _load_checkpoint_tensors(quantized_megatron_path / "iter_0000000")
+    first = _load_checkpoint_tensors(distill_output_dir / "checkpoints" / "iter_0000001")
+    trained = {n for n in first if n in initial and not torch.equal(first[n], initial[n])}
     # Expert FC weights (sequential ``.weight``, grouped ``.weight<i>``, or the SwiGLU halves
     # ``.weight_w`` / ``.weight_v`` the checkpoint stores for ``linear_fc1``) and the decoder final
     # norm are the only tensors allowed to change; expert and non-expert LSQ scales must not.
