@@ -638,7 +638,7 @@ class DSparkExporter(DFlashExporter):
                     "mask_token_id": config["dflash_config"]["mask_token_id"],
                     "target_layer_ids": config["dflash_config"]["target_layer_ids"],
                     "markov_rank": config["dflash_config"]["markov_rank"],
-                    "sample_from_anchor": config["dflash_config"]["shift_label"],
+                    "sample_from_anchor": bool(self.model._label_shift),
                     "enable_confidence_head": config["dflash_config"]["use_confidence_head"],
                     "confidence_head_with_markov": config["dflash_config"]["use_confidence_head"],
                 }
