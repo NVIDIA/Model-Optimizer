@@ -95,8 +95,8 @@ def restore_dflash_model(
     # Warm start is a one-time training-time init; the restored weights would overwrite it
     # anyway, and replaying it on the meta device would raise.
     config = config.model_copy(update={"dflash_init_checkpoint": None})
-    # shift_label: false is refused at convert only: DSpark drafters saved with it before the
-    # refusal trained next-token alignment regardless, and must still load.
+    # shift_label is refused at convert only: checkpoints saved before the refusal carry it (the
+    # Domino recipe set it; DSpark ones may say false yet trained next-token) and must still load.
     config.dflash_architecture_config = {
         k: v for k, v in config.dflash_architecture_config.items() if k != "shift_label"
     }

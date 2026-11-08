@@ -1597,19 +1597,21 @@ def test_a_step_with_nothing_to_train_reaches_every_draft_parameter(head, draft_
     assert all(output.grad is not None for output in outputs)
 
 
+@pytest.mark.parametrize("shift_label", [True, False])
 @pytest.mark.parametrize(
     "head_fields",
     [
+        {},
         {"projector_type": "dspark", "markov_rank": 4},
         {"projector_type": "domino", "emb_dim": 8, "gru_hidden_dim": 8},
     ],
-    ids=["dspark", "domino"],
+    ids=["dflash", "dspark", "domino"],
 )
-def test_next_token_variants_refuse_shift_label_false_at_convert(head_fields):
-    """Left unset, as the recipes do, shift_label converts; set to false, it is refused.
+def test_shift_label_is_refused_at_convert_but_restores(head_fields, shift_label):
+    """projector_type fixes the label alignment, so a config naming it is refused at convert.
 
-    Restore does not refuse it: DSpark used to accept the field, ignore it in training and
-    save it into the checkpoint's modelopt_state.
+    Restore drops it instead: DSpark used to accept the field and ignore it in training, and
+    the Domino recipe set it, so checkpoints carry it in their modelopt_state.
     """
     config = get_dflash_config()
     config["dflash_architecture_config"].update(head_fields)
@@ -1618,12 +1620,12 @@ def test_next_token_variants_refuse_shift_label_false_at_convert(head_fields):
 
     state = mto.modelopt_state(model)
     saved_config = state["modelopt_state_dict"][0][1]["config"]
-    saved_config["dflash_architecture_config"]["shift_label"] = False
+    saved_config["dflash_architecture_config"]["shift_label"] = shift_label
     restored = mto.restore_from_modelopt_state(get_tiny_llama(num_hidden_layers=4), state)
-    assert restored._label_shift == 1
+    assert restored._label_shift == model._label_shift
 
-    config["dflash_architecture_config"]["shift_label"] = False
-    with pytest.raises(ValueError, match="only next-token alignment"):
+    config["dflash_architecture_config"]["shift_label"] = shift_label
+    with pytest.raises(ValueError, match="shift_label is not a setting"):
         mtsp.convert(get_tiny_llama(num_hidden_layers=4), [("dflash", config)])
 
 

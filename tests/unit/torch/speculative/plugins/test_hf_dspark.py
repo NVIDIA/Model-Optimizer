@@ -76,7 +76,6 @@ def _get_dspark_config(
         "markov_head_type": head_type,
         "use_confidence_head": use_confidence_head,
         "pure_draft_prefix_len": 1,
-        "shift_label": True,
     }
     return config
 
