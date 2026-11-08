@@ -29,6 +29,7 @@ from .common import (
     pin_packed_weight,
     quantize_energy_matched,
 )
+from .gsq import _GSQ_CAPTURE
 from .registry import GGML_FORMAT_REGISTRY
 
 __all__ = ["GGMLGPTQHelper", "compensated_block_hessian", "gptq_group_update", "row_gains"]
@@ -176,6 +177,9 @@ class GGMLGPTQHelper(GPTQHelper):
         """
         weight = self.module.weight if weight is None else weight
         self._weight_dtype = weight.dtype
+        capture = _GSQ_CAPTURE.get()
+        teacher = weight.detach().clone() if capture is not None else None
+        covariance = self.hessian.detach().clone() if capture is not None else None
         super().update_weights(block_size, perc_damp, weight, device)
         if self._unrounded is not None:
             weight.data.copy_(self._unrounded.reshape(weight.shape))
@@ -193,6 +197,8 @@ class GGMLGPTQHelper(GPTQHelper):
             source=weight if self._searched else None,
             search_scales=search_scales,
         )
+        if capture is not None:
+            capture(self, teacher, covariance, self._packed)
         self._packed = self._unrounded = self._importance = self._searched = None
         self._search_scales = None
         target = weight.device if device is None else torch.device(device)
