@@ -894,14 +894,25 @@ class TensorQuantizer(nn.Module):
                     "M=4/M=6 choice baked into the quantizer amax by MSE calibration is not "
                     "preserved by real quantization. Use mtq.quantize + export for 4/6 instead."
                 )
+            weights_scaling_factor_2 = (
+                NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(self)
+                if self.amax is not None
+                else None
+            )
+            # A static quantizer holds a calibrated (e.g. MSE) per-block amax, which fake quant
+            # uses; recomputing the per-block scale from the weight would ignore it.
+            weights_scaling_factor = (
+                NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
+                    self, inputs, weights_scaling_factor_2
+                )[0]
+                if self.amax is not None and NVFP4QTensor._is_static_quantizer(self)
+                else None
+            )
             outputs, _weights_scaling_factor, _weights_scaling_factor_2 = NVFP4QTensor.quantize(
                 inputs,
                 self._block_sizes[-1],
-                weights_scaling_factor_2=(
-                    NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(self)
-                    if self.amax is not None
-                    else None
-                ),
+                weights_scaling_factor=weights_scaling_factor,
+                weights_scaling_factor_2=weights_scaling_factor_2,
                 try_tensorrt=True,
             )
             buffer_to_register["_scale"] = _weights_scaling_factor
