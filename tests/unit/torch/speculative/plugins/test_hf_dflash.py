@@ -1625,7 +1625,7 @@ def test_shift_label_is_refused_at_convert_but_restores(head_fields, shift_label
     assert restored._label_shift == model._label_shift
 
     config["dflash_architecture_config"]["shift_label"] = shift_label
-    with pytest.raises(ValueError, match="shift_label is not a setting"):
+    with pytest.raises(ValueError, match="shift_label is no longer a setting"):
         mtsp.convert(get_tiny_llama(num_hidden_layers=4), [("dflash", config)])
 
 

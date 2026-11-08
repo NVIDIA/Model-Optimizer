@@ -58,9 +58,27 @@ _REGISTRY_BY_PROJECTOR_TYPE = {
     "lilicorr": LiLiCorrDMRegistry,
 }
 
+# Keys dflash_architecture_config once accepted, and why each is gone. Convert refuses them;
+# restore drops them, since checkpoints saved before carry them.
+_RETIRED_ARCHITECTURE_KEYS = {
+    "shift_label": (
+        "projector_type fixes the label alignment (dspark and domino predict the token at "
+        "anchor + k + 1, the others the token at anchor + k)"
+    ),
+}
+
 
 def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertReturnType:
     """Convert the model to a DFlash (or Domino) model as per `config`."""
+    retired = sorted(_RETIRED_ARCHITECTURE_KEYS.keys() & config.dflash_architecture_config.keys())
+    if retired:
+        raise ValueError(
+            "\n".join(
+                f"dflash_architecture_config.{key} is no longer a setting: "
+                f"{_RETIRED_ARCHITECTURE_KEYS[key]}. Remove it."
+                for key in retired
+            )
+        )
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
     # merge custom config with default config (lazy import to avoid circular)
@@ -95,9 +113,9 @@ def restore_dflash_model(
     # Warm start is a one-time training-time init; the restored weights would overwrite it
     # anyway, and replaying it on the meta device would raise.
     config = config.model_copy(update={"dflash_init_checkpoint": None})
-    # shift_label is refused at convert only: checkpoints saved before the refusal carry it (the
-    # Domino recipe set it; DSpark ones may say false yet trained next-token) and must still load.
     config.dflash_architecture_config = {
-        k: v for k, v in config.dflash_architecture_config.items() if k != "shift_label"
+        k: v
+        for k, v in config.dflash_architecture_config.items()
+        if k not in _RETIRED_ARCHITECTURE_KEYS
     }
     return convert_to_dflash_model(model, config)[0]

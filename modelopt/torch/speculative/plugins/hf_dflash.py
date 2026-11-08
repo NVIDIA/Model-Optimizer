@@ -393,15 +393,6 @@ class HFDFlashModel(DFlashModel):
         """Initialize DFlash draft module."""
         super().modify(config)
 
-        # The label alignment is the variant's own (_label_shift), which the export writes as
-        # shift_label; a config naming it could only repeat or contradict it.
-        if "shift_label" in config.dflash_architecture_config:
-            raise ValueError(
-                "dflash_architecture_config.shift_label is not a setting: projector_type fixes "
-                "the label alignment (dspark and domino predict the token at anchor + k + 1, the "
-                "others the token at anchor + k). Remove it."
-            )
-
         self.dflash_fp32_master_weights = config.dflash_fp32_master_weights
 
         base_config = self._base_llm_config
