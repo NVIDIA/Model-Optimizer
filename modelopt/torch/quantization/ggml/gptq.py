@@ -22,6 +22,7 @@ import torch
 from ..extensions import get_cuda_ext_ggml
 from ..utils.calib_utils import GPTQHelper, register_gptq_helper
 from .common import floored_second_moments, pin_packed_weight
+from .gsq import _GSQ_CAPTURE
 from .registry import GGML_FORMAT_REGISTRY
 
 __all__ = ["GGMLGPTQHelper", "gptq_group_update"]
@@ -94,12 +95,17 @@ class GGMLGPTQHelper(GPTQHelper):
         """Run the GPTQ update, then pin the chosen payload to the weight quantizer."""
         weight = self.module.weight if weight is None else weight
         self._weight_dtype = weight.dtype
+        capture = _GSQ_CAPTURE.get()
+        teacher = weight.detach().clone() if capture is not None else None
+        covariance = self.hessian.detach().clone() if capture is not None else None
         super().update_weights(block_size, perc_damp, weight, device)
         if self._unrounded is not None:
             weight.data.copy_(self._unrounded.reshape(weight.shape))
         quantizer = self.weight_quantizer
         importance = None if self._importance is None else self._importance.to(weight.device)
         pin_packed_weight(quantizer, quantizer.num_bits, self._packed.to(weight.device), importance)
+        if capture is not None:
+            capture(self, teacher, covariance, self._packed)
         self._packed = self._unrounded = self._importance = None
 
     def _blockwise_update(self, block_size):
