@@ -59,7 +59,6 @@ def _get_domino_config(block_size=BLOCK_SIZE, num_layers=NUM_DRAFT_LAYERS):
         "gru_hidden_dim": GRU_HIDDEN_DIM,
         "emb_dim": EMB_DIM,
         "pure_draft_prefix_len": 1,
-        "shift_label": True,
     }
     return config
 

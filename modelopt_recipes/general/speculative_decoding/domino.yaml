@@ -86,4 +86,3 @@ dflash:
     emb_dim: 256
     gru_hidden_dim: 1024
     pure_draft_prefix_len: 1
-    shift_label: true
