@@ -239,6 +239,13 @@ class KDTrainer(ModelOptHFTrainer):
                     outputs = model(**kd_inputs)
                     if self._kd_loss_alpha < 1.0:
                         ce_loss = self._liger_loss_func(outputs, labels, **kwargs)
+                        # Called here and not through the parent's compute_loss, which scales CE by
+                        # the world size when num_items_in_batch is the global count; the KD terms
+                        # are scaled alike, and the blend's ratio must survive it.
+                        if kwargs.get("num_items_in_batch") is not None and getattr(
+                            self.args, "average_tokens_across_devices", False
+                        ):
+                            ce_loss = ce_loss * self.args.world_size
         else:
             ce_loss, outputs = super().compute_loss(model, inputs, return_outputs=True, **kwargs)
             batch_size = find_batch_size(inputs)
