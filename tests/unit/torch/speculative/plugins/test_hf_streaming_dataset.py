@@ -669,9 +669,10 @@ def test_serialized_empty_conversations_falls_back_to_messages(tiny_tokenizer, c
         ("tools", '{"type": "function"}'),
         ("tools", [1]),
         ("tools", "[1]"),
+        ("reasoning_effort", {"effort": "high"}),
     ],
 )
-def test_getitem_resamples_malformed_fields(tiny_tokenizer, field, value):
+def test_getitem_resamples_malformed_fields(tiny_tokenizer, project_root_path, field, value):
     class EchoDataset(StreamingDataset):
         def _fetch(self, sample):
             return sample
@@ -681,25 +682,40 @@ def test_getitem_resamples_malformed_fields(tiny_tokenizer, field, value):
 
     tiny_tokenizer.chat_template = "{{ messages[0]['content'] }}"
     valid = {"conversation_id": "valid", "messages": [{"role": "user", "content": "hello"}]}
+    if field == "reasoning_effort":
+        tiny_tokenizer.chat_template = (
+            project_root_path
+            / "tools/launcher/examples/openai/gpt-oss-20b/chat_template_train.jinja"
+        ).read_text()
+        valid["reasoning_effort"] = "high"
     malformed = {**valid, "conversation_id": "malformed", field: value}
     dataset = EchoDataset([malformed, valid], tiny_tokenizer)
     sample = dataset[0]
     assert sample["cid"] == "valid"
-    assert sample["token_ids"] == tiny_tokenizer("hello", add_special_tokens=False)["input_ids"]
+    expected = (
+        tiny_tokenizer.apply_chat_template(
+            valid["messages"],
+            reasoning_effort="high",
+            add_generation_prompt=False,
+            return_dict=False,
+        )
+        if field == "reasoning_effort"
+        else tiny_tokenizer("hello", add_special_tokens=False)["input_ids"]
+    )
+    assert sample["token_ids"] == expected
 
 
 @pytest.mark.parametrize("tools", [[], "[]"])
-@pytest.mark.parametrize("template_mapping", [False, True])
-def test_empty_tools_preserve_template_semantics(tiny_tokenizer, tools, template_mapping):
-    if template_mapping:
-        tiny_tokenizer.chat_template = {
-            "default": "{{ messages[0]['content'] }}",
-            "tool_use": "tool {{ messages[0]['content'] }}",
-        }
-    else:
+@pytest.mark.parametrize("template_kind", ["single", "default", "tool_use_only"])
+def test_empty_tools_preserve_template_semantics(tiny_tokenizer, tools, template_kind):
+    if template_kind == "single":
         tiny_tokenizer.chat_template = (
             "{% if tools is not none %}tool {% endif %}{{ messages[0]['content'] }}"
         )
+    else:
+        tiny_tokenizer.chat_template = {"tool_use": "tool {{ messages[0]['content'] }}"}
+        if template_kind == "default":
+            tiny_tokenizer.chat_template["default"] = "{{ messages[0]['content'] }}"
     entry = {
         "conversation_id": "no-tools",
         "messages": [{"role": "user", "content": "hello"}],
@@ -707,5 +723,5 @@ def test_empty_tools_preserve_template_semantics(tiny_tokenizer, tools, template
     }
     sample = StreamingDataset([entry], tiny_tokenizer)._tokenize_entry(entry)
     assert sample is not None
-    expected = "hello" if template_mapping else "tool hello"
+    expected = "hello" if template_kind == "default" else "tool hello"
     assert sample["token_ids"] == tiny_tokenizer(expected, add_special_tokens=False)["input_ids"]

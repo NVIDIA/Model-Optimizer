@@ -145,6 +145,8 @@ Streaming input accepts `conversations` or `messages` as a list or a JSON-encode
 Per-row `tools`, `reasoning_effort`, `builtin_tools`, and `model_identity` are passed to
 the chat template; `tools` can also be JSON-encoded. Include these fields when the
 conversation depends on them so training uses the same tokenization.
+When provided, `reasoning_effort` must be a string; malformed values are skipped
+through the dataset's resampling path.
 
 ## Training a Standalone (External) Draft Model
 

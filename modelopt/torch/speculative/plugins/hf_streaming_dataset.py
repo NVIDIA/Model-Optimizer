@@ -329,7 +329,14 @@ class StreamingDataset(Dataset):
             isinstance(tools, list) and all(isinstance(tool, dict) for tool in tools)
         ):
             return None
-        if tools == [] and isinstance(self.tokenizer.chat_template, dict):
+        reasoning_effort = template_kwargs.get("reasoning_effort")
+        if reasoning_effort is not None and not isinstance(reasoning_effort, str):
+            return None
+        if (
+            tools == []
+            and isinstance(self.tokenizer.chat_template, dict)
+            and "default" in self.tokenizer.chat_template
+        ):
             template_kwargs["chat_template"] = self.tokenizer.get_chat_template()
         input_ids, loss_mask = _tokenize_with_loss_mask(
             self.tokenizer,
