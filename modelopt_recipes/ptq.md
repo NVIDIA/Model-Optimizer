@@ -257,7 +257,8 @@ How the quantization scales are searched. The default (no suffix) is `max`.
   `input_scale == 1.0`) or to take expert activation calibration out of the
   picture.
 - **`gptq`** (`nvfp4_default-kv_none-gptq`) — GPTQ layerwise calibration of the
-  weight scales; writes layerwise checkpoints. GPTQ is best established for
+  weight scales. Resume checkpointing is opt-in (set `layerwise.checkpoint_dir`;
+  it raises on multi-process jobs, so single-process runs only). GPTQ is best established for
   **INT4 weight-only** quantization; its effectiveness on **NVFP4** weight
   quantization varies model by model — it tends to help most when the other
   recipes show a larger accuracy loss. Applying GPTQ to **MoE** models is still

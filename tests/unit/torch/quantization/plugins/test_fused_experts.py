@@ -22,6 +22,7 @@ import warnings
 import weakref
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -55,8 +56,11 @@ from modelopt.torch.export.quant_utils import (
 from modelopt.torch.export.unified_export_hf import _prepare_moe_inputs
 from modelopt.torch.models import is_moe
 from modelopt.torch.opt.conversion import ApplyModeError
+from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.model_calib import (
     _expert_slices,
     _register_weight_input_hooks,
@@ -687,27 +691,58 @@ class TestIterWeightQuantizersForCalibration:
         assert quantizers_only, "expected per-expert weight quantizers"
         assert [id(q) for q in quantizers_only] == [id(q) for q in from_weights]
 
-    def test_does_not_index_the_fused_weight(self):
-        """The point of the override: no ``weight[idx]``, which is the per-expert collective."""
-        experts = self._convert(_TinyMoEModel())
-
+    @staticmethod
+    def _forbid_indexing(experts):
         class _NoIndexing(torch.Tensor):
             @staticmethod
             def __new__(cls, data):
                 return torch.Tensor._make_subclass(cls, data, False)
 
             def __getitem__(self, item):
-                raise AssertionError("iter_weight_quantizers_for_calibration indexed the weight")
+                raise AssertionError("indexed the weight")
 
         for name in (experts._first_proj_attr, "down_proj"):
             weight = getattr(experts, name)
             setattr(experts, name, nn.Parameter(_NoIndexing(weight.data), requires_grad=False))
+
+    def test_does_not_index_the_fused_weight(self):
+        """The point of the override: no ``weight[idx]``, which is the per-expert collective."""
+        experts = self._convert(_TinyMoEModel())
+        self._forbid_indexing(experts)
 
         assert list(experts.iter_weight_quantizers_for_calibration())
         # The weight iterator is the expensive one; it must still slice, or the guard above is
         # not actually testing anything.
         with pytest.raises(AssertionError, match="indexed the weight"):
             list(experts.iter_weights_for_calibration())
+
+    def test_auto_quantize_leaves_experts_unindexed_when_no_candidate_pinned_codes(self):
+        """Writing back selected codes after a search reads only quantizers when nothing is pinned."""
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        TestQuantFusedExperts._cleanup_registry(expert_type)
+        seq_len = NUM_EXPERTS // TOP_K
+        batch = (
+            torch.randn(seq_len, HIDDEN_DIM),
+            torch.arange(NUM_EXPERTS).reshape(seq_len, TOP_K),
+            torch.ones(seq_len, TOP_K) / TOP_K,
+        )
+        try:
+            mtq.auto_quantize(
+                model,
+                constraints={"effective_bits": 8.0},
+                quantization_formats=[mtq.FP8_DEFAULT_CFG],
+                data_loader=[batch],
+                forward_step=lambda m, b: m.moe.experts(*b),
+                loss_func=lambda output, b: output.square().sum(),
+                num_calib_steps=1,
+                num_score_steps=1,
+            )
+            self._forbid_indexing(model.moe.experts)
+
+            _AutoQuantizeBaseSearcher._write_selected_codes_to_weights(SimpleNamespace(model=model))
+        finally:
+            TestQuantFusedExperts._cleanup_registry(expert_type)
 
 
 class TestExportFusedExperts:
@@ -2697,8 +2732,61 @@ def test_native_fp8_experts_reject_packed_weight_updates(cfg, algorithm):
         name: getattr(experts, name).detach().clone() for name in ("gate_up_proj", "down_proj")
     }
     mtq.calibrate(experts, algorithm, forward_loop=lambda m: m(inputs, indices, routing))
+    if algorithm == "imatrix":
+        # IQ formats keep the weight unrounded and pin the codes imatrix chose instead.
+        quantizers = [
+            q for q in experts.modules() if getattr(q, "num_bits", None) == cfg["num_bits"]
+        ]
+        assert quantizers
+        assert all(pinned_packed_weight(q, cfg["num_bits"]) is not None for q in quantizers)
+        return
     for name, weight in unpacked.items():
         assert not torch.equal(getattr(experts, name), weight)
+
+
+@pytest.mark.parametrize("algorithm", ["imatrix", {"method": "gptq", "block_size": 256}])
+def test_native_fp8_experts_calibrate_in_the_dtype_their_forward_runs_in(algorithm):
+    # A BF16 forward encodes each expert cast to BF16; calibration must see those same weights, or
+    # the ranges max records and the codes GPTQ or imatrix pin are not the ones the forward uses.
+    torch.manual_seed(42)
+    config = PretrainedConfig(
+        hidden_size=256,
+        intermediate_size=256,
+        num_experts=2,
+        hidden_act="silu",
+        dtype=torch.bfloat16,
+    )
+    experts = FP8Experts(config, block_size=None, has_gate=True)
+    for name in ("gate_up_proj", "down_proj"):
+        weight = getattr(experts, name)
+        with torch.no_grad():
+            weight.copy_(torch.randn(weight.shape).to(weight.dtype))
+            getattr(experts, f"{name}_scale_inv").fill_(0.02)
+    cfg = {"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"}
+    quant_cfg = [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*weight_quantizer", "cfg": cfg},
+    ]
+    mtq.quantize(experts, {"quant_cfg": quant_cfg, "algorithm": "max"}, forward_loop=None)
+    for name in ("gate_up_proj", "down_proj"):
+        for idx, quantizer in enumerate(getattr(experts, f"{name}_weight_quantizers")):
+            blocks = experts.get_expert_weight(name, idx, torch.bfloat16).float().reshape(-1, 256)
+            torch.testing.assert_close(
+                quantizer.amax.flatten().float(), blocks.abs().amax(dim=1), rtol=0, atol=0
+            )
+    experts.unpack_weight()
+    inputs = torch.randn(64, 256, dtype=torch.bfloat16)
+    indices = (torch.arange(64) % 2).unsqueeze(1)
+    routing = torch.ones(64, 1, dtype=torch.bfloat16)
+    mtq.calibrate(experts, algorithm, forward_loop=lambda m: m(inputs, indices, routing))
+
+    iq2_xxs = GGML_FORMAT_REGISTRY["iq2_xxs"]
+    for name in ("gate_up_proj", "down_proj"):
+        for idx, quantizer in enumerate(getattr(experts, f"{name}_weight_quantizers")):
+            forward_weight = experts.get_expert_weight(name, idx, inputs.dtype)
+            assert torch.equal(
+                iq2_xxs.pack(forward_weight, quantizer), pinned_packed_weight(quantizer, "iq2_xxs")
+            )
 
 
 # ---------------------------------------------------------------------------

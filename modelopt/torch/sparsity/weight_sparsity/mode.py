@@ -117,7 +117,7 @@ class SparseMagnitudeModeDescriptor(ModeDescriptor):
     @property
     def next_modes(self) -> set[str] | None:
         """Specifies the next modes for the mode."""
-        return {"export_sparse", "kd_loss", "quantize"}
+        return {"export_sparse", "kd_loss", "quantize", "sparse_attention"}
 
     @property
     def export_mode(self) -> str | None:

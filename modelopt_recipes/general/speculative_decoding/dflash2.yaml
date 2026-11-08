@@ -58,7 +58,9 @@ training:
   max_grad_norm: 1.0
   dataloader_drop_last: true
   bf16: true
-  tf32: true
+  # Off: with dflash_use_torch_compile, TF32 makes Inductor fail at the first step on PyTorch
+  # 2.9 and 2.10.
+  tf32: false
   remove_unused_columns: false
   # Safe default: the selector params are unused when
   # dflash_selector_loss_alpha == 0, which would otherwise trip DDP.
@@ -70,7 +72,10 @@ training:
 dflash:
   dflash_block_size: 16
   dflash_num_anchors: 256
-  dflash_use_torch_compile: false
+  # Both fix the draft's block count at dflash_num_anchors. With very short answers that
+  # padding outweighs their speedup, so set both false there.
+  dflash_use_torch_compile: true
+  dflash_use_flex_attention: true
   dflash_self_logit_distillation: false
   # gamma for exponential loss decay (block_size=16 -> 7).
   dflash_loss_decay_factor: 7.0

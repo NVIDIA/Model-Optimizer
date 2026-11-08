@@ -1241,11 +1241,22 @@ class _QuantFP8Experts(_QuantFusedExperts):
             raise NotImplementedError("Only FP8 E4M3 native expert weights are supported")
         super()._setup()
 
+    def _materialized_dtype(self) -> torch.dtype:
+        """The dtype of the checkpoint's other weights, which the forward casts each expert to.
+
+        Experts unpacked, or dequantized with no dtype asked for, take it, so calibration encodes
+        the weights the fake-quantized forward runs on. The default dtype without a config dtype.
+        """
+        dtype = getattr(self.config, "dtype", None)
+        if isinstance(dtype, torch.dtype) and dtype.is_floating_point and dtype.itemsize > 1:
+            return dtype
+        return torch.get_default_dtype()
+
     def get_expert_weight(self, name, idx, dtype=None):
         weight = self._local_experts(getattr(self, name))[idx]
         if weight.element_size() > 1:
             return weight if dtype is None else weight.to(dtype)
-        dtype = dtype or torch.get_default_dtype()
+        dtype = dtype or self._materialized_dtype()
         scales = self._local_experts(getattr(self, f"{name}_scale_inv"))[idx].float()
         rows, cols = self.block_size or (weight.shape[0] // scales.shape[0], weight.shape[1])
         scales = scales.repeat_interleave(rows, 0).repeat_interleave(cols, 1)
@@ -1278,11 +1289,12 @@ class _QuantFP8Experts(_QuantFusedExperts):
                 f"{type(self).__name__} cannot unpack native FP8 expert weights sharded over the "
                 "experts. Quantize the model without expert parallelism."
             )
+        dtype = self._materialized_dtype()
         for name in names:
             weight = getattr(self, name)
-            unpacked = torch.empty_like(weight, dtype=torch.get_default_dtype())
+            unpacked = torch.empty_like(weight, dtype=dtype)
             for idx in range(self.num_experts):
-                unpacked[idx].copy_(self.get_expert_weight(name, idx))
+                unpacked[idx].copy_(self.get_expert_weight(name, idx, dtype))
             setattr(self, name, nn.Parameter(unpacked, requires_grad=False))
 
 
@@ -1674,13 +1686,7 @@ def register_fused_experts_on_the_fly(model):
         visited_types.add(mod_type)
 
         wrapper = _fused_experts_wrapper(module)
-        if wrapper is not None and (
-            getattr(module, "is_transposed", False)
-            # Stored `(num_experts, out_dim, in_dim)`, the first projection takes the dim down_proj
-            # puts out. A gated container's first projection is `2 * intermediate`, so its shapes
-            # give a transposed layout away whether it says so or not.
-            or getattr(module, wrapper._first_proj_attr).shape[-1] != module.down_proj.shape[1]
-        ):
+        if wrapper is not None and _transposed_experts([module]):
             # `_fused_experts_wrapper` matches on parameter SHAPE only, so it also claims a
             # transposed `(num_experts, in_dim, out_dim)` container. The fused-experts export
             # (export/moe_utils.py) then splits gate/up by slicing dim 1 at `intermediate_dim`, the
@@ -1700,6 +1706,48 @@ def register_fused_experts_on_the_fly(model):
                 f"registering with {wrapper.__name__}.\033[0m"
             )
             QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(wrapper)
+
+
+def _transposed_experts(modules) -> list[str]:
+    """Names of the expert classes in ``modules`` stored ``(num_experts, in_dim, out_dim)``.
+
+    A container may say so (``is_transposed``), and a gated fused-experts one shows it either way:
+    stored ``(num_experts, out_dim, in_dim)``, its first projection takes the dim ``down_proj`` puts
+    out, which stored transposed it never does. A non-gated container (``up_proj``, as Nemotron-H's)
+    matches no :func:`_fused_experts_wrapper`, so only its ``is_transposed`` is read, and its own
+    wrapper is responsible for the layout.
+    """
+    return sorted(
+        {
+            type(module).__name__
+            for module in modules
+            if getattr(module, "is_transposed", False)
+            or (
+                (wrapper := _fused_experts_wrapper(module)) is not None
+                and getattr(module, wrapper._first_proj_attr).shape[-1] != module.down_proj.shape[1]
+            )
+        }
+    )
+
+
+def _eager_only_experts(modules) -> list[str]:
+    """Names of the expert classes in ``modules`` ModelOpt quantizes on the eager forward only.
+
+    A class with its own quantized wrapper -- GPT-OSS's quantizes down_proj's input by intercepting
+    the eager forward's bmm/matmul -- only works on the eager forward, and so does a fused-experts
+    wrapper that says so (FP8's). The registry lookup caches the dynamic class it generates, as
+    quantizing the module would. Those wrappers register when their module is imported;
+    register_fused_experts_on_the_fly, which may run after this, registers only the generic
+    wrapper, which is not eager-only.
+    """
+    return sorted(
+        {
+            type(module).__name__
+            for module in modules
+            if (wrapper := QuantModuleRegistry.get(type(module))) is not None
+            and (not issubclass(wrapper, _QuantFusedExperts) or wrapper._eager_only)
+        }
+    )
 
 
 def normalize_experts_impl_on_the_fly(model):
@@ -1741,19 +1789,8 @@ def normalize_experts_impl_on_the_fly(model):
         ("grouped_mm",) if _HAS_GROUPED_LINEAR else ()
     )
     fallback_impl = "grouped_mm" if _HAS_GROUPED_LINEAR else "eager"
-    # A class with its own quantized wrapper -- GPT-OSS's quantizes down_proj's input by intercepting
-    # the eager forward's bmm/matmul -- only works on the eager forward, and so does a fused-experts
-    # wrapper that says so (FP8's), so keep main's forced eager for such a model. Those register
-    # when their module is imported; register_fused_experts_on_the_fly, which may run after this,
-    # registers only the generic wrapper, which is not eager-only.
-    eager_only = sorted(
-        {
-            type(module).__name__
-            for module in fused_experts
-            if (wrapper := QuantModuleRegistry.get(type(module))) is not None
-            and (not issubclass(wrapper, _QuantFusedExperts) or wrapper._eager_only)
-        }
-    )
+    # Experts that quantize on the eager forward only keep main's forced eager.
+    eager_only = _eager_only_experts(fused_experts)
 
     def _configs(cfg):
         if cfg is not None:

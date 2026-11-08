@@ -397,9 +397,11 @@ class TestCandidateSelectorAlignment:
             torch.nn.init.normal_(selector.successor_codebook, std=0.5)
         return selector
 
-    def _selector_terms(self, selector, target_ids, candidate_ids):
+    def _selector_terms(self, selector, target_ids, candidate_ids, loss_weights=None):
         """Drive HFDFlash2Model._selector_loss with a hand-built candidate set."""
         b, length, k = candidate_ids.shape
+        supervised = torch.ones(b, length, dtype=torch.double)
+        weights = supervised if loss_weights is None else loss_weights
         model = HFDFlash2Model.__new__(HFDFlash2Model)
         model.dflash_module = type("_M", (), {"candidate_selector": selector})()
         logits = torch.zeros(b, length, 32, dtype=torch.double)
@@ -410,9 +412,13 @@ class TestCandidateSelectorAlignment:
             model,
             logits,
             target_ids,
-            torch.randn(b, length, 8, dtype=torch.double),
+            torch.randn(
+                b, length, 8, generator=torch.Generator().manual_seed(1), dtype=torch.double
+            ),
             torch.zeros(b, length, dtype=torch.long),
-            torch.ones(b, length, dtype=torch.double),
+            supervised,
+            weights,
+            weights.sum(),
         )
 
     def test_a_miss_carries_no_selector_gradient(self):
@@ -452,6 +458,26 @@ class TestCandidateSelectorAlignment:
         selector.zero_grad()
         loss.backward()
         assert selector.successor_codebook.grad.abs().sum() > 0.0
+
+    def test_positions_weigh_like_the_backbone_and_misses_stay_in_the_denominator(self):
+        """The term is the backbone-weighted mean over every supervised position.
+
+        A miss adds nothing to the numerator but keeps its weight in the denominator, so
+        the term does not grow as backbone recall drops.
+        """
+        selector = self._selector(vocab=32, top_k=2)
+        candidates = torch.tensor([[[5, 6], [5, 6], [5, 6]]])
+        targets = torch.tensor([[5, 6, 9]])  # two covered positions, one miss
+        weights = torch.tensor([[1.0, 3.0, 2.0]], dtype=torch.double)
+
+        loss, _, _ = self._selector_terms(selector, targets, candidates, weights)
+        per_position = [
+            self._selector_terms(selector, targets, candidates, torch.eye(3)[i : i + 1].double())[0]
+            for i in range(3)
+        ]
+        assert float(per_position[2]) == 0.0
+        expected = sum(w * term for w, term in zip(weights[0], per_position)) / weights.sum()
+        torch.testing.assert_close(loss, expected)
 
     def test_greedy_path_position_zero_is_seeded_by_the_anchor(self):
         """``greedy_path`` position 0 scores against the anchor, i.e. block offset 1.
