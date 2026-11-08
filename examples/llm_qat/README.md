@@ -303,7 +303,7 @@ python dataset_utils.py \
   --model_name_or_path Qwen/Qwen3-8B
 ```
 
-The cached dataset is stored under `.dataset_cache/tokenized/` by default (configurable via `--dataset_cache_dir`). The cache key depends on the dataset config (`blend_size`, `splits`, sources) and tokenizer — changing `train_samples` or `eval_samples` in the training config does **not** invalidate the cache.
+The cached dataset is stored under `.dataset_cache/tokenized/` by default (configurable via `--dataset_cache_dir`). The cache key depends on the dataset config (`blend_size`, `splits`, sources), the tokenizer and the shuffle settings (`--dataset_seed`, `--shuffle`, `--shuffle_buffer`) — changing `train_samples` or `eval_samples` in the training config does **not** invalidate the cache, and neither does the number of processes that build it: the cache is the same blend whether `dataset_utils.py` or a multi-GPU run builds it.
 
 </details>
 
