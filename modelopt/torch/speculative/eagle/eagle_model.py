@@ -61,33 +61,34 @@ class EagleModel(DynamicModule):
         hidden_states_history: list[torch.Tensor],
         *,
         process_group: torch.distributed.ProcessGroup | None = None,
+        sequence_parallel: bool = False,
     ) -> torch.Tensor:
         """Sample whole hidden vectors from history in either batch- or sequence-first layout.
 
-        Stack/gather favors sampling speed but materializes a full history copy that autograd
-        retains for backward. Successive ``torch.where`` selections produced identical outputs
-        and gradients with lower peak memory, but were slower in our GPU benchmark.
-
-        A synthetic four-TTT-round HSM forward/backward benchmark with batch size 1, hidden size
-        4,096, and BF16 peaked at approximately 1.38 GiB for 8,192 tokens and 2.75 GiB for 16,384
-        tokens on GB300 (PyTorch 2.9/CUDA 13).
-        This covers history and sampling, excluding model weights, optimizer state, and transformer
-        activations; it is not a full-model training-memory estimate.
+        With sequence parallelism, history is sequence-first and local to each rank. Sample
+        global indices before slicing so SP preserves the non-SP choices and RNG consumption.
         """
         stacked = torch.stack(hidden_states_history, dim=0)
         num_candidates, dim0, dim1, hidden_size = stacked.shape
+        tp_size = (
+            torch.distributed.get_world_size(process_group) if process_group is not None else 1
+        )
         candidate_indices = torch.randint(
             num_candidates,
-            (1, dim0, dim1, 1),
+            (1, dim0 * tp_size if sequence_parallel else dim0, dim1, 1),
             device=stacked.device,
         )
-        if process_group is not None and torch.distributed.get_world_size(process_group) > 1:
-            # Replicated activations must use the same candidates on every TP rank.
+        if process_group is not None and tp_size > 1:
+            # All TP ranks must agree on the global sampling choices.
             torch.distributed.broadcast(
                 candidate_indices,
                 src=torch.distributed.get_global_rank(process_group, 0),
                 group=process_group,
             )
+            if sequence_parallel:
+                candidate_indices = candidate_indices.chunk(tp_size, dim=1)[
+                    torch.distributed.get_rank(process_group)
+                ]
         return stacked.gather(
             0,
             candidate_indices.expand(-1, -1, -1, hidden_size),

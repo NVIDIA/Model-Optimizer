@@ -20,7 +20,6 @@ import torch
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from megatron.core.parallel_state import get_tensor_model_parallel_group
 
-import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.plugins.megatron_eagle import _DynamicEagleGPTModel
 
@@ -46,7 +45,6 @@ def _test_speculative_gpt_model(
     vocab_size = 64
     batch_size = 2
 
-    sparse_sp = sequence_parallel and mix_hidden_states_mode == "sparse_replace"
     create_model = partial(
         get_mcore_gpt_model,
         tensor_model_parallel_size=size,
@@ -60,9 +58,7 @@ def _test_speculative_gpt_model(
         hidden_dropout=0.0,
         attention_dropout=0.0,
     )
-    model = create_model(
-        initialize_megatron=True, sequence_parallel=sequence_parallel and not sparse_sp
-    ).cuda()
+    model = create_model(initialize_megatron=True, sequence_parallel=sequence_parallel).cuda()
 
     if algo in ("eagle1", "eagle3"):
         mtsp_config = deepcopy(ALGO_TO_CONFIG["eagle3"])
@@ -83,7 +79,7 @@ def _test_speculative_gpt_model(
                     if mix_hidden_states_mode == "unknown"
                     else mix_hidden_states_mode
                 ),
-                eagle_ttt_steps=3,
+                eagle_ttt_steps=4,
             )
 
         model = mtsp.convert(model, mtsp_config)
@@ -115,31 +111,11 @@ def _test_speculative_gpt_model(
     # Bfloat16
     model = model.to(torch.bfloat16)
 
-    if sparse_sp:
-        # Restore a non-SP checkpoint into an SP model for generation.
-        restored = create_model(initialize_megatron=False, sequence_parallel=True).cuda()
-        mto.restore_from_modelopt_state(restored, mto.modelopt_state(model))
-        restored = restored.to(torch.bfloat16)
-        restored.load_state_dict(model.state_dict())
-        model = restored
-
     # Prepare inputs for forward.
     prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
     attention_mask = torch.tril(torch.ones((1, 1, max_sequence_length, max_sequence_length))).cuda()
     position_ids = torch.arange(max_sequence_length, dtype=torch.long).unsqueeze(0).cuda()
     attention_mask = attention_mask < 0.5
-
-    if sparse_sp:
-        labels = prompt_tokens.clone()
-        for forward_labels in (None, labels):
-            with pytest.raises(ValueError):
-                model(prompt_tokens, position_ids, attention_mask, labels=forward_labels)
-        # Rejected mixing forwards must leave the restored model usable for generation.
-        model.eval()
-        with torch.no_grad():
-            base_token, draft_tokens = model.pseudo_speculative_generate(prompt_tokens, steps=1)
-        assert base_token.shape == draft_tokens.shape == (batch_size, 1)
-        return
 
     if mix_hidden_states_mode == "unknown":
         model.eagle_mix_hidden_states_mode = "unknown"
@@ -193,7 +169,7 @@ def _test_speculative_gpt_model(
             assert grad is not None and torch.isfinite(grad).all()
             assert torch.count_nonzero(grad) > 0
 
-            if sequence_parallel and mix_hidden_states_mode == "uniform_layer_sample":
+            if sequence_parallel:
                 reference = create_model(initialize_megatron=False, sequence_parallel=False).cuda()
                 reference = mtsp.convert(reference, deepcopy(mtsp_config)).to(torch.bfloat16)
                 reference.load_state_dict(model.state_dict())
@@ -232,6 +208,7 @@ def _test_speculative_gpt_model(
         ("eagle3", 1, "swiglu", "RMSNorm", "uniform_layer_sample", False),
         ("eagle3", 1, "swiglu", "RMSNorm", "uniform_layer_sample", True),
         ("eagle1", 1, "swiglu", "RMSNorm", "uniform_layer_sample", True),
+        ("eagle1", 1, "swiglu", "RMSNorm", "sparse_replace", True),
     ],
 )
 def test_speculative_gpt_model(
