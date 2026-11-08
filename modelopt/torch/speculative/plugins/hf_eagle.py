@@ -32,6 +32,7 @@ from ...export.plugins.hf_spec_export import EagleExporter, SpeculativeDecodingE
 from ..eagle.conversion import EagleDMRegistry
 from ..eagle.eagle_model import EagleModel
 from ..eagle.utils import expand_mask, make_causal_mask
+from ..losses import masked_soft_target_cross_entropy
 from ..utils import (
     AcceptanceRateValidation,
     _setup_kimi_k2_decoder,
@@ -886,14 +887,12 @@ class HFEagleModel(EagleModel):
         loss_mask,
     ):
         """Function for EAGLE loss computing."""
-        loss_mask = loss_mask[:, : eagle_logits.shape[1], None]
-        eagle_logsoft = torch.log_softmax(eagle_logits, dim=2)
-        classification_loss = -torch.sum(
-            torch.sum(loss_mask * base_output_softmax_logits * eagle_logsoft, 2)
-        ) / (loss_mask.sum() + 1e-5)
+        classification_loss = masked_soft_target_cross_entropy(
+            base_output_softmax_logits, eagle_logits, loss_mask
+        )
         # Compute accuracy (returned as tensor to avoid sync; .item() called after TTT loop)
         eagle_predict_tok = eagle_logits.detach().argmax(dim=-1)
-        valid = loss_mask[:, :, 0].bool()
+        valid = loss_mask[:, : eagle_logits.shape[1]].bool()
         correct = (base_output_predict_tok == eagle_predict_tok) & valid
         denom = valid.sum().clamp_min(1).float()
         accuracy = correct.sum().float() / denom

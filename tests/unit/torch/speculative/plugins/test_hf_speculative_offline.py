@@ -18,6 +18,7 @@
 import argparse
 import importlib.util
 import os
+import pickle
 
 # ---------------------------------------------------------------------------
 # Load eagle_utils from examples/ via importlib (not a package, so no import).
@@ -547,11 +548,14 @@ def _make_data_args(sample_size, tmp_path, n_files=5):
 
 
 def test_sample_size_positive_truncates(tmp_path):
-    """sample_size > 0 should truncate the dataset to that many samples."""
-    data_args = _make_data_args(sample_size=3, tmp_path=tmp_path, n_files=5)
+    """Sample selection uses stable lexical order before applying the limit."""
+    data_args = _make_data_args(sample_size=3, tmp_path=tmp_path, n_files=12)
     tokenizer = MagicMock()
     module = make_speculative_data_module(tokenizer, data_args, train_len=8)
     assert len(module["train_dataset"]) == 3
+    assert module["train_dataset"].dumped_files == [
+        str(tmp_path / f"sample_{i}.pt") for i in (0, 1, 10)
+    ]
 
 
 def test_sample_size_minus_one_uses_all(tmp_path):
@@ -828,3 +832,70 @@ def test_collator_batches_multiple(tmp_path):
         train_len,
         HIDDEN_SIZE,
     )
+
+
+def test_offline_custom_features_and_collation(tmp_path):
+    """Native state layouts reuse mask handling, padding and truncation without EAGLE metadata."""
+    mapping = {"raw_state": "target_state", "head_input": "teacher_hidden"}
+    records = []
+    files = []
+    for length in (4, 12):
+        record = {
+            "input_ids": torch.arange(length),
+            "loss_mask": torch.arange(length) % 2,
+            "raw_state": torch.randn(length, 4, 8),
+            "head_input": torch.randn(length, 8),
+            "hidden_states_prenorm": True,
+        }
+        path = tmp_path / f"{length}.pt"
+        torch.save(record, path)
+        records.append(record)
+        files.append(path)
+    dataset = OfflineSupervisedDataset(files, answer_only_loss=True, feature_key_mapping=mapping)
+    collator = EagleOfflineDataCollator(
+        8,
+        batch_keys=("input_ids", "attention_mask", "loss_mask"),
+        feature_keys=tuple(mapping.values()),
+        feature_output_key="mtp_boost_inputs",
+    )
+    batch = collator([dataset[0], dataset[1]])
+    assert set(batch) == {"input_ids", "attention_mask", "loss_mask", "mtp_boost_inputs"}
+    assert set(batch["mtp_boost_inputs"]) == set(mapping.values())
+    for i, record in enumerate(records):
+        length = min(len(record["input_ids"]), 8)
+        torch.testing.assert_close(batch["loss_mask"][i, :length], record["loss_mask"][:length])
+        assert not batch["attention_mask"][i, length:].any()
+        assert not batch["loss_mask"][i, length:].any()
+        for source, destination in mapping.items():
+            value = batch["mtp_boost_inputs"][destination][i]
+            torch.testing.assert_close(value[:length], record[source][:length])
+            assert not value[length:].any()
+
+
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [
+        ("missing", KeyError),
+        ("corrupt", pickle.UnpicklingError),
+        ("short_feature", ValueError),
+        ("long_feature", ValueError),
+    ],
+)
+def test_offline_dump_failure_identifies_file_without_substitution(tmp_path, failure, error):
+    bad_path, good_path = tmp_path / "bad.pt", tmp_path / "good.pt"
+    _make_offline_pt(good_path)
+    if failure == "corrupt":
+        bad_path.write_bytes(b"not a checkpoint")
+    elif failure == "missing":
+        torch.save({"input_ids": torch.arange(4)}, bad_path)
+    else:
+        data = _make_offline_pt(bad_path)
+        if failure == "short_feature":
+            data["hidden_states"] = data["hidden_states"][:-1]
+        else:
+            data["aux_hidden_states"] = torch.randn(SEQ_LEN + 1, 4, HIDDEN_SIZE)
+        torch.save(data, bad_path)
+    dataset = OfflineSupervisedDataset([bad_path, good_path])
+    with pytest.raises(error) as exc:
+        dataset[0]
+    assert str(bad_path) in "\n".join(exc.value.__notes__)

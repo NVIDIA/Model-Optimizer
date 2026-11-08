@@ -17,4 +17,5 @@
 
 from . import eagle, external, medusa, mode, plugins
 from .config import *
+from .losses import *
 from .speculative_decoding import *
