@@ -64,8 +64,11 @@ def _test_speculative_gpt_model(
         initialize_megatron=True, sequence_parallel=sequence_parallel and not sparse_sp
     ).cuda()
 
-    if algo == "eagle3":
-        mtsp_config = deepcopy(ALGO_TO_CONFIG[algo])
+    if algo in ("eagle1", "eagle3"):
+        mtsp_config = deepcopy(ALGO_TO_CONFIG["eagle3"])
+        mtsp_config["config"]["eagle_architecture_config"]["use_aux_hidden_state"] = (
+            algo == "eagle3"
+        )
 
         mtsp_config["config"]["eagle_architecture_config"]["num_hidden_layers"] = num_layers
         mtsp_config["config"]["eagle_architecture_config"]["hidden_size"] = model.config.hidden_size
@@ -84,12 +87,13 @@ def _test_speculative_gpt_model(
             )
 
         model = mtsp.convert(model, mtsp_config)
-        # The duplicated FC leaves initialization to the training/checkpoint loader.
-        torch.nn.init.normal_(
-            model.eagle_module.fc.weight,
-            std=0.02,
-            generator=torch.Generator(device="cuda").manual_seed(1234),
-        )
+        if algo == "eagle3":
+            # The duplicated FC leaves initialization to the training/checkpoint loader.
+            torch.nn.init.normal_(
+                model.eagle_module.fc.weight,
+                std=0.02,
+                generator=torch.Generator(device="cuda").manual_seed(1234),
+            )
 
         # Type checking
         assert isinstance(model, _DynamicEagleGPTModel)
@@ -149,7 +153,7 @@ def _test_speculative_gpt_model(
     assert logits.shape[1] == max_sequence_length
     assert logits.shape[2] == vocab_size / size
 
-    if algo == "eagle3":
+    if algo in ("eagle1", "eagle3"):
         labels = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
 
         def check_tp_inputs(module, inputs):
@@ -178,9 +182,16 @@ def _test_speculative_gpt_model(
         if mix_hidden_states_mode is not None:
             assert torch.isfinite(eagle_loss).all()
             eagle_loss.mean().backward()
-            fc_grad = model.eagle_module.fc.weight.grad
-            assert fc_grad is not None and torch.isfinite(fc_grad).all()
-            assert torch.count_nonzero(fc_grad) > 0
+            # EAGLE1 carries gradients through TTT outputs; EAGLE3 detaches them.
+            parameter_name = (
+                "fc.weight"
+                if algo == "eagle3"
+                else "decoder.layers.0.self_attention.linear_qkv.weight"
+            )
+            parameter = model.eagle_module.get_parameter(parameter_name)
+            grad = parameter.grad
+            assert grad is not None and torch.isfinite(grad).all()
+            assert torch.count_nonzero(grad) > 0
 
             if sequence_parallel and mix_hidden_states_mode == "uniform_layer_sample":
                 reference = create_model(initialize_megatron=False, sequence_parallel=False).cuda()
@@ -193,10 +204,11 @@ def _test_speculative_gpt_model(
                 reference_loss.mean().backward()
                 torch.testing.assert_close(eagle_loss, reference_loss, rtol=1e-2, atol=1e-3)
 
-                # Match Megatron's sum of replicated FC parameter gradients across SP shards.
-                sp_grad = fc_grad.detach().float().clone()
-                torch.distributed.all_reduce(sp_grad, group=get_tensor_model_parallel_group())
-                reference_grad = reference.eagle_module.fc.weight.grad.float()
+                # Match Megatron's sum for replicated SP parameters; QKV weights are TP-sharded.
+                sp_grad = grad.detach().float().clone()
+                if getattr(parameter, "sequence_parallel", False):
+                    torch.distributed.all_reduce(sp_grad, group=get_tensor_model_parallel_group())
+                reference_grad = reference.eagle_module.get_parameter(parameter_name).grad.float()
                 # Allow BF16 accumulation differences, but reject TP-scaled gradients.
                 assert (sp_grad - reference_grad).norm() <= 0.01 * reference_grad.norm()
 
@@ -219,6 +231,7 @@ def _test_speculative_gpt_model(
         ("eagle3", 1, "swiglu", "RMSNorm", None, True),
         ("eagle3", 1, "swiglu", "RMSNorm", "uniform_layer_sample", False),
         ("eagle3", 1, "swiglu", "RMSNorm", "uniform_layer_sample", True),
+        ("eagle1", 1, "swiglu", "RMSNorm", "uniform_layer_sample", True),
     ],
 )
 def test_speculative_gpt_model(

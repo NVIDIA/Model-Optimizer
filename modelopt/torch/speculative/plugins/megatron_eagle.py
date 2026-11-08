@@ -1183,7 +1183,7 @@ class _DynamicEagleGPTModel(EagleModel):
 
             if self.config.sequence_parallel:
                 eagle_module_output_hidden_states = gather_from_sequence_parallel_region(
-                    eagle_module_output_hidden_states
+                    eagle_module_output_hidden_states, tensor_parallel_output_grad=False
                 )
             eagle_module_output_hidden_states = torch.cat(
                 (
