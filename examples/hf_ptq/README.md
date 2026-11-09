@@ -840,15 +840,17 @@ After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build c
 
 ## Reproducible PTQ
 
-On the configurations we measured (Qwen3-30B-A3B NVFP4 on one and two GPUs, Qwen3-8B AWQ), repeating a run with the same model, data, recipe, batch size, hardware and software gave identical scales. What moved them was the calibration batch size: the default `--batch_size 0` probes it from free GPU memory, so another GPU or memory state silently calibrates with another batch size. `--deterministic` pins what the run still depends on: it requires an explicit `--batch_size`, seeds every random number generator and selects deterministic torch kernels. This is best effort, not a guarantee: an op without a deterministic kernel still runs and only warns. It costs some run time.
+Repeating a run with the same model, data, recipe, batch size, hardware and software gives identical scales. What moves them is what a sample is batched with. The default SDPA attention runs a sample with a different kernel when another sample in its batch is padded, and with yet another when the batch holds that sample alone, so the sample's activations differ in their last bits and the calibrated scales follow: by up to a few percent on the models we measured, more where a Mixture-of-Experts router sends a token to another expert. Which samples share a batch depends on the order of the calibration data and on `--batch_size`, and the default `--batch_size 0` probes the latter from free GPU memory, so another GPU or memory state silently calibrates differently.
+
+`--deterministic` removes that dependence. It calibrates with eager attention, which gives a sample the same activations in any batch, feeds the samples in an order fixed by their content (the SHA-256 of the text), seeds every random number generator and selects deterministic torch kernels (an op without one only warns). The scales then depend on which samples are used, not on their order in the dataset or on the batch size. That holds on the same GPU architecture and software versions, since another one runs other kernels, and for the same padded length. Eager attention takes more memory than SDPA, so it is not the default; `--attn_implementation eager` alone removes the dependence on the batch, without the sorting.
 
 ```bash
-python hf_ptq.py ... --batch_size 8 --deterministic --export_path run_a
-python hf_ptq.py ... --batch_size 8 --deterministic --export_path run_b
+python hf_ptq.py ... --deterministic --export_path run_a
+python hf_ptq.py ... --deterministic --export_path run_b  # the same samples in another order, or another --batch_size
 python -m modelopt.torch.quantization.utils.scale_compare run_a run_b
 ```
 
-`scale_compare` lists, per scale kind (`input_scale`, `weight_scale`, ...), how many tensors differ and by how much, and exits non-zero when a scale differs by more than `--rtol` / `--atol` (default 0: identical). Run it on checkpoints that differ in batch size or GPU layout to see how far the scales move.
+`scale_compare` lists, per scale kind (`input_scale`, `weight_scale`, ...), how many tensors differ and by how much, and exits non-zero when a scale differs by more than `--rtol` / `--atol` (default 0: identical). Run it on checkpoints that differ in GPU layout to see how far the scales move.
 
 ## Tracking runs with MLflow
 
